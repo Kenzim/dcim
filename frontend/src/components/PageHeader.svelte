@@ -30,6 +30,21 @@
     }
   }
 
+  function handleMouseEnter() {
+    if (userMenuTimeout) {
+      clearTimeout(userMenuTimeout);
+      userMenuTimeout = null;
+    }
+    showUserMenu = true;
+  }
+
+  function handleMouseLeave() {
+    userMenuTimeout = setTimeout(() => {
+      showUserMenu = false;
+      userMenuTimeout = null;
+    }, 200);
+  }
+
   async function handleLogout() {
     try {
       await logout();
@@ -55,20 +70,15 @@
     {#if $user}
       <div 
         class="user-menu-container" 
-        on:mouseenter={() => { 
-          if (userMenuTimeout) clearTimeout(userMenuTimeout);
-          showUserMenu = true; 
-        }} 
-        on:mouseleave={() => {
-          userMenuTimeout = setTimeout(() => { showUserMenu = false; }, 200);
-        }}
+        on:mouseenter={handleMouseEnter}
+        on:mouseleave={handleMouseLeave}
       >
         <button class="user-badge" on:click={handleUserClick}>
           <div class="user-avatar">
             {$user.username.charAt(0).toUpperCase()}
           </div>
           <span class="user-name">{$user.username}</span>
-          <svg xmlns="http://www.w3.org/2000/svg" class="chevron-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg xmlns="http://www.w3.org/2000/svg" class="chevron-icon" class:rotated={showUserMenu} fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
           </svg>
         </button>
@@ -124,9 +134,17 @@
 
   .user-menu-container {
     position: relative;
-    /* Extend hover area to include dropdown gap */
-    padding-bottom: 4px;
-    margin-bottom: -4px;
+    /* Create invisible bridge to prevent gap issues */
+  }
+
+  .user-menu-container::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    height: 8px;
+    /* Invisible bridge to keep hover active when moving to dropdown */
   }
 
   .user-badge {
@@ -174,13 +192,17 @@
     transition: transform 0.2s ease;
   }
 
+  .chevron-icon.rotated {
+    transform: rotate(180deg);
+  }
+
   .user-menu-container:hover .chevron-icon {
     transform: rotate(180deg);
   }
 
   .user-dropdown {
     position: absolute;
-    top: calc(100% + 4px);
+    top: calc(100% + 8px);
     right: 0;
     background: white;
     border: 1px solid var(--border-color);
