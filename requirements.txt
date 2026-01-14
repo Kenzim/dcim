@@ -4,5 +4,7 @@ sqlalchemy
 pymysql
 redis
 pydantic-settings
+pydantic[email]
 alembic
+passlib[bcrypt]
 
