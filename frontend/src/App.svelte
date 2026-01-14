@@ -14,9 +14,17 @@
   });
 </script>
 
-{#if $isAuthenticated}
-  <Dashboard />
-{:else}
-  <Login />
-{/if}
+<div class="app-container">
+  {#if $isAuthenticated}
+    <Dashboard />
+  {:else}
+    <Login />
+  {/if}
+</div>
+
+<style>
+  .app-container {
+    min-height: 100vh;
+  }
+</style>
 

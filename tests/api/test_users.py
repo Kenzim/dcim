@@ -338,3 +338,153 @@ def test_admin_login(client, test_admin_user, mock_redis):
     stored_data = mock_redis.hgetall(token_key)
     assert stored_data["is_admin"] == "true"
 
+
+def test_delete_session(client, test_user, mock_redis):
+    """Test deleting a session"""
+    # Login twice to create two sessions
+    login1 = client.post(
+        "/api/users/login",
+        json={
+            "username": "testuser",
+            "password": "testpassword123"
+        }
+    )
+    token1 = login1.json()["token"]
+    token_id1 = _derive_token_id(token1)
+    
+    login2 = client.post(
+        "/api/users/login",
+        json={
+            "username": "testuser",
+            "password": "testpassword123"
+        }
+    )
+    token2 = login2.json()["token"]
+    token_id2 = _derive_token_id(token2)
+    
+    # Verify both tokens exist
+    assert len(mock_redis.hgetall(f"tok:{token_id1}")) > 0
+    assert len(mock_redis.hgetall(f"tok:{token_id2}")) > 0
+    
+    # Delete session 1 using token2 (current session)
+    response = client.delete(
+        f"/api/users/sessions/{token_id1}",
+        cookies={"auth_token": token2}
+    )
+    
+    assert response.status_code == 200
+    assert response.json()["message"] == "Session deleted successfully"
+    
+    # Verify token1 was deleted
+    assert len(mock_redis.hgetall(f"tok:{token_id1}")) == 0
+    
+    # Verify token1 was removed from ZSET
+    user_toks_key = f"user_toks:{test_user.id}"
+    assert token_id1 not in mock_redis._zsets.get(user_toks_key, {})
+    
+    # Verify token2 still exists
+    assert len(mock_redis.hgetall(f"tok:{token_id2}")) > 0
+
+
+def test_delete_current_session(client, test_user, mock_redis):
+    """Test that deleting current session is not allowed"""
+    # Login
+    login_response = client.post(
+        "/api/users/login",
+        json={
+            "username": "testuser",
+            "password": "testpassword123"
+        }
+    )
+    token = login_response.json()["token"]
+    token_id = _derive_token_id(token)
+    
+    # Try to delete current session
+    response = client.delete(
+        f"/api/users/sessions/{token_id}",
+        cookies={"auth_token": token}
+    )
+    
+    assert response.status_code == 400
+    assert "Cannot delete current session" in response.json()["detail"]
+
+
+def test_delete_nonexistent_session(client, test_user, mock_redis):
+    """Test deleting a non-existent session"""
+    # Login
+    login_response = client.post(
+        "/api/users/login",
+        json={
+            "username": "testuser",
+            "password": "testpassword123"
+        }
+    )
+    token = login_response.json()["token"]
+    
+    # Try to delete non-existent session
+    fake_token_id = "nonexistent_token_id_12345"
+    response = client.delete(
+        f"/api/users/sessions/{fake_token_id}",
+        cookies={"auth_token": token}
+    )
+    
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_delete_other_user_session(client, test_user, test_admin_user, mock_redis):
+    """Test that users cannot delete other users' sessions"""
+    # Login as test_user
+    login1 = client.post(
+        "/api/users/login",
+        json={
+            "username": "testuser",
+            "password": "testpassword123"
+        }
+    )
+    token1 = login1.json()["token"]
+    
+    # Login as admin_user
+    login2 = client.post(
+        "/api/users/login",
+        json={
+            "username": "admin",
+            "password": "adminpassword123"
+        }
+    )
+    token2 = login2.json()["token"]
+    token_id2 = _derive_token_id(token2)
+    
+    # Try to delete admin's session while logged in as test_user
+    response = client.delete(
+        f"/api/users/sessions/{token_id2}",
+        cookies={"auth_token": token1}
+    )
+    
+    assert response.status_code == 403
+    assert "other users" in response.json()["detail"].lower()
+
+
+def test_get_sessions_includes_token_id(client, test_user, mock_redis):
+    """Test that get sessions includes token_id for deletion"""
+    # Login
+    login_response = client.post(
+        "/api/users/login",
+        json={
+            "username": "testuser",
+            "password": "testpassword123"
+        }
+    )
+    token = login_response.json()["token"]
+    token_id = _derive_token_id(token)
+    
+    # Get sessions
+    response = client.get("/api/users/sessions", cookies={"auth_token": token})
+    
+    assert response.status_code == 200
+    sessions = response.json()
+    assert len(sessions) == 1
+    assert "token_id" in sessions[0]
+    assert sessions[0]["token_id"] == token_id
+    assert sessions[0]["token"] == token_id[:8] + "..." + token_id[-8:]  # Masked
+

@@ -47,9 +47,15 @@ class UserResponse(BaseModel):
 
 class SessionResponse(BaseModel):
     """Session/token response schema"""
-    token: str
+    token: str  # Masked token for display
+    token_id: str  # Full token_id for deletion
     created_at: str
     last_seen_at: str
     last_seen_ip: str
     is_current: bool = False
+
+
+class DeleteSessionRequest(BaseModel):
+    """Delete session request schema"""
+    token_id: str
 

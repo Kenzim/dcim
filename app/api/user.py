@@ -10,7 +10,7 @@ from app.core.redis import redis_client
 from app.core.config import settings
 from app.core.auth import get_current_user, _derive_token_id
 from app.dao import UserDAO
-from app.schemas.user import UserLogin, UserLoginResponse, UserResponse, SessionResponse
+from app.schemas.user import UserLogin, UserLoginResponse, UserResponse, SessionResponse, DeleteSessionRequest
 
 router = APIRouter()
 
@@ -207,6 +207,7 @@ async def get_user_sessions(
         # Token data is already a dict (HASH)
         sessions.append(SessionResponse(
             token=token_id[:8] + "..." + token_id[-8:],  # Masked token_id for display
+            token_id=token_id,  # Full token_id for deletion
             created_at=token_data.get("created_at", "unknown"),
             last_seen_at=token_data.get("last_seen_at", "unknown"),
             last_seen_ip=token_data.get("last_seen_ip", "unknown"),
@@ -215,4 +216,66 @@ async def get_user_sessions(
     
     # Already sorted by ZSET score (most recent first)
     return sessions
+
+
+@router.delete("/sessions/{token_id}")
+async def delete_session(
+    token_id: str,
+    request: Request,
+    auth: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a specific session/token"""
+    user_id = auth.get("user_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+    
+    # Get current token to prevent deleting current session
+    current_token = None
+    current_token_id = None
+    if "authorization" in request.headers:
+        auth_header = request.headers["authorization"]
+        if auth_header.startswith("Bearer "):
+            current_token = auth_header[7:]
+            current_token_id = _derive_token_id(current_token)
+    elif "auth_token" in request.cookies:
+        current_token = request.cookies["auth_token"]
+        current_token_id = _derive_token_id(current_token)
+    
+    # Prevent deleting current session
+    if token_id == current_token_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete current session"
+        )
+    
+    # Verify token belongs to this user
+    token_key = f"tok:{token_id}"
+    token_data = redis_client.hgetall(token_key)
+    
+    if not token_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found or already expired"
+        )
+    
+    # Verify token belongs to current user
+    token_user_id = int(token_data.get("user_id", 0))
+    if token_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot delete sessions belonging to other users"
+        )
+    
+    # Delete token HASH
+    redis_client.delete(token_key)
+    
+    # Remove from user's ZSET
+    user_toks_key = f"user_toks:{user_id}"
+    redis_client.zrem(user_toks_key, token_id)
+    
+    return {"message": "Session deleted successfully"}
 
