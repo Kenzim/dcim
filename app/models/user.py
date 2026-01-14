@@ -1,9 +1,6 @@
 from sqlalchemy import Column, Integer, String, Boolean
-from passlib.context import CryptContext
+import bcrypt
 from app.core.database import Base
-
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class User(Base):
@@ -17,9 +14,20 @@ class User(Base):
 
     def set_password(self, password: str) -> None:
         """Hash and set the password"""
-        self.password = pwd_context.hash(password)
+        # Bcrypt has a 72-byte limit, reject passwords that are too long
+        password_bytes = password.encode('utf-8')
+        if len(password_bytes) > 72:
+            raise ValueError("Password cannot be longer than 72 bytes")
+        self.password = bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
 
     def verify_password(self, password: str) -> bool:
         """Verify a password against the stored hash"""
-        return pwd_context.verify(password, self.password)
+        # Bcrypt has a 72-byte limit, reject passwords that are too long
+        password_bytes = password.encode('utf-8')
+        if len(password_bytes) > 72:
+            return False
+        try:
+            return bcrypt.checkpw(password_bytes, self.password.encode('utf-8'))
+        except Exception:
+            return False
 

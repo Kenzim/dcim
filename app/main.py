@@ -8,11 +8,6 @@ app = FastAPI(
     version=settings.api_version,
 )
 
-# Mount static files at root
-static_path = Path(settings.static_files_path)
-if static_path.exists():
-    app.mount("/", StaticFiles(directory=str(static_path), html=True), name="static")
-
 # Create API router with /api prefix
 api_router = APIRouter(prefix="/api")
 
@@ -20,6 +15,11 @@ api_router = APIRouter(prefix="/api")
 from app.api import user as user_api
 api_router.include_router(user_api.router, prefix="/users", tags=["users"])
 
-# Mount the API router
+# Mount the API router FIRST (before static files)
 app.include_router(api_router)
+
+# Mount static files at root (after API routes)
+static_path = Path(settings.static_files_path)
+if static_path.exists():
+    app.mount("/", StaticFiles(directory=str(static_path), html=True), name="static")
 

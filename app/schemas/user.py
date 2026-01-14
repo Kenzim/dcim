@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 
 
@@ -7,6 +7,15 @@ class UserLogin(BaseModel):
     username: Optional[str] = None
     email: Optional[EmailStr] = None
     password: str
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_length(cls, v: str) -> str:
+        """Validate password is not longer than 72 bytes (bcrypt limit)"""
+        password_bytes = v.encode('utf-8')
+        if len(password_bytes) > 72:
+            raise ValueError("Password cannot be longer than 72 bytes")
+        return v
 
     class Config:
         json_schema_extra = {
