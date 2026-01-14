@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { user } from '../stores/auth.js';
+  import { user, logout } from '../stores/auth.js';
   import { getCurrentUser, getSessions, deleteSession } from '../lib/api.js';
   import PageHeader from './PageHeader.svelte';
 
@@ -55,6 +55,20 @@
     } catch (err) {
       alert(err.message || 'Failed to delete session');
       console.error('Error deleting session:', err);
+    }
+  }
+
+  async function handleLogoutCurrentSession() {
+    if (!confirm('Are you sure you want to logout? This will end your current session.')) {
+      return;
+    }
+
+    try {
+      await logout();
+      window.location.href = '/';
+    } catch (err) {
+      alert(err.message || 'Failed to logout');
+      console.error('Error logging out:', err);
     }
   }
 
@@ -162,9 +176,32 @@
                 <div class="session-item" class:current={session.is_current}>
                   <div class="session-header">
                     <span class="session-token">{session.token}</span>
-                    {#if session.is_current}
-                      <span class="session-badge">Current Session</span>
-                    {/if}
+                    <div class="session-header-right">
+                      {#if session.is_current}
+                        <span class="session-badge">Current Session</span>
+                        <button 
+                          class="session-action-btn logout-btn" 
+                          on:click={handleLogoutCurrentSession}
+                          title="Logout from this session"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" class="action-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                          </svg>
+                          <span>Logout</span>
+                        </button>
+                      {:else}
+                        <button 
+                          class="session-action-btn delete-btn" 
+                          on:click={() => handleDeleteSession(session.token_id)}
+                          title="Delete this session"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" class="action-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                          <span>Delete</span>
+                        </button>
+                      {/if}
+                    </div>
                   </div>
                   <div class="session-details">
                     <div class="session-detail">
@@ -434,28 +471,44 @@
     gap: 8px;
   }
 
-  .delete-session-btn {
-    background: transparent;
-    border: none;
-    padding: 4px;
-    cursor: pointer;
-    color: #ef4444;
-    border-radius: 4px;
-    transition: all 0.2s ease;
+  .session-action-btn {
     display: flex;
     align-items: center;
-    justify-content: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
   }
 
-  .delete-session-btn:hover {
+  .session-action-btn.delete-btn {
     background: #fee2e2;
     color: #dc2626;
   }
 
-  .delete-icon {
-    width: 18px;
-    height: 18px;
+  .session-action-btn.delete-btn:hover {
+    background: #fecaca;
+    color: #b91c1c;
   }
+
+  .session-action-btn.logout-btn {
+    background: #dbeafe;
+    color: #2563eb;
+  }
+
+  .session-action-btn.logout-btn:hover {
+    background: #bfdbfe;
+    color: #1d4ed8;
+  }
+
+  .action-icon {
+    width: 16px;
+    height: 16px;
+  }
+
 
   .session-token {
     font-family: 'Courier New', monospace;

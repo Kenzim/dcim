@@ -8,7 +8,7 @@ from typing import List
 from app.core.database import get_db
 from app.core.redis import redis_client
 from app.core.config import settings
-from app.core.auth import get_current_user, _derive_token_id
+from app.core.auth import get_current_user, require_admin, _derive_token_id
 from app.dao import UserDAO
 from app.schemas.user import UserLogin, UserLoginResponse, UserResponse, SessionResponse, DeleteSessionRequest
 
@@ -134,7 +134,7 @@ async def logout(
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_details(
-    auth: dict = Depends(get_current_user),
+    auth: dict = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Get current user details"""
@@ -163,7 +163,7 @@ async def get_current_user_details(
 @router.get("/sessions", response_model=List[SessionResponse])
 async def get_user_sessions(
     request: Request,
-    auth: dict = Depends(get_current_user),
+    auth: dict = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Get all active sessions/tokens for the current user"""
@@ -222,7 +222,7 @@ async def get_user_sessions(
 async def delete_session(
     token_id: str,
     request: Request,
-    auth: dict = Depends(get_current_user),
+    auth: dict = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """Delete a specific session/token"""

@@ -1,11 +1,22 @@
 <script>
   import User from './User.svelte';
+  import Plugins from './Plugins.svelte';
   import PageHeader from './PageHeader.svelte';
+  import { logout } from '../stores/auth.js';
 
   let currentPage = 'dashboard';
 
   function navigate(page) {
     currentPage = page;
+  }
+
+  async function handleLogout() {
+    try {
+      await logout();
+      window.location.href = '/';
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
   }
 </script>
 
@@ -31,6 +42,14 @@
             <span>Dashboard</span>
           </a>
         </li>
+        <li class="nav-item" class:active={currentPage === 'plugins'}>
+          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('plugins')}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+            <span>Plugins</span>
+          </a>
+        </li>
       </ul>
     </div>
 
@@ -52,6 +71,8 @@
       <div class="content-body">
         <!-- Dashboard content will go here -->
       </div>
+    {:else if currentPage === 'plugins'}
+      <Plugins />
     {:else if currentPage === 'user'}
       <User />
     {/if}

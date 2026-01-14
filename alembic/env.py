@@ -9,6 +9,8 @@ from alembic import context
 from app.core.database import Base
 from app.core.config import settings
 import app.models  # This ensures all models are imported
+# Explicitly import junction table to ensure it's registered
+from app.models.plugin_category import plugin_categories
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

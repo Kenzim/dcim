@@ -20,6 +20,21 @@ async def lifespan(app: FastAPI):
     # Start keyspace notification listener in background
     listener_task = asyncio.create_task(start_keyspace_notification_listener())
     
+    # Seed default categories if needed
+    from app.core.database import SessionLocal
+    from app.core.seed_categories import seed_categories
+    from app.services.plugin_sync import sync_plugins_to_db
+    try:
+        db = SessionLocal()
+        seed_categories(db)
+        # Auto-sync plugins to database on startup
+        sync_results = sync_plugins_to_db(db)
+        db.close()
+        logger.info("Seeded default categories")
+        logger.info(f"Synced plugins: {len(sync_results['created'])} created, {len(sync_results['updated'])} updated")
+    except Exception as e:
+        logger.warning(f"Could not seed categories/sync plugins (may already exist): {e}")
+    
     yield
     
     # Shutdown
@@ -43,6 +58,10 @@ api_router = APIRouter(prefix="/api")
 # Include user routes
 from app.api import user as user_api
 api_router.include_router(user_api.router, prefix="/users", tags=["users"])
+
+# Include plugin routes
+from app.api import plugin as plugin_api
+api_router.include_router(plugin_api.router, prefix="/plugins", tags=["plugins"])
 
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)

@@ -98,14 +98,36 @@ def test_login_with_email(client, test_user):
     assert "token" in data
 
 
-def test_get_current_user_with_bearer_token(client, test_user):
-    """Test getting current user details using Bearer token"""
-    # First login to get token
+def test_get_current_user_requires_admin(client, test_user):
+    """Test that getting current user details requires admin"""
+    # First login to get token (non-admin user)
     login_response = client.post(
         "/api/users/login",
         json={
             "username": "testuser",
             "password": "testpassword123"
+        }
+    )
+    token = login_response.json()["token"]
+    
+    # Get user details using Bearer token - should fail with 403
+    response = client.get(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    
+    assert response.status_code == 403
+    assert "Admin access required" in response.json()["detail"]
+
+
+def test_get_current_user_with_admin(client, test_admin_user):
+    """Test getting current user details with admin user"""
+    # First login as admin to get token
+    login_response = client.post(
+        "/api/users/login",
+        json={
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token = login_response.json()["token"]
@@ -118,15 +140,15 @@ def test_get_current_user_with_bearer_token(client, test_user):
     
     assert response.status_code == 200
     data = response.json()
-    assert data["username"] == "testuser"
-    assert data["email"] == "test@example.com"
-    assert data["id"] == test_user.id
-    assert data["is_admin"] is False
+    assert data["username"] == "admin"
+    assert data["email"] == "admin@example.com"
+    assert data["id"] == test_admin_user.id
+    assert data["is_admin"] is True
 
 
-def test_get_current_user_with_cookie(client, test_user):
-    """Test getting current user details using cookie"""
-    # First login to get cookie
+def test_get_current_user_with_cookie_requires_admin(client, test_user):
+    """Test that getting current user details with cookie requires admin"""
+    # First login to get cookie (non-admin user)
     login_response = client.post(
         "/api/users/login",
         json={
@@ -139,15 +161,11 @@ def test_get_current_user_with_cookie(client, test_user):
     token = login_response.cookies.get("auth_token")
     assert token is not None
     
-    # Get user details - cookie should be sent automatically
+    # Get user details - should fail with 403
     response = client.get("/api/users/me")
     
-    assert response.status_code == 200
-    data = response.json()
-    assert data["username"] == "testuser"
-    assert data["email"] == "test@example.com"
-    assert data["id"] == test_user.id
-    assert data["is_admin"] is False
+    assert response.status_code == 403
+    assert "Admin access required" in response.json()["detail"]
 
 
 def test_logout_with_cookie(client, test_user, mock_redis):
@@ -213,14 +231,33 @@ def test_logout_with_bearer_token(client, test_user, mock_redis):
     assert len(mock_redis.hgetall(token_key)) == 0
 
 
-def test_get_sessions(client, test_user, mock_redis):
-    """Test getting user sessions"""
-    # Login first
+def test_get_sessions_requires_admin(client, test_user, mock_redis):
+    """Test that getting sessions requires admin"""
+    # Login first (non-admin user)
     login_response = client.post(
         "/api/users/login",
         json={
             "username": "testuser",
             "password": "testpassword123"
+        }
+    )
+    token = login_response.json()["token"]
+    
+    # Get sessions - should fail with 403
+    response = client.get("/api/users/sessions")
+    
+    assert response.status_code == 403
+    assert "Admin access required" in response.json()["detail"]
+
+
+def test_get_sessions_with_admin(client, test_admin_user, mock_redis):
+    """Test getting user sessions with admin user"""
+    # Login as admin
+    login_response = client.post(
+        "/api/users/login",
+        json={
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token = login_response.json()["token"]
@@ -245,14 +282,14 @@ def test_get_sessions(client, test_user, mock_redis):
     assert "..." in session["token"]
 
 
-def test_get_sessions_multiple_tokens(client, test_user, mock_redis):
-    """Test getting sessions with multiple tokens"""
+def test_get_sessions_multiple_tokens_with_admin(client, test_admin_user, mock_redis):
+    """Test getting sessions with multiple tokens (admin user)"""
     # Login twice to create two sessions
     login1 = client.post(
         "/api/users/login",
         json={
-            "username": "testuser",
-            "password": "testpassword123"
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token1 = login1.json()["token"]
@@ -261,8 +298,8 @@ def test_get_sessions_multiple_tokens(client, test_user, mock_redis):
     login2 = client.post(
         "/api/users/login",
         json={
-            "username": "testuser",
-            "password": "testpassword123"
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token2 = login2.json()["token"]
@@ -288,6 +325,7 @@ def test_get_sessions_multiple_tokens(client, test_user, mock_redis):
 def test_get_current_user_unauthorized(client):
     """Test getting current user without authentication"""
     response = client.get("/api/users/me")
+    # Should be 401 (unauthorized) not 403 (forbidden) when no auth
     assert response.status_code == 401
 
 
@@ -300,6 +338,7 @@ def test_logout_unauthorized(client):
 def test_get_sessions_unauthorized(client):
     """Test getting sessions without authentication"""
     response = client.get("/api/users/sessions")
+    # Should be 401 (unauthorized) not 403 (forbidden) when no auth
     assert response.status_code == 401
 
 
@@ -339,9 +378,9 @@ def test_admin_login(client, test_admin_user, mock_redis):
     assert stored_data["is_admin"] == "true"
 
 
-def test_delete_session(client, test_user, mock_redis):
-    """Test deleting a session"""
-    # Login twice to create two sessions
+def test_delete_session_requires_admin(client, test_user, mock_redis):
+    """Test that deleting a session requires admin"""
+    # Login twice to create two sessions (non-admin user)
     login1 = client.post(
         "/api/users/login",
         json={
@@ -357,6 +396,38 @@ def test_delete_session(client, test_user, mock_redis):
         json={
             "username": "testuser",
             "password": "testpassword123"
+        }
+    )
+    token2 = login2.json()["token"]
+    
+    # Try to delete session - should fail with 403
+    response = client.delete(
+        f"/api/users/sessions/{token_id1}",
+        cookies={"auth_token": token2}
+    )
+    
+    assert response.status_code == 403
+    assert "Admin access required" in response.json()["detail"]
+
+
+def test_delete_session_with_admin(client, test_admin_user, mock_redis):
+    """Test deleting a session with admin user"""
+    # Login twice to create two sessions
+    login1 = client.post(
+        "/api/users/login",
+        json={
+            "username": "admin",
+            "password": "adminpassword123"
+        }
+    )
+    token1 = login1.json()["token"]
+    token_id1 = _derive_token_id(token1)
+    
+    login2 = client.post(
+        "/api/users/login",
+        json={
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token2 = login2.json()["token"]
@@ -379,21 +450,21 @@ def test_delete_session(client, test_user, mock_redis):
     assert len(mock_redis.hgetall(f"tok:{token_id1}")) == 0
     
     # Verify token1 was removed from ZSET
-    user_toks_key = f"user_toks:{test_user.id}"
+    user_toks_key = f"user_toks:{test_admin_user.id}"
     assert token_id1 not in mock_redis._zsets.get(user_toks_key, {})
     
     # Verify token2 still exists
     assert len(mock_redis.hgetall(f"tok:{token_id2}")) > 0
 
 
-def test_delete_current_session(client, test_user, mock_redis):
-    """Test that deleting current session is not allowed"""
-    # Login
+def test_delete_current_session_with_admin(client, test_admin_user, mock_redis):
+    """Test that deleting current session is not allowed (admin user)"""
+    # Login as admin
     login_response = client.post(
         "/api/users/login",
         json={
-            "username": "testuser",
-            "password": "testpassword123"
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token = login_response.json()["token"]
@@ -409,14 +480,14 @@ def test_delete_current_session(client, test_user, mock_redis):
     assert "Cannot delete current session" in response.json()["detail"]
 
 
-def test_delete_nonexistent_session(client, test_user, mock_redis):
-    """Test deleting a non-existent session"""
-    # Login
+def test_delete_nonexistent_session_with_admin(client, test_admin_user, mock_redis):
+    """Test deleting a non-existent session (admin user)"""
+    # Login as admin
     login_response = client.post(
         "/api/users/login",
         json={
-            "username": "testuser",
-            "password": "testpassword123"
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token = login_response.json()["token"]
@@ -433,8 +504,8 @@ def test_delete_nonexistent_session(client, test_user, mock_redis):
 
 
 def test_delete_other_user_session(client, test_user, test_admin_user, mock_redis):
-    """Test that users cannot delete other users' sessions"""
-    # Login as test_user
+    """Test that non-admin users cannot delete sessions (requires admin)"""
+    # Login as test_user (non-admin)
     login1 = client.post(
         "/api/users/login",
         json={
@@ -456,23 +527,59 @@ def test_delete_other_user_session(client, test_user, test_admin_user, mock_redi
     token_id2 = _derive_token_id(token2)
     
     # Try to delete admin's session while logged in as test_user
+    # Should fail with admin requirement, not "other users" error
     response = client.delete(
         f"/api/users/sessions/{token_id2}",
         cookies={"auth_token": token1}
     )
     
     assert response.status_code == 403
-    assert "other users" in response.json()["detail"].lower()
+    assert "admin access required" in response.json()["detail"].lower()
 
 
-def test_get_sessions_includes_token_id(client, test_user, mock_redis):
-    """Test that get sessions includes token_id for deletion"""
-    # Login
-    login_response = client.post(
+def test_delete_other_user_session_with_admin(client, test_user, test_admin_user, mock_redis):
+    """Test that admin cannot delete other users' sessions (API still restricts to own sessions)"""
+    # Login as test_user
+    login1 = client.post(
         "/api/users/login",
         json={
             "username": "testuser",
             "password": "testpassword123"
+        }
+    )
+    token1 = login1.json()["token"]
+    token_id1 = _derive_token_id(token1)
+    
+    # Login as admin_user
+    login2 = client.post(
+        "/api/users/login",
+        json={
+            "username": "admin",
+            "password": "adminpassword123"
+        }
+    )
+    token2 = login2.json()["token"]
+    
+    # Try to delete test_user's session while logged in as admin
+    # API still checks that token belongs to current user, so admin can't delete other users' sessions
+    response = client.delete(
+        f"/api/users/sessions/{token_id1}",
+        cookies={"auth_token": token2}
+    )
+    
+    # Admin cannot delete other users' sessions (API restriction)
+    assert response.status_code == 403
+    assert "other users" in response.json()["detail"].lower()
+
+
+def test_get_sessions_includes_token_id_with_admin(client, test_admin_user, mock_redis):
+    """Test that get sessions includes token_id for deletion (admin user)"""
+    # Login as admin
+    login_response = client.post(
+        "/api/users/login",
+        json={
+            "username": "admin",
+            "password": "adminpassword123"
         }
     )
     token = login_response.json()["token"]

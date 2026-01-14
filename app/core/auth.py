@@ -104,3 +104,23 @@ async def get_current_user(
     
     return user_info
 
+
+async def require_admin(
+    auth: dict = Depends(get_current_user)
+) -> dict:
+    """
+    Dependency function that requires the user to be an admin.
+    
+    Usage:
+        @app.get("/admin-only")
+        async def admin_route(auth = Depends(require_admin)):
+            # auth contains user info, guaranteed to be admin
+            return {"message": "Admin access granted"}
+    """
+    if not auth.get("is_admin", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    return auth
+
