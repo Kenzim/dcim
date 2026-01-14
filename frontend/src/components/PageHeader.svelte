@@ -180,7 +180,7 @@
 
   .user-dropdown {
     position: absolute;
-    top: 100%;
+    top: calc(100% + 4px);
     right: 0;
     background: white;
     border: 1px solid var(--border-color);
@@ -189,9 +189,6 @@
     min-width: 200px;
     overflow: hidden;
     z-index: 1000;
-    /* Overlap with badge to eliminate gap */
-    margin-top: -4px;
-    padding-top: 4px;
   }
 
   .dropdown-item {
