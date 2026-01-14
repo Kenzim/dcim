@@ -44,3 +44,12 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+class SessionResponse(BaseModel):
+    """Session/token response schema"""
+    token: str
+    created_at: str
+    last_seen_at: str
+    last_seen_ip: str
+    is_current: bool = False
+

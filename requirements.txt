@@ -7,4 +7,8 @@ pydantic-settings
 pydantic[email]
 alembic
 passlib[bcrypt]
+pytest
+pytest-asyncio
+pytest-cov
+httpx
 
