@@ -18,6 +18,8 @@ class Plugin(Base):
     version = Column(String(50), nullable=False)
     description = Column(Text, nullable=True)
     config_template = Column(JSON, nullable=False)  # JSON schema for plugin configuration
+    # Capabilities tracking (plugin-level - what the plugin claims to support)
+    available_capabilities = Column(JSON, nullable=True)  # List of capabilities the plugin claims to support
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
