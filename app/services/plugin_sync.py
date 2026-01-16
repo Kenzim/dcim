@@ -65,6 +65,18 @@ def sync_plugins_to_db(db: Session) -> Dict[str, Any]:
                 db_plugin.version = plugin_info["version"]
                 db_plugin.config_template = plugin_info.get("config_template", {})
                 
+                # Update available capabilities if not already set
+                if db_plugin.available_capabilities is None:
+                    try:
+                        plugin_class = registry._plugins.get(plugin_name)
+                        if plugin_class:
+                            # Create a dummy instance to get capabilities
+                            dummy_config = {k: "" for k in plugin_class.CONFIG_TEMPLATE.get("properties", {}).keys()}
+                            dummy_instance = plugin_class(dummy_config)
+                            db_plugin.available_capabilities = dummy_instance.get_capabilities()
+                    except Exception as e:
+                        logger.warning(f"Failed to get capabilities for {plugin_name}: {e}")
+                
                 # Update categories relationship
                 # Clear existing categories and add new ones
                 db_plugin.categories.clear()
@@ -74,6 +86,18 @@ def sync_plugins_to_db(db: Session) -> Dict[str, Any]:
                 results["updated"].append(plugin_name)
                 logger.info(f"Updated plugin: {plugin_name}")
             else:
+                # Get available capabilities
+                available_capabilities = None
+                try:
+                    plugin_class = registry._plugins.get(plugin_name)
+                    if plugin_class:
+                        # Create a dummy instance to get capabilities
+                        dummy_config = {k: "" for k in plugin_class.CONFIG_TEMPLATE.get("properties", {}).keys()}
+                        dummy_instance = plugin_class(dummy_config)
+                        available_capabilities = dummy_instance.get_capabilities()
+                except Exception as e:
+                    logger.warning(f"Failed to get capabilities for {plugin_name}: {e}")
+                
                 # Create new plugin
                 new_plugin = PluginDAO.create(
                     db,
@@ -83,6 +107,12 @@ def sync_plugins_to_db(db: Session) -> Dict[str, Any]:
                     config_template=plugin_info.get("config_template", {}),
                     description=None
                 )
+                
+                # Set available capabilities
+                if available_capabilities:
+                    new_plugin.available_capabilities = available_capabilities
+                    db.commit()
+                
                 results["created"].append(plugin_name)
                 logger.info(f"Created plugin: {plugin_name}")
         

@@ -102,15 +102,11 @@ class PluginRegistry:
         if plugin_name not in self._plugins:
             raise KeyError(f"Plugin '{plugin_name}' not found")
         
-        # Create instance key from plugin name and config hash
-        # For now, just use plugin name (could be improved with config hashing)
-        instance_key = plugin_name
-        
-        if instance_key not in self._plugin_instances:
-            plugin_class = self._plugins[plugin_name]
-            self._plugin_instances[instance_key] = plugin_class(config)
-        
-        return self._plugin_instances[instance_key]
+        # Always create a new instance with the provided config
+        # This ensures each test/request gets a fresh instance with the correct config
+        # (Previously cached instances could have stale config values)
+        plugin_class = self._plugins[plugin_name]
+        return plugin_class(config)
     
     def list_plugins(self) -> List[Dict[str, Any]]:
         """

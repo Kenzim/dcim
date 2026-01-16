@@ -59,14 +59,67 @@ class ServerPlugin(ABC):
             "config_template": self.CONFIG_TEMPLATE
         }
     
+    def get_capabilities(self) -> List[str]:
+        """
+        Get list of capabilities this plugin claims to support.
+        
+        Returns:
+            List of capability names (e.g., ["test_connection", "get_power_state", "power_on", "power_off", "power_reset"])
+        """
+        capabilities = ["test_connection"]
+        
+        if PluginCategory.POWER_CONTROL in self.SUPPORTED_CATEGORIES:
+            capabilities.extend([
+                "get_power_state",
+                "power_on",
+                "power_off",
+                "power_reset"
+            ])
+        
+        if PluginCategory.USER_ACCOUNT_CONTROL in self.SUPPORTED_CATEGORIES:
+            capabilities.extend([
+                "list_users",
+                "create_user",
+                "delete_user",
+                "update_user_password"
+            ])
+        
+        if PluginCategory.BOOT_ORDER_CONTROL in self.SUPPORTED_CATEGORIES:
+            capabilities.extend([
+                "get_boot_order",
+                "set_boot_order",
+                "set_next_boot_device"
+            ])
+        
+        return capabilities
+    
     def supports_category(self, category: PluginCategory) -> bool:
         """Check if plugin supports a specific category"""
         return category in self.SUPPORTED_CATEGORIES
     
+    @abstractmethod
+    async def test_connection(self) -> Dict[str, Any]:
+        """
+        Test the plugin connection and verify credentials.
+        
+        This method should attempt to connect to the server management interface
+        and verify that the provided credentials are valid.
+        
+        Returns:
+            Dict with keys:
+                - success: bool - True if connection test passed
+                - message: str - Human-readable message about the test result
+                - details: Optional[Dict] - Additional details (e.g., server info, version, etc.)
+        
+        Raises:
+            Exception: If connection test fails with a specific error
+        """
+        pass
+    
     # ========== Power Control Methods ==========
     
     @abstractmethod
-    def get_power_state(self) -> PowerState:
+    async def get_power_state(self) -> PowerState:
         """
         Get current power state of the server.
         
@@ -80,7 +133,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support power control")
     
     @abstractmethod
-    def power_on(self) -> bool:
+    async def power_on(self) -> bool:
         """
         Power on the server.
         
@@ -94,7 +147,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support power control")
     
     @abstractmethod
-    def power_off(self, force: bool = False) -> bool:
+    async def power_off(self, force: bool = False) -> bool:
         """
         Power off the server.
         
@@ -111,7 +164,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support power control")
     
     @abstractmethod
-    def power_reset(self) -> bool:
+    async def power_reset(self) -> bool:
         """
         Reset/reboot the server.
         
@@ -127,7 +180,7 @@ class ServerPlugin(ABC):
     # ========== User Account Control Methods ==========
     
     @abstractmethod
-    def list_users(self) -> List[Dict[str, Any]]:
+    async def list_users(self) -> List[Dict[str, Any]]:
         """
         List all user accounts on the server.
         
@@ -141,7 +194,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user account control")
     
     @abstractmethod
-    def create_user(self, username: str, password: str, roles: Optional[List[str]] = None) -> bool:
+    async def create_user(self, username: str, password: str, roles: Optional[List[str]] = None) -> bool:
         """
         Create a new user account on the server.
         
@@ -160,7 +213,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user account control")
     
     @abstractmethod
-    def delete_user(self, username: str) -> bool:
+    async def delete_user(self, username: str) -> bool:
         """
         Delete a user account from the server.
         
@@ -177,7 +230,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user account control")
     
     @abstractmethod
-    def update_user_password(self, username: str, new_password: str) -> bool:
+    async def update_user_password(self, username: str, new_password: str) -> bool:
         """
         Update a user's password.
         
@@ -197,7 +250,7 @@ class ServerPlugin(ABC):
     # ========== Boot Order Control Methods ==========
     
     @abstractmethod
-    def get_boot_order(self) -> List[str]:
+    async def get_boot_order(self) -> List[str]:
         """
         Get current boot order.
         
@@ -211,7 +264,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
     
     @abstractmethod
-    def set_boot_order(self, boot_devices: List[str]) -> bool:
+    async def set_boot_order(self, boot_devices: List[str]) -> bool:
         """
         Set the boot order.
         
@@ -228,7 +281,7 @@ class ServerPlugin(ABC):
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
     
     @abstractmethod
-    def set_next_boot_device(self, device: str) -> bool:
+    async def set_next_boot_device(self, device: str) -> bool:
         """
         Set the device for the next boot only (one-time boot).
         
