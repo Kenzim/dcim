@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServerDAO, PluginDAO, LocationDAO, DiskDAO, NetworkPortDAO
@@ -15,6 +15,21 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def convert_disks_to_response(disks: List[Disk]) -> List[Dict[str, Any]]:
+    """Convert Disk model objects to response format with lowercase type"""
+    result = []
+    for disk in disks:
+        disk_dict = {
+            "id": disk.id,
+            "server_id": disk.server_id,
+            "type": disk.type.value.lower() if hasattr(disk.type, 'value') else str(disk.type).lower(),
+            "capacity_gb": disk.capacity_gb,
+            "description": disk.description
+        }
+        result.append(disk_dict)
+    return result
 
 
 class DiskCreate(BaseModel):
@@ -32,6 +47,19 @@ class DiskResponse(BaseModel):
 
     class Config:
         from_attributes = True
+    
+    @field_serializer('type')
+    def serialize_type(self, value: Any) -> str:
+        """Convert disk type to lowercase for API response"""
+        if isinstance(value, str):
+            return value.lower()
+        # Handle enum values (DiskType enum)
+        if hasattr(value, 'value'):
+            return str(value.value).lower()
+        # Handle DiskType enum directly
+        if isinstance(value, DiskType):
+            return value.value.lower()
+        return str(value).lower()
 
 
 class NetworkPortCreate(BaseModel):
@@ -429,7 +457,7 @@ async def list_servers(
         network_ports = NetworkPortDAO.get_by_server(db, server.id)
         result.append({
             **server.__dict__,
-            "disks": disks,
+            "disks": convert_disks_to_response(disks),
             "network_ports": network_ports,
             "plugin_categories": plugin_categories
         })
@@ -443,101 +471,121 @@ async def create_server(
     db: Session = Depends(get_db)
 ):
     """Create a new server"""
-    # Validate plugin exists
-    plugin = PluginDAO.get_by_id(db, server_data.plugin_id)
-    if not plugin:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Plugin not found"
-        )
+    try:
+        logger.info(f"Creating server: name={server_data.name}, plugin_id={server_data.plugin_id}, location_id={server_data.location_id}")
+        logger.debug(f"Server data: disks={len(server_data.disks) if server_data.disks else 0}, network_ports={len(server_data.network_ports) if server_data.network_ports else 0}")
+    except Exception as e:
+        logger.warning(f"Error logging server creation request: {e}")
     
-    # Validate location (required)
-    location = LocationDAO.get_by_id(db, server_data.location_id)
-    if not location:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Location not found"
-        )
-    
-    # Check if server with same name already exists
-    existing = ServerDAO.get_by_name(db, server_data.name)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Server with this name already exists"
-        )
-    
-    # Create server
-    server = ServerDAO.create(
-        db,
-        name=server_data.name,
-        server_ip=server_data.server_ip,
-        description=server_data.description,
-        cpu_count=server_data.cpu_count,
-        cpu_model=server_data.cpu_model,
-        ram_gb=server_data.ram_gb,
-        port_speed_mbps=server_data.port_speed_mbps,
-        location_id=server_data.location_id,
-        plugin_id=server_data.plugin_id,
-        plugin_config=server_data.plugin_config
-    )
-    
-    # Create disks
-    for disk_data in server_data.disks:
-        try:
-            disk_type = DiskType(disk_data.type.lower())
-        except ValueError:
+    try:
+        # Validate plugin exists
+        plugin = PluginDAO.get_by_id(db, server_data.plugin_id)
+        if not plugin:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid disk type: {disk_data.type}. Must be 'ssd' or 'hdd'"
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Plugin not found"
             )
         
-        DiskDAO.create(
+        # Validate location (required)
+        location = LocationDAO.get_by_id(db, server_data.location_id)
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Location not found"
+            )
+        
+        # Check if server with same name already exists
+        existing = ServerDAO.get_by_name(db, server_data.name)
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Server with this name already exists"
+            )
+        
+        # Create server
+        server = ServerDAO.create(
             db,
-            server_id=server.id,
-            type=disk_type,
-            capacity_gb=disk_data.capacity_gb,
-            description=disk_data.description
+            name=server_data.name,
+            server_ip=server_data.server_ip,
+            description=server_data.description,
+            cpu_count=server_data.cpu_count,
+            cpu_model=server_data.cpu_model,
+            ram_gb=server_data.ram_gb,
+            port_speed_mbps=server_data.port_speed_mbps,
+            location_id=server_data.location_id,
+            plugin_id=server_data.plugin_id,
+            plugin_config=server_data.plugin_config
         )
-    
-    # Create network ports
-    for port_data in server_data.network_ports:
-        NetworkPortDAO.create(
-            db,
-            server_id=server.id,
-            name=port_data.name,
-            mac_address=port_data.mac_address,
-            speed_mbps=port_data.speed_mbps,
-            lag_group=port_data.lag_group,
-            monitor_bandwidth=port_data.monitor_bandwidth,
-            pxe_boot=port_data.pxe_boot,
-            pxe_ip=port_data.pxe_ip,
-            description=port_data.description
-        )
-    
-    # Refresh to get disks and network ports
-    db.refresh(server)
-    disks = DiskDAO.get_by_server(db, server.id)
-    network_ports = NetworkPortDAO.get_by_server(db, server.id)
-    
-    # Automatically test capabilities after creating server
-    try:
-        registry = get_registry()
-        plugin_instance = registry.get_plugin(plugin.name, server.plugin_config)
-        test_results = await _test_plugin_capabilities(plugin_instance, plugin.name)
-        server.tested_capabilities = test_results["tested_capabilities"]
-        server.test_logs = test_results["test_logs"]
-        db.commit()
+        
+        # Create disks
+        if server_data.disks:
+            for disk_data in server_data.disks:
+                try:
+                    # Convert to uppercase to match enum values (SSD, HDD)
+                    disk_type = DiskType(disk_data.type.upper())
+                except ValueError as e:
+                    logger.error(f"Invalid disk type: {disk_data.type}. Error: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid disk type: {disk_data.type}. Must be 'ssd' or 'hdd'"
+                    )
+                
+                DiskDAO.create(
+                    db,
+                    server_id=server.id,
+                    type=disk_type,
+                    capacity_gb=disk_data.capacity_gb,
+                    description=disk_data.description
+                )
+        
+        # Create network ports
+        if server_data.network_ports:
+            for port_data in server_data.network_ports:
+                NetworkPortDAO.create(
+                    db,
+                    server_id=server.id,
+                    name=port_data.name,
+                    mac_address=port_data.mac_address,
+                    speed_mbps=port_data.speed_mbps,
+                    lag_group=port_data.lag_group,
+                    monitor_bandwidth=port_data.monitor_bandwidth,
+                    pxe_boot=port_data.pxe_boot,
+                    pxe_ip=port_data.pxe_ip,
+                    description=port_data.description
+                )
+        
+        # Refresh to get disks and network ports
         db.refresh(server)
+        disks = DiskDAO.get_by_server(db, server.id)
+        network_ports = NetworkPortDAO.get_by_server(db, server.id)
+        
+        # Automatically test capabilities after creating server
+        try:
+            registry = get_registry()
+            plugin_instance = registry.get_plugin(plugin.name, server.plugin_config)
+            test_results = await _test_plugin_capabilities(plugin_instance, plugin.name)
+            server.tested_capabilities = test_results["tested_capabilities"]
+            server.test_logs = test_results["test_logs"]
+            db.commit()
+            db.refresh(server)
+        except Exception as e:
+            logger.warning(f"Failed to test capabilities for new server {server.id}: {e}")
+            # Don't fail the creation if capability test fails
+        
+        return {
+            **server.__dict__,
+            "disks": convert_disks_to_response(disks),
+            "network_ports": network_ports
+        }
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        logger.warning(f"Failed to test capabilities for new server {server.id}: {e}")
-        # Don't fail the creation if capability test fails
-    
-    return {
-        **server.__dict__,
-        "disks": disks,
-        "network_ports": network_ports
-    }
+        logger.error(f"Unexpected error creating server: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating server: {str(e)}"
+        )
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
@@ -558,7 +606,7 @@ async def get_server(
     network_ports = NetworkPortDAO.get_by_server(db, server.id)
     return {
         **server.__dict__,
-        "disks": disks,
+        "disks": convert_disks_to_response(disks),
         "network_ports": network_ports
     }
 
@@ -630,7 +678,8 @@ async def update_server(
         # Create new disks
         for disk_data in server_data.disks:
             try:
-                disk_type = DiskType(disk_data.type.lower())
+                # Convert to uppercase to match enum values (SSD, HDD)
+                disk_type = DiskType(disk_data.type.upper())
             except ValueError:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -688,7 +737,7 @@ async def update_server(
     
     return {
         **server.__dict__,
-        "disks": disks,
+        "disks": convert_disks_to_response(disks),
         "network_ports": network_ports
     }
 

@@ -69,3 +69,36 @@ class NetworkPortDAO:
         deleted = db.query(NetworkPort).filter(NetworkPort.server_id == server_id).delete()
         db.commit()
         return deleted
+
+    @staticmethod
+    def get_by_mac_address(db: Session, mac_address: str) -> Optional[NetworkPort]:
+        """
+        Get network port by MAC address.
+        
+        Args:
+            db: Database session
+            mac_address: MAC address (will be normalized internally)
+            
+        Returns:
+            NetworkPort if found, None otherwise
+        """
+        # Normalize MAC address (uppercase, colon-separated)
+        mac_clean = mac_address.replace(":", "").replace("-", "").replace(".", "").upper()
+        if len(mac_clean) == 12:
+            normalized_mac = ":".join(mac_clean[i:i+2] for i in range(0, 12, 2))
+        else:
+            normalized_mac = mac_address.upper()
+        
+        # Try exact match first
+        port = db.query(NetworkPort).filter(NetworkPort.mac_address == normalized_mac).first()
+        if port:
+            return port
+        
+        # Try case-insensitive search (in case MAC was stored in different case)
+        # SQLite doesn't support ILIKE, so we'll query all and filter
+        all_ports = db.query(NetworkPort).filter(NetworkPort.mac_address.isnot(None)).all()
+        for p in all_ports:
+            if p.mac_address and p.mac_address.replace(":", "").replace("-", "").replace(".", "").upper() == mac_clean:
+                return p
+        
+        return None
