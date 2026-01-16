@@ -1,5 +1,7 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request, status
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pathlib import Path
 from contextlib import asynccontextmanager
 from app.core.config import settings
@@ -52,6 +54,21 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle Pydantic validation errors with detailed logging"""
+    logger.error(f"Validation error on {request.method} {request.url.path}")
+    logger.error(f"Validation errors: {exc.errors()}")
+    logger.error(f"Request body: {await request.body()}")
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "detail": exc.errors(),
+            "body": str(await request.body())
+        }
+    )
+
 # Create API router with /api prefix
 api_router = APIRouter(prefix="/api")
 
@@ -70,6 +87,10 @@ api_router.include_router(location_api.router, prefix="/locations", tags=["locat
 # Include server routes
 from app.api import server as server_api
 api_router.include_router(server_api.router, prefix="/servers", tags=["servers"])
+
+# Include server interaction routes (PXE boot, network config, password updates, etc.)
+from app.api import server_interaction as server_interaction_api
+api_router.include_router(server_interaction_api.router, prefix="/servers/interaction", tags=["server-interaction"])
 
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)
