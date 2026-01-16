@@ -246,84 +246,11 @@
     
     formData.plugin_config = config;
     
-    // Auto-test capabilities when plugin config is complete
-    if (formData.plugin_id && formData.plugin_config && Object.keys(formData.plugin_config).length > 0) {
-      // Check if all required fields are filled
-      const requiredFields = plugin.config_template?.required || [];
-      const allRequiredFilled = requiredFields.every(field => {
-        const value = formData.plugin_config[field];
-        return value !== undefined && value !== null && value !== '';
-      });
-      
-      if (allRequiredFilled) {
-        // Auto-test capabilities after a short delay (debounce)
-        setTimeout(() => {
-          autoTestCapabilities();
-        }, 500);
-      }
-    }
-  }
-  
-  async function autoTestCapabilities() {
-    const plugin = getSelectedPlugin();
-    if (!plugin || !formData.plugin_config || Object.keys(formData.plugin_config).length === 0) {
-      return;
-    }
-
-    // Validate required fields
-    const requiredFields = plugin.config_template?.required || [];
-    const missingFields = requiredFields.filter(field => {
-      const value = formData.plugin_config[field];
-      return value === undefined || value === null || value === '';
-    });
-    
-    if (missingFields.length > 0) {
-      return; // Don't test if required fields are missing
-    }
-
-    try {
-      testingCapabilitiesInForm = true;
-      pluginConfigError = null;
-      
-      // Test connection first
-      const connectionResult = await testServerConnection(formData.plugin_id, formData.plugin_config);
-      testResult = connectionResult;
-      testPassed = connectionResult.success === true;
-      
-      if (!testPassed) {
-        pluginConfigError = connectionResult.message || 'Connection test failed';
-        capabilitiesTestPassed = false;
-        capabilitiesTestResult = null;
-        testingCapabilitiesInForm = false;
-        return;
-      }
-      
-      // If connection test passes, test capabilities
-      try {
-        const capabilitiesResult = await testPluginCapabilities(formData.plugin_id, formData.plugin_config);
-        capabilitiesTestPassed = true;
-        capabilitiesTestResult = capabilitiesResult;
-      } catch (capErr) {
-        capabilitiesTestPassed = false;
-        capabilitiesTestResult = {
-          success: false,
-          message: capErr.message || 'Capability test failed',
-          tested_capabilities: [],
-          test_logs: capErr.message || 'Failed to test capabilities'
-        };
-      }
-    } catch (err) {
-      testResult = {
-        success: false,
-        message: err.message || 'Connection test failed'
-      };
-      testPassed = false;
-      capabilitiesTestPassed = false;
-      capabilitiesTestResult = null;
-      pluginConfigError = err.message || 'Connection test failed';
-    } finally {
-      testingCapabilitiesInForm = false;
-    }
+    // Clear any existing test results when plugin changes
+    testResult = null;
+    testPassed = false;
+    capabilitiesTestResult = null;
+    capabilitiesTestPassed = false;
   }
 
   async function testConnection() {
@@ -397,7 +324,6 @@
       formError = 'Plugin configuration is required';
       return;
     }
-    // Note: Capabilities will be automatically tested on the backend during save
 
     // Validate disks
     for (let i = 0; i < formData.disks.length; i++) {
@@ -839,8 +765,6 @@
                             ...formData.plugin_config,
                             [key]: e.target.checked
                           };
-                          // Trigger auto-test after change
-                          setTimeout(() => autoTestCapabilities(), 500);
                         }}
                       />
                     {:else if schema.type === 'integer'}
@@ -849,10 +773,6 @@
                         type="number"
                         bind:value={formData.plugin_config[key]}
                         placeholder={schema.default || ''}
-                        on:input={() => {
-                          // Trigger auto-test after user input
-                          setTimeout(() => autoTestCapabilities(), 1000);
-                        }}
                       />
                     {:else if schema.format === 'password'}
                       <input
@@ -860,10 +780,6 @@
                         type="password"
                         bind:value={formData.plugin_config[key]}
                         placeholder={schema.description || ''}
-                        on:input={() => {
-                          // Trigger auto-test after user input
-                          setTimeout(() => autoTestCapabilities(), 1000);
-                        }}
                       />
                     {:else}
                       <input
@@ -871,10 +787,6 @@
                         type="text"
                         bind:value={formData.plugin_config[key]}
                         placeholder={schema.description || schema.default || ''}
-                        on:input={() => {
-                          // Trigger auto-test after user input
-                          setTimeout(() => autoTestCapabilities(), 1000);
-                        }}
                       />
                     {/if}
                     {#if schema.description}
@@ -887,17 +799,6 @@
                     <button type="button" class="btn-secondary" on:click={testConnection} disabled={testingConnection || !formData.plugin_id}>
                       {testingConnection ? 'Testing...' : 'Test Connection'}
                     </button>
-                    {#if testingCapabilitiesInForm}
-                      <span class="test-status">Testing capabilities...</span>
-                    {/if}
-                    {#if testPassed && capabilitiesTestPassed}
-                      <div class="test-success-indicator">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" class="test-icon-small">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        <span>Ready to save - capabilities will be tested automatically</span>
-                      </div>
-                    {/if}
                   </div>
                   {#if testResult}
                     <div class="test-result" class:test-success={testResult.success} class:test-failure={!testResult.success}>
@@ -1059,7 +960,7 @@
                     </div>
                     <div class="form-group">
                       <label>MAC Address</label>
-                      <input type="text" bind:value={port.mac_address} placeholder="e.g., 00:0e:1e:6f:16:b0" pattern="^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$" />
+                      <input type="text" bind:value={port.mac_address} placeholder="e.g., 00:0e:1e:6f:16:b0" pattern="^([0-9A-Fa-f]{2}[\-:]){5}[0-9A-Fa-f]{2}$" />
                       <small class="field-help">Format: XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX</small>
                     </div>
                   </div>
