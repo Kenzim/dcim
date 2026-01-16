@@ -148,3 +148,5 @@ def test_get_plugin_details_with_admin(client, test_admin_user, mock_redis):
     # May be 200 or 404 depending on if example plugin exists
     assert response.status_code in [200, 404]
 
+
+

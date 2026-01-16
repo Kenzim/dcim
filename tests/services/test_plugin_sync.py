@@ -155,3 +155,5 @@ def test_sync_plugins_links_categories(db_session, monkeypatch):
     assert "power_control" in category_names
     assert "boot_order_control" in category_names
 
+
+

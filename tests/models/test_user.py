@@ -28,3 +28,6 @@ def test_password_too_long(db_session):
     with pytest.raises(ValueError):
         user.set_password(long_password)
 
+
+
+
