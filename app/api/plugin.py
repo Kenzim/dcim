@@ -1,11 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Dict, Any
+from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.plugins.registry import get_registry
-from app.dao import PluginDAO
+from app.dao import PluginDAO, ServerDAO
 from app.services.plugin_sync import sync_plugins_to_db
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -33,12 +37,13 @@ async def list_plugins(
             categories = plugin.get("supported_categories", [])
         
         result.append({
+            "id": db_plugin.id if db_plugin else None,
             "name": plugin["name"],
             "version": plugin["version"],
             "supported_categories": categories,
             "config_template": plugin.get("config_template", {}),
             "registered": db_plugin is not None,
-            "db_id": db_plugin.id if db_plugin else None
+            "available_capabilities": db_plugin.available_capabilities if db_plugin else None
         })
     
     return result
@@ -70,13 +75,34 @@ async def get_plugin_details(
         # Get database record if exists
         db_plugin = PluginDAO.get_by_name(db, plugin_name)
         
+        # Get plugin class to get capabilities
+        available_capabilities = []
+        try:
+            # Get plugin class from registry
+            plugin_class = registry._plugins.get(plugin_name)
+            if plugin_class:
+                # Create a dummy instance to get capabilities
+                dummy_config = {}
+                if plugin_class.CONFIG_TEMPLATE and plugin_class.CONFIG_TEMPLATE.get("properties"):
+                    dummy_config = {k: "" for k in plugin_class.CONFIG_TEMPLATE.get("properties", {}).keys()}
+                dummy_instance = plugin_class(dummy_config)
+                available_capabilities = dummy_instance.get_capabilities()
+        except Exception as e:
+            logger.warning(f"Failed to get capabilities for {plugin_name}: {e}")
+            available_capabilities = []
+        
         return {
             **plugin_info,
             "registered": db_plugin is not None,
             "db_id": db_plugin.id if db_plugin else None,
-            "db_description": db_plugin.description if db_plugin else None
+            "db_description": db_plugin.description if db_plugin else None,
+            "available_capabilities": available_capabilities
         }
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 404) as-is
+        raise
     except Exception as e:
+        logger.error(f"Unexpected error getting plugin details for {plugin_name}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -105,4 +131,43 @@ async def sync_plugins(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error syncing plugins: {str(e)}"
         )
+
+
+@router.delete("/{plugin_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_plugin(
+    plugin_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete a plugin by ID. Cannot delete if servers are using it."""
+    plugin = PluginDAO.get_by_id(db, plugin_id)
+    if not plugin:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Plugin not found"
+        )
+    
+    # Check if any servers are using this plugin
+    servers_using_plugin = ServerDAO.get_by_plugin(db, plugin_id)
+    if servers_using_plugin:
+        server_names = [s.name for s in servers_using_plugin]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete plugin '{plugin.name}' because it is used by {len(servers_using_plugin)} server(s): {', '.join(server_names)}"
+        )
+    
+    # Delete the plugin (category associations will be automatically deleted due to CASCADE)
+    success = PluginDAO.delete(db, plugin_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete plugin"
+        )
+
+
+class PluginTestRequest(BaseModel):
+    """Request model for testing plugin capabilities"""
+    plugin_config: Dict[str, Any]
+
+
 

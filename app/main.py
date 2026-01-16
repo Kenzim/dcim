@@ -63,6 +63,14 @@ api_router.include_router(user_api.router, prefix="/users", tags=["users"])
 from app.api import plugin as plugin_api
 api_router.include_router(plugin_api.router, prefix="/plugins", tags=["plugins"])
 
+# Include location routes
+from app.api import location as location_api
+api_router.include_router(location_api.router, prefix="/locations", tags=["locations"])
+
+# Include server routes
+from app.api import server as server_api
+api_router.include_router(server_api.router, prefix="/servers", tags=["servers"])
+
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)
 
