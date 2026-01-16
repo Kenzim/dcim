@@ -38,3 +38,5 @@ def seed_categories(db: Session) -> None:
             description=category_data["description"]
         )
 
+
+
