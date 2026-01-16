@@ -1,0 +1,36 @@
+#!ipxe
+
+:start
+echo
+echo ========================================
+echo         iPXE Boot Menu
+echo ========================================
+echo
+echo Select boot option:
+echo
+echo [1] Boot from local disk
+echo [2] Boot from USB  
+echo [3] Auto-boot (UEFI boot manager)
+echo [4] Reboot
+echo [5] Exit iPXE
+echo
+prompt --timeout 10000 --default 3 "Select (1-5): " option || goto start
+
+iseq ${option} 1 && goto boot_disk
+iseq ${option} 2 && goto boot_usb
+iseq ${option} 3 && goto boot_autoboot
+iseq ${option} 4 && reboot || goto start
+iseq ${option} 5 && exit || goto start
+goto start
+
+:boot_autoboot
+echo Booting using UEFI boot manager...
+autoboot
+
+:boot_disk
+echo Booting from local disk...
+sanboot --no-describe --drive 0x80 || sanboot --no-describe --drive 0x81 || echo Boot failed. && goto start
+
+:boot_usb
+echo Booting from USB...
+sanboot --no-describe --drive 0x81 || sanboot --no-describe --drive 0x82 || echo Boot failed. && goto start
