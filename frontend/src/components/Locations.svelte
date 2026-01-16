@@ -1,0 +1,405 @@
+<script>
+  import PageHeader from './PageHeader.svelte';
+  import { getLocations, createLocation, updateLocation, deleteLocation } from '../lib/api.js';
+  import { onMount } from 'svelte';
+
+  let locations = [];
+  let loading = true;
+  let error = null;
+  let showModal = false;
+  let editingLocation = null;
+  let formData = { name: '', description: '' };
+  let formError = null;
+
+  onMount(async () => {
+    await loadLocations();
+  });
+
+  async function loadLocations() {
+    try {
+      loading = true;
+      error = null;
+      locations = await getLocations();
+    } catch (err) {
+      error = err.message;
+      console.error('Failed to load locations:', err);
+    } finally {
+      loading = false;
+    }
+  }
+
+  function openAddModal() {
+    editingLocation = null;
+    formData = { name: '', description: '' };
+    formError = null;
+    showModal = true;
+  }
+
+  function openEditModal(location) {
+    editingLocation = location;
+    formData = { name: location.name, description: location.description || '' };
+    formError = null;
+    showModal = true;
+  }
+
+  function closeModal() {
+    showModal = false;
+    editingLocation = null;
+    formData = { name: '', description: '' };
+    formError = null;
+  }
+
+  async function handleSubmit() {
+    if (!formData.name.trim()) {
+      formError = 'Name is required';
+      return;
+    }
+
+    try {
+      formError = null;
+      if (editingLocation) {
+        await updateLocation(editingLocation.id, formData.name, formData.description);
+      } else {
+        await createLocation(formData.name, formData.description);
+      }
+      closeModal();
+      await loadLocations();
+    } catch (err) {
+      formError = err.message;
+    }
+  }
+
+  async function handleDelete(location) {
+    if (!confirm(`Are you sure you want to delete location "${location.name}"?`)) {
+      return;
+    }
+
+    try {
+      await deleteLocation(location.id);
+      await loadLocations();
+    } catch (err) {
+      alert('Failed to delete location: ' + err.message);
+    }
+  }
+</script>
+
+<PageHeader title="Locations" />
+
+<div class="locations-container">
+  <div class="locations-header">
+    <h2>Locations</h2>
+    <button class="btn-primary" on:click={openAddModal}>
+      <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+      </svg>
+      Add Location
+    </button>
+  </div>
+
+  {#if loading}
+    <div class="loading">Loading locations...</div>
+  {:else if error}
+    <div class="error">Error: {error}</div>
+  {:else if locations.length === 0}
+    <div class="empty-state">
+      <p>No locations found. Click "Add Location" to create one.</p>
+    </div>
+  {:else}
+    <div class="locations-grid">
+      {#each locations as location}
+        <div class="location-card">
+          <div class="location-header">
+            <h3>{location.name}</h3>
+            <div class="location-actions">
+              <button class="btn-icon-only" on:click={() => openEditModal(location)} title="Edit">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                </svg>
+              </button>
+              <button class="btn-icon-only btn-danger" on:click={() => handleDelete(location)} title="Delete">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          {#if location.description}
+            <p class="location-description">{location.description}</p>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+</div>
+
+{#if showModal}
+  <div class="modal-overlay" on:click={closeModal}>
+    <div class="modal-content" on:click|stopPropagation>
+      <div class="modal-header">
+        <h3>{editingLocation ? 'Edit Location' : 'Add Location'}</h3>
+        <button class="btn-icon-only" on:click={closeModal}>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        {#if formError}
+          <div class="form-error">{formError}</div>
+        {/if}
+        <div class="form-group">
+          <label for="location-name">Name *</label>
+          <input
+            id="location-name"
+            type="text"
+            bind:value={formData.name}
+            placeholder="e.g., Data Center A, Rack 1"
+            required
+          />
+        </div>
+        <div class="form-group">
+          <label for="location-description">Description</label>
+          <textarea
+            id="location-description"
+            bind:value={formData.description}
+            placeholder="Optional description"
+            rows="3"
+          ></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" on:click={closeModal}>Cancel</button>
+        <button class="btn-primary" on:click={handleSubmit}>
+          {editingLocation ? 'Update' : 'Create'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<style>
+  .locations-container {
+    padding: 32px;
+  }
+
+  .locations-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+  }
+
+  .locations-header h2 {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .btn-primary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  }
+
+  .btn-icon {
+    width: 18px;
+    height: 18px;
+  }
+
+  .loading, .error, .empty-state {
+    text-align: center;
+    padding: 48px;
+    color: var(--text-secondary);
+  }
+
+  .error {
+    color: #ef4444;
+  }
+
+  .locations-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 20px;
+  }
+
+  .location-card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .location-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .location-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 12px;
+  }
+
+  .location-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .location-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .btn-icon-only {
+    background: none;
+    border: none;
+    padding: 6px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    border-radius: 6px;
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+
+  .btn-icon-only:hover {
+    background: #f1f5f9;
+    color: var(--text-primary);
+  }
+
+  .btn-icon-only.btn-danger:hover {
+    background: #fee2e2;
+    color: #ef4444;
+  }
+
+  .btn-icon-only svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .location-description {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal-content {
+    background: white;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .modal-header h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  .modal-body {
+    padding: 24px;
+  }
+
+  .form-error {
+    background: #fee2e2;
+    color: #991b1b;
+    padding: 12px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+
+  .form-group {
+    margin-bottom: 20px;
+  }
+
+  .form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .form-group input,
+  .form-group textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: border-color 0.2s ease;
+  }
+
+  .form-group input:focus,
+  .form-group textarea:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    padding: 20px 24px;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  .btn-secondary {
+    padding: 10px 20px;
+    background: #f1f5f9;
+    color: var(--text-primary);
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s ease;
+  }
+
+  .btn-secondary:hover {
+    background: #e2e8f0;
+  }
+</style>
+
+
+

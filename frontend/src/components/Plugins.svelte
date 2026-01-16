@@ -79,6 +79,20 @@
                   {/each}
                 </div>
               </div>
+
+              {#if plugin.available_capabilities && plugin.available_capabilities.length > 0}
+                <div class="plugin-capabilities">
+                  <h4 class="capabilities-title">Available Capabilities:</h4>
+                  <div class="capabilities-list">
+                    {#each plugin.available_capabilities as capability}
+                      <span class="capability-badge">
+                        {capability.replace(/_/g, ' ')}
+                      </span>
+                    {/each}
+                  </div>
+                  <p class="capabilities-note">Note: Capabilities are tested per server. Test capabilities when creating or editing a server.</p>
+                </div>
+              {/if}
             </div>
           </div>
         {/each}
@@ -278,5 +292,66 @@
     font-weight: 500;
     text-transform: capitalize;
   }
+
+  .plugin-capabilities {
+    margin-top: 20px;
+  }
+
+  .capabilities-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 12px;
+  }
+
+  .capabilities-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .capability-badge {
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    text-transform: capitalize;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .capability-badge.tested {
+    background: #d1fae5;
+    color: #065f46;
+  }
+
+  .capability-badge.untested {
+    background: #fef3c7;
+    color: #92400e;
+  }
+
+  .capability-icon {
+    width: 14px;
+    height: 14px;
+  }
+
+  .plugin-actions {
+    margin-top: 20px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .capabilities-note {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 8px;
+    font-style: italic;
+  }
 </style>
+
+
 

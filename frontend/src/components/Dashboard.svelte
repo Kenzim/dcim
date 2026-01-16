@@ -1,6 +1,8 @@
 <script>
   import User from './User.svelte';
   import Plugins from './Plugins.svelte';
+  import Locations from './Locations.svelte';
+  import Servers from './Servers.svelte';
   import PageHeader from './PageHeader.svelte';
   import { logout } from '../stores/auth.js';
 
@@ -42,6 +44,23 @@
             <span>Dashboard</span>
           </a>
         </li>
+        <li class="nav-item" class:active={currentPage === 'servers'}>
+          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('servers')}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+            </svg>
+            <span>Servers</span>
+          </a>
+        </li>
+        <li class="nav-item" class:active={currentPage === 'locations'}>
+          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('locations')}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span>Locations</span>
+          </a>
+        </li>
         <li class="nav-item" class:active={currentPage === 'plugins'}>
           <a href="#" class="nav-link" on:click|preventDefault={() => navigate('plugins')}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -71,6 +90,10 @@
       <div class="content-body">
         <!-- Dashboard content will go here -->
       </div>
+    {:else if currentPage === 'servers'}
+      <Servers />
+    {:else if currentPage === 'locations'}
+      <Locations />
     {:else if currentPage === 'plugins'}
       <Plugins />
     {:else if currentPage === 'user'}
