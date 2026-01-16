@@ -9,16 +9,28 @@ class ServerDAO:
     @staticmethod
     def create(
         db: Session,
-        hostname: str,
+        name: str,
+        server_ip: str,
         plugin_id: int,
         plugin_config: dict,
-        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        cpu_count: int = 1,
+        cpu_model: Optional[str] = None,
+        ram_gb: Optional[int] = None,
+        port_speed_mbps: Optional[int] = None,
+        location_id: Optional[int] = None,
         enabled: bool = True
     ) -> Server:
         """Create a new server"""
         server = Server(
-            hostname=hostname,
-            display_name=display_name,
+            name=name,
+            server_ip=server_ip,
+            description=description,
+            cpu_count=cpu_count,
+            cpu_model=cpu_model,
+            ram_gb=ram_gb,
+            port_speed_mbps=port_speed_mbps,
+            location_id=location_id,
             plugin_id=plugin_id,
             plugin_config=plugin_config,
             enabled=enabled
@@ -34,9 +46,9 @@ class ServerDAO:
         return db.query(Server).filter(Server.id == server_id).first()
 
     @staticmethod
-    def get_by_hostname(db: Session, hostname: str) -> Optional[Server]:
-        """Get server by hostname"""
-        return db.query(Server).filter(Server.hostname == hostname).first()
+    def get_by_name(db: Session, name: str) -> Optional[Server]:
+        """Get server by name"""
+        return db.query(Server).filter(Server.name == name).first()
 
     @staticmethod
     def get_all(db: Session, skip: int = 0, limit: int = 100, enabled_only: bool = False) -> List[Server]:
@@ -44,12 +56,17 @@ class ServerDAO:
         query = db.query(Server)
         if enabled_only:
             query = query.filter(Server.enabled == True)
-        return query.offset(skip).limit(limit).all()
+        return query.order_by(Server.name).offset(skip).limit(limit).all()
 
     @staticmethod
     def get_by_plugin(db: Session, plugin_id: int) -> List[Server]:
         """Get all servers using a specific plugin"""
         return db.query(Server).filter(Server.plugin_id == plugin_id).all()
+
+    @staticmethod
+    def get_by_location(db: Session, location_id: int) -> List[Server]:
+        """Get all servers in a location"""
+        return db.query(Server).filter(Server.location_id == location_id).all()
 
     @staticmethod
     def update(db: Session, server: Server) -> Server:
