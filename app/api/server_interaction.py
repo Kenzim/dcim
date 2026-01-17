@@ -1043,3 +1043,59 @@ async def get_temp_os_modloop(
             "Content-Disposition": f'inline; filename="{filename}"'
         }
     )
+
+
+# Disk Image Serving Endpoints
+
+@router.get("/disk-images/{filename}")
+@router.head("/disk-images/{filename}")
+async def get_disk_image(
+    filename: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Serve disk image files (ISOs, disk images, etc.) from disk_images/ directory.
+    
+    This endpoint serves disk images for OS installation templates.
+    Place disk image files in the disk_images/ directory.
+    Supports both GET and HEAD requests (HEAD for file size checks).
+    """
+    disk_image_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "disk_images", filename
+    )
+    
+    # Security: only allow files in the disk_images directory
+    if ".." in filename or "/" in filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename"
+        )
+    
+    if not os.path.exists(disk_image_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Disk image '{filename}' not found"
+        )
+    
+    # For HEAD requests, return headers only (no body)
+    if request.method == "HEAD":
+        file_size = os.path.getsize(disk_image_path)
+        return Response(
+            status_code=200,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(file_size),
+                "Content-Disposition": f'inline; filename="{filename}"'
+            }
+        )
+    
+    logger.info(f"Serving disk image file: {filename}")
+    return FileResponse(
+        disk_image_path,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"'
+        }
+    )
