@@ -1,0 +1,38 @@
+{
+  "id": "windows-server-2022",
+  "name": "Windows Server 2022",
+  "description": "Install Windows Server 2022 Standard or Datacenter edition",
+  "os_type": "windows",
+  "parameters": {
+    "edition": {
+      "type": "select",
+      "label": "Edition",
+      "required": true,
+      "default": "Standard",
+      "options": ["Standard", "Datacenter"],
+      "help": "Windows Server 2022 edition to install"
+    },
+    "admin_password": {
+      "type": "password",
+      "label": "Administrator Password",
+      "required": true,
+      "help": "Password for the Administrator account"
+    },
+    "product_key": {
+      "type": "text",
+      "label": "Product Key (Optional)",
+      "required": false,
+      "help": "Windows product key (leave empty for evaluation)"
+    },
+    "partitioning": {
+      "type": "select",
+      "label": "Partitioning",
+      "required": false,
+      "default": "auto",
+      "options": ["auto", "custom"],
+      "help": "Partitioning scheme (auto uses entire disk)"
+    }
+  },
+  "kernel_url": "http://192.168.12.74:8000/api/servers/interaction/kernel/vmlinuz",
+  "initrd_url": "http://192.168.12.74:8000/api/servers/interaction/initrd/initrd.gz"
+}
