@@ -443,6 +443,7 @@ async def create_boot_task(
     script_content = boot_task_data.script_content
     kernel_url = boot_task_data.kernel_url
     initrd_url = boot_task_data.initrd_url
+    kernel_params = boot_task_data.kernel_params
     
     if boot_task_data.template_id:
         # Generate script from template
