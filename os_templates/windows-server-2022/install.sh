@@ -1,7 +1,7 @@
 #!/bin/bash
 # Windows Server 2022 Installation Script
 # This script runs in Alpine Linux environment booted via PXE
-# Simple approach: download disk image, dd it to disk, write password file
+# Simple approach: download raw disk image, dd it to disk, write password file
 
 set -e
 
@@ -20,7 +20,7 @@ fi
 
 # Get disk image URL (injected by backend from template.disk_image)
 DISK_IMAGE_URL="${DISK_IMAGE_URL}"
-DISK_IMAGE="/tmp/disk_image.iso"
+DISK_IMAGE="/tmp/disk_image.raw"
 
 if [ -z "$DISK_IMAGE_URL" ]; then
     echo "ERROR: DISK_IMAGE_URL not provided"
@@ -42,64 +42,51 @@ if [ -z "$TARGET_DISK" ]; then
 fi
 
 echo "Target disk: $TARGET_DISK"
-echo "WARNING: This will completely wipe $TARGET_DISK"
+echo "WARNING: This will completely overwrite $TARGET_DISK"
 echo ""
 
 # Install required tools
 echo "Installing required tools..."
-apk add --no-cache wget dd parted dosfstools ntfs-3g
+apk add --no-cache wget dd ntfs-3g
 
-# Download disk image
-echo "Downloading disk image from ${DISK_IMAGE_URL}..."
+# Download raw disk image
+echo "Downloading raw disk image from ${DISK_IMAGE_URL}..."
 if ! wget -O "$DISK_IMAGE" "$DISK_IMAGE_URL"; then
     echo "ERROR: Failed to download disk image"
     exit 1
 fi
 
-# Mount ISO
-ISO_MOUNT="/mnt/iso"
-mkdir -p "$ISO_MOUNT"
-mount -o loop "$DISK_IMAGE" "$ISO_MOUNT"
+# Write raw disk image directly to target disk
+echo "Writing disk image to $TARGET_DISK (this may take a while)..."
+dd if="$DISK_IMAGE" of="$TARGET_DISK" bs=4M status=progress
 
-# Partition disk (GPT with EFI + Windows)
-echo "Partitioning disk..."
-parted -s "$TARGET_DISK" mklabel gpt
-parted -s "$TARGET_DISK" mkpart primary fat32 1MiB 101MiB
-parted -s "$TARGET_DISK" set 1 esp on
-parted -s "$TARGET_DISK" mkpart primary ntfs 101MiB 100%
+# Sync to ensure all data is written
+sync
 
-# Format partitions
-mkfs.fat -F 32 "${TARGET_DISK}1"
-mkfs.ntfs -f "${TARGET_DISK}2"
-
-# Mount Windows partition
+# Try to mount the Windows partition and write password file
+echo "Attempting to write password configuration..."
 WINDOWS_MOUNT="/mnt/windows"
 mkdir -p "$WINDOWS_MOUNT"
-mount -t ntfs-3g "${TARGET_DISK}2" "$WINDOWS_MOUNT"
 
-# Copy all files from ISO to disk
-echo "Copying files from ISO to disk (this may take a while)..."
-cp -a "$ISO_MOUNT"/* "$WINDOWS_MOUNT/" || true
-
-# Copy EFI boot files
-mkdir -p "${WINDOWS_MOUNT}/EFI/Microsoft/Boot"
-if [ -d "$ISO_MOUNT/EFI/Microsoft/Boot" ]; then
-    cp -a "$ISO_MOUNT/EFI/Microsoft/Boot"/* "${WINDOWS_MOUNT}/EFI/Microsoft/Boot/" || true
-fi
-
-# Write password file for Windows to read on first boot
-echo "Writing password configuration..."
-PASSWORD_FILE="${WINDOWS_MOUNT}/dcim_password.txt"
-echo "$ADMIN_PASSWORD" > "$PASSWORD_FILE"
-chmod 600 "$PASSWORD_FILE"
-
-# Unmount
-umount "$WINDOWS_MOUNT" || true
-umount "$ISO_MOUNT" || true
+# Try common partition numbers (Windows usually on partition 2 or 3)
+for part_num in 2 3 1; do
+    if [ -b "${TARGET_DISK}${part_num}" ]; then
+        echo "Trying to mount ${TARGET_DISK}${part_num}..."
+        if mount -t ntfs-3g "${TARGET_DISK}${part_num}" "$WINDOWS_MOUNT" 2>/dev/null; then
+            echo "Mounted ${TARGET_DISK}${part_num}, writing password file..."
+            PASSWORD_FILE="${WINDOWS_MOUNT}/dcim_password.txt"
+            echo "$ADMIN_PASSWORD" > "$PASSWORD_FILE"
+            chmod 600 "$PASSWORD_FILE"
+            umount "$WINDOWS_MOUNT" || true
+            echo "Password file written successfully"
+            break
+        fi
+    fi
+done
 
 echo ""
 echo "=== Installation Complete ==="
-echo "Disk image written to $TARGET_DISK"
+echo "Raw disk image written to $TARGET_DISK"
 echo "Password written to disk (Windows will read it on first boot)"
 echo ""
 echo "Rebooting in 5 seconds..."
