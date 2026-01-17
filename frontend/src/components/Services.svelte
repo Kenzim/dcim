@@ -30,6 +30,7 @@
   let regenerating = false;
   let savingTFTP = false;
   let actionInProgressTFTP = false;
+  let refreshing = false;
 
   let formData = {
     enabled: true,
@@ -152,6 +153,18 @@
     }
   }
 
+  async function handleRefresh() {
+    refreshing = true;
+    try {
+      await loadData();
+    } catch (err) {
+      console.error('Failed to refresh:', err);
+      error = err.message;
+    } finally {
+      refreshing = false;
+    }
+  }
+
   function addInterface() {
     formData.interfaces = [...formData.interfaces, { interface: '', ip: '' }];
   }
@@ -244,7 +257,16 @@
 </script>
 
 <div class="services-page">
-  <PageHeader title="Services" onNavigate={onNavigate} />
+  <PageHeader title="Services" onNavigate={onNavigate}>
+    <svelte:fragment slot="actions">
+      <button class="refresh-button" on:click={handleRefresh} disabled={refreshing || loading}>
+        <svg xmlns="http://www.w3.org/2000/svg" class="refresh-icon" class:spinning={refreshing} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        <span>{refreshing ? 'Refreshing...' : 'Refresh'}</span>
+      </button>
+    </svelte:fragment>
+  </PageHeader>
 
   {#if loading}
     <div class="content-body">
@@ -667,6 +689,51 @@
     margin-top: 1.5rem;
     padding-top: 1.5rem;
     border-top: 1px solid #e5e7eb;
+  }
+
+  .refresh-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .refresh-button:hover:not(:disabled) {
+    background: #f8fafc;
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+  }
+
+  .refresh-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .refresh-icon {
+    width: 18px;
+    height: 18px;
+    transition: transform 0.3s ease;
+  }
+
+  .refresh-icon.spinning {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .btn-primary, .btn-secondary {
