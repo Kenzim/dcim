@@ -1,7 +1,9 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, testServerCapabilities, testPluginCapabilities } from '../lib/api.js';
+  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, testServerConnection, testServerCapabilities, testPluginCapabilities } from '../lib/api.js';
   import { onMount } from 'svelte';
+
+  export let onViewServer = null; // Callback to navigate to server detail page
 
   let servers = [];
   let plugins = [];
@@ -20,6 +22,7 @@
     location_id: null,
     plugin_id: null,
     plugin_config: {},
+    boot_mode: 'uefi',
     disks: [],
     network_ports: []
   };
@@ -28,15 +31,10 @@
   let testingConnection = false;
   let testResult = null;
   let testPassed = false;
-  let powerStates = {}; // Map of server_id -> power_state
-  let powerActionsInProgress = {}; // Map of server_id -> action (e.g., 'power_on', 'power_off', etc.)
   let testingCapabilities = {}; // Map of server_id -> boolean
-  let expandedServer = null; // Server ID for showing test logs
 
   onMount(async () => {
     await Promise.all([loadServers(), loadPlugins(), loadLocations()]);
-    // Load power states after servers are loaded
-    await loadPowerStates();
   });
 
   async function loadServers() {
@@ -44,8 +42,6 @@
       loading = true;
       error = null;
       servers = await getServers();
-      // Load power states after servers are loaded
-      await loadPowerStates();
     } catch (err) {
       error = err.message;
       console.error('Failed to load servers:', err);
@@ -83,6 +79,7 @@
       location_id: null,
       plugin_id: null,
       plugin_config: {},
+      boot_mode: 'uefi',
       disks: [],
       network_ports: []
     };
@@ -106,6 +103,7 @@
       cpu_count: server.cpu_count,
       cpu_model: server.cpu_model || '',
       ram_gb: server.ram_gb,
+      boot_mode: server.boot_mode || 'uefi',
       location_id: server.location_id,
       plugin_id: server.plugin_id,
       plugin_config: server.plugin_config || {},
@@ -380,106 +378,9 @@
     }
   }
 
-  function serverSupportsPowerControl(server) {
-    return server.plugin_categories && server.plugin_categories.includes('power_control');
-  }
-
-  async function testCapabilities(server) {
-    if (!confirm(`Test capabilities for server "${server.name}"? This will test all available plugin capabilities.`)) {
-      return;
-    }
-
-    testingCapabilities[server.id] = true;
-    try {
-      const result = await testServerCapabilities(server.id);
-      // Reload servers to get updated test results
-      await loadServers();
-      alert(`Capability test completed!\n\nTested: ${result.summary.tested}/${result.summary.total}\nFailed: ${result.summary.failed}`);
-    } catch (err) {
-      alert('Failed to test capabilities: ' + err.message);
-    } finally {
-      testingCapabilities[server.id] = false;
-    }
-  }
-
-  function toggleTestLogs(serverId) {
-    expandedServer = expandedServer === serverId ? null : serverId;
-  }
-
   function getAvailableCapabilities(server) {
     const plugin = plugins.find(p => p.id === server.plugin_id);
     return plugin?.available_capabilities || [];
-  }
-
-  async function refreshPowerState(server) {
-    if (!serverSupportsPowerControl(server)) return;
-    
-    try {
-      const result = await getServerPowerState(server.id);
-      powerStates = { ...powerStates, [server.id]: result.power_state };
-    } catch (err) {
-      console.error('Failed to get power state:', err);
-      powerStates = { ...powerStates, [server.id]: 'unknown' };
-    }
-  }
-
-  async function loadPowerStates() {
-    for (const server of servers) {
-      if (serverSupportsPowerControl(server)) {
-        await refreshPowerState(server);
-      }
-    }
-  }
-
-  async function handlePowerOn(server) {
-    if (!confirm(`Power on server "${server.name}"?`)) {
-      return;
-    }
-
-    try {
-      powerActionsInProgress = { ...powerActionsInProgress, [server.id]: 'power_on' };
-      await powerOnServer(server.id);
-      // Refresh power state after a short delay
-      setTimeout(() => refreshPowerState(server), 2000);
-    } catch (err) {
-      alert('Failed to power on server: ' + err.message);
-    } finally {
-      powerActionsInProgress = { ...powerActionsInProgress, [server.id]: null };
-    }
-  }
-
-  async function handlePowerOff(server) {
-    if (!confirm(`Power off server "${server.name}"?`)) {
-      return;
-    }
-
-    try {
-      powerActionsInProgress = { ...powerActionsInProgress, [server.id]: 'power_off' };
-      await powerOffServer(server.id);
-      // Refresh power state after a short delay
-      setTimeout(() => refreshPowerState(server), 2000);
-    } catch (err) {
-      alert('Failed to power off server: ' + err.message);
-    } finally {
-      powerActionsInProgress = { ...powerActionsInProgress, [server.id]: null };
-    }
-  }
-
-  async function handlePowerReset(server) {
-    if (!confirm(`Reset/reboot server "${server.name}"?`)) {
-      return;
-    }
-
-    try {
-      powerActionsInProgress = { ...powerActionsInProgress, [server.id]: 'power_reset' };
-      await powerResetServer(server.id);
-      // Refresh power state after a short delay
-      setTimeout(() => refreshPowerState(server), 2000);
-    } catch (err) {
-      alert('Failed to reset server: ' + err.message);
-    } finally {
-      powerActionsInProgress = { ...powerActionsInProgress, [server.id]: null };
-    }
   }
 </script>
 
@@ -515,114 +416,35 @@
             <th>RAM</th>
             <th>Location</th>
             <th>Plugin</th>
-            <th>Capabilities</th>
-            <th>Power State</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           {#each servers as server}
             <tr>
-              <td><strong>{server.name}</strong></td>
+              <td>
+                {#if onViewServer}
+                  <a href="#" class="server-name-link" on:click|preventDefault={() => onViewServer(server.id)}>
+                    <strong>{server.name}</strong>
+                  </a>
+                {:else}
+                  <strong>{server.name}</strong>
+                {/if}
+              </td>
               <td>{server.server_ip}</td>
               <td>{server.cpu_count}x {server.cpu_model || 'N/A'}</td>
               <td>{server.ram_gb ? server.ram_gb + ' GB' : 'N/A'}</td>
               <td>{server.location_id ? (locations.find(l => l.id === server.location_id)?.name || 'N/A') : 'N/A'}</td>
               <td>{plugins.find(p => p.id === server.plugin_id)?.name || 'N/A'}</td>
               <td>
-                <div class="capabilities-cell">
-                  {#if server.tested_capabilities && server.tested_capabilities.length > 0}
-                    <div class="capabilities-badges">
-                      {#each server.tested_capabilities as capability}
-                        <span class="capability-badge tested" title="Tested and working">
-                          {capability.replace(/_/g, ' ')}
-                          <svg xmlns="http://www.w3.org/2000/svg" class="capability-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                          </svg>
-                        </span>
-                      {/each}
-                    </div>
-                    {#if server.test_logs}
-                      <button class="btn-text btn-small" on:click={() => toggleTestLogs(server.id)}>
-                        {expandedServer === server.id ? 'Hide' : 'Show'} Logs
-                      </button>
-                    {/if}
-                  {:else}
-                    <button class="btn-secondary btn-small" on:click={() => testCapabilities(server)} disabled={testingCapabilities[server.id]}>
-                      {testingCapabilities[server.id] ? 'Testing...' : 'Test Capabilities'}
-                    </button>
-                  {/if}
-                </div>
-              </td>
-              <td>
-                {#if serverSupportsPowerControl(server)}
-                  <div class="power-state">
-                    <span class="power-state-badge" class:power-on={powerStates[server.id] === 'on'} class:power-off={powerStates[server.id] === 'off'} class:power-unknown={powerStates[server.id] === 'unknown' || !powerStates[server.id]}>
-                      {powerStates[server.id] || 'Loading...'}
-                    </span>
-                    <button class="btn-icon-only btn-small" on:click={() => refreshPowerState(server)} title="Refresh power state">
+                <div class="table-actions">
+                  {#if onViewServer}
+                    <button class="btn-icon-only" on:click={() => onViewServer(server.id)} title="View Details">
                       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                       </svg>
                     </button>
-                  </div>
-                {:else}
-                  <span class="power-state-na">N/A</span>
-                {/if}
-              </td>
-              <td>
-                <div class="table-actions">
-                  {#if serverSupportsPowerControl(server)}
-                    <div class="power-control-buttons">
-                      <button 
-                        class="btn-power btn-power-on" 
-                        on:click={() => handlePowerOn(server)} 
-                        disabled={powerActionsInProgress[server.id] === 'power_on'}
-                        title="Power On"
-                      >
-                        {#if powerActionsInProgress[server.id] === 'power_on'}
-                          <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                          </svg>
-                        {:else}
-                          <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                          </svg>
-                        {/if}
-                      </button>
-                      <button 
-                        class="btn-power btn-power-off" 
-                        on:click={() => handlePowerOff(server)} 
-                        disabled={powerActionsInProgress[server.id] === 'power_off'}
-                        title="Power Off"
-                      >
-                        {#if powerActionsInProgress[server.id] === 'power_off'}
-                          <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                          </svg>
-                        {:else}
-                          <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        {/if}
-                      </button>
-                      <button 
-                        class="btn-power btn-power-reset" 
-                        on:click={() => handlePowerReset(server)} 
-                        disabled={powerActionsInProgress[server.id] === 'power_reset'}
-                        title="Reset/Reboot"
-                      >
-                        {#if powerActionsInProgress[server.id] === 'power_reset'}
-                          <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                          </svg>
-                        {:else}
-                          <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                          </svg>
-                        {/if}
-                      </button>
-                    </div>
                   {/if}
                   <button class="btn-icon-only" on:click={() => openEditModal(server)} title="Edit">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -637,16 +459,6 @@
                 </div>
               </td>
             </tr>
-            {#if expandedServer === server.id && server.test_logs}
-              <tr class="test-logs-row">
-                <td colspan="8">
-                  <div class="test-logs-container">
-                    <h4>Test Logs:</h4>
-                    <pre class="test-logs-content">{server.test_logs}</pre>
-                  </div>
-                </td>
-              </tr>
-            {/if}
           {/each}
         </tbody>
       </table>
@@ -704,6 +516,14 @@
             <div class="form-group">
               <label for="ram-gb">RAM (GB)</label>
               <input id="ram-gb" type="number" bind:value={formData.ram_gb} min="0" />
+            </div>
+            <div class="form-group">
+              <label for="boot-mode">Boot Mode *</label>
+              <select id="boot-mode" bind:value={formData.boot_mode} required>
+                <option value="uefi">UEFI</option>
+                <option value="bios">BIOS</option>
+              </select>
+              <small class="field-help">Select UEFI or BIOS boot mode</small>
             </div>
           </div>
         </div>
@@ -1132,6 +952,18 @@
 
   tbody tr:hover {
     background: #f8fafc;
+  }
+
+  .server-name-link {
+    color: #3b82f6;
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 0.2s ease;
+  }
+
+  .server-name-link:hover {
+    color: #2563eb;
+    text-decoration: underline;
   }
 
   .table-actions {

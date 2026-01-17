@@ -67,6 +67,7 @@
 <div class="page-header">
   <h1 class="page-title">{title}</h1>
   <div class="header-actions">
+    <slot name="actions" />
     {#if $user}
       <div 
         class="user-menu-container" 
@@ -106,6 +107,9 @@
 
 <style>
   .page-header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
     background: white;
     padding: 16px 32px;
     border-bottom: 1px solid var(--border-color);
