@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, field_serializer
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServerDAO, PluginDAO, LocationDAO, DiskDAO, NetworkPortDAO
 from app.models.server import Server
+from app.models.plugin import Plugin
 from app.models.disk import Disk, DiskType
 from app.models.network_port import NetworkPort
 from app.plugins.registry import get_registry
@@ -100,6 +101,7 @@ class ServerCreate(BaseModel):
     location_id: int
     plugin_id: int
     plugin_config: dict
+    boot_mode: str = "uefi"  # "uefi" or "bios"
     disks: List[DiskCreate] = []
     network_ports: List[NetworkPortCreate] = []
 
@@ -133,10 +135,12 @@ class ServerResponse(BaseModel):
     plugin_id: int
     plugin_config: dict
     enabled: bool
+    boot_mode: str  # "uefi" or "bios"
     tested_capabilities: List[str] | None = None
     test_logs: str | None = None
     disks: List[DiskResponse] = []
     network_ports: List[NetworkPortResponse] = []
+    plugin_categories: List[str] = []  # Categories supported by the plugin (e.g., 'power_control')
 
     class Config:
         from_attributes = True
@@ -449,14 +453,15 @@ async def list_servers(
     for server in servers:
         disks = DiskDAO.get_by_server(db, server.id)
         # Get plugin categories for power control support
-        plugin = PluginDAO.get_by_id(db, server.plugin_id)
+        # Use joinedload to eagerly load categories relationship
+        plugin = db.query(Plugin).options(joinedload(Plugin.categories)).filter(Plugin.id == server.plugin_id).first()
         plugin_categories = []
-        if plugin:
+        if plugin and plugin.categories:
             plugin_categories = [cat.name for cat in plugin.categories]
         
         network_ports = NetworkPortDAO.get_by_server(db, server.id)
         result.append({
-            **server.__dict__,
+            **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
             "disks": convert_disks_to_response(disks),
             "network_ports": network_ports,
             "plugin_categories": plugin_categories
@@ -502,6 +507,16 @@ async def create_server(
                 detail="Server with this name already exists"
             )
         
+        # Convert boot_mode string to enum
+        try:
+            from app.models.server import BootMode
+            boot_mode = BootMode(server_data.boot_mode.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid boot_mode: {server_data.boot_mode}. Must be 'uefi' or 'bios'"
+            )
+        
         # Create server
         server = ServerDAO.create(
             db,
@@ -514,7 +529,8 @@ async def create_server(
             port_speed_mbps=server_data.port_speed_mbps,
             location_id=server_data.location_id,
             plugin_id=server_data.plugin_id,
-            plugin_config=server_data.plugin_config
+            plugin_config=server_data.plugin_config,
+            boot_mode=boot_mode
         )
         
         # Create disks
@@ -573,7 +589,7 @@ async def create_server(
             # Don't fail the creation if capability test fails
         
         return {
-            **server.__dict__,
+            **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
             "disks": convert_disks_to_response(disks),
             "network_ports": network_ports
         }
@@ -604,10 +620,18 @@ async def get_server(
     
     disks = DiskDAO.get_by_server(db, server.id)
     network_ports = NetworkPortDAO.get_by_server(db, server.id)
+    
+    # Get plugin categories for power control support
+    plugin = db.query(Plugin).options(joinedload(Plugin.categories)).filter(Plugin.id == server.plugin_id).first()
+    plugin_categories = []
+    if plugin and plugin.categories:
+        plugin_categories = [cat.name for cat in plugin.categories]
+    
     return {
-        **server.__dict__,
+        **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
         "disks": convert_disks_to_response(disks),
-        "network_ports": network_ports
+        "network_ports": network_ports,
+        "plugin_categories": plugin_categories
     }
 
 
@@ -670,6 +694,15 @@ async def update_server(
         server.plugin_config = server_data.plugin_config
     if server_data.enabled is not None:
         server.enabled = server_data.enabled
+    if server_data.boot_mode is not None:
+        try:
+            from app.models.server import BootMode
+            server.boot_mode = BootMode(server_data.boot_mode.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid boot_mode: {server_data.boot_mode}. Must be 'uefi' or 'bios'"
+            )
     
     # Update disks if provided
     if server_data.disks is not None:
@@ -736,7 +769,7 @@ async def update_server(
             # Don't fail the update if capability test fails
     
     return {
-        **server.__dict__,
+        **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
         "disks": convert_disks_to_response(disks),
         "network_ports": network_ports
     }

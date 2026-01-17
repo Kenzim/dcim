@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from typing import Optional, List
-from app.models.server import Server
+from app.models.server import Server, BootMode
 
 
 class ServerDAO:
@@ -19,7 +19,8 @@ class ServerDAO:
         ram_gb: Optional[int] = None,
         port_speed_mbps: Optional[int] = None,
         location_id: Optional[int] = None,
-        enabled: bool = True
+        enabled: bool = True,
+        boot_mode: BootMode = BootMode.UEFI
     ) -> Server:
         """Create a new server"""
         server = Server(
@@ -33,7 +34,8 @@ class ServerDAO:
             location_id=location_id,
             plugin_id=plugin_id,
             plugin_config=plugin_config,
-            enabled=enabled
+            enabled=enabled,
+            boot_mode=boot_mode
         )
         db.add(server)
         db.commit()

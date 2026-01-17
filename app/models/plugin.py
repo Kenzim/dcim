@@ -9,7 +9,7 @@ class Plugin(Base):
     Plugin model - stores metadata about available server management plugins.
     
     Each plugin represents a different method of interfacing with servers
-    (e.g., IPMI, Redfish, SSH, vendor APIs).
+    (e.g., IPMI, Proxmox, SSH, vendor APIs).
     """
     __tablename__ = "plugins"
 

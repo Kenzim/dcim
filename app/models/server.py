@@ -1,7 +1,14 @@
-from sqlalchemy import Column, Integer, String, JSON, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, JSON, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
+import enum
+
+
+class BootMode(str, enum.Enum):
+    """Boot mode options"""
+    BIOS = "bios"
+    UEFI = "uefi"
 
 
 class Server(Base):
@@ -25,6 +32,7 @@ class Server(Base):
     plugin_id = Column(Integer, ForeignKey("plugins.id"), nullable=False, index=True)
     plugin_config = Column(JSON, nullable=False)  # Plugin-specific configuration (IPMI IP, credentials, etc.)
     enabled = Column(Boolean, default=True, nullable=False)
+    boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # Boot mode: UEFI or BIOS
     # Capabilities tracking (per-server, since capabilities may differ per server)
     tested_capabilities = Column(JSON, nullable=True)  # List of capabilities that were successfully tested for this server
     test_logs = Column(Text, nullable=True)  # Logs from the last capability test run for this server
