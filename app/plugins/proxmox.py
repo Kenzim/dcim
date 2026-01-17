@@ -164,7 +164,7 @@ class ProxmoxPlugin(ServerPlugin):
             logger.info(f"[ProxmoxPlugin.test_connection] Testing Proxmox connection to {self.hostname}:{self.port}")
             
             # Authenticate
-            auth_data = self._get_auth_ticket()
+            auth_data = await self._get_auth_ticket()
             self.ticket = auth_data["ticket"]
             self.csrf_token = auth_data["CSRFPreventionToken"]
             
