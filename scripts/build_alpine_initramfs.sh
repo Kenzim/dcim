@@ -115,15 +115,22 @@ run_api_script() {
     MAC=$(ip link show "$NETIF" 2>/dev/null | grep -oP 'link/ether \\K[^ ]+' | tr '[:lower:]' '[:upper:]' || echo "")
     [ -z "$MAC" ] && return 1
     SCRIPT_URL="http://192.168.12.74:8000/api/servers/interaction/pxe?mac=${MAC}&script=true"
-    if wget -O /tmp/run.sh "$SCRIPT_URL" 2>/dev/null || curl -o /tmp/run.sh "$SCRIPT_URL" 2>/dev/null; then
-        [ -s /tmp/run.sh ] && chmod +x /tmp/run.sh && sh /tmp/run.sh && return 0
+    # Try to download script - ignore 404 errors (no script available)
+    if wget -O /tmp/run.sh "$SCRIPT_URL" 2>/dev/null || curl -f -o /tmp/run.sh "$SCRIPT_URL" 2>/dev/null; then
+        if [ -s /tmp/run.sh ]; then
+            chmod +x /tmp/run.sh
+            echo "Running script from API..."
+            sh /tmp/run.sh
+            echo "Script completed, dropping to shell"
+            exec /bin/sh
+        fi
     fi
-    return 1
+    # If we get here, no script was available - return 0 to continue normal boot
+    return 0
 }
-# Try to run script - if successful, drop to shell instead of switching root
-if run_api_script; then
-    echo "Script completed, dropping to shell instead of switching root"
-    exec /bin/sh
+# Try to run script - if no script available, continue with normal Alpine boot
+if ! run_api_script; then
+    echo "No script available, continuing with normal Alpine boot"
 fi
 '''
 
