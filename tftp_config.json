@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "root_directory": "/root/dcim/tftp",
+  "bind_address": "192.168.12.74",
+  "bind_port": 69,
+  "allow_create": false,
+  "verbose": true,
+  "ipv4_only": true
+}
