@@ -56,3 +56,19 @@ dhcpd.leases
 ipmi.py
 dhcpd.pid
 *.pid
+
+# Installation configs and disk images
+installation_configs/**/*
+!installation_configs/**/.gitkeep
+disk_images/**/*
+!disk_images/**/.gitkeep
+# Installation configs and disk images
+# Ignore everything in installation_configs except config.json and README files
+installation_configs/**/*
+!installation_configs/**/.gitkeep
+!installation_configs/**/README.md
+!installation_configs/**/config.json
+# Ignore everything in disk_images except README files
+disk_images/**/*
+!disk_images/**/.gitkeep
+!disk_images/**/README.md
