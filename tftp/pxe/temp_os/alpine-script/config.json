@@ -4,7 +4,7 @@
   "description": "Alpine Linux with automatic script download and execution",
   "kernel_file": "vmlinuz-lts",
   "initrd_file": "alpine-script.cpio.gz",
-  "kernel_params": "ip=dhcp modules=loop,squashfs,all nomodeset console=ttyS0,115200 console=tty0 quiet",
+  "kernel_params": "ip=dhcp modules=loop,squashfs,all nomodeset console=ttyS0,115200 console=tty0 earlyprintk=serial,ttyS0,115200 nokaslr debug",
   "requires_modloop": false,
   "version": "3.23.0",
   "flavor": "lts-script"
