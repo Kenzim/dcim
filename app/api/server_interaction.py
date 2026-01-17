@@ -539,10 +539,14 @@ async def create_boot_task(
         if not boot_task_data.description:
             boot_task_data.description = f"Boot into {os_config.name}"
     
-    # Set boot_type for custom scripts
+    # Determine boot_type and temp_os_id
     if boot_task_data.custom_script:
+        # Custom scripts boot Alpine
         boot_type = BootType.TEMP_OS
-        temp_os_id = os_config.id if 'os_config' in locals() else None
+        temp_os_id = os_config.id if 'os_config' in locals() else "alpine-script"
+    elif boot_task_data.boot_type.lower() == "temp_os":
+        boot_type = BootType.TEMP_OS
+        temp_os_id = boot_task_data.temp_os_id
     else:
         boot_type = BootType(boot_task_data.boot_type.lower())
         temp_os_id = boot_task_data.temp_os_id
