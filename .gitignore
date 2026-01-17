@@ -54,3 +54,5 @@ isos/*.iso
 
 dhcpd.leases
 ipmi.py
+dhcpd.pid
+*.pid
