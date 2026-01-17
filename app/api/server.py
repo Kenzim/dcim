@@ -11,6 +11,9 @@ from app.models.disk import Disk, DiskType
 from app.models.network_port import NetworkPort
 from app.plugins.registry import get_registry
 from app.plugins.base import PluginCategory, PowerState
+from app.services.dhcp_config_service import get_dhcp_config_service
+from app.services.dhcp_config_generator import generate_dhcpd_conf
+from app.services.dhcp_service import get_dhcp_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -588,6 +591,19 @@ async def create_server(
             logger.warning(f"Failed to test capabilities for new server {server.id}: {e}")
             # Don't fail the creation if capability test fails
         
+        # Regenerate DHCP configuration and reload service
+        try:
+            dhcp_config_service = get_dhcp_config_service()
+            dhcp_config = dhcp_config_service.get_config()
+            if dhcp_config.enabled:
+                generate_dhcpd_conf(dhcp_config, db)
+                dhcp_service = get_dhcp_service()
+                await dhcp_service.reload()
+                logger.info(f"Regenerated DHCP config after creating server {server.id}")
+        except Exception as e:
+            logger.warning(f"Failed to regenerate DHCP config after creating server {server.id}: {e}")
+            # Don't fail the creation if DHCP config regeneration fails
+        
         return {
             **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
             "disks": convert_disks_to_response(disks),
@@ -768,6 +784,22 @@ async def update_server(
             logger.warning(f"Failed to test capabilities for updated server {server.id}: {e}")
             # Don't fail the update if capability test fails
     
+    # Regenerate DHCP configuration and reload service (if network ports or boot mode changed)
+    if (server_data.network_ports is not None or 
+        server_data.boot_mode is not None or 
+        server_data.server_ip is not None):
+        try:
+            dhcp_config_service = get_dhcp_config_service()
+            dhcp_config = dhcp_config_service.get_config()
+            if dhcp_config.enabled:
+                generate_dhcpd_conf(dhcp_config, db)
+                dhcp_service = get_dhcp_service()
+                await dhcp_service.reload()
+                logger.info(f"Regenerated DHCP config after updating server {server.id}")
+        except Exception as e:
+            logger.warning(f"Failed to regenerate DHCP config after updating server {server.id}: {e}")
+            # Don't fail the update if DHCP config regeneration fails
+    
     return {
         **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
         "disks": convert_disks_to_response(disks),
@@ -788,6 +820,19 @@ async def delete_server(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Server not found"
         )
+    
+    # Regenerate DHCP configuration and reload service
+    try:
+        dhcp_config_service = get_dhcp_config_service()
+        dhcp_config = dhcp_config_service.get_config()
+        if dhcp_config.enabled:
+            generate_dhcpd_conf(dhcp_config, db)
+            dhcp_service = get_dhcp_service()
+            await dhcp_service.reload()
+            logger.info(f"Regenerated DHCP config after deleting server {server_id}")
+    except Exception as e:
+        logger.warning(f"Failed to regenerate DHCP config after deleting server {server_id}: {e}")
+        # Don't fail the deletion if DHCP config regeneration fails
 
 
 # ========== Power Control Endpoints ==========
