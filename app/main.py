@@ -41,6 +41,23 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("Shutting down...")
+    
+    # Stop DHCP service if running
+    from app.services.dhcp_service import get_dhcp_service
+    try:
+        dhcp_service = get_dhcp_service()
+        await dhcp_service.cleanup()
+    except Exception as e:
+        logger.warning(f"Error stopping DHCP service: {e}")
+    
+    # Stop TFTP service if running
+    from app.services.tftp_service import get_tftp_service
+    try:
+        tftp_service = get_tftp_service()
+        await tftp_service.cleanup()
+    except Exception as e:
+        logger.warning(f"Error stopping TFTP service: {e}")
+    
     listener_task.cancel()
     try:
         await listener_task
@@ -59,13 +76,42 @@ app = FastAPI(
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle Pydantic validation errors with detailed logging"""
     logger.error(f"Validation error on {request.method} {request.url.path}")
-    logger.error(f"Validation errors: {exc.errors()}")
-    logger.error(f"Request body: {await request.body()}")
+    
+    # Convert errors to JSON-serializable format
+    # exc.errors() may contain non-serializable objects (like ValueError) in ctx field
+    errors = exc.errors()
+    serializable_errors = []
+    for error in errors:
+        serializable_error = {}
+        for key, value in error.items():
+            if isinstance(value, Exception):
+                # Convert exception objects to strings
+                serializable_error[key] = str(value)
+            elif isinstance(value, dict):
+                # Recursively handle nested dicts (like ctx field)
+                serializable_error[key] = {
+                    k: str(v) if isinstance(v, Exception) else v
+                    for k, v in value.items()
+                }
+            else:
+                serializable_error[key] = value
+        serializable_errors.append(serializable_error)
+    
+    logger.error(f"Validation errors: {serializable_errors}")
+    
+    try:
+        request_body = await request.body()
+        body_str = request_body.decode('utf-8', errors='replace') if request_body else ""
+    except Exception:
+        body_str = ""
+    
+    logger.error(f"Request body: {body_str}")
+    
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
-            "detail": exc.errors(),
-            "body": str(await request.body())
+            "detail": serializable_errors,
+            "body": body_str
         }
     )
 
@@ -91,6 +137,18 @@ api_router.include_router(server_api.router, prefix="/servers", tags=["servers"]
 # Include server interaction routes (PXE boot, network config, password updates, etc.)
 from app.api import server_interaction as server_interaction_api
 api_router.include_router(server_interaction_api.router, prefix="/servers/interaction", tags=["server-interaction"])
+
+# Include OS template routes
+from app.api import os_templates as os_templates_api
+api_router.include_router(os_templates_api.router, prefix="/os-templates", tags=["os-templates"])
+
+# Include DHCP management routes
+from app.api import dhcp as dhcp_api
+api_router.include_router(dhcp_api.router, tags=["dhcp"])
+
+# Include TFTP management routes
+from app.api import tftp as tftp_api
+api_router.include_router(tftp_api.router, tags=["tftp"])
 
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)

@@ -48,8 +48,9 @@ Thumbs.db
 # Logs
 *.log
 
-
-
+# ISO image files
+*.iso
+isos/*.iso
 
 dhcpd.leases
 ipmi.py

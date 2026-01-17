@@ -74,7 +74,8 @@ def test_get_pxe_boot_file_success(client, db_session, test_pxe_port):
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/plain; charset=utf-8"
     assert "#!ipxe" in response.text
-    assert "iPXE Boot Menu" in response.text
+    # When no boot task exists, should return exit script
+    assert "exit" in response.text.lower() or "local disk" in response.text.lower()
 
 
 def test_get_pxe_boot_file_mac_normalization(client, db_session, test_pxe_port):

@@ -102,3 +102,11 @@ class NetworkPortDAO:
                 return p
         
         return None
+    
+    @staticmethod
+    def get_pxe_boot_port(db: Session, server_id: int) -> Optional[NetworkPort]:
+        """Get the PXE boot port for a server"""
+        return db.query(NetworkPort).filter(
+            NetworkPort.server_id == server_id,
+            NetworkPort.pxe_boot == True
+        ).first()
