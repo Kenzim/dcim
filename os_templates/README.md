@@ -1,9 +1,9 @@
 # OS Installation Templates
 
-This directory contains OS installation templates. Each template is a self-contained directory with:
+This directory contains **executable OS installation templates**. Each template is a self-contained directory with:
 
-- `template.json` - Template metadata and parameter schema
-- `install.sh` - Installation script (or other required files)
+- `template.json` - Template metadata and parameter schema (used by GUI)
+- `install.sh` - **The actual installation script** that runs to install the OS
 
 ## Template Structure
 

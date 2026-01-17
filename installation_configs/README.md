@@ -1,32 +1,44 @@
 # Installation Configurations
 
-This directory contains installation configuration files for different operating systems.
+This directory contains installation configuration files that define the **workflow and process** for installing operating systems.
+
+## Purpose
+
+**`installation_configs/`** defines **HOW** the installation process works:
+- Installation steps and workflow
+- Where configuration files should be written (e.g., `C:/dcim_password.txt`)
+- What parameters are required
+- The sequence of operations
+
+## Relationship to `os_templates/`
+
+- **`os_templates/`** = The **executable code** (scripts, templates, files) that actually performs the installation
+- **`installation_configs/`** = The **workflow definition** that describes the installation process
+
+Think of it like:
+- `os_templates/` = The chef and recipe (does the work)
+- `installation_configs/` = The cooking instructions (describes the steps)
 
 ## Structure
 
 Each installation configuration is a single JSON file named after the OS and version:
-- `windows_2022.json` - Windows Server 2022 installation
-- `windows_2025.json` - Windows Server 2025 installation
-- `ubuntu.json` - Ubuntu installation
+- `windows_2022.json` - Windows Server 2022 installation workflow
+- `windows_2025.json` - Windows Server 2025 installation workflow
+- `ubuntu.json` - Ubuntu installation workflow
 - etc.
 
-## Windows Server 2022 Installation
+## Example: Windows Server 2022
 
-The Windows Server 2022 installation configuration (`windows_2022.json`) defines:
-- Installation steps (write template, mount filesystem, write password config, boot)
-- Configuration file locations (C:/dcim_password.txt, C:/dcim_config.json)
-- Required parameters (admin_password, hostname)
+The `windows_2022.json` file defines:
+- **Steps**: Write template → Mount filesystem → Write password config → Boot
+- **Config file locations**: Where to write password (`C:/dcim_password.txt`) and config (`C:/dcim_config.json`)
+- **Required parameters**: What user input is needed (admin_password, hostname)
 
-The installation process will:
-1. Write the Windows template to the target disk
-2. Mount the newly created Windows filesystem
-3. Write the administrator password to `C:/dcim_password.txt`
-4. Write additional configuration to `C:/dcim_config.json`
-5. Reboot and boot into Windows
+## Current Status
 
-## Adding New Configurations
+**Note:** This directory is currently **not yet integrated** into the system. The actual installation system currently uses `os_templates/` which contains both the workflow and executable scripts.
 
-To add a new installation configuration:
-1. Create a new JSON file named `{os}_{version}.json` (e.g., `ubuntu_22.04.json`)
-2. Follow the structure of existing configuration files
-3. Add any required installation scripts or templates to the `os_templates/` directory
+This directory is prepared for future use where we might want to:
+- Separate workflow definitions from executable code
+- Have multiple workflows reference the same template
+- Define installation processes more declaratively
