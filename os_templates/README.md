@@ -1,9 +1,9 @@
 # OS Installation Templates
 
-This directory contains **executable OS installation templates**. Each template is a self-contained directory with:
+This directory contains OS installation templates. Each template is a self-contained directory with:
 
-- `template.json` - Template metadata and parameter schema (used by GUI)
-- `install.sh` - **The actual installation script** that runs to install the OS
+- `template.json` - Template configuration (script, disk image, parameters)
+- `install.sh` - Installation script that runs to install the OS
 
 ## Template Structure
 
@@ -22,6 +22,8 @@ template-name/
   "name": "Display Name",
   "description": "Description of what this template does",
   "os_type": "windows|linux|other",
+  "script": "install.sh",                    // Script file to run (relative to template directory)
+  "disk_image": "disk_images/os-image.iso", // Disk image location (relative to project root)
   "parameters": {
     "param_name": {
       "type": "text|password|select|number|boolean",
@@ -36,6 +38,12 @@ template-name/
   "initrd_url": "http://..."   // Optional: For Linux templates
 }
 ```
+
+## Key Fields
+
+- **`script`** - The installation script filename (e.g., `install.sh`) that will be executed
+- **`disk_image`** - Path to the disk image file (ISO, etc.) relative to project root (e.g., `disk_images/windows-server-2022.iso`)
+- **`parameters`** - User-configurable parameters shown in the GUI
 
 ## Adding a New Template
 
