@@ -151,6 +151,45 @@ async def get_dhcp_config(
     return config_service.get_config()
 
 
+@router.post("/regenerate", response_model=Dict[str, Any])
+async def regenerate_dhcp_config(
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+    config_service: DHCPConfigService = Depends(get_dhcp_config_service),
+    dhcp_service: DHCPService = Depends(get_dhcp_service)
+):
+    """
+    Manually regenerate DHCP configuration from current server settings.
+    
+    This will regenerate the dhcpd.conf file based on all servers with PXE boot ports
+    and reload the DHCP server if it's currently running.
+    
+    Returns:
+        Status information about the regeneration
+    """
+    try:
+        config = config_service.get_config()
+        
+        # Regenerate dhcpd.conf file
+        generate_dhcpd_conf(config, db)
+        
+        # Reload DHCP server if it's running
+        status_info = await dhcp_service.get_status()
+        if status_info.get("running"):
+            await dhcp_service.reload()
+        
+        return {
+            "success": True,
+            "message": "DHCP configuration regenerated successfully",
+            "status": "regenerated"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to regenerate DHCP config: {str(e)}"
+        )
+
+
 @router.put("/config", response_model=DHCPConfig)
 async def update_dhcp_config(
     config_data: DHCPConfigUpdate,

@@ -7,6 +7,7 @@
     restartDHCPServer,
     getDHCPConfig,
     updateDHCPConfig,
+    regenerateDHCPConfig,
     getTFTPStatus,
     startFTPServer,
     stopFTPServer,
@@ -26,6 +27,7 @@
   let tftpConfig = null;
   let saving = false;
   let actionInProgress = false;
+  let regenerating = false;
   let savingTFTP = false;
   let actionInProgressTFTP = false;
 
@@ -131,6 +133,22 @@
       alert('Failed to restart DHCP server: ' + err.message);
     } finally {
       actionInProgress = false;
+    }
+  }
+
+  async function handleRegenerate() {
+    if (!confirm('Regenerate DHCP configuration from current server settings?')) return;
+    try {
+      regenerating = true;
+      error = null;
+      await regenerateDHCPConfig();
+      await loadData();
+      alert('DHCP configuration regenerated successfully.');
+    } catch (err) {
+      error = err.message;
+      alert('Failed to regenerate DHCP configuration: ' + err.message);
+    } finally {
+      regenerating = false;
     }
   }
 
@@ -258,6 +276,9 @@
                 Start
               </button>
             {/if}
+            <button class="btn-secondary" on:click={handleRegenerate} disabled={regenerating || actionInProgress}>
+              {regenerating ? 'Regenerating...' : 'Regenerate Config'}
+            </button>
           </div>
         </div>
         <div class="card-body">
