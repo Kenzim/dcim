@@ -29,6 +29,8 @@ class OSTemplate(BaseModel):
     name: str = Field(..., description="Display name")
     description: str = Field(..., description="Template description")
     os_type: str = Field(..., description="OS type: windows, linux, other")
+    script: Optional[str] = Field(default=None, description="Installation script filename (e.g., install.sh)")
+    disk_image: Optional[str] = Field(default=None, description="Disk image path relative to project root (e.g., disk_images/os.iso)")
     parameters: Dict[str, TemplateParameter] = Field(default_factory=dict, description="Template parameters")
     kernel_url: Optional[str] = Field(default=None, description="Kernel URL for Linux templates")
     initrd_url: Optional[str] = Field(default=None, description="Initrd URL for Linux templates")
@@ -76,6 +78,8 @@ class OSTemplateService:
                     name=template_data.get("name", template_dir.name),
                     description=template_data.get("description", ""),
                     os_type=template_data.get("os_type", "other"),
+                    script=template_data.get("script"),
+                    disk_image=template_data.get("disk_image"),
                     parameters=parameters,
                     kernel_url=template_data.get("kernel_url"),
                     initrd_url=template_data.get("initrd_url"),
@@ -102,7 +106,13 @@ class OSTemplateService:
         if not template or not template.template_dir:
             return None
         
-        # Look for common script names
+        # Use script field from template.json if specified
+        if template.script:
+            script_path = template.template_dir / template.script
+            if script_path.exists():
+                return script_path
+        
+        # Fallback: Look for common script names
         script_names = ["install.sh", "install.bash", "setup.sh"]
         for script_name in script_names:
             script_path = template.template_dir / script_name
