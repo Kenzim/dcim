@@ -566,6 +566,29 @@
                 </button>
               </div>
             {/if}
+
+            <div class="boot-option">
+              <h4>Run Custom Script</h4>
+              <p class="boot-option-description">Boot into Alpine Linux and run a custom script from the scripts/ folder.</p>
+              {#if loadingScripts}
+                <p>Loading scripts...</p>
+              {:else if scripts.length === 0}
+                <p class="no-isos">No scripts found. Place .sh files in the <code>scripts/</code> directory on the server.</p>
+              {:else}
+                <div class="form-group">
+                  <label for="script-select">Select Script:</label>
+                  <select id="script-select" bind:value={selectedScript} disabled={creatingBootTask}>
+                    <option value="">-- Select a script --</option>
+                    {#each scripts as script}
+                      <option value={script.filename}>{script.filename} ({formatFileSize(script.size_kb)} KB)</option>
+                    {/each}
+                  </select>
+                </div>
+                <button class="btn-primary" on:click={handleRunScript} disabled={creatingBootTask || !selectedScript}>
+                  {creatingBootTask ? 'Creating...' : 'Run Script'}
+                </button>
+              {/if}
+            </div>
           </div>
         {/if}
       </div>
