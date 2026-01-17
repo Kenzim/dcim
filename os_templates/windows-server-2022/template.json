@@ -4,7 +4,7 @@
   "description": "Install Windows Server 2022 Standard or Datacenter edition",
   "os_type": "windows",
   "script": "install.sh",
-  "disk_image": "disk_images/windows-server-2022.iso",
+  "disk_image": "disk_images/w2022.raw",
   "parameters": {
     "edition": {
       "type": "select",
