@@ -485,6 +485,13 @@ async def create_boot_task(
             "SERVER_ID": str(server_id),
         }
         
+        # Add disk image URL if template has one
+        if template.disk_image:
+            # Extract filename from disk_image path (e.g., "disk_images/windows.iso" -> "windows.iso")
+            disk_image_filename = template.disk_image.split("/")[-1]
+            disk_image_url = f"http://{server.server_ip}:8000/api/servers/interaction/disk-images/{disk_image_filename}"
+            replacements["DISK_IMAGE_URL"] = disk_image_url
+        
         # Add template parameters as PARAM_* variables
         if boot_task_data.template_parameters:
             for param_name, param_value in boot_task_data.template_parameters.items():
