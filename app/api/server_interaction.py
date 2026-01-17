@@ -122,7 +122,8 @@ async def get_pxe_boot_file(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="No active boot task found for script request"
                 )
-            if boot_task.boot_type != BootType.LINUX_SCRIPT:
+            # Serve script content for LINUX_SCRIPT or TEMP_OS (Alpine) boot tasks
+            if boot_task.boot_type not in [BootType.LINUX_SCRIPT, BootType.TEMP_OS, BootType.ALPINE]:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"No script content available for boot type {boot_task.boot_type.value}"
@@ -138,6 +139,14 @@ async def get_pxe_boot_file(
                     headers={
                         "Content-Disposition": f'inline; filename="script-{boot_task.id}.sh"'
                     }
+                )
+            elif boot_task.script_url:
+                # If script_url is set, redirect to it or fetch and serve
+                logger.info(f"Boot task {boot_task.id} has script_url, serving via redirect")
+                # For now, return a message - Alpine can fetch from script_url directly
+                raise HTTPException(
+                    status_code=status.HTTP_302_FOUND,
+                    detail=f"Script available at: {boot_task.script_url}"
                 )
             else:
                 raise HTTPException(
@@ -390,6 +399,8 @@ class BootTaskCreate(BaseModel):
     iso_url: Optional[str] = None  # URL to ISO image
     # Temporary OS configuration (for TEMP_OS type)
     temp_os_id: Optional[str] = None  # ID of temporary OS (e.g., 'alpine', 'systemrescue')
+    # Custom script configuration (for running scripts from scripts/ folder)
+    custom_script: Optional[str] = None  # Filename of script in scripts/ folder
     # Description
     description: Optional[str] = None  # Optional description
     # Template-based installation (creates InstallationTask)
@@ -528,18 +539,26 @@ async def create_boot_task(
         if not boot_task_data.description:
             boot_task_data.description = f"Boot into {os_config.name}"
     
+    # Set boot_type for custom scripts
+    if boot_task_data.custom_script:
+        boot_type = BootType.TEMP_OS
+        temp_os_id = os_config.id if 'os_config' in locals() else None
+    else:
+        boot_type = BootType(boot_task_data.boot_type.lower())
+        temp_os_id = boot_task_data.temp_os_id
+    
     # Create boot task
     boot_task = BootTaskDAO.create(
         db=db,
         server_id=server_id,
-        boot_type=boot_task_data.boot_type,
+        boot_type=boot_type,
         kernel_url=kernel_url,
         initrd_url=initrd_url,
         kernel_params=kernel_params,
-        script_url=boot_task_data.script_url,
+        script_url=script_url if 'script_url' in locals() else boot_task_data.script_url,
         script_content=script_content,
         iso_url=boot_task_data.iso_url,
-        temp_os_id=boot_task_data.temp_os_id,
+        temp_os_id=temp_os_id,
         description=boot_task_data.description
     )
     
@@ -789,6 +808,86 @@ async def get_modloop(
     return FileResponse(
         modloop_path,
         media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"'
+        }
+    )
+
+
+# Custom Scripts Endpoints
+
+@router.get("/scripts")
+async def list_scripts(
+    auth: dict = Depends(require_admin)
+):
+    """
+    List all available custom scripts.
+    
+    Returns a list of script files available in the scripts/ directory.
+    """
+    scripts_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "scripts"
+    )
+    
+    if not os.path.exists(scripts_dir):
+        return []
+    
+    script_files = []
+    for filename in os.listdir(scripts_dir):
+        file_path = os.path.join(scripts_dir, filename)
+        if os.path.isfile(file_path) and filename.endswith('.sh'):
+            file_size = os.path.getsize(file_path)
+            script_files.append({
+                "filename": filename,
+                "size_bytes": file_size,
+                "size_kb": round(file_size / 1024, 2),
+                "url": f"/api/servers/interaction/scripts/{filename}"
+            })
+    
+    return sorted(script_files, key=lambda x: x["filename"])
+
+
+@router.get("/scripts/{filename}")
+async def get_script(
+    filename: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Serve custom script files.
+    
+    This endpoint serves script files from the scripts/ directory.
+    Scripts can be executed via boot tasks.
+    """
+    script_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "scripts", filename
+    )
+    
+    # Security: only allow files in the scripts directory
+    if ".." in filename or "/" in filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename"
+        )
+    
+    if not os.path.exists(script_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Script '{filename}' not found"
+        )
+    
+    # Only allow .sh files
+    if not filename.endswith('.sh'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .sh script files are allowed"
+        )
+    
+    logger.info(f"Serving script file: {filename}")
+    return FileResponse(
+        script_path,
+        media_type="text/x-shellscript",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"'
         }

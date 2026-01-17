@@ -1,6 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServer, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, testServerCapabilities, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, listTempOS } from '../lib/api.js';
+  import { getServer, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, testServerCapabilities, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, listTempOS, listScripts } from '../lib/api.js';
   import { onMount } from 'svelte';
 
   export let serverId;
@@ -22,6 +22,9 @@
   let tempOSes = [];
   let loadingTempOSes = false;
   let selectedTempOS = null;
+  let scripts = [];
+  let loadingScripts = false;
+  let selectedScript = null;
   let creatingBootTask = false;
   let refreshing = false;
 
@@ -30,7 +33,7 @@
   });
 
   async function loadAllData() {
-    await Promise.all([loadServer(), loadPlugins(), loadLocations(), loadISOs(), loadTempOSes()]);
+    await Promise.all([loadServer(), loadPlugins(), loadLocations(), loadISOs(), loadTempOSes(), loadScripts()]);
     if (server && serverSupportsPowerControl(server)) {
       await loadPowerState();
     }
@@ -252,6 +255,52 @@
       await loadBootTask();
       alert(`Boot task created successfully. Server will boot into ${os.name} on next reboot.`);
       selectedTempOS = null;
+    } catch (err) {
+      alert('Failed to create boot task: ' + err.message);
+    } finally {
+      creatingBootTask = false;
+    }
+  }
+
+  async function loadScripts() {
+    try {
+      loadingScripts = true;
+      scripts = await listScripts();
+    } catch (err) {
+      console.error('Failed to load scripts:', err);
+      scripts = [];
+    } finally {
+      loadingScripts = false;
+    }
+  }
+
+  async function handleRunScript() {
+    if (!selectedScript) {
+      alert('Please select a script');
+      return;
+    }
+
+    const script = scripts.find(s => s.filename === selectedScript);
+    if (!script) {
+      alert('Selected script not found');
+      return;
+    }
+
+    if (!confirm(`Boot server "${server.name}" into Alpine and run script "${script.filename}"?`)) {
+      return;
+    }
+
+    creatingBootTask = true;
+    try {
+      await createBootTask(serverId, {
+        boot_type: 'temp_os',
+        temp_os_id: 'alpine-script',
+        custom_script: script.filename,
+        description: `Run script: ${script.filename}`
+      });
+      await loadBootTask();
+      alert(`Boot task created successfully. Server will boot into Alpine and run "${script.filename}" on next reboot.`);
+      selectedScript = null;
     } catch (err) {
       alert('Failed to create boot task: ' + err.message);
     } finally {

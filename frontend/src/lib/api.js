@@ -494,6 +494,19 @@ export async function cancelBootTask(serverId) {
 }
 
 // ISO API
+export async function listScripts() {
+  const response = await fetch(`${API_BASE}/servers/interaction/scripts`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to list scripts');
+  }
+
+  return await response.json();
+}
+
 export async function listISOs() {
   const response = await fetch(`${API_BASE}/servers/interaction/isos`, {
     method: 'GET',
