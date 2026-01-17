@@ -121,9 +121,9 @@ run_api_script() {
         if [ -s /tmp/run.sh ]; then
             chmod +x /tmp/run.sh
             echo "Running script from API..."
-            sh /tmp/run.sh
+            /bin/busybox sh /tmp/run.sh
             echo "Script completed, dropping to shell"
-            exec /bin/sh
+            exec /bin/busybox sh
         fi
     fi
     # If we get here, no script was available (404 or empty file) - return 1 to allow normal boot
