@@ -1,6 +1,6 @@
 {
-  "id": "windows",
-  "name": "Windows Installation",
+  "id": "windows_2022",
+  "name": "Windows Server 2022 Installation",
   "description": "Windows Server installation configuration",
   "version": "1.0.0",
   "os_type": "windows",

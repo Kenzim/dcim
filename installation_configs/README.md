@@ -4,13 +4,15 @@ This directory contains installation configuration files for different operating
 
 ## Structure
 
-Each installation configuration should have:
-- `config.json` - Configuration metadata and parameters
-- Installation scripts and templates as needed
+Each installation configuration is a single JSON file named after the OS and version:
+- `windows_2022.json` - Windows Server 2022 installation
+- `windows_2025.json` - Windows Server 2025 installation
+- `ubuntu.json` - Ubuntu installation
+- etc.
 
-## Windows Installation
+## Windows Server 2022 Installation
 
-The Windows installation configuration (`windows/config.json`) defines:
+The Windows Server 2022 installation configuration (`windows_2022.json`) defines:
 - Installation steps (write template, mount filesystem, write password config, boot)
 - Configuration file locations (C:/dcim_password.txt, C:/dcim_config.json)
 - Required parameters (admin_password, hostname)
@@ -25,6 +27,6 @@ The installation process will:
 ## Adding New Configurations
 
 To add a new installation configuration:
-1. Create a new directory under `installation_configs/`
-2. Add a `config.json` file with the configuration metadata
-3. Add any required installation scripts or templates
+1. Create a new JSON file named `{os}_{version}.json` (e.g., `ubuntu_22.04.json`)
+2. Follow the structure of existing configuration files
+3. Add any required installation scripts or templates to the `os_templates/` directory
