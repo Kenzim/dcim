@@ -35,6 +35,7 @@ def normalize_mac_address(mac: str) -> str:
         "00:0e:1e:6f:16:b0" -> "00:0E:1E:6F:16:B0"
         "00-0e-1e-6f-16-b0" -> "00:0E:1E:6F:16:B0"
         "000e1e6f16b0" -> "00:0E:1E:6F:16:B0"
+        "BC:24:11:9A:6B:9D@" -> "BC:24:11:9A:6B:9D" (strips trailing @)
     
     Raises:
         ValueError: If mac is None or empty
@@ -42,8 +43,12 @@ def normalize_mac_address(mac: str) -> str:
     if not mac:
         raise ValueError("MAC address cannot be None or empty")
     
-    # Remove separators and convert to uppercase
+    # Remove separators and any trailing non-hex characters (like @ from kernel params)
     mac_clean = mac.replace(":", "").replace("-", "").replace(".", "").upper()
+    
+    # Strip any trailing non-hexadecimal characters (kernel params sometimes add @ or other chars)
+    import re
+    mac_clean = re.sub(r'[^0-9A-F].*$', '', mac_clean)
     
     # Add colons every 2 characters
     if len(mac_clean) == 12:
@@ -123,7 +128,7 @@ async def get_pxe_boot_file(
                     detail="No active boot task found for script request"
                 )
             # Serve script content for LINUX_SCRIPT or TEMP_OS (Alpine) boot tasks
-            if boot_task.boot_type not in [BootType.LINUX_SCRIPT, BootType.TEMP_OS, BootType.ALPINE]:
+            if boot_task.boot_type not in [BootType.LINUX_SCRIPT, BootType.TEMP_OS]:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"No script content available for boot type {boot_task.boot_type.value}"
@@ -235,11 +240,11 @@ echo ISO boot task already completed, booting from local disk...
 exit
 """
             
-            elif boot_task.boot_type == BootType.TEMP_OS or boot_task.boot_type == BootType.ALPINE:
+            elif boot_task.boot_type == BootType.TEMP_OS:
                 # Boot temporary OS (Alpine, SystemRescue, etc.)
                 # For ALPINE type (deprecated), treat as temp_os with id 'alpine'
                 temp_os_id = boot_task.temp_os_id
-                if boot_task.boot_type == BootType.ALPINE and not temp_os_id:
+                if not temp_os_id:
                     temp_os_id = "alpine"  # Backward compatibility
                 
                 if not temp_os_id:
@@ -261,14 +266,30 @@ exit
                     else:
                         # Get URLs from temp OS service
                         base_url = "http://192.168.12.74:8000"
+                        # NOTE: For our squashfs-based live OS, we intentionally boot the kernel+initramfs
+                        # from the `images/` directory (served by `/api/servers/interaction/images/...`).
+                        # This avoids accidentally booting a distro initrd (e.g. Ubuntu casper) that cannot
+                        # find our squashfs rootfs and will prompt "Attempt interactive netboot from a URL?".
+                        # Get URLs from temp OS service (now serves from temp_os/{os_id}/files/)
                         kernel_url = boot_task.kernel_url or temp_os_service.get_kernel_url(temp_os_id, base_url)
                         initrd_url = boot_task.initrd_url or temp_os_service.get_initrd_url(temp_os_id, base_url)
                         kernel_params = boot_task.kernel_params or temp_os_service.get_kernel_params(temp_os_id)
                         
-                        # For temporary OS boots, mark as completed immediately after serving the boot script
-                        # Similar to ISO boots - we can't track when the user exits the temporary OS
+                        # Add squashfs fetch URL if available (for debian-live)
+                        squashfs_url = temp_os_service.get_squashfs_url(temp_os_id, base_url)
+                        if squashfs_url and "fetch=" not in kernel_params:
+                            kernel_params = f"{kernel_params} fetch={squashfs_url}"
+                        
+                        # Add script URL if script exists
+                        if boot_task.script_content:
+                            script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
+                            from urllib.parse import quote
+                            encoded_script_url = quote(script_url, safe=':/?=&')
+                            if "script_url=" not in kernel_params:
+                                kernel_params = f"{kernel_params} script_url={encoded_script_url}"
+                        
+                        # Generate iPXE script for temporary OS
                         if boot_task.status == BootTaskStatus.PENDING:
-                            # Generate iPXE script to boot temporary OS
                             boot_script = f"""#!ipxe
 echo ========================================
 echo   Booting {os_config.name}
@@ -278,17 +299,17 @@ echo Task ID: {boot_task.id}
 echo OS: {os_config.name} ({os_config.version or 'unknown version'})
 echo
 echo Loading kernel...
+echo   {kernel_url}
 kernel {kernel_url} {kernel_params}
 echo Loading initrd...
+echo   {initrd_url}
 initrd {initrd_url}
 echo Booting {os_config.name}...
 boot
 """
                             logger.info(f"Boot task {boot_task.id} found for server {server.name}, booting {os_config.name} (temp_os_id={temp_os_id})")
-                            # Mark as completed immediately since we can't track temporary OS session completion
                             BootTaskDAO.mark_completed(db, boot_task.id)
                         else:
-                            # Already served/completed, return exit script
                             boot_script = f"""#!ipxe
 echo {os_config.name} boot task already completed, booting from local disk...
 exit
@@ -429,7 +450,7 @@ class BootTaskResponse(BaseModel):
         from_attributes = True
 
 
-@router.post("/servers/{server_id}/boot-task", response_model=BootTaskResponse)
+@router.post("/{server_id}/boot-task", response_model=BootTaskResponse)
 async def create_boot_task(
     server_id: int,
     boot_task_data: BootTaskCreate,
@@ -539,11 +560,82 @@ async def create_boot_task(
         if not boot_task_data.description:
             boot_task_data.description = f"Boot into {os_config.name}"
     
-    # Determine boot_type and temp_os_id
+    # Handle custom script from scripts/ folder
     if boot_task_data.custom_script:
-        # Custom scripts boot Alpine
+        # Read the custom script file
+        scripts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "scripts"
+        )
+        script_path = os.path.join(scripts_dir, boot_task_data.custom_script)
+        
+        # Security: only allow files in the scripts directory
+        if ".." in boot_task_data.custom_script or "/" in boot_task_data.custom_script:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid script filename"
+            )
+        
+        if not os.path.exists(script_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Script file '{boot_task_data.custom_script}' not found in scripts/ directory"
+            )
+        
+        # Only allow .sh files
+        if not boot_task_data.custom_script.endswith('.sh'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only .sh script files are allowed"
+            )
+        
+        # Read script content
+        with open(script_path, 'r') as f:
+            script_content = f.read()
+        
+        # Get server's PXE boot port MAC address for script variables
+        pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+        server_mac = pxe_port.mac_address if pxe_port else None
+        
+        # Replace variables in script
+        script_content = script_content.replace("${SERVER_IP}", server.server_ip or "")
+        script_content = script_content.replace("${SERVER_MAC}", server_mac or "")
+        script_content = script_content.replace("${SERVER_ID}", str(server_id))
+        script_content = script_content.replace("$SERVER_IP", server.server_ip or "")
+        script_content = script_content.replace("$SERVER_MAC", server_mac or "")
+        script_content = script_content.replace("$SERVER_ID", str(server_id))
+        
+        # Custom scripts boot Debian Live (squashfs)
         boot_type = BootType.TEMP_OS
-        temp_os_id = os_config.id if 'os_config' in locals() else "alpine-script"
+        # Get temp OS config for debian-live
+        temp_os_service = get_temp_os_service()
+        os_config = temp_os_service.get_os_config("debian-live")
+        if not os_config:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="debian-live temporary OS not found"
+            )
+        temp_os_id = "debian-live"
+        
+        # Get URLs - for debian-live, kernel/initrd are served from /api/servers/interaction/images/
+        base_url = "http://192.168.12.74:8000"
+        kernel_url = f"{base_url}/api/servers/interaction/images/{os_config.kernel_file}"
+        initrd_url = f"{base_url}/api/servers/interaction/images/{os_config.initrd_file}"
+        kernel_params = temp_os_service.get_kernel_params("debian-live", boot_task_data.kernel_params)
+        # Script URL will be added to kernel params after boot task is created
+        pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+        server_mac = pxe_port.mac_address if pxe_port else None
+        if server_mac:
+            base_url = "http://192.168.12.74:8000"
+            preseed_url = f"{base_url}/api/servers/interaction/preseed?mac={server_mac}"
+            kernel_params = f"{kernel_params} preseed/url={preseed_url}"
+        
+        # Set description if not provided
+        if not boot_task_data.description:
+            boot_task_data.description = f"Run custom script: {boot_task_data.custom_script}"
+        
+        # Set boot_type for custom script
+        boot_type = BootType.TEMP_OS
     elif boot_task_data.boot_type.lower() == "temp_os":
         boot_type = BootType.TEMP_OS
         temp_os_id = boot_task_data.temp_os_id
@@ -565,6 +657,18 @@ async def create_boot_task(
         temp_os_id=temp_os_id,
         description=boot_task_data.description
     )
+    
+    # For Debian Live (squashfs), add script URL to kernel params if script exists
+    if boot_task.temp_os_id == "debian-live" and boot_task.script_content:
+        base_url = "http://192.168.12.74:8000"
+        script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
+        from urllib.parse import quote
+        encoded_script_url = quote(script_url, safe=':/?=&')
+        if "script_url=" not in boot_task.kernel_params:
+            updated_kernel_params = f"{boot_task.kernel_params} script_url={encoded_script_url}"
+            boot_task.kernel_params = updated_kernel_params
+            db.commit()
+            db.refresh(boot_task)
     
     # If this is a template-based installation, create InstallationTask
     installation_task = None
@@ -603,7 +707,7 @@ async def create_boot_task(
     )
 
 
-@router.get("/servers/{server_id}/boot-task", response_model=Optional[BootTaskResponse])
+@router.get("/{server_id}/boot-task", response_model=Optional[BootTaskResponse])
 async def get_boot_task(
     server_id: int,
     auth: dict = Depends(require_admin),
@@ -639,7 +743,7 @@ async def get_boot_task(
     )
 
 
-@router.delete("/servers/{server_id}/boot-task")
+@router.delete("/{server_id}/boot-task")
 async def cancel_boot_task(
     server_id: int,
     auth: dict = Depends(require_admin),
@@ -771,46 +875,6 @@ async def get_initrd(
     
     return FileResponse(
         initrd_path,
-        media_type="application/octet-stream",
-        headers={
-            "Content-Disposition": f'inline; filename="{filename}"'
-        }
-    )
-
-
-@router.get("/modloop/{filename}")
-async def get_modloop(
-    filename: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Serve Alpine Linux modloop files.
-    
-    This endpoint serves modloop files for Alpine Linux netboot.
-    Place modloop files in the tftp/pxe/modloop/ directory.
-    See: https://wiki.alpinelinux.org/wiki/Netboot_Alpine_Linux_using_iPXE
-    """
-    modloop_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "tftp", "pxe", "modloop", filename
-    )
-    
-    # Security: only allow files in the modloop directory
-    if ".." in filename or "/" in filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
-        )
-    
-    if not os.path.exists(modloop_path):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Modloop file '{filename}' not found"
-        )
-    
-    logger.info(f"Serving modloop file: {filename}")
-    return FileResponse(
-        modloop_path,
         media_type="application/octet-stream",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"'
@@ -1007,22 +1071,24 @@ async def list_temp_os(
             "description": config.description,
             "version": config.version,
             "flavor": config.flavor,
-            "requires_modloop": config.requires_modloop
         }
         for config in configs
     ]
 
 
-@router.get("/temp-os/{os_id}/kernel/{filename}")
-async def get_temp_os_kernel(
+@router.get("/temp-os/{os_id}/files/{filename}")
+@router.head("/temp-os/{os_id}/files/{filename}")
+async def get_temp_os_file(
     os_id: str,
     filename: str,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
-    Serve kernel files for temporary OSes.
+    Serve files for temporary OSes from their directory.
     
-    This endpoint serves kernel files from the temp_os/{os_id}/kernel/ directory.
+    This endpoint serves files (kernel, initrd, squashfs, etc.) from the temp_os/{os_id}/ directory.
+    Files are stored directly in the temp_os/{os_id}/ folder (not in subdirectories).
     """
     temp_os_service = get_temp_os_service()
     os_dir = temp_os_service.get_os_dir(os_id)
@@ -1033,119 +1099,99 @@ async def get_temp_os_kernel(
             detail=f"Temporary OS '{os_id}' not found"
         )
     
-    kernel_path = os_dir / "kernel" / filename
+    file_path = os_dir / filename
     
-    # Security: only allow files in the kernel directory
+    # Security: only allow files in the temp OS directory
     if ".." in filename or "/" in filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid filename"
         )
     
-    if not kernel_path.exists():
+    if not file_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Kernel file '{filename}' not found for OS '{os_id}'"
+            detail=f"File '{filename}' not found for OS '{os_id}'"
         )
     
-    logger.info(f"Serving kernel file: {os_id}/{filename}")
+    # Determine media type based on extension
+    if filename.endswith('.squashfs'):
+        media_type = "application/x-squashfs"
+    elif filename.endswith('.img') or filename.endswith('.cpio.gz') or filename.endswith('.cpio'):
+        media_type = "application/x-cpio"
+    elif filename.startswith('vmlinuz') or filename.endswith('.bin') or filename.endswith('.efi'):
+        media_type = "application/x-executable"
+    else:
+        media_type = "application/octet-stream"
+    
+    logger.info(f"Serving file: {os_id}/{filename}")
     return FileResponse(
-        str(kernel_path),
-        media_type="application/octet-stream",
+        str(file_path),
+        media_type=media_type,
         headers={
             "Content-Disposition": f'inline; filename="{filename}"'
         }
     )
 
 
-@router.get("/temp-os/{os_id}/initrd/{filename}")
-async def get_temp_os_initrd(
-    os_id: str,
+# Live OS Image Serving Endpoints
+
+@router.get("/images/{filename}")
+@router.head("/images/{filename}")
+async def get_live_os_image(
     filename: str,
-    db: Session = Depends(get_db)
+    request: Request
 ):
     """
-    Serve initrd files for temporary OSes.
+    Serve live OS images (squashfs, initramfs, kernel) from images/ directory.
     
-    This endpoint serves initrd files from the temp_os/{os_id}/initrd/ directory.
+    This endpoint serves:
+    - debian-live.squashfs (the root filesystem)
+    - initramfs-live.cpio.gz (the initramfs)
+    - vmlinuz-live (the kernel)
+    
+    Supports both GET and HEAD requests.
     """
-    temp_os_service = get_temp_os_service()
-    os_dir = temp_os_service.get_os_dir(os_id)
+    images_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "images"
+    )
     
-    if not os_dir:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Temporary OS '{os_id}' not found"
-        )
+    image_path = os.path.join(images_dir, filename)
     
-    initrd_path = os_dir / "initrd" / filename
-    
-    # Security: only allow files in the initrd directory
+    # Security: only allow files in the images directory
     if ".." in filename or "/" in filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid filename"
         )
     
-    if not initrd_path.exists():
+    if not os.path.exists(image_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Initrd file '{filename}' not found for OS '{os_id}'"
+            detail=f"Image file '{filename}' not found"
         )
     
-    logger.info(f"Serving initrd file: {os_id}/{filename}")
+    # Determine media type based on extension
+    if filename.endswith('.squashfs'):
+        media_type = "application/x-squashfs"
+    elif filename.endswith('.cpio.gz') or filename.endswith('.cpio'):
+        media_type = "application/x-cpio"
+    elif filename.startswith('vmlinuz') or filename.endswith('.bin'):
+        media_type = "application/x-executable"
+    else:
+        media_type = "application/octet-stream"
+    
+    logger.info(f"Serving live OS image: {filename}")
     return FileResponse(
-        str(initrd_path),
-        media_type="application/octet-stream",
+        image_path,
+        media_type=media_type,
         headers={
             "Content-Disposition": f'inline; filename="{filename}"'
         }
     )
 
 
-@router.get("/temp-os/{os_id}/modloop/{filename}")
-async def get_temp_os_modloop(
-    os_id: str,
-    filename: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Serve modloop files for temporary OSes (e.g., Alpine Linux).
-    
-    This endpoint serves modloop files from the temp_os/{os_id}/modloop/ directory.
-    """
-    temp_os_service = get_temp_os_service()
-    os_dir = temp_os_service.get_os_dir(os_id)
-    
-    if not os_dir:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Temporary OS '{os_id}' not found"
-        )
-    
-    modloop_path = os_dir / "modloop" / filename
-    
-    # Security: only allow files in the modloop directory
-    if ".." in filename or "/" in filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
-        )
-    
-    if not modloop_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Modloop file '{filename}' not found for OS '{os_id}'"
-        )
-    
-    logger.info(f"Serving modloop file: {os_id}/{filename}")
-    return FileResponse(
-        str(modloop_path),
-        media_type="application/octet-stream",
-        headers={
-            "Content-Disposition": f'inline; filename="{filename}"'
-        }
-    )
 
 
 # Disk Image Serving Endpoints

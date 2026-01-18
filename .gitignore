@@ -67,3 +67,41 @@ disk_images/**/*
 disk_images/**/*
 !disk_images/**/.gitkeep
 !disk_images/**/README.md
+
+# Binary boot files (should never be in git)
+*.squashfs
+*.img
+vmlinuz*
+initrd*
+initramfs*
+*.cpio.gz
+*.modloop
+*.iso
+
+# Temporary OS files (keep config.json, ignore binaries)
+tftp/pxe/temp_os/**/*.squashfs
+tftp/pxe/temp_os/**/*.img
+tftp/pxe/temp_os/**/vmlinuz*
+tftp/pxe/temp_os/**/initrd*
+tftp/pxe/temp_os/**/initramfs*
+tftp/pxe/temp_os/**/*.cpio.gz
+tftp/pxe/temp_os/**/*.modloop
+tftp/pxe/temp_os/**/kernel/*
+tftp/pxe/temp_os/**/initrd/*
+tftp/pxe/temp_os/**/modloop/*
+!tftp/pxe/temp_os/**/config.json
+
+# Squashfs root (extracted filesystem)
+tftp/squashfs-root/
+squashfs-root/
+
+# System binaries and mount scripts
+sbin/
+
+# Run scripts (user-specific)
+run_*.sh
+
+# Old PXE boot files
+tftp/pxe/boot.ipxe
+tftp/pxe/initrd/
+tftp/pxe/kernel/

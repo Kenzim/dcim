@@ -1,7 +1,0 @@
-#!ipxe
-
-# Simple boot script - exit iPXE to boot from local disk
-# The API can override this with other options if needed
-
-echo Exiting iPXE to boot from local disk...
-exit

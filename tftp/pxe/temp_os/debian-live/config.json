@@ -1,0 +1,11 @@
+{
+  "id": "debian-live",
+  "name": "Debian Live OS",
+  "description": "Debian Live Server booted from squashfs with systemd script runner",
+  "kernel_file": "vmlinuz",
+  "initrd_file": "initrd.img",
+  "squashfs_file": "filesystem.squashfs",
+  "kernel_params": "boot=live ip=dhcp net.ifnames=0 biosdevname=0 console=tty0 console=ttyS0,115200",
+  "version": "12",
+  "flavor": "bookworm"
+}

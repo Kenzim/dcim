@@ -271,7 +271,7 @@ export async function reloadOSTemplates() {
 
 // Boot Tasks API
 export async function getBootTask(serverId) {
-  const response = await fetch(`${API_BASE}/servers/interaction/servers/${serverId}/boot-task`, {
+  const response = await fetch(`${API_BASE}/servers/interaction/${serverId}/boot-task`, {
     method: 'GET',
     credentials: 'include',
   });
@@ -287,7 +287,7 @@ export async function getBootTask(serverId) {
 }
 
 export async function createBootTask(serverId, bootTaskData) {
-  const response = await fetch(`${API_BASE}/servers/interaction/servers/${serverId}/boot-task`, {
+  const response = await fetch(`${API_BASE}/servers/interaction/${serverId}/boot-task`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -480,7 +480,7 @@ export async function listTempOS() {
 }
 
 export async function cancelBootTask(serverId) {
-  const response = await fetch(`${API_BASE}/servers/interaction/servers/${serverId}/boot-task`, {
+  const response = await fetch(`${API_BASE}/servers/interaction/${serverId}/boot-task`, {
     method: 'DELETE',
     credentials: 'include',
   });

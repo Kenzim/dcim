@@ -286,7 +286,7 @@
       return;
     }
 
-    if (!confirm(`Boot server "${server.name}" into Alpine and run script "${script.filename}"?`)) {
+    if (!confirm(`Boot server "${server.name}" into Ubuntu Live OS and run script "${script.filename}"?`)) {
       return;
     }
 
@@ -294,12 +294,12 @@
     try {
       await createBootTask(serverId, {
         boot_type: 'temp_os',
-        temp_os_id: 'alpine-script',
+        temp_os_id: 'debian-live',
         custom_script: script.filename,
         description: `Run script: ${script.filename}`
       });
       await loadBootTask();
-      alert(`Boot task created successfully. Server will boot into Alpine and run "${script.filename}" on next reboot.`);
+      alert(`Boot task created successfully. Server will boot into Ubuntu Live OS and run "${script.filename}" on next reboot.`);
       selectedScript = null;
     } catch (err) {
       alert('Failed to create boot task: ' + err.message);
@@ -569,7 +569,7 @@
 
             <div class="boot-option">
               <h4>Run Custom Script</h4>
-              <p class="boot-option-description">Boot into Alpine Linux and run a custom script from the scripts/ folder.</p>
+              <p class="boot-option-description">Boot into Ubuntu Live OS (squashfs) and run a custom script from the scripts/ folder.</p>
               {#if loadingScripts}
                 <p>Loading scripts...</p>
               {:else if scripts.length === 0}
