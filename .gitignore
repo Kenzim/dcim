@@ -94,6 +94,9 @@ tftp/pxe/temp_os/**/modloop/*
 # Squashfs root (extracted filesystem)
 tftp/squashfs-root/
 squashfs-root/
+usr/
+sys/
+newroot/
 
 # System binaries and mount scripts
 sbin/
