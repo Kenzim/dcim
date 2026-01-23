@@ -1,13 +1,12 @@
 #!/bin/bash
 # Test Script
 # This is a basic test script to verify Alpine boot and script execution
-
 echo "=== Test Script ==="
 echo "Server IP: ${SERVER_IP}"
 echo "Server MAC: ${SERVER_MAC}"
 echo "Server ID: ${SERVER_ID}"
 echo ""
-echo "This script is running in Alpine Linux!"
+echo "This script is running in $(uname -a)!"
 echo "Current date: $(date)"
 echo "Current user: $(whoami)"
 echo "Hostname: $(hostname)"

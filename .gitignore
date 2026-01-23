@@ -57,9 +57,7 @@ ipmi.py
 dhcpd.pid
 *.pid
 
-# Installation configs and disk images
-installation_configs/**/*
-!installation_configs/**/.gitkeep
+
 disk_images/**/*
 !disk_images/**/.gitkeep
 # Disk images

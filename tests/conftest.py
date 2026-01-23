@@ -35,13 +35,30 @@ def mock_redis():
     # Store TTLs: {key: seconds}
     mock_redis_client._ttls = {}
     
-    def mock_hset(key, mapping=None, **kwargs):
+    def mock_hset(key, *args, mapping=None, **kwargs):
+        """
+        Mock hset supporting multiple forms:
+        - hset(key, mapping={...})
+        - hset(key, field, value)
+        - hset(key, **kwargs)
+        """
         if key not in mock_redis_client._hashes:
             mock_redis_client._hashes[key] = {}
+        
+        # Handle hset(key, field, value) form (3 positional arguments)
+        if len(args) == 2 and mapping is None and not kwargs:
+            field, value = args
+            mock_redis_client._hashes[key][field] = value
+            return 1
+        
+        # Handle hset(key, mapping={...}) form
         if mapping:
             mock_redis_client._hashes[key].update(mapping)
+        
+        # Handle hset(key, **kwargs) form
         if kwargs:
             mock_redis_client._hashes[key].update(kwargs)
+        
         return len(mock_redis_client._hashes[key])
     
     def mock_hgetall(key):
@@ -65,6 +82,17 @@ def mock_redis():
             mock_redis_client._ttls[key] = seconds
             return True
         return False
+    
+    def mock_exists(key):
+        return key in mock_redis_client._hashes or key in mock_redis_client._zsets
+    
+    def mock_scan_iter(match=None):
+        """Mock scan_iter for iterating over keys"""
+        keys = list(mock_redis_client._hashes.keys()) + list(mock_redis_client._zsets.keys())
+        if match:
+            import fnmatch
+            keys = [k for k in keys if fnmatch.fnmatch(k, match)]
+        return iter(keys)
     
     def mock_zadd(key, mapping):
         if key not in mock_redis_client._zsets:
@@ -122,6 +150,8 @@ def mock_redis():
     mock_redis_client.hgetall = mock_hgetall
     mock_redis_client.delete = mock_delete
     mock_redis_client.expire = mock_expire
+    mock_redis_client.exists = mock_exists
+    mock_redis_client.scan_iter = mock_scan_iter
     mock_redis_client.zadd = mock_zadd
     mock_redis_client.zrem = mock_zrem
     mock_redis_client.zrevrange = mock_zrevrange
@@ -155,10 +185,12 @@ def client(db_session, mock_redis, monkeypatch):
     import app.core.redis as redis_module
     import app.api.user as user_api
     import app.core.auth as auth_module
+    import app.services.download_token_service as token_service_module
     
     monkeypatch.setattr(redis_module, "redis_client", mock_redis)
     monkeypatch.setattr(user_api, "redis_client", mock_redis)
     monkeypatch.setattr(auth_module, "redis_client", mock_redis)
+    monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
     app.dependency_overrides[get_db] = override_get_db
     
