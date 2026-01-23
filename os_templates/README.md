@@ -31,7 +31,13 @@ template-name/
       "required": true|false,
       "default": "default_value",
       "options": ["option1", "option2"],  // For select type
-      "help": "Help text for this parameter"
+      "help": "Help text for this parameter",
+      "generate": {  // Optional: Password generation config (for password type)
+        "enabled": true,  // Whether to show generate button (default: true for password type)
+        "length": 16,  // Password length (default: 16)
+        "charset": "alphanumeric",  // Character set: "alphanumeric", "alphanumeric_symbols", "numeric", "alphabetic"
+        "exclude_ambiguous": true  // Exclude ambiguous characters: 0, O, 1, I, l, 5, S, 2, Z (default: true)
+      }
     }
   },
   "kernel_url": "http://...",  // Optional: For Linux templates
@@ -44,6 +50,7 @@ template-name/
 - **`script`** - The installation script filename (e.g., `install.sh`) that will be executed
 - **`disk_image`** - Path to the disk image file (ISO, etc.) relative to project root (e.g., `disk_images/windows-server-2022.iso`)
 - **`parameters`** - User-configurable parameters shown in the GUI
+- **`parameters[].generate`** - Optional password generation configuration for password-type parameters. If not specified, defaults are used (enabled: true, length: 16, charset: alphanumeric, exclude_ambiguous: true)
 
 ## Adding a New Template
 
