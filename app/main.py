@@ -130,6 +130,10 @@ api_router.include_router(plugin_api.router, prefix="/plugins", tags=["plugins"]
 from app.api import location as location_api
 api_router.include_router(location_api.router, prefix="/locations", tags=["locations"])
 
+# Include rack routes
+from app.api import rack as rack_api
+api_router.include_router(rack_api.router, prefix="/racks", tags=["racks"])
+
 # Include server routes
 from app.api import server as server_api
 api_router.include_router(server_api.router, prefix="/servers", tags=["servers"])
@@ -137,6 +141,14 @@ api_router.include_router(server_api.router, prefix="/servers", tags=["servers"]
 # Include server interaction routes (PXE boot, network config, password updates, etc.)
 from app.api import server_interaction as server_interaction_api
 api_router.include_router(server_interaction_api.router, prefix="/servers/interaction", tags=["server-interaction"])
+
+# Include installation task routes
+from app.api import installation_tasks as installation_tasks_api
+api_router.include_router(installation_tasks_api.router, tags=["installation-tasks"])
+
+# Include utility routes
+from app.api import utils as utils_api
+api_router.include_router(utils_api.router, tags=["utils"])
 
 # Include OS template routes
 from app.api import os_templates as os_templates_api
@@ -149,6 +161,22 @@ api_router.include_router(dhcp_api.router, tags=["dhcp"])
 # Include TFTP management routes
 from app.api import tftp as tftp_api
 api_router.include_router(tftp_api.router, tags=["tftp"])
+
+# Include billing API routes
+from app.api import billing as billing_api
+api_router.include_router(billing_api.router, tags=["billing"])
+
+# Include billing admin routes
+from app.api import billing_admin as billing_admin_api
+api_router.include_router(billing_admin_api.router, tags=["billing-admin"])
+
+# Include services admin routes
+from app.api import services_admin as services_admin_api
+api_router.include_router(services_admin_api.router, tags=["admin-services"])
+
+# Include scripts admin routes
+from app.api import scripts_admin as scripts_admin_api
+api_router.include_router(scripts_admin_api.router, tags=["scripts-admin"])
 
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)

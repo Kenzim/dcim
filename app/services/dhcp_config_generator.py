@@ -108,9 +108,9 @@ def generate_dhcpd_conf(config: DHCPConfig, db: Session) -> None:
         mac = pxe_port.mac_address.upper().replace("-", ":")
         pxe_ip = pxe_port.pxe_ip
         
-        # Determine boot mode and iPXE filename
-        boot_mode = server.boot_mode.value if hasattr(server, 'boot_mode') else "uefi"
-        ipxe_filename = "pxe/snponly.efi" if boot_mode == "uefi" else "pxe/undionly.kpxe"
+        # Determine boot mode and iPXE filename (use pxe_boot_mode for DHCP, fallback to boot_mode for backward compatibility)
+        pxe_boot_mode = server.pxe_boot_mode.value if hasattr(server, 'pxe_boot_mode') and server.pxe_boot_mode else (server.boot_mode.value if hasattr(server, 'boot_mode') else "uefi")
+        ipxe_filename = "pxe/snponly.efi" if pxe_boot_mode == "uefi" else "pxe/undionly.kpxe"
         
         # Get API server IP (use first interface IP or default)
         if config.interfaces and len(config.interfaces) > 0:

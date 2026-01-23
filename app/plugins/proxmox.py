@@ -334,12 +334,13 @@ class ProxmoxPlugin(ServerPlugin):
     async def power_reset(self) -> bool:
         """
         Reset/reboot the VM via Proxmox API.
+        Uses hard reset (like pressing reset button) instead of graceful reboot.
         
         Returns:
             True if successful, False otherwise
         """
         try:
-            url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/reboot"
+            url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/reset"
             headers = await self._get_headers()
             
             async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:

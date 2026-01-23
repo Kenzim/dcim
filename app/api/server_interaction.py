@@ -13,12 +13,13 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel
 from app.core.database import get_db
-from app.core.auth import require_admin
-from app.dao import NetworkPortDAO, ServerDAO, BootTaskDAO
+from app.core.auth import require_admin, get_current_user
+from app.dao import NetworkPortDAO, ServerDAO, BootTaskDAO, DiskDAO
 from app.models.network_port import NetworkPort
 from app.models.boot_task import BootType, BootTaskStatus
 from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
+from app.services.download_token_service import get_download_token_service
 import logging
 import os
 
@@ -420,8 +421,8 @@ class BootTaskCreate(BaseModel):
     iso_url: Optional[str] = None  # URL to ISO image
     # Temporary OS configuration (for TEMP_OS type)
     temp_os_id: Optional[str] = None  # ID of temporary OS (e.g., 'alpine', 'systemrescue')
-    # Custom script configuration (for running scripts from scripts/ folder)
-    custom_script: Optional[str] = None  # Filename of script in scripts/ folder
+    # Custom script configuration (for running scripts from database)
+    custom_script: Optional[str] = None  # Script ID (integer) or name (string) from database
     # Description
     description: Optional[str] = None  # Optional description
     # Template-based installation (creates InstallationTask)
@@ -471,11 +472,16 @@ async def create_boot_task(
             detail=f"Server {server_id} not found"
         )
     
+    # Initialize replacements dict (will be populated by template or other branches)
+    replacements = {}
+    
     # Handle template-based installation
     script_content = boot_task_data.script_content
     kernel_url = boot_task_data.kernel_url
     initrd_url = boot_task_data.initrd_url
     kernel_params = boot_task_data.kernel_params
+    boot_type = None  # Will be set based on boot_task_data or template
+    temp_os_id = boot_task_data.temp_os_id
     
     if boot_task_data.template_id:
         # Generate script from template
@@ -499,40 +505,61 @@ async def create_boot_task(
         with open(script_path, 'r') as f:
             script_content = f.read()
         
-        # Use template's kernel/initrd URLs if not provided
-        if template.kernel_url and not kernel_url:
-            kernel_url = template.kernel_url
-        if template.initrd_url and not initrd_url:
-            initrd_url = template.initrd_url
-        
         # Replace template variables in script
         # Get server's PXE boot port MAC address
         pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
         server_mac = pxe_port.mac_address if pxe_port else None
+        
+        # Get OS disk for installation
+        os_disk = DiskDAO.get_os_disk(db, server_id)
         
         # Build environment variables for script
         replacements = {
             "SERVER_IP": server.server_ip,
             "SERVER_MAC": server_mac or "",
             "SERVER_ID": str(server_id),
+            "OS_BOOT_MODE": server.os_boot_mode.value if server.os_boot_mode else "uefi",
         }
         
-        # Add disk image URL if template has one
+        # Add disk information for installation scripts
+        if os_disk:
+            replacements["OS_DISK_SERIAL"] = os_disk.serial_number or ""
+            replacements["OS_DISK_SIZE_GB"] = str(os_disk.capacity_gb)
+            replacements["OS_DISK_TYPE"] = os_disk.type.value.lower() if hasattr(os_disk.type, 'value') else str(os_disk.type).lower()
+        else:
+            replacements["OS_DISK_SERIAL"] = ""
+            replacements["OS_DISK_SIZE_GB"] = ""
+            replacements["OS_DISK_TYPE"] = ""
+        
+        # Template installations use temp_os boot type with debian-live (same as normal script runs)
+        # This ensures scripts run properly via the bashrc/profile system
+        boot_type = BootType.TEMP_OS
+        temp_os_id = "debian-live"
+        
+        # Get URLs from debian-live temp OS service
+        temp_os_service = get_temp_os_service()
+        base_url = "http://192.168.12.74:8000"
+        
+        # Store disk image filename for token generation
+        disk_image_filename = None
         if template.disk_image:
-            # Extract filename from disk_image path (e.g., "disk_images/windows.iso" -> "windows.iso")
             disk_image_filename = template.disk_image.split("/")[-1]
-            disk_image_url = f"http://{server.server_ip}:8000/api/servers/interaction/disk-images/{disk_image_filename}"
-            replacements["DISK_IMAGE_URL"] = disk_image_url
         
         # Add template parameters as PARAM_* variables
         if boot_task_data.template_parameters:
             for param_name, param_value in boot_task_data.template_parameters.items():
                 replacements[f"PARAM_{param_name.upper()}"] = str(param_value)
         
-        # Replace variables in script (simple ${VAR} replacement)
-        for var_name, var_value in replacements.items():
-            script_content = script_content.replace(f"${{{var_name}}}", var_value)
-            script_content = script_content.replace(f"${var_name}", var_value)
+        # Note: Variable replacement will happen AFTER token generation (below)
+        # This ensures all variables including DISK_IMAGE_URL and DOWNLOAD_TOKEN are replaced in one pass
+        kernel_url = temp_os_service.get_kernel_url("debian-live", base_url)
+        initrd_url = temp_os_service.get_initrd_url("debian-live", base_url)
+        kernel_params = temp_os_service.get_kernel_params("debian-live")
+        
+        # Add squashfs fetch URL (required for debian-live to boot properly)
+        squashfs_url = temp_os_service.get_squashfs_url("debian-live", base_url)
+        if squashfs_url and "fetch=" not in kernel_params:
+            kernel_params = f"{kernel_params} fetch={squashfs_url}"
     
     # Handle temporary OS boot type
     if boot_task_data.boot_type.lower() == "temp_os":
@@ -560,38 +587,34 @@ async def create_boot_task(
         if not boot_task_data.description:
             boot_task_data.description = f"Boot into {os_config.name}"
     
-    # Handle custom script from scripts/ folder
+    # Handle custom script from database
     if boot_task_data.custom_script:
-        # Read the custom script file
-        scripts_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            "scripts"
-        )
-        script_path = os.path.join(scripts_dir, boot_task_data.custom_script)
+        # Get script from database (by name or ID)
+        from app.dao.script_dao import ScriptDAO
         
-        # Security: only allow files in the scripts directory
-        if ".." in boot_task_data.custom_script or "/" in boot_task_data.custom_script:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid script filename"
-            )
+        # Try to parse as ID first, then as name
+        script = None
+        try:
+            script_id = int(boot_task_data.custom_script)
+            script = ScriptDAO.get_by_id(db, script_id)
+        except ValueError:
+            # Not an ID, try as name
+            script = ScriptDAO.get_by_name(db, boot_task_data.custom_script)
         
-        if not os.path.exists(script_path):
+        if not script:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Script file '{boot_task_data.custom_script}' not found in scripts/ directory"
+                detail=f"Script '{boot_task_data.custom_script}' not found"
             )
         
-        # Only allow .sh files
-        if not boot_task_data.custom_script.endswith('.sh'):
+        if not script.enabled:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only .sh script files are allowed"
+                detail=f"Script '{script.name}' is disabled"
             )
         
-        # Read script content
-        with open(script_path, 'r') as f:
-            script_content = f.read()
+        # Get script content
+        script_content = script.content
         
         # Get server's PXE boot port MAC address for script variables
         pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
@@ -617,29 +640,32 @@ async def create_boot_task(
             )
         temp_os_id = "debian-live"
         
-        # Get URLs - for debian-live, kernel/initrd are served from /api/servers/interaction/images/
+        # Get URLs - use temp_os_service to get correct URLs (serves from temp_os/{os_id}/files/)
         base_url = "http://192.168.12.74:8000"
-        kernel_url = f"{base_url}/api/servers/interaction/images/{os_config.kernel_file}"
-        initrd_url = f"{base_url}/api/servers/interaction/images/{os_config.initrd_file}"
+        kernel_url = temp_os_service.get_kernel_url("debian-live", base_url)
+        initrd_url = temp_os_service.get_initrd_url("debian-live", base_url)
         kernel_params = temp_os_service.get_kernel_params("debian-live", boot_task_data.kernel_params)
-        # Script URL will be added to kernel params after boot task is created
-        pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
-        server_mac = pxe_port.mac_address if pxe_port else None
+        
+        # Add squashfs fetch URL (required for debian-live to boot properly)
+        squashfs_url = temp_os_service.get_squashfs_url("debian-live", base_url)
+        if squashfs_url and "fetch=" not in kernel_params:
+            kernel_params = f"{kernel_params} fetch={squashfs_url}"
+        
+        # Add preseed URL
         if server_mac:
-            base_url = "http://192.168.12.74:8000"
             preseed_url = f"{base_url}/api/servers/interaction/preseed?mac={server_mac}"
             kernel_params = f"{kernel_params} preseed/url={preseed_url}"
         
         # Set description if not provided
         if not boot_task_data.description:
-            boot_task_data.description = f"Run custom script: {boot_task_data.custom_script}"
+            boot_task_data.description = f"Run script: {script.name}"
         
         # Set boot_type for custom script
         boot_type = BootType.TEMP_OS
     elif boot_task_data.boot_type.lower() == "temp_os":
         boot_type = BootType.TEMP_OS
         temp_os_id = boot_task_data.temp_os_id
-    else:
+    elif boot_type is None:  # Only set if not already set by template
         boot_type = BootType(boot_task_data.boot_type.lower())
         temp_os_id = boot_task_data.temp_os_id
     
@@ -654,9 +680,117 @@ async def create_boot_task(
         script_url=script_url if 'script_url' in locals() else boot_task_data.script_url,
         script_content=script_content,
         iso_url=boot_task_data.iso_url,
-        temp_os_id=temp_os_id,
+        temp_os_id=temp_os_id if 'temp_os_id' in locals() else None,
         description=boot_task_data.description
     )
+    
+    # Generate download token for file access (one-time use)
+    # Determine which files this boot task needs access to
+    allowed_files = []
+    allowed_patterns = []
+    template_image_files = []
+    
+    # If template-based installation, check for template files in deploy/ directory
+    if boot_task_data.template_id:
+        template_service = get_template_service()
+        template = template_service.get_template(boot_task_data.template_id)
+        if template and template.template_dir:
+            deploy_dir = template.template_dir / "deploy"
+            if deploy_dir.exists() and deploy_dir.is_dir():
+                # Look for windows.img and efi.img in deploy directory
+                for img_file in ["windows.img", "efi.img"]:
+                    img_path = deploy_dir / img_file
+                    if img_path.exists():
+                        template_image_files.append(img_file)
+                        allowed_files.append(img_file)
+        
+        # Fallback: check for old disk_image format
+        if template and template.disk_image and not template_image_files:
+            disk_image_filename = template.disk_image.split("/")[-1]
+            allowed_files.append(disk_image_filename)
+    
+    # Generate token (allow access to specific files or all files if none specified)
+    download_token_service = get_download_token_service()
+    download_token = download_token_service.generate_token(
+        boot_task_id=boot_task.id,
+        allowed_files=allowed_files if allowed_files else None,
+        allowed_patterns=allowed_patterns if allowed_patterns else None,
+        expires_in=900  # 15 minutes for image downloads
+    )
+    
+    # Inject token and do variable replacement (single pass for all variables)
+    if script_content:
+        # Populate replacements if it's empty (for non-template boot tasks)
+        if not replacements:
+            # Get server info for replacements
+            pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+            server_mac = pxe_port.mac_address if pxe_port else None
+            os_disk = DiskDAO.get_os_disk(db, server_id)
+            
+            replacements = {
+                "SERVER_IP": server.server_ip or "",
+                "SERVER_MAC": server_mac or "",
+                "SERVER_ID": str(server_id),
+                "OS_BOOT_MODE": server.os_boot_mode.value if server.os_boot_mode else "uefi",
+            }
+            
+            # Add disk information
+            if os_disk:
+                replacements["OS_DISK_SERIAL"] = os_disk.serial_number or ""
+                replacements["OS_DISK_SIZE_GB"] = str(os_disk.capacity_gb)
+                replacements["OS_DISK_TYPE"] = os_disk.type.value.lower() if hasattr(os_disk.type, 'value') else str(os_disk.type).lower()
+            else:
+                replacements["OS_DISK_SERIAL"] = ""
+                replacements["OS_DISK_SIZE_GB"] = ""
+                replacements["OS_DISK_TYPE"] = ""
+        
+        # Add token to replacements if available
+        if download_token:
+            replacements["DOWNLOAD_TOKEN"] = download_token
+            base_url = "http://192.168.12.74:8000"
+            replacements["API_BASE_URL"] = base_url
+            
+            # Add template file URLs if template has deploy directory with image files
+            if boot_task_data.template_id and template_image_files:
+                template_id = boot_task_data.template_id
+                
+                # Inject URLs for each image file found
+                for img_file in template_image_files:
+                    if img_file == "windows.img":
+                        windows_img_url = f"{base_url}/api/servers/interaction/template-files/{template_id}/{img_file}?token={download_token}"
+                        replacements["WINDOWS_IMG_URL"] = windows_img_url
+                        logger.info(f"Injected WINDOWS_IMG_URL for boot task {boot_task.id}")
+                    elif img_file == "efi.img":
+                        efi_img_url = f"{base_url}/api/servers/interaction/template-files/{template_id}/{img_file}?token={download_token}"
+                        replacements["EFI_IMG_URL"] = efi_img_url
+                        logger.info(f"Injected EFI_IMG_URL for boot task {boot_task.id}")
+            
+            # Fallback: old disk_image format
+            elif boot_task_data.template_id:
+                template_service = get_template_service()
+                template = template_service.get_template(boot_task_data.template_id)
+                if template and template.disk_image:
+                    disk_image_filename = template.disk_image.split("/")[-1]
+                    disk_image_url = f"{base_url}/api/servers/interaction/disk-images/{disk_image_filename}?token={download_token}"
+                    replacements["DISK_IMAGE_URL"] = disk_image_url
+                    logger.info(f"Injected DISK_IMAGE_URL for boot task {boot_task.id}: {disk_image_url[:50]}...")
+        
+        # Do single replacement pass for ALL variables (including tokens and disk info)
+        # Replace both ${VAR} and ${VAR:-default} patterns
+        for var_name, var_value in replacements.items():
+            # Replace ${VAR} pattern
+            script_content = script_content.replace(f"${{{var_name}}}", var_value)
+            # Replace ${VAR:-default} pattern (bash default value syntax)
+            import re
+            pattern = re.compile(r'\$\{' + re.escape(var_name) + r':-[^}]*\}')
+            script_content = pattern.sub(var_value, script_content)
+            # Replace $VAR pattern (without braces)
+            script_content = script_content.replace(f"${var_name}", var_value)
+        
+        # Update boot task with script containing all replacements
+        boot_task.script_content = script_content
+        db.commit()
+        db.refresh(boot_task)
     
     # For Debian Live (squashfs), add script URL to kernel params if script exists
     if boot_task.temp_os_id == "debian-live" and boot_task.script_content:
@@ -670,7 +804,7 @@ async def create_boot_task(
             db.commit()
             db.refresh(boot_task)
     
-    # If this is a template-based installation, create InstallationTask
+    # If this is a template-based installation, create InstallationTask and save credentials
     installation_task = None
     if boot_task_data.template_id:
         from app.dao.installation_task_dao import InstallationTaskDAO
@@ -686,6 +820,36 @@ async def create_boot_task(
             os_name=template.name if template else None
         )
         logger.info(f"Created installation task {installation_task.id} for boot task {boot_task.id}")
+        
+        # Add INSTALLATION_TASK_ID to script replacements so install script can upload logs
+        replacements["INSTALLATION_TASK_ID"] = str(installation_task.id)
+        
+        # Re-apply replacements to script_content with the new INSTALLATION_TASK_ID
+        for var_name, var_value in replacements.items():
+            script_content = script_content.replace(f"${{{var_name}}}", var_value)
+            script_content = script_content.replace(f"${var_name}", var_value)
+        
+        # Update boot task with the updated script content
+        boot_task.script_content = script_content
+        db.commit()
+        db.refresh(boot_task)
+        
+        # Save credentials to server (passwords, etc.)
+        if boot_task_data.template_parameters:
+            credentials = server.credentials or {}
+            # Store template parameters as credentials (especially passwords)
+            credentials.update({
+                'os_type': template.os_type if template else None,
+                'template_id': boot_task_data.template_id,
+                'last_updated': boot_task.created_at.isoformat() if boot_task.created_at else None
+            })
+            # Store individual parameters
+            for param_name, param_value in boot_task_data.template_parameters.items():
+                credentials[param_name] = param_value
+            
+            server.credentials = credentials
+            db.commit()
+            logger.info(f"Saved credentials for server {server_id}")
     
     logger.info(f"Created boot task {boot_task.id} for server {server_id}")
     
@@ -766,6 +930,7 @@ async def cancel_boot_task(
 @router.get("/scripts/{task_id}", response_class=PlainTextResponse)
 async def get_script(
     task_id: int,
+    token: Optional[str] = Query(None, description="One-time download token (optional for backward compatibility)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -773,6 +938,8 @@ async def get_script(
     
     This endpoint is called by the Linux environment to fetch the script
     that should be executed.
+    
+    Token validation is optional for backward compatibility, but recommended.
     """
     boot_task = BootTaskDAO.get_by_id(db, task_id)
     if not boot_task:
@@ -786,6 +953,20 @@ async def get_script(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No script content for boot task {task_id}"
         )
+    
+    # Validate token if provided
+    if token:
+        download_token_service = get_download_token_service()
+        token_data = download_token_service.validate_token(token, f"script-{task_id}.sh")
+        
+        if not token_data or token_data.get("boot_task_id") != task_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired download token"
+            )
+        
+        # Mark token as used
+        download_token_service.mark_token_used(token)
     
     logger.info(f"Serving script for boot task {task_id}")
     
@@ -886,78 +1067,85 @@ async def get_initrd(
 
 @router.get("/scripts")
 async def list_scripts(
-    auth: dict = Depends(require_admin)
-):
-    """
-    List all available custom scripts.
-    
-    Returns a list of script files available in the scripts/ directory.
-    """
-    scripts_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "scripts"
-    )
-    
-    if not os.path.exists(scripts_dir):
-        return []
-    
-    script_files = []
-    for filename in os.listdir(scripts_dir):
-        file_path = os.path.join(scripts_dir, filename)
-        if os.path.isfile(file_path) and filename.endswith('.sh'):
-            file_size = os.path.getsize(file_path)
-            script_files.append({
-                "filename": filename,
-                "size_bytes": file_size,
-                "size_kb": round(file_size / 1024, 2),
-                "url": f"/api/servers/interaction/scripts/{filename}"
-            })
-    
-    return sorted(script_files, key=lambda x: x["filename"])
-
-
-@router.get("/scripts/{filename}")
-async def get_script(
-    filename: str,
+    auth: dict = Depends(require_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Serve custom script files.
+    List all available scripts from database.
     
-    This endpoint serves script files from the scripts/ directory.
-    Scripts can be executed via boot tasks.
+    Returns a list of scripts stored in the database.
     """
-    script_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "scripts", filename
-    )
+    from app.dao.script_dao import ScriptDAO
     
-    # Security: only allow files in the scripts directory
-    if ".." in filename or "/" in filename:
+    scripts = ScriptDAO.get_all(db, enabled_only=True)
+    
+    return [
+        {
+            "id": script.id,
+            "name": script.name,
+            "description": script.description,
+            "size_bytes": len(script.content.encode('utf-8')),
+            "size_kb": round(len(script.content.encode('utf-8')) / 1024, 2),
+            "user_executable": script.user_executable,
+            "url": f"/api/servers/interaction/scripts/by-id/{script.id}"
+        }
+        for script in scripts
+    ]
+
+
+@router.get("/scripts/by-id/{script_id_or_name}")
+async def get_script_by_id_or_name(
+    script_id_or_name: str,
+    token: Optional[str] = Query(None, description="One-time download token"),
+    request: Request = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Get script content by ID or name.
+    
+    Scripts are stored in the database and can be retrieved by ID or name.
+    This endpoint is for retrieving script definitions, not boot task scripts.
+    Use /scripts/{task_id} to get boot task script content.
+    
+    Requires authentication (admin) or a valid download token.
+    """
+    from app.dao.script_dao import ScriptDAO
+    
+    # Try to get auth token from request
+    auth = None
+    try:
+        auth = await get_current_user(request, None, None, db)
+    except HTTPException:
+        pass  # Auth failed, will check token instead
+    
+    # Check authentication - either admin auth or valid token
+    if not auth and not token:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required (admin token or download token)"
         )
     
-    if not os.path.exists(script_path):
+    # Try to parse as ID first, then as name
+    script = None
+    try:
+        script_id = int(script_id_or_name)
+        script = ScriptDAO.get_by_id(db, script_id)
+    except ValueError:
+        # Not an ID, try as name
+        script = ScriptDAO.get_by_name(db, script_id_or_name)
+    
+    if not script:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Script '{filename}' not found"
+            detail=f"Script '{script_id_or_name}' not found"
         )
     
-    # Only allow .sh files
-    if not filename.endswith('.sh'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .sh script files are allowed"
-        )
-    
-    logger.info(f"Serving script file: {filename}")
-    return FileResponse(
-        script_path,
+    logger.info(f"Serving script: {script.name} (ID: {script.id})")
+    return PlainTextResponse(
+        content=script.content,
         media_type="text/x-shellscript",
         headers={
-            "Content-Disposition": f'inline; filename="{filename}"'
+            "Content-Disposition": f'inline; filename="{script.name}.sh"'
         }
     )
 
@@ -1001,6 +1189,7 @@ async def list_isos(
 async def get_iso(
     filename: str,
     request: Request,
+    token: Optional[str] = Query(None, description="One-time download token"),
     db: Session = Depends(get_db)
 ):
     """
@@ -1009,7 +1198,25 @@ async def get_iso(
     This endpoint serves ISO files for network booting.
     Place ISO files in the isos/ directory.
     Supports both GET and HEAD requests (HEAD for file size checks).
+    
+    Requires a valid one-time download token for security.
     """
+    # Validate token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Download token required"
+        )
+    
+    download_token_service = get_download_token_service()
+    token_data = download_token_service.validate_token(token, filename)
+    
+    if not token_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired download token"
+        )
+    
     iso_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "isos", filename
@@ -1028,6 +1235,9 @@ async def get_iso(
             detail=f"ISO file '{filename}' not found"
         )
     
+    # Mark token as used (one-time use)
+    download_token_service.mark_token_used(token)
+    
     # For HEAD requests, return headers only (no body)
     if request.method == "HEAD":
         file_size = os.path.getsize(iso_path)
@@ -1040,7 +1250,7 @@ async def get_iso(
             }
         )
     
-    logger.info(f"Serving ISO file: {filename}")
+    logger.info(f"Serving ISO file: {filename} (boot_task: {token_data.get('boot_task_id')})")
     return FileResponse(
         iso_path,
         media_type="application/octet-stream",
@@ -1201,6 +1411,7 @@ async def get_live_os_image(
 async def get_disk_image(
     filename: str,
     request: Request,
+    token: Optional[str] = Query(None, description="One-time download token"),
     db: Session = Depends(get_db)
 ):
     """
@@ -1209,7 +1420,25 @@ async def get_disk_image(
     This endpoint serves disk images for OS installation templates.
     Place disk image files in the disk_images/ directory.
     Supports both GET and HEAD requests (HEAD for file size checks).
+    
+    Requires a valid one-time download token for security.
     """
+    # Validate token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Download token required"
+        )
+    
+    download_token_service = get_download_token_service()
+    token_data = download_token_service.validate_token(token, filename)
+    
+    if not token_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired download token"
+        )
+    
     disk_image_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "disk_images", filename
@@ -1228,6 +1457,9 @@ async def get_disk_image(
             detail=f"Disk image '{filename}' not found"
         )
     
+    # Mark token as used (one-time use)
+    download_token_service.mark_token_used(token)
+    
     # For HEAD requests, return headers only (no body)
     if request.method == "HEAD":
         file_size = os.path.getsize(disk_image_path)
@@ -1240,7 +1472,7 @@ async def get_disk_image(
             }
         )
     
-    logger.info(f"Serving disk image file: {filename}")
+    logger.info(f"Serving disk image file: {filename} (boot_task: {token_data.get('boot_task_id')})")
     return FileResponse(
         disk_image_path,
         media_type="application/octet-stream",
@@ -1248,3 +1480,122 @@ async def get_disk_image(
             "Content-Disposition": f'inline; filename="{filename}"'
         }
     )
+
+
+# Template Files Serving Endpoints
+
+@router.get("/template-files/{template_id}/{filename}")
+@router.head("/template-files/{template_id}/{filename}")
+async def get_template_file(
+    template_id: str,
+    filename: str,
+    request: Request,
+    token: Optional[str] = Query(None, description="One-time download token"),
+    db: Session = Depends(get_db)
+):
+    """
+    Serve template files from os_templates/{template_id}/deploy/ directory.
+    
+    This endpoint serves image files (windows.img, efi.img, etc.) from template-specific directories.
+    Files should be placed in os_templates/{template_id}/deploy/ directory.
+    Supports both GET and HEAD requests.
+    
+    Requires a valid one-time download token for security.
+    """
+    # Validate token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Download token required"
+        )
+    
+    download_token_service = get_download_token_service()
+    token_data = download_token_service.validate_token(token, filename)
+    
+    if not token_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired download token"
+        )
+    
+    # Get template directory
+    template_service = get_template_service()
+    template = template_service.get_template(template_id)
+    
+    if not template or not template.template_dir:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Template '{template_id}' not found"
+        )
+    
+    # Security: only allow files in the deploy directory
+    if ".." in filename or "/" in filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename"
+        )
+    
+    # File should be in template_dir/deploy/ directory
+    deploy_dir = template.template_dir / "deploy"
+    file_path = deploy_dir / filename
+    
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Template file '{filename}' not found for template '{template_id}'"
+        )
+    
+    # Security: ensure file is within deploy directory (prevent directory traversal)
+    try:
+        file_path.resolve().relative_to(deploy_dir.resolve())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file path"
+        )
+    
+    # Note: We don't mark token as used here since multiple files may be downloaded
+    # Token will be explicitly terminated by the script when done
+    
+    # For HEAD requests, return headers only (no body)
+    if request.method == "HEAD":
+        file_size = file_path.stat().st_size
+        return Response(
+            status_code=200,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(file_size),
+                "Content-Disposition": f'inline; filename="{filename}"'
+            }
+        )
+    
+    logger.info(f"Serving template file: {template_id}/{filename} (boot_task: {token_data.get('boot_task_id')})")
+    return FileResponse(
+        str(file_path),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"'
+        }
+    )
+
+
+@router.post("/download-token/{token}/terminate")
+async def terminate_download_token(
+    token: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Explicitly terminate a download token.
+    
+    This endpoint allows installation scripts to explicitly terminate their download token
+    when they're done downloading files, rather than waiting for expiration.
+    """
+    download_token_service = get_download_token_service()
+    
+    if download_token_service.revoke_token(token):
+        return {"status": "success", "message": "Download token terminated"}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Token not found or already expired"
+        )

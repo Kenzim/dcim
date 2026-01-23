@@ -1,9 +1,12 @@
 from fastapi import Depends, HTTPException, status, Request, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Optional
+from typing import Optional, Union
 import hashlib
 from datetime import datetime
+from sqlalchemy.orm import Session
 from app.core.redis import redis_client
+from app.core.database import get_db
+from app.models.billing_integration import BillingIntegration
 
 security = HTTPBearer(auto_error=False)
 
@@ -57,16 +60,19 @@ def _get_user_from_token(token: str, client_ip: Optional[str] = None) -> Optiona
 async def get_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    auth_token: Optional[str] = Cookie(None, alias="auth_token")
+    auth_token: Optional[str] = Cookie(None, alias="auth_token"),
+    db: Session = Depends(get_db)
 ) -> dict:
     """
-    Dependency function for FastAPI routes to authenticate users via Redis tokens.
+    Dependency function for FastAPI routes to authenticate users via Redis tokens or API keys.
     Supports both Bearer token (Authorization header) and cookie (auth_token cookie).
+    
+    First tries Redis token authentication, then falls back to API key authentication.
     
     Usage:
         @app.get("/protected")
         async def protected_route(auth = Depends(get_current_user)):
-            # auth contains user info from Redis
+            # auth contains user info from Redis or API key integration info
             return {"user": auth}
     """
     token = None
@@ -92,17 +98,40 @@ async def get_current_user(
     if "x-forwarded-for" in request.headers:
         client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
     
-    # Auth lookup - single O(1) Redis call, never touches ZSET
+    # First try Redis token authentication (user session)
     user_info = _get_user_from_token(token, client_ip=client_ip)
     
-    if not user_info:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    if user_info:
+        return user_info
     
-    return user_info
+    # If Redis token auth failed, try API key authentication
+    integration = db.query(BillingIntegration).filter(
+        BillingIntegration.api_key == token,
+        BillingIntegration.enabled == True
+    ).first()
+    
+    if integration:
+        # Update last used timestamp and IP
+        integration.last_used_at = datetime.utcnow()
+        integration.last_used_ip = client_ip
+        db.commit()
+        db.refresh(integration)
+        
+        # Return API key auth info (different format than user auth)
+        return {
+            "type": "api_key",
+            "integration_id": integration.id,
+            "integration_name": integration.name,
+            "integration_type": integration.integration_type,
+            "is_admin": False  # API keys are not admin users
+        }
+    
+    # Neither authentication method worked
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def require_admin(

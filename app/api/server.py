@@ -30,7 +30,9 @@ def convert_disks_to_response(disks: List[Disk]) -> List[Dict[str, Any]]:
             "server_id": disk.server_id,
             "type": disk.type.value.lower() if hasattr(disk.type, 'value') else str(disk.type).lower(),
             "capacity_gb": disk.capacity_gb,
-            "description": disk.description
+            "description": disk.description,
+            "serial_number": disk.serial_number,
+            "is_os_disk": disk.is_os_disk
         }
         result.append(disk_dict)
     return result
@@ -40,6 +42,8 @@ class DiskCreate(BaseModel):
     type: str  # "ssd" or "hdd"
     capacity_gb: int
     description: str | None = None
+    serial_number: str | None = None  # Disk serial number for matching
+    is_os_disk: bool = False  # Flag to mark this as the OS installation disk
 
 
 class DiskResponse(BaseModel):
@@ -48,6 +52,8 @@ class DiskResponse(BaseModel):
     type: str
     capacity_gb: int
     description: str | None
+    serial_number: str | None
+    is_os_disk: bool
 
     class Config:
         from_attributes = True
@@ -102,11 +108,20 @@ class ServerCreate(BaseModel):
     ram_gb: int | None = None
     port_speed_mbps: int | None = None
     location_id: int
+    rack_id: int | None = None
+    rack_unit: int | None = None
     plugin_id: int
     plugin_config: dict
-    boot_mode: str = "uefi"  # "uefi" or "bios"
+    boot_mode: str = "uefi"  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
+    pxe_boot_mode: str = "uefi"  # "uefi" or "bios" - controls what DHCP serves initially
+    os_boot_mode: str = "uefi"  # "uefi" or "bios" - controls how the server boots the installed OS
     disks: List[DiskCreate] = []
     network_ports: List[NetworkPortCreate] = []
+    # IPMI Web Proxy configuration
+    ipmi_proxy_enabled: bool = False
+    ipmi_web_management_url: str | None = None
+    ipmi_viewer_username: str | None = None
+    ipmi_viewer_password: str | None = None
 
 
 class ServerUpdate(BaseModel):
@@ -118,11 +133,21 @@ class ServerUpdate(BaseModel):
     ram_gb: int | None = None
     port_speed_mbps: int | None = None
     location_id: int | None = None
+    rack_id: int | None = None
+    rack_unit: int | None = None
     plugin_id: int | None = None
     plugin_config: dict | None = None
     enabled: bool | None = None
+    boot_mode: str | None = None  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
+    pxe_boot_mode: str | None = None  # "uefi" or "bios" - controls what DHCP serves initially
+    os_boot_mode: str | None = None  # "uefi" or "bios" - controls how the server boots the installed OS
     disks: List[DiskCreate] | None = None
     network_ports: List[NetworkPortCreate] | None = None
+    # IPMI Web Proxy configuration
+    ipmi_proxy_enabled: bool | None = None
+    ipmi_web_management_url: str | None = None
+    ipmi_viewer_username: str | None = None
+    ipmi_viewer_password: str | None = None
 
 
 class ServerResponse(BaseModel):
@@ -135,15 +160,25 @@ class ServerResponse(BaseModel):
     ram_gb: int | None
     port_speed_mbps: int | None
     location_id: int
+    rack_id: int | None = None
+    rack_unit: int | None = None
     plugin_id: int
     plugin_config: dict
     enabled: bool
-    boot_mode: str  # "uefi" or "bios"
+    boot_mode: str  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
+    pxe_boot_mode: str  # "uefi" or "bios" - controls what DHCP serves initially
+    os_boot_mode: str  # "uefi" or "bios" - controls how the server boots the installed OS
     tested_capabilities: List[str] | None = None
     test_logs: str | None = None
+    credentials: dict | None = None  # OS installation passwords and credentials
     disks: List[DiskResponse] = []
     network_ports: List[NetworkPortResponse] = []
     plugin_categories: List[str] = []  # Categories supported by the plugin (e.g., 'power_control')
+    # IPMI Web Proxy configuration
+    ipmi_proxy_enabled: bool
+    ipmi_web_management_url: str | None
+    ipmi_viewer_username: str | None
+    ipmi_viewer_password: str | None = None  # Don't expose password in responses
 
     class Config:
         from_attributes = True
@@ -463,8 +498,11 @@ async def list_servers(
             plugin_categories = [cat.name for cat in plugin.categories]
         
         network_ports = NetworkPortDAO.get_by_server(db, server.id)
+        server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
+        # Don't expose password in responses
+        server_dict["ipmi_viewer_password"] = None
         result.append({
-            **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
+            **server_dict,
             "disks": convert_disks_to_response(disks),
             "network_ports": network_ports,
             "plugin_categories": plugin_categories
@@ -502,6 +540,35 @@ async def create_server(
                 detail="Location not found"
             )
         
+        # Validate rack if provided
+        if server_data.rack_id is not None:
+            from app.dao import RackDAO
+            rack = RackDAO.get_by_id(db, server_data.rack_id)
+            if not rack:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Rack not found"
+                )
+            # Ensure rack is in the same location
+            if rack.location_id != server_data.location_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Rack must be in the same location as the server"
+                )
+            # Validate rack_unit if provided
+            if server_data.rack_unit is not None:
+                if server_data.rack_unit < 1 or server_data.rack_unit > rack.units:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Rack unit must be between 1 and {rack.units}"
+                    )
+            # If rack_unit is provided but rack_id is not, that's invalid
+            if server_data.rack_unit is not None and server_data.rack_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="rack_unit requires rack_id"
+                )
+        
         # Check if server with same name already exists
         existing = ServerDAO.get_by_name(db, server_data.name)
         if existing:
@@ -510,14 +577,21 @@ async def create_server(
                 detail="Server with this name already exists"
             )
         
-        # Convert boot_mode string to enum
+        # Convert boot_mode strings to enums
         try:
             from app.models.server import BootMode
             boot_mode = BootMode(server_data.boot_mode.lower())
-        except ValueError:
+            # Handle new pxe_boot_mode and os_boot_mode fields
+            pxe_boot_mode = None
+            os_boot_mode = None
+            if hasattr(server_data, 'pxe_boot_mode') and server_data.pxe_boot_mode:
+                pxe_boot_mode = BootMode(server_data.pxe_boot_mode.lower())
+            if hasattr(server_data, 'os_boot_mode') and server_data.os_boot_mode:
+                os_boot_mode = BootMode(server_data.os_boot_mode.lower())
+        except ValueError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid boot_mode: {server_data.boot_mode}. Must be 'uefi' or 'bios'"
+                detail=f"Invalid boot_mode: {str(e)}. Must be 'uefi' or 'bios'"
             )
         
         # Create server
@@ -531,9 +605,17 @@ async def create_server(
             ram_gb=server_data.ram_gb,
             port_speed_mbps=server_data.port_speed_mbps,
             location_id=server_data.location_id,
+            rack_id=server_data.rack_id,
+            rack_unit=server_data.rack_unit,
             plugin_id=server_data.plugin_id,
             plugin_config=server_data.plugin_config,
-            boot_mode=boot_mode
+            boot_mode=boot_mode,
+            pxe_boot_mode=pxe_boot_mode,
+            os_boot_mode=os_boot_mode,
+            ipmi_proxy_enabled=server_data.ipmi_proxy_enabled,
+            ipmi_web_management_url=server_data.ipmi_web_management_url,
+            ipmi_viewer_username=server_data.ipmi_viewer_username,
+            ipmi_viewer_password=server_data.ipmi_viewer_password
         )
         
         # Create disks
@@ -554,7 +636,9 @@ async def create_server(
                     server_id=server.id,
                     type=disk_type,
                     capacity_gb=disk_data.capacity_gb,
-                    description=disk_data.description
+                    description=disk_data.description,
+                    serial_number=disk_data.serial_number,
+                    is_os_disk=disk_data.is_os_disk
                 )
         
         # Create network ports
@@ -577,6 +661,16 @@ async def create_server(
         db.refresh(server)
         disks = DiskDAO.get_by_server(db, server.id)
         network_ports = NetworkPortDAO.get_by_server(db, server.id)
+        
+        # Build response, excluding password
+        server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
+        server_dict["ipmi_viewer_password"] = None
+        
+        # Get plugin categories
+        plugin = db.query(Plugin).options(joinedload(Plugin.categories)).filter(Plugin.id == server.plugin_id).first()
+        plugin_categories = []
+        if plugin and plugin.categories:
+            plugin_categories = [cat.name for cat in plugin.categories]
         
         # Automatically test capabilities after creating server
         try:
@@ -605,9 +699,10 @@ async def create_server(
             # Don't fail the creation if DHCP config regeneration fails
         
         return {
-            **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
+            **server_dict,
             "disks": convert_disks_to_response(disks),
-            "network_ports": network_ports
+            "network_ports": network_ports,
+            "plugin_categories": plugin_categories
         }
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -643,8 +738,12 @@ async def get_server(
     if plugin and plugin.categories:
         plugin_categories = [cat.name for cat in plugin.categories]
     
+    server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
+    # Don't expose password in responses
+    server_dict["ipmi_viewer_password"] = None
+    
     return {
-        **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
+        **server_dict,
         "disks": convert_disks_to_response(disks),
         "network_ports": network_ports,
         "plugin_categories": plugin_categories
@@ -698,6 +797,41 @@ async def update_server(
                 detail="Location not found"
             )
         server.location_id = server_data.location_id
+    
+    # Handle rack assignment
+    if server_data.rack_id is not None or server_data.rack_unit is not None:
+        from app.dao import RackDAO
+        # If rack_id is being cleared (set to None explicitly), clear both
+        if server_data.rack_id is None:
+            server.rack_id = None
+            server.rack_unit = None
+        else:
+            # Validate rack exists
+            rack = RackDAO.get_by_id(db, server_data.rack_id)
+            if not rack:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Rack not found"
+                )
+            # Ensure rack is in the same location as server
+            if rack.location_id != server.location_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Rack must be in the same location as the server"
+                )
+            server.rack_id = server_data.rack_id
+            # Validate rack_unit if provided
+            if server_data.rack_unit is not None:
+                if server_data.rack_unit < 1 or server_data.rack_unit > rack.units:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Rack unit must be between 1 and {rack.units}"
+                    )
+                server.rack_unit = server_data.rack_unit
+            elif server_data.rack_id is not None:
+                # If rack_id is set but rack_unit is None, clear rack_unit
+                server.rack_unit = None
+    
     if server_data.plugin_id is not None:
         plugin = PluginDAO.get_by_id(db, server_data.plugin_id)
         if not plugin:
@@ -719,6 +853,34 @@ async def update_server(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid boot_mode: {server_data.boot_mode}. Must be 'uefi' or 'bios'"
             )
+    if server_data.pxe_boot_mode is not None:
+        try:
+            from app.models.server import BootMode
+            server.pxe_boot_mode = BootMode(server_data.pxe_boot_mode.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid pxe_boot_mode: {server_data.pxe_boot_mode}. Must be 'uefi' or 'bios'"
+            )
+    if server_data.os_boot_mode is not None:
+        try:
+            from app.models.server import BootMode
+            server.os_boot_mode = BootMode(server_data.os_boot_mode.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid os_boot_mode: {server_data.os_boot_mode}. Must be 'uefi' or 'bios'"
+            )
+    
+    # Update IPMI proxy settings
+    if server_data.ipmi_proxy_enabled is not None:
+        server.ipmi_proxy_enabled = server_data.ipmi_proxy_enabled
+    if server_data.ipmi_web_management_url is not None:
+        server.ipmi_web_management_url = server_data.ipmi_web_management_url
+    if server_data.ipmi_viewer_username is not None:
+        server.ipmi_viewer_username = server_data.ipmi_viewer_username
+    if server_data.ipmi_viewer_password is not None:
+        server.ipmi_viewer_password = server_data.ipmi_viewer_password
     
     # Update disks if provided
     if server_data.disks is not None:
@@ -740,7 +902,9 @@ async def update_server(
                 server_id=server.id,
                 type=disk_type,
                 capacity_gb=disk_data.capacity_gb,
-                description=disk_data.description
+                description=disk_data.description,
+                serial_number=disk_data.serial_number,
+                is_os_disk=disk_data.is_os_disk
             )
     
     # Update network ports if provided
@@ -784,9 +948,10 @@ async def update_server(
             logger.warning(f"Failed to test capabilities for updated server {server.id}: {e}")
             # Don't fail the update if capability test fails
     
-    # Regenerate DHCP configuration and reload service (if network ports or boot mode changed)
+    # Regenerate DHCP configuration and reload service (if network ports or PXE boot mode changed)
     if (server_data.network_ports is not None or 
         server_data.boot_mode is not None or 
+        server_data.pxe_boot_mode is not None or 
         server_data.server_ip is not None):
         try:
             dhcp_config_service = get_dhcp_config_service()
@@ -800,10 +965,21 @@ async def update_server(
             logger.warning(f"Failed to regenerate DHCP config after updating server {server.id}: {e}")
             # Don't fail the update if DHCP config regeneration fails
     
+    # Build response, excluding password
+    server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
+    server_dict["ipmi_viewer_password"] = None
+    
+    # Get plugin categories
+    plugin = db.query(Plugin).options(joinedload(Plugin.categories)).filter(Plugin.id == server.plugin_id).first()
+    plugin_categories = []
+    if plugin and plugin.categories:
+        plugin_categories = [cat.name for cat in plugin.categories]
+    
     return {
-        **{k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()},
+        **server_dict,
         "disks": convert_disks_to_response(disks),
-        "network_ports": network_ports
+        "network_ports": network_ports,
+        "plugin_categories": plugin_categories
     }
 
 

@@ -22,6 +22,7 @@ class TemplateResponse(BaseModel):
     parameters: dict
     kernel_url: str | None = None
     initrd_url: str | None = None
+    user_reinstallable: bool = False
 
     class Config:
         from_attributes = True
@@ -53,7 +54,8 @@ async def list_templates(
                 for name, param in template.parameters.items()
             },
             kernel_url=template.kernel_url,
-            initrd_url=template.initrd_url
+            initrd_url=template.initrd_url,
+            user_reinstallable=template.user_reinstallable
         )
         for template in templates
     ]

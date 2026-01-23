@@ -1,5 +1,5 @@
 """Disk model for server storage"""
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, Enum as SQLEnum, TypeDecorator
+from sqlalchemy import Column, Integer, String, Text, Boolean, ForeignKey, Enum as SQLEnum, TypeDecorator
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 import enum
@@ -66,12 +66,14 @@ class Disk(Base):
     type = Column(CaseInsensitiveEnum(DiskType), nullable=False)
     capacity_gb = Column(Integer, nullable=False)  # Capacity in GB
     description = Column(Text, nullable=True)
+    serial_number = Column(String(255), nullable=True, index=True)  # Disk serial number for matching
+    is_os_disk = Column(Boolean, default=False, nullable=False, index=True)  # Flag to mark this as the OS installation disk
     
     # Relationship
     server = relationship("Server", backref="disks")
     
     def __repr__(self):
-        return f"<Disk(id={self.id}, type='{self.type.value}', capacity={self.capacity_gb}GB)>"
+        return f"<Disk(id={self.id}, type='{self.type.value}', capacity={self.capacity_gb}GB, serial={self.serial_number}, is_os_disk={self.is_os_disk})>"
 
 
 

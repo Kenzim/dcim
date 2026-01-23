@@ -4,13 +4,27 @@ OS Template Service - Scans and manages OS installation templates from disk.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Literal
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 # Base path for OS templates
 TEMPLATES_DIR = Path(__file__).parent.parent.parent / "os_templates"
+
+
+class PasswordGenerateConfig(BaseModel):
+    """Password generation configuration"""
+    enabled: bool = Field(default=True, description="Whether password generation is enabled")
+    length: int = Field(default=16, ge=4, le=128, description="Password length")
+    charset: Literal["alphanumeric", "alphanumeric_symbols", "numeric", "alphabetic"] = Field(
+        default="alphanumeric",
+        description="Character set to use"
+    )
+    exclude_ambiguous: bool = Field(
+        default=True,
+        description="Exclude ambiguous characters (0, O, 1, I, l, 5, S, 2, Z)"
+    )
 
 
 class TemplateParameter(BaseModel):
@@ -21,6 +35,7 @@ class TemplateParameter(BaseModel):
     default: Optional[Any] = Field(default=None, description="Default value")
     options: Optional[List[str]] = Field(default=None, description="Options for select type")
     help: Optional[str] = Field(default=None, description="Help text")
+    generate: Optional[PasswordGenerateConfig] = Field(default=None, description="Password generation configuration (for password type)")
 
 
 class OSTemplate(BaseModel):
@@ -34,6 +49,7 @@ class OSTemplate(BaseModel):
     parameters: Dict[str, TemplateParameter] = Field(default_factory=dict, description="Template parameters")
     kernel_url: Optional[str] = Field(default=None, description="Kernel URL for Linux templates")
     initrd_url: Optional[str] = Field(default=None, description="Initrd URL for Linux templates")
+    user_reinstallable: bool = Field(default=False, description="Whether external users can reinstall this OS via billing API")
     template_dir: Optional[Path] = Field(default=None, exclude=True, description="Template directory path")
 
 
@@ -71,7 +87,11 @@ class OSTemplateService:
                 # Convert parameters dict to TemplateParameter objects
                 parameters = {}
                 for param_name, param_data in template_data.get("parameters", {}).items():
-                    parameters[param_name] = TemplateParameter(**param_data)
+                    # Handle generate config if present
+                    param_dict = dict(param_data)
+                    if "generate" in param_dict and isinstance(param_dict["generate"], dict):
+                        param_dict["generate"] = PasswordGenerateConfig(**param_dict["generate"])
+                    parameters[param_name] = TemplateParameter(**param_dict)
                 
                 template = OSTemplate(
                     id=template_data.get("id", template_dir.name),
@@ -83,6 +103,7 @@ class OSTemplateService:
                     parameters=parameters,
                     kernel_url=template_data.get("kernel_url"),
                     initrd_url=template_data.get("initrd_url"),
+                    user_reinstallable=template_data.get("user_reinstallable", False),
                     template_dir=template_dir
                 )
                 

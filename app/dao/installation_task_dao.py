@@ -116,6 +116,16 @@ class InstallationTaskDAO:
         return task
 
     @staticmethod
+    def update_logs(db: Session, task_id: int, logs: str) -> Optional[InstallationTask]:
+        """Update installation task logs (replace existing logs)"""
+        task = InstallationTaskDAO.get_by_id(db, task_id)
+        if task:
+            task.logs = logs
+            db.commit()
+            db.refresh(task)
+        return task
+
+    @staticmethod
     def cancel(db: Session, task_id: int) -> Optional[InstallationTask]:
         """Cancel an installation task"""
         task = InstallationTaskDAO.get_by_id(db, task_id)

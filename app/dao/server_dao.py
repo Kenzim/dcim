@@ -19,10 +19,24 @@ class ServerDAO:
         ram_gb: Optional[int] = None,
         port_speed_mbps: Optional[int] = None,
         location_id: Optional[int] = None,
+        rack_id: Optional[int] = None,
+        rack_unit: Optional[int] = None,
         enabled: bool = True,
-        boot_mode: BootMode = BootMode.UEFI
+        boot_mode: BootMode = BootMode.UEFI,
+        pxe_boot_mode: Optional[BootMode] = None,
+        os_boot_mode: Optional[BootMode] = None,
+        ipmi_proxy_enabled: bool = False,
+        ipmi_web_management_url: Optional[str] = None,
+        ipmi_viewer_username: Optional[str] = None,
+        ipmi_viewer_password: Optional[str] = None
     ) -> Server:
         """Create a new server"""
+        # Use provided pxe_boot_mode/os_boot_mode, or fallback to boot_mode for backward compatibility
+        if pxe_boot_mode is None:
+            pxe_boot_mode = boot_mode
+        if os_boot_mode is None:
+            os_boot_mode = boot_mode
+        
         server = Server(
             name=name,
             server_ip=server_ip,
@@ -32,10 +46,18 @@ class ServerDAO:
             ram_gb=ram_gb,
             port_speed_mbps=port_speed_mbps,
             location_id=location_id,
+            rack_id=rack_id,
+            rack_unit=rack_unit,
             plugin_id=plugin_id,
             plugin_config=plugin_config,
             enabled=enabled,
-            boot_mode=boot_mode
+            boot_mode=boot_mode,
+            pxe_boot_mode=pxe_boot_mode,
+            os_boot_mode=os_boot_mode,
+            ipmi_proxy_enabled=ipmi_proxy_enabled,
+            ipmi_web_management_url=ipmi_web_management_url,
+            ipmi_viewer_username=ipmi_viewer_username,
+            ipmi_viewer_password=ipmi_viewer_password
         )
         db.add(server)
         db.commit()
