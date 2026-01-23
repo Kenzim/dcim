@@ -1,13 +1,14 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, testServerConnection, testServerCapabilities, testPluginCapabilities } from '../lib/api.js';
+  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, getRacks, testServerConnection, testServerCapabilities, testPluginCapabilities } from '../lib/api.js';
   import { onMount } from 'svelte';
-
-  export let onViewServer = null; // Callback to navigate to server detail page
+  import { link } from 'svelte-spa-router';
 
   let servers = [];
   let plugins = [];
   let locations = [];
+  let racks = [];
+  let availableRacks = [];
   let loading = true;
   let error = null;
   let showModal = false;
@@ -20,11 +21,19 @@
     cpu_model: '',
     ram_gb: null,
     location_id: null,
+    rack_id: null,
+    rack_unit: null,
     plugin_id: null,
     plugin_config: {},
-    boot_mode: 'uefi',
+    boot_mode: 'uefi', // Deprecated - kept for backward compatibility
+    pxe_boot_mode: 'uefi', // Controls what DHCP serves initially
+    os_boot_mode: 'uefi', // Controls how the server boots the installed OS
     disks: [],
-    network_ports: []
+    network_ports: [],
+    // IPMI Web Management configuration
+    ipmi_web_management_url: '',
+    ipmi_viewer_username: '',
+    ipmi_viewer_password: ''
   };
   let formError = null;
   let pluginConfigError = null;
@@ -34,7 +43,7 @@
   let testingCapabilities = {}; // Map of server_id -> boolean
 
   onMount(async () => {
-    await Promise.all([loadServers(), loadPlugins(), loadLocations()]);
+    await Promise.all([loadServers(), loadPlugins(), loadLocations(), loadRacks()]);
   });
 
   async function loadServers() {
@@ -66,6 +75,50 @@
     }
   }
 
+  async function loadRacks() {
+    try {
+      racks = await getRacks();
+      updateAvailableRacks();
+    } catch (err) {
+      console.error('Failed to load racks:', err);
+    }
+  }
+
+  function updateAvailableRacks() {
+    if (formData.location_id) {
+      // Convert to number for comparison (select elements return strings)
+      const locationId = Number(formData.location_id);
+      availableRacks = racks.filter(r => Number(r.location_id) === locationId);
+      // Clear rack selection if current rack is not in the selected location
+      if (formData.rack_id) {
+        const currentRack = racks.find(r => r.id === formData.rack_id);
+        if (!currentRack || Number(currentRack.location_id) !== locationId) {
+          formData.rack_id = null;
+          formData.rack_unit = null;
+        }
+      }
+    } else {
+      availableRacks = [];
+      formData.rack_id = null;
+      formData.rack_unit = null;
+    }
+  }
+
+  function onLocationChange() {
+    updateAvailableRacks();
+  }
+
+  function getMaxRackUnits() {
+    if (!formData.rack_id) return 0;
+    const rack = racks.find(r => r.id === formData.rack_id);
+    return rack ? rack.units : 0;
+  }
+
+  // Reactive: update available racks when location_id or racks change
+  $: if (formData.location_id && racks.length > 0) {
+    updateAvailableRacks();
+  }
+
   function openAddModal() {
     editingServer = null;
     previousPluginId = null;
@@ -77,11 +130,19 @@
       cpu_model: '',
       ram_gb: null,
       location_id: null,
+      rack_id: null,
+      rack_unit: null,
       plugin_id: null,
       plugin_config: {},
-      boot_mode: 'uefi',
+      boot_mode: 'uefi', // Deprecated - kept for backward compatibility
+      pxe_boot_mode: 'uefi', // Controls what DHCP serves initially
+      os_boot_mode: 'uefi', // Controls how the server boots the installed OS
       disks: [],
-      network_ports: []
+      network_ports: [],
+      // IPMI Web Management configuration
+      ipmi_web_management_url: '',
+      ipmi_viewer_username: '',
+      ipmi_viewer_password: ''
     };
     formError = null;
     pluginConfigError = null;
@@ -103,14 +164,24 @@
       cpu_count: server.cpu_count,
       cpu_model: server.cpu_model || '',
       ram_gb: server.ram_gb,
-      boot_mode: server.boot_mode || 'uefi',
+      boot_mode: server.boot_mode || 'uefi', // Deprecated - kept for backward compatibility
+      pxe_boot_mode: server.pxe_boot_mode || server.boot_mode || 'uefi', // Fallback to boot_mode for backward compatibility
+      os_boot_mode: server.os_boot_mode || server.boot_mode || 'uefi', // Fallback to boot_mode for backward compatibility
       location_id: server.location_id,
+      rack_id: server.rack_id || null,
+      rack_unit: server.rack_unit || null,
       plugin_id: server.plugin_id,
       plugin_config: server.plugin_config || {},
+      // IPMI Web Proxy configuration
+      ipmi_web_management_url: server.ipmi_web_management_url || '',
+      ipmi_viewer_username: server.ipmi_viewer_username || '',
+      ipmi_viewer_password: server.ipmi_viewer_password || '',
       disks: (server.disks || []).map(d => ({
         type: d.type,
         capacity_gb: d.capacity_gb,
-        description: d.description || ''
+        description: d.description || '',
+        serial_number: d.serial_number || '',
+        is_os_disk: d.is_os_disk || false
       })),
       network_ports: (server.network_ports || []).map(p => ({
         name: p.name,
@@ -130,6 +201,8 @@
     capabilitiesTestResult = null;
     capabilitiesTestPassed = false;
     testingCapabilitiesInForm = false;
+    // Update available racks when opening edit modal (after formData is set)
+    updateAvailableRacks();
     showModal = true;
   }
 
@@ -141,7 +214,7 @@
   }
 
   function addDisk() {
-    formData.disks = [...formData.disks, { type: 'ssd', capacity_gb: 0, description: '' }];
+    formData.disks = [...formData.disks, { type: 'ssd', capacity_gb: 0, description: '', serial_number: '', is_os_disk: false }];
   }
 
   function removeDisk(index) {
@@ -339,7 +412,9 @@
         disks: formData.disks.map(d => ({
           type: d.type,
           capacity_gb: parseInt(d.capacity_gb),
-          description: d.description || null
+          description: d.description || null,
+          serial_number: d.serial_number && d.serial_number.trim() ? d.serial_number.trim() : null,
+          is_os_disk: d.is_os_disk || false
         })),
         network_ports: formData.network_ports.map(p => ({
           name: p.name.trim(),
@@ -423,13 +498,9 @@
           {#each servers as server}
             <tr>
               <td>
-                {#if onViewServer}
-                  <a href="#" class="server-name-link" on:click|preventDefault={() => onViewServer(server.id)}>
-                    <strong>{server.name}</strong>
-                  </a>
-                {:else}
+                <a href="/admin/servers/{server.id}" class="server-name-link">
                   <strong>{server.name}</strong>
-                {/if}
+                </a>
               </td>
               <td>{server.server_ip}</td>
               <td>{server.cpu_count}x {server.cpu_model || 'N/A'}</td>
@@ -438,14 +509,12 @@
               <td>{plugins.find(p => p.id === server.plugin_id)?.name || 'N/A'}</td>
               <td>
                 <div class="table-actions">
-                  {#if onViewServer}
-                    <button class="btn-icon-only" on:click={() => onViewServer(server.id)} title="View Details">
-                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                      </svg>
-                    </button>
-                  {/if}
+                  <a href="/admin/servers/{server.id}" class="btn-icon-only" title="View Details">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                  </a>
                   <button class="btn-icon-only" on:click={() => openEditModal(server)} title="Edit">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -518,12 +587,20 @@
               <input id="ram-gb" type="number" bind:value={formData.ram_gb} min="0" />
             </div>
             <div class="form-group">
-              <label for="boot-mode">Boot Mode *</label>
-              <select id="boot-mode" bind:value={formData.boot_mode} required>
+              <label for="pxe-boot-mode">PXE Boot Mode *</label>
+              <select id="pxe-boot-mode" bind:value={formData.pxe_boot_mode} required>
                 <option value="uefi">UEFI</option>
                 <option value="bios">BIOS</option>
               </select>
-              <small class="field-help">Select UEFI or BIOS boot mode</small>
+              <small class="field-help">Controls what DHCP serves initially (UEFI: snponly.efi, BIOS: undionly.kpxe)</small>
+            </div>
+            <div class="form-group">
+              <label for="os-boot-mode">OS Boot Mode *</label>
+              <select id="os-boot-mode" bind:value={formData.os_boot_mode} required>
+                <option value="uefi">UEFI</option>
+                <option value="bios">BIOS</option>
+              </select>
+              <small class="field-help">Controls how the server boots the installed OS</small>
             </div>
           </div>
         </div>
@@ -532,12 +609,45 @@
           <h4>Location</h4>
           <div class="form-group">
             <label for="location">Location *</label>
-            <select id="location" bind:value={formData.location_id} required>
+            <select id="location" bind:value={formData.location_id} on:change={onLocationChange} required>
               <option value={null}>Select a location</option>
               {#each locations as location}
                 <option value={location.id}>{location.name}</option>
               {/each}
             </select>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <h4>Rack Assignment (Optional)</h4>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="rack">Rack</label>
+              <select id="rack" bind:value={formData.rack_id} disabled={!formData.location_id || availableRacks.length === 0}>
+                <option value={null}>No rack</option>
+                {#each availableRacks as rack}
+                  <option value={rack.id}>{rack.name} ({rack.units}U)</option>
+                {/each}
+              </select>
+              {#if formData.location_id && availableRacks.length === 0}
+                <small class="field-help">No racks available in this location</small>
+              {/if}
+            </div>
+            <div class="form-group">
+              <label for="rack-unit">Rack Unit (U)</label>
+              <input 
+                id="rack-unit" 
+                type="number" 
+                bind:value={formData.rack_unit} 
+                min="1" 
+                max={getMaxRackUnits()}
+                disabled={!formData.rack_id}
+                placeholder="1-{getMaxRackUnits()}"
+              />
+              {#if formData.rack_id}
+                <small class="field-help">Unit position (1-{getMaxRackUnits()})</small>
+              {/if}
+            </div>
           </div>
         </div>
 
@@ -703,6 +813,42 @@
         </div>
 
         <div class="form-section">
+          <h4>IPMI Web Management</h4>
+          <div class="form-group">
+            <label for="ipmi-web-url">Web Management URL</label>
+            <input 
+              id="ipmi-web-url" 
+              type="text" 
+              bind:value={formData.ipmi_web_management_url} 
+              placeholder="e.g., https://192.168.1.100"
+            />
+            <small class="field-help">URL for IPMI web management interface</small>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="ipmi-viewer-username">Viewer Username</label>
+              <input 
+                id="ipmi-viewer-username" 
+                type="text" 
+                bind:value={formData.ipmi_viewer_username} 
+                placeholder="Read-only username"
+              />
+              <small class="field-help">Username for web access</small>
+            </div>
+            <div class="form-group">
+              <label for="ipmi-viewer-password">Viewer Password</label>
+              <input 
+                id="ipmi-viewer-password" 
+                type="password" 
+                bind:value={formData.ipmi_viewer_password} 
+                placeholder="Read-only password"
+              />
+              <small class="field-help">Password for web access</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
           <div class="section-header">
             <h4>Disks</h4>
             <button type="button" class="btn-secondary btn-small" on:click={addDisk}>
@@ -737,6 +883,20 @@
                     <div class="form-group">
                       <label>Capacity (GB) *</label>
                       <input type="number" bind:value={disk.capacity_gb} min="1" required />
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label>Serial Number</label>
+                      <input type="text" bind:value={disk.serial_number} placeholder="Optional serial number" />
+                      <small class="field-help">Used to match disk during OS installation</small>
+                    </div>
+                    <div class="form-group">
+                      <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" bind:checked={disk.is_os_disk} style="cursor: pointer;" />
+                        <span>OS Installation Disk</span>
+                      </label>
+                      <small class="field-help">Mark this disk as the target for OS installation</small>
                     </div>
                   </div>
                   <div class="form-group">
@@ -892,7 +1052,7 @@
     align-items: center;
     gap: 8px;
     padding: 10px 20px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     color: white;
     border: none;
     border-radius: 8px;
@@ -902,8 +1062,9 @@
   }
 
   .btn-primary:hover {
+    background: var(--accent-dark);
     transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    box-shadow: var(--shadow-lg);
   }
 
   .btn-icon {
@@ -922,10 +1083,12 @@
   }
 
   .servers-table {
-    background: white;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 12px;
     overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-sm);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
   table {
@@ -934,7 +1097,7 @@
   }
 
   thead {
-    background: #f8fafc;
+    background: var(--bg-tertiary);
   }
 
   th {
@@ -942,20 +1105,21 @@
     text-align: left;
     font-weight: 600;
     color: var(--text-primary);
-    border-bottom: 2px solid #e5e7eb;
+    border-bottom: 2px solid var(--border-color);
   }
 
   td {
     padding: 16px;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
   }
 
   tbody tr:hover {
-    background: #f8fafc;
+    background: var(--bg-secondary);
   }
 
   .server-name-link {
-    color: #3b82f6;
+    color: var(--accent-color);
     text-decoration: none;
     cursor: pointer;
     transition: color 0.2s ease;
@@ -1047,7 +1211,7 @@
 
   .power-state-badge.power-unknown {
     background: #f3f4f6;
-    color: #6b7280;
+    color: var(--text-secondary);
   }
 
   .power-state-na {
@@ -1065,23 +1229,31 @@
   }
 
   .btn-icon-only {
-    background: none;
-    border: none;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
     padding: 6px;
     cursor: pointer;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     border-radius: 6px;
-    transition: background 0.2s ease, color 0.2s ease;
+    transition: all 0.2s ease;
   }
 
   .btn-icon-only:hover {
-    background: #f1f5f9;
-    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+    transform: translateY(-1px);
   }
 
+  .btn-icon-only.btn-danger {
+    border-color: var(--danger-color);
+    color: var(--danger-color);
+  }
+  
   .btn-icon-only.btn-danger:hover {
-    background: #fee2e2;
-    color: #ef4444;
+    background: var(--danger-color);
+    color: white;
+    border-color: var(--danger-color);
   }
 
   .btn-icon-only svg {
@@ -1104,13 +1276,16 @@
   }
 
   .modal-content {
-    background: white;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 12px;
     width: 100%;
     max-width: 500px;
     max-height: 90vh;
     overflow-y: auto;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-xl);
+    color: var(--text-primary);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
   .modal-content.large {
@@ -1122,11 +1297,12 @@
     justify-content: space-between;
     align-items: center;
     padding: 20px 24px;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--border-color);
     position: sticky;
     top: 0;
-    background: white;
+    background: var(--bg-primary);
     z-index: 10;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
   .modal-header h3 {
@@ -1149,7 +1325,7 @@
     font-weight: 600;
     color: var(--text-primary);
     padding-bottom: 8px;
-    border-bottom: 2px solid #e5e7eb;
+    border-bottom: 2px solid var(--border-color);
   }
 
   .form-section h5 {
@@ -1206,20 +1382,29 @@
   .form-group select {
     width: 100%;
     padding: 10px 12px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     font-size: 14px;
-    transition: border-color 0.2s ease;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    transition: border-color 0.2s ease, background-color 0.3s ease, color 0.3s ease;
     font-family: inherit;
   }
 
   .form-group input:focus,
+  
   .form-group textarea:focus,
+  
   .form-group select:focus {
+  
     outline: none;
-    border-color: #667eea;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+  
+    border-color: var(--accent-color);
+  
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
+  
   }
+  
 
   .form-group input[type="checkbox"] {
     width: auto;
@@ -1246,9 +1431,9 @@
 
   .btn-quick {
     padding: 6px 12px;
-    background: #f1f5f9;
+    background: var(--bg-tertiary);
     color: var(--text-primary);
-    border: 1px solid #d1d5db;
+    border-color: var(--border-color);
     border-radius: 6px;
     font-size: 13px;
     font-weight: 500;
@@ -1257,9 +1442,9 @@
   }
 
   .btn-quick:hover {
-    background: #e2e8f0;
-    border-color: #667eea;
-    color: #667eea;
+    background: var(--bg-secondary);
+    border-color: var(--accent-color);
+    color: var(--accent-color);
   }
 
   .port-speed-display {
@@ -1269,7 +1454,7 @@
   }
 
   .plugin-config {
-    background: #f8fafc;
+    background: var(--bg-secondary);
     padding: 16px;
     border-radius: 8px;
     margin-top: 12px;
@@ -1460,10 +1645,10 @@
   }
 
   .disk-item {
-    background: #f8fafc;
+    background: var(--bg-secondary);
     padding: 16px;
     border-radius: 8px;
-    border: 1px solid #e5e7eb;
+    border-color: var(--border-color);
   }
 
   .disk-header {
@@ -1481,7 +1666,7 @@
 
   .btn-secondary {
     padding: 10px 20px;
-    background: #f1f5f9;
+    background: var(--bg-tertiary);
     color: var(--text-primary);
     border: none;
     border-radius: 8px;
@@ -1491,7 +1676,7 @@
   }
 
   .btn-secondary:hover {
-    background: #e2e8f0;
+    background: var(--accent-color);
   }
 
   .btn-secondary.btn-small {
@@ -1509,10 +1694,11 @@
     justify-content: flex-end;
     gap: 12px;
     padding: 20px 24px;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border-color);
     position: sticky;
     bottom: 0;
-    background: white;
+    background: var(--bg-primary);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
   .capabilities-cell {
@@ -1550,7 +1736,7 @@
   }
 
   .test-logs-row {
-    background: #f8fafc;
+    background: var(--bg-secondary);
   }
 
   .test-logs-container {
@@ -1571,10 +1757,10 @@
     font-size: 11px;
     line-height: 1.6;
     color: var(--text-primary);
-    background: white;
+    background: var(--bg-primary);
     padding: 12px;
     border-radius: 6px;
-    border: 1px solid #e5e7eb;
+    border-color: var(--border-color);
     overflow-x: auto;
     white-space: pre-wrap;
     word-wrap: break-word;

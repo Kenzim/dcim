@@ -1,6 +1,7 @@
 <script>
   import { login } from '../lib/api.js';
   import { user, isAuthenticated } from '../stores/auth.js';
+  import { navigate } from '../lib/router.js';
 
   let username = '';
   let password = '';
@@ -10,26 +11,22 @@
   async function handleLogin() {
     error = '';
     loading = true;
-    console.log('Starting login for user:', username);
 
     try {
-      console.log('Calling login API...');
       const result = await login(username, password);
-      console.log('Login API response:', result);
       
       // Cookie is set automatically by the server
       // Update store directly from login response
-      // Dashboard will fetch full user data when it loads
       user.set({
         id: result.user_id,
         username: result.username,
-        email: '', // Will be fetched by Dashboard from /me endpoint
+        email: '', // Will be fetched from /me endpoint when needed
         is_admin: result.is_admin
       });
       isAuthenticated.set(true);
-      console.log('Store updated, isAuthenticated set to true');
       loading = false;
-      // App.svelte will reactively show Dashboard component
+      // Redirect to admin panel
+      navigate('/admin');
     } catch (err) {
       error = err.message || 'Login failed';
       console.error('Login error:', err);
@@ -135,26 +132,9 @@
     align-items: center;
     justify-content: center;
     padding: 20px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--bg-secondary);
     position: relative;
     overflow: hidden;
-  }
-
-  .login-container::before {
-    content: '';
-    position: absolute;
-    top: -50%;
-    right: -50%;
-    width: 200%;
-    height: 200%;
-    background: radial-gradient(circle, rgba(255, 255, 255, 0.1) 1px, transparent 1px);
-    background-size: 50px 50px;
-    animation: drift 20s linear infinite;
-  }
-
-  @keyframes drift {
-    0% { transform: translate(0, 0); }
-    100% { transform: translate(50px, 50px); }
   }
 
   .login-wrapper {
@@ -165,9 +145,10 @@
   }
 
   .login-card {
-    background: white;
+    background: var(--bg-primary);
     border-radius: 20px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-xl);
+    border: 1px solid var(--border-color);
     overflow: hidden;
     animation: slideUp 0.5s ease-out;
   }
@@ -184,7 +165,7 @@
   }
 
   .login-header {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     padding: 40px 30px;
     text-align: center;
     color: white;
@@ -194,7 +175,7 @@
     width: 64px;
     height: 64px;
     margin: 0 auto 16px;
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.25);
     border-radius: 16px;
     display: flex;
     align-items: center;
@@ -277,24 +258,25 @@
     border-radius: 10px;
     font-size: 15px;
     transition: all 0.2s ease;
-    background: white;
+    background: var(--bg-primary);
+    color: var(--text-primary);
   }
 
   .form-control:focus {
     outline: none;
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
   }
 
   .form-control:disabled {
-    background: #f1f5f9;
+    background: var(--bg-tertiary);
     cursor: not-allowed;
   }
 
   .btn-login {
     width: 100%;
     padding: 14px 24px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     color: white;
     border: none;
     border-radius: 10px;
@@ -307,12 +289,13 @@
     justify-content: center;
     gap: 8px;
     margin-top: 8px;
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-login:hover:not(:disabled) {
+    background: var(--accent-dark);
     transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+    box-shadow: var(--shadow-lg);
   }
 
   .btn-login:active:not(:disabled) {

@@ -3,6 +3,7 @@
   import { user, logout } from '../stores/auth.js';
   import { getCurrentUser, getSessions, deleteSession } from '../lib/api.js';
   import PageHeader from './PageHeader.svelte';
+  import { navigate } from '../lib/router.js';
 
   let userData = null;
   let sessions = [];
@@ -65,7 +66,7 @@
 
     try {
       await logout();
-      window.location.href = '/';
+      navigate('/');
     } catch (err) {
       alert(err.message || 'Failed to logout');
       console.error('Error logging out:', err);
@@ -230,7 +231,7 @@
 <style>
   .user-page {
     min-height: 100vh;
-    background: #f8fafc;
+    background: var(--bg-secondary);
   }
 
 
@@ -290,7 +291,7 @@
   }
 
   .info-card {
-    background: white;
+    background: var(--bg-primary);
     border-radius: 16px;
     padding: 24px;
     display: flex;
@@ -323,19 +324,19 @@
   }
 
   .user-icon {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
   }
 
   .username-icon {
-    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    background: var(--danger-color);
   }
 
   .email-icon {
-    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    background: var(--info-color);
   }
 
   .admin-icon {
-    background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+    background: var(--success-color);
   }
 
   .card-content {
@@ -374,12 +375,12 @@
   }
 
   .badge-secondary {
-    background: #e2e8f0;
+    background: var(--bg-secondary);
     color: #475569;
   }
 
   .sessions-card {
-    background: white;
+    background: var(--bg-primary);
     border-radius: 16px;
     box-shadow: var(--shadow-md);
     border: 1px solid var(--border-color);
@@ -389,7 +390,7 @@
   .card-header {
     padding: 24px 32px;
     border-bottom: 1px solid var(--border-color);
-    background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
+    background: var(--bg-primary);
   }
 
   .card-header h2 {
@@ -440,7 +441,7 @@
   }
 
   .session-item {
-    background: #f8fafc;
+    background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 12px;
     padding: 20px;
@@ -453,9 +454,9 @@
   }
 
   .session-item.current {
-    background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
+    background: var(--bg-tertiary);
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
   }
 
   .session-header {
@@ -519,7 +520,7 @@
 
   .session-badge {
     padding: 4px 10px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     color: white;
     border-radius: 6px;
     font-size: 11px;

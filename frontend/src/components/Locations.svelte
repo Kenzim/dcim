@@ -201,18 +201,20 @@
     align-items: center;
     gap: 8px;
     padding: 10px 20px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     color: white;
-    border: none;
+    border: 1px solid var(--accent-color);
     border-radius: 8px;
     font-weight: 600;
     cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    transition: all 0.2s ease;
   }
 
-  .btn-primary:hover {
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-dark);
+    border-color: var(--accent-dark);
     transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    box-shadow: var(--shadow-lg);
   }
 
   .btn-icon {
@@ -237,7 +239,7 @@
   }
 
   .location-card {
-    background: white;
+    background: var(--bg-primary);
     border-radius: 12px;
     padding: 20px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
@@ -269,23 +271,31 @@
   }
 
   .btn-icon-only {
-    background: none;
-    border: none;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
     padding: 6px;
     cursor: pointer;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     border-radius: 6px;
-    transition: background 0.2s ease, color 0.2s ease;
+    transition: all 0.2s ease;
   }
 
   .btn-icon-only:hover {
-    background: #f1f5f9;
-    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+    transform: translateY(-1px);
   }
 
+  .btn-icon-only.btn-danger {
+    border-color: var(--danger-color);
+    color: var(--danger-color);
+  }
+  
   .btn-icon-only.btn-danger:hover {
-    background: #fee2e2;
-    color: #ef4444;
+    background: var(--danger-color);
+    color: white;
+    border-color: var(--danger-color);
   }
 
   .btn-icon-only svg {
@@ -314,13 +324,14 @@
   }
 
   .modal-content {
-    background: white;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 12px;
     width: 90%;
     max-width: 500px;
     max-height: 90vh;
     overflow-y: auto;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-xl);
   }
 
   .modal-header {
@@ -328,13 +339,28 @@
     justify-content: space-between;
     align-items: center;
     padding: 20px 24px;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-primary);
   }
 
   .modal-header h3 {
     margin: 0;
     font-size: 20px;
-    font-weight: 600;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  
+  .modal-header .btn-icon-only {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    padding: 8px;
+    color: var(--text-primary);
+  }
+  
+  .modal-header .btn-icon-only:hover {
+    background: var(--danger-color);
+    border-color: var(--danger-color);
+    color: white;
   }
 
   .modal-body {
@@ -342,11 +368,12 @@
   }
 
   .form-error {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
     padding: 12px;
     border-radius: 8px;
     margin-bottom: 16px;
+    border: 1px solid var(--danger-color);
   }
 
   .form-group {
@@ -364,17 +391,25 @@
   .form-group textarea {
     width: 100%;
     padding: 10px 12px;
-    border: 1px solid #d1d5db;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     font-size: 14px;
-    transition: border-color 0.2s ease;
+    color: var(--text-primary);
+    transition: all 0.2s ease;
+  }
+  
+  .form-group input::placeholder,
+  .form-group textarea::placeholder {
+    color: var(--text-secondary);
+    opacity: 0.7;
   }
 
   .form-group input:focus,
   .form-group textarea:focus {
     outline: none;
-    border-color: #667eea;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
   }
 
   .modal-footer {
@@ -382,22 +417,28 @@
     justify-content: flex-end;
     gap: 12px;
     padding: 20px 24px;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border-color);
+    background: var(--bg-primary);
   }
 
   .btn-secondary {
     padding: 10px 20px;
-    background: #f1f5f9;
+    background: var(--bg-primary);
     color: var(--text-primary);
-    border: none;
+    border: 2px solid var(--accent-color);
     border-radius: 8px;
     font-weight: 600;
     cursor: pointer;
-    transition: background 0.2s ease;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 
-  .btn-secondary:hover {
-    background: #e2e8f0;
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 </style>
 

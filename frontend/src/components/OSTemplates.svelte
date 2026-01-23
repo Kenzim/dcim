@@ -176,14 +176,14 @@
   .no-templates {
     padding: 48px;
     text-align: center;
-    background: white;
+    background: var(--bg-primary);
     border-radius: 12px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }
 
   .no-templates p {
     margin: 8px 0;
-    color: #6b7280;
+    color: var(--text-secondary);
   }
 
   .help-text {
@@ -205,7 +205,7 @@
   }
 
   .template-card {
-    background: white;
+    background: var(--bg-primary);
     border-radius: 12px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     padding: 24px;
@@ -227,12 +227,12 @@
     margin: 0 0 4px 0;
     font-size: 20px;
     font-weight: 700;
-    color: #111827;
+    color: var(--text-primary);
   }
 
   .template-id {
     font-size: 12px;
-    color: #6b7280;
+    color: var(--text-secondary);
     font-family: 'Courier New', monospace;
   }
 
@@ -255,7 +255,7 @@
   }
 
   .template-description {
-    color: #6b7280;
+    color: var(--text-secondary);
     margin: 12px 0;
     line-height: 1.5;
   }
@@ -263,7 +263,7 @@
   .template-parameters {
     margin-top: 16px;
     padding-top: 16px;
-    border-top: 1px solid #e5e7eb;
+    border-color: var(--border-color);
   }
 
   .no-parameters {
@@ -282,9 +282,9 @@
 
   .parameter-item {
     padding: 12px;
-    background: #f9fafb;
+    background: var(--bg-tertiary);
     border-radius: 8px;
-    border-left: 3px solid #3b82f6;
+    border-left: 3px solid var(--accent-color);
   }
 
   .parameter-header {
@@ -295,7 +295,7 @@
   }
 
   .parameter-header strong {
-    color: #111827;
+    color: var(--text-primary);
   }
 
   .parameter-type {
@@ -303,7 +303,7 @@
     padding: 2px 6px;
     background: #e5e7eb;
     border-radius: 4px;
-    color: #374151;
+    color: var(--text-primary);
     font-weight: 600;
   }
 
@@ -318,13 +318,13 @@
 
   .parameter-help {
     font-size: 13px;
-    color: #6b7280;
+    color: var(--text-secondary);
     margin: 4px 0;
   }
 
   .parameter-options {
     font-size: 12px;
-    color: #374151;
+    color: var(--text-primary);
     margin-top: 4px;
   }
 
@@ -337,19 +337,19 @@
   .template-boot-info {
     margin-top: 16px;
     padding-top: 16px;
-    border-top: 1px solid #e5e7eb;
+    border-color: var(--border-color);
     font-size: 13px;
   }
 
   .template-boot-info strong {
-    color: #111827;
+    color: var(--text-primary);
     display: block;
     margin-bottom: 8px;
   }
 
   .boot-url {
     margin: 4px 0;
-    color: #6b7280;
+    color: var(--text-secondary);
   }
 
   .boot-url code {
@@ -380,7 +380,7 @@
   .btn-secondary {
     padding: 10px 20px;
     background: #f3f4f6;
-    color: #374151;
+    color: var(--text-primary);
     border: none;
     border-radius: 8px;
     cursor: pointer;
@@ -400,7 +400,7 @@
   .btn-text {
     background: none;
     border: none;
-    color: #3b82f6;
+    color: var(--accent-color);
     cursor: pointer;
     font-weight: 600;
     padding: 4px 8px;

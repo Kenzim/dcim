@@ -17,7 +17,7 @@
   } from '../lib/api.js';
   import { onMount } from 'svelte';
 
-  export let onNavigate = null;
+  // onNavigate prop removed - using routing instead
 
   let loading = true;
   let error = null;
@@ -257,7 +257,7 @@
 </script>
 
 <div class="services-page">
-  <PageHeader title="Services" onNavigate={onNavigate}>
+  <PageHeader title="Services">
     <svelte:fragment slot="actions">
       <button class="refresh-button" on:click={handleRefresh} disabled={refreshing || loading}>
         <svg xmlns="http://www.w3.org/2000/svg" class="refresh-icon" class:spinning={refreshing} fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -550,9 +550,10 @@
   }
 
   .card {
-    background: white;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-md);
     margin-bottom: 2rem;
   }
 
@@ -561,13 +562,14 @@
     justify-content: space-between;
     align-items: center;
     padding: 1.5rem;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--border-color);
   }
 
   .card-header h2 {
     margin: 0;
     font-size: 1.5rem;
     font-weight: 600;
+    color: var(--text-primary);
   }
 
   .card-actions {
@@ -594,17 +596,19 @@
   }
 
   .info-item label {
-    font-weight: 500;
-    color: #6b7280;
+    font-weight: 600;
+    color: var(--text-primary);
     font-size: 0.875rem;
+    opacity: 0.9;
   }
 
   .info-item span {
-    color: #111827;
+    color: var(--text-primary);
+    font-weight: 500;
   }
 
   .text-muted {
-    color: #6b7280;
+    color: var(--text-secondary);
     font-style: italic;
   }
 
@@ -616,13 +620,15 @@
   }
 
   .status-badge.enabled {
-    background: #d1fae5;
-    color: #065f46;
+    background: var(--success-bg);
+    color: var(--success-text);
+    border: 1px solid var(--success-color);
   }
 
   .status-badge.disabled {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-color);
   }
 
   .form-section {
@@ -633,6 +639,9 @@
     margin: 0 0 1rem 0;
     font-size: 1.25rem;
     font-weight: 600;
+    color: var(--text-primary);
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--border-color);
   }
 
   .form-group {
@@ -642,21 +651,41 @@
   .form-group label {
     display: block;
     margin-bottom: 0.5rem;
-    font-weight: 500;
-    color: #374151;
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .form-group input[type="text"],
   .form-group input[type="number"] {
     width: 100%;
     padding: 0.5rem;
-    border: 1px solid #d1d5db;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 4px;
     font-size: 1rem;
+    color: var(--text-primary);
+    transition: all 0.2s ease;
+  }
+  
+  .form-group input[type="text"]:focus,
+  .form-group input[type="number"]:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
   }
 
   .form-group input[type="checkbox"] {
     margin-right: 0.5rem;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    accent-color: var(--accent-color);
+  }
+  
+  .form-group label:has(input[type="checkbox"]) {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
   }
 
   .form-row {
@@ -669,7 +698,7 @@
     display: block;
     margin-top: 0.25rem;
     font-size: 0.875rem;
-    color: #6b7280;
+    color: var(--text-secondary);
   }
 
   .interfaces-list {
@@ -680,15 +709,15 @@
 
   .interface-item {
     padding: 1rem;
-    background: #f9fafb;
-    border-radius: 4px;
-    border: 1px solid #e5e7eb;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
   }
 
   .form-actions {
     margin-top: 1.5rem;
     padding-top: 1.5rem;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border-color);
   }
 
   .refresh-button {
@@ -696,20 +725,21 @@
     align-items: center;
     gap: 8px;
     padding: 8px 16px;
-    background: white;
-    border: 1px solid var(--border-color);
+    background: var(--accent-color);
+    border: 1px solid var(--accent-color);
     border-radius: 8px;
-    color: var(--text-primary);
+    color: white;
     font-size: 14px;
-    font-weight: 500;
+    font-weight: 600;
     cursor: pointer;
     transition: all 0.2s ease;
   }
 
   .refresh-button:hover:not(:disabled) {
-    background: #f8fafc;
-    border-color: var(--primary-color);
-    color: var(--primary-color);
+    background: var(--accent-dark);
+    border-color: var(--accent-dark);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .refresh-button:disabled {
@@ -738,29 +768,38 @@
 
   .btn-primary, .btn-secondary {
     padding: 0.5rem 1rem;
-    border-radius: 4px;
-    font-weight: 500;
+    border-radius: 8px;
+    font-weight: 600;
     cursor: pointer;
-    border: none;
-    transition: all 0.2s;
+    transition: all 0.2s ease;
   }
 
   .btn-primary {
-    background: #3b82f6;
+    background: var(--accent-color);
     color: white;
+    border: 1px solid var(--accent-color);
   }
 
   .btn-primary:hover:not(:disabled) {
-    background: #2563eb;
+    background: var(--accent-dark);
+    border-color: var(--accent-dark);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-secondary {
-    background: #e5e7eb;
-    color: #374151;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 2px solid var(--accent-color);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 
   .btn-secondary:hover:not(:disabled) {
-    background: #d1d5db;
+    background: var(--accent-color);
+    border-color: var(--accent-color);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-small {

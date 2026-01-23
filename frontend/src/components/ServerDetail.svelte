@@ -1,6 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServer, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, testServerCapabilities, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, listTempOS, listScripts } from '../lib/api.js';
+  import { getServer, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, testServerCapabilities, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, listTempOS, getScripts, getOSTemplates, getInstallationHistory, generatePassword } from '../lib/api.js';
   import { onMount } from 'svelte';
 
   export let serverId;
@@ -27,18 +27,39 @@
   let selectedScript = null;
   let creatingBootTask = false;
   let refreshing = false;
+  let templates = [];
+  let loadingTemplates = false;
+  let selectedTemplate = null;
+  let templateParameters = {};
+  let bootOperationsExpanded = true;
+  let hardwareExpanded = false;
+  let installationHistory = [];
+  let loadingInstallationHistory = false;
+  let installationHistoryExpanded = false;
 
   onMount(async () => {
     await loadAllData();
   });
 
   async function loadAllData() {
-    await Promise.all([loadServer(), loadPlugins(), loadLocations(), loadISOs(), loadTempOSes(), loadScripts()]);
+    await Promise.all([loadServer(), loadPlugins(), loadLocations(), loadISOs(), loadTempOSes(), loadScripts(), loadTemplates()]);
     if (server && serverSupportsPowerControl(server)) {
       await loadPowerState();
     }
     if (server) {
-      await loadBootTask();
+      await Promise.all([loadBootTask(), loadInstallationHistory()]);
+    }
+  }
+
+  async function loadInstallationHistory() {
+    try {
+      loadingInstallationHistory = true;
+      installationHistory = await getInstallationHistory(serverId) || [];
+    } catch (err) {
+      // Silently handle errors - installation history is optional
+      installationHistory = [];
+    } finally {
+      loadingInstallationHistory = false;
     }
   }
 
@@ -265,12 +286,96 @@
   async function loadScripts() {
     try {
       loadingScripts = true;
-      scripts = await listScripts();
+      // Filter to only enabled scripts that are user-executable or all enabled scripts for admin
+      const allScripts = await getScripts();
+      scripts = allScripts.filter(s => s.enabled);
     } catch (err) {
       console.error('Failed to load scripts:', err);
       scripts = [];
     } finally {
       loadingScripts = false;
+    }
+  }
+
+  async function loadTemplates() {
+    try {
+      loadingTemplates = true;
+      templates = await getOSTemplates();
+    } catch (err) {
+      console.error('Failed to load templates:', err);
+      templates = [];
+    } finally {
+      loadingTemplates = false;
+    }
+  }
+
+  function handleTemplateChange() {
+    if (!selectedTemplate) {
+      templateParameters = {};
+      return;
+    }
+    
+    const template = templates.find(t => t.id === selectedTemplate);
+    if (template) {
+      // Initialize parameters with defaults
+      templateParameters = {};
+      for (const [paramName, param] of Object.entries(template.parameters)) {
+        if (param.default !== null && param.default !== undefined) {
+          templateParameters[paramName] = param.default;
+        } else if (param.type === 'boolean') {
+          templateParameters[paramName] = false;
+        } else if (param.type === 'number') {
+          templateParameters[paramName] = 0;
+        } else {
+          templateParameters[paramName] = '';
+        }
+      }
+    }
+  }
+
+  async function handleStartInstallation() {
+    if (!selectedTemplate) {
+      alert('Please select an OS template');
+      return;
+    }
+
+    const template = templates.find(t => t.id === selectedTemplate);
+    if (!template) {
+      alert('Selected template not found');
+      return;
+    }
+
+    // Validate required parameters
+    for (const [paramName, param] of Object.entries(template.parameters)) {
+      if (param.required) {
+        const value = templateParameters[paramName];
+        if (value === null || value === undefined || value === '') {
+          alert(`Parameter "${param.label}" is required`);
+          return;
+        }
+      }
+    }
+
+    if (!confirm(`Start OS installation for server "${server.name}" using template "${template.name}"?`)) {
+      return;
+    }
+
+    creatingBootTask = true;
+    try {
+      await createBootTask(serverId, {
+        boot_type: 'linux_script',
+        template_id: selectedTemplate,
+        template_parameters: templateParameters,
+        description: `Install ${template.name}`
+      });
+      await loadBootTask();
+      alert(`Installation job created successfully. Server will boot and start installation on next reboot.`);
+      selectedTemplate = null;
+      templateParameters = {};
+    } catch (err) {
+      alert('Failed to create installation job: ' + err.message);
+    } finally {
+      creatingBootTask = false;
     }
   }
 
@@ -280,26 +385,28 @@
       return;
     }
 
-    const script = scripts.find(s => s.filename === selectedScript);
+    // selectedScript is the script name or ID
+    const script = scripts.find(s => s.name === selectedScript || s.id.toString() === selectedScript);
     if (!script) {
       alert('Selected script not found');
       return;
     }
 
-    if (!confirm(`Boot server "${server.name}" into Ubuntu Live OS and run script "${script.filename}"?`)) {
+    if (!confirm(`Boot server "${server.name}" into Ubuntu Live OS and run script "${script.name}"?`)) {
       return;
     }
 
     creatingBootTask = true;
     try {
+      // Use script name (backend accepts name or ID)
       await createBootTask(serverId, {
         boot_type: 'temp_os',
         temp_os_id: 'debian-live',
-        custom_script: script.filename,
-        description: `Run script: ${script.filename}`
+        custom_script: script.name,
+        description: `Run script: ${script.name}`
       });
       await loadBootTask();
-      alert(`Boot task created successfully. Server will boot into Ubuntu Live OS and run "${script.filename}" on next reboot.`);
+      alert(`Boot task created successfully. Server will boot into Ubuntu Live OS and run "${script.name}" on next reboot.`);
       selectedScript = null;
     } catch (err) {
       alert('Failed to create boot task: ' + err.message);
@@ -329,10 +436,115 @@
       return `${(mb / 1024).toFixed(2)} GB`;
     }
   }
+
+  async function handleGeneratePassword(paramName) {
+    const template = templates.find(t => t.id === selectedTemplate);
+    if (!template || !template.parameters[paramName]) {
+      return;
+    }
+    
+    const param = template.parameters[paramName];
+    const generateConfig = param.generate || {};
+    
+    // Use template config if available, otherwise use defaults
+    const length = generateConfig.length || 16;
+    const charset = generateConfig.charset || 'alphanumeric';
+    const excludeAmbiguous = generateConfig.exclude_ambiguous !== undefined 
+      ? generateConfig.exclude_ambiguous 
+      : true;
+    
+    try {
+      const password = await generatePassword(length, charset, excludeAmbiguous);
+      templateParameters[paramName] = password;
+      // Trigger reactivity
+      templateParameters = { ...templateParameters };
+    } catch (err) {
+      alert('Failed to generate password: ' + err.message);
+    }
+  }
+
+  async function handleCopyPassword(paramName, event) {
+    const password = templateParameters[paramName];
+    if (!password) return;
+    
+    try {
+      await navigator.clipboard.writeText(password);
+      // Show temporary feedback
+      const button = event?.target?.closest('button');
+      if (button) {
+        const originalTitle = button.title;
+        button.title = 'Copied!';
+        setTimeout(() => {
+          button.title = originalTitle;
+        }, 2000);
+      }
+    } catch (err) {
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = password;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-999999px';
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        const button = event?.target?.closest('button');
+        if (button) {
+          const originalTitle = button.title;
+          button.title = 'Copied!';
+          setTimeout(() => {
+            button.title = originalTitle;
+          }, 2000);
+        }
+      } catch (e) {
+        alert('Failed to copy password. Please copy manually.');
+      }
+      document.body.removeChild(textArea);
+    }
+  }
+
+  async function handleCopyCredential(value, event) {
+    if (!value) return;
+    
+    try {
+      await navigator.clipboard.writeText(String(value));
+      // Show temporary feedback
+      const button = event?.target?.closest('button');
+      if (button) {
+        const originalTitle = button.title;
+        button.title = 'Copied!';
+        setTimeout(() => {
+          button.title = originalTitle;
+        }, 2000);
+      }
+    } catch (err) {
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = String(value);
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-999999px';
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        const button = event?.target?.closest('button');
+        if (button) {
+          const originalTitle = button.title;
+          button.title = 'Copied!';
+          setTimeout(() => {
+            button.title = originalTitle;
+          }, 2000);
+        }
+      } catch (e) {
+        alert('Failed to copy. Please copy manually.');
+      }
+      document.body.removeChild(textArea);
+    }
+  }
 </script>
 
 <div class="server-detail-page">
-  <PageHeader title="Server Details" onNavigate={onBack}>
+  <PageHeader title="Server Details">
     <svelte:fragment slot="actions">
       <button class="refresh-button" on:click={handleRefresh} disabled={refreshing || loading}>
         <svg xmlns="http://www.w3.org/2000/svg" class="refresh-icon" class:spinning={refreshing} fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -354,136 +566,149 @@
   </div>
 {:else if server}
   <div class="content-body">
-    <!-- Server Info Card -->
-    <div class="card">
-      <div class="card-header">
-        <h2>{server.name}</h2>
-        <div class="card-actions">
-          <button class="btn-secondary" on:click={onBack}>Back to List</button>
-        </div>
-      </div>
-      <div class="card-body">
-        <div class="info-grid">
-          <div class="info-item">
-            <label>Server IP</label>
-            <span>{server.server_ip}</span>
-          </div>
-          <div class="info-item">
-            <label>Description</label>
-            <span>{server.description || 'N/A'}</span>
-          </div>
-          <div class="info-item">
-            <label>CPU</label>
-            <span>{server.cpu_count}x {server.cpu_model || 'N/A'}</span>
-          </div>
-          <div class="info-item">
-            <label>RAM</label>
-            <span>{server.ram_gb ? server.ram_gb + ' GB' : 'N/A'}</span>
-          </div>
-          <div class="info-item">
-            <label>Location</label>
-            <span>{getLocationName()}</span>
-          </div>
-          <div class="info-item">
-            <label>Plugin</label>
-            <span>{getPluginName()}</span>
-          </div>
-          <div class="info-item">
-            <label>Status</label>
-            <span class="status-badge" class:enabled={server.enabled} class:disabled={!server.enabled}>
-              {server.enabled ? 'Enabled' : 'Disabled'}
-            </span>
-          </div>
-          <div class="info-item">
-            <label>Boot Mode</label>
-            <span>{server.boot_mode ? server.boot_mode.toUpperCase() : 'N/A'}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Power Control Card -->
-    {#if serverSupportsPowerControl(server)}
+    <!-- Top Section: Server Info and Power Control Side by Side -->
+    <div class="top-section">
+      <!-- Server Info Card -->
       <div class="card">
         <div class="card-header">
-          <h3>Power Control</h3>
+          <h2>{server.name}</h2>
+          <div class="card-actions">
+            <button class="btn-secondary btn-small" on:click={onBack}>Back</button>
+          </div>
         </div>
         <div class="card-body">
-          <div class="power-control-section">
-            <div class="power-state-display">
-              <label>Current Power State:</label>
-              <span class="power-state-badge" class:power-on={powerState === 'on'} class:power-off={powerState === 'off'} class:power-unknown={powerState === 'unknown' || !powerState}>
-                {powerState || 'Loading...'}
+          <div class="info-grid">
+            <div class="info-item">
+              <label>Server IP</label>
+              <span>{server.server_ip}</span>
+            </div>
+            <div class="info-item">
+              <label>CPU</label>
+              <span>{server.cpu_count}x {server.cpu_model || 'N/A'}</span>
+            </div>
+            <div class="info-item">
+              <label>RAM</label>
+              <span>{server.ram_gb ? server.ram_gb + ' GB' : 'N/A'}</span>
+            </div>
+            <div class="info-item">
+              <label>Location</label>
+              <span>{getLocationName()}</span>
+            </div>
+            <div class="info-item">
+              <label>Plugin</label>
+              <span>{getPluginName()}</span>
+            </div>
+            <div class="info-item">
+              <label>Status</label>
+              <span class="status-badge" class:enabled={server.enabled} class:disabled={!server.enabled}>
+                {server.enabled ? 'Enabled' : 'Disabled'}
               </span>
-              <button class="btn-icon-only btn-small" on:click={loadPowerState} title="Refresh power state">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
             </div>
-            <div class="power-control-buttons">
-              <button 
-                class="btn-power btn-power-on" 
-                on:click={handlePowerOn} 
-                disabled={powerActionsInProgress.power_on}
-                title="Power On"
-              >
-                {#if powerActionsInProgress.power_on}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                {:else}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                  </svg>
-                {/if}
-                Power On
-              </button>
-              <button 
-                class="btn-power btn-power-off" 
-                on:click={handlePowerOff} 
-                disabled={powerActionsInProgress.power_off}
-                title="Power Off"
-              >
-                {#if powerActionsInProgress.power_off}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                {:else}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                {/if}
-                Power Off
-              </button>
-              <button 
-                class="btn-power btn-power-reset" 
-                on:click={handlePowerReset} 
-                disabled={powerActionsInProgress.power_reset}
-                title="Reset/Reboot"
-              >
-                {#if powerActionsInProgress.power_reset}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                {:else}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                {/if}
-                Reset/Reboot
-              </button>
+            <div class="info-item">
+              <label>PXE Boot</label>
+              <span>{server.pxe_boot_mode ? server.pxe_boot_mode.toUpperCase() : (server.boot_mode ? server.boot_mode.toUpperCase() : 'N/A')}</span>
             </div>
+            <div class="info-item">
+              <label>OS Boot</label>
+              <span>{server.os_boot_mode ? server.os_boot_mode.toUpperCase() : (server.boot_mode ? server.boot_mode.toUpperCase() : 'N/A')}</span>
+            </div>
+            {#if server.description}
+              <div class="info-item info-item-full">
+                <label>Description</label>
+                <span>{server.description}</span>
+              </div>
+            {/if}
           </div>
         </div>
       </div>
-    {/if}
+
+      <!-- Power Control Card -->
+      {#if serverSupportsPowerControl(server)}
+        <div class="card">
+          <div class="card-header">
+            <h3>Power Control</h3>
+          </div>
+          <div class="card-body">
+            <div class="power-control-section">
+              <div class="power-state-display">
+                <label>Power State:</label>
+                <span class="power-state-badge" class:power-on={powerState === 'on'} class:power-off={powerState === 'off'} class:power-unknown={powerState === 'unknown' || !powerState}>
+                  {powerState || 'Loading...'}
+                </span>
+                <button class="btn-icon-only btn-small" on:click={loadPowerState} title="Refresh">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="14" height="14">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              </div>
+              <div class="power-control-buttons">
+                <button 
+                  class="btn-power btn-power-on" 
+                  on:click={handlePowerOn} 
+                  disabled={powerActionsInProgress.power_on}
+                  title="Power On"
+                >
+                  {#if powerActionsInProgress.power_on}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="16" height="16">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  {:else}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="16" height="16">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                  {/if}
+                  On
+                </button>
+                <button 
+                  class="btn-power btn-power-off" 
+                  on:click={handlePowerOff} 
+                  disabled={powerActionsInProgress.power_off}
+                  title="Power Off"
+                >
+                  {#if powerActionsInProgress.power_off}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="16" height="16">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  {:else}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="16" height="16">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  {/if}
+                  Off
+                </button>
+                <button 
+                  class="btn-power btn-power-reset" 
+                  on:click={handlePowerReset} 
+                  disabled={powerActionsInProgress.power_reset}
+                  title="Reset/Reboot"
+                >
+                  {#if powerActionsInProgress.power_reset}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="16" height="16">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  {:else}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="16" height="16">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  {/if}
+                  Reset
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      {/if}
+    </div>
 
     <!-- Boot Operations Card -->
     <div class="card">
-      <div class="card-header">
+      <div class="card-header collapsible" on:click={() => bootOperationsExpanded = !bootOperationsExpanded}>
         <h3>Boot Operations</h3>
+        <svg xmlns="http://www.w3.org/2000/svg" class="collapse-icon" class:expanded={bootOperationsExpanded} fill="none" viewBox="0 0 24 24" stroke="currentColor" width="20" height="20">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+        </svg>
       </div>
+      {#if bootOperationsExpanded}
       <div class="card-body">
         {#if bootTask}
           <div class="boot-task-info">
@@ -494,15 +719,15 @@
               </span>
             </div>
             <div class="boot-task-details">
-              <div><strong>Type:</strong> {bootTask.boot_type.replace('_', ' ')}</div>
+              <div><strong>Type:</strong> <span>{bootTask.boot_type.replace('_', ' ')}</span></div>
               {#if bootTask.description}
-                <div><strong>Description:</strong> {bootTask.description}</div>
+                <div><strong>Description:</strong> <span>{bootTask.description}</span></div>
               {/if}
               {#if bootTask.iso_url}
-                <div><strong>ISO:</strong> {bootTask.iso_url.split('/').pop()}</div>
+                <div><strong>ISO:</strong> <span>{bootTask.iso_url.split('/').pop()}</span></div>
               {/if}
               {#if bootTask.created_at}
-                <div><strong>Created:</strong> {new Date(bootTask.created_at).toLocaleString()}</div>
+                <div><strong>Created:</strong> <span>{new Date(bootTask.created_at).toLocaleString()}</span></div>
               {/if}
             </div>
             {#if bootTask.status === 'pending' || bootTask.status === 'in_progress'}
@@ -569,18 +794,23 @@
 
             <div class="boot-option">
               <h4>Run Custom Script</h4>
-              <p class="boot-option-description">Boot into Ubuntu Live OS (squashfs) and run a custom script from the scripts/ folder.</p>
+              <p class="boot-option-description">Boot into Ubuntu Live OS (squashfs) and run a custom script from the database.</p>
               {#if loadingScripts}
                 <p>Loading scripts...</p>
               {:else if scripts.length === 0}
-                <p class="no-isos">No scripts found. Place .sh files in the <code>scripts/</code> directory on the server.</p>
+                <p class="no-isos">No enabled scripts found. Create scripts in the <strong>Scripts</strong> section.</p>
               {:else}
                 <div class="form-group">
                   <label for="script-select">Select Script:</label>
                   <select id="script-select" bind:value={selectedScript} disabled={creatingBootTask}>
                     <option value="">-- Select a script --</option>
                     {#each scripts as script}
-                      <option value={script.filename}>{script.filename} ({formatFileSize(script.size_kb)} KB)</option>
+                      <option value={script.name}>
+                        {script.name}
+                        {#if script.description}
+                          - {script.description}
+                        {/if}
+                      </option>
                     {/each}
                   </select>
                 </div>
@@ -589,12 +819,102 @@
                 </button>
               {/if}
             </div>
+
+            {#if templates.length > 0}
+              <div class="boot-option-group">
+                <h4>Install OS</h4>
+                <p class="boot-option-description">Install an operating system using a pre-configured template.</p>
+                {#if loadingTemplates}
+                  <p>Loading templates...</p>
+                {:else}
+                  <div class="form-group">
+                    <label for="template-select">Select OS Template:</label>
+                    <select id="template-select" bind:value={selectedTemplate} on:change={handleTemplateChange} disabled={creatingBootTask || loadingTemplates}>
+                      <option value="">-- Select a template --</option>
+                      {#each templates as template}
+                        <option value={template.id}>{template.name}</option>
+                      {/each}
+                    </select>
+                  </div>
+                  
+                  {#if selectedTemplate}
+                    {@const template = templates.find(t => t.id === selectedTemplate)}
+                    {#if template}
+                      <div class="template-info">
+                        <p class="template-description">{template.description}</p>
+                        
+                        {#if Object.keys(template.parameters).length > 0}
+                          {@const requiredParams = Object.entries(template.parameters).filter(([_, p]) => p.required)}
+                          {#if requiredParams.length > 0}
+                            <div class="template-parameters-form">
+                              {#each requiredParams as [paramName, param]}
+                                <div class="form-group">
+                                  <label for="param-{paramName}">
+                                    {param.label}
+                                    <span class="required">*</span>
+                                  </label>
+                                  
+                                  {#if param.type === 'select' && param.options}
+                                    <select id="param-{paramName}" bind:value={templateParameters[paramName]} disabled={creatingBootTask}>
+                                      <option value="">-- Select --</option>
+                                      {#each param.options as option}
+                                        <option value={option}>{option}</option>
+                                      {/each}
+                                    </select>
+                                  {:else if param.type === 'password'}
+                                    {@const generateConfig = param.generate || {}}
+                                    {@const showGenerate = generateConfig.enabled !== false}
+                                    <div style="display: flex; gap: 8px; align-items: center;">
+                                      <input id="param-{paramName}" type="text" bind:value={templateParameters[paramName]} placeholder={param.help || ''} disabled={creatingBootTask} style="flex: 1;" />
+                                      {#if showGenerate}
+                                        <button type="button" class="btn-secondary btn-small" on:click={() => handleGeneratePassword(paramName)} disabled={creatingBootTask} title="Generate password">
+                                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width: 16px; height: 16px;">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                          </svg>
+                                        </button>
+                                      {/if}
+                                      <button type="button" class="btn-secondary btn-small" on:click={(e) => handleCopyPassword(paramName, e)} disabled={creatingBootTask || !templateParameters[paramName]} title="Copy password">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width: 16px; height: 16px;">
+                                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                        </svg>
+                                      </button>
+                                    </div>
+                                  {:else if param.type === 'number'}
+                                    <input id="param-{paramName}" type="number" bind:value={templateParameters[paramName]} placeholder={param.help || ''} disabled={creatingBootTask} />
+                                  {:else if param.type === 'boolean'}
+                                    <label class="checkbox-label">
+                                      <input type="checkbox" bind:checked={templateParameters[paramName]} disabled={creatingBootTask} />
+                                      <span>{param.help || 'Enable'}</span>
+                                    </label>
+                                  {:else}
+                                    <input id="param-{paramName}" type="text" bind:value={templateParameters[paramName]} placeholder={param.help || ''} disabled={creatingBootTask} />
+                                  {/if}
+                                  
+                                  {#if param.help && param.type !== 'boolean'}
+                                    <small class="field-help">{param.help}</small>
+                                  {/if}
+                                </div>
+                              {/each}
+                            </div>
+                          {/if}
+                        {/if}
+                      </div>
+                    {/if}
+                  {/if}
+                  
+                  <button class="btn-primary" on:click={handleStartInstallation} disabled={creatingBootTask || !selectedTemplate || loadingTemplates}>
+                    {creatingBootTask ? 'Creating...' : 'Start Installation'}
+                  </button>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/if}
       </div>
+      {/if}
     </div>
 
-    <!-- Capabilities Card -->
+    <!-- Hardware Section: Disks, Network Ports, Credentials, Capabilities -->
     <div class="card">
       <div class="card-header">
         <h3>Capabilities</h3>
@@ -648,6 +968,8 @@
               <tr>
                 <th>Type</th>
                 <th>Capacity</th>
+                <th>Serial Number</th>
+                <th>OS Disk</th>
                 <th>Description</th>
               </tr>
             </thead>
@@ -656,11 +978,56 @@
                 <tr>
                   <td>{disk.type}</td>
                   <td>{disk.capacity_gb} GB</td>
+                  <td>{disk.serial_number || 'N/A'}</td>
+                  <td>{disk.is_os_disk ? '✓' : '—'}</td>
                   <td>{disk.description || 'N/A'}</td>
                 </tr>
               {/each}
             </tbody>
           </table>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Credentials Card -->
+    {#if server.credentials && Object.keys(server.credentials).length > 0}
+      <div class="card">
+        <div class="card-header">
+          <h3>Saved Credentials</h3>
+        </div>
+        <div class="card-body">
+          <div class="credentials-info">
+            {#if server.credentials.os_type}
+              <div class="credential-item">
+                <strong>OS Type:</strong> {server.credentials.os_type}
+              </div>
+            {/if}
+            {#if server.credentials.template_id}
+              <div class="credential-item">
+                <strong>Template:</strong> {server.credentials.template_id}
+              </div>
+            {/if}
+            {#if server.credentials.last_updated}
+              <div class="credential-item">
+                <strong>Last Updated:</strong> {new Date(server.credentials.last_updated).toLocaleString()}
+              </div>
+            {/if}
+            {#each Object.entries(server.credentials) as [key, value]}
+              {#if key !== 'os_type' && key !== 'template_id' && key !== 'last_updated' && value}
+                <div class="credential-item">
+                  <strong>{key.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}:</strong>
+                  <div style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
+                    <code style="flex: 1; padding: 6px 10px; background: #f3f4f6; border-radius: 4px; font-family: monospace;">{value}</code>
+                    <button type="button" class="btn-secondary btn-small" on:click={(e) => handleCopyCredential(value, e)} title="Copy">
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width: 16px; height: 16px;">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            {/each}
+          </div>
         </div>
       </div>
     {/if}
@@ -701,13 +1068,89 @@
         </div>
       </div>
     {/if}
+
+    <!-- Installation History Card -->
+    <div class="card">
+      <div class="card-header collapsible" on:click={() => installationHistoryExpanded = !installationHistoryExpanded}>
+        <h3>Installation History</h3>
+        <svg xmlns="http://www.w3.org/2000/svg" class="collapse-icon" class:expanded={installationHistoryExpanded} fill="none" viewBox="0 0 24 24" stroke="currentColor" width="20" height="20">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+      {#if installationHistoryExpanded}
+      <div class="card-body">
+        {#if loadingInstallationHistory}
+          <p>Loading installation history...</p>
+        {:else if installationHistory.length === 0}
+          <p class="no-installations">No installation history found.</p>
+        {:else}
+          <div class="installation-history-list">
+            {#each installationHistory as installation}
+              <div class="installation-item">
+                <div class="installation-header">
+                  <div class="installation-title">
+                    <strong>{installation.os_name || installation.template_id || 'Unknown OS'}</strong>
+                    <span class="status-badge" 
+                          class:pending={installation.status === 'pending'}
+                          class:in-progress={installation.status === 'in_progress'}
+                          class:completed={installation.status === 'completed'}
+                          class:failed={installation.status === 'failed'}
+                          class:cancelled={installation.status === 'cancelled'}>
+                      {installation.status.replace('_', ' ')}
+                    </span>
+                  </div>
+                  <div class="installation-meta">
+                    {#if installation.created_at}
+                      <small>Created: {new Date(installation.created_at).toLocaleString()}</small>
+                    {/if}
+                    {#if installation.completed_at}
+                      <small>Completed: {new Date(installation.completed_at).toLocaleString()}</small>
+                    {/if}
+                  </div>
+                </div>
+                {#if installation.logs}
+                  <details class="installation-logs">
+                    <summary>View Logs</summary>
+                    <pre class="installation-logs-content">{installation.logs}</pre>
+                  </details>
+                {/if}
+                {#if installation.error_message}
+                  <div class="installation-error">
+                    <strong>Error:</strong> {installation.error_message}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+      {/if}
+    </div>
   </div>
 {/if}
 </div>
 
 <style>
   .content-body {
-    padding: 32px;
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+
+  .top-section {
+    display: grid;
+    grid-template-columns: 1fr 400px;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  @media (max-width: 1200px) {
+    .top-section {
+      grid-template-columns: 1fr;
+    }
   }
 
   .loading, .error {
@@ -721,33 +1164,55 @@
   }
 
   .card {
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-    margin-bottom: 24px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: var(--shadow-sm);
+    margin-bottom: 16px;
     overflow: hidden;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
   .card-header {
-    padding: 20px 24px;
-    border-bottom: 1px solid #e5e7eb;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-color);
     display: flex;
     justify-content: space-between;
     align-items: center;
+    background: var(--bg-primary);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+  }
+
+  .card-header.collapsible {
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .card-header.collapsible:hover {
+    background: var(--bg-tertiary);
+  }
+
+  .collapse-icon {
+    transition: transform 0.2s ease;
+    color: var(--text-secondary);
+  }
+
+  .collapse-icon.expanded {
+    transform: rotate(180deg);
   }
 
   .card-header h2 {
     margin: 0;
-    font-size: 24px;
+    font-size: 20px;
     font-weight: 700;
-    color: #111827;
+    color: var(--text-primary);
   }
 
   .card-header h3 {
     margin: 0;
-    font-size: 18px;
+    font-size: 16px;
     font-weight: 600;
-    color: #111827;
+    color: var(--text-primary);
   }
 
 
@@ -756,21 +1221,22 @@
     align-items: center;
     gap: 8px;
     padding: 8px 16px;
-    background: white;
-    border: 1px solid var(--border-color);
+    background: var(--accent-color);
+    border: 1px solid var(--accent-color);
     border-radius: 8px;
-    color: var(--text-primary);
+    color: white;
     font-size: 14px;
-    font-weight: 500;
+    font-weight: 600;
     cursor: pointer;
     transition: all 0.2s ease;
     white-space: nowrap;
   }
 
   .refresh-button:hover:not(:disabled) {
-    background: #f8fafc;
-    border-color: var(--primary-color);
-    color: var(--primary-color);
+    background: var(--accent-dark);
+    border-color: var(--accent-dark);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .refresh-button:disabled {
@@ -803,13 +1269,17 @@
   }
 
   .card-body {
-    padding: 24px;
+    padding: 16px;
   }
 
   .info-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+  }
+
+  .info-item-full {
+    grid-column: 1 / -1;
   }
 
   .info-item {
@@ -819,16 +1289,18 @@
   }
 
   .info-item label {
-    font-size: 12px;
-    font-weight: 600;
-    color: #6b7280;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    opacity: 0.9;
   }
 
   .info-item span {
-    font-size: 16px;
-    color: #111827;
+    font-size: 14px;
+    color: var(--text-primary);
+    font-weight: 500;
   }
 
   .status-badge {
@@ -841,19 +1313,19 @@
   }
 
   .status-badge.enabled {
-    background: #dcfce7;
-    color: #166534;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .status-badge.disabled {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .power-control-section {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 12px;
   }
 
   .power-state-display {
@@ -864,7 +1336,7 @@
 
   .power-state-display label {
     font-weight: 600;
-    color: #374151;
+    color: var(--text-primary);
   }
 
   .power-state-badge {
@@ -876,18 +1348,18 @@
   }
 
   .power-state-badge.power-on {
-    background: #dcfce7;
-    color: #166534;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .power-state-badge.power-off {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .power-state-badge.power-unknown {
-    background: #f3f4f6;
-    color: #6b7280;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
   }
 
   .power-control-buttons {
@@ -897,16 +1369,17 @@
   }
 
   .btn-power {
-    padding: 10px 20px;
+    padding: 8px 16px;
     border: none;
-    border-radius: 8px;
+    border-radius: 6px;
     cursor: pointer;
     transition: all 0.2s ease;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     font-weight: 600;
-    font-size: 14px;
+    font-size: 13px;
+    flex: 1;
   }
 
   .btn-power:disabled {
@@ -941,22 +1414,26 @@
     background: #d97706;
   }
 
+
   .btn-icon {
     width: 18px;
     height: 18px;
   }
 
   .btn-icon-only {
-    background: none;
-    border: none;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
     padding: 6px;
     cursor: pointer;
     border-radius: 6px;
-    transition: background 0.2s ease;
+    transition: all 0.2s ease;
+    color: var(--text-primary);
   }
 
   .btn-icon-only:hover {
-    background: #f3f4f6;
+    background: var(--bg-secondary);
+    border-color: var(--accent-color);
+    color: var(--accent-color);
   }
 
   .btn-small {
@@ -978,15 +1455,28 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 12px;
+    padding: 8px 14px;
     border-radius: 8px;
     font-size: 13px;
     font-weight: 600;
+    border: 1px solid var(--border-color);
+    transition: all 0.2s ease;
   }
 
   .capability-badge.tested {
-    background: #dcfce7;
-    color: #166534;
+    background: var(--success-bg);
+    color: var(--success-text);
+    border-color: var(--success-color);
+  }
+  
+  .capability-badge:not(.tested) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+  
+  .capability-badge:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
   }
 
   .capability-icon {
@@ -995,28 +1485,28 @@
   }
 
   .test-logs-section {
-    margin-top: 20px;
-    padding-top: 20px;
-    border-top: 1px solid #e5e7eb;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-color: var(--border-color);
   }
 
   .test-logs-content {
-    margin-top: 12px;
-    padding: 16px;
-    background: #f9fafb;
-    border-radius: 8px;
-    font-size: 12px;
+    margin-top: 8px;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    font-size: 11px;
     font-family: 'Courier New', monospace;
     white-space: pre-wrap;
     word-wrap: break-word;
-    max-height: 400px;
+    max-height: 300px;
     overflow-y: auto;
   }
 
   .no-capabilities {
     padding: 20px;
     text-align: center;
-    color: #6b7280;
+    color: var(--text-secondary);
   }
 
   .data-table {
@@ -1024,48 +1514,123 @@
     border-collapse: collapse;
   }
 
+  .hardware-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .hardware-subsection {
+    border-color: var(--border-color);
+    padding-bottom: 12px;
+  }
+
+  .hardware-subsection:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .subsection-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+
+  .subsection-header h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .hardware-subsection h4 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .subsection-content {
+    font-size: 13px;
+  }
+
+  .data-table {
+    font-size: 13px;
+  }
+
+  .data-table.compact-table th {
+    text-align: left;
+    padding: 8px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-color: var(--border-color);
+    font-size: 12px;
+  }
+
+  .data-table.compact-table td {
+    padding: 8px;
+    border-color: var(--border-color);
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
   .data-table th {
     text-align: left;
-    padding: 12px;
+    padding: 10px;
     font-weight: 600;
-    color: #374151;
-    border-bottom: 2px solid #e5e7eb;
+    color: var(--text-primary);
+    border-color: var(--border-color);
+    font-size: 13px;
   }
 
   .data-table td {
-    padding: 12px;
-    border-bottom: 1px solid #e5e7eb;
-    color: #111827;
+    padding: 10px;
+    border-color: var(--border-color);
+    color: var(--text-primary);
+    font-size: 13px;
   }
 
   .data-table tr:hover {
-    background: #f9fafb;
+    background: var(--bg-tertiary);
   }
 
   .btn-primary {
     padding: 10px 20px;
-    background: #3b82f6;
+    background: var(--accent-color);
     color: white;
-    border: none;
+    border: 1px solid var(--accent-color);
     border-radius: 8px;
     cursor: pointer;
     font-weight: 600;
-    transition: background 0.2s ease;
+    transition: all 0.2s ease;
   }
 
-  .btn-primary:hover {
-    background: #2563eb;
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-dark);
+    border-color: var(--accent-dark);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-secondary {
     padding: 10px 20px;
-    background: #f3f4f6;
-    color: #374151;
-    border: none;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 2px solid var(--accent-color);
     border-radius: 8px;
     cursor: pointer;
     font-weight: 600;
-    transition: background 0.2s ease;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+  
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--accent-color);
+    border-color: white;
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-secondary:hover {
@@ -1075,7 +1640,7 @@
   .btn-text {
     background: none;
     border: none;
-    color: #3b82f6;
+    color: var(--accent-color);
     cursor: pointer;
     font-weight: 600;
     padding: 4px 8px;
@@ -1098,13 +1663,19 @@
     align-items: center;
     gap: 12px;
   }
+  
+  .boot-task-status strong {
+    color: var(--text-primary);
+    font-weight: 700;
+  }
 
   .boot-task-details {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 12px;
-    background: #f9fafb;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     font-size: 14px;
   }
@@ -1112,11 +1683,18 @@
   .boot-task-details div {
     display: flex;
     gap: 8px;
+    color: var(--text-primary);
+  }
+  
+  .boot-task-details div span {
+    color: var(--text-primary);
+    font-weight: 500;
   }
 
   .boot-task-details strong {
     min-width: 100px;
-    color: #374151;
+    color: var(--text-primary);
+    font-weight: 700;
   }
 
   .status-badge {
@@ -1128,52 +1706,53 @@
   }
 
   .status-badge.pending {
-    background: #fef3c7;
-    color: #92400e;
+    background: var(--warning-bg);
+    color: var(--warning-text);
   }
 
   .status-badge.in-progress {
-    background: #dbeafe;
-    color: #1e40af;
+    background: var(--info-bg);
+    color: var(--info-text);
   }
 
   .status-badge.completed {
-    background: #dcfce7;
-    color: #166534;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .status-badge.failed {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .boot-options-section {
-    display: flex;
-    flex-direction: column;
-    gap: 24px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
   }
 
   .boot-option-group {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
 
-  .boot-option-group h4 {
-    margin: 0;
-    font-size: 16px;
+  .boot-option-group h4,
+  .boot-option h4 {
+    margin: 0 0 6px 0;
+    font-size: 14px;
     font-weight: 600;
-    color: #111827;
+    color: var(--text-primary);
   }
 
   .boot-option-description {
-    color: #6b7280;
-    font-size: 14px;
-    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin: 0 0 10px 0;
   }
 
   .no-isos {
-    color: #6b7280;
+    color: var(--text-secondary);
     font-size: 14px;
   }
 
@@ -1185,31 +1764,143 @@
 
   .iso-selector label {
     font-weight: 600;
-    color: #374151;
+    color: var(--text-primary);
     font-size: 14px;
   }
 
   .iso-selector select {
     padding: 10px 12px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     font-size: 14px;
     font-family: inherit;
-    background: white;
+    background: var(--bg-primary);
+    color: var(--text-primary);
     cursor: pointer;
-    transition: border-color 0.2s ease;
+    transition: border-color 0.2s ease, background-color 0.3s ease, color 0.3s ease;
   }
 
   .iso-selector select:focus {
     outline: none;
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
   }
 
   .iso-info {
-    color: #6b7280;
+    color: var(--text-secondary);
     font-size: 13px;
   }
+
+  .template-info {
+    margin: 12px 0;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent-color);
+  }
+
+  .template-description {
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    font-size: 12px;
+  }
+
+  .template-parameters-form {
+    margin-top: 16px;
+  }
+
+  .template-parameters-form h5 {
+    margin: 0 0 12px 0;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .template-parameters-form .form-group {
+    margin-bottom: 12px;
+  }
+
+  .template-parameters-form label {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  .template-parameters-form .required {
+    color: #ef4444;
+  }
+
+  .template-parameters-form input[type="text"],
+  .template-parameters-form input[type="password"],
+  .template-parameters-form input[type="number"],
+  .template-parameters-form select {
+    width: 100%;
+    padding: 6px 10px;
+    border-color: var(--border-color);
+    border-radius: 6px;
+    font-size: 13px;
+    transition: border-color 0.2s ease;
+  }
+
+  .template-parameters-form input:focus,
+  .template-parameters-form select:focus {
+    outline: none;
+    border-color: var(--accent-color);
+  }
+
+  .template-parameters-form .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-weight: normal;
+  }
+
+  .template-parameters-form .checkbox-label input[type="checkbox"] {
+    width: auto;
+    cursor: pointer;
+  }
+
+  .field-help {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .btn-small {
+    padding: 6px 12px;
+    font-size: 13px;
+    min-width: auto;
+  }
+
+  .credentials-info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .credential-item {
+    padding: 10px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent-color);
+  }
+
+  .credential-item strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  .credential-item code {
+    word-break: break-all;
+    font-size: 13px;
+  }
+
   .boot-task-info {
     display: flex;
     flex-direction: column;
@@ -1221,13 +1912,19 @@
     align-items: center;
     gap: 12px;
   }
+  
+  .boot-task-status strong {
+    color: var(--text-primary);
+    font-weight: 700;
+  }
 
   .boot-task-details {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 12px;
-    background: #f9fafb;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     font-size: 14px;
   }
@@ -1235,11 +1932,18 @@
   .boot-task-details div {
     display: flex;
     gap: 8px;
+    color: var(--text-primary);
+  }
+  
+  .boot-task-details div span {
+    color: var(--text-primary);
+    font-weight: 500;
   }
 
   .boot-task-details strong {
     min-width: 100px;
-    color: #374151;
+    color: var(--text-primary);
+    font-weight: 700;
   }
 
   .status-badge {
@@ -1251,27 +1955,27 @@
   }
 
   .status-badge.pending {
-    background: #fef3c7;
-    color: #92400e;
+    background: var(--warning-bg);
+    color: var(--warning-text);
   }
 
   .status-badge.in-progress {
-    background: #dbeafe;
-    color: #1e40af;
+    background: var(--info-bg);
+    color: var(--info-text);
   }
 
   .status-badge.completed {
-    background: #dcfce7;
-    color: #166534;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .status-badge.failed {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .no-isos {
-    color: #6b7280;
+    color: var(--text-secondary);
     font-size: 14px;
   }
 
@@ -1283,29 +1987,107 @@
 
   .iso-selector label {
     font-weight: 600;
-    color: #374151;
+    color: var(--text-primary);
     font-size: 14px;
   }
 
   .iso-selector select {
     padding: 10px 12px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     font-size: 14px;
     font-family: inherit;
-    background: white;
+    background: var(--bg-primary);
+    color: var(--text-primary);
     cursor: pointer;
-    transition: border-color 0.2s ease;
+    transition: border-color 0.2s ease, background-color 0.3s ease, color 0.3s ease;
   }
 
   .iso-selector select:focus {
     outline: none;
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
   }
 
   .iso-info {
-    color: #6b7280;
+    color: var(--text-secondary);
     font-size: 13px;
+  }
+
+  .no-installations {
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 12px;
+    text-align: center;
+  }
+
+  .installation-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .installation-item {
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent-color);
+  }
+
+  .installation-header {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .installation-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+  }
+
+  .installation-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .installation-logs {
+    margin-top: 8px;
+  }
+
+  .installation-logs summary {
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-color);
+    padding: 4px 0;
+  }
+
+  .installation-logs-content {
+    margin-top: 8px;
+    padding: 10px;
+    background: #1e293b;
+    color: #e2e8f0;
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: 'Courier New', monospace;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .installation-error {
+    margin-top: 8px;
+    padding: 8px;
+    background: #fee2e2;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #991b1b;
   }
 </style>

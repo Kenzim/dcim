@@ -6,6 +6,9 @@
   import ServerDetail from './ServerDetail.svelte';
   import OSTemplates from './OSTemplates.svelte';
   import Services from './Services.svelte';
+  import BillingIntegrations from './BillingIntegrations.svelte';
+  import ServicesList from './ServicesList.svelte';
+  import Scripts from './Scripts.svelte';
   import PageHeader from './PageHeader.svelte';
   import { logout } from '../stores/auth.js';
 
@@ -101,6 +104,30 @@
             <span>Services</span>
           </a>
         </li>
+        <li class="nav-item" class:active={currentPage === 'billing-integrations'}>
+          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('billing-integrations')}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>Billing Integrations</span>
+          </a>
+        </li>
+        <li class="nav-item" class:active={currentPage === 'services-list'}>
+          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('services-list')}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span>Services & Users</span>
+          </a>
+        </li>
+        <li class="nav-item" class:active={currentPage === 'scripts'}>
+          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('scripts')}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+            </svg>
+            <span>Scripts</span>
+          </a>
+        </li>
       </ul>
     </div>
 
@@ -134,6 +161,12 @@
       <OSTemplates />
     {:else if currentPage === 'services'}
       <Services onNavigate={navigate} />
+    {:else if currentPage === 'billing-integrations'}
+      <BillingIntegrations />
+    {:else if currentPage === 'services-list'}
+      <ServicesList />
+    {:else if currentPage === 'scripts'}
+      <Scripts />
     {:else if currentPage === 'user'}
       <User />
     {/if}
@@ -144,7 +177,7 @@
   .dashboard-container {
     display: flex;
     min-height: 100vh;
-    background: #f8fafc;
+    background: var(--bg-secondary);
   }
 
   .sidebar {
@@ -153,7 +186,7 @@
     bottom: 0;
     left: 0;
     width: 260px;
-    background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+    background: var(--bg-secondary);
     color: white;
     display: flex;
     flex-direction: column;
@@ -172,7 +205,7 @@
   .sidebar-logo {
     width: 40px;
     height: 40px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     border-radius: 10px;
     display: flex;
     align-items: center;
@@ -240,9 +273,9 @@
   }
 
   .nav-item.active .nav-link {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     color: white;
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    box-shadow: var(--shadow-md);
   }
 
   .nav-link {
@@ -286,7 +319,7 @@
     align-items: center;
     gap: 12px;
     padding: 8px 16px;
-    background: #f8fafc;
+    background: var(--bg-secondary);
     border-radius: 12px;
   }
 
@@ -294,7 +327,7 @@
     width: 36px;
     height: 36px;
     border-radius: 50%;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     color: white;
     display: flex;
     align-items: center;

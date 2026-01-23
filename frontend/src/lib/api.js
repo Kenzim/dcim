@@ -1,5 +1,53 @@
 const API_BASE = '/api';
 
+export async function getInstallationHistory(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/installation-tasks`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    // Handle 404 gracefully - return empty array instead of throwing
+    if (response.status === 404) {
+      return [];
+    }
+    // For other errors, try to get error message
+    try {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to get installation history');
+    } catch (e) {
+      // If response isn't JSON, throw a generic error
+      throw new Error(`Failed to get installation history: ${response.statusText}`);
+    }
+  }
+
+  return await response.json();
+}
+
+// Utility API functions
+export async function generatePassword(length = 16, charset = 'alphanumeric', excludeAmbiguous = true) {
+  const response = await fetch(`${API_BASE}/utils/generate-password`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      length,
+      charset,
+      exclude_ambiguous: excludeAmbiguous,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to generate password');
+  }
+
+  const data = await response.json();
+  return data.password;
+}
+
 export async function login(username, password) {
   // Create an AbortController for timeout
   const controller = new AbortController();
@@ -194,6 +242,115 @@ export async function deleteLocation(id) {
     const error = await response.json();
     throw new Error(error.detail || 'Failed to delete location');
   }
+}
+
+// Rack API functions
+export async function getRacks(locationId = null, row = null) {
+  const params = new URLSearchParams();
+  if (locationId) params.append('location_id', locationId);
+  if (row !== null) params.append('row', row);
+  const url = params.toString() 
+    ? `${API_BASE}/racks/?${params.toString()}`
+    : `${API_BASE}/racks/`;
+  const response = await fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get racks');
+  }
+
+  return await response.json();
+}
+
+export async function getRack(id) {
+  const response = await fetch(`${API_BASE}/racks/${id}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return null;
+    }
+    throw new Error('Failed to get rack');
+  }
+
+  return await response.json();
+}
+
+export async function createRack(locationId, name, units = 42, description = null, row = null, rowPosition = null) {
+  const body = { location_id: locationId, name, units };
+  if (description !== null) body.description = description;
+  if (row !== null && row !== '') body.row = Number(row);
+  if (rowPosition !== null && rowPosition !== '') body.row_position = Number(rowPosition);
+  
+  const response = await fetch(`${API_BASE}/racks/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to create rack');
+  }
+
+  return await response.json();
+}
+
+export async function updateRack(id, name = null, units = null, description = null, row = null, rowPosition = null) {
+  const body = {};
+  if (name !== null) body.name = name;
+  if (units !== null) body.units = units;
+  if (description !== null) body.description = description;
+  if (row !== null && row !== '') body.row = Number(row);
+  if (rowPosition !== null && rowPosition !== '') body.row_position = Number(rowPosition);
+
+  const response = await fetch(`${API_BASE}/racks/${id}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to update rack');
+  }
+
+  return await response.json();
+}
+
+export async function deleteRack(id) {
+  const response = await fetch(`${API_BASE}/racks/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to delete rack');
+  }
+}
+
+export async function getRackServers(rackId) {
+  const response = await fetch(`${API_BASE}/racks/${rackId}/servers`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get rack servers');
+  }
+
+  return await response.json();
 }
 
 // Server API functions
@@ -681,5 +838,287 @@ export async function powerResetServer(serverId) {
   }
 
   return await response.json();
+}
+
+// Billing Integration API functions
+export async function getBillingIntegrations() {
+  const response = await fetch(`${API_BASE}/billing/integrations`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get billing integrations');
+  }
+
+  return await response.json();
+}
+
+export async function getBillingIntegrationTypes() {
+  const response = await fetch(`${API_BASE}/billing/integrations/types`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get integration types');
+  }
+
+  return await response.json();
+}
+
+export async function getBillingIntegration(integrationId) {
+  const response = await fetch(`${API_BASE}/billing/integrations/${integrationId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get billing integration');
+  }
+
+  return await response.json();
+}
+
+export async function createBillingIntegration(data) {
+  const response = await fetch(`${API_BASE}/billing/integrations`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to create billing integration');
+  }
+
+  return await response.json();
+}
+
+export async function updateBillingIntegration(integrationId, data) {
+  const response = await fetch(`${API_BASE}/billing/integrations/${integrationId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to update billing integration');
+  }
+
+  return await response.json();
+}
+
+export async function deleteBillingIntegration(integrationId) {
+  const response = await fetch(`${API_BASE}/billing/integrations/${integrationId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to delete billing integration');
+  }
+}
+
+export async function rotateBillingIntegrationKey(integrationId) {
+  const response = await fetch(`${API_BASE}/billing/integrations/${integrationId}/rotate-key`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to rotate API key');
+  }
+
+  return await response.json();
+}
+
+// Services and External Users API functions
+export async function getServices(params = {}) {
+  const url = new URL(`${API_BASE}/admin/services`, window.location.origin);
+  Object.keys(params).forEach(key => {
+    if (params[key]) {
+      url.searchParams.append(key, params[key]);
+    }
+  });
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get services');
+  }
+
+  return await response.json();
+}
+
+export async function getService(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get service');
+  }
+
+  return await response.json();
+}
+
+export async function getExternalUsers(integrationId = null) {
+  const url = new URL(`${API_BASE}/admin/services/external-users`, window.location.origin);
+  if (integrationId) {
+    url.searchParams.append('integration_id', integrationId);
+  }
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get external users');
+  }
+
+  return await response.json();
+}
+
+export async function getExternalUser(userId) {
+  const response = await fetch(`${API_BASE}/admin/services/external-users/${userId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get external user');
+  }
+
+  return await response.json();
+}
+
+// Scripts API functions
+export async function getScripts() {
+  const url = `${API_BASE}/admin/scripts`;
+  console.log('Fetching scripts from:', url);
+  
+  // Create an AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+  
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+    console.log('Scripts response status:', response.status, response.statusText);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Scripts API error response:', errorText);
+      let errorMessage = 'Failed to get scripts';
+      try {
+        const errorJson = JSON.parse(errorText);
+        errorMessage = errorJson.detail || errorMessage;
+      } catch {
+        errorMessage = errorText || errorMessage;
+      }
+      throw new Error(errorMessage);
+    }
+
+    const scripts = await response.json();
+    console.log('Scripts response data:', scripts);
+    // Calculate size_bytes for each script
+    return scripts.map(script => ({
+      ...script,
+      size_bytes: script.content ? script.content.length : 0
+    }));
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      console.error('Scripts fetch timeout');
+      throw new Error('Request timed out. Please check your connection.');
+    }
+    console.error('Scripts fetch error:', err);
+    throw err;
+  }
+}
+
+export async function getScript(scriptId) {
+  const response = await fetch(`${API_BASE}/admin/scripts/${scriptId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get script');
+  }
+
+  const script = await response.json();
+  return {
+    ...script,
+    size_bytes: script.content ? script.content.length : 0
+  };
+}
+
+export async function createScript(data) {
+  const response = await fetch(`${API_BASE}/admin/scripts`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to create script');
+  }
+
+  return await response.json();
+}
+
+export async function updateScript(scriptId, data) {
+  const response = await fetch(`${API_BASE}/admin/scripts/${scriptId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to update script');
+  }
+
+  return await response.json();
+}
+
+export async function deleteScript(scriptId) {
+  const response = await fetch(`${API_BASE}/admin/scripts/${scriptId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to delete script');
+  }
 }
 

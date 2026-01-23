@@ -104,7 +104,7 @@
 <style>
   .plugins-page {
     min-height: 100vh;
-    background: #f8fafc;
+    background: var(--bg-secondary);
   }
 
   .page-content {
@@ -191,7 +191,7 @@
   }
 
   .plugin-card {
-    background: white;
+    background: var(--bg-primary);
     border-radius: 16px;
     padding: 24px;
     box-shadow: var(--shadow-md);
@@ -215,7 +215,7 @@
     width: 48px;
     height: 48px;
     border-radius: 12px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -260,7 +260,7 @@
   }
 
   .plugin-badge.unregistered {
-    background: #e2e8f0;
+    background: var(--bg-secondary);
     color: #475569;
   }
 
@@ -285,7 +285,7 @@
 
   .category-badge {
     padding: 6px 12px;
-    background: #f1f5f9;
+    background: var(--bg-tertiary);
     color: var(--text-primary);
     border-radius: 6px;
     font-size: 12px;

@@ -3,9 +3,10 @@
   import { fade, fly } from 'svelte/transition';
   import { logout, user } from '../stores/auth.js';
   import { getCurrentUser } from '../lib/api.js';
+  import { navigate } from '../lib/router.js';
+  import { theme, toggleTheme } from '../stores/theme.js';
 
   export let title = 'Dashboard';
-  export let onNavigate = null; // Optional navigation callback
 
   let userData = null;
   let showUserMenu = false;
@@ -52,14 +53,12 @@
       console.error('Logout error:', error);
     } finally {
       showUserMenu = false;
-      window.location.href = '/';
+      navigate('/');
     }
   }
 
   function handleUserClick() {
-    if (onNavigate) {
-      onNavigate('user');
-    }
+    navigate('/admin/user');
     showUserMenu = false;
   }
 </script>
@@ -68,9 +67,21 @@
   <h1 class="page-title">{title}</h1>
   <div class="header-actions">
     <slot name="actions" />
+    <button class="theme-toggle" on:click={toggleTheme} title="Toggle theme">
+      {#if $theme === 'light'}
+        <svg xmlns="http://www.w3.org/2000/svg" class="theme-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+        </svg>
+      {:else}
+        <svg xmlns="http://www.w3.org/2000/svg" class="theme-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+        </svg>
+      {/if}
+    </button>
     {#if $user}
       <div 
         class="user-menu-container" 
+        role="menu"
         on:mouseenter={handleMouseEnter}
         on:mouseleave={handleMouseLeave}
       >
@@ -85,12 +96,12 @@
         </button>
         {#if showUserMenu}
           <div class="user-dropdown" transition:fly={{ y: -8, duration: 150 }}>
-            <a href="#" class="dropdown-item" on:click|preventDefault={() => { handleUserClick(); }}>
+            <button class="dropdown-item" on:click={() => { handleUserClick(); }}>
               <svg xmlns="http://www.w3.org/2000/svg" class="dropdown-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
               </svg>
               <span>User Management</span>
-            </a>
+            </button>
             <div class="dropdown-divider"></div>
             <button class="dropdown-item logout-item" on:click={() => { handleLogout(); showUserMenu = false; }}>
               <svg xmlns="http://www.w3.org/2000/svg" class="dropdown-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -110,7 +121,7 @@
     position: sticky;
     top: 0;
     z-index: 100;
-    background: white;
+    background: var(--bg-primary);
     padding: 16px 32px;
     border-bottom: 1px solid var(--border-color);
     box-shadow: var(--shadow-sm);
@@ -119,6 +130,7 @@
     align-items: center;
     height: 60px;
     box-sizing: border-box;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
   .page-title {
@@ -133,7 +145,34 @@
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
+  }
+
+  .theme-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    background: var(--bg-primary);
+    border: 2px solid var(--accent-color);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: var(--accent-color);
+  }
+
+  .theme-toggle:hover {
+    background: var(--accent-color);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+  }
+
+  .theme-icon {
+    width: 20px;
+    height: 20px;
   }
 
   .user-menu-container {
@@ -156,8 +195,8 @@
     align-items: center;
     gap: 8px;
     padding: 6px 12px;
-    background: #f8fafc;
-    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    border: 2px solid var(--accent-color);
     border-radius: 8px;
     cursor: pointer;
     transition: all 0.2s ease;
@@ -165,15 +204,24 @@
   }
 
   .user-badge:hover {
-    background: #f1f5f9;
-    border-color: var(--primary-color);
+    background: var(--accent-color);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+  }
+  
+  .user-badge:hover .user-name {
+    color: white;
+  }
+  
+  .user-badge:hover .chevron-icon {
+    color: white;
   }
 
   .user-avatar {
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--accent-color);
     color: white;
     display: flex;
     align-items: center;
@@ -208,7 +256,7 @@
     position: absolute;
     top: calc(100% + 8px);
     right: 0;
-    background: white;
+    background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 12px;
     box-shadow: var(--shadow-lg);
@@ -235,15 +283,16 @@
   }
 
   .dropdown-item:hover {
-    background: #f8fafc;
+    background: var(--bg-tertiary);
   }
 
   .dropdown-item.logout-item {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 
   .dropdown-item.logout-item:hover {
-    background: #fee2e2;
+    background: var(--bg-tertiary);
+    opacity: 0.9;
   }
 
   .dropdown-icon {
