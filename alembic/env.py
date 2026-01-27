@@ -17,9 +17,10 @@ from app.models.plugin_category import plugin_categories
 config = context.config
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+# disable_existing_loggers=False prevents disabling uvicorn.access when
+# env.py is imported during app startup (migrations run in lifespan).
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Set the database URL from settings
 config.set_main_option("sqlalchemy.url", settings.database_url)
