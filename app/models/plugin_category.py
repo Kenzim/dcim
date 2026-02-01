@@ -5,7 +5,7 @@ from app.core.database import Base
 plugin_categories = Table(
     'plugin_categories',
     Base.metadata,
-    Column('plugin_id', Integer, ForeignKey('plugins.id', ondelete='CASCADE'), primary_key=True),
+    Column('plugin_id', Integer, ForeignKey('server_plugins.id', ondelete='CASCADE'), primary_key=True),
     Column('category_id', Integer, ForeignKey('categories.id', ondelete='CASCADE'), primary_key=True)
 )
 

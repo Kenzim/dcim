@@ -1,3 +1,4 @@
+import uuid
 from sqlalchemy import Column, Integer, String, JSON, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -13,7 +14,7 @@ class BootMode(str, enum.Enum):
 
 class Server(Base):
     """
-    Server model - represents a physical or virtual server in the DCIM system.
+    Server model - represents a physical or virtual server in the Rackflow system.
     
     Each server is linked to a plugin that defines how to interface with it.
     The plugin_config stores plugin-specific configuration (credentials, IP, etc.).
@@ -21,17 +22,20 @@ class Server(Base):
     __tablename__ = "servers"
 
     id = Column(Integer, primary_key=True, index=True)
+    uuid = Column(String(36), unique=True, index=True, nullable=False, default=lambda: str(uuid.uuid4()))  # For IPMI proxy URLs
     name = Column(String(255), unique=True, index=True, nullable=False)
     server_ip = Column(String(45), nullable=False)  # IPv4 or IPv6
     description = Column(Text, nullable=True)
+    comments = Column(Text, nullable=True)
     cpu_count = Column(Integer, default=1, nullable=False)
     cpu_model = Column(String(255), nullable=True)
     ram_gb = Column(Integer, nullable=True)  # RAM amount in GB
     port_speed_mbps = Column(Integer, nullable=True)  # Port speed in Mbps (e.g., 1000 for 1Gbps, 10000 for 10Gbps)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False, index=True)
     rack_id = Column(Integer, ForeignKey("racks.id"), nullable=True, index=True)  # Optional rack assignment
-    rack_unit = Column(Integer, nullable=True)  # Rack unit position (1-based, e.g., 1-42 for a 42U rack)
-    plugin_id = Column(Integer, ForeignKey("plugins.id"), nullable=False, index=True)
+    rack_unit = Column(Integer, nullable=True)  # Bottom (lowest) U the server occupies (1-based). With rack_units=2, occupies U rack_unit .. rack_unit+1
+    rack_units = Column(Integer, nullable=False, default=1)  # Height in U (1-based). Server occupies U [rack_unit, rack_unit+rack_units-1]
+    plugin_name = Column(String(255), nullable=False, index=True)  # Plugin name (folder name on disk)
     plugin_config = Column(JSON, nullable=False)  # Plugin-specific configuration (IPMI IP, credentials, etc.)
     enabled = Column(Boolean, default=True, nullable=False)
     boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # Boot mode: UEFI or BIOS (deprecated - use pxe_boot_mode and os_boot_mode)
@@ -48,14 +52,15 @@ class Server(Base):
     ipmi_web_management_url = Column(String(512), nullable=True)  # URL for IPMI web management interface
     ipmi_viewer_username = Column(String(255), nullable=True)  # Username for IPMI web access (read-only)
     ipmi_viewer_password = Column(String(255), nullable=True)  # Password for IPMI web access (read-only)
+    preview_asset_id = Column(Integer, ForeignKey("assets.id"), nullable=True, index=True)  # Optional image from asset manager
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relationships
-    plugin = relationship("Plugin", backref="servers")
     location = relationship("Location", backref="servers")
     rack = relationship("Rack", backref="servers")
     external_user = relationship("ExternalUser", back_populates="servers")
+    server_groups = relationship("ServerGroup", secondary="server_group_association", back_populates="servers")
 
     def __repr__(self):
-        return f"<Server(name='{self.name}', server_ip='{self.server_ip}', plugin_id={self.plugin_id})>"
+        return f"<Server(name='{self.name}', server_ip='{self.server_ip}', plugin_name='{self.plugin_name}')>"

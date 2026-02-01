@@ -1,11 +1,11 @@
 from sqlalchemy.orm import Session
 from typing import Optional, List
-from app.models.plugin import Plugin
+from app.models.plugin import ServerPlugin
 from app.models.category import Category
 
 
-class PluginDAO:
-    """Data Access Object for Plugin model"""
+class ServerPluginDAO:
+    """Data Access Object for ServerPlugin model"""
 
     @staticmethod
     def create(
@@ -15,9 +15,9 @@ class PluginDAO:
         category_names: List[str],
         config_template: dict,
         description: Optional[str] = None
-    ) -> Plugin:
-        """Create a new plugin with categories"""
-        plugin = Plugin(
+    ) -> ServerPlugin:
+        """Create a new server plugin with categories"""
+        plugin = ServerPlugin(
             name=name,
             version=version,
             config_template=config_template,
@@ -36,22 +36,22 @@ class PluginDAO:
         return plugin
 
     @staticmethod
-    def get_by_id(db: Session, plugin_id: int) -> Optional[Plugin]:
-        """Get plugin by ID"""
-        return db.query(Plugin).filter(Plugin.id == plugin_id).first()
+    def get_by_id(db: Session, plugin_id: int) -> Optional[ServerPlugin]:
+        """Get server plugin by ID"""
+        return db.query(ServerPlugin).filter(ServerPlugin.id == plugin_id).first()
 
     @staticmethod
-    def get_by_name(db: Session, name: str) -> Optional[Plugin]:
-        """Get plugin by name"""
-        return db.query(Plugin).filter(Plugin.name == name).first()
+    def get_by_name(db: Session, name: str) -> Optional[ServerPlugin]:
+        """Get server plugin by name"""
+        return db.query(ServerPlugin).filter(ServerPlugin.name == name).first()
 
     @staticmethod
-    def get_all(db: Session, skip: int = 0, limit: int = 100) -> List[Plugin]:
-        """Get all plugins with pagination"""
-        return db.query(Plugin).offset(skip).limit(limit).all()
+    def get_all(db: Session, skip: int = 0, limit: int = 100) -> List[ServerPlugin]:
+        """Get all server plugins with pagination"""
+        return db.query(ServerPlugin).offset(skip).limit(limit).all()
 
     @staticmethod
-    def update(db: Session, plugin: Plugin) -> Plugin:
+    def update(db: Session, plugin: ServerPlugin) -> ServerPlugin:
         """Update a plugin"""
         db.commit()
         db.refresh(plugin)
@@ -59,8 +59,8 @@ class PluginDAO:
 
     @staticmethod
     def delete(db: Session, plugin_id: int) -> bool:
-        """Delete a plugin by ID"""
-        plugin = db.query(Plugin).filter(Plugin.id == plugin_id).first()
+        """Delete a server plugin by ID"""
+        plugin = db.query(ServerPlugin).filter(ServerPlugin.id == plugin_id).first()
         if plugin:
             db.delete(plugin)
             db.commit()

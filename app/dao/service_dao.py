@@ -1,6 +1,8 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 from typing import Optional, List
 from app.models.service import Service, ServiceStatus
+from app.models.external_user import ExternalUser
 
 
 class ServiceDAO:
@@ -46,6 +48,23 @@ class ServiceDAO:
     def get_by_external_service_id(db: Session, external_service_id: str) -> Optional[Service]:
         """Get service by external service ID"""
         return db.query(Service).filter(Service.external_service_id == external_service_id).first()
+
+    @staticmethod
+    def get_by_external_service_id_and_integration(
+        db: Session, external_service_id: str, integration_id: int
+    ) -> Optional[Service]:
+        """Get service by external service ID and billing integration (for idempotent register)."""
+        return (
+            db.query(Service)
+            .join(ExternalUser, Service.external_user_id == ExternalUser.id)
+            .filter(
+                and_(
+                    Service.external_service_id == external_service_id,
+                    ExternalUser.integration_id == integration_id,
+                )
+            )
+            .first()
+        )
 
     @staticmethod
     def get_by_external_user(db: Session, external_user_id: int) -> List[Service]:

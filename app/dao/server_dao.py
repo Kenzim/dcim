@@ -11,7 +11,7 @@ class ServerDAO:
         db: Session,
         name: str,
         server_ip: str,
-        plugin_id: int,
+        plugin_name: str,
         plugin_config: dict,
         description: Optional[str] = None,
         cpu_count: int = 1,
@@ -21,6 +21,7 @@ class ServerDAO:
         location_id: Optional[int] = None,
         rack_id: Optional[int] = None,
         rack_unit: Optional[int] = None,
+        rack_units: int = 1,
         enabled: bool = True,
         boot_mode: BootMode = BootMode.UEFI,
         pxe_boot_mode: Optional[BootMode] = None,
@@ -48,7 +49,8 @@ class ServerDAO:
             location_id=location_id,
             rack_id=rack_id,
             rack_unit=rack_unit,
-            plugin_id=plugin_id,
+            rack_units=rack_units,
+            plugin_name=plugin_name,
             plugin_config=plugin_config,
             enabled=enabled,
             boot_mode=boot_mode,
@@ -75,6 +77,13 @@ class ServerDAO:
         return db.query(Server).filter(Server.name == name).first()
 
     @staticmethod
+    def get_by_ip(db: Session, server_ip: str) -> Optional[Server]:
+        """Get server by primary IP address (exact match)."""
+        if not server_ip or not server_ip.strip():
+            return None
+        return db.query(Server).filter(Server.server_ip == server_ip.strip()).first()
+
+    @staticmethod
     def get_all(db: Session, skip: int = 0, limit: int = 100, enabled_only: bool = False) -> List[Server]:
         """Get all servers with pagination"""
         query = db.query(Server)
@@ -83,9 +92,9 @@ class ServerDAO:
         return query.order_by(Server.name).offset(skip).limit(limit).all()
 
     @staticmethod
-    def get_by_plugin(db: Session, plugin_id: int) -> List[Server]:
+    def get_by_plugin(db: Session, plugin_name: str) -> List[Server]:
         """Get all servers using a specific plugin"""
-        return db.query(Server).filter(Server.plugin_id == plugin_id).all()
+        return db.query(Server).filter(Server.plugin_name == plugin_name).all()
 
     @staticmethod
     def get_by_location(db: Session, location_id: int) -> List[Server]:
