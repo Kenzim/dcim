@@ -135,3 +135,13 @@ class InstallationTaskDAO:
             db.commit()
             db.refresh(task)
         return task
+
+    @staticmethod
+    def delete_pending_by_server(db: Session, server_id: int) -> int:
+        """Delete all pending installation tasks for a server. Returns count deleted."""
+        deleted = db.query(InstallationTask).filter(
+            InstallationTask.server_id == server_id,
+            InstallationTask.status == InstallationStatus.PENDING
+        ).delete()
+        db.commit()
+        return deleted

@@ -16,8 +16,7 @@ class Category(Base):
     display_name = Column(String(255), nullable=False)  # e.g., "Power Control"
     description = Column(Text, nullable=True)
 
-    # Many-to-many relationship with plugins
-    plugins = relationship("Plugin", secondary="plugin_categories", back_populates="categories")
+    # Note: Plugin relationships removed - plugins are no longer stored in database
 
     def __repr__(self):
         return f"<Category(name='{self.name}')>"
