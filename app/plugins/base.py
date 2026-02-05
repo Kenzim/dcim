@@ -3,17 +3,23 @@ Base plugin interface for server management modules.
 
 All server plugins must inherit from ServerPlugin and implement
 the methods for the categories they support.
+
+Plugins define CAPABILITIES (list of Capability) with UI schema
+for config-driven frontend rendering. Optional capabilities are
+enabled per-server via plugin_config["enabled_capabilities"].
 """
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from enum import Enum
+
+if TYPE_CHECKING:
+    from app.plugins.capabilities import Capability
 
 
 class PluginCategory(str, Enum):
-    """Categories of functionality that plugins can support"""
+    """Categories of functionality that server plugins can support"""
     POWER_CONTROL = "power_control"
-    USER_ACCOUNT_CONTROL = "user_account_control"
-    BOOT_ORDER_CONTROL = "boot_order_control"
+    USER_CONTROL = "user_control"
 
 
 class PowerState(str, Enum):
@@ -39,6 +45,7 @@ class ServerPlugin(ABC):
     PLUGIN_VERSION: str = ""
     SUPPORTED_CATEGORIES: List[PluginCategory] = []
     CONFIG_TEMPLATE: Dict[str, Any] = {}  # JSON schema for configuration form
+    CAPABILITIES: List["Capability"] = []  # Capability definitions with UI schema
     
     def __init__(self, config: Dict[str, Any]):
         """
@@ -51,13 +58,16 @@ class ServerPlugin(ABC):
         self.config = config
     
     def get_plugin_info(self) -> Dict[str, Any]:
-        """Get plugin metadata"""
-        return {
+        """Get plugin metadata including capabilities with UI schema."""
+        result = {
             "name": self.PLUGIN_NAME,
             "version": self.PLUGIN_VERSION,
             "supported_categories": [cat.value for cat in self.SUPPORTED_CATEGORIES],
-            "config_template": self.CONFIG_TEMPLATE
+            "config_template": self.CONFIG_TEMPLATE,
         }
+        if self.CAPABILITIES:
+            result["capabilities"] = [c.to_dict() for c in self.CAPABILITIES]
+        return result
     
     def get_capabilities(self) -> List[str]:
         """
@@ -76,19 +86,12 @@ class ServerPlugin(ABC):
                 "power_reset"
             ])
         
-        if PluginCategory.USER_ACCOUNT_CONTROL in self.SUPPORTED_CATEGORIES:
+        if PluginCategory.USER_CONTROL in self.SUPPORTED_CATEGORIES:
             capabilities.extend([
                 "list_users",
                 "create_user",
                 "delete_user",
                 "update_user_password"
-            ])
-        
-        if PluginCategory.BOOT_ORDER_CONTROL in self.SUPPORTED_CATEGORIES:
-            capabilities.extend([
-                "get_boot_order",
-                "set_boot_order",
-                "set_next_boot_device"
             ])
         
         return capabilities
@@ -188,10 +191,10 @@ class ServerPlugin(ABC):
             List of dictionaries with user information (username, roles, etc.)
         
         Raises:
-            NotImplementedError: If USER_ACCOUNT_CONTROL not in SUPPORTED_CATEGORIES
+            NotImplementedError: If USER_CONTROL not in SUPPORTED_CATEGORIES
         """
-        if PluginCategory.USER_ACCOUNT_CONTROL not in self.SUPPORTED_CATEGORIES:
-            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user account control")
+        if PluginCategory.USER_CONTROL not in self.SUPPORTED_CATEGORIES:
+            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user control")
     
     @abstractmethod
     async def create_user(self, username: str, password: str, roles: Optional[List[str]] = None) -> bool:
@@ -207,10 +210,10 @@ class ServerPlugin(ABC):
             bool: True if user was created successfully, False otherwise
         
         Raises:
-            NotImplementedError: If USER_ACCOUNT_CONTROL not in SUPPORTED_CATEGORIES
+            NotImplementedError: If USER_CONTROL not in SUPPORTED_CATEGORIES
         """
-        if PluginCategory.USER_ACCOUNT_CONTROL not in self.SUPPORTED_CATEGORIES:
-            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user account control")
+        if PluginCategory.USER_CONTROL not in self.SUPPORTED_CATEGORIES:
+            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user control")
     
     @abstractmethod
     async def delete_user(self, username: str) -> bool:
@@ -224,10 +227,10 @@ class ServerPlugin(ABC):
             bool: True if user was deleted successfully, False otherwise
         
         Raises:
-            NotImplementedError: If USER_ACCOUNT_CONTROL not in SUPPORTED_CATEGORIES
+            NotImplementedError: If USER_CONTROL not in SUPPORTED_CATEGORIES
         """
-        if PluginCategory.USER_ACCOUNT_CONTROL not in self.SUPPORTED_CATEGORIES:
-            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user account control")
+        if PluginCategory.USER_CONTROL not in self.SUPPORTED_CATEGORIES:
+            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user control")
     
     @abstractmethod
     async def update_user_password(self, username: str, new_password: str) -> bool:
@@ -242,58 +245,8 @@ class ServerPlugin(ABC):
             bool: True if password was updated successfully, False otherwise
         
         Raises:
-            NotImplementedError: If USER_ACCOUNT_CONTROL not in SUPPORTED_CATEGORIES
+            NotImplementedError: If USER_CONTROL not in SUPPORTED_CATEGORIES
         """
-        if PluginCategory.USER_ACCOUNT_CONTROL not in self.SUPPORTED_CATEGORIES:
-            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user account control")
-    
-    # ========== Boot Order Control Methods ==========
-    
-    @abstractmethod
-    async def get_boot_order(self) -> List[str]:
-        """
-        Get current boot order.
-        
-        Returns:
-            List of boot device identifiers in order (e.g., ["PXE", "HDD", "CDROM"])
-        
-        Raises:
-            NotImplementedError: If BOOT_ORDER_CONTROL not in SUPPORTED_CATEGORIES
-        """
-        if PluginCategory.BOOT_ORDER_CONTROL not in self.SUPPORTED_CATEGORIES:
-            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
-    
-    @abstractmethod
-    async def set_boot_order(self, boot_devices: List[str]) -> bool:
-        """
-        Set the boot order.
-        
-        Args:
-            boot_devices: List of boot device identifiers in desired order
-        
-        Returns:
-            bool: True if boot order was set successfully, False otherwise
-        
-        Raises:
-            NotImplementedError: If BOOT_ORDER_CONTROL not in SUPPORTED_CATEGORIES
-        """
-        if PluginCategory.BOOT_ORDER_CONTROL not in self.SUPPORTED_CATEGORIES:
-            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
-    
-    @abstractmethod
-    async def set_next_boot_device(self, device: str) -> bool:
-        """
-        Set the device for the next boot only (one-time boot).
-        
-        Args:
-            device: Boot device identifier (e.g., "PXE", "HDD")
-        
-        Returns:
-            bool: True if next boot device was set successfully, False otherwise
-        
-        Raises:
-            NotImplementedError: If BOOT_ORDER_CONTROL not in SUPPORTED_CATEGORIES
-        """
-        if PluginCategory.BOOT_ORDER_CONTROL not in self.SUPPORTED_CATEGORIES:
-            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
+        if PluginCategory.USER_CONTROL not in self.SUPPORTED_CATEGORIES:
+            raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user control")
 

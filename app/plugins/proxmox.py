@@ -9,8 +9,9 @@ from typing import Dict, Any, Optional
 from app.plugins.base import (
     ServerPlugin,
     PluginCategory,
-    PowerState
+    PowerState,
 )
+from app.plugins.capabilities import Capability, ActionDef, UIPattern
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,22 @@ class ProxmoxPlugin(ServerPlugin):
     PLUGIN_NAME = "proxmox"
     PLUGIN_VERSION = "1.0.0"
     SUPPORTED_CATEGORIES = [
-        PluginCategory.POWER_CONTROL,  # Power control only
+        PluginCategory.POWER_CONTROL,
+    ]
+    CAPABILITIES = [
+        Capability(
+            id="power_control",
+            display_name="Power Control",
+            description="Power on, off, and reset the VM",
+            optional=False,
+            ui_pattern=UIPattern.STATE_AND_ACTIONS,
+            state_action="get_power_state",
+            actions=[
+                ActionDef("power_on", "Power On", variant="success"),
+                ActionDef("power_off", "Power Off", variant="danger"),
+                ActionDef("power_reset", "Reset", variant="warning"),
+            ],
+        ),
     ]
     CONFIG_TEMPLATE = {
         "type": "object",
