@@ -110,20 +110,25 @@ class PluginRegistry:
     
     def list_plugins(self) -> List[Dict[str, Any]]:
         """
-        List all registered plugins with their metadata.
+        List all registered plugins with their metadata and capabilities.
         
         Returns:
-            List of plugin info dictionaries
+            List of plugin info dictionaries including capabilities with UI schema
         """
         return [
             {
                 "name": name,
                 "version": plugin_class.PLUGIN_VERSION,
                 "supported_categories": [cat.value for cat in plugin_class.SUPPORTED_CATEGORIES],
-                "config_template": plugin_class.CONFIG_TEMPLATE
+                "config_template": plugin_class.CONFIG_TEMPLATE,
+                "capabilities": [c.to_dict() for c in getattr(plugin_class, "CAPABILITIES", [])],
             }
             for name, plugin_class in self._plugins.items()
         ]
+
+    def get_plugin_class(self, plugin_name: str) -> Optional[Type[ServerPlugin]]:
+        """Get the plugin class by name."""
+        return self._plugins.get(plugin_name)
     
     def get_plugins_by_category(self, category: PluginCategory) -> List[str]:
         """
@@ -141,6 +146,21 @@ class PluginRegistry:
             if category in plugin_class.SUPPORTED_CATEGORIES
         ]
     
+    def get_plugin_info(self, plugin_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed info for a plugin including capabilities with UI schema.
+        """
+        if plugin_name not in self._plugins:
+            return None
+        plugin_class = self._plugins[plugin_name]
+        return {
+            "name": plugin_class.PLUGIN_NAME,
+            "version": plugin_class.PLUGIN_VERSION,
+            "supported_categories": [cat.value for cat in plugin_class.SUPPORTED_CATEGORIES],
+            "config_template": plugin_class.CONFIG_TEMPLATE,
+            "capabilities": [c.to_dict() for c in getattr(plugin_class, "CAPABILITIES", [])],
+        }
+
     def plugin_supports_category(self, plugin_name: str, category: PluginCategory) -> bool:
         """
         Check if a plugin supports a specific category.
