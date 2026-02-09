@@ -27,9 +27,11 @@ class TempOSConfig(BaseModel):
     kernel_file: str = Field(..., description="Kernel filename")
     initrd_file: str = Field(..., description="Initrd filename")
     squashfs_file: Optional[str] = Field(default=None, description="Squashfs filename (for live OSes)")
+    modloop_file: Optional[str] = Field(default=None, description="Modloop filename (e.g. for Alpine)")
     kernel_params: str = Field(default="", description="Default kernel parameters")
     version: Optional[str] = Field(default=None, description="OS version")
     flavor: Optional[str] = Field(default=None, description="OS flavor/variant")
+    requires_modloop: bool = Field(default=False, description="Whether this OS requires a modloop file")
     
     @field_validator('id')
     @classmethod

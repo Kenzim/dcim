@@ -34,16 +34,18 @@ class DownloadTokenService:
         boot_task_id: int,
         allowed_files: Optional[List[str]] = None,
         allowed_patterns: Optional[List[str]] = None,
-        expires_in: int = TOKEN_EXPIRATION_SECONDS
+        expires_in: int = TOKEN_EXPIRATION_SECONDS,
+        single_use: bool = True,
     ) -> str:
         """
-        Generate a one-time download token.
+        Generate a download token.
         
         Args:
             boot_task_id: ID of the boot task this token is for
             allowed_files: List of specific filenames this token can access (e.g., ["install.wim"])
             allowed_patterns: List of filename patterns this token can access (e.g., ["*.iso", "*.wim"])
             expires_in: Token expiration time in seconds (default: 24 hours)
+            single_use: If True, token is invalidated after first use. If False, valid until expiry (e.g. for ISO boot where iPXE requests the same URL multiple times).
         
         Returns:
             The generated token string
@@ -62,6 +64,7 @@ class DownloadTokenService:
             "created_at": now.isoformat(),
             "expires_at": expires_at.isoformat(),
             "used": "false",
+            "single_use": "true" if single_use else "false",
             "allowed_files": json.dumps(allowed_files or []),
             "allowed_patterns": json.dumps(allowed_patterns or []),
         }
@@ -120,32 +123,25 @@ class DownloadTokenService:
             logger.error(f"Invalid token data format for {token_id[:8]}...")
             return None
         
+        single_use = str(token_data.get("single_use", "true")).lower() == "true"
+        result = {
+            "boot_task_id": int(token_data.get("boot_task_id", 0)),
+            "created_at": token_data.get("created_at"),
+            "expires_at": token_data.get("expires_at"),
+            "single_use": single_use,
+        }
         # If no restrictions, allow all files
         if not allowed_files and not allowed_patterns:
-            return {
-                "boot_task_id": int(token_data.get("boot_task_id", 0)),
-                "created_at": token_data.get("created_at"),
-                "expires_at": token_data.get("expires_at"),
-            }
-        
+            return result
         # Check specific files
         if allowed_files and filename in allowed_files:
-            return {
-                "boot_task_id": int(token_data.get("boot_task_id", 0)),
-                "created_at": token_data.get("created_at"),
-                "expires_at": token_data.get("expires_at"),
-            }
-        
+            return result
         # Check patterns
         if allowed_patterns:
             import fnmatch
             for pattern in allowed_patterns:
                 if fnmatch.fnmatch(filename, pattern):
-                    return {
-                        "boot_task_id": int(token_data.get("boot_task_id", 0)),
-                        "created_at": token_data.get("created_at"),
-                        "expires_at": token_data.get("expires_at"),
-                    }
+                    return result
         
         # File not allowed
         logger.warning(f"Download token does not allow access to '{filename}': {token_id[:8]}...")
