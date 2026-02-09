@@ -1,21 +1,36 @@
 """
 DHCP Configuration Service
 
-Manages DHCP server configuration stored as JSON on disk.
+Manages DHCP server configuration stored in the database.
+Defaults for file paths come from env: DHCP_CONFIG_FILE_PATH, DHCP_LEASE_FILE_PATH.
 """
-import json
 import logging
-from pathlib import Path
-from typing import Dict, Any, List, Optional
+import os
+from typing import List, Optional  # noqa: F401 - Optional used in return type
+from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
+from app.dao.dhcp_config_dao import DHCPConfigDAO
+from app.models.dhcp_config import DHCPConfigModel
+
 logger = logging.getLogger(__name__)
+
+
+def _default_config_path() -> str:
+    return os.environ.get("DHCP_CONFIG_FILE_PATH", "/shared/dhcp/dhcpd.conf")
+
+
+def _default_lease_path() -> str:
+    return os.environ.get("DHCP_LEASE_FILE_PATH", "/shared/dhcp/dhcpd.leases")
 
 
 class DHCPInterfaceConfig(BaseModel):
     """DHCP interface configuration"""
     interface: str = Field(..., description="Network interface name (e.g., eth1)")
     ip: str = Field(..., description="IP address to bind to (e.g., 192.168.12.74)")
+    cidr: Optional[int] = Field(None, description="CIDR notation (e.g., 24 for /24). If not provided, defaults to /24")
+    netmask: Optional[str] = Field(None, description="Netmask (e.g., 255.255.255.0). Alternative to CIDR. If both provided, CIDR takes precedence")
+    gateway: Optional[str] = Field(None, description="Default gateway (routers) for this subnet (e.g., 192.168.1.1). Servers on this subnet will receive this via DHCP option routers.")
 
 
 class DHCPConfig(BaseModel):
@@ -25,6 +40,10 @@ class DHCPConfig(BaseModel):
         default_factory=lambda: [DHCPInterfaceConfig(interface="eth1", ip="192.168.12.74")],
         description="List of interfaces/IPs to bind to"
     )
+    dns_servers: Optional[List[str]] = Field(
+        default=None,
+        description="DNS servers to send via DHCP option domain-name-servers (e.g. [\"8.8.8.8\", \"8.8.4.4\"])"
+    )
     hand_out_leases: bool = Field(default=True, description="Whether to hand out normal DHCP leases")
     default_lease_time: int = Field(default=3600, description="Default lease time in seconds")
     max_lease_time: int = Field(default=7200, description="Maximum lease time in seconds")
@@ -32,111 +51,99 @@ class DHCPConfig(BaseModel):
     lease_file_path: str = Field(default="/root/dcim/dhcpd.leases", description="Path to dhcpd.leases")
 
 
+def _row_to_config(row: DHCPConfigModel) -> DHCPConfig:
+    """Convert DB row to Pydantic config."""
+    interfaces = []
+    if row.interfaces:
+        for iface in row.interfaces:
+            if isinstance(iface, dict):
+                interfaces.append(DHCPInterfaceConfig(**iface))
+            else:
+                interfaces.append(iface)
+    if not interfaces:
+        interfaces = [DHCPInterfaceConfig(interface="eth1", ip="192.168.12.74")]
+    return DHCPConfig(
+        enabled=row.enabled,
+        interfaces=interfaces,
+        dns_servers=row.dns_servers,
+        hand_out_leases=row.hand_out_leases,
+        default_lease_time=row.default_lease_time,
+        max_lease_time=row.max_lease_time,
+        config_file_path=row.config_file_path,
+        lease_file_path=row.lease_file_path,
+    )
+
+
 class DHCPConfigService:
-    """Service for managing DHCP configuration stored as JSON"""
-    
-    def __init__(self, config_file: str = "/root/dcim/dhcp_config.json"):
+    """Service for managing DHCP configuration from the database."""
+
+    def get_config(self, db: Session) -> DHCPConfig:
+        """Get current DHCP configuration from database (legacy global config)."""
+        row = DHCPConfigDAO.get_config(db)
+        if row is not None:
+            return _row_to_config(row)
+        row = DHCPConfigDAO.get_or_create(db, _default_config_path(), _default_lease_path())
+        return _row_to_config(row)
+
+    def get_config_by_service_instance(
+        self, db: Session, service_instance_id: int
+    ) -> Optional[DHCPConfig]:
+        """Get DHCP config for a service instance, or None if not configured."""
+        row = DHCPConfigDAO.get_by_service_instance_id(db, service_instance_id)
+        if row is None:
+            return None
+        return _row_to_config(row)
+
+    def get_or_create_config_for_service_instance(
+        self, db: Session, service_instance_id: int, config_path: str, lease_path: str
+    ) -> DHCPConfig:
+        row = DHCPConfigDAO.get_or_create_for_service_instance(
+            db, service_instance_id, config_path, lease_path
+        )
+        return _row_to_config(row)
+
+    def update_config(self, db: Session, **kwargs) -> DHCPConfig:
         """
-        Initialize DHCP config service.
-        
+        Update DHCP configuration in the database.
+
         Args:
-            config_file: Path to JSON configuration file
-        """
-        self.config_file = Path(config_file)
-        self._config: Optional[DHCPConfig] = None
-    
-    def _ensure_config_file(self) -> None:
-        """Ensure config file exists with default values if it doesn't."""
-        if not self.config_file.exists():
-            logger.info(f"Creating default DHCP config file at {self.config_file}")
-            default_config = DHCPConfig()
-            self._save_config(default_config)
-    
-    def _load_config(self) -> DHCPConfig:
-        """Load configuration from JSON file."""
-        self._ensure_config_file()
-        
-        try:
-            with open(self.config_file, 'r') as f:
-                data = json.load(f)
-            
-            # Convert interfaces list to DHCPInterfaceConfig objects
-            if "interfaces" in data:
-                interfaces = [DHCPInterfaceConfig(**iface) for iface in data["interfaces"]]
-                data["interfaces"] = interfaces
-            
-            return DHCPConfig(**data)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse DHCP config JSON: {e}")
-            # Return default config if JSON is invalid
-            return DHCPConfig()
-        except Exception as e:
-            logger.error(f"Failed to load DHCP config: {e}")
-            return DHCPConfig()
-    
-    def _save_config(self, config: DHCPConfig) -> None:
-        """Save configuration to JSON file."""
-        try:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Convert to dict for JSON serialization
-            config_dict = config.model_dump()
-            
-            with open(self.config_file, 'w') as f:
-                json.dump(config_dict, f, indent=2)
-            
-            logger.info(f"Saved DHCP config to {self.config_file}")
-        except Exception as e:
-            logger.error(f"Failed to save DHCP config: {e}", exc_info=True)
-            raise
-    
-    def get_config(self) -> DHCPConfig:
-        """Get current DHCP configuration."""
-        if self._config is None:
-            self._config = self._load_config()
-        return self._config
-    
-    def update_config(self, **kwargs) -> DHCPConfig:
-        """
-        Update DHCP configuration.
-        
-        Args:
+            db: Database session
             **kwargs: Configuration fields to update
-        
+
         Returns:
             Updated configuration
         """
-        current = self.get_config()
-        
-        # Update fields
+        row = DHCPConfigDAO.get_config(db)
+        if row is None:
+            row = DHCPConfigDAO.get_or_create(db, _default_config_path(), _default_lease_path())
+        current = _row_to_config(row)
         update_data = current.model_dump()
         update_data.update({k: v for k, v in kwargs.items() if v is not None})
-        
-        # Handle interfaces specially
         if "interfaces" in kwargs:
             if isinstance(kwargs["interfaces"], list):
-                # Convert dicts to DHCPInterfaceConfig objects
                 interfaces = []
                 for iface in kwargs["interfaces"]:
                     if isinstance(iface, dict):
-                        interfaces.append(DHCPInterfaceConfig(**iface))
-                    elif isinstance(iface, DHCPInterfaceConfig):
                         interfaces.append(iface)
+                    else:
+                        interfaces.append(iface.model_dump())
                 update_data["interfaces"] = interfaces
-        
-        updated_config = DHCPConfig(**update_data)
-        self._save_config(updated_config)
-        self._config = updated_config
-        
-        return updated_config
-    
-    def reload(self) -> DHCPConfig:
-        """Reload configuration from disk (discard cached version)."""
-        self._config = None
-        return self.get_config()
+        row.enabled = update_data["enabled"]
+        row.interfaces = update_data["interfaces"]
+        row.dns_servers = update_data.get("dns_servers")
+        row.hand_out_leases = update_data["hand_out_leases"]
+        row.default_lease_time = update_data["default_lease_time"]
+        row.max_lease_time = update_data["max_lease_time"]
+        row.config_file_path = update_data["config_file_path"]
+        row.lease_file_path = update_data["lease_file_path"]
+        DHCPConfigDAO.update(db, row)
+        return _row_to_config(row)
+
+    def reload(self, db: Session) -> DHCPConfig:
+        """Reload configuration from database (no cache)."""
+        return self.get_config(db)
 
 
-# Global instance
 _dhcp_config_service: Optional[DHCPConfigService] = None
 
 

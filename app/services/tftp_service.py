@@ -1,16 +1,16 @@
 """
-TFTP Service Manager
+TFTP Service Manager (remote runner only).
 
-Manages the TFTP server (in.tftpd) via systemd, allowing the backend
-to start, stop, restart, and reload the TFTP server. The service runs
-independently via systemd, so it persists across app restarts.
+All operations go to the TFTP runner container via HTTP.
+No local subprocess or systemd; runner URL must be set (TFTP_RUNNER_URL or legacy dhcp_tftp_service_url).
 """
 import asyncio
 import logging
-import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any
 from enum import Enum
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,304 +24,171 @@ class TFTPStatus(str, Enum):
     ERROR = "error"
 
 
+def _remote_base() -> tuple[str, str]:
+    """Return (base_url, path_prefix). Prefix is '' for separate runner, '/tftp' for combined."""
+    if settings.tftp_runner_url:
+        return settings.tftp_runner_url.rstrip("/"), ""
+    if settings.dhcp_tftp_service_url:
+        return settings.dhcp_tftp_service_url.rstrip("/"), "/tftp"
+    return "", ""
+
+
+def _has_runner() -> bool:
+    return bool(settings.tftp_runner_url or settings.dhcp_tftp_service_url)
+
+
+def _no_runner_result(message: str) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "status": "error",
+        "message": message,
+        "running": False,
+        "pid": None,
+    }
+
+
 class TFTPService:
     """
-    Manages the TFTP server (in.tftpd) subprocess.
-    
-    Handles starting, stopping, restarting, and reloading the TFTP server.
+    Manages the TFTP server via the remote runner API only.
     """
-    
+
     def __init__(
         self,
         root_directory: Optional[str] = None,
         bind_address: Optional[str] = None,
-        bind_port: Optional[int] = None
+        bind_port: Optional[int] = None,
     ):
-        """
-        Initialize TFTP service manager.
-        
-        Args:
-            root_directory: TFTP root directory (defaults from config)
-            bind_address: IP address to bind to (defaults from config)
-            bind_port: Port to bind to (defaults from config)
-        """
-        # These will be set from config when starting
-        self.root_directory = Path(root_directory) if root_directory else Path("/root/dcim/tftp")
-        self.bind_address = bind_address or "192.168.12.74"
+        self.root_directory = Path(root_directory) if root_directory else Path("/shared/tftp")
+        self.bind_address = bind_address or "0.0.0.0"
         self.bind_port = bind_port or 69
-        
         self.status = TFTPStatus.STOPPED
         self._lock = asyncio.Lock()
-        self.service_name = "dcim-tftpd.service"
-        
-        # Check if in.tftpd is available
-        self.tftpd_binary = shutil.which("in.tftpd")
-        if not self.tftpd_binary:
-            logger.warning("in.tftpd binary not found in PATH. TFTP service will not be available.")
-            self.tftpd_binary = "/usr/sbin/in.tftpd"  # Common location
-    
+        self._db = None
+
     def _load_config_from_service(self):
-        """Load configuration from TFTP config service and update instance variables."""
+        """Load config from DB when _db is set (for display in status)."""
+        db = getattr(self, "_db", None)
+        if not db:
+            return
         try:
             from app.services.tftp_config_service import get_tftp_config_service
-            config_service = get_tftp_config_service()
-            config = config_service.get_config()
-            
+            config = get_tftp_config_service().get_config(db)
             if config:
                 self.root_directory = Path(config.root_directory)
                 self.bind_address = config.bind_address
                 self.bind_port = config.bind_port
         except Exception as e:
-            logger.warning(f"Failed to load config from service, using defaults: {e}")
-    
-    def _ensure_service_file(self):
-        """Ensure systemd service file is up to date."""
-        from app.services.systemd_service import get_systemd_manager
-        
-        # Load config to get current settings
-        self._load_config_from_service()
-        
-        # Load full config
-        from app.services.tftp_config_service import get_tftp_config_service
-        config_service = get_tftp_config_service()
-        config = config_service.get_config()
-        
-        systemd_manager = get_systemd_manager()
-        service_content = systemd_manager.generate_tftp_service_file(
-            str(self.root_directory),
-            self.bind_address,
-            self.bind_port,
-            config.ipv4_only,
-            config.allow_create,
-            config.verbose
-        )
-        
-        systemd_manager.install_service(self.service_name, service_content)
-    
+            logger.warning("Failed to load TFTP config from DB: %s", e)
+
     async def start(self) -> Dict[str, Any]:
-        """
-        Start the TFTP server via systemd.
-        
-        Returns:
-            Dict with status, message, and details
-        """
-        # Load config from service before starting
+        if not _has_runner():
+            return _no_runner_result("TFTP runner is not configured (set TFTP_RUNNER_URL).")
         self._load_config_from_service()
-        
+        import httpx
+        base, prefix = _remote_base()
         async with self._lock:
-            from app.services.systemd_service import get_systemd_manager
-            
-            systemd_manager = get_systemd_manager()
-            
-            # Check current status
-            status_info = systemd_manager.get_service_status(self.service_name)
-            if status_info.get("active"):
-                self.status = TFTPStatus.RUNNING
-                return {
-                    "success": True,
-                    "status": "running",
-                    "message": "TFTP server is already running",
-                    "pid": status_info.get("pid")
-                }
-            
-            if self.status == TFTPStatus.STARTING:
-                return {
-                    "success": False,
-                    "status": "starting",
-                    "message": "TFTP server is already starting"
-                }
-            
             try:
-                # Ensure root directory exists
-                self.root_directory.mkdir(parents=True, exist_ok=True)
-                
-                self.status = TFTPStatus.STARTING
-                
-                # Ensure systemd service file is up to date
-                self._ensure_service_file()
-                
-                # Start via systemd
-                success, output = systemd_manager.start_service(self.service_name)
-                
-                if success:
-                    # Get updated status
-                    status_info = systemd_manager.get_service_status(self.service_name)
-                    if status_info.get("active"):
-                        self.status = TFTPStatus.RUNNING
-                        logger.info(f"TFTP server started successfully via systemd (PID: {status_info.get('pid')})")
-                        return {
-                            "success": True,
-                            "status": "running",
-                            "message": "TFTP server started successfully",
-                            "pid": status_info.get("pid")
-                        }
-                    else:
-                        self.status = TFTPStatus.ERROR
-                        return {
-                            "success": False,
-                            "status": "error",
-                            "message": f"Failed to start TFTP server: {output}",
-                            "error": output
-                        }
-                else:
-                    self.status = TFTPStatus.ERROR
-                    return {
-                        "success": False,
-                        "status": "error",
-                        "message": f"Failed to start TFTP server: {output}",
-                        "error": output
-                    }
-                
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    r = await client.post(f"{base}{prefix}/start")
+                    r.raise_for_status()
+                    data = r.json()
+                    self.status = TFTPStatus.RUNNING if data.get("success") else TFTPStatus.ERROR
+                    return {"success": data.get("success", False), "status": data.get("status", "error"), "message": data.get("message", ""), "pid": data.get("pid")}
             except Exception as e:
                 self.status = TFTPStatus.ERROR
-                error_str = str(e)
-                logger.error(f"Failed to start TFTP server: {error_str}", exc_info=True)
-                return {
-                    "success": False,
-                    "status": "error",
-                    "message": f"Failed to start TFTP server: {error_str}",
-                    "error": error_str
-                }
-    
+                logger.exception("Remote TFTP start failed: %s", e)
+                return {"success": False, "status": "error", "message": str(e), "error": str(e)}
+
     async def stop(self) -> Dict[str, Any]:
-        """
-        Stop the TFTP server via systemd.
-        
-        Returns:
-            Dict with status and message
-        """
+        if not _has_runner():
+            return _no_runner_result("TFTP runner is not configured (set TFTP_RUNNER_URL).")
+        import httpx
+        base, prefix = _remote_base()
         async with self._lock:
-            from app.services.systemd_service import get_systemd_manager
-            
-            systemd_manager = get_systemd_manager()
-            
-            # Check current status
-            status_info = systemd_manager.get_service_status(self.service_name)
-            if not status_info.get("active"):
-                self.status = TFTPStatus.STOPPED
-                return {
-                    "success": True,
-                    "status": "stopped",
-                    "message": "TFTP server is already stopped"
-                }
-            
-            if self.status == TFTPStatus.STOPPING:
-                return {
-                    "success": False,
-                    "status": "stopping",
-                    "message": "TFTP server is already stopping"
-                }
-            
             try:
-                self.status = TFTPStatus.STOPPING
-                
-                logger.info(f"Stopping TFTP server via systemd")
-                
-                # Stop via systemd
-                success, output = systemd_manager.stop_service(self.service_name)
-                
-                if success:
-                    self.status = TFTPStatus.STOPPED
-                    logger.info("TFTP server stopped successfully")
-                    return {
-                        "success": True,
-                        "status": "stopped",
-                        "message": "TFTP server stopped successfully"
-                    }
-                else:
-                    self.status = TFTPStatus.ERROR
-                    return {
-                        "success": False,
-                        "status": "error",
-                        "message": f"Failed to stop TFTP server: {output}",
-                        "error": output
-                    }
-                
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    r = await client.post(f"{base}{prefix}/stop")
+                    r.raise_for_status()
+                    data = r.json()
+                    self.status = TFTPStatus.STOPPED if data.get("success") else self.status
+                    return {"success": data.get("success", False), "status": data.get("status", "stopped"), "message": data.get("message", "")}
             except Exception as e:
-                error_str = str(e)
-                logger.error(f"Failed to stop TFTP server: {error_str}", exc_info=True)
                 self.status = TFTPStatus.ERROR
-                return {
-                    "success": False,
-                    "status": "error",
-                    "message": f"Failed to stop TFTP server: {error_str}",
-                    "error": error_str
-                }
-    
+                return {"success": False, "status": "error", "message": str(e), "error": str(e)}
+
     async def restart(self) -> Dict[str, Any]:
-        """
-        Restart the TFTP server.
-        
-        Returns:
-            Dict with status and message
-        """
-        logger.info("Restarting TFTP server...")
-        
-        # Stop first (ignore errors if not running)
+        if not _has_runner():
+            return _no_runner_result("TFTP runner is not configured (set TFTP_RUNNER_URL).")
         await self.stop()
-        
-        # Wait a moment
         await asyncio.sleep(1)
-        
-        # Start
         return await self.start()
-    
+
     async def reload(self) -> Dict[str, Any]:
-        """
-        Reload TFTP server configuration.
-        
-        Note: TFTP doesn't support graceful reload, so this restarts the server.
-        
-        Returns:
-            Dict with status and message
-        """
-        logger.info("Reloading TFTP server configuration...")
-        return await self.restart()
-    
+        if not _has_runner():
+            return _no_runner_result("TFTP runner is not configured (set TFTP_RUNNER_URL).")
+        import httpx
+        base, prefix = _remote_base()
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.post(f"{base}{prefix}/restart")
+                r.raise_for_status()
+                data = r.json()
+                self.status = TFTPStatus.RUNNING if data.get("success") else TFTPStatus.ERROR
+                return {"success": data.get("success", False), "status": data.get("status", ""), "message": data.get("message", ""), "pid": data.get("pid")}
+        except Exception as e:
+            return {"success": False, "status": "error", "message": str(e)}
+
     async def get_status(self) -> Dict[str, Any]:
-        """
-        Get current TFTP server status via systemd.
-        
-        Returns:
-            Dict with status, pid, and other details
-        """
-        # Load config to get current settings
+        if not _has_runner():
+            return {
+                "status": "error",
+                "pid": None,
+                "running": False,
+                "root_directory": str(self.root_directory),
+                "bind_address": self.bind_address,
+                "bind_port": self.bind_port,
+            }
         self._load_config_from_service()
-        
-        from app.services.systemd_service import get_systemd_manager
-        
-        systemd_manager = get_systemd_manager()
-        status_info = systemd_manager.get_service_status(self.service_name)
-        
-        is_running = status_info.get("active", False)
-        if is_running:
-            self.status = TFTPStatus.RUNNING
-        else:
-            self.status = TFTPStatus.STOPPED
-        
-        return {
-            "status": self.status.value,
-            "pid": status_info.get("pid"),
-            "running": is_running,
-            "root_directory": str(self.root_directory),
-            "bind_address": self.bind_address,
-            "bind_port": self.bind_port
-        }
-    
+        import httpx
+        base, prefix = _remote_base()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{base}{prefix}/status")
+                r.raise_for_status()
+                data = r.json()
+                self.status = TFTPStatus.RUNNING if data.get("running") else TFTPStatus.STOPPED
+                return {
+                    "status": self.status.value,
+                    "pid": data.get("pid"),
+                    "running": data.get("running", False),
+                    "root_directory": data.get("root_directory", str(self.root_directory)),
+                    "bind_address": self.bind_address,
+                    "bind_port": self.bind_port,
+                }
+        except Exception as e:
+            logger.warning("Remote TFTP status failed: %s", e)
+            self.status = TFTPStatus.ERROR
+            return {
+                "status": "error",
+                "pid": None,
+                "running": False,
+                "root_directory": str(self.root_directory),
+                "bind_address": self.bind_address,
+                "bind_port": self.bind_port,
+            }
+
     async def cleanup(self):
-        """Cleanup resources on shutdown."""
-        # Don't stop the daemon on app shutdown - let it keep running
-        # The daemon runs independently and should persist
-        logger.info("TFTP service cleanup: daemon will continue running independently")
+        """No-op; runner is a separate process."""
+        pass
 
 
-# Global instance
 _tftp_service: Optional[TFTPService] = None
 
 
-def get_tftp_service() -> TFTPService:
-    """Get the global TFTP service instance."""
+def get_tftp_service(db=None) -> TFTPService:
     global _tftp_service
     if _tftp_service is None:
         _tftp_service = TFTPService()
+    if db is not None:
+        _tftp_service._db = db
     return _tftp_service

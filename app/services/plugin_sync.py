@@ -1,12 +1,9 @@
 """
-Service to sync plugins from the registry (Python files) into the database.
+Plugin sync functions - now no-ops since plugins are not stored in the database.
+These functions exist for backward compatibility.
 """
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any
-from app.plugins.registry import get_registry
-from app.dao import PluginDAO, CategoryDAO
-from app.models.plugin import Plugin
-from app.models.category import Category
+from typing import Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)
@@ -14,112 +11,32 @@ logger = logging.getLogger(__name__)
 
 def sync_plugins_to_db(db: Session) -> Dict[str, Any]:
     """
-    Sync plugins from the registry to the database.
-    
-    This function:
-    1. Discovers all plugins from the registry
-    2. Creates/updates plugin records in the database
-    3. Links plugins to their supported categories
+    No-op: Server plugins are no longer stored in the database.
+    They are loaded directly from disk via the registry.
     
     Returns:
-        Dictionary with sync results (created, updated, errors)
+        Dictionary with empty sync results
     """
-    registry = get_registry()
-    registry_plugins = registry.list_plugins()
-    
-    results = {
+    logger.info("Plugin sync called but plugins are no longer stored in database")
+    return {
         "created": [],
         "updated": [],
         "errors": []
     }
+
+
+def sync_switch_plugins_to_db(db: Session) -> Dict[str, Any]:
+    """
+    No-op: Switch plugins are no longer stored in the database.
+    They are loaded directly from disk via the switch registry.
     
-    # Get all existing plugins from database
-    db_plugins = PluginDAO.get_all(db)
-    db_plugins_by_name = {p.name: p for p in db_plugins}
-    
-    # Get all categories from database
-    db_categories = CategoryDAO.get_all(db)
-    categories_by_name = {cat.name: cat for cat in db_categories}
-    
-    for plugin_info in registry_plugins:
-        plugin_name = plugin_info["name"]
-        
-        try:
-            # Get or create category records for this plugin's supported categories
-            plugin_categories = []
-            for category_name in plugin_info.get("supported_categories", []):
-                # Category should already exist from seed, but create if missing
-                category = CategoryDAO.get_or_create(
-                    db,
-                    name=category_name,
-                    display_name=category_name.replace("_", " ").title(),
-                    description=f"Category: {category_name}"
-                )
-                plugin_categories.append(category)
-            
-            # Check if plugin exists in database
-            db_plugin = db_plugins_by_name.get(plugin_name)
-            
-            if db_plugin:
-                # Update existing plugin
-                db_plugin.version = plugin_info["version"]
-                db_plugin.config_template = plugin_info.get("config_template", {})
-                
-                # Update available capabilities if not already set
-                if db_plugin.available_capabilities is None:
-                    try:
-                        plugin_class = registry._plugins.get(plugin_name)
-                        if plugin_class:
-                            # Create a dummy instance to get capabilities
-                            dummy_config = {k: "" for k in plugin_class.CONFIG_TEMPLATE.get("properties", {}).keys()}
-                            dummy_instance = plugin_class(dummy_config)
-                            db_plugin.available_capabilities = dummy_instance.get_capabilities()
-                    except Exception as e:
-                        logger.warning(f"Failed to get capabilities for {plugin_name}: {e}")
-                
-                # Update categories relationship
-                # Clear existing categories and add new ones
-                db_plugin.categories.clear()
-                db_plugin.categories.extend(plugin_categories)
-                
-                PluginDAO.update(db, db_plugin)
-                results["updated"].append(plugin_name)
-                logger.info(f"Updated plugin: {plugin_name}")
-            else:
-                # Get available capabilities
-                available_capabilities = None
-                try:
-                    plugin_class = registry._plugins.get(plugin_name)
-                    if plugin_class:
-                        # Create a dummy instance to get capabilities
-                        dummy_config = {k: "" for k in plugin_class.CONFIG_TEMPLATE.get("properties", {}).keys()}
-                        dummy_instance = plugin_class(dummy_config)
-                        available_capabilities = dummy_instance.get_capabilities()
-                except Exception as e:
-                    logger.warning(f"Failed to get capabilities for {plugin_name}: {e}")
-                
-                # Create new plugin
-                new_plugin = PluginDAO.create(
-                    db,
-                    name=plugin_name,
-                    version=plugin_info["version"],
-                    category_names=[cat.name for cat in plugin_categories],
-                    config_template=plugin_info.get("config_template", {}),
-                    description=None
-                )
-                
-                # Set available capabilities
-                if available_capabilities:
-                    new_plugin.available_capabilities = available_capabilities
-                    db.commit()
-                
-                results["created"].append(plugin_name)
-                logger.info(f"Created plugin: {plugin_name}")
-        
-        except Exception as e:
-            error_msg = f"Error syncing plugin {plugin_name}: {str(e)}"
-            results["errors"].append(error_msg)
-            logger.error(error_msg, exc_info=True)
-    
-    return results
+    Returns:
+        Dictionary with empty sync results
+    """
+    logger.info("Switch plugin sync called but plugins are no longer stored in database")
+    return {
+        "created": [],
+        "updated": [],
+        "errors": []
+    }
 
