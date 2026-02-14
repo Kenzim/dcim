@@ -7,8 +7,8 @@ This module handles all server-to-API communication, including:
 - Password updates
 - Other server management operations
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Request
-from fastapi.responses import PlainTextResponse, FileResponse, Response, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi.responses import PlainTextResponse, FileResponse, Response
 from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel
@@ -20,12 +20,22 @@ from app.models.boot_task import BootType, BootTaskStatus
 from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
+from app.services.dhcp_config_service import get_dhcp_config_service
+from app.services.dhcp_config_generator import get_next_server_ip_for_client, get_subnet_info_for_client
 import logging
+import re
 import os
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _get_base_url_for_pxe_ip(db, pxe_ip: Optional[str]) -> str:
+    """Base URL for boot resources (ISO, kernel, initrd, etc.) using next-server IP from DHCP interfaces for this client's subnet."""
+    config = get_dhcp_config_service().get_config(db)
+    ip = get_next_server_ip_for_client(config, pxe_ip)
+    return f"http://{ip}:8000"
 
 
 def normalize_mac_address(mac: str) -> str:
@@ -116,6 +126,7 @@ async def get_pxe_boot_file(
             )
         
         logger.info(f"Serving PXE boot file for server '{server.name}' (MAC: {mac}, Port: {port.name})")
+        base_url = _get_base_url_for_pxe_ip(db, port.pxe_ip)
         
         # Check if there's an active boot task for this server (pending or in_progress)
         boot_task = BootTaskDAO.get_active_by_server(db, server.id)
@@ -161,6 +172,9 @@ async def get_pxe_boot_file(
                 )
         
         if boot_task:
+            # Basic DHCP only
+            ip_param = "ip=dhcp"
+
             if boot_task.boot_type == BootType.LINUX_SCRIPT:
                 # For Linux script boots, mark as in_progress when serving the boot script
                 # The script can report back via API when it completes
@@ -169,23 +183,32 @@ async def get_pxe_boot_file(
                     # Refresh the task to get updated status
                     db.refresh(boot_task)
                 # Build kernel and initrd URLs (use defaults if not specified)
-                kernel_url = boot_task.kernel_url or "http://192.168.12.74:8000/api/servers/interaction/kernel/vmlinuz"
-                initrd_url = boot_task.initrd_url or "http://192.168.12.74:8000/api/servers/interaction/initrd/initrd.gz"
+                kernel_url = boot_task.kernel_url or f"{base_url}/api/servers/interaction/kernel/vmlinuz"
+                initrd_url = boot_task.initrd_url or f"{base_url}/api/servers/interaction/initrd/initrd.gz"
                 
                 # Build script URL (use task's script_url or generate one)
                 if boot_task.script_url:
                     script_url = boot_task.script_url
                 elif boot_task.script_content:
                     # Script is stored in database, serve it via API
-                    script_url = f"http://192.168.12.74:8000/api/servers/interaction/scripts/{boot_task.id}"
+                    script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
                 else:
                     script_url = None
                 
-                # Build kernel parameters
+                # Build kernel parameters (static IP + MAC pinning or MAC-based DHCP)
                 kernel_params = boot_task.kernel_params or ""
+                if ip_param is not None:
+                    orig = kernel_params
+                    kernel_params = re.sub(r"\bip=[^\s]+", ip_param, kernel_params, count=1)
+                    if kernel_params == orig:
+                        kernel_params = f"{kernel_params} {ip_param}".strip()
+                    else:
+                        kernel_params = kernel_params.strip()
                 if script_url:
                     kernel_params += f" script_url={script_url}"
-                
+                if "rd.neednet=" not in kernel_params:
+                    kernel_params = f"{kernel_params} rd.neednet=1".strip()
+
                 # Generate iPXE script to boot Linux
                 boot_script = f"""#!ipxe
 echo ========================================
@@ -195,7 +218,7 @@ echo Server: {server.name}
 echo Task ID: {boot_task.id}
 echo
 echo Loading kernel...
-kernel {kernel_url} {kernel_params}
+kernel {kernel_url} {kernel_params} 
 echo Loading initrd...
 initrd {initrd_url}
 echo Booting...
@@ -210,6 +233,24 @@ boot
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="ISO URL is required for ISO boot type"
                     )
+                # Use next-server base URL so the client can reach the ISO (same subnet as DHCP)
+                from urllib.parse import urlparse
+                _u = urlparse(boot_task.iso_url)
+                iso_filename = os.path.basename(_u.path.rstrip("/"))
+                if not iso_filename:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Invalid ISO URL: no filename in path"
+                    )
+                # Generate one-time download token so the client can fetch the ISO (endpoint requires token)
+                download_token_service = get_download_token_service()
+                iso_token = download_token_service.generate_token(
+                    boot_task_id=boot_task.id,
+                    allowed_files=[iso_filename],
+                    expires_in=900,
+                    single_use=False,  # iPXE requests same URL for initrd and again for chain/sanboot
+                )
+                iso_url_to_use = f"{base_url}{_u.path}?token={iso_token}"
                 
                 # For ISO boots, mark as completed immediately after serving the boot script
                 # We can't detect when an ISO boot completes, so we mark it done right away
@@ -223,15 +264,15 @@ echo   Booting from ISO image
 echo ========================================
 echo Server: {server.name}
 echo Task ID: {boot_task.id}
-echo ISO: {boot_task.iso_url}
+echo ISO: {iso_url_to_use}
 echo
 echo Loading ISO into memory...
-initrd {boot_task.iso_url}
+initrd {iso_url_to_use}
 echo Booting ISO...
 # Try different ISO boot methods
-chain {boot_task.iso_url} || sanboot --no-describe {boot_task.iso_url} || exit
+chain {iso_url_to_use} || sanboot --no-describe {iso_url_to_use} || exit
 """
-                    logger.info(f"Boot task {boot_task.id} found for server {server.name}, booting ISO: {boot_task.iso_url}")
+                    logger.info(f"Boot task {boot_task.id} found for server {server.name}, booting ISO: {iso_url_to_use}")
                     # Mark as completed immediately since we can't track ISO boot completion
                     BootTaskDAO.mark_completed(db, boot_task.id)
                 else:
@@ -265,8 +306,7 @@ echo Error: Temporary OS '{temp_os_id}' not found
 exit
 """
                     else:
-                        # Get URLs from temp OS service
-                        base_url = "http://192.168.12.74:8000"
+                        # Get URLs from temp OS service (base_url already set from port.pxe_ip above)
                         # NOTE: For our squashfs-based live OS, we intentionally boot the kernel+initramfs
                         # from the `images/` directory (served by `/api/servers/interaction/images/...`).
                         # This avoids accidentally booting a distro initrd (e.g. Ubuntu casper) that cannot
@@ -281,6 +321,13 @@ exit
                         if squashfs_url and "fetch=" not in kernel_params:
                             kernel_params = f"{kernel_params} fetch={squashfs_url}"
                         
+                        # Pin by MAC: static IP or MAC-based DHCP (use ip_param computed above)
+                        orig = kernel_params
+                        kernel_params = re.sub(r"\bip=[^\s]+", ip_param, kernel_params, count=1)
+                        if kernel_params == orig:
+                            kernel_params = f"{kernel_params} {ip_param}".strip()
+                        else:
+                            kernel_params = kernel_params.strip()
                         # Add script URL if script exists
                         if boot_task.script_content:
                             script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
@@ -288,7 +335,9 @@ exit
                             encoded_script_url = quote(script_url, safe=':/?=&')
                             if "script_url=" not in kernel_params:
                                 kernel_params = f"{kernel_params} script_url={encoded_script_url}"
-                        
+                        if "rd.neednet=" not in kernel_params:
+                            kernel_params = f"{kernel_params} rd.neednet=1".strip()
+
                         # Generate iPXE script for temporary OS
                         if boot_task.status == BootTaskStatus.PENDING:
                             boot_script = f"""#!ipxe
@@ -471,6 +520,8 @@ async def create_boot_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Server {server_id} not found"
         )
+    pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+    base_url = _get_base_url_for_pxe_ip(db, pxe_port.pxe_ip if pxe_port else None)
     
     # Initialize replacements dict (will be populated by template or other branches)
     replacements = {}
@@ -538,7 +589,6 @@ async def create_boot_task(
         
         # Get URLs from debian-live temp OS service
         temp_os_service = get_temp_os_service()
-        base_url = "http://192.168.12.74:8000"
         
         # Store disk image filename for token generation
         disk_image_filename = None
@@ -578,7 +628,6 @@ async def create_boot_task(
             )
         
         # Get URLs from temp OS service
-        base_url = "http://192.168.12.74:8000"
         kernel_url = temp_os_service.get_kernel_url(boot_task_data.temp_os_id, base_url)
         initrd_url = temp_os_service.get_initrd_url(boot_task_data.temp_os_id, base_url)
         kernel_params = temp_os_service.get_kernel_params(boot_task_data.temp_os_id, boot_task_data.kernel_params)
@@ -641,7 +690,6 @@ async def create_boot_task(
         temp_os_id = "debian-live"
         
         # Get URLs - use temp_os_service to get correct URLs (serves from temp_os/{os_id}/files/)
-        base_url = "http://192.168.12.74:8000"
         kernel_url = temp_os_service.get_kernel_url("debian-live", base_url)
         initrd_url = temp_os_service.get_initrd_url("debian-live", base_url)
         kernel_params = temp_os_service.get_kernel_params("debian-live", boot_task_data.kernel_params)
@@ -747,7 +795,6 @@ async def create_boot_task(
         # Add token to replacements if available
         if download_token:
             replacements["DOWNLOAD_TOKEN"] = download_token
-            base_url = "http://192.168.12.74:8000"
             replacements["API_BASE_URL"] = base_url
             
             # Add template file URLs if template has deploy directory with image files
@@ -794,7 +841,6 @@ async def create_boot_task(
     
     # For Debian Live (squashfs), add script URL to kernel params if script exists
     if boot_task.temp_os_id == "debian-live" and boot_task.script_content:
-        base_url = "http://192.168.12.74:8000"
         script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
         from urllib.parse import quote
         encoded_script_url = quote(script_url, safe=':/?=&')
@@ -1154,11 +1200,12 @@ async def get_script_by_id_or_name(
 
 @router.get("/isos")
 async def list_isos(
-    auth: dict = Depends(require_admin)
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ):
     """
     List all available ISO files.
-    
+
     Returns a list of ISO files available in the isos/ directory.
     """
     isos_dir = os.path.join(
@@ -1178,7 +1225,7 @@ async def list_isos(
                 "filename": filename,
                 "size_bytes": file_size,
                 "size_mb": round(file_size / (1024 * 1024), 2),
-                "url": f"http://192.168.12.74:8000/api/servers/interaction/isos/{filename}"
+                "url": f"{_get_base_url_for_pxe_ip(db, None)}/api/servers/interaction/isos/{filename}"
             })
     
     return sorted(iso_files, key=lambda x: x["filename"])
@@ -1235,8 +1282,9 @@ async def get_iso(
             detail=f"ISO file '{filename}' not found"
         )
     
-    # Mark token as used (one-time use)
-    download_token_service.mark_token_used(token)
+    # Mark token as used only if single-use (ISO boot reuses the same URL for initrd + chain/sanboot)
+    if token_data.get("single_use", True):
+        download_token_service.mark_token_used(token)
     
     # For HEAD requests, return headers only (no body)
     if request.method == "HEAD":
@@ -1281,6 +1329,7 @@ async def list_temp_os(
             "description": config.description,
             "version": config.version,
             "flavor": config.flavor,
+            "requires_modloop": config.requires_modloop,
         }
         for config in configs
     ]

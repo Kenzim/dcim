@@ -18,6 +18,7 @@ from app.models.server import Server, BootMode
 from app.models.service import Service, ServiceStatus
 from app.schemas.billing import (
     BillingServiceCreate,
+    BillingRegisterService,
     BillingServiceResponse,
     BillingServiceDetailResponse,
     PowerAction,
@@ -27,9 +28,10 @@ from app.schemas.billing import (
     ServiceActionReinstallOS
 )
 from app.dao.server_dao import ServerDAO
+from app.dao.server_group_dao import ServerGroupDAO
 from app.dao.disk_dao import DiskDAO
 from app.dao.network_port_dao import NetworkPortDAO
-from app.dao.plugin_dao import PluginDAO
+from app.plugins.registry import get_registry
 from app.dao.location_dao import LocationDAO
 from app.dao.external_user_dao import ExternalUserDAO
 from app.dao.service_dao import ServiceDAO
@@ -48,6 +50,125 @@ import os
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+@router.get("/server-by-ip")
+async def get_server_by_ip(
+    ip: str,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db)
+):
+    """
+    Look up a RackFlow server by its primary IP address.
+    Used when linking an existing (already deployed) server to a billing service.
+    """
+    if not ip or not ip.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Query parameter 'ip' is required"
+        )
+    server = ServerDAO.get_by_ip(db, ip.strip())
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No server found with IP {ip.strip()}"
+        )
+    return {
+        "id": server.id,
+        "name": server.name,
+        "server_ip": server.server_ip,
+        "description": server.description,
+    }
+
+
+@router.post("/register-service", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
+async def register_service(
+    data: BillingRegisterService,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db)
+):
+    """
+    Register an existing RackFlow server as a billing service (no provisioning).
+    Creates/finds the external user and links the server to the WHMCS (or other) service.
+    Does not create a server or trigger any OS install.
+    """
+    logger.info(f"Billing API: Registering existing server {data.server_id} as service via integration '{integration.name}'")
+
+    # Idempotent: if a service already exists for this external_service_id and integration, return it
+    existing = ServiceDAO.get_by_external_service_id_and_integration(
+        db, data.external_service_id, integration.id
+    )
+    if existing:
+        db.refresh(existing)
+        return BillingServiceResponse(
+            id=existing.id,
+            name=existing.name,
+            external_service_id=existing.external_service_id,
+            server_id=existing.server_id,
+            external_user_id=existing.external_user_id,
+            status=existing.status.value,
+            description=existing.description,
+            config=existing.config,
+            created_at=existing.created_at,
+            updated_at=existing.updated_at,
+        )
+
+    # Validate server exists
+    server = ServerDAO.get_by_id(db, data.server_id)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Server not found"
+        )
+
+    # Server must not already be linked to a non-terminated service
+    existing_services = ServiceDAO.get_by_server(db, server.id)
+    for svc in existing_services:
+        if svc.status != ServiceStatus.TERMINATED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Server is already linked to service '{svc.name}' (ID: {svc.id}). Unlink or terminate that service first."
+            )
+
+    # Find or create external user
+    external_user = ExternalUserDAO.get_by_external_id(
+        db, integration.id, data.external_user_id
+    )
+    if not external_user:
+        external_user = ExternalUserDAO.create(
+            db,
+            integration_id=integration.id,
+            external_user_id=data.external_user_id,
+            external_username=data.external_username,
+            external_email=data.external_email,
+        )
+        logger.info(f"Created external user (ID: {external_user.id}, external_user_id: {data.external_user_id})")
+
+    name = data.name or f"service-{data.external_service_id}"
+    service = ServiceDAO.create(
+        db,
+        name=name,
+        server_id=server.id,
+        external_user_id=external_user.id,
+        external_service_id=data.external_service_id,
+        status=ServiceStatus.ACTIVE,
+        description=None,
+        config=None,
+    )
+    db.refresh(service)
+    logger.info(f"Billing API: Registered service '{service.name}' (ID: {service.id}) for server {server.id}")
+    return BillingServiceResponse(
+        id=service.id,
+        name=service.name,
+        external_service_id=service.external_service_id,
+        server_id=service.server_id,
+        external_user_id=service.external_user_id,
+        status=service.status.value,
+        description=service.description,
+        config=service.config,
+        created_at=service.created_at,
+        updated_at=service.updated_at,
+    )
 
 
 @router.post("/services", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
@@ -81,12 +202,13 @@ async def create_service(
         )
         logger.info(f"Created external user (ID: {external_user.id}, external_user_id: {service_data.external_user_id})")
     
-    # Validate plugin exists
-    plugin = PluginDAO.get_by_id(db, service_data.plugin_id)
-    if not plugin:
+    # Validate plugin exists (plugins are loaded from disk, not database)
+    registry = get_registry()
+    plugin_class = registry.get_plugin(service_data.plugin_name)
+    if not plugin_class:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Plugin not found"
+            detail=f"Plugin '{service_data.plugin_name}' not found"
         )
     
     # Validate location exists
@@ -133,7 +255,7 @@ async def create_service(
         ram_gb=service_data.ram_gb,
         port_speed_mbps=service_data.port_speed_mbps,
         location_id=service_data.location_id,
-        plugin_id=service_data.plugin_id,
+        plugin_name=service_data.plugin_name,
         plugin_config=service_data.plugin_config,
         enabled=True,
         boot_mode=os_boot_mode,  # For backward compatibility
@@ -475,7 +597,7 @@ async def power_control(
     
     # Get plugin instance
     registry = get_registry()
-    plugin_instance = registry.get_plugin(server.plugin.name, server.plugin_config)
+    plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
     
     if not plugin_instance:
         raise HTTPException(
@@ -552,7 +674,7 @@ async def get_service_status(
     power_state = PowerState.UNKNOWN
     try:
         registry = get_registry()
-        plugin_instance = registry.get_plugin(server.plugin.name, server.plugin_config)
+        plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
         if plugin_instance:
             power_state = await plugin_instance.get_power_state()
     except Exception as e:
@@ -915,6 +1037,86 @@ async def reinstall_os_on_service(
         "message": f"OS reinstallation '{template.name}' queued",
         "boot_task_id": boot_task.id
     }
+
+
+@router.get("/isos", response_model=List[dict])
+async def list_isos_billing(
+    integration: BillingIntegration = Depends(get_billing_integration),
+):
+    """
+    List ISO files available for boot (read-only).
+    Returns filenames for use in product configuration.
+    """
+    isos_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "isos",
+    )
+    if not os.path.exists(isos_dir):
+        return []
+    result = []
+    for filename in os.listdir(isos_dir):
+        file_path = os.path.join(isos_dir, filename)
+        if os.path.isfile(file_path) and filename.lower().endswith(".iso"):
+            result.append({
+                "id": filename,
+                "name": filename,
+                "size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
+            })
+    return sorted(result, key=lambda x: x["name"])
+
+
+@router.get("/temp-os", response_model=List[dict])
+async def list_temp_os_billing(
+    integration: BillingIntegration = Depends(get_billing_integration),
+):
+    """
+    List temporary OS configurations (e.g. debian-live) for product configuration.
+    """
+    temp_os_service = get_temp_os_service()
+    configs = temp_os_service.scan_os_configs()
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "description": c.description or "",
+        }
+        for c in configs
+    ]
+
+
+@router.get("/server-groups", response_model=List[dict])
+async def list_server_groups_billing(
+    skip: int = 0,
+    limit: int = 100,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db)
+):
+    """
+    List server groups via billing API (read-only).
+
+    Allows billing systems (e.g. WHMCS) to populate the RackFlow Server Group
+    dropdown when using a billing API key for the server connection test.
+    """
+    server_groups = ServerGroupDAO.get_all(db, skip=skip, limit=limit)
+    return [
+        {
+            "id": group.id,
+            "name": group.name,
+            "description": group.description,
+            "server_count": len(group.servers) if group.servers else 0,
+            "created_at": group.created_at.isoformat() if group.created_at else None,
+            "updated_at": group.updated_at.isoformat() if group.updated_at else None,
+            "enable_isos": getattr(group, "enable_isos", False) or False,
+            "permitted_isos": list(group.permitted_isos or []),
+            "enable_temp_os": getattr(group, "enable_temp_os", False) or False,
+            "permitted_temp_os": list(group.permitted_temp_os or []),
+            "enable_scripts": getattr(group, "enable_scripts", False) or False,
+            "permitted_scripts": list(group.permitted_scripts or []),
+            "enable_os_templates": getattr(group, "enable_os_templates", False) or False,
+            "permitted_os_templates": list(group.permitted_os_templates or []),
+        }
+        for group in server_groups
+    ]
 
 
 @router.get("/scripts", response_model=List[dict])

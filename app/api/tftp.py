@@ -4,6 +4,7 @@ TFTP Server Management API
 Endpoints for managing the TFTP server subprocess.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 from typing import Dict, Any, Optional
 from pydantic import BaseModel
 from app.services.tftp_service import get_tftp_service, TFTPService
@@ -13,8 +14,14 @@ from app.services.tftp_config_service import (
     TFTPConfig
 )
 from app.core.auth import require_admin
+from app.core.database import get_db
 
 router = APIRouter(prefix="/tftp", tags=["tftp"])
+
+
+def get_tftp_service_with_db(db: Session = Depends(get_db)):
+    """Provide TFTPService with DB so it can load config from database."""
+    return get_tftp_service(db)
 
 
 class TFTPConfigUpdate(BaseModel):
@@ -31,7 +38,7 @@ class TFTPConfigUpdate(BaseModel):
 @router.post("/start", response_model=Dict[str, Any])
 async def start_tftp_server(
     auth: dict = Depends(require_admin),
-    tftp_service: TFTPService = Depends(get_tftp_service)
+    tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
     Start the TFTP server.
@@ -53,7 +60,7 @@ async def start_tftp_server(
 @router.post("/stop", response_model=Dict[str, Any])
 async def stop_tftp_server(
     auth: dict = Depends(require_admin),
-    tftp_service: TFTPService = Depends(get_tftp_service)
+    tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
     Stop the TFTP server.
@@ -75,7 +82,7 @@ async def stop_tftp_server(
 @router.post("/restart", response_model=Dict[str, Any])
 async def restart_tftp_server(
     auth: dict = Depends(require_admin),
-    tftp_service: TFTPService = Depends(get_tftp_service)
+    tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
     Restart the TFTP server.
@@ -97,7 +104,7 @@ async def restart_tftp_server(
 @router.post("/reload", response_model=Dict[str, Any])
 async def reload_tftp_server(
     auth: dict = Depends(require_admin),
-    tftp_service: TFTPService = Depends(get_tftp_service)
+    tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
     Reload TFTP server configuration.
@@ -121,7 +128,7 @@ async def reload_tftp_server(
 @router.get("/status", response_model=Dict[str, Any])
 async def get_tftp_status(
     auth: dict = Depends(require_admin),
-    tftp_service: TFTPService = Depends(get_tftp_service)
+    tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
     Get current TFTP server status.
@@ -135,23 +142,25 @@ async def get_tftp_status(
 @router.get("/config", response_model=TFTPConfig)
 async def get_tftp_config(
     auth: dict = Depends(require_admin),
-    config_service: TFTPConfigService = Depends(get_tftp_config_service)
+    db: Session = Depends(get_db),
+    config_service: TFTPConfigService = Depends(get_tftp_config_service),
 ):
     """
     Get TFTP server configuration.
-    
+
     Returns:
         Current TFTP configuration
     """
-    return config_service.get_config()
+    return config_service.get_config(db)
 
 
 @router.put("/config", response_model=TFTPConfig)
 async def update_tftp_config(
     config_data: TFTPConfigUpdate,
     auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
     config_service: TFTPConfigService = Depends(get_tftp_config_service),
-    tftp_service: TFTPService = Depends(get_tftp_service)
+    tftp_service: TFTPService = Depends(get_tftp_service_with_db),
 ):
     """
     Update TFTP server configuration.
@@ -179,11 +188,13 @@ async def update_tftp_config(
         update_data["ipv4_only"] = config_data.ipv4_only
     
     # Update configuration
-    config = config_service.update_config(**update_data)
-    
-    # Restart TFTP server if it's running
+    config = config_service.update_config(db, **update_data)
+
+    # Start or restart TFTP server so it uses the new config
     status_info = await tftp_service.get_status()
     if status_info.get("running"):
         await tftp_service.restart()
-    
+    elif config.enabled:
+        await tftp_service.start()
+
     return config

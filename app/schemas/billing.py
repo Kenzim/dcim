@@ -23,12 +23,22 @@ class BillingServiceCreate(BaseModel):
     ram_gb: Optional[int] = Field(None, description="RAM in GB")
     port_speed_mbps: Optional[int] = Field(None, description="Port speed in Mbps")
     location_id: int = Field(..., description="Location ID")
-    plugin_id: int = Field(..., description="Plugin ID")
+    plugin_name: str = Field(..., description="Plugin name (folder name on disk)")
     plugin_config: Dict[str, Any] = Field(..., description="Plugin configuration")
     os_boot_mode: Optional[str] = Field("uefi", description="OS boot mode (uefi/bios)")
     disks: List[Dict[str, Any]] = Field(default_factory=list, description="Disks configuration")
     network_ports: List[Dict[str, Any]] = Field(default_factory=list, description="Network ports configuration")
     service_config: Optional[Dict[str, Any]] = Field(None, description="Service-specific configuration")
+
+
+class BillingRegisterService(BaseModel):
+    """Request schema for registering an existing server as a service (no provisioning)."""
+    server_id: int = Field(..., description="RackFlow server ID (e.g. from server-by-ip lookup)")
+    external_service_id: str = Field(..., description="External service ID (e.g. WHMCS service ID)")
+    external_user_id: str = Field(..., description="External user/client ID")
+    external_username: Optional[str] = Field(None, description="Username in external system")
+    external_email: Optional[str] = Field(None, description="Email in external system")
+    name: Optional[str] = Field(None, description="Service name; default service-{external_service_id}")
 
 
 class BillingServiceResponse(BaseModel):
