@@ -33,10 +33,10 @@ async def get_billing_integration(
     if credentials:
         api_key = credentials.credentials
     
-    if not api_key:
+    if not api_key or not api_key.strip():
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key required",
+            detail="API key required. In WHMCS use Setup > Servers > Password/Access Hash with a RackFlow Billing Integration API key.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
@@ -49,7 +49,7 @@ async def get_billing_integration(
     if not integration:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or disabled API key",
+            detail="Invalid or disabled API key. Create a Billing Integration in RackFlow (admin) and use its API key in WHMCS Setup > Servers.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     

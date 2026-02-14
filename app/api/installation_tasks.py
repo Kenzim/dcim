@@ -25,6 +25,12 @@ class InstallationTaskLogUpdate(BaseModel):
     error_message: Optional[str] = None
 
 
+class InstallationTaskStatusUpdate(BaseModel):
+    """Request model for manually updating installation task status (admin)"""
+    status: str  # "in_progress" | "completed" | "failed" | "cancelled"
+    error_message: Optional[str] = None
+
+
 class InstallationTaskResponse(BaseModel):
     """Response model for installation task"""
     id: int
@@ -44,6 +50,24 @@ class InstallationTaskResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+@router.post("/purge-pending")
+async def purge_pending_installation_tasks(
+    server_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete all pending installation tasks for this server (admin only)."""
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Server not found"
+        )
+    deleted = InstallationTaskDAO.delete_pending_by_server(db, server_id)
+    logger.info(f"Purged {deleted} pending installation task(s) for server {server_id}")
+    return {"deleted": deleted}
 
 
 @router.get("", response_model=List[InstallationTaskResponse])
@@ -155,3 +179,69 @@ async def update_installation_logs(
     logger.info(f"Updated logs for installation task {task_id} (status: {log_data.status or 'unchanged'})")
     
     return {"status": "success", "message": "Logs updated successfully"}
+
+
+@router.patch("/{task_id}", response_model=InstallationTaskResponse)
+async def update_installation_task_status(
+    server_id: int,
+    task_id: int,
+    body: InstallationTaskStatusUpdate,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Manually update installation task status (admin only).
+    Use to mark pending/stuck tasks as completed, failed, or cancelled.
+    """
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Server not found"
+        )
+    task = InstallationTaskDAO.get_by_id(db, task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Installation task not found"
+        )
+    if task.server_id != server_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Installation task does not belong to this server"
+        )
+    status_val = (body.status or "").strip().lower()
+    if status_val not in ("in_progress", "completed", "failed", "cancelled"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="status must be one of: in_progress, completed, failed, cancelled"
+        )
+    if status_val == "in_progress":
+        task = InstallationTaskDAO.mark_in_progress(db, task_id)
+    elif status_val == "completed":
+        task = InstallationTaskDAO.mark_completed(db, task_id)
+    elif status_val == "failed":
+        task = InstallationTaskDAO.mark_failed(db, task_id, body.error_message)
+    else:
+        task = InstallationTaskDAO.cancel(db, task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Installation task not found"
+        )
+    return InstallationTaskResponse(
+        id=task.id,
+        server_id=task.server_id,
+        boot_task_id=task.boot_task_id,
+        template_id=task.template_id,
+        template_parameters=task.template_parameters,
+        status=task.status.value,
+        os_name=task.os_name,
+        os_version=task.os_version,
+        progress_percent=task.progress_percent,
+        logs=task.logs,
+        error_message=task.error_message,
+        created_at=task.created_at.isoformat() if task.created_at else None,
+        started_at=task.started_at.isoformat() if task.started_at else None,
+        completed_at=task.completed_at.isoformat() if task.completed_at else None
+    )

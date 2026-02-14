@@ -196,6 +196,7 @@ async def get_rack_servers(
             "id": server.id,
             "name": server.name,
             "rack_unit": server.rack_unit,
+            "rack_units": getattr(server, "rack_units", 1) or 1,
             "server_ip": server.server_ip,
             "description": server.description
         })
