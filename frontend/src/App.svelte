@@ -4,9 +4,7 @@
   import routes from './routes/index.js';
   import { theme } from './stores/theme.js';
   
-  // Bootstrap CSS
-  import 'bootstrap/dist/css/bootstrap.min.css';
-  // Global styles
+  // Global styles (theme store applies data-theme)
   import './app.css';
   
   let router;
@@ -16,11 +14,6 @@
   
   onMount(() => {
     router = initRouter(routes);
-    // Initialize theme
-    if (typeof document !== 'undefined') {
-      const initialTheme = localStorage.getItem('theme') || 'light';
-      document.documentElement.setAttribute('data-theme', initialTheme);
-    }
   });
 </script>
 
