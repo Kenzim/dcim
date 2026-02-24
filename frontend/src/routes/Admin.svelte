@@ -9,16 +9,21 @@
   import User from '../components/User.svelte';
   import Plugins from '../components/Plugins.svelte';
   import Locations from '../components/Locations.svelte';
+  import LocationDetail from '../components/LocationDetail.svelte';
   import Racks from '../components/Racks.svelte';
   import RackView from '../components/RackView.svelte';
   import RowView from '../components/RowView.svelte';
   import Servers from '../components/Servers.svelte';
   import ServerDetail from '../components/ServerDetail.svelte';
+  import Switches from '../components/Switches.svelte';
+  import SwitchDetail from '../components/SwitchDetail.svelte';
   import OSTemplates from '../components/OSTemplates.svelte';
-  import Services from '../components/Services.svelte';
   import BillingIntegrations from '../components/BillingIntegrations.svelte';
   import ServicesList from '../components/ServicesList.svelte';
   import Scripts from '../components/Scripts.svelte';
+  import ServerGroups from '../components/ServerGroups.svelte';
+  import ServerGroupDetail from '../components/ServerGroupDetail.svelte';
+  import AssetManager from '../components/AssetManager.svelte';
 
   let authChecked = false;
   
@@ -30,9 +35,12 @@
   // Get current route name from location
   let routeName = 'dashboard';
   let serverId = null;
+  let switchId = null;
   let rackId = null;
   let rowLocationId = null;
   let rowNumber = null;
+  let groupId = null;
+  let locationId = null;
   
   $: {
     const path = $currentRoute || window.location.pathname;
@@ -49,13 +57,57 @@
     }
     
     // Extract server ID from URL if it's a server detail route
-    if (routeName && routeName.startsWith('servers/')) {
+    if (routeName && routeName.startsWith('servers/') && !routeName.startsWith('server-groups/')) {
       const routeParts = routeName.split('/');
-      if (routeParts.length > 1 && routeParts[1]) {
+      if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
         serverId = routeParts[1];
       }
     } else {
       serverId = null;
+    }
+    
+    // Extract server group ID from URL if it's a server group detail route
+    if (routeName && routeName.startsWith('server-groups/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
+        groupId = parseInt(routeParts[1], 10);
+      }
+    } else {
+      groupId = null;
+    }
+    
+    // Extract switch ID from URL if it's a switch detail route
+    if (routeName && routeName.startsWith('switches/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1]) {
+        switchId = routeParts[1];
+      }
+    } else {
+      switchId = null;
+    }
+    
+    // Extract row location and row number from URL if it's a row view route (check this first)
+    if (routeName && routeName.startsWith('racks/rows/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 3 && routeParts[2] && routeParts[3]) {
+        rowLocationId = parseInt(routeParts[2], 10);
+        rowNumber = parseInt(routeParts[3], 10);
+      }
+    } else {
+      rowLocationId = null;
+      rowNumber = null;
+    }
+
+    // Extract location ID from URL for location detail
+    if (routeName && routeName.startsWith('locations/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
+        locationId = parseInt(routeParts[1], 10);
+      } else {
+        locationId = null;
+      }
+    } else {
+      locationId = null;
     }
     
     // Extract rack ID from URL if it's a rack view route (but not a row route)
@@ -66,18 +118,6 @@
       }
     } else {
       rackId = null;
-    }
-    
-    // Extract row location and row number from URL if it's a row view route
-    if (routeName && routeName.startsWith('rows/')) {
-      const routeParts = routeName.split('/');
-      if (routeParts.length > 2 && routeParts[1] && routeParts[2]) {
-        rowLocationId = parseInt(routeParts[1], 10);
-        rowNumber = parseInt(routeParts[2], 10);
-      }
-    } else {
-      rowLocationId = null;
-      rowNumber = null;
     }
   }
 
@@ -101,8 +141,14 @@
         <Servers />
       {:else if routeName.startsWith('servers/') && serverId}
         <ServerDetail serverId={serverId} onBack={() => navigate('/admin/servers')} />
+      {:else if routeName === 'switches'}
+        <Switches />
+      {:else if routeName.startsWith('switches/') && switchId}
+        <SwitchDetail switchId={switchId} onBack={() => navigate('/admin/switches')} />
       {:else if routeName === 'locations'}
         <Locations />
+      {:else if routeName.startsWith('locations/') && locationId}
+        <LocationDetail locationId={locationId} onBack={() => navigate('/admin/locations')} />
       {:else if routeName === 'racks'}
         <Racks />
       {:else if routeName.startsWith('racks/rows/') && rowLocationId && rowNumber}
@@ -113,14 +159,18 @@
         <Plugins />
       {:else if routeName === 'os-templates'}
         <OSTemplates />
-      {:else if routeName === 'services'}
-        <Services />
       {:else if routeName === 'billing-integrations'}
         <BillingIntegrations />
       {:else if routeName === 'services-list'}
         <ServicesList />
       {:else if routeName === 'scripts'}
         <Scripts />
+      {:else if routeName === 'asset-manager'}
+        <AssetManager />
+      {:else if routeName === 'server-groups'}
+        <ServerGroups />
+      {:else if routeName.startsWith('server-groups/') && groupId}
+        <ServerGroupDetail groupId={groupId} />
       {:else if routeName === 'user'}
         <User />
       {:else}
@@ -147,7 +197,14 @@
   .main-content {
     flex: 1;
     margin-left: 260px;
-    min-height: 100vh;
+    height: 100vh;
+    max-height: 100vh;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .content-body {

@@ -26,7 +26,7 @@
     align-items: center;
     justify-content: center;
     padding: 20px;
-    background: #f8fafc;
+    background: var(--bg-secondary);
   }
 
   .client-content {

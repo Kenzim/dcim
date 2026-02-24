@@ -1,9 +1,11 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  
+  import { theme as themeStore } from '../stores/theme.js';
+
   export let value = '';
-  export let language = 'bash';
-  export let theme = 'dark';
+  /** Reserved for syntax highlighting when re-enabled. Use export const so parent need not pass it. */
+  export const language = 'bash';
+  $: theme = $themeStore;
   
   let container;
   let view = null;
@@ -44,39 +46,20 @@
       //   }
       // }
       
-      // Use a basic dark theme instead of oneDark to avoid highlighting conflicts
-      // We'll create a simple dark theme manually
-      let themeExtension = null;
-      if (theme === 'dark') {
-        // Create a simple dark theme without highlighting conflicts
-        themeExtension = EditorView.theme({
-          '&': {
-            backgroundColor: '#1e293b',
-            color: '#e2e8f0'
-          },
-          '.cm-content': {
-            caretColor: '#e2e8f0'
-          },
-          '.cm-scroller': {
-            fontFamily: "'Courier New', 'Monaco', 'Menlo', monospace"
-          },
-          '&.cm-focused .cm-cursor': {
-            borderLeftColor: '#e2e8f0'
-          },
-          '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': {
-            backgroundColor: '#334155'
-          },
-          '.cm-gutters': {
-            backgroundColor: '#0f172a',
-            color: '#64748b',
-            border: 'none'
-          },
-          '.cm-lineNumbers .cm-gutterElement': {
-            minWidth: '3ch',
-            padding: '0 8px 0 8px'
-          }
-        }, { dark: true });
-      }
+      // Theme colors matching app.css light/dark
+      const isDark = theme === 'dark';
+      const colors = isDark
+        ? { bg: '#1e293b', text: '#e2e8f0', gutterBg: '#0f172a', gutterText: '#64748b', selection: '#334155' }
+        : { bg: '#f1f5f9', text: '#0f172a', gutterBg: '#e2e8f0', gutterText: '#64748b', selection: '#cbd5e1' };
+      const themeExtension = EditorView.theme({
+        '&': { backgroundColor: colors.bg, color: colors.text },
+        '.cm-content': { caretColor: colors.text },
+        '.cm-scroller': { fontFamily: "'Courier New', Monaco, Menlo, monospace" },
+        '&.cm-focused .cm-cursor': { borderLeftColor: colors.text },
+        '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: colors.selection },
+        '.cm-gutters': { backgroundColor: colors.gutterBg, color: colors.gutterText, border: 'none' },
+        '.cm-lineNumbers .cm-gutterElement': { minWidth: '3ch', padding: '0 8px 0 8px' }
+      }, { dark: isDark });
       
       // Build extensions array
       const extensions = [basicSetup];
@@ -86,10 +69,7 @@
       //   extensions.push(langExtension);
       // }
       
-      // Add simple dark theme
-      if (themeExtension) {
-        extensions.push(themeExtension);
-      }
+      extensions.push(themeExtension);
       
       extensions.push(
         EditorView.updateListener.of(update => {
@@ -138,9 +118,11 @@
     }
   }
 
-  onMount(() => {
+  onMount(() => initEditor());
+
+  $: if (container && view && theme !== undefined) {
     initEditor();
-  });
+  }
 
   onDestroy(() => {
     if (view) {
@@ -166,14 +148,14 @@
 
   .code-editor :global(.cm-scroller) {
     overflow: auto;
-    font-family: 'Courier New', 'Monaco', 'Menlo', monospace;
+    font-family: var(--font-mono);
     font-size: 14px;
   }
 
   .code-editor :global(textarea) {
     width: 100%;
     height: 400px;
-    font-family: 'Courier New', 'Monaco', 'Menlo', monospace;
+    font-family: var(--font-mono);
     padding: 12px;
     border-color: var(--border-color);
     border-radius: 8px;

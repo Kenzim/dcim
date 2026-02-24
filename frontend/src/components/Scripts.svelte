@@ -206,8 +206,8 @@
 </div>
 
 {#if showModal}
-  <div class="modal-overlay" on:click={closeModal}>
-    <div class="modal-content modal-large" on:click|stopPropagation>
+  <button type="button" class="modal-overlay" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeModal()}>
+    <div class="modal-content modal-large" role="dialog">
       <div class="modal-header">
         <h3>{editingScript ? 'Edit Script' : 'Add Script'}</h3>
         <button class="btn-icon-only" on:click={closeModal}>
@@ -241,7 +241,7 @@
         </div>
         <div class="form-group">
           <label for="script-content">Script Content *</label>
-          <CodeEditor bind:value={formData.content} language="bash" theme="dark" />
+          <CodeEditor bind:value={formData.content} />
           <p class="form-help">Use <code>{'$'}{'{SERVER_IP}'}</code>, <code>{'$'}{'{SERVER_MAC}'}</code>, <code>{'$'}{'{SERVER_ID}'}</code> for variable substitution</p>
         </div>
         <div class="form-group form-group-inline">
@@ -262,7 +262,7 @@
         </button>
       </div>
     </div>
-  </div>
+  </button>
 {/if}
 
 <style>
@@ -315,7 +315,7 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 
   .scripts-grid {
@@ -367,18 +367,18 @@
   }
 
   .badge-success {
-    background: #d1fae5;
-    color: #065f46;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .badge-disabled {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .badge-info {
-    background: #dbeafe;
-    color: #1e40af;
+    background: var(--info-bg);
+    color: var(--info-text);
   }
 
   .script-actions {
@@ -455,7 +455,7 @@
     margin: 0;
     font-family: 'Courier New', monospace;
     font-size: 12px;
-    color: #e2e8f0;
+    color: var(--code-text);
     white-space: pre-wrap;
     word-wrap: break-word;
   }
@@ -464,13 +464,24 @@
     font-family: inherit;
   }
 
+  button.modal-overlay {
+    padding: 0;
+    border: none;
+    font: inherit;
+    color: inherit;
+    cursor: default;
+    width: 100%;
+    height: 100%;
+    text-align: left;
+  }
+
   .modal-overlay {
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--overlay-bg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -510,8 +521,8 @@
   }
 
   .form-error {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
     padding: 12px;
     border-radius: 8px;
     margin-bottom: 16px;
@@ -567,24 +578,7 @@
   .form-group textarea:focus {
     outline: none;
     border-color: var(--accent-color);
-    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
-  }
-
-  .code-editor-wrapper {
-    border-color: var(--border-color);
-    border-radius: 8px;
-    overflow: hidden;
-    min-height: 400px;
-  }
-
-  .code-editor-wrapper :global(.cm-editor) {
-    height: 400px;
-  }
-
-  .code-editor-wrapper :global(.cm-scroller) {
-    overflow: auto;
-    font-family: 'Courier New', monospace;
-    font-size: 14px;
+    box-shadow: var(--focus-ring-accent);
   }
 
   .form-help {

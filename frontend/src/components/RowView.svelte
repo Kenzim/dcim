@@ -30,13 +30,16 @@
       racks = racksData.sort((a, b) => (a.row_position || 0) - (b.row_position || 0));
       location = locationsData.find(l => l.id === Number(locationId));
       
-      // Load servers for each rack
+      // Load servers for each rack; servers can occupy multiple units (rack_units)
       for (const rack of racks) {
         try {
           const servers = await getRackServers(rack.id);
           rackServers[rack.id] = servers.reduce((acc, server) => {
             if (server.rack_unit) {
-              acc[server.rack_unit] = server;
+              const size = server.rack_units || 1;
+              for (let u = 0; u < size; u++) {
+                acc[server.rack_unit + u] = server;
+              }
             }
             return acc;
           }, {});
@@ -57,6 +60,18 @@
     return rackServers[rackId]?.[unit] || null;
   }
 
+  function isStartOfServer(rackId, unit) {
+    const server = rackServers[rackId]?.[unit];
+    if (!server) return true;
+    return server.rack_unit === unit;
+  }
+
+  function getSlotSpan(rackId, unit) {
+    const server = rackServers[rackId]?.[unit];
+    if (!server || !isStartOfServer(rackId, unit)) return 1;
+    return server.rack_units || 1;
+  }
+
   function getMaxUnits() {
     return Math.max(...racks.map(r => r.units), 42);
   }
@@ -72,23 +87,6 @@
   {:else if racks.length === 0}
     <div class="empty-state">No racks found in this row</div>
   {:else}
-    <div class="row-view-header">
-      <div class="row-info">
-        <h2>Row {row}</h2>
-        {#if location}
-          <p class="location-name">{location.name}</p>
-        {/if}
-      </div>
-      {#if onBack}
-        <button class="btn-secondary" on:click={onBack}>
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width: 18px; height: 18px; margin-right: 8px;">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-          </svg>
-          Back
-        </button>
-      {/if}
-    </div>
-
     <div class="racks-row">
       {#each racks as rack}
         <div class="rack-column">
@@ -102,15 +100,27 @@
             {#each Array(rack.units) as _, i}
               {@const unit = rack.units - i}
               {@const server = getServerAtUnit(rack.id, unit)}
-              <div class="rack-unit-compact" class:occupied={server !== null}>
-                <div class="unit-number-compact">{unit}</div>
+              {@const startOfServer = isStartOfServer(rack.id, unit)}
+              {@const span = getSlotSpan(rack.id, unit)}
+              <div
+                class="rack-unit-compact"
+                class:occupied={server !== null && startOfServer}
+                class:continuation={server !== null && !startOfServer}
+                style={startOfServer && span > 1 ? `height: ${span * 26}px; min-height: ${span * 26}px;` : (server && !startOfServer ? 'height: 0; min-height: 0; overflow: hidden; border: none; margin: 0;' : '')}
+              >
+                <div class="unit-number-compact">{server && !startOfServer ? '' : (span > 1 ? `${unit}-${unit + span - 1}` : unit)}</div>
                 <div class="unit-content-compact">
-                  {#if server}
+                  {#if server && startOfServer}
                     <div class="server-slot-compact">
-                      <div class="server-name-compact">{server.name}</div>
-                      <div class="server-ip-compact">{server.server_ip}</div>
+                      <div class="server-name-compact">{server.name}{span > 1 ? ` (${span}U)` : ''}</div>
+                      <div class="server-tooltip">
+                        <div><strong>IP:</strong> {server.server_ip}</div>
+                        {#if server.description}
+                          <div><strong>Description:</strong> {server.description}</div>
+                        {/if}
+                      </div>
                     </div>
-                  {:else}
+                  {:else if !server}
                     <div class="empty-slot-compact"></div>
                   {/if}
                 </div>
@@ -132,7 +142,14 @@
       </div>
       <div class="summary-item">
         <span class="summary-label">Occupied:</span>
-        <span class="summary-value">{Object.values(rackServers).reduce((sum, servers) => sum + Object.keys(servers).length, 0)}U</span>
+        <span class="summary-value">{Object.values(rackServers).reduce((total, unitMap) => {
+          const byId = {};
+          for (const server of Object.values(unitMap)) {
+            if (server && server.rack_unit != null) byId[server.id] = server;
+          }
+          const rackU = Object.values(byId).reduce((s, server) => s + (server.rack_units || 1), 0);
+          return total + rackU;
+        }, 0)}U</span>
       </div>
     </div>
   {/if}
@@ -140,71 +157,40 @@
 
 <style>
   .row-view-container {
-    padding: 32px;
+    padding: 16px 32px;
   }
 
-  .row-view-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 24px;
-  }
-
-  .row-info h2 {
-    margin: 0 0 8px 0;
-    font-size: 28px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .location-name {
-    margin: 0;
-    font-size: 16px;
-    color: var(--text-secondary);
-  }
-
-  .btn-secondary {
-    display: flex;
-    align-items: center;
-    padding: 10px 20px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    border: 2px solid var(--accent-color);
-    border-radius: 8px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .btn-secondary:hover {
-    background: var(--accent-color);
-    color: white;
-  }
 
   .racks-row {
     display: flex;
     gap: 16px;
     overflow-x: auto;
     padding-bottom: 16px;
-    margin-bottom: 24px;
+    margin-bottom: 20px;
+    margin-top: 0;
   }
 
   .rack-column {
     flex: 0 0 auto;
-    min-width: 200px;
+    min-width: 288px;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 12px;
-    padding: 16px;
+    padding: 10px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  }
+
+  /* No rounding on any rack units */
+  .rack-units-compact > .rack-unit-compact {
+    border-radius: 0;
   }
 
   .rack-header-compact {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 12px;
-    padding-bottom: 12px;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
     border-bottom: 1px solid var(--border-color);
   }
 
@@ -227,35 +213,58 @@
   .rack-units-compact {
     display: flex;
     flex-direction: column-reverse;
-    gap: 1px;
-    max-height: 500px;
-    overflow-y: auto;
+    gap: 0;
   }
 
   .rack-unit-compact {
     display: flex;
     align-items: center;
-    min-height: 24px;
+    min-height: 26px;
     background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 2px;
+    border-left: 1px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
+    border-top: 1px solid var(--border-color);
+    border-bottom: none;
+    border-radius: 0;
     transition: all 0.2s ease;
+    position: relative;
   }
 
-  .rack-unit-compact:hover {
+  /* Only the last unit gets a bottom border to close the rack - must override default */
+  .rack-units-compact > .rack-unit-compact:last-child {
+    border-bottom: 1px solid var(--border-color) !important;
+  }
+
+  /* Occupied units get borders on all sides */
+  .rack-unit-compact.occupied {
+    border-left: 1px solid var(--accent-color);
+    border-right: 1px solid var(--accent-color);
+    border-top: 1px solid var(--accent-color);
+    border-bottom: 1px solid var(--accent-color);
+  }
+
+  /* Occupied last unit keeps its bottom border - must override both default and occupied rule */
+  .rack-units-compact > .rack-unit-compact.occupied:last-child {
+    border-bottom: 1px solid var(--accent-color) !important;
+  }
+
+  /* Occupied units - full highlight borders on all sides, no rounding */
+  .rack-unit-compact.occupied {
+    background: var(--accent-bg);
+    border-radius: 0;
+    z-index: 1;
+    position: relative;
+  }
+
+  .rack-unit-compact:hover:not(.occupied) {
     background: var(--bg-tertiary);
   }
 
-  .rack-unit-compact.occupied {
-    background: var(--accent-bg);
-    border-color: var(--accent-color);
-  }
-
   .unit-number-compact {
-    width: 30px;
-    padding: 4px 6px;
+    width: 35px;
+    padding: 3px 6px;
     font-weight: 600;
-    font-size: 10px;
+    font-size: 11px;
     color: var(--text-secondary);
     text-align: center;
     border-right: 1px solid var(--border-color);
@@ -267,32 +276,68 @@
     font-weight: 700;
   }
 
+  .rack-unit-compact.continuation {
+    border: none;
+    background: transparent;
+  }
+
+  .rack-unit-compact.continuation .unit-number-compact,
+  .rack-unit-compact.continuation .unit-content-compact {
+    visibility: hidden;
+  }
+
   .unit-content-compact {
     flex: 1;
-    padding: 4px 6px;
+    padding: 3px 8px;
   }
 
   .server-slot-compact {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+    position: relative;
   }
 
   .server-name-compact {
     font-weight: 600;
     color: var(--text-primary);
-    font-size: 11px;
-    line-height: 1.2;
+    font-size: 13px;
+    line-height: 1.3;
+    cursor: help;
   }
 
-  .server-ip-compact {
-    font-size: 9px;
-    color: var(--text-secondary);
-    line-height: 1.2;
+  .server-tooltip {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    border-radius: 6px;
+    font-size: 11px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+
+  .server-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: rgba(0, 0, 0, 0.9);
+  }
+
+  .server-slot-compact:hover .server-tooltip {
+    opacity: 1;
   }
 
   .empty-slot-compact {
-    height: 16px;
+    min-height: 0;
   }
 
   .row-summary {
@@ -332,6 +377,6 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 </style>

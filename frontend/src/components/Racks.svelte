@@ -113,8 +113,9 @@
   }
 
   function getLocationName(locationId) {
+    if (locationId == null || locationId === undefined) return '(no location set)';
     const location = locations.find(l => l.id === locationId);
-    return location ? location.name : 'Unknown';
+    return location ? location.name : 'Unknown location';
   }
 
   function viewRow(locationId, row) {
@@ -365,7 +366,7 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 
   .racks-grid {
@@ -542,7 +543,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--overlay-bg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -642,7 +643,7 @@
   .form-group select:focus {
     outline: none;
     border-color: var(--accent-color);
-    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
+    box-shadow: var(--focus-ring-accent);
   }
 
   .modal-footer {

@@ -206,8 +206,8 @@
 </div>
 
 {#if selectedService}
-  <div class="modal-overlay" on:click={closeDetails}>
-    <div class="modal-content" on:click|stopPropagation>
+  <button type="button" class="modal-overlay" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeDetails()}>
+    <div class="modal-content" role="dialog">
       <div class="modal-header">
         <h3>Service Details</h3>
         <button class="btn-icon-only" on:click={closeDetails}>
@@ -266,12 +266,12 @@
         <button class="btn-secondary" on:click={closeDetails}>Close</button>
       </div>
     </div>
-  </div>
+  </button>
 {/if}
 
 {#if selectedUser}
-  <div class="modal-overlay" on:click={closeDetails}>
-    <div class="modal-content" on:click|stopPropagation>
+  <button type="button" class="modal-overlay" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeDetails()}>
+    <div class="modal-content" role="dialog">
       <div class="modal-header">
         <h3>External User Details</h3>
         <button class="btn-icon-only" on:click={closeDetails}>
@@ -320,7 +320,7 @@
         <button class="btn-secondary" on:click={closeDetails}>Close</button>
       </div>
     </div>
-  </div>
+  </button>
 {/if}
 
 <style>
@@ -388,7 +388,7 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 
   .services-grid, .users-grid {
@@ -398,17 +398,19 @@
   }
 
   .service-card, .user-card {
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
     border-radius: 12px;
     padding: 20px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
     cursor: pointer;
   }
 
   .service-card:hover, .user-card:hover {
     transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    box-shadow: var(--shadow-md);
+    border-color: var(--text-tertiary);
   }
 
   .service-header, .user-header {
@@ -434,23 +436,23 @@
   }
 
   .status-active {
-    background: #d1fae5;
-    color: #065f46;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .status-suspended {
-    background: #fef3c7;
-    color: #92400e;
+    background: var(--warning-bg);
+    color: var(--warning-text);
   }
 
   .status-terminated {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .status-pending {
-    background: #dbeafe;
-    color: #1e40af;
+    background: var(--info-bg);
+    color: var(--info-text);
   }
 
   .integration-badge {
@@ -458,8 +460,8 @@
     border-radius: 12px;
     font-size: 12px;
     font-weight: 600;
-    background: #e0e7ff;
-    color: #3730a3;
+    background: var(--info-bg);
+    color: var(--info-text);
   }
 
   .service-details, .user-details {
@@ -471,12 +473,33 @@
   .detail-item {
     display: flex;
     justify-content: space-between;
+    align-items: baseline;
     font-size: 14px;
+    gap: 12px;
+  }
+
+  .detail-item span:last-child {
+    color: var(--text-primary);
+    font-weight: 500;
+    word-break: break-word;
+    text-align: right;
   }
 
   .detail-label {
     font-weight: 600;
     color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+
+  button.modal-overlay {
+    padding: 0;
+    border: none;
+    font: inherit;
+    color: inherit;
+    cursor: default;
+    width: 100%;
+    height: 100%;
+    text-align: left;
   }
 
   .modal-overlay {
@@ -485,7 +508,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--overlay-bg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -493,13 +516,14 @@
   }
 
   .modal-content {
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
     border-radius: 12px;
     width: 90%;
     max-width: 600px;
     max-height: 90vh;
     overflow-y: auto;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-xl);
   }
 
   .modal-header {
@@ -507,13 +531,14 @@
     justify-content: space-between;
     align-items: center;
     padding: 20px 24px;
-    border-color: var(--border-color);
+    border-bottom: 1px solid var(--border-color);
   }
 
   .modal-header h3 {
     margin: 0;
     font-size: 20px;
     font-weight: 600;
+    color: var(--text-primary);
   }
 
   .modal-body {
@@ -531,11 +556,23 @@
     justify-content: space-between;
     align-items: center;
     padding-bottom: 12px;
-    border-bottom: 1px solid #f1f5f9;
+    border-bottom: 1px solid var(--border-color);
+    gap: 12px;
   }
 
   .detail-row:last-child {
     border-bottom: none;
+  }
+
+  .detail-row .detail-label {
+    flex-shrink: 0;
+  }
+
+  .detail-row span:last-child {
+    color: var(--text-primary);
+    font-weight: 500;
+    text-align: right;
+    word-break: break-word;
   }
 
   .modal-footer {

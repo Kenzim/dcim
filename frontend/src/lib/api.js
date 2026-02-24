@@ -24,6 +24,32 @@ export async function getInstallationHistory(serverId) {
   return await response.json();
 }
 
+export async function updateInstallationTaskStatus(serverId, taskId, { status, error_message }) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/installation-tasks/${taskId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ status, error_message }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update installation status');
+  }
+  return await response.json();
+}
+
+export async function purgePendingInstallationHistory(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/installation-tasks/purge-pending`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to purge pending installation history');
+  }
+  return await response.json();
+}
+
 // Utility API functions
 export async function generatePassword(length = 16, charset = 'alphanumeric', excludeAmbiguous = true) {
   const response = await fetch(`${API_BASE}/utils/generate-password`, {
@@ -127,8 +153,8 @@ export async function getSessions() {
   });
 
   if (!response.ok) {
-    if (response.status === 401) {
-      return null; // Not authenticated
+    if (response.status === 401 || response.status === 403) {
+      return []; // Not authenticated or not allowed (e.g. non-admin)
     }
     throw new Error('Failed to get sessions');
   }
@@ -150,6 +176,25 @@ export async function deleteSession(tokenId) {
   return await response.json();
 }
 
+export async function changePassword(currentPassword, newPassword) {
+  const response = await fetch(`${API_BASE}/users/me/change-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to change password');
+  }
+
+  return await response.json();
+}
+
 export async function getPlugins() {
   const response = await fetch(`${API_BASE}/plugins/`, {
     method: 'GET',
@@ -161,6 +206,22 @@ export async function getPlugins() {
       return null; // Not authenticated
     }
     throw new Error('Failed to get plugins');
+  }
+
+  return await response.json();
+}
+
+export async function getSwitchPlugins() {
+  const response = await fetch(`${API_BASE}/switch-plugins/`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      return null; // Not authenticated
+    }
+    throw new Error('Failed to get switch plugins');
   }
 
   return await response.json();
@@ -183,6 +244,18 @@ export async function getPluginDetails(pluginName) {
 }
 
 // Location API functions
+export async function getLocation(id) {
+  const response = await fetch(`${API_BASE}/locations/${id}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to get location');
+  }
+  return await response.json();
+}
+
 export async function getLocations() {
   const response = await fetch(`${API_BASE}/locations/`, {
     method: 'GET',
@@ -622,6 +695,182 @@ export async function updateTFTPConfig(config) {
   return await response.json();
 }
 
+// Service instances (per-location DHCP/TFTP runners)
+export async function listServiceInstances(locationId) {
+  const url = locationId
+    ? `${API_BASE}/service-instances/?location_id=${locationId}`
+    : `${API_BASE}/service-instances/`;
+  const response = await fetch(url, { credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to list service instances');
+  return await response.json();
+}
+
+export async function createServiceInstance(data) {
+  const response = await fetch(`${API_BASE}/service-instances/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to create service instance');
+  }
+  return await response.json();
+}
+
+export async function getServiceInstance(id) {
+  const response = await fetch(`${API_BASE}/service-instances/${id}`, { credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get service instance');
+  return await response.json();
+}
+
+export async function updateServiceInstance(id, data) {
+  const response = await fetch(`${API_BASE}/service-instances/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to update service instance');
+  }
+  return await response.json();
+}
+
+export async function deleteServiceInstance(id) {
+  const response = await fetch(`${API_BASE}/service-instances/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) throw new Error('Failed to delete service instance');
+}
+
+export async function testServiceInstance(id, apiKey) {
+  const response = await fetch(`${API_BASE}/service-instances/${id}/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Test failed');
+  }
+  return await response.json();
+}
+
+// Location-scoped DHCP
+export async function getLocationDHCPStatus(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/status`, { credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get DHCP status');
+  return await response.json();
+}
+
+export async function startLocationDHCP(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/start`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to start');
+  }
+  return await response.json();
+}
+
+export async function stopLocationDHCP(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/stop`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to stop');
+  }
+  return await response.json();
+}
+
+export async function restartLocationDHCP(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/restart`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to restart');
+  }
+  return await response.json();
+}
+
+export async function regenerateLocationDHCP(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/regenerate`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to regenerate');
+  }
+  return await response.json();
+}
+
+export async function getLocationDHCPLogs(locationId, limit = 100) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/logs?limit=${limit}`, { credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get logs');
+  return await response.json();
+}
+
+// Location-scoped TFTP
+export async function getLocationTFTPStatus(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/tftp/status`, { credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get TFTP status');
+  return await response.json();
+}
+
+export async function startLocationTFTP(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/tftp/start`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to start');
+  }
+  return await response.json();
+}
+
+export async function stopLocationTFTP(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/tftp/stop`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to stop');
+  }
+  return await response.json();
+}
+
+export async function restartLocationTFTP(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/tftp/restart`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(err.detail || 'Failed to restart');
+  }
+  return await response.json();
+}
+
+export async function getLocationTFTPLogs(locationId, limit = 100) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/tftp/logs?limit=${limit}`, { credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get logs');
+  return await response.json();
+}
+
 export async function listTempOS() {
   const response = await fetch(`${API_BASE}/servers/interaction/temp-os`, {
     method: 'GET',
@@ -725,14 +974,14 @@ export async function deleteServer(id) {
   }
 }
 
-export async function testServerConnection(pluginId, pluginConfig) {
+export async function testServerConnection(pluginName, pluginConfig) {
   const response = await fetch(`${API_BASE}/servers/test`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     credentials: 'include',
-    body: JSON.stringify({ plugin_id: pluginId, plugin_config: pluginConfig }),
+    body: JSON.stringify({ plugin_name: pluginName, plugin_config: pluginConfig }),
   });
 
   if (!response.ok) {
@@ -757,7 +1006,7 @@ export async function testServerCapabilities(serverId) {
   return await response.json();
 }
 
-export async function testPluginCapabilities(pluginId, pluginConfig) {
+export async function testPluginCapabilities(pluginName, pluginConfig) {
   const response = await fetch(`${API_BASE}/servers/test-capabilities`, {
     method: 'POST',
     headers: {
@@ -765,7 +1014,7 @@ export async function testPluginCapabilities(pluginId, pluginConfig) {
     },
     credentials: 'include',
     body: JSON.stringify({
-      plugin_id: pluginId,
+      plugin_name: pluginName,
       plugin_config: pluginConfig,
     }),
   });
@@ -835,6 +1084,244 @@ export async function powerResetServer(serverId) {
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || 'Failed to reset server');
+  }
+
+  return await response.json();
+}
+
+/**
+ * Call a server plugin action by method name (for config-driven capability UI).
+ * Maps known actions to existing endpoints.
+ */
+export async function callServerPluginAction(serverId, action, params = {}) {
+  const stateActions = {
+    get_power_state: () => getServerPowerState(serverId),
+  };
+  const postActions = {
+    power_on: () => powerOnServer(serverId),
+    power_off: () => powerOffServer(serverId, params.force),
+    power_reset: () => powerResetServer(serverId),
+  };
+  if (stateActions[action]) {
+    return stateActions[action]();
+  }
+  if (postActions[action]) {
+    return postActions[action]();
+  }
+  throw new Error(`Unknown plugin action: ${action}`);
+}
+
+// Network Switch API functions
+export async function getSwitches(locationId = null, rackId = null, enabledOnly = false) {
+  const params = new URLSearchParams();
+  if (locationId) params.append('location_id', locationId);
+  if (rackId) params.append('rack_id', rackId);
+  if (enabledOnly) params.append('enabled_only', 'true');
+  const url = params.toString() 
+    ? `${API_BASE}/network-switches/?${params.toString()}`
+    : `${API_BASE}/network-switches/`;
+  const response = await fetch(url, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get switches');
+  }
+
+  return await response.json();
+}
+
+export async function getSwitch(id) {
+  const response = await fetch(`${API_BASE}/network-switches/${id}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return null;
+    }
+    throw new Error('Failed to get switch');
+  }
+
+  return await response.json();
+}
+
+export async function getSwitchPorts(switchId) {
+  const response = await fetch(`${API_BASE}/network-switches/${switchId}/switch-ports`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get switch ports');
+  }
+
+  return await response.json();
+}
+
+export async function updateSwitchPorts(switchId, ports) {
+  const response = await fetch(`${API_BASE}/network-switches/${switchId}/switch-ports`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ ports }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || error.message || 'Failed to update switch ports');
+  }
+
+  return await response.json();
+}
+
+export async function getSwitchBandwidth(switchId, hours = 24, portIdentifier = null, resolutionMinutes = 0) {
+  const params = new URLSearchParams();
+  params.append('hours', String(hours));
+  if (portIdentifier) params.append('port_identifier', portIdentifier);
+  if (resolutionMinutes > 0) params.append('resolution_minutes', String(resolutionMinutes));
+  const response = await fetch(`${API_BASE}/network-switches/${switchId}/bandwidth?${params}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    if (response.status === 404) throw new Error('Switch not found');
+    throw new Error('Failed to get switch bandwidth');
+  }
+  return await response.json();
+}
+
+export async function getServerBandwidth(serverId, hours = 24, resolutionMinutes = 0) {
+  const params = new URLSearchParams();
+  params.append('hours', String(hours));
+  if (resolutionMinutes > 0) params.append('resolution_minutes', String(resolutionMinutes));
+  const response = await fetch(`${API_BASE}/servers/${serverId}/bandwidth?${params}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    if (response.status === 404) throw new Error('Server not found');
+    throw new Error('Failed to get server bandwidth');
+  }
+  return await response.json();
+}
+
+export async function regenerateSwitchPorts(switchId) {
+  const response = await fetch(`${API_BASE}/network-switches/${switchId}/regenerate-ports`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to regenerate switch ports');
+  }
+
+  return await response.json();
+}
+
+export async function createSwitch(switchData) {
+  const response = await fetch(`${API_BASE}/network-switches/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(switchData),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to create switch');
+  }
+
+  return await response.json();
+}
+
+export async function updateSwitch(id, switchData) {
+  const response = await fetch(`${API_BASE}/network-switches/${id}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(switchData),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to update switch');
+  }
+
+  return await response.json();
+}
+
+export async function deleteSwitch(id) {
+  const response = await fetch(`${API_BASE}/network-switches/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to delete switch');
+  }
+}
+
+// Cable run (server port <-> switch port mapping) API
+export async function listCableRuns({ switchId, serverId } = {}) {
+  const params = new URLSearchParams();
+  if (switchId) params.append('switch_id', switchId);
+  if (serverId) params.append('server_id', serverId);
+  const url = params.toString() ? `${API_BASE}/cable-runs/?${params}` : `${API_BASE}/cable-runs/`;
+  const response = await fetch(url, { method: 'GET', credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to list cable runs');
+  return await response.json();
+}
+
+export async function createCableRun({ port_a, port_b, cable_type = null, speed_mbps = null, description = null }) {
+  const response = await fetch(`${API_BASE}/cable-runs/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ port_a, port_b, cable_type, speed_mbps, description }),
+  });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to create cable run');
+  }
+  return await response.json();
+}
+
+export async function deleteCableRun(cableRunId) {
+  const response = await fetch(`${API_BASE}/cable-runs/${cableRunId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to delete cable run');
+  }
+}
+
+export async function testSwitchConnection(pluginName, pluginConfig) {
+  const response = await fetch(`${API_BASE}/network-switches/test`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      plugin_name: pluginName,
+      plugin_config: pluginConfig,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to test switch connection');
   }
 
   return await response.json();
@@ -1105,6 +1592,160 @@ export async function updateScript(scriptId, data) {
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || 'Failed to update script');
+  }
+
+  return await response.json();
+}
+
+// Asset manager API
+export async function getAssets(label = null) {
+  const url = label ? `${API_BASE}/assets?label=${encodeURIComponent(label)}` : `${API_BASE}/assets`;
+  const response = await fetch(url, { method: 'GET', credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get assets');
+  return await response.json();
+}
+
+export async function getAssetLabels() {
+  const response = await fetch(`${API_BASE}/assets/labels`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get asset labels');
+  return await response.json();
+}
+
+export async function getAsset(assetId) {
+  const response = await fetch(`${API_BASE}/assets/${assetId}`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to get asset');
+  return await response.json();
+}
+
+/** URL to display or download an asset image (use in img src or link). */
+export function getAssetFileUrl(assetId) {
+  return `${API_BASE}/assets/${assetId}/file`;
+}
+
+export async function uploadAsset(file, label, description = null) {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('label', label);
+  if (description != null && description !== '') form.append('description', description);
+  const response = await fetch(`${API_BASE}/assets`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to upload asset');
+  }
+  return await response.json();
+}
+
+export async function deleteAsset(assetId) {
+  const response = await fetch(`${API_BASE}/assets/${assetId}`, { method: 'DELETE', credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to delete asset');
+}
+
+// Server Group API functions
+export async function getServerGroups() {
+  const response = await fetch(`${API_BASE}/server-groups/`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get server groups');
+  }
+
+  return await response.json();
+}
+
+export async function getServerGroup(groupId) {
+  const response = await fetch(`${API_BASE}/server-groups/${groupId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to get server group');
+  }
+
+  return await response.json();
+}
+
+export async function createServerGroup(name, description) {
+  const response = await fetch(`${API_BASE}/server-groups/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify({ name, description }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to create server group');
+  }
+
+  return await response.json();
+}
+
+export async function updateServerGroup(groupId, data) {
+  const response = await fetch(`${API_BASE}/server-groups/${groupId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to update server group');
+  }
+
+  return await response.json();
+}
+
+export async function deleteServerGroup(groupId) {
+  const response = await fetch(`${API_BASE}/server-groups/${groupId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to delete server group');
+  }
+}
+
+export async function addServersToGroup(groupId, serverIds) {
+  const response = await fetch(`${API_BASE}/server-groups/${groupId}/servers`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    credentials: 'include',
+    body: JSON.stringify({ server_ids: serverIds }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to add servers to group');
+  }
+
+  return await response.json();
+}
+
+export async function removeServerFromGroup(groupId, serverId) {
+  const response = await fetch(`${API_BASE}/server-groups/${groupId}/servers/${serverId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to remove server from group');
   }
 
   return await response.json();

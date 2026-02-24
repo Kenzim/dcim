@@ -1,6 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getRack, getRackServers, getServers } from '../lib/api.js';
+  import { getRack, getRackServers, getSwitches } from '../lib/api.js';
   import { onMount } from 'svelte';
 
   export let rackId;
@@ -8,11 +8,11 @@
 
   let rack = null;
   let servers = [];
-  let allServers = [];
+  let switches = [];
   let loading = true;
   let error = null;
 
-  // Map of rack unit to server
+  // Map of rack unit to device: { type: 'server'|'switch', data: {...} }
   let rackMap = {};
 
   onMount(async () => {
@@ -23,16 +23,28 @@
     try {
       loading = true;
       error = null;
-      [rack, servers] = await Promise.all([
+      [rack, servers, switches] = await Promise.all([
         getRack(rackId),
-        getRackServers(rackId)
+        getRackServers(rackId),
+        getSwitches(null, rackId)
       ]);
       
-      // Build map of rack units to servers
+      // Build map of rack units to devices. Servers can occupy multiple units (rack_units); fill each unit they occupy.
       rackMap = {};
       servers.forEach(server => {
         if (server.rack_unit) {
-          rackMap[server.rack_unit] = server;
+          const size = server.rack_units || 1;
+          for (let u = 0; u < size; u++) {
+            rackMap[server.rack_unit + u] = { type: 'server', data: server };
+          }
+        }
+      });
+      (switches || []).forEach(sw => {
+        if (sw.rack_unit) {
+          const size = sw.rack_units || 1;
+          for (let u = 0; u < size; u++) {
+            rackMap[sw.rack_unit + u] = { type: 'switch', data: sw };
+          }
         }
       });
     } catch (err) {
@@ -43,15 +55,30 @@
     }
   }
 
-  function getServerAtUnit(unit) {
+  function getDeviceAtUnit(unit) {
     return rackMap[unit] || null;
   }
 
-  function getUnitHeight(server) {
-    // Default to 1U if not specified
-    // In a real implementation, you might want to store server height in the database
+  /** True if this unit is the top (start) of the device, so we render the slot and span. */
+  function isStartOfDevice(unit) {
+    const device = rackMap[unit];
+    if (!device) return true;
+    if (device.type === 'server') return device.data.rack_unit === unit;
+    if (device.type === 'switch') return device.data.rack_unit === unit;
+    return true;
+  }
+
+  /** Number of units this slot spans (for servers/switches that occupy multiple U). */
+  function getSlotSpan(unit) {
+    const device = rackMap[unit];
+    if (!device || !isStartOfDevice(unit)) return 1;
+    if (device.type === 'server') return device.data.rack_units || 1;
+    if (device.type === 'switch') return device.data.rack_units || 1;
     return 1;
   }
+
+  /** Total occupied U for summary (servers and switches count their rack_units). */
+  $: occupiedUnits = rack ? servers.reduce((sum, s) => sum + (s.rack_units || 1), 0) + (switches || []).reduce((sum, sw) => sum + (sw.rack_units || 1), 0) : 0;
 </script>
 
 <PageHeader title={rack ? `Rack: ${rack.name}` : 'Rack View'} />
@@ -83,24 +110,55 @@
     </div>
 
     <div class="rack-visualization">
+      <!-- Units count down from top: 42 at top, 1 at bottom -->
       <div class="rack-units">
         {#each Array(rack.units) as _, i}
           {@const unit = rack.units - i}
-          {@const server = getServerAtUnit(unit)}
-          <div class="rack-unit" class:occupied={server !== null}>
-            <div class="unit-number">{unit}</div>
-            <div class="unit-content">
-              {#if server}
-                <div class="server-slot">
-                  <div class="server-name">{server.name}</div>
-                  <div class="server-details">
-                    <span>{server.server_ip}</span>
-                    {#if server.description}
-                      <span class="server-description">{server.description}</span>
-                    {/if}
-                  </div>
-                </div>
+          {@const device = getDeviceAtUnit(unit)}
+          {@const startOfDevice = isStartOfDevice(unit)}
+          {@const span = getSlotSpan(unit)}
+          <div
+            class="rack-unit"
+            class:occupied={device !== null && startOfDevice}
+            class:switch-slot={device?.type === 'switch'}
+            class:continuation={device !== null && !startOfDevice}
+            style={startOfDevice && span > 1 ? `height: ${span * 24}px; min-height: ${span * 24}px;` : (device && !startOfDevice ? 'height: 0; min-height: 0; overflow: hidden; border: none; margin: -1px 0 0 0;' : '')}
+          >
+            <div class="unit-number">
+              {#if device && !startOfDevice}
+                <!-- continuation: no number -->
               {:else}
+                {span > 1 ? `${unit}-${unit + span - 1}` : unit}
+              {/if}
+            </div>
+            <div class="unit-content">
+              {#if device && startOfDevice}
+                {#if device.type === 'server'}
+                  <a href="/admin/servers/{device.data.id}" class="device-slot server-slot">
+                    <span class="device-name">{device.data.name}{span > 1 ? ` (${span}U)` : ''}</span>
+                    <div class="device-tooltip">
+                      <div><strong>Server</strong>{#if span > 1} <span>({span}U)</span>{/if}</div>
+                      <div><strong>IP:</strong> {device.data.server_ip || 'N/A'}</div>
+                      {#if device.data.description}
+                        <div><strong>Description:</strong> {device.data.description}</div>
+                      {/if}
+                    </div>
+                  </a>
+                {:else}
+                  <a href="/admin/switches/{device.data.id}" class="device-slot switch-slot">
+                    <span class="device-name">{device.data.name}{span > 1 ? ` (${span}U)` : ''}</span>
+                    <div class="device-tooltip">
+                      <div><strong>Switch</strong>{#if span > 1} <span>({span}U)</span>{/if}</div>
+                      {#if device.data.model}
+                        <div><strong>Model:</strong> {device.data.model}</div>
+                      {/if}
+                      {#if device.data.description}
+                        <div><strong>Description:</strong> {device.data.description}</div>
+                      {/if}
+                    </div>
+                  </a>
+                {/if}
+              {:else if !device}
                 <div class="empty-slot">Empty</div>
               {/if}
             </div>
@@ -116,15 +174,15 @@
       </div>
       <div class="summary-item">
         <span class="summary-label">Occupied:</span>
-        <span class="summary-value">{servers.length}U</span>
+        <span class="summary-value">{occupiedUnits}U</span>
       </div>
       <div class="summary-item">
         <span class="summary-label">Available:</span>
-        <span class="summary-value">{rack.units - servers.length}U</span>
+        <span class="summary-value">{rack.units - occupiedUnits}U</span>
       </div>
       <div class="summary-item">
         <span class="summary-label">Utilization:</span>
-        <span class="summary-value">{Math.round((servers.length / rack.units) * 100)}%</span>
+        <span class="summary-value">{rack.units ? Math.round((occupiedUnits / rack.units) * 100) : 0}%</span>
       </div>
     </div>
   {/if}
@@ -182,28 +240,32 @@
   .rack-visualization {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
+    border-radius: 10px;
     padding: 24px;
     margin-bottom: 24px;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    /* 30% wider, 10% taller; aligned far left */
+    max-width: 416px;
+    margin-left: 0;
+    margin-right: auto;
   }
 
   .rack-units {
     display: flex;
-    flex-direction: column-reverse;
-    gap: 2px;
-    max-height: 600px;
-    overflow-y: auto;
+    flex-direction: column;
+    gap: 1px;
   }
 
   .rack-unit {
     display: flex;
     align-items: center;
-    min-height: 40px;
+    min-height: 24px;
+    height: 24px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
-    transition: all 0.2s ease;
+    border-radius: 3px;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    position: relative;
   }
 
   .rack-unit:hover {
@@ -216,9 +278,12 @@
   }
 
   .unit-number {
-    width: 50px;
-    padding: 8px 12px;
+    width: 40px;
+    min-width: 40px;
+    padding: 0 6px;
     font-weight: 600;
+    font-size: 14px;
+    line-height: 24px;
     color: var(--text-secondary);
     text-align: center;
     border-right: 1px solid var(--border-color);
@@ -230,37 +295,93 @@
     font-weight: 700;
   }
 
+  .rack-unit.continuation {
+    border: none;
+    background: transparent;
+  }
+
+  .rack-unit.continuation .unit-number,
+  .rack-unit.continuation .unit-content {
+    visibility: hidden;
+  }
+
   .unit-content {
     flex: 1;
-    padding: 8px 12px;
+    padding: 0 10px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .server-slot {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .device-slot {
+    position: relative;
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .server-name {
-    font-weight: 600;
+  .device-slot.server-slot {
     color: var(--text-primary);
-    font-size: 14px;
   }
 
-  .server-details {
-    display: flex;
-    gap: 12px;
-    font-size: 12px;
-    color: var(--text-secondary);
+  .device-slot.switch-slot .device-name {
+    color: var(--info-color);
   }
 
-  .server-description {
-    font-style: italic;
+  .device-name {
+    font-weight: 600;
+    font-size: 15px;
+    line-height: 24px;
+    cursor: help;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .device-tooltip {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 4px;
+    padding: 6px 10px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 1000;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+
+  .device-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: rgba(0, 0, 0, 0.9);
+  }
+
+  .device-slot:hover .device-tooltip {
+    opacity: 1;
+  }
+
+  .rack-unit.switch-slot.occupied {
+    border-color: var(--info-color);
   }
 
   .empty-slot {
     color: var(--text-secondary);
     font-size: 14px;
+    line-height: 24px;
     font-style: italic;
   }
 
@@ -301,6 +422,6 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 </style>
