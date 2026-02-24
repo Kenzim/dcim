@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { user, logout } from '../stores/auth.js';
-  import { getCurrentUser, getSessions, deleteSession } from '../lib/api.js';
+  import { getCurrentUser, getSessions, deleteSession, changePassword } from '../lib/api.js';
   import PageHeader from './PageHeader.svelte';
   import { navigate } from '../lib/router.js';
 
@@ -10,6 +10,13 @@
   let loading = true;
   let sessionsLoading = false;
   let error = null;
+
+  let currentPassword = '';
+  let newPassword = '';
+  let confirmPassword = '';
+  let passwordChanging = false;
+  let passwordError = '';
+  let passwordSuccess = false;
 
   onMount(async () => {
     await loadUserData();
@@ -80,6 +87,35 @@
       return date.toLocaleString();
     } catch {
       return dateString;
+    }
+  }
+
+  async function handleChangePassword() {
+    passwordError = '';
+    passwordSuccess = false;
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      passwordError = 'Please fill in all fields';
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      passwordError = 'New password and confirmation do not match';
+      return;
+    }
+    if (newPassword.length < 8) {
+      passwordError = 'New password must be at least 8 characters';
+      return;
+    }
+    passwordChanging = true;
+    try {
+      await changePassword(currentPassword, newPassword);
+      passwordSuccess = true;
+      currentPassword = '';
+      newPassword = '';
+      confirmPassword = '';
+    } catch (err) {
+      passwordError = err.message || 'Failed to change password';
+    } finally {
+      passwordChanging = false;
     }
   }
 
@@ -155,6 +191,73 @@
               {/if}
             </p>
           </div>
+        </div>
+      </div>
+
+      <div class="password-card">
+        <div class="card-header">
+          <h2>Change Password</h2>
+          <p class="card-subtitle">Update your account password</p>
+        </div>
+        <div class="card-body">
+          {#if passwordSuccess}
+            <div class="alert alert-success">
+              <svg xmlns="http://www.w3.org/2000/svg" class="alert-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Password changed successfully.
+            </div>
+          {:else}
+            {#if passwordError}
+              <div class="alert alert-error">
+                <svg xmlns="http://www.w3.org/2000/svg" class="alert-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {passwordError}
+              </div>
+            {/if}
+            <form class="password-form" on:submit|preventDefault={handleChangePassword}>
+              <div class="form-group">
+                <label for="current-password" class="form-label">Current password</label>
+                <input
+                  id="current-password"
+                  type="password"
+                  class="form-control"
+                  bind:value={currentPassword}
+                  placeholder="Enter current password"
+                  autocomplete="current-password"
+                  disabled={passwordChanging}
+                />
+              </div>
+              <div class="form-group">
+                <label for="new-password" class="form-label">New password</label>
+                <input
+                  id="new-password"
+                  type="password"
+                  class="form-control"
+                  bind:value={newPassword}
+                  placeholder="Enter new password (min 8 characters)"
+                  autocomplete="new-password"
+                  disabled={passwordChanging}
+                />
+              </div>
+              <div class="form-group">
+                <label for="confirm-password" class="form-label">Confirm new password</label>
+                <input
+                  id="confirm-password"
+                  type="password"
+                  class="form-control"
+                  bind:value={confirmPassword}
+                  placeholder="Confirm new password"
+                  autocomplete="new-password"
+                  disabled={passwordChanging}
+                />
+              </div>
+              <button type="submit" class="btn-primary" disabled={passwordChanging}>
+                {passwordChanging ? 'Changing…' : 'Change password'}
+              </button>
+            </form>
+          {/if}
         </div>
       </div>
 
@@ -272,9 +375,9 @@
   }
 
   .alert-error {
-    background: #fee2e2;
-    color: #991b1b;
-    border: 1px solid #fecaca;
+    background: var(--danger-bg);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-color);
   }
 
   .alert-icon {
@@ -370,13 +473,88 @@
   }
 
   .badge-success {
-    background: #d1fae5;
-    color: #065f46;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .badge-secondary {
     background: var(--bg-secondary);
-    color: #475569;
+    color: var(--text-secondary);
+  }
+
+  .password-card {
+    background: var(--bg-primary);
+    border-radius: 16px;
+    box-shadow: var(--shadow-md);
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+    margin-bottom: 32px;
+  }
+
+  .password-form {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    max-width: 400px;
+  }
+
+  .password-form .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .password-form .form-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .password-form .form-control {
+    padding: 10px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    font-size: 14px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+  }
+
+  .password-form .form-control:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: var(--focus-ring-accent);
+  }
+
+  .password-form .form-control:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .password-form .btn-primary {
+    padding: 10px 20px;
+    background: var(--accent-color);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    align-self: flex-start;
+  }
+
+  .password-form .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .password-form .btn-primary:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .alert-success {
+    background: var(--success-bg);
+    color: var(--success-text);
+    border: 1px solid var(--success-color);
   }
 
   .sessions-card {
@@ -456,7 +634,7 @@
   .session-item.current {
     background: var(--bg-tertiary);
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
+    box-shadow: var(--focus-ring-accent);
   }
 
   .session-header {
@@ -486,23 +664,23 @@
   }
 
   .session-action-btn.delete-btn {
-    background: #fee2e2;
-    color: #dc2626;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .session-action-btn.delete-btn:hover {
-    background: #fecaca;
-    color: #b91c1c;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .session-action-btn.logout-btn {
-    background: #dbeafe;
-    color: #2563eb;
+    background: var(--info-bg);
+    color: var(--info-text);
   }
 
   .session-action-btn.logout-btn:hover {
-    background: #bfdbfe;
-    color: #1d4ed8;
+    background: var(--info-bg);
+    color: var(--info-text);
   }
 
   .action-icon {

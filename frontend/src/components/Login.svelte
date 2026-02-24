@@ -2,6 +2,8 @@
   import { login } from '../lib/api.js';
   import { user, isAuthenticated } from '../stores/auth.js';
   import { navigate } from '../lib/router.js';
+  import { theme, toggleTheme } from '../stores/theme.js';
+  import { Alert, FormGroup, Spinner } from './ui/index.js';
 
   let username = '';
   let password = '';
@@ -42,6 +44,13 @@
 </script>
 
 <div class="login-container">
+  <button class="theme-toggle-login" on:click={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
+    {#if $theme === 'light'}
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+    {:else}
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+    {/if}
+  </button>
   <div class="login-wrapper">
     <div class="login-card">
       <div class="login-header">
@@ -50,18 +59,13 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
           </svg>
         </div>
-        <h1 class="login-title">DCIM</h1>
+        <h1 class="login-title">Rackflow</h1>
         <p class="login-subtitle">Data Center Infrastructure Management</p>
       </div>
       
       <div class="login-body">
         {#if error}
-          <div class="alert alert-danger" role="alert">
-            <svg xmlns="http://www.w3.org/2000/svg" class="alert-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            {error}
-          </div>
+          <Alert type="danger">{error}</Alert>
         {/if}
 
         <form on:submit|preventDefault={handleLogin} class="login-form">
@@ -74,7 +78,6 @@
             </label>
             <input
               type="text"
-              class="form-control"
               id="username"
               bind:value={username}
               on:keypress={handleKeyPress}
@@ -94,7 +97,6 @@
             </label>
             <input
               type="password"
-              class="form-control"
               id="password"
               bind:value={password}
               on:keypress={handleKeyPress}
@@ -110,7 +112,7 @@
             disabled={loading}
           >
             {#if loading}
-              <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+              <Spinner size="small" />
               Logging in...
             {:else}
               <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -135,6 +137,32 @@
     background: var(--bg-secondary);
     position: relative;
     overflow: hidden;
+  }
+
+  .theme-toggle-login {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    border: 2px solid var(--accent-color);
+    border-radius: 8px;
+    color: var(--accent-color);
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .theme-toggle-login:hover {
+    background: var(--accent-color);
+    color: white;
+  }
+  .theme-toggle-login svg {
+    width: 22px;
+    height: 22px;
   }
 
   .login-wrapper {
@@ -175,7 +203,7 @@
     width: 64px;
     height: 64px;
     margin: 0 auto 16px;
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.2);
     border-radius: 16px;
     display: flex;
     align-items: center;
@@ -206,24 +234,6 @@
     padding: 40px 30px;
   }
 
-  .alert {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px 16px;
-    border-radius: 10px;
-    margin-bottom: 24px;
-    background: #fee2e2;
-    color: #991b1b;
-    border: 1px solid #fecaca;
-  }
-
-  .alert-icon {
-    width: 20px;
-    height: 20px;
-    flex-shrink: 0;
-  }
-
   .login-form {
     display: flex;
     flex-direction: column;
@@ -251,26 +261,9 @@
     color: var(--primary-color);
   }
 
-  .form-control {
-    width: 100%;
+  .login-form .form-group input {
     padding: 14px 16px;
-    border: 2px solid var(--border-color);
-    border-radius: 10px;
     font-size: 15px;
-    transition: all 0.2s ease;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-  }
-
-  .form-control:focus {
-    outline: none;
-    border-color: var(--accent-color);
-    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
-  }
-
-  .form-control:disabled {
-    background: var(--bg-tertiary);
-    cursor: not-allowed;
   }
 
   .btn-login {

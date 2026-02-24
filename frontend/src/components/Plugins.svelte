@@ -80,17 +80,20 @@
                 </div>
               </div>
 
-              {#if plugin.available_capabilities && plugin.available_capabilities.length > 0}
+              {#if plugin.capabilities && plugin.capabilities.length > 0}
                 <div class="plugin-capabilities">
-                  <h4 class="capabilities-title">Available Capabilities:</h4>
+                  <h4 class="capabilities-title">Capabilities:</h4>
                   <div class="capabilities-list">
-                    {#each plugin.available_capabilities as capability}
-                      <span class="capability-badge">
-                        {capability.replace(/_/g, ' ')}
+                    {#each plugin.capabilities as cap}
+                      <span class="capability-badge" class:optional={cap.optional}>
+                        {cap.display_name || cap.id.replace(/_/g, ' ')}
+                        {#if cap.optional}
+                          <span class="optional-tag">(optional)</span>
+                        {/if}
                       </span>
                     {/each}
                   </div>
-                  <p class="capabilities-note">Note: Capabilities are tested per server. Test capabilities when creating or editing a server.</p>
+                  <p class="capabilities-note">Capabilities are declared by the plugin. Optional capabilities can be enabled per server when creating or editing.</p>
                 </div>
               {/if}
             </div>
@@ -144,9 +147,9 @@
   }
 
   .alert-error {
-    background: #fee2e2;
-    color: #991b1b;
-    border: 1px solid #fecaca;
+    background: var(--danger-bg);
+    color: var(--danger-text);
+    border: 1px solid var(--danger-color);
   }
 
   .alert-icon {
@@ -255,13 +258,13 @@
   }
 
   .plugin-badge.registered {
-    background: #d1fae5;
-    color: #065f46;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .plugin-badge.unregistered {
     background: var(--bg-secondary);
-    color: #475569;
+    color: var(--text-secondary);
   }
 
   .plugin-body {
@@ -312,6 +315,11 @@
     gap: 8px;
   }
 
+  .capability-badge.optional .optional-tag {
+    font-size: 0.75em;
+    opacity: 0.8;
+  }
+
   .capability-badge {
     padding: 6px 12px;
     border-radius: 6px;
@@ -324,13 +332,13 @@
   }
 
   .capability-badge.tested {
-    background: #d1fae5;
-    color: #065f46;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .capability-badge.untested {
-    background: #fef3c7;
-    color: #92400e;
+    background: var(--warning-bg);
+    color: var(--warning-text);
   }
 
   .capability-icon {

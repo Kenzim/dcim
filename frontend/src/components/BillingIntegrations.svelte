@@ -1,5 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
+  import { Button, Modal, FormGroup, FormError } from './ui/index.js';
   import { 
     getBillingIntegrations, 
     createBillingIntegration, 
@@ -134,10 +135,40 @@
 
   async function copyApiKey(apiKey) {
     try {
-      await navigator.clipboard.writeText(apiKey);
-      alert('API key copied to clipboard!');
+      // Try modern clipboard API first
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(apiKey);
+        alert('API key copied to clipboard!');
+        return;
+      }
+      
+      // Fallback for browsers that don't support clipboard API
+      // Create a temporary textarea element
+      const textarea = document.createElement('textarea');
+      textarea.value = apiKey;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-999999px';
+      textarea.style.top = '-999999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      
+      try {
+        const successful = document.execCommand('copy');
+        if (successful) {
+          alert('API key copied to clipboard!');
+        } else {
+          throw new Error('execCommand copy failed');
+        }
+      } catch (e) {
+        // If execCommand fails, show prompt as last resort
+        prompt('Copy this API key (Ctrl+C to copy):', apiKey);
+      } finally {
+        document.body.removeChild(textarea);
+      }
     } catch (err) {
-      alert('Failed to copy API key: ' + err.message);
+      // If all else fails, show the key in a prompt so user can manually copy
+      prompt('Copy this API key (Ctrl+C to copy):', apiKey);
     }
   }
 
@@ -165,12 +196,14 @@
 <div class="integrations-container">
   <div class="integrations-header">
     <h2>Billing Integrations</h2>
-    <button class="btn-primary" on:click={openAddModal}>
-      <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-      </svg>
+    <Button variant="primary" on:click={openAddModal}>
+      <svelte:fragment slot="icon">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+        </svg>
+      </svelte:fragment>
       Add Integration
-    </button>
+    </Button>
   </div>
 
   {#if loading}
@@ -246,19 +279,19 @@
           </div>
 
           <div class="integration-actions">
-            <button class="btn-secondary btn-small" on:click={() => handleRotateKey(integration)} disabled={rotatingKey[integration.id]}>
+            <Button variant="secondary" size="small" on:click={() => handleRotateKey(integration)} disabled={rotatingKey[integration.id]}>
               {rotatingKey[integration.id] ? 'Rotating...' : 'Rotate Key'}
-            </button>
-            <button class="btn-icon-only" on:click={() => openEditModal(integration)} title="Edit">
+            </Button>
+            <Button iconOnly on:click={() => openEditModal(integration)} title="Edit" ariaLabel="Edit">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
-            </button>
-            <button class="btn-icon-only btn-danger" on:click={() => handleDelete(integration)} title="Delete">
+            </Button>
+            <Button variant="danger" iconOnly on:click={() => handleDelete(integration)} title="Delete" ariaLabel="Delete">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
-            </button>
+            </Button>
           </div>
         </div>
       {/each}
@@ -267,62 +300,50 @@
 </div>
 
 {#if showModal}
-  <div class="modal-overlay" on:click={closeModal}>
-    <div class="modal-content" on:click|stopPropagation>
-      <div class="modal-header">
-        <h3>{editingIntegration ? 'Edit Integration' : 'Add Integration'}</h3>
-        <button class="btn-icon-only" on:click={closeModal}>
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        {#if formError}
-          <div class="form-error">{formError}</div>
-        {/if}
-        <div class="form-group">
-          <label for="integration-name">Name *</label>
-          <input
-            id="integration-name"
-            type="text"
-            bind:value={formData.name}
-            placeholder="e.g., WHMCS Production"
-            required
-          />
-        </div>
-        <div class="form-group">
-          <label for="integration-type">Integration Type *</label>
-          <select id="integration-type" bind:value={formData.integration_type}>
-            {#each integrationTypes as type}
-              <option value={type.type}>{type.name}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="integration-description">Description</label>
-          <textarea
-            id="integration-description"
-            bind:value={formData.description}
-            placeholder="Optional description"
-            rows="3"
-          ></textarea>
-        </div>
-        <div class="form-group">
-          <label>
-            <input type="checkbox" bind:checked={formData.enabled} />
-            Enabled
-          </label>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-secondary" on:click={closeModal}>Cancel</button>
-        <button class="btn-primary" on:click={handleSubmit}>
-          {editingIntegration ? 'Update' : 'Create'}
-        </button>
-      </div>
-    </div>
-  </div>
+  <Modal
+    title={editingIntegration ? 'Edit Integration' : 'Add Integration'}
+    onClose={closeModal}
+  >
+    {#if formError}
+      <FormError>{formError}</FormError>
+    {/if}
+    <FormGroup label="Name *" forId="integration-name" required>
+      <input
+        id="integration-name"
+        type="text"
+        bind:value={formData.name}
+        placeholder="e.g., WHMCS Production"
+        required
+      />
+    </FormGroup>
+    <FormGroup label="Integration Type *" forId="integration-type">
+      <select id="integration-type" bind:value={formData.integration_type}>
+        {#each integrationTypes as type}
+          <option value={type.type}>{type.name}</option>
+        {/each}
+      </select>
+    </FormGroup>
+    <FormGroup label="Description" forId="integration-description">
+      <textarea
+        id="integration-description"
+        bind:value={formData.description}
+        placeholder="Optional description"
+        rows="3"
+      ></textarea>
+    </FormGroup>
+    <FormGroup>
+      <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+        <input type="checkbox" bind:checked={formData.enabled} />
+        Enabled
+      </label>
+    </FormGroup>
+    <svelte:fragment slot="footer">
+      <Button variant="secondary" on:click={closeModal}>Cancel</Button>
+      <Button variant="primary" on:click={handleSubmit}>
+        {editingIntegration ? 'Update' : 'Create'}
+      </Button>
+    </svelte:fragment>
+  </Modal>
 {/if}
 
 <style>
@@ -344,35 +365,6 @@
     color: var(--text-primary);
   }
 
-  .btn-primary {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 20px;
-    background: var(--accent-color);
-    color: white;
-    border: none;
-    border-radius: 8px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-  }
-
-  .btn-primary:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .btn-icon {
-    width: 18px;
-    height: 18px;
-  }
-
   .loading, .error, .empty-state {
     text-align: center;
     padding: 48px;
@@ -380,7 +372,7 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 
   .integrations-grid {
@@ -436,13 +428,13 @@
   }
 
   .status-active {
-    background: #d1fae5;
-    color: #065f46;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .status-inactive {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .integration-description {
@@ -508,7 +500,7 @@
   }
 
   .btn-icon-small:hover {
-    background: #e5e7eb;
+    background: var(--bg-tertiary);
     color: var(--text-primary);
   }
 
@@ -526,157 +518,4 @@
     border-color: var(--border-color);
   }
 
-  .btn-secondary {
-    padding: 8px 16px;
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-    border: none;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 14px;
-    cursor: pointer;
-    transition: background 0.2s ease;
-  }
-
-  .btn-secondary:hover:not(:disabled) {
-    background: var(--accent-color);
-  }
-
-  .btn-secondary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .btn-small {
-    padding: 6px 12px;
-    font-size: 12px;
-  }
-
-  .btn-icon-only {
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    padding: 6px;
-    cursor: pointer;
-    color: var(--text-primary);
-    border-radius: 6px;
-    transition: background 0.2s ease, color 0.2s ease;
-  }
-
-  .btn-icon-only:hover {
-    background: var(--bg-secondary);
-    border-color: var(--accent-color);
-    color: var(--accent-color);
-    transform: translateY(-1px);
-    color: var(--text-primary);
-  }
-
-  .btn-icon-only.btn-danger:hover {
-    background: var(--danger-color);
-    color: white;
-    border-color: var(--danger-color);
-  }
-
-  .btn-icon-only svg {
-    width: 18px;
-    height: 18px;
-  }
-
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal-content {
-    background: var(--bg-primary);
-    border-radius: 12px;
-    width: 90%;
-    max-width: 500px;
-    max-height: 90vh;
-    overflow-y: auto;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
-  }
-
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 20px 24px;
-    border-color: var(--border-color);
-  }
-
-  .modal-header h3 {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 600;
-  }
-
-  .modal-body {
-    padding: 24px;
-  }
-
-  .form-error {
-    background: #fee2e2;
-    color: #991b1b;
-    padding: 12px;
-    border-radius: 8px;
-    margin-bottom: 16px;
-  }
-
-  .form-group {
-    margin-bottom: 20px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 8px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .form-group input,
-  .form-group textarea,
-  .form-group select {
-    width: 100%;
-    padding: 10px 12px;
-    border-color: var(--border-color);
-    border-radius: 8px;
-    font-size: 14px;
-    transition: border-color 0.2s ease;
-  }
-
-  .form-group input[type="checkbox"] {
-    width: auto;
-    margin-right: 8px;
-  }
-
-  .form-group input:focus,
-  
-  .form-group textarea:focus,
-  
-  .form-group select:focus {
-  
-    outline: none;
-  
-    border-color: var(--accent-color);
-  
-    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
-  
-  }
-  
-
-  .modal-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 12px;
-    padding: 20px 24px;
-    border-color: var(--border-color);
-  }
 </style>

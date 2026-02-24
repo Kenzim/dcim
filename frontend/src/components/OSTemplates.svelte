@@ -164,7 +164,7 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 
   .header-actions {

@@ -1,6 +1,7 @@
 <script>
   import PageHeader from './PageHeader.svelte';
   import { getLocations, createLocation, updateLocation, deleteLocation } from '../lib/api.js';
+  import { navigate } from '../lib/router.js';
   import { onMount } from 'svelte';
 
   let locations = [];
@@ -107,10 +108,10 @@
   {:else}
     <div class="locations-grid">
       {#each locations as location}
-        <div class="location-card">
+        <div class="location-card" role="button" tabindex="0" on:click={() => navigate(`/admin/locations/${location.id}`)} on:keydown={(e) => e.key === 'Enter' && navigate(`/admin/locations/${location.id}`)}>
           <div class="location-header">
             <h3>{location.name}</h3>
-            <div class="location-actions">
+            <div class="location-actions" role="group" on:click|stopPropagation>
               <button class="btn-icon-only" on:click={() => openEditModal(location)} title="Edit">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -229,7 +230,7 @@
   }
 
   .error {
-    color: #ef4444;
+    color: var(--danger-color);
   }
 
   .locations-grid {
@@ -249,6 +250,10 @@
   .location-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  .location-card[role="button"] {
+    cursor: pointer;
   }
 
   .location-header {
@@ -316,7 +321,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--overlay-bg);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -409,7 +414,7 @@
   .form-group textarea:focus {
     outline: none;
     border-color: var(--accent-color);
-    box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.1);
+    box-shadow: var(--focus-ring-accent);
   }
 
   .modal-footer {
