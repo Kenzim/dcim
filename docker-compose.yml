@@ -1,0 +1,100 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    ports:
+      - "10.16.251.240:8000:8000"
+      - "192.168.10.171:8000:8000"
+    environment:
+      DATABASE_URL: mysql+pymysql://dcim:dcim@mysql:3306/dcim
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      STATIC_FILES_PATH: /app/static
+      # Initial admin (only created when no users exist)
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-admin}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      # Separate runner containers (optional; comment out to run in-app subprocesses)
+      DHCP_RUNNER_URL: http://dhcp-runner:9080
+      TFTP_RUNNER_URL: http://tftp-runner:9081
+      DHCP_CONFIG_FILE_PATH: /shared/dhcp/dhcpd.conf
+      DHCP_LEASE_FILE_PATH: /shared/dhcp/dhcpd.leases
+      TFTP_ROOT_DIRECTORY: /shared/tftp
+    volumes:
+      - dhcp_tftp_shared:/shared
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  dhcp-runner:
+    build:
+      context: dhcp_runner
+      dockerfile: Dockerfile
+    environment:
+      DHCP_CONFIG_PATH: /shared/dhcp/dhcpd.conf
+      DHCP_LEASE_PATH: /shared/dhcp/dhcpd.leases
+      DHCP_INTERFACES: ${DHCP_INTERFACES:-eth0}
+    volumes:
+      - dhcp_tftp_shared:/shared
+    ports:
+      - "10.16.251.240:9080:9080"
+      - "192.168.10.171:9080:9080"
+    restart: unless-stopped
+
+  tftp-runner:
+    build:
+      context: tftp_runner
+      dockerfile: Dockerfile
+    environment:
+      TFTP_ROOT: /shared/tftp
+      TFTP_BIND: 0.0.0.0:69
+    volumes:
+      - dhcp_tftp_shared:/shared
+    ports:
+      - "10.16.251.240:9081:9081"
+      - "192.168.10.171:9081:9081"
+      - "10.16.251.240:69:69/udp"
+      - "192.168.10.171:69:69/udp"
+    restart: unless-stopped
+
+  bandwidth-poller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: bandwidth-poller
+    environment:
+      DATABASE_URL: mysql+pymysql://dcim:dcim@mysql:3306/dcim
+      POLL_INTERVAL: "60"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mysql:
+    image: mariadb:11
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: dcim
+      MYSQL_USER: dcim
+      MYSQL_PASSWORD: dcim
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  dhcp_tftp_shared:

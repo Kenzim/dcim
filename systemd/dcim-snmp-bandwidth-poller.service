@@ -1,0 +1,15 @@
+[Unit]
+Description=DCIM SNMP bandwidth poller (stores port counters in DB)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/dcim
+EnvironmentFile=/root/dcim/.env
+ExecStart=/root/dcim/.venv/bin/python -m scripts.snmp_bandwidth_poller --interval 60
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
