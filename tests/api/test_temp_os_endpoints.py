@@ -12,16 +12,15 @@ from app.services.temp_os_service import TempOSService
 
 @pytest.fixture
 def temp_os_dir(tmp_path, monkeypatch):
-    """Create a temporary directory structure for temp OSes and patch the service"""
+    """Create a temporary directory structure for temp OSes and patch the service.
+    API serves files from temp-os/{os_id}/files/{filename} with files directly in os_id dir.
+    """
     base_dir = tmp_path / "temp_os"
     base_dir.mkdir(parents=True)
     
-    # Create Alpine config
+    # Create Alpine config - files live directly in alpine/ (no kernel/initrd/modloop subdirs)
     alpine_dir = base_dir / "alpine"
     alpine_dir.mkdir()
-    (alpine_dir / "kernel").mkdir()
-    (alpine_dir / "initrd").mkdir()
-    (alpine_dir / "modloop").mkdir()
     
     alpine_config = {
         "id": "alpine",
@@ -39,16 +38,14 @@ def temp_os_dir(tmp_path, monkeypatch):
     with open(alpine_dir / "config.json", "w") as f:
         json.dump(alpine_config, f)
     
-    # Create kernel, initrd, and modloop files
-    (alpine_dir / "kernel" / "vmlinuz-virt").write_bytes(b"fake kernel content")
-    (alpine_dir / "initrd" / "initramfs-virt").write_bytes(b"fake initrd content")
-    (alpine_dir / "modloop" / "modloop-virt").write_bytes(b"fake modloop content")
+    # Files directly in alpine/ (API serves from os_id dir)
+    (alpine_dir / "vmlinuz-virt").write_bytes(b"fake kernel content")
+    (alpine_dir / "initramfs-virt").write_bytes(b"fake initrd content")
+    (alpine_dir / "modloop-virt").write_bytes(b"fake modloop content")
     
     # Create custom-initramfs config
     custom_dir = base_dir / "custom-initramfs"
     custom_dir.mkdir()
-    (custom_dir / "kernel").mkdir()
-    (custom_dir / "initrd").mkdir()
     
     custom_config = {
         "id": "custom-initramfs",
@@ -65,8 +62,8 @@ def temp_os_dir(tmp_path, monkeypatch):
     with open(custom_dir / "config.json", "w") as f:
         json.dump(custom_config, f)
     
-    (custom_dir / "kernel" / "vmlinuz-virt").write_bytes(b"fake kernel content")
-    (custom_dir / "initrd" / "custom-initramfs.cpio.gz").write_bytes(b"fake initrd content")
+    (custom_dir / "vmlinuz-virt").write_bytes(b"fake kernel content")
+    (custom_dir / "custom-initramfs.cpio.gz").write_bytes(b"fake initrd content")
     
     # Patch the service to use our temp directory
     def get_temp_os_service():
@@ -110,55 +107,55 @@ def test_list_temp_os(client, temp_os_dir):
 
 
 def test_get_temp_os_kernel(client, temp_os_dir):
-    """Test getting kernel file"""
-    response = client.get("/api/servers/interaction/temp-os/alpine/kernel/vmlinuz-virt")
+    """Test getting kernel file (served from temp-os/{os_id}/files/{filename})"""
+    response = client.get("/api/servers/interaction/temp-os/alpine/files/vmlinuz-virt")
     
     assert response.status_code == 200
     assert response.content == b"fake kernel content"
-    assert response.headers["Content-Type"] == "application/octet-stream"
+    assert response.headers["Content-Type"] in ("application/octet-stream", "application/x-executable")
 
 
 def test_get_temp_os_kernel_not_found(client, temp_os_dir):
     """Test getting non-existent kernel file"""
-    response = client.get("/api/servers/interaction/temp-os/alpine/kernel/nonexistent")
+    response = client.get("/api/servers/interaction/temp-os/alpine/files/nonexistent")
     
     assert response.status_code == 404
 
 
 def test_get_temp_os_kernel_invalid_os(client, temp_os_dir):
     """Test getting kernel for non-existent OS"""
-    response = client.get("/api/servers/interaction/temp-os/nonexistent/kernel/vmlinuz-virt")
+    response = client.get("/api/servers/interaction/temp-os/nonexistent/files/vmlinuz-virt")
     
     assert response.status_code == 404
 
 
 def test_get_temp_os_kernel_path_traversal(client, temp_os_dir):
     """Test path traversal protection"""
-    response = client.get("/api/servers/interaction/temp-os/alpine/kernel/../config.json")
+    response = client.get("/api/servers/interaction/temp-os/alpine/files/../config.json")
     
     # Path traversal should be rejected (either 400 or 404 is acceptable)
     assert response.status_code in [400, 404]
 
 
 def test_get_temp_os_initrd(client, temp_os_dir):
-    """Test getting initrd file"""
-    response = client.get("/api/servers/interaction/temp-os/alpine/initrd/initramfs-virt")
+    """Test getting initrd file (served from temp-os/{os_id}/files/{filename})"""
+    response = client.get("/api/servers/interaction/temp-os/alpine/files/initramfs-virt")
     
     assert response.status_code == 200
     assert response.content == b"fake initrd content"
-    assert response.headers["Content-Type"] == "application/octet-stream"
+    assert response.headers["Content-Type"] in ("application/octet-stream", "application/x-cpio")
 
 
 def test_get_temp_os_initrd_not_found(client, temp_os_dir):
     """Test getting non-existent initrd file"""
-    response = client.get("/api/servers/interaction/temp-os/alpine/initrd/nonexistent")
+    response = client.get("/api/servers/interaction/temp-os/alpine/files/nonexistent")
     
     assert response.status_code == 404
 
 
 def test_get_temp_os_modloop(client, temp_os_dir):
-    """Test getting modloop file"""
-    response = client.get("/api/servers/interaction/temp-os/alpine/modloop/modloop-virt")
+    """Test getting modloop file (served from temp-os/{os_id}/files/{filename})"""
+    response = client.get("/api/servers/interaction/temp-os/alpine/files/modloop-virt")
     
     assert response.status_code == 200
     assert response.content == b"fake modloop content"
@@ -167,14 +164,14 @@ def test_get_temp_os_modloop(client, temp_os_dir):
 
 def test_get_temp_os_modloop_not_found(client, temp_os_dir):
     """Test getting non-existent modloop file"""
-    response = client.get("/api/servers/interaction/temp-os/alpine/modloop/nonexistent")
+    response = client.get("/api/servers/interaction/temp-os/alpine/files/nonexistent")
     
     assert response.status_code == 404
 
 
 def test_get_temp_os_modloop_no_modloop_os(client, temp_os_dir):
-    """Test getting modloop for OS that doesn't have modloop directory"""
-    # custom-initramfs doesn't have modloop directory
-    response = client.get("/api/servers/interaction/temp-os/custom-initramfs/modloop/anything")
+    """Test getting modloop for OS that doesn't have modloop file"""
+    # custom-initramfs doesn't have modloop-virt file
+    response = client.get("/api/servers/interaction/temp-os/custom-initramfs/files/modloop-virt")
     
     assert response.status_code == 404

@@ -12,25 +12,22 @@ def test_installation_logs_accepts_token(client, db_session, mock_redis, monkeyp
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
     # Create server and installation task
-    from app.dao import ServerDAO, InstallationTaskDAO, LocationDAO
-    from app.models.server import Server, BootMode
+    from app.dao import ServerDAO, InstallationTaskDAO
+    from app.models.server import BootMode
     from app.models.location import Location
-    from app.models.plugin import Plugin
     from app.models.boot_task import BootType
     
-    location = Location(name="Test Location", address="123 Test St")
+    location = Location(name="Test Location", description="123 Test St")
     db_session.add(location)
-    
-    plugin = Plugin(name="test_plugin", plugin_type="test")
-    db_session.add(plugin)
     db_session.commit()
+    db_session.refresh(location)
     
     server = ServerDAO.create(
         db_session,
         name="test_server",
         server_ip="192.168.1.100",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,
@@ -77,25 +74,22 @@ def test_installation_logs_rejects_invalid_token(client, db_session, mock_redis,
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
     # Create server and installation task
-    from app.dao import ServerDAO, InstallationTaskDAO, LocationDAO
-    from app.models.server import Server, BootMode
+    from app.dao import ServerDAO, InstallationTaskDAO
+    from app.models.server import BootMode
     from app.models.location import Location
-    from app.models.plugin import Plugin
     from app.models.boot_task import BootType
     
-    location = Location(name="Test Location", address="123 Test St")
+    location = Location(name="Test Location", description="123 Test St")
     db_session.add(location)
-    
-    plugin = Plugin(name="test_plugin", plugin_type="test")
-    db_session.add(plugin)
     db_session.commit()
+    db_session.refresh(location)
     
     server = ServerDAO.create(
         db_session,
         name="test_server2",
         server_ip="192.168.1.101",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,
@@ -136,25 +130,22 @@ def test_installation_logs_works_without_token(client, db_session, mock_redis, m
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
     # Create server and installation task
-    from app.dao import ServerDAO, InstallationTaskDAO, LocationDAO
-    from app.models.server import Server, BootMode
+    from app.dao import ServerDAO, InstallationTaskDAO
+    from app.models.server import BootMode
     from app.models.location import Location
-    from app.models.plugin import Plugin
     from app.models.boot_task import BootType
     
-    location = Location(name="Test Location", address="123 Test St")
+    location = Location(name="Test Location", description="123 Test St")
     db_session.add(location)
-    
-    plugin = Plugin(name="test_plugin", plugin_type="test")
-    db_session.add(plugin)
     db_session.commit()
+    db_session.refresh(location)
     
     server = ServerDAO.create(
         db_session,
         name="test_server3",
         server_ip="192.168.1.102",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,
@@ -195,25 +186,22 @@ def test_installation_logs_validates_boot_task_match(client, db_session, mock_re
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
     # Create two servers with different boot tasks
-    from app.dao import ServerDAO, InstallationTaskDAO, LocationDAO
-    from app.models.server import Server, BootMode
+    from app.dao import ServerDAO, InstallationTaskDAO
+    from app.models.server import BootMode
     from app.models.location import Location
-    from app.models.plugin import Plugin
     from app.models.boot_task import BootType
     
-    location = Location(name="Test Location", address="123 Test St")
+    location = Location(name="Test Location", description="123 Test St")
     db_session.add(location)
-    
-    plugin = Plugin(name="test_plugin", plugin_type="test")
-    db_session.add(plugin)
     db_session.commit()
+    db_session.refresh(location)
     
     server1 = ServerDAO.create(
         db_session,
         name="test_server4",
         server_ip="192.168.1.103",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,
@@ -225,7 +213,7 @@ def test_installation_logs_validates_boot_task_match(client, db_session, mock_re
         name="test_server5",
         server_ip="192.168.1.104",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,

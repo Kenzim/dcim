@@ -1,6 +1,14 @@
 """
 Pytest configuration and shared fixtures
 """
+import os
+
+# Use SQLite for tests - must be set before app imports so migrations use it
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+# Disable initial admin creation so test fixtures can create users without conflicts
+os.environ["INITIAL_ADMIN_USERNAME"] = ""
+os.environ["INITIAL_ADMIN_PASSWORD"] = ""
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -175,6 +183,16 @@ def db_session():
 @pytest.fixture(scope="function")
 def client(db_session, mock_redis, monkeypatch):
     """Create a test client with database and Redis overrides"""
+    # Skip migrations - we use create_all in db_session. Migrations use MySQL syntax that fails on SQLite.
+    def noop_migrations():
+        pass
+    monkeypatch.setattr("app.main._run_migrations", noop_migrations)
+
+    # Make app use our test engine so lifespan (seed_categories, etc.) sees the same DB with tables
+    import app.core.database as db_module
+    monkeypatch.setattr(db_module, "engine", engine)
+    monkeypatch.setattr(db_module, "SessionLocal", TestingSessionLocal)
+
     def override_get_db():
         try:
             yield db_session
@@ -186,20 +204,22 @@ def client(db_session, mock_redis, monkeypatch):
     import app.api.user as user_api
     import app.core.auth as auth_module
     import app.services.download_token_service as token_service_module
-    
+
     monkeypatch.setattr(redis_module, "redis_client", mock_redis)
     monkeypatch.setattr(user_api, "redis_client", mock_redis)
     monkeypatch.setattr(auth_module, "redis_client", mock_redis)
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
-    
+
     app.dependency_overrides[get_db] = override_get_db
-    
+
     with TestClient(app) as test_client:
         yield test_client
     
     app.dependency_overrides.clear()
-    # Clear mock Redis storage
-    mock_redis._storage.clear()
+    # Clear mock Redis storage between tests
+    mock_redis._hashes.clear()
+    mock_redis._zsets.clear()
+    mock_redis._ttls.clear()
 
 
 @pytest.fixture

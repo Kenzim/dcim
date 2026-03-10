@@ -34,12 +34,15 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
 
-# Alembic
-alembic.ini
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
 # OS
 .DS_Store
@@ -48,20 +51,33 @@ Thumbs.db
 # Logs
 *.log
 
-# ISO image files
+# Temporary / download artifacts
+output.txt
+output*.txt
+*.zip
+*.sfs
+
+# ISO and Windows installer images
 *.iso
 isos/*.iso
+*.wim
+*.esd
+*.vhd
+*.vhdx
 
 dhcpd.leases
-ipmi.py
 dhcpd.pid
 *.pid
 
+# Uploaded assets (asset manager)
+uploads/
 
-disk_images/**/*
-!disk_images/**/.gitkeep
-# Disk images
-# Ignore everything in disk_images except README files
+# Runtime / generated config (machine-specific)
+dhcp_config.json
+tftp_config.json
+dhcpd.conf
+
+# Disk images (ignore contents except .gitkeep and README)
 disk_images/**/*
 !disk_images/**/.gitkeep
 !disk_images/**/README.md
@@ -74,7 +90,6 @@ initrd*
 initramfs*
 *.cpio.gz
 *.modloop
-*.iso
 
 # Temporary OS files (keep config.json, ignore binaries)
 tftp/pxe/temp_os/**/*.squashfs

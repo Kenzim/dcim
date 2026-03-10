@@ -37,24 +37,21 @@ def test_boot_task_contains_token(client, db_session, mock_redis, admin_token, m
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
     # Create server and location
-    from app.dao import ServerDAO, LocationDAO
-    from app.models.server import Server, BootMode
+    from app.dao import ServerDAO
+    from app.models.server import BootMode
     from app.models.location import Location
-    from app.models.plugin import Plugin
     
-    location = Location(name="Test Location", address="123 Test St")
+    location = Location(name="Test Location", description="123 Test St")
     db_session.add(location)
-    
-    plugin = Plugin(name="test_plugin", plugin_type="test")
-    db_session.add(plugin)
     db_session.commit()
+    db_session.refresh(location)
     
     server = ServerDAO.create(
         db_session,
         name="test_server",
         server_ip="192.168.1.100",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,
@@ -95,24 +92,21 @@ def test_boot_task_token_generation(client, db_session, mock_redis, admin_token,
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
     # Create server
-    from app.dao import ServerDAO, LocationDAO
-    from app.models.server import Server, BootMode
+    from app.dao import ServerDAO
+    from app.models.server import BootMode
     from app.models.location import Location
-    from app.models.plugin import Plugin
     
-    location = Location(name="Test Location", address="123 Test St")
+    location = Location(name="Test Location", description="123 Test St")
     db_session.add(location)
-    
-    plugin = Plugin(name="test_plugin", plugin_type="test")
-    db_session.add(plugin)
     db_session.commit()
+    db_session.refresh(location)
     
     server = ServerDAO.create(
         db_session,
         name="test_server2",
         server_ip="192.168.1.101",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,
@@ -152,24 +146,21 @@ def test_boot_task_disk_image_url_contains_token(client, db_session, mock_redis,
     # For now, we'll test the concept
     
     # Create server
-    from app.dao import ServerDAO, LocationDAO
-    from app.models.server import Server, BootMode
+    from app.dao import ServerDAO
+    from app.models.server import BootMode
     from app.models.location import Location
-    from app.models.plugin import Plugin
     
-    location = Location(name="Test Location", address="123 Test St")
+    location = Location(name="Test Location", description="123 Test St")
     db_session.add(location)
-    
-    plugin = Plugin(name="test_plugin", plugin_type="test")
-    db_session.add(plugin)
     db_session.commit()
+    db_session.refresh(location)
     
     server = ServerDAO.create(
         db_session,
         name="test_server3",
         server_ip="192.168.1.102",
         location_id=location.id,
-        plugin_id=plugin.id,
+        plugin_name="ipmi",
         plugin_config={},
         boot_mode=BootMode.UEFI,
         pxe_boot_mode=BootMode.UEFI,
@@ -192,5 +183,5 @@ def test_boot_task_disk_image_url_contains_token(client, db_session, mock_redis,
         headers=headers
     )
     
-    # Should create boot task successfully
-    assert response.status_code in [201, 400, 500]  # 400/500 if template setup needed
+    # Should create boot task successfully (201 Created or 200 OK depending on API)
+    assert response.status_code in [200, 201, 400, 500]  # 400/500 if template setup needed

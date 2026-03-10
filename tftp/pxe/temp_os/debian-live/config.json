@@ -5,7 +5,7 @@
   "kernel_file": "vmlinuz",
   "initrd_file": "initrd.img",
   "squashfs_file": "filesystem.squashfs",
-  "kernel_params": "boot=live ip=dhcp net.ifnames=0 biosdevname=0 console=tty0 console=ttyS0,115200 live-config.username=root systemd.getty_autologin=root",
+  "kernel_params": "boot=live ip=dhcp net.ifnames=0 biosdevname=0 console=tty0 live-config.username=root systemd.getty_autologin=root",
   "version": "12",
   "flavor": "bookworm"
 }

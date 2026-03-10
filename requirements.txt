@@ -12,4 +12,6 @@ pytest-asyncio
 pytest-cov
 httpx
 python-ipmi
+pysnmp
+cryptography
 

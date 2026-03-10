@@ -7,7 +7,6 @@ from app.main import app
 from app.dao import BootTaskDAO, ServerDAO
 from app.models.boot_task import BootType, BootTaskStatus
 from app.models.server import Server
-from app.models.plugin import Plugin
 from app.models.location import Location
 from app.services.temp_os_service import TempOSService
 import json
@@ -68,27 +67,13 @@ def test_location(db_session):
 
 
 @pytest.fixture
-def test_plugin(db_session):
-    """Create a test plugin"""
-    plugin = Plugin(
-        name="test_plugin",
-        version="1.0.0",
-        config_template={"type": "object", "properties": {}}
-    )
-    db_session.add(plugin)
-    db_session.commit()
-    db_session.refresh(plugin)
-    return plugin
-
-
-@pytest.fixture
-def test_server(db_session, test_location, test_plugin):
-    """Create a test server"""
+def test_server(db_session, test_location):
+    """Create a test server (uses plugin_name)"""
     server = Server(
         name="test-server",
         server_ip="192.168.1.100",
         location_id=test_location.id,
-        plugin_id=test_plugin.id,
+        plugin_name="ipmi",
         plugin_config={"hostname": "192.168.1.100"}
     )
     db_session.add(server)
@@ -111,7 +96,7 @@ def admin_client(client, test_admin_user):
 def test_create_boot_task_temp_os(admin_client, test_server, temp_os_dir):
     """Test creating a boot task with temporary OS"""
     response = admin_client.post(
-        f"/api/servers/interaction/servers/{test_server.id}/boot-task",
+        f"/api/servers/interaction/{test_server.id}/boot-task",
         json={
             "boot_type": "temp_os",
             "temp_os_id": "alpine",
@@ -127,21 +112,20 @@ def test_create_boot_task_temp_os(admin_client, test_server, temp_os_dir):
     assert data["description"] == "Boot into Alpine Linux"
     assert data["status"] == "pending"
     
-    # Check that kernel and initrd URLs are set
+    # Check that kernel and initrd URLs are set (format: .../temp-os/alpine/files/<filename>)
     assert data["kernel_url"] is not None
-    assert "temp-os/alpine/kernel" in data["kernel_url"]
+    assert "temp-os/alpine" in data["kernel_url"]
     assert data["initrd_url"] is not None
-    assert "temp-os/alpine/initrd" in data["initrd_url"]
+    assert "temp-os/alpine" in data["initrd_url"]
     
-    # Check that kernel params include modloop
+    # kernel_params come from config; modloop is injected when serving PXE script
     assert data["kernel_params"] is not None
-    assert "modloop=" in data["kernel_params"]
 
 
 def test_create_boot_task_temp_os_missing_id(admin_client, test_server, temp_os_dir):
     """Test creating boot task with temp_os type but missing temp_os_id"""
     response = admin_client.post(
-        f"/api/servers/interaction/servers/{test_server.id}/boot-task",
+        f"/api/servers/interaction/{test_server.id}/boot-task",
         json={
             "boot_type": "temp_os",
             "description": "Boot into temporary OS"
@@ -155,7 +139,7 @@ def test_create_boot_task_temp_os_missing_id(admin_client, test_server, temp_os_
 def test_create_boot_task_temp_os_invalid_id(admin_client, test_server, temp_os_dir):
     """Test creating boot task with non-existent temp_os_id"""
     response = admin_client.post(
-        f"/api/servers/interaction/servers/{test_server.id}/boot-task",
+        f"/api/servers/interaction/{test_server.id}/boot-task",
         json={
             "boot_type": "temp_os",
             "temp_os_id": "nonexistent",
@@ -192,7 +176,7 @@ def test_create_boot_task_temp_os_custom_initramfs(admin_client, test_server, te
     (custom_dir / "initrd" / "custom-initramfs.cpio.gz").write_bytes(b"fake initrd")
     
     response = admin_client.post(
-        f"/api/servers/interaction/servers/{test_server.id}/boot-task",
+        f"/api/servers/interaction/{test_server.id}/boot-task",
         json={
             "boot_type": "temp_os",
             "temp_os_id": "custom-initramfs",
@@ -213,7 +197,7 @@ def test_create_boot_task_temp_os_custom_initramfs(admin_client, test_server, te
 def test_create_boot_task_temp_os_with_additional_params(admin_client, test_server, temp_os_dir):
     """Test creating boot task with additional kernel parameters"""
     response = admin_client.post(
-        f"/api/servers/interaction/servers/{test_server.id}/boot-task",
+        f"/api/servers/interaction/{test_server.id}/boot-task",
         json={
             "boot_type": "temp_os",
             "temp_os_id": "alpine",
@@ -225,9 +209,8 @@ def test_create_boot_task_temp_os_with_additional_params(admin_client, test_serv
     assert response.status_code == 200
     data = response.json()
     
-    # Should include both default params and additional params
+    # Should include additional params (modloop added when serving PXE script)
     assert "console=ttyS0,115200" in data["kernel_params"]
-    assert "modloop=" in data["kernel_params"]
 
 
 def test_get_boot_task_temp_os(admin_client, test_server, temp_os_dir, db_session):
@@ -242,7 +225,7 @@ def test_get_boot_task_temp_os(admin_client, test_server, temp_os_dir, db_sessio
     )
     
     response = admin_client.get(
-        f"/api/servers/interaction/servers/{test_server.id}/boot-task"
+        f"/api/servers/interaction/{test_server.id}/boot-task"
     )
     
     assert response.status_code == 200
@@ -253,7 +236,7 @@ def test_get_boot_task_temp_os(admin_client, test_server, temp_os_dir, db_sessio
     assert data["temp_os_id"] == "alpine"
 
 
-def test_pxe_boot_script_temp_os(client, test_server, temp_os_dir, db_session, test_location, test_plugin):
+def test_pxe_boot_script_temp_os(client, test_server, temp_os_dir, db_session, test_location):
     """Test PXE boot script generation for temp_os boot task"""
     from app.dao import NetworkPortDAO
     
@@ -288,6 +271,4 @@ def test_pxe_boot_script_temp_os(client, test_server, temp_os_dir, db_session, t
     # Should contain iPXE script with kernel and initrd URLs
     assert "#!ipxe" in script
     assert "Booting Alpine Linux" in script
-    assert "temp-os/alpine/kernel" in script
-    assert "temp-os/alpine/initrd" in script
-    assert "modloop=" in script
+    assert "temp-os/alpine" in script

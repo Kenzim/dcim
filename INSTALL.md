@@ -1,11 +1,9 @@
-# DCIM Installation Guide
+# Rackflow Installation Guide
 
 ## System Requirements
 
-- Linux system with systemd
 - Python 3.11+
 - MySQL/MariaDB database
-- Root or sudo access for service installation
 
 ## Installation Steps
 
@@ -28,27 +26,7 @@ Edit `app/core/config.py` or set environment variables for database connection.
 alembic upgrade head
 ```
 
-### 4. Install Systemd Services
-
-The DHCP and TFTP services need to be installed as systemd services:
-
-```bash
-sudo ./scripts/install_services.sh
-```
-
-This will:
-- Create `/etc/systemd/system/dcim-dhcpd.service`
-- Create `/etc/systemd/system/dcim-tftpd.service`
-- Reload systemd daemon
-
-### 5. (Optional) Enable Services to Start on Boot
-
-```bash
-sudo systemctl enable dcim-dhcpd.service
-sudo systemctl enable dcim-tftpd.service
-```
-
-### 6. Start the Application
+### 4. Start the Application
 
 ```bash
 source .venv/bin/activate
@@ -59,33 +37,84 @@ Or use a process manager like systemd, supervisor, or PM2.
 
 ## Service Management
 
-### Start/Stop Services via GUI
+DHCP and TFTP are controlled from the web UI (Services tab). The app runs them as subprocesses, or calls a remote runner container API when `DHCP_TFTP_SERVICE_URL` is set (see Docker).
 
-The web interface provides controls to start, stop, and restart DHCP and TFTP services.
+## Docker
 
-### Start/Stop Services via Command Line
+The app can run as Docker containers: the main FastAPI app (with static frontend) and the SNMP bandwidth poller as separate services, with MySQL and Redis.
+
+### Build and run with Docker Compose
 
 ```bash
-# DHCP
-sudo systemctl start dcim-dhcpd.service
-sudo systemctl stop dcim-dhcpd.service
-sudo systemctl restart dcim-dhcpd.service
-sudo systemctl status dcim-dhcpd.service
-
-# TFTP
-sudo systemctl start dcim-tftpd.service
-sudo systemctl stop dcim-tftpd.service
-sudo systemctl restart dcim-tftpd.service
-sudo systemctl status dcim-tftpd.service
+docker compose up -d --build
 ```
+
+This starts:
+
+- **app** – FastAPI on port 8000 (frontend is built and served from `/app/static`)
+- **bandwidth-poller** – SNMP poller (same DB, poll interval 60s)
+- **dhcp-runner** – optional container that runs `dhcpd`; app calls its API (port 9080) to start/stop/restart.
+- **tftp-runner** – optional container that runs `in.tftpd`; app calls its API (port 9081), TFTP on 69/udp. Config is shared via volume `/shared`.
+- **mysql** – MariaDB 11 (database `dcim`, user `dcim`/`dcim`)
+- **redis** – Redis 7
+
+When `DHCP_RUNNER_URL` and `TFTP_RUNNER_URL` are set, the UI’s DHCP/TFTP controls talk to those containers. The app writes `dhcpd.conf` and TFTP files to the shared volume; the runners read them. For DHCP to serve a real LAN you may need `network_mode: host` and `DHCP_INTERFACES` set (e.g. `eth0`).
+
+### First run: migrations and initial admin
+
+Migrations run automatically on app startup. To create an initial admin user when the database has no users, set:
+
+- `INITIAL_ADMIN_USERNAME` – admin username (e.g. `admin`)
+- `INITIAL_ADMIN_PASSWORD` – admin password (required; do not leave empty)
+- `INITIAL_ADMIN_EMAIL` – optional (defaults to `{username}@localhost`)
+
+Example:
+
+```bash
+export INITIAL_ADMIN_USERNAME=admin
+export INITIAL_ADMIN_PASSWORD=your-secure-password
+docker compose up -d --build
+```
+
+Or in `docker-compose.yml` under `app.environment`, or via a `.env` file in the project root.
+
+### Overriding configuration
+
+Set `DATABASE_URL`, `REDIS_HOST`, etc. in the environment or via a `.env` file in the project root. Example for custom DB credentials:
+
+```bash
+# .env (do not commit real credentials)
+DATABASE_URL=mysql+pymysql://user:pass@mysql:3306/dcim
+REDIS_HOST=redis
+```
+
+Then in `docker-compose.yml` under `app` and `bandwidth-poller` you can use `env_file: .env` or pass variables in the `environment` section.
+
+### Building images only
+
+- Main app (default): `docker build -t dcim-app .`
+- Bandwidth poller only: `docker build --target bandwidth-poller -t dcim-bandwidth-poller .`
 
 ## Service Configuration
 
-Service configurations are stored in:
-- `/root/dcim/dhcp_config.json` - DHCP server configuration
-- `/root/dcim/tftp_config.json` - TFTP server configuration
+DHCP and TFTP configuration is stored in the **database** and managed via the web UI (Services tab). No JSON config files are used. After saving configuration, the generated config files (e.g. `dhcpd.conf`) are written to the shared volume and the runner services are started or restarted automatically when using the Docker setup.
 
-These can be edited via the web interface (Services tab) or manually. After changing configuration, the service files will be automatically regenerated when you start/restart the services through the GUI.
+## SNMP bandwidth poller (optional)
+
+A separate app polls SNMP port counters (IF-MIB) from switches that use a monitoring-capable plugin (e.g. SNMPv3) and stores samples in the database for bandwidth history.
+
+- **One-shot (e.g. cron):** `python3 -m scripts.snmp_bandwidth_poller --once`
+- **Long-lived (default 60s interval):** `python3 -m scripts.snmp_bandwidth_poller --interval 60`
+- **Environment:** Uses the same `DATABASE_URL` as the main app. Optional `POLL_INTERVAL` (seconds).
+
+To run as a systemd service, copy the unit and enable it (adjust paths if needed):
+
+```bash
+sudo cp systemd/dcim-snmp-bandwidth-poller.service /etc/systemd/system/
+# Edit /etc/systemd/system/dcim-snmp-bandwidth-poller.service to set WorkingDirectory and EnvironmentFile
+sudo systemctl daemon-reload
+sudo systemctl enable --now dcim-snmp-bandwidth-poller.service
+```
 
 ## Notes
 
