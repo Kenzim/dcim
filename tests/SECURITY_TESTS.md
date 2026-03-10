@@ -1,6 +1,6 @@
 # Security Tests Documentation
 
-This document describes the security test suite added to verify the security improvements implemented in the DCIM application.
+This document describes the security test suite added to verify the security improvements implemented in the Rackflow application.
 
 ## Test Files Created
 

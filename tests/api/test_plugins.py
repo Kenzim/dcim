@@ -1,39 +1,9 @@
 """
-Tests for plugin API endpoints
+Tests for plugin API endpoints.
+
+Plugins are loaded from disk (registry), not stored in the database.
 """
 import pytest
-from app.dao import PluginDAO, CategoryDAO
-from app.models.plugin import Plugin
-from app.models.category import Category
-
-
-@pytest.fixture
-def test_category(db_session):
-    """Create a test category"""
-    category = Category(
-        name="power_control",
-        display_name="Power Control",
-        description="Test category"
-    )
-    db_session.add(category)
-    db_session.commit()
-    db_session.refresh(category)
-    return category
-
-
-@pytest.fixture
-def test_plugin(db_session, test_category):
-    """Create a test plugin"""
-    plugin = Plugin(
-        name="test_plugin",
-        version="1.0.0",
-        config_template={"type": "object", "properties": {}}
-    )
-    plugin.categories.append(test_category)
-    db_session.add(plugin)
-    db_session.commit()
-    db_session.refresh(plugin)
-    return plugin
 
 
 def test_list_plugins_requires_admin(client, test_user, mock_redis):
@@ -55,7 +25,7 @@ def test_list_plugins_requires_admin(client, test_user, mock_redis):
     assert "Admin access required" in response.json()["detail"]
 
 
-def test_list_plugins_with_admin(client, test_admin_user, mock_redis, db_session, test_plugin):
+def test_list_plugins_with_admin(client, test_admin_user, mock_redis):
     """Test that admin can list plugins"""
     # Login as admin user
     login_response = client.post(
@@ -121,13 +91,14 @@ def test_sync_plugins_with_admin(client, test_admin_user, mock_redis, db_session
     assert login_response.status_code == 200
     token = login_response.json()["token"]
     
-    # Sync plugins - should succeed
+    # Sync plugins - no-op, returns 200 with message
     response = client.post(
         "/api/plugins/sync",
         headers={"Authorization": f"Bearer {token}"}
     )
-    # Should succeed (may return empty results if no plugins found)
-    assert response.status_code in [200, 500]  # 500 if no plugins to sync
+    assert response.status_code == 200
+    data = response.json()
+    assert "message" in data
 
 
 def test_get_plugin_details_with_admin(client, test_admin_user, mock_redis):

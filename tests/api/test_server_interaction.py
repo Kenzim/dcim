@@ -5,7 +5,6 @@ import pytest
 from app.dao import NetworkPortDAO, ServerDAO
 from app.models.network_port import NetworkPort
 from app.models.server import Server
-from app.models.plugin import Plugin
 from app.models.location import Location
 
 
@@ -20,27 +19,13 @@ def test_location(db_session):
 
 
 @pytest.fixture
-def test_plugin(db_session):
-    """Create a test plugin"""
-    plugin = Plugin(
-        name="test_plugin",
-        version="1.0.0",
-        config_template={"type": "object", "properties": {}}
-    )
-    db_session.add(plugin)
-    db_session.commit()
-    db_session.refresh(plugin)
-    return plugin
-
-
-@pytest.fixture
-def test_server(db_session, test_location, test_plugin):
-    """Create a test server"""
+def test_server(db_session, test_location):
+    """Create a test server (uses plugin_name)"""
     server = Server(
         name="test-server",
         server_ip="192.168.1.100",
         location_id=test_location.id,
-        plugin_id=test_plugin.id,
+        plugin_name="ipmi",
         plugin_config={"hostname": "192.168.1.100"}
     )
     db_session.add(server)

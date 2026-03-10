@@ -10,6 +10,25 @@ set -o pipefail  # Make pipes fail if any command in the pipeline fails
 LOG_FILE="/tmp/dcim-installation.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+# Report installation status to DCIM API (success or failure)
+DCIM_STATUS_REPORTED=0
+report_installation_status() {
+    local status="$1"
+    local error_msg="${2:-}"
+    [ -n "${INSTALLATION_TASK_ID:-}" ] || return 0
+    [ -n "${SERVER_ID:-}" ] || return 0
+    [ -n "${API_BASE:-}" ] || return 0
+    local url="${API_BASE}/api/servers/${SERVER_ID}/installation-tasks/${INSTALLATION_TASK_ID}/logs"
+    local payload
+    if [ "$status" = "failed" ] && [ -n "$error_msg" ]; then
+        payload=$(printf '{"logs":"","status":"failed","error_message":"%s"}' "$(echo "$error_msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g')")
+    else
+        payload=$(printf '{"logs":"","status":"%s"}' "$status")
+    fi
+    curl -X POST "$url" -H "Content-Type: application/json" -d "$payload" -f -s >/dev/null 2>&1 || true
+}
+trap 'e=$?; if [ "$DCIM_STATUS_REPORTED" = 0 ] && [ "$e" -ne 0 ]; then report_installation_status failed "Installation script failed"; fi' EXIT
+
 echo "=== Windows Server 2022 Installation ==="
 echo "Server IP: ${SERVER_IP}"
 echo "Server MAC: ${SERVER_MAC}"
@@ -224,6 +243,10 @@ if ! command -v parted >/dev/null 2>&1; then
     MISSING_TOOLS+=("parted")
 fi
 
+if ! command -v mkfs.ntfs >/dev/null 2>&1; then
+    MISSING_TOOLS+=("ntfs-3g")
+fi
+
 if [ "$BOOT_MODE" = "bios" ]; then
     if ! command -v ms-sys >/dev/null 2>&1; then
         MISSING_TOOLS+=("ms-sys")
@@ -392,6 +415,34 @@ fi
 sync
 echo ""
 
+# Format all extra disks (non-OS disks) as NTFS
+EXTRA_DISKS=()
+for disk in "${AVAILABLE_DISKS[@]}"; do
+    [ "$disk" = "$TARGET_DISK" ] && continue
+    EXTRA_DISKS+=("$disk")
+done
+
+if [ ${#EXTRA_DISKS[@]} -gt 0 ]; then
+    echo "=========================================="
+    echo "Formatting ${#EXTRA_DISKS[@]} extra disk(s) as NTFS"
+    echo "=========================================="
+    for disk in "${EXTRA_DISKS[@]}"; do
+        echo "Formatting $disk as NTFS..."
+        if command -v blkdiscard >/dev/null 2>&1; then
+            blkdiscard -f "$disk" 2>/dev/null || true
+        else
+            dd if=/dev/zero of="$disk" bs=4M count=100 2>/dev/null || true
+            sync
+        fi
+        parted -s "$disk" mklabel gpt
+        parted -s "$disk" mkpart primary ntfs 1MiB 100%
+        EXTRA_PART=$(partpath "$disk" 1)
+        mkfs.ntfs -f -L "Data" "$EXTRA_PART"
+        echo "✓ $disk formatted (partition $EXTRA_PART)"
+    done
+    echo ""
+fi
+
 # Write password file (mount Windows partition temporarily)
 echo "Writing password configuration file..."
 WINDOWS_MOUNT="/mnt/windows"
@@ -435,9 +486,10 @@ echo "Boot mode: $BOOT_MODE"
 echo "Password written to disk (Windows will read it on first boot)"
 echo ""
 
-# Upload logs to DCIM API if INSTALLATION_TASK_ID is set
+# Upload logs and report success to DCIM API if INSTALLATION_TASK_ID is set
 if [ -n "${INSTALLATION_TASK_ID:-}" ] && [ -n "${SERVER_ID:-}" ]; then
-    echo "Uploading installation logs..."
+    DCIM_STATUS_REPORTED=1
+    echo "Uploading installation logs and reporting success..."
     
     # Read log file content
     if [ -f "$LOG_FILE" ]; then
