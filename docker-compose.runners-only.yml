@@ -1,41 +1,30 @@
 # Deploy DHCP and TFTP runners at a remote datacenter location.
-# The central DCIM backend connects to these runners via base_url + API key.
-# Set API_KEY on each runner for authentication. Example:
-#   API_KEY=your-secret-key
-#   docker compose -f docker-compose.runners-only.yml up -d
-#
-# Expose ports 9080 (DHCP) and 9081 (TFTP) for the control API.
-# Expose 69/udp for TFTP traffic.
+# The central DCIM backend connects to these runners via base_url.
+# Uses host networking like docker-compose.registry.yml. Example:
+#   docker compose -f docker-compose.runners-only.yml up -d --build
 services:
   dhcp-runner:
     build:
       context: dhcp_runner
       dockerfile: Dockerfile
+    network_mode: host
     environment:
       DHCP_CONFIG_PATH: /shared/dhcp/dhcpd.conf
       DHCP_LEASE_PATH: /shared/dhcp/dhcpd.leases
       DHCP_INTERFACES: ${DHCP_INTERFACES:-eth0}
-      API_KEY: ${API_KEY:-}
     volumes:
-      - dhcp_tftp_shared:/shared
-    ports:
-      - "9080:9080"
+      - dhcp_shared:/shared
     restart: unless-stopped
 
   tftp-runner:
     build:
-      context: tftp_runner
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: tftp_runner/Dockerfile
+    network_mode: host
     environment:
       TFTP_ROOT: /shared/tftp
       TFTP_BIND: 0.0.0.0:69
-      API_KEY: ${API_KEY:-}
-    volumes:
-      - dhcp_tftp_shared:/shared
-    ports:
-      - "9081:9081"
-      - "69:69/udp"
     restart: unless-stopped
 
 volumes:
-  dhcp_tftp_shared:
+  dhcp_shared:
