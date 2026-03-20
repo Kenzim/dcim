@@ -1,0 +1,45 @@
+{
+  "id": "ubuntu-cloud-image",
+  "name": "Ubuntu Cloud Image (HTTP cloud-init)",
+  "description": "Deploy an Ubuntu cloud image to bare metal and configure cloud-init to fetch its final configuration from this Rackflow backend over HTTP.",
+  "os_type": "linux",
+  "script": "install.sh",
+  "parameters": {
+    "ubuntu_release": {
+      "type": "select",
+      "label": "Ubuntu release",
+      "required": true,
+      "default": "jammy",
+      "options": ["jammy", "noble"],
+      "help": "Which Ubuntu LTS cloud image to deploy (server cloudimg, amd64)."
+    },
+    "username": {
+      "type": "text",
+      "label": "Default username",
+      "required": true,
+      "default": "rackflow",
+      "help": "Primary SSH user to create via cloud-init."
+    },
+    "password": {
+      "type": "password",
+      "label": "Default user password",
+      "required": true,
+      "help": "Password for the default user. You can generate a strong password from the UI.",
+      "generate": {
+        "enabled": true,
+        "length": 20,
+        "charset": "alphanumeric_symbols",
+        "exclude_ambiguous": true
+      }
+    },
+    "ssh_public_key": {
+      "type": "text",
+      "label": "SSH public key (optional)",
+      "required": false,
+      "default": "",
+      "help": "Optional SSH public key to authorize for the default user."
+    }
+  },
+  "user_reinstallable": false
+}
+

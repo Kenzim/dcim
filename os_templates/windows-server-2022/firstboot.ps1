@@ -78,7 +78,7 @@ Write-Host ""
 # 2. Force all adapters to DHCP
 # --------------------------------
 
-Write-Host "[2/5] Configuring network adapters for DHCP..." -ForegroundColor Yellow
+Write-Host "[2/6] Configuring network adapters for DHCP..." -ForegroundColor Yellow
 
 $adapters = Get-NetAdapter | Where-Object { $_.Status -ne "Disabled" }
 
@@ -102,10 +102,35 @@ if ($adapters) {
 Write-Host ""
 
 # --------------------------------
-# 3. Enable RDP
+# 3. Configure NTP (Cloudflare) and force sync
 # --------------------------------
 
-Write-Host "[3/5] Enabling Remote Desktop (RDP)..." -ForegroundColor Yellow
+Write-Host "[3/6] Configuring Windows Time (Cloudflare NTP)..." -ForegroundColor Yellow
+
+try {
+    $ntpPeers = "time.cloudflare.com,0x8 1.1.1.1,0x8 1.0.0.1,0x8"
+    Write-Host "  Setting NTP peers: $ntpPeers" -ForegroundColor Gray
+
+    w32tm /config /syncfromflags:manual /manualpeerlist:"$ntpPeers" /update | Out-Null
+    Write-Host "  Windows Time config updated" -ForegroundColor Green
+
+    Set-Service -Name W32Time -StartupType Automatic -ErrorAction Stop
+    Restart-Service -Name W32Time -Force -ErrorAction Stop
+    Write-Host "  Windows Time service restarted" -ForegroundColor Green
+
+    w32tm /resync /force | Out-Null
+    Write-Host "  [SUCCESS] Time sync forced successfully" -ForegroundColor Green
+} catch {
+    Write-Warning "  [FAILED] Failed to configure/sync NTP: $_"
+}
+
+Write-Host ""
+
+# --------------------------------
+# 4. Enable RDP
+# --------------------------------
+
+Write-Host "[4/6] Enabling Remote Desktop (RDP)..." -ForegroundColor Yellow
 
 try {
     # Enable RDP in registry
@@ -145,40 +170,79 @@ try {
 Write-Host ""
 
 # --------------------------------
-# 4. Extend C: partition
+# 5. Extend C: partition (diskpart then PowerShell fallback)
 # --------------------------------
 
-Write-Host "[4/4] Extending C: partition to maximum size..." -ForegroundColor Yellow
+Write-Host "[5/6] Extending C: partition to maximum size..." -ForegroundColor Yellow
 
+# 4a. Use diskpart: select volume C, extend, exit
+$diskpartScript = @"
+select volume C
+extend
+exit
+"@
+$diskpartFile = Join-Path $env:TEMP "dcim_extend_c.diskpart"
+try {
+    Set-Content -Path $diskpartFile -Value $diskpartScript -Encoding ASCII -ErrorAction Stop
+    Write-Host "  Running diskpart to extend C: (select volume C, extend)..." -ForegroundColor Gray
+    $diskpartOut = & diskpart /s $diskpartFile 2>&1
+    $diskpartOut | ForEach-Object { Write-Host "  diskpart: $_" -ForegroundColor Gray }
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [SUCCESS] diskpart extended C: volume" -ForegroundColor Green
+    } else {
+        Write-Warning "  diskpart exited with code $LASTEXITCODE; trying PowerShell fallback"
+    }
+} catch {
+    Write-Warning "  diskpart failed: $_"
+} finally {
+    if (Test-Path $diskpartFile) { Remove-Item $diskpartFile -Force -ErrorAction SilentlyContinue }
+}
+
+# 4b. PowerShell fallback if diskpart did not extend (e.g. no contiguous space or already max)
 try {
     $driveLetter = "C"
     $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
     $diskNumber = $partition.DiskNumber
-    
-    Write-Host "  Current C: partition size: $([math]::Round($partition.Size / 1GB, 2)) GB" -ForegroundColor Gray
-    
-    $supported = Get-PartitionSupportedSize -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -ErrorAction Stop
-    
-    if ($partition.Size -ge $supported.SizeMax) {
-        Write-Host "  C: is already at maximum size ($([math]::Round($supported.SizeMax / 1GB, 2)) GB)" -ForegroundColor Green
-        Write-Host "  [SKIP] No extension needed" -ForegroundColor Yellow
+
+    $currentSizeGB   = [math]::Round($partition.Size / 1GB, 2)
+    $supported       = Get-PartitionSupportedSize -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -ErrorAction Stop
+    $supportedMaxGB  = [math]::Round($supported.SizeMax / 1GB, 2)
+    $deltaBytes      = $supported.SizeMax - $partition.Size
+
+    Write-Host "  Current C: size: $currentSizeGB GB" -ForegroundColor Gray
+    Write-Host "  Max supported C: size: $supportedMaxGB GB" -ForegroundColor Gray
+
+    if ($deltaBytes -lt 1MB) {
+        Write-Host "  C: is already using all available space (no extendable free space >= 1 MB)" -ForegroundColor Green
+        Write-Host "  [SKIP] No further extension needed" -ForegroundColor Yellow
+    } elseif ($partition.Size -ge $supported.SizeMax) {
+        Write-Host "  C: is already at maximum size ($supportedMaxGB GB)" -ForegroundColor Green
+        Write-Host "  [SKIP] No further extension needed" -ForegroundColor Yellow
     } else {
-        Write-Host "  Extending to maximum size: $([math]::Round($supported.SizeMax / 1GB, 2)) GB" -ForegroundColor Gray
-        Resize-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -Size $supported.SizeMax -ErrorAction Stop
-        Write-Host "  [SUCCESS] Extended C: to $([math]::Round($supported.SizeMax / 1GB, 2)) GB" -ForegroundColor Green
+        $targetBytes = [math]::Floor(($supported.SizeMax - 1MB) / 1MB) * 1MB
+        $targetGB    = [math]::Round($targetBytes / 1GB, 2)
+        Write-Host "  Extending via PowerShell to: $targetGB GB..." -ForegroundColor Gray
+        Resize-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -Size $targetBytes -ErrorAction Stop
+        Write-Host "  [SUCCESS] Extended C: to approximately $targetGB GB" -ForegroundColor Green
     }
 } catch {
-    Write-Error "  [FAILED] Failed to extend C: partition: $_"
-    Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Red
+    $msg = $_.Exception.Message
+    if ($msg -like "*Size Not Supported*" -or $msg -like "*extent is less than the minimum of 1MB*") {
+        Write-Warning "  [SKIP] C: partition cannot be extended further (no free space >= 1 MB)."
+        Write-Host "  Details: $msg" -ForegroundColor Gray
+    } else {
+        Write-Error "  [FAILED] Failed to extend C: partition: $_"
+        Write-Host "  Error details: $msg" -ForegroundColor Red
+    }
 }
 
 Write-Host ""
 
 # --------------------------------
-# 5. Format additional data disks
+# 6. Format additional data disks
 # --------------------------------
 
-Write-Host "[5/5] Formatting additional data disks..." -ForegroundColor Yellow
+Write-Host "[6/6] Formatting additional data disks..." -ForegroundColor Yellow
 
 # Formats all non-OS, non-removable disks as NTFS and assigns drive letters
 # Safe for templates: skips disk with C: and skips removable media
