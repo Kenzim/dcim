@@ -3,7 +3,7 @@
   import ServerControlsPanel from './ServerControlsPanel.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
-  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, getAssets, getAssetFileUrl } from '../lib/api.js';
+  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
 
@@ -35,6 +35,21 @@
   let hardwareExpanded = false;
   let installationHistory = [];
   let loadingInstallationHistory = false;
+  let serverActivity = [];
+  let loadingServerActivity = false;
+  let hardwareDetectionReports = [];
+  let loadingHardwareDetectionReports = false;
+  let hardwareDetectionError = null;
+  let activeHardwareDetectionReport = null;
+  let hardwareDetectionDiff = null;
+  let loadingHardwareDetectionDiff = false;
+  let hardwareDetectionNicRemap = {};
+  let hardwareDetectionNotes = '';
+  let runningHardwareDetection = false;
+  let applyingHardwareDetection = false;
+  let rejectingHardwareDetection = false;
+  let deletingHardwareDetectionReport = false;
+  let queueingBootOrderFix = false;
   let installationHistoryExpanded = false;
   let serverGroups = [];
   let allServerGroups = [];
@@ -61,11 +76,18 @@
   let serverBandwidthHours = 24;
   let serverBandwidthResolution = 0; // 0 = raw, 5, 15, 60 min
   let serverBandwidthExpanded = false;
+  let bootOptionsData = null;
+  let loadingBootOptions = false;
+  let bootOptionsError = null;
+  let selectedBootDevice = '';
+  let bootPersistent = false;
+  let bootUefi = false;
+  let settingBootOption = false;
 
   // Left pane tabs (General, Additional Information, Files)
   let leftPaneTab = 'general';
 
-  // Bottom right pane tabs (Management, Network, Disks, Credentials)
+  // Bottom right pane tabs (Management, Network, Disks, Boot, Hardware Detection, Credentials)
   let bottomTab = 'management';
 
   // Edit network config modal
@@ -88,6 +110,7 @@
   let pluginConfigTestMessage = null;
 
   let purgingPendingInstallation = false;
+  let installationLogsView = null; // { id, os_name, template_id, status, logs, error_message, created_at }
   $: pendingInstallationCount = (installationHistory || []).filter(e => e.status === 'pending').length;
 
   $: if (server) {
@@ -96,6 +119,7 @@
   }
 
   let leftPanePowerState = null; // 'on' | 'off' | 'unknown' | null (loading)
+  let powerActionInProgress = null; // 'on' | 'off' | 'reset' | null
 
   let showPreviewAssetPicker = false;
   let previewAssets = [];
@@ -115,6 +139,11 @@
   // Load bandwidth when switching to Networking tab
   $: if (activeTab === 'networking' && serverId && !serverBandwidthLoading && !serverBandwidth) {
     loadServerBandwidth();
+  }
+
+  // Load boot options when opening Boot tab
+  $: if (bottomTab === 'boot' && serverId && bootCapabilityEnabled && !loadingBootOptions && !bootOptionsData) {
+    loadBootOptions();
   }
 
   // Sync plugin config edit state when viewing Credentials tab or server changes
@@ -143,7 +172,13 @@
       id != null ? loadCableRuns() : Promise.resolve(),
     ]);
     if (server) {
-      await Promise.all([loadBootTask(), loadInstallationHistory(), loadServerBandwidth()]);
+      await Promise.all([
+        loadBootTask(),
+        loadInstallationHistory(),
+        loadServerActivity(),
+        loadServerBandwidth(),
+        loadHardwareDetectionReports(),
+      ]);
     }
     if (id != null) {
       getServerPowerState(id).then(r => { leftPanePowerState = (r && r.power_state) || 'unknown'; }).catch(() => { leftPanePowerState = 'unknown'; });
@@ -177,7 +212,54 @@
     }
   }
 
+  async function loadBootOptions() {
+    if (!serverId || !bootCapabilityEnabled) {
+      bootOptionsData = null;
+      return;
+    }
+    loadingBootOptions = true;
+    bootOptionsError = null;
+    try {
+      bootOptionsData = await getServerBootOptions(serverId);
+      selectedBootDevice = bootOptionsData?.current?.current_device || '';
+      bootPersistent = !!bootOptionsData?.current?.persistent;
+      bootUefi = bootOptionsData?.current?.uefi === true;
+    } catch (err) {
+      bootOptionsData = null;
+      bootOptionsError = err.message;
+    } finally {
+      loadingBootOptions = false;
+    }
+  }
+
+  async function handleSetBootOption() {
+    if (!serverId || !selectedBootDevice) {
+      alert('Select a boot device first.');
+      return;
+    }
+    if (!confirm(`Set next boot device for "${server?.name || 'server'}" to "${selectedBootDevice}"?`)) return;
+    settingBootOption = true;
+    bootOptionsError = null;
+    try {
+      await setServerBootOption(serverId, {
+        device: selectedBootDevice,
+        persistent: bootPersistent,
+        uefi: bootUefi,
+      });
+      await Promise.all([loadBootOptions(), loadServerActivity()]);
+      alert('Boot option updated.');
+    } catch (err) {
+      bootOptionsError = err.message;
+      alert('Failed to set boot option: ' + err.message);
+    } finally {
+      settingBootOption = false;
+    }
+  }
+
   $: firstPortWithSamples = serverBandwidth?.ports?.find(p => p.samples?.length > 0);
+  $: currentPhysicalPorts = (server?.network_ports || []).filter(p => p?.is_physical !== false);
+  $: detectedNics = hardwareDetectionDiff?.diff?.nics?.detected || [];
+  $: bootCapabilityEnabled = !!(server?.effective_capabilities || []).find(c => c?.id === 'boot_order');
 
   function formatBytesServer(n) {
     if (n == null || n === undefined) return '—';
@@ -583,6 +665,198 @@
     }
   }
 
+  async function loadServerActivity() {
+    try {
+      loadingServerActivity = true;
+      serverActivity = await getServerActivity(serverId, 100) || [];
+    } catch (err) {
+      // Silently handle errors - activity log should not block page usage
+      serverActivity = [];
+    } finally {
+      loadingServerActivity = false;
+    }
+  }
+
+  function defaultNicRemapFromDiff(diffPayload) {
+    const remap = {};
+    const current = diffPayload?.diff?.nics?.current || [];
+    const detected = diffPayload?.diff?.nics?.detected || [];
+    for (const nic of current) {
+      const currentPci = (nic.pci_address || '').toLowerCase();
+      const currentMac = (nic.mac_address || '').toLowerCase();
+      let idx = -1;
+      if (currentPci) idx = detected.findIndex(d => ((d.pci_address || '').toLowerCase()) === currentPci);
+      if (idx < 0 && currentMac) idx = detected.findIndex(d => ((d.mac_address || '').toLowerCase()) === currentMac);
+      if (idx >= 0 && nic.id != null) remap[String(nic.id)] = idx;
+    }
+    return remap;
+  }
+
+  async function loadHardwareDetectionDiff(reportId) {
+    if (!serverId || !reportId) {
+      hardwareDetectionDiff = null;
+      hardwareDetectionNicRemap = {};
+      return;
+    }
+    loadingHardwareDetectionDiff = true;
+    try {
+      hardwareDetectionDiff = await getServerHardwareDetectionDiff(serverId, reportId);
+      hardwareDetectionNicRemap = defaultNicRemapFromDiff(hardwareDetectionDiff);
+    } catch (err) {
+      hardwareDetectionDiff = null;
+      hardwareDetectionNicRemap = {};
+      hardwareDetectionError = err.message;
+    } finally {
+      loadingHardwareDetectionDiff = false;
+    }
+  }
+
+  function selectHardwareDetectionReport(report) {
+    activeHardwareDetectionReport = report || null;
+    hardwareDetectionNotes = '';
+    if (report?.id) {
+      loadHardwareDetectionDiff(report.id);
+    } else {
+      hardwareDetectionDiff = null;
+      hardwareDetectionNicRemap = {};
+    }
+  }
+
+  async function loadHardwareDetectionReports() {
+    if (!serverId) return;
+    loadingHardwareDetectionReports = true;
+    hardwareDetectionError = null;
+    try {
+      const reports = await listServerHardwareDetectionReports(serverId);
+      hardwareDetectionReports = Array.isArray(reports) ? reports : [];
+      if (!activeHardwareDetectionReport || !hardwareDetectionReports.some(r => r.id === activeHardwareDetectionReport.id)) {
+        const preferred = hardwareDetectionReports.find(r => r.status === 'submitted') || hardwareDetectionReports[0] || null;
+        activeHardwareDetectionReport = preferred;
+      } else {
+        activeHardwareDetectionReport = hardwareDetectionReports.find(r => r.id === activeHardwareDetectionReport.id) || null;
+      }
+      if (activeHardwareDetectionReport?.id) {
+        await loadHardwareDetectionDiff(activeHardwareDetectionReport.id);
+      } else {
+        hardwareDetectionDiff = null;
+        hardwareDetectionNicRemap = {};
+      }
+    } catch (err) {
+      hardwareDetectionReports = [];
+      hardwareDetectionDiff = null;
+      hardwareDetectionError = err.message;
+    } finally {
+      loadingHardwareDetectionReports = false;
+    }
+  }
+
+  async function handleRunHardwareDetection() {
+    if (!serverId || !server) return;
+    if (!confirm(`Queue hardware detection boot workflow for "${server.name}"?`)) return;
+    runningHardwareDetection = true;
+    hardwareDetectionError = null;
+    try {
+      await runServerHardwareDetection(serverId);
+      await Promise.all([loadBootTask(), loadHardwareDetectionReports(), loadServerActivity()]);
+      alert('Hardware detection queued. Reboot the server to run collection.');
+    } catch (err) {
+      hardwareDetectionError = err.message;
+      alert('Failed to queue hardware detection: ' + err.message);
+    } finally {
+      runningHardwareDetection = false;
+    }
+  }
+
+  function updateHardwareNicRemap(portId, detectedIndexRaw) {
+    const key = String(portId);
+    const idx = detectedIndexRaw === '' ? null : Number(detectedIndexRaw);
+    if (idx == null || Number.isNaN(idx)) {
+      const next = { ...hardwareDetectionNicRemap };
+      delete next[key];
+      hardwareDetectionNicRemap = next;
+      return;
+    }
+    hardwareDetectionNicRemap = { ...hardwareDetectionNicRemap, [key]: idx };
+  }
+
+  async function handleApplyHardwareDetection() {
+    if (!serverId || !activeHardwareDetectionReport?.id) return;
+    if (activeHardwareDetectionReport.status !== 'submitted') {
+      alert('Only submitted reports can be applied.');
+      return;
+    }
+    if (!confirm('Apply detected hardware inventory to this server?')) return;
+    applyingHardwareDetection = true;
+    hardwareDetectionError = null;
+    try {
+      await applyServerHardwareDetectionReport(serverId, activeHardwareDetectionReport.id, {
+        nic_remap: hardwareDetectionNicRemap,
+        notes: hardwareDetectionNotes || undefined,
+      });
+      await Promise.all([
+        loadServer(),
+        loadCableRuns(),
+        loadHardwareDetectionReports(),
+        loadServerActivity(),
+      ]);
+      hardwareDetectionNotes = '';
+      alert('Hardware detection report applied.');
+    } catch (err) {
+      hardwareDetectionError = err.message;
+      alert('Failed to apply report: ' + err.message);
+    } finally {
+      applyingHardwareDetection = false;
+    }
+  }
+
+  async function handleDeleteHardwareDetectionReport() {
+    if (!serverId || !activeHardwareDetectionReport?.id) return;
+    if (!confirm(`Delete report #${activeHardwareDetectionReport.id}? This cannot be undone.`)) return;
+    deletingHardwareDetectionReport = true;
+    try {
+      await deleteServerHardwareDetectionReport(serverId, activeHardwareDetectionReport.id);
+      const wasActive = activeHardwareDetectionReport?.id;
+      await loadHardwareDetectionReports();
+      if (wasActive) {
+        activeHardwareDetectionReport = hardwareDetectionReports[0] || null;
+        hardwareDetectionDiff = null;
+        hardwareDetectionNicRemap = {};
+        if (activeHardwareDetectionReport?.id) {
+          await loadHardwareDetectionDiff(activeHardwareDetectionReport.id);
+        }
+      }
+    } catch (err) {
+      hardwareDetectionError = err.message;
+      alert('Failed to delete report: ' + err.message);
+    } finally {
+      deletingHardwareDetectionReport = false;
+    }
+  }
+
+  async function handleRejectHardwareDetection() {
+    if (!serverId || !activeHardwareDetectionReport?.id) return;
+    if (activeHardwareDetectionReport.status !== 'submitted') {
+      alert('Only submitted reports can be rejected.');
+      return;
+    }
+    if (!confirm('Reject this hardware detection report?')) return;
+    rejectingHardwareDetection = true;
+    hardwareDetectionError = null;
+    try {
+      await rejectServerHardwareDetectionReport(serverId, activeHardwareDetectionReport.id, {
+        notes: hardwareDetectionNotes || undefined,
+      });
+      await Promise.all([loadHardwareDetectionReports(), loadServerActivity()]);
+      hardwareDetectionNotes = '';
+      alert('Hardware detection report rejected.');
+    } catch (err) {
+      hardwareDetectionError = err.message;
+      alert('Failed to reject report: ' + err.message);
+    } finally {
+      rejectingHardwareDetection = false;
+    }
+  }
+
   let updatingInstallationId = null;
   let installationStatusError = null;
   let installationStatusSelection = {}; // id -> selected status string
@@ -626,6 +900,47 @@
     }
   }
 
+  async function handlePowerOn() {
+    if (!serverId || powerActionInProgress) return;
+    powerActionInProgress = 'on';
+    try {
+      await powerOnServer(serverId);
+      const res = await getServerPowerState(serverId).catch(() => ({}));
+      leftPanePowerState = (res && res.power_state) || 'on';
+    } catch (err) {
+      alert(err.message || 'Failed to power on');
+    } finally {
+      powerActionInProgress = null;
+    }
+  }
+  async function handlePowerOff() {
+    if (!serverId || powerActionInProgress) return;
+    if (!confirm('Power off this server?')) return;
+    powerActionInProgress = 'off';
+    try {
+      await powerOffServer(serverId);
+      const res = await getServerPowerState(serverId).catch(() => ({}));
+      leftPanePowerState = (res && res.power_state) || 'off';
+    } catch (err) {
+      alert(err.message || 'Failed to power off');
+    } finally {
+      powerActionInProgress = null;
+    }
+  }
+  async function handlePowerReset() {
+    if (!serverId || powerActionInProgress) return;
+    if (!confirm('Reboot this server?')) return;
+    powerActionInProgress = 'reset';
+    try {
+      await powerResetServer(serverId);
+      leftPanePowerState = 'on';
+    } catch (err) {
+      alert(err.message || 'Failed to reboot');
+    } finally {
+      powerActionInProgress = null;
+    }
+  }
+
   async function loadServer() {
     try {
       loading = true;
@@ -634,6 +949,8 @@
       if (!server) {
         error = 'Server not found';
       } else {
+        bootOptionsData = null;
+        bootOptionsError = null;
         // Update server groups from server data
         if (server.server_groups) {
           serverGroups = server.server_groups;
@@ -737,6 +1054,19 @@
       alert('Failed to create boot task: ' + err.message);
     } finally {
       creatingBootTask = false;
+    }
+  }
+
+  async function handleBootOrderFix() {
+    if (!serverId || queueingBootOrderFix) return;
+    queueingBootOrderFix = true;
+    try {
+      await runBootOrderFix(serverId);
+      await Promise.all([loadBootTask(), loadServerActivity()]);
+    } catch (err) {
+      alert('Failed to queue boot order correction: ' + (err.message || err));
+    } finally {
+      queueingBootOrderFix = false;
     }
   }
 
@@ -1102,6 +1432,17 @@
             <button type="button" class="left-pane-edit-btn" on:click={() => showEditModal = true} title="Edit server">Edit</button>
           </div>
         </div>
+        <div class="left-pane-power-buttons">
+          <button type="button" class="btn-power-compact btn-power-on" on:click={handlePowerOn} disabled={powerActionInProgress !== null} title="Power on">
+            {powerActionInProgress === 'on' ? '…' : 'On'}
+          </button>
+          <button type="button" class="btn-power-compact btn-power-off" on:click={handlePowerOff} disabled={powerActionInProgress !== null} title="Power off">
+            {powerActionInProgress === 'off' ? '…' : 'Off'}
+          </button>
+          <button type="button" class="btn-power-compact btn-power-reset" on:click={handlePowerReset} disabled={powerActionInProgress !== null} title="Reboot">
+            {powerActionInProgress === 'reset' ? '…' : 'Reboot'}
+          </button>
+        </div>
         <dl class="server-preview-details">
           <div class="detail-row">
             <dt>IP Address</dt>
@@ -1197,7 +1538,57 @@
               </section>
             </div>
           {:else if leftPaneTab === 'additional'}
-            <p class="tab-placeholder">Additional information — add later.</p>
+            <div class="additional-pane">
+              <h4 class="general-section-title">Additional Information</h4>
+              <dl class="general-details-list">
+                {#if server.port_speed_mbps != null}
+                  <div class="general-detail-row">
+                    <dt>Port speed</dt>
+                    <dd>
+                      {server.port_speed_mbps >= 1000
+                        ? (server.port_speed_mbps === 1000 ? '1 Gbps' : (server.port_speed_mbps / 1000) + ' Gbps')
+                        : server.port_speed_mbps + ' Mbps'}
+                    </dd>
+                  </div>
+                {/if}
+                {#if server.cpu_count != null || server.cpu_model || server.ram_gb != null}
+                  <div class="general-detail-row">
+                    <dt>CPU</dt>
+                    <dd>{server.cpu_count != null ? server.cpu_count + '× ' : ''}{server.cpu_model || '—'}</dd>
+                  </div>
+                  {#if server.ram_gb != null}
+                    <div class="general-detail-row">
+                      <dt>RAM</dt>
+                      <dd>{server.ram_gb} GB</dd>
+                    </div>
+                  {/if}
+                {/if}
+                <div class="general-detail-row">
+                  <dt>OS boot mode</dt>
+                  <dd>{server.os_boot_mode || server.boot_mode || '—'}</dd>
+                </div>
+                {#if server.credentials && Object.keys(server.credentials).length > 0}
+                  <div class="general-detail-row">
+                    <dt>Last install credentials</dt>
+                    <dd>
+                      <span class="credentials-summary">
+                        {(() => {
+                          const cred = server.credentials;
+                          const parts = [];
+                          if (cred.os_type) parts.push('OS: ' + cred.os_type);
+                          if (cred.template_id) parts.push('Template: ' + cred.template_id);
+                          if (Object.keys(cred).some(k => /password|admin_password/i.test(k))) parts.push('(passwords stored)');
+                          return parts.length ? parts.join(' · ') : '(stored)';
+                        })()}
+                      </span>
+                    </dd>
+                  </div>
+                {/if}
+                </dl>
+              {#if server.port_speed_mbps == null && (!server.cpu_count && !server.cpu_model && server.ram_gb == null)}
+                <p class="tab-placeholder small">Set port speed, CPU, and RAM in Edit server to see them here.</p>
+              {/if}
+            </div>
           {:else}
             <p class="tab-placeholder">Files — add later.</p>
           {/if}
@@ -1216,8 +1607,8 @@
             <div class="traffic-graph-wrap">
               <TrafficGraph
                 samples={firstPortWithSamples.samples}
-                width={400}
-                height={180}
+                width={520}
+                height={230}
                 graphId="main"
               />
             </div>
@@ -1227,17 +1618,17 @@
         </section>
         <section class="right-panel activity-panel">
           <h3 class="panel-title">Activity Log</h3>
-          {#if loadingInstallationHistory}
+          {#if loadingServerActivity}
             <p class="panel-empty">Loading…</p>
-          {:else if installationHistory.length === 0}
+          {:else if serverActivity.length === 0}
             <p class="panel-empty">No activity yet.</p>
           {:else}
             <ul class="activity-list">
-              {#each installationHistory.slice(0, 20) as entry}
+              {#each serverActivity.slice(0, 20) as entry}
                 <li class="activity-item">
                   <span class="activity-time">{entry.created_at ? new Date(entry.created_at).toLocaleString() : '—'}</span>
-                  <span class="activity-desc">{entry.os_name || entry.template_id || entry.description || 'Installation'}</span>
-                  <span class="activity-status" class:completed={entry.status === 'completed'} class:failed={entry.status === 'failed'} class:pending={entry.status === 'pending' || entry.status === 'in_progress'}>{entry.status?.replace('_', ' ') || '—'}</span>
+                  <span class="activity-desc">{entry.message || entry.description || 'Activity'}</span>
+                  <span class="activity-status" class:completed={entry.status === 'success' || entry.status === 'completed'} class:failed={entry.status === 'failed'} class:pending={entry.status === 'attempt' || entry.status === 'pending' || entry.status === 'in_progress'}>{entry.status?.replace('_', ' ') || '—'}</span>
                 </li>
               {/each}
             </ul>
@@ -1249,6 +1640,8 @@
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'management'} on:click={() => bottomTab = 'management'}>Management</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'network'} on:click={() => bottomTab = 'network'}>Network</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'disks'} on:click={() => bottomTab = 'disks'}>Disks</button>
+          <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'boot'} on:click={() => bottomTab = 'boot'}>Boot</button>
+          <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'hardware-detection'} on:click={() => bottomTab = 'hardware-detection'}>Hardware Detection</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'credentials'} on:click={() => bottomTab = 'credentials'}>Credentials</button>
         </nav>
         <div class="bottom-tab-content" class:credentials-tab-active={bottomTab === 'credentials'}>
@@ -1282,8 +1675,13 @@
                 </div>
                 <div class="boot-op-card">
                   <span class="boot-op-label">Temporary OS</span>
-                  <span class="boot-op-hint">Debian Live for manual ops</span>
-                  <button type="button" class="btn-primary btn-sm" on:click={handleBootTempOS} disabled={creatingBootTask}>{creatingBootTask ? '…' : 'Boot'}</button>
+                  <span class="boot-op-hint">Debian Live for manual ops and maintenance</span>
+                  <div class="boot-op-row boot-op-row-stack">
+                    <button type="button" class="btn-primary btn-sm" on:click={handleBootTempOS} disabled={creatingBootTask}>{creatingBootTask ? '…' : 'Boot'}</button>
+                    <button type="button" class="btn-secondary btn-sm" on:click={handleBootOrderFix} disabled={queueingBootOrderFix || creatingBootTask}>
+                      {queueingBootOrderFix ? 'Queuing…' : 'Boot order correction'}
+                    </button>
+                  </div>
                 </div>
                 <div class="boot-op-card">
                   <span class="boot-op-label">Run Script</span>
@@ -1373,6 +1771,151 @@
                 </div>
               </div>
             </div>
+          {:else if bottomTab === 'hardware-detection'}
+            <section class="hardware-detection-panel">
+              <div class="hardware-detection-header">
+                <div>
+                  <h3>Hardware Detection</h3>
+                  <p class="text-muted">Boots built-in detection workflow and lets you review/apply inventory diffs.</p>
+                </div>
+                <button type="button" class="btn-secondary btn-sm" on:click={handleRunHardwareDetection} disabled={runningHardwareDetection || creatingBootTask}>
+                  {runningHardwareDetection ? 'Queuing…' : 'Run detection'}
+                </button>
+              </div>
+
+              {#if hardwareDetectionError}
+                <div class="connect-modal-error">{hardwareDetectionError}</div>
+              {/if}
+
+              {#if loadingHardwareDetectionReports}
+                <p class="text-muted">Loading reports…</p>
+              {:else if !hardwareDetectionReports.length}
+                <p class="text-muted">No hardware detection reports yet.</p>
+              {:else}
+                <div class="hardware-detection-report-list">
+                  {#each hardwareDetectionReports.slice(0, 8) as report}
+                    <button
+                      type="button"
+                      class="hardware-detection-report-chip"
+                      class:active={activeHardwareDetectionReport?.id === report.id}
+                      on:click={() => selectHardwareDetectionReport(report)}
+                    >
+                      <span>#{report.id}</span>
+                      <span>{report.status}</span>
+                      <span>{report.created_at ? new Date(report.created_at).toLocaleString() : '—'}</span>
+                    </button>
+                  {/each}
+                </div>
+
+                {#if activeHardwareDetectionReport}
+                  <div class="hardware-detection-review">
+                    <div class="hardware-detection-status">
+                      Active report: <strong>#{activeHardwareDetectionReport.id}</strong>
+                      <span class="activity-status" class:completed={activeHardwareDetectionReport.status === 'applied'} class:failed={activeHardwareDetectionReport.status === 'rejected'} class:pending={activeHardwareDetectionReport.status === 'pending' || activeHardwareDetectionReport.status === 'submitted'}>
+                        {activeHardwareDetectionReport.status}
+                      </span>
+                      <button type="button" class="btn-secondary btn-sm hardware-detection-delete-btn" on:click={handleDeleteHardwareDetectionReport} disabled={deletingHardwareDetectionReport} title="Delete this report">
+                        {deletingHardwareDetectionReport ? 'Deleting…' : 'Delete'}
+                      </button>
+                    </div>
+
+                    {#if loadingHardwareDetectionDiff}
+                      <p class="text-muted">Loading hardware diff…</p>
+                    {:else if hardwareDetectionDiff?.diff}
+                      <div class="hardware-detection-diff-grid">
+                        <div class="hardware-detection-diff-card">
+                          <h4>Server Hardware</h4>
+                          <div class="hardware-diff-kv"><span>CPU Count</span><strong>{hardwareDetectionDiff.diff.server?.current?.cpu_count ?? '—'} → {hardwareDetectionDiff.diff.server?.detected?.cpu_count ?? '—'}</strong></div>
+                          <div class="hardware-diff-kv"><span>CPU Model</span><strong>{hardwareDetectionDiff.diff.server?.current?.cpu_model || '—'} → {hardwareDetectionDiff.diff.server?.detected?.cpu_model || '—'}</strong></div>
+                          <div class="hardware-diff-kv"><span>RAM (GB)</span><strong>{hardwareDetectionDiff.diff.server?.current?.ram_gb ?? '—'} → {hardwareDetectionDiff.diff.server?.detected?.ram_gb ?? '—'}</strong></div>
+                        </div>
+
+                        <div class="hardware-detection-diff-card">
+                          <h4>NIC Remap (Cable Preserve)</h4>
+                          {#if currentPhysicalPorts.length === 0}
+                            <p class="text-muted">No physical NICs currently recorded.</p>
+                          {:else}
+                            <div class="hardware-remap-list">
+                              {#each currentPhysicalPorts as port}
+                                <div class="hardware-remap-row">
+                                  <span>{port.name} ({port.mac_address || 'no-mac'})</span>
+                                  <select value={hardwareDetectionNicRemap[String(port.id)] ?? ''} on:change={(e) => updateHardwareNicRemap(port.id, e.target.value)} disabled={activeHardwareDetectionReport.status !== 'submitted'}>
+                                    <option value="">Auto/no remap</option>
+                                    {#each detectedNics as nic, idx}
+                                      <option value={idx}>{idx}: {nic.name || 'unnamed'} ({nic.pci_address || nic.mac_address || 'id unknown'})</option>
+                                    {/each}
+                                  </select>
+                                </div>
+                              {/each}
+                            </div>
+                          {/if}
+                        </div>
+                      </div>
+
+                      <div class="hardware-detection-diff-grid">
+                        <div class="hardware-detection-diff-card">
+                          <h4>Current Physical NICs</h4>
+                          <div class="hardware-mini-table">
+                            {#if (hardwareDetectionDiff.diff.nics?.current || []).length === 0}
+                              <p class="text-muted">None</p>
+                            {:else}
+                              {#each hardwareDetectionDiff.diff.nics.current as nic}
+                                <div class="hardware-mini-row"><span>{nic.name}{#if nic.mac_address} ({nic.mac_address}){/if}</span><span>{nic.pci_address || '—'}</span></div>
+                              {/each}
+                            {/if}
+                          </div>
+                        </div>
+                        <div class="hardware-detection-diff-card">
+                          <h4>Detected Physical NICs</h4>
+                          <div class="hardware-mini-table">
+                            {#if (hardwareDetectionDiff.diff.nics?.detected || []).length === 0}
+                              <p class="text-muted">None</p>
+                            {:else}
+                              {#each hardwareDetectionDiff.diff.nics.detected as nic, idx}
+                                <div class="hardware-mini-row"><span>{idx}: {nic.name || 'unnamed'}{#if nic.mac_address} ({nic.mac_address}){/if}</span><span>{nic.pci_address || '—'}</span></div>
+                              {/each}
+                            {/if}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="hardware-detection-diff-card">
+                        <h4>Disks</h4>
+                        <div class="hardware-mini-table">
+                          <div class="hardware-mini-row hardware-mini-row-header"><span>Current</span><span>Detected</span></div>
+                          {#each Array(Math.max((hardwareDetectionDiff.diff.disks?.current || []).length, (hardwareDetectionDiff.diff.disks?.detected || []).length)) as _, idx}
+                            {@const cd = hardwareDetectionDiff.diff.disks?.current?.[idx]}
+                            {@const dd = hardwareDetectionDiff.diff.disks?.detected?.[idx]}
+                            <div class="hardware-mini-row">
+                              <span>{cd ? `${cd.capacity_gb}GB ${cd.type} ${cd.serial_number || ''}` : '—'}</span>
+                              <span>{dd ? `${dd.capacity_gb || '—'}GB ${dd.type || '—'} ${dd.serial_number || ''}` : '—'}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="hardware-detection-notes">Review notes</label>
+                        <textarea id="hardware-detection-notes" rows="2" bind:value={hardwareDetectionNotes} placeholder="Optional notes for apply/reject" />
+                      </div>
+
+                      {#if activeHardwareDetectionReport.status === 'submitted'}
+                        <div class="hardware-detection-actions">
+                          <button type="button" class="btn-danger btn-sm" on:click={handleRejectHardwareDetection} disabled={rejectingHardwareDetection || applyingHardwareDetection}>
+                            {rejectingHardwareDetection ? 'Rejecting…' : 'Reject report'}
+                          </button>
+                          <button type="button" class="btn-primary btn-sm" on:click={handleApplyHardwareDetection} disabled={applyingHardwareDetection || rejectingHardwareDetection}>
+                            {applyingHardwareDetection ? 'Applying…' : 'Apply to server'}
+                          </button>
+                        </div>
+                      {/if}
+                    {:else}
+                      <p class="text-muted">No diff available for this report yet.</p>
+                    {/if}
+                  </div>
+                {/if}
+              {/if}
+            </section>
           {:else if bottomTab === 'network'}
             <div class="network-tab-content">
               <div class="network-tab-toolbar">
@@ -1460,6 +2003,57 @@
                 </div>
               {:else}
                 <p class="bottom-placeholder">No disks. Click "Edit disks" to add disks.</p>
+              {/if}
+            </div>
+          {:else if bottomTab === 'boot'}
+            <div class="boot-tab-content">
+              {#if !bootCapabilityEnabled}
+                <p class="bottom-placeholder">Boot controls are disabled for this server. Enable the optional <code>boot_order</code> capability in server edit.</p>
+              {:else}
+                <div class="boot-control-card">
+                  <div class="boot-control-header">
+                    <h3>Boot Device</h3>
+                    <button type="button" class="btn-secondary btn-sm" on:click={loadBootOptions} disabled={loadingBootOptions}>
+                      {loadingBootOptions ? 'Refreshing…' : 'Refresh'}
+                    </button>
+                  </div>
+                  {#if bootOptionsError}
+                    <div class="connect-modal-error">{bootOptionsError}</div>
+                  {/if}
+                  {#if loadingBootOptions}
+                    <p class="text-muted">Loading boot options…</p>
+                  {:else if !bootOptionsData}
+                    <p class="text-muted">No boot data available.</p>
+                  {:else}
+                    <div class="boot-current-state">
+                      <div><strong>Current selector:</strong> {bootOptionsData?.current?.current_device || 'unknown'}</div>
+                      <div><strong>Persistent:</strong> {bootOptionsData?.current?.persistent ? 'Yes' : 'No'}</div>
+                      <div><strong>UEFI hint:</strong> {bootOptionsData?.current?.uefi === true ? 'UEFI' : bootOptionsData?.current?.uefi === false ? 'Legacy' : 'Unknown'}</div>
+                    </div>
+                    <div class="boot-control-form">
+                      <div class="form-group">
+                        <label for="boot-device-select">Boot device</label>
+                        <select id="boot-device-select" bind:value={selectedBootDevice}>
+                          <option value="">Select boot device</option>
+                          {#each bootOptionsData?.options?.available_devices || [] as dev}
+                            <option value={dev.id}>{dev.label || dev.id}</option>
+                          {/each}
+                        </select>
+                      </div>
+                      <div class="form-group checkbox-group">
+                        <label><input type="checkbox" bind:checked={bootPersistent} /> Persistent</label>
+                      </div>
+                      <div class="form-group checkbox-group">
+                        <label><input type="checkbox" bind:checked={bootUefi} /> UEFI boot hint</label>
+                      </div>
+                      <div class="boot-control-actions">
+                        <button type="button" class="btn-primary btn-sm" on:click={handleSetBootOption} disabled={settingBootOption || !selectedBootDevice}>
+                          {settingBootOption ? 'Applying…' : 'Set boot option'}
+                        </button>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
               {/if}
             </div>
           {:else if bottomTab === 'credentials'}
@@ -1581,6 +2175,9 @@
                       {:else}
                         <p class="installation-credentials-empty">No parameters recorded</p>
                       {/if}
+                      {#if mostRecent.logs || mostRecent.error_message}
+                        <button type="button" class="btn-secondary btn-sm installation-view-logs" on:click={() => installationLogsView = mostRecent}>View logs</button>
+                      {/if}
                     </div>
                   </div>
                   {#if olderHistory.length > 0}
@@ -1608,6 +2205,9 @@
                           {:else}
                             <p class="installation-credentials-empty">No parameters recorded</p>
                           {/if}
+                          {#if entry.logs || entry.error_message}
+                            <button type="button" class="btn-secondary btn-sm installation-view-logs" on:click={() => installationLogsView = entry}>View logs</button>
+                          {/if}
                         </li>
                       {/each}
                     </ul>
@@ -1627,6 +2227,38 @@
 
   {#if showEditModal && server}
     <Servers embeddedEditServer={server} onEditComplete={handleEditComplete} />
+  {/if}
+
+  <!-- Installation logs modal -->
+  {#if installationLogsView}
+    <div class="modal-overlay" on:click={() => installationLogsView = null} role="presentation">
+      <div class="modal installation-logs-modal" on:click|stopPropagation role="dialog" aria-labelledby="installation-logs-title">
+        <div class="modal-header">
+          <h3 id="installation-logs-title">Installation logs – {installationLogsView.os_name || installationLogsView.template_id || 'Installation'}</h3>
+          <button type="button" class="modal-close" on:click={() => installationLogsView = null} aria-label="Close">×</button>
+        </div>
+        <div class="modal-body installation-logs-body">
+          <p class="installation-logs-meta">
+            {installationLogsView.created_at ? new Date(installationLogsView.created_at).toLocaleString() : '—'}
+            · {installationLogsView.status?.replace('_', ' ') || '—'}
+          </p>
+          {#if installationLogsView.error_message}
+            <div class="installation-logs-error">
+              <strong>Error:</strong>
+              <pre>{installationLogsView.error_message}</pre>
+            </div>
+          {/if}
+          {#if installationLogsView.logs}
+            <div class="installation-logs-content">
+              <strong>Output:</strong>
+              <pre class="installation-logs-pre">{installationLogsView.logs}</pre>
+            </div>
+          {:else if !installationLogsView.error_message}
+            <p class="text-muted">No logs recorded for this installation.</p>
+          {/if}
+        </div>
+      </div>
+    </div>
   {/if}
 
   <!-- Preview image picker (asset manager) modal -->
@@ -2043,6 +2675,40 @@
     border-color: rgba(255, 255, 255, 0.6);
   }
 
+  .left-pane-power-buttons {
+    display: flex;
+    gap: 6px;
+    padding: 0 16px 10px;
+    flex-wrap: wrap;
+  }
+
+  .btn-power-compact {
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #fff;
+    transition: opacity 0.2s, filter 0.2s;
+  }
+  .btn-power-compact:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+  .btn-power-compact:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .btn-power-compact.btn-power-on {
+    background: #0d7d3d;
+  }
+  .btn-power-compact.btn-power-off {
+    background: #b91c1c;
+  }
+  .btn-power-compact.btn-power-reset {
+    background: #b45309;
+  }
+
   .server-preview-details {
     margin: 0;
     padding: 8px 16px 12px;
@@ -2129,6 +2795,22 @@
   .tab-placeholder {
     margin: 0;
     font-style: italic;
+  }
+  .tab-placeholder.small {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 8px;
+  }
+
+  .additional-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    color: var(--text-primary);
+  }
+  .credentials-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
   .general-pane {
@@ -2514,6 +3196,11 @@
     align-items: center;
   }
 
+  .boot-op-row.boot-op-row-stack {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
   .boot-op-row .btn-sm {
     height: 34px;
     padding: 0 14px;
@@ -2709,12 +3396,13 @@
     flex: 1;
     min-height: 0;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    align-items: stretch;
+    justify-content: stretch;
   }
 
   .traffic-graph-wrap :global(.traffic-graph) {
-    flex-shrink: 0;
+    width: 100%;
+    min-width: 0;
   }
 
   .activity-panel {
@@ -4195,6 +4883,77 @@
     font-style: italic;
   }
 
+  .installation-view-logs {
+    margin-top: 10px;
+  }
+
+  .installation-logs-modal {
+    max-width: 90vw;
+    width: 720px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .installation-logs-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .installation-logs-meta {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+
+  .installation-logs-error {
+    flex-shrink: 0;
+  }
+
+  .installation-logs-error pre {
+    margin: 8px 0 0 0;
+    padding: 10px;
+    background: var(--danger-color);
+    color: white;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+
+  .installation-logs-content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .installation-logs-content strong {
+    flex-shrink: 0;
+  }
+
+  .installation-logs-pre {
+    margin: 8px 0 0 0;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow: auto;
+    flex: 1;
+    min-height: 200px;
+  }
+
   .boot-task-info {
     display: flex;
     flex-direction: column;
@@ -4955,5 +5714,161 @@
 
   .bandwidth-help strong {
     color: var(--text-primary);
+  }
+
+  .boot-tab-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .boot-control-card {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    padding: 14px;
+  }
+  .boot-control-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .boot-control-header h3 {
+    margin: 0;
+    font-size: 16px;
+  }
+  .boot-current-state {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 13px;
+  }
+  .boot-control-form {
+    display: grid;
+    gap: 10px;
+  }
+  .boot-control-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .hardware-detection-panel {
+    margin-top: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 14px;
+    background: var(--bg-secondary);
+  }
+  .hardware-detection-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .hardware-detection-header h3 {
+    margin: 0 0 4px 0;
+    font-size: 16px;
+  }
+  .hardware-detection-report-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .hardware-detection-report-chip {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border-radius: 6px;
+    padding: 6px 10px;
+    display: inline-flex;
+    gap: 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .hardware-detection-report-chip.active {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 1px var(--accent-color);
+  }
+  .hardware-detection-review {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .hardware-detection-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .hardware-detection-delete-btn {
+    margin-left: auto;
+  }
+  .hardware-detection-diff-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .hardware-detection-diff-card {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--bg-primary);
+  }
+  .hardware-detection-diff-card h4 {
+    margin: 0 0 10px;
+    font-size: 13px;
+  }
+  .hardware-diff-kv {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+    margin-bottom: 6px;
+  }
+  .hardware-diff-kv span {
+    color: var(--text-secondary);
+  }
+  .hardware-remap-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .hardware-remap-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 220px;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .hardware-remap-row select {
+    width: 100%;
+  }
+  .hardware-mini-table {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+  }
+  .hardware-mini-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--border-color);
+  }
+  .hardware-mini-row:last-child {
+    border-bottom: none;
+  }
+  .hardware-mini-row-header {
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .hardware-detection-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
 </style>

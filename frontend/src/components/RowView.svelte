@@ -1,6 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getRacks, getRackServers, getLocations } from '../lib/api.js';
+  import { getRacks, getRackServers, getLocations, getSwitches } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { onMount } from 'svelte';
 
@@ -10,6 +10,7 @@
 
   let racks = [];
   let rackServers = {};
+  let rackSwitches = {};
   let location = null;
   let loading = true;
   let error = null;
@@ -30,10 +31,14 @@
       racks = racksData.sort((a, b) => (a.row_position || 0) - (b.row_position || 0));
       location = locationsData.find(l => l.id === Number(locationId));
       
-      // Load servers for each rack; servers can occupy multiple units (rack_units)
+      // Load servers and switches for each rack; each device can occupy multiple units (rack_units)
       for (const rack of racks) {
         try {
-          const servers = await getRackServers(rack.id);
+          const [servers, switches] = await Promise.all([
+            getRackServers(rack.id),
+            getSwitches(null, rack.id)
+          ]);
+
           rackServers[rack.id] = servers.reduce((acc, server) => {
             if (server.rack_unit) {
               const size = server.rack_units || 1;
@@ -43,9 +48,20 @@
             }
             return acc;
           }, {});
+
+          rackSwitches[rack.id] = (switches || []).reduce((acc, sw) => {
+            if (sw.rack_unit) {
+              const size = sw.rack_units || 1;
+              for (let u = 0; u < size; u++) {
+                acc[sw.rack_unit + u] = sw;
+              }
+            }
+            return acc;
+          }, {});
         } catch (err) {
-          console.error(`Failed to load servers for rack ${rack.id}:`, err);
-          rackServers[rack.id] = {};
+          console.error(`Failed to load devices for rack ${rack.id}:`, err);
+          rackServers[rack.id] = rackServers[rack.id] || {};
+          rackSwitches[rack.id] = rackSwitches[rack.id] || {};
         }
       }
     } catch (err) {
@@ -56,20 +72,27 @@
     }
   }
 
-  function getServerAtUnit(rackId, unit) {
-    return rackServers[rackId]?.[unit] || null;
+  function getDeviceAtUnit(rackId, unit) {
+    const servers = rackServers[rackId] || {};
+    const switches = rackSwitches[rackId] || {};
+    // Prefer servers if both mapped to same U
+    return servers[unit] ? { type: 'server', data: servers[unit] } : (switches[unit] ? { type: 'switch', data: switches[unit] } : null);
   }
 
-  function isStartOfServer(rackId, unit) {
-    const server = rackServers[rackId]?.[unit];
-    if (!server) return true;
-    return server.rack_unit === unit;
+  function isStartOfDevice(rackId, unit) {
+    const device = getDeviceAtUnit(rackId, unit);
+    if (!device) return true;
+    if (device.type === 'server') return device.data.rack_unit === unit;
+    if (device.type === 'switch') return device.data.rack_unit === unit;
+    return true;
   }
 
   function getSlotSpan(rackId, unit) {
-    const server = rackServers[rackId]?.[unit];
-    if (!server || !isStartOfServer(rackId, unit)) return 1;
-    return server.rack_units || 1;
+    const device = getDeviceAtUnit(rackId, unit);
+    if (!device || !isStartOfDevice(rackId, unit)) return 1;
+    if (device.type === 'server') return device.data.rack_units || 1;
+    if (device.type === 'switch') return device.data.rack_units || 1;
+    return 1;
   }
 
   function getMaxUnits() {
@@ -98,29 +121,45 @@
           </div>
           <div class="rack-units-compact">
             {#each Array(rack.units) as _, i}
-              {@const unit = rack.units - i}
-              {@const server = getServerAtUnit(rack.id, unit)}
-              {@const startOfServer = isStartOfServer(rack.id, unit)}
+              {@const startFromBottom = rack.units_start_from_bottom !== false}
+              {@const unit = startFromBottom ? rack.units - i : i + 1}
+              {@const device = getDeviceAtUnit(rack.id, unit)}
+              {@const startOfDevice = isStartOfDevice(rack.id, unit)}
               {@const span = getSlotSpan(rack.id, unit)}
               <div
                 class="rack-unit-compact"
-                class:occupied={server !== null && startOfServer}
-                class:continuation={server !== null && !startOfServer}
-                style={startOfServer && span > 1 ? `height: ${span * 26}px; min-height: ${span * 26}px;` : (server && !startOfServer ? 'height: 0; min-height: 0; overflow: hidden; border: none; margin: 0;' : '')}
+                class:occupied={device !== null && startOfDevice}
+                class:continuation={device !== null && !startOfDevice}
+                class:switch-slot={device?.type === 'switch'}
+                style={startOfDevice && span > 1 ? `height: ${span * 26}px; min-height: ${span * 26}px;` : (device && !startOfDevice ? 'height: 0; min-height: 0; overflow: hidden; border: none; margin: 0;' : '')}
               >
-                <div class="unit-number-compact">{server && !startOfServer ? '' : (span > 1 ? `${unit}-${unit + span - 1}` : unit)}</div>
+                <div class="unit-number-compact">{device && !startOfDevice ? '' : (span > 1 ? `${unit}-${unit + span - 1}` : unit)}</div>
                 <div class="unit-content-compact">
-                  {#if server && startOfServer}
-                    <div class="server-slot-compact">
-                      <div class="server-name-compact">{server.name}{span > 1 ? ` (${span}U)` : ''}</div>
-                      <div class="server-tooltip">
-                        <div><strong>IP:</strong> {server.server_ip}</div>
-                        {#if server.description}
-                          <div><strong>Description:</strong> {server.description}</div>
-                        {/if}
+                  {#if device && startOfDevice}
+                    {#if device.type === 'server'}
+                      <div class="server-slot-compact">
+                        <div class="server-name-compact">{device.data.name}{span > 1 ? ` (${span}U)` : ''}</div>
+                        <div class="server-tooltip">
+                          <div><strong>IP:</strong> {device.data.server_ip}</div>
+                          {#if device.data.description}
+                            <div><strong>Description:</strong> {device.data.description}</div>
+                          {/if}
+                        </div>
                       </div>
-                    </div>
-                  {:else if !server}
+                    {:else}
+                      <div class="server-slot-compact switch-slot-compact">
+                        <div class="server-name-compact">{device.data.name}{span > 1 ? ` (${span}U)` : ''}</div>
+                        <div class="server-tooltip">
+                          {#if device.data.model}
+                            <div><strong>Model:</strong> {device.data.model}</div>
+                          {/if}
+                          {#if device.data.description}
+                            <div><strong>Description:</strong> {device.data.description}</div>
+                          {/if}
+                        </div>
+                      </div>
+                    {/if}
+                  {:else if !device}
                     <div class="empty-slot-compact"></div>
                   {/if}
                 </div>
@@ -212,7 +251,7 @@
 
   .rack-units-compact {
     display: flex;
-    flex-direction: column-reverse;
+    flex-direction: column;
     gap: 0;
   }
 
@@ -254,6 +293,13 @@
     border-radius: 0;
     z-index: 1;
     position: relative;
+  }
+
+  .rack-unit-compact.switch-slot.occupied {
+    border-left-color: var(--info-color);
+    border-right-color: var(--info-color);
+    border-top-color: var(--info-color);
+    border-bottom-color: var(--info-color);
   }
 
   .rack-unit-compact:hover:not(.occupied) {
@@ -301,6 +347,10 @@
     font-size: 13px;
     line-height: 1.3;
     cursor: help;
+  }
+
+  .switch-slot-compact .server-name-compact {
+    color: var(--info-color);
   }
 
   .server-tooltip {

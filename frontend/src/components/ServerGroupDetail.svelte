@@ -1,15 +1,30 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServerGroup, addServersToGroup, removeServerFromGroup, getServers, updateServerGroup, listISOs, listTempOS, getScripts, getOSTemplates } from '../lib/api.js';
+  import {
+    getServerGroup,
+    addServersToGroup,
+    removeServerFromGroup,
+    getServers,
+    updateServerGroup,
+    listISOs,
+    listTempOS,
+    getScripts,
+    getOSTemplates,
+    getServices
+  } from '../lib/api.js';
   import { onMount } from 'svelte';
 
   export let groupId;
   let group = null;
   let allServers = [];
+  let availableServers = [];
+  let serversWithServices = new Set();
   let loading = true;
+  let loadingAvailability = false;
   let error = null;
   let showAddServerModal = false;
   let selectedServerIds = [];
+  let showOnlyAvailableInModal = true;
 
   let availableIsos = [];
   let availableTempOs = [];
@@ -20,7 +35,11 @@
   onMount(async () => {
     if (groupId) {
       await loadGroup();
-      await Promise.all([loadAllServers(), loadAvailableOptions()]);
+      await Promise.all([
+        loadAllServers(),
+        loadAvailableOptions(),
+        loadServiceAssignments()
+      ]);
     }
   });
 
@@ -53,9 +72,39 @@
   async function loadAllServers() {
     try {
       allServers = await getServers();
+      recomputeAvailableServers();
     } catch (err) {
       console.error('Failed to load servers:', err);
     }
+  }
+
+  async function loadServiceAssignments() {
+    try {
+      loadingAvailability = true;
+      const services = await getServices({ limit: 1000 });
+      const used = new Set();
+      for (const svc of services) {
+        const status = (svc.status || '').toLowerCase();
+        // Treat any non-terminated service as "in use"
+        if (status && status !== 'terminated' && svc.server_id != null) {
+          used.add(svc.server_id);
+        }
+      }
+      serversWithServices = used;
+      recomputeAvailableServers();
+    } catch (err) {
+      console.error('Failed to load services for availability:', err);
+    } finally {
+      loadingAvailability = false;
+    }
+  }
+
+  function recomputeAvailableServers() {
+    if (!allServers || !serversWithServices) {
+      availableServers = allServers;
+      return;
+    }
+    availableServers = allServers.filter((s) => !serversWithServices.has(s.id));
   }
 
   function openAddServerModal() {
@@ -267,12 +316,14 @@
           <p>No servers in this group. Click "Add Servers" to add servers.</p>
         </div>
       {:else}
-        <table class="table">
+        <div class="servers-table-wrapper">
+        <table class="table servers-table">
           <thead>
             <tr>
               <th>Name</th>
               <th>IP Address</th>
               <th>Description</th>
+              <th class="status-col">Billing Status</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -280,12 +331,19 @@
             {#each group.servers as server}
               <tr>
                 <td>
-                  <a href="/admin/servers/{server.id}">{server.name}</a>
+                  <a href="/admin/servers/{server.id}" class="server-name-link">{server.name}</a>
                 </td>
                 <td>{server.server_ip}</td>
                 <td>{server.description || '-'}</td>
+                <td class="status-col">
+                  {#if serversWithServices.has(server.id)}
+                    <span class="badge badge-danger">In use by WHMCS</span>
+                  {:else}
+                    <span class="badge badge-success">Available</span>
+                  {/if}
+                </td>
                 <td>
-                  <button class="btn btn-sm btn-danger" on:click={() => handleRemoveServer(server.id)}>
+                  <button class="btn btn-sm btn-remove" on:click={() => handleRemoveServer(server.id)}>
                     <i class="fa fa-times"></i> Remove
                   </button>
                 </td>
@@ -293,6 +351,7 @@
             {/each}
           </tbody>
         </table>
+        </div>
       {/if}
     </div>
   {/if}
@@ -312,8 +371,17 @@
           <div class="alert alert-danger">{error}</div>
         {/if}
         <p>Select servers to add to this group:</p>
+        <div class="server-selection-toolbar">
+          <label class="toggle-available">
+            <input type="checkbox" bind:checked={showOnlyAvailableInModal} />
+            <span>Show only servers without an active WHMCS service</span>
+          </label>
+          {#if loadingAvailability}
+            <span class="muted small-text">Checking availability…</span>
+          {/if}
+        </div>
         <div class="server-selection">
-          {#each allServers as server}
+          {#each (showOnlyAvailableInModal ? availableServers : allServers) as server}
             <label class="checkbox-label">
               <input
                 type="checkbox"
@@ -322,6 +390,12 @@
               />
               <span>
                 <strong>{server.name}</strong> - {server.server_ip}
+                {' '}
+                {#if serversWithServices.has(server.id)}
+                  <span class="badge badge-danger">In use by WHMCS</span>
+                {:else}
+                  <span class="badge badge-success">Available</span>
+                {/if}
                 {#if server.description}
                   <br><small>{server.description}</small>
                 {/if}
@@ -448,6 +522,71 @@
     margin-bottom: 15px;
   }
 
+  .servers-table-wrapper {
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+    background: var(--bg-primary);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .servers-table {
+    width: 100%;
+    margin-bottom: 0;
+  }
+
+  .servers-table thead {
+    background: var(--bg-secondary);
+  }
+
+  .servers-table th,
+  .servers-table td {
+    vertical-align: middle;
+    padding: 10px 12px;
+  }
+
+  .servers-table tbody tr:nth-child(even) {
+    background: var(--bg-secondary);
+  }
+
+  .servers-table tbody tr:hover {
+    background: var(--bg-tertiary);
+  }
+
+  .server-name-link {
+    color: var(--accent-color);
+    text-decoration: none;
+    font-weight: 500;
+  }
+  .server-name-link:hover {
+    color: var(--accent-light);
+    text-decoration: underline;
+  }
+
+  .servers-table .btn-remove {
+    background: #b91c1c;
+    color: #fff;
+    border: 1px solid #b91c1c;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+  .servers-table .btn-remove:hover {
+    background: #991b1b;
+    border-color: #991b1b;
+  }
+
+  .status-col {
+    width: 1%;
+    white-space: nowrap;
+  }
+
   .empty-state {
     text-align: center;
     padding: 40px;
@@ -461,6 +600,22 @@
     border-radius: 6px;
     padding: 10px;
     background: var(--bg-secondary);
+  }
+
+  .server-selection-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+  }
+
+  .toggle-available {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
   }
 
   .checkbox-label {
@@ -481,6 +636,28 @@
 
   .checkbox-label input {
     margin-right: 10px;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .badge-success {
+    background-color: #1e7e34;
+    color: #fff;
+  }
+
+  .badge-danger {
+    background-color: #c82333;
+    color: #fff;
+  }
+
+  .small-text {
+    font-size: 0.8rem;
   }
 
   .modal-large {
