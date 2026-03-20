@@ -117,6 +117,12 @@ sbin/
 # Run scripts (user-specific)
 run_*.sh
 
+# Local compose overrides and machine-specific compose files
+docker-compose.override.yml
+docker-compose.*.local.yml
+*.local.yml
+docker-compose.registry.yml
+
 # Old PXE boot files
 tftp/pxe/boot.ipxe
 tftp/pxe/initrd/
