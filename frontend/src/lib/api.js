@@ -24,6 +24,115 @@ export async function getInstallationHistory(serverId) {
   return await response.json();
 }
 
+export async function getServerActivity(serverId, limit = 100) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/activity?limit=${encodeURIComponent(limit)}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return [];
+    }
+    try {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to get server activity');
+    } catch (e) {
+      throw new Error(`Failed to get server activity: ${response.statusText}`);
+    }
+  }
+
+  return await response.json();
+}
+
+export async function runServerHardwareDetection(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/hardware-detection/run`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to queue hardware detection');
+  }
+  return await response.json();
+}
+
+export async function listServerHardwareDetectionReports(serverId, statusFilter = null) {
+  const query = statusFilter ? `?status_filter=${encodeURIComponent(statusFilter)}` : '';
+  const response = await fetch(`${API_BASE}/servers/${serverId}/hardware-detection/reports${query}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list hardware detection reports');
+  }
+  return await response.json();
+}
+
+export async function getServerHardwareDetectionReport(serverId, reportId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/hardware-detection/reports/${reportId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to get hardware detection report');
+  }
+  return await response.json();
+}
+
+export async function getServerHardwareDetectionDiff(serverId, reportId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/hardware-detection/reports/${reportId}/diff`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load hardware detection diff');
+  }
+  return await response.json();
+}
+
+export async function applyServerHardwareDetectionReport(serverId, reportId, payload = {}) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/hardware-detection/reports/${reportId}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to apply hardware detection report');
+  }
+  return await response.json();
+}
+
+export async function rejectServerHardwareDetectionReport(serverId, reportId, payload = {}) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/hardware-detection/reports/${reportId}/reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to reject hardware detection report');
+  }
+  return await response.json();
+}
+
+export async function deleteServerHardwareDetectionReport(serverId, reportId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/hardware-detection/reports/${reportId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to delete hardware detection report');
+  }
+}
+
 export async function updateInstallationTaskStatus(serverId, taskId, { status, error_message }) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/installation-tasks/${taskId}`, {
     method: 'PATCH',
@@ -353,8 +462,8 @@ export async function getRack(id) {
   return await response.json();
 }
 
-export async function createRack(locationId, name, units = 42, description = null, row = null, rowPosition = null) {
-  const body = { location_id: locationId, name, units };
+export async function createRack(locationId, name, units = 42, description = null, row = null, rowPosition = null, unitsStartFromBottom = true) {
+  const body = { location_id: locationId, name, units, units_start_from_bottom: unitsStartFromBottom };
   if (description !== null) body.description = description;
   if (row !== null && row !== '') body.row = Number(row);
   if (rowPosition !== null && rowPosition !== '') body.row_position = Number(rowPosition);
@@ -376,13 +485,14 @@ export async function createRack(locationId, name, units = 42, description = nul
   return await response.json();
 }
 
-export async function updateRack(id, name = null, units = null, description = null, row = null, rowPosition = null) {
+export async function updateRack(id, name = null, units = null, description = null, row = null, rowPosition = null, unitsStartFromBottom = null) {
   const body = {};
   if (name !== null) body.name = name;
   if (units !== null) body.units = units;
   if (description !== null) body.description = description;
   if (row !== null && row !== '') body.row = Number(row);
   if (rowPosition !== null && rowPosition !== '') body.row_position = Number(rowPosition);
+  if (unitsStartFromBottom !== null) body.units_start_from_bottom = unitsStartFromBottom;
 
   const response = await fetch(`${API_BASE}/racks/${id}`, {
     method: 'PUT',
@@ -453,6 +563,32 @@ export async function getServer(id) {
     throw new Error('Failed to get server');
   }
 
+  return await response.json();
+}
+
+export async function getServerCapabilities(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/capabilities`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load server capabilities');
+  }
+  return await response.json();
+}
+
+export async function updateServerCapabilities(serverId, capabilityStates) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/capabilities`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ capability_states: capabilityStates }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update server capabilities');
+  }
   return await response.json();
 }
 
@@ -757,6 +893,32 @@ export async function testServiceInstance(id, apiKey) {
   if (!response.ok) {
     const err = await response.json();
     throw new Error(err.detail || 'Test failed');
+  }
+  return await response.json();
+}
+
+export async function getLocationDHCPSettings(locationId) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/settings`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to get DHCP settings');
+  }
+  return await response.json();
+}
+
+export async function updateLocationDHCPSettings(locationId, data) {
+  const response = await fetch(`${API_BASE}/locations/${locationId}/dhcp/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update DHCP settings');
   }
   return await response.json();
 }
@@ -1089,6 +1251,44 @@ export async function powerResetServer(serverId) {
   return await response.json();
 }
 
+export async function getServerBootOptions(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/boot/options`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load boot options');
+  }
+  return await response.json();
+}
+
+export async function setServerBootOption(serverId, payload) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/boot/set`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to set boot option');
+  }
+  return await response.json();
+}
+
+export async function runBootOrderFix(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/boot/fix-boot-order`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to queue boot order correction');
+  }
+  return await response.json();
+}
+
 /**
  * Call a server plugin action by method name (for config-driven capability UI).
  * Maps known actions to existing endpoints.
@@ -1101,6 +1301,7 @@ export async function callServerPluginAction(serverId, action, params = {}) {
     power_on: () => powerOnServer(serverId),
     power_off: () => powerOffServer(serverId, params.force),
     power_reset: () => powerResetServer(serverId),
+    set_next_boot_device: () => setServerBootOption(serverId, params),
   };
   if (stateActions[action]) {
     return stateActions[action]();

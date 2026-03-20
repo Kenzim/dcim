@@ -11,8 +11,9 @@
   let showModal = false;
   let editingRack = null;
   let selectedLocationId = null;
-  let formData = { name: '', units: 42, description: '', row: null, row_position: null };
+  let formData = { name: '', units: 42, description: '', row: null, row_position: null, units_start_from_bottom: true };
   let formError = null;
+  let racksByLocationAndRow = {};
 
   onMount(async () => {
     await Promise.all([loadRacks(), loadLocations()]);
@@ -42,7 +43,7 @@
   function openAddModal() {
     editingRack = null;
     selectedLocationId = null;
-    formData = { name: '', units: 42, description: '', row: null, row_position: null };
+    formData = { name: '', units: 42, description: '', row: null, row_position: null, units_start_from_bottom: true };
     formError = null;
     showModal = true;
   }
@@ -55,7 +56,9 @@
       units: rack.units, 
       description: rack.description || '',
       row: rack.row || null,
-      row_position: rack.row_position || null
+      row_position: rack.row_position || null,
+      // Default to true if field is missing (existing racks)
+      units_start_from_bottom: rack.units_start_from_bottom !== false
     };
     formError = null;
     showModal = true;
@@ -65,7 +68,7 @@
     showModal = false;
     editingRack = null;
     selectedLocationId = null;
-    formData = { name: '', units: 42, description: '', row: null, row_position: null };
+    formData = { name: '', units: 42, description: '', row: null, row_position: null, units_start_from_bottom: true };
     formError = null;
   }
 
@@ -88,9 +91,25 @@
     try {
       formError = null;
       if (editingRack) {
-        await updateRack(editingRack.id, formData.name, formData.units, formData.description, formData.row, formData.row_position);
+        await updateRack(
+          editingRack.id,
+          formData.name,
+          formData.units,
+          formData.description,
+          formData.row,
+          formData.row_position,
+          formData.units_start_from_bottom
+        );
       } else {
-        await createRack(selectedLocationId, formData.name, formData.units, formData.description, formData.row, formData.row_position);
+        await createRack(
+          selectedLocationId,
+          formData.name,
+          formData.units,
+          formData.description,
+          formData.row,
+          formData.row_position,
+          formData.units_start_from_bottom
+        );
       }
       closeModal();
       await loadRacks();
@@ -122,20 +141,23 @@
     navigate(`/admin/racks/rows/${locationId}/${row}`);
   }
 
-  // Group racks by location and row
-  $: racksByLocationAndRow = racks.reduce((acc, rack) => {
-    const key = `${rack.location_id}-${rack.row || 'no-row'}`;
-    if (!acc[key]) {
-      acc[key] = {
-        location_id: rack.location_id,
-        location_name: getLocationName(rack.location_id),
-        row: rack.row,
-        racks: []
-      };
-    }
-    acc[key].racks.push(rack);
-    return acc;
-  }, {});
+  // Group racks by location and row; recompute when either racks or locations change
+  $: {
+    const _locations = locations;
+    racksByLocationAndRow = racks.reduce((acc, rack) => {
+      const key = `${rack.location_id}-${rack.row || 'no-row'}`;
+      if (!acc[key]) {
+        acc[key] = {
+          location_id: rack.location_id,
+          location_name: getLocationName(rack.location_id),
+          row: rack.row,
+          racks: []
+        };
+      }
+      acc[key].racks.push(rack);
+      return acc;
+    }, {});
+  }
 </script>
 
 <PageHeader title="Racks" />
@@ -293,6 +315,32 @@
             />
             <small class="field-help">Position within the row (1, 2, 3...)</small>
           </div>
+        </div>
+        <div class="form-group">
+          <label>Rack unit numbering</label>
+          <div class="toggle-group">
+            <label class:active={formData.units_start_from_bottom}>
+              <input
+                type="radio"
+                name="unit-numbering"
+                value="bottom"
+                checked={formData.units_start_from_bottom}
+                on:change={() => (formData.units_start_from_bottom = true)}
+              />
+              1 at bottom (default)
+            </label>
+            <label class:active={!formData.units_start_from_bottom}>
+              <input
+                type="radio"
+                name="unit-numbering"
+                value="top"
+                checked={!formData.units_start_from_bottom}
+                on:change={() => (formData.units_start_from_bottom = false)}
+              />
+              1 at top
+            </label>
+          </div>
+          <small class="field-help">Controls how rack units are numbered and rendered in rack and row views.</small>
         </div>
         <div class="form-group">
           <label for="rack-description">Description</label>

@@ -1,6 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, getRacks, testServerConnection, getServerGroups } from '../lib/api.js';
+  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, getRacks, testServerConnection, getServerGroups, getServerCapabilities, updateServerCapabilities } from '../lib/api.js';
   import { onMount, tick } from 'svelte';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
@@ -77,11 +77,12 @@
   let testResult = null;
   let testPassed = false;
   let testingCapabilities = {}; // Map of server_id -> boolean
+  let capabilityStates = {};
 
   onMount(async () => {
     if (embeddedEditServer) {
       await Promise.all([loadPlugins(), loadLocations(), loadRacks(), loadServerGroups()]);
-      openEditModal(embeddedEditServer);
+      await openEditModal(embeddedEditServer);
     } else {
       await Promise.all([loadServers(), loadPlugins(), loadLocations(), loadRacks(), loadServerGroups()]);
       const params = new URLSearchParams(window.location.search);
@@ -90,7 +91,7 @@
         const server = servers.find(s => String(s.id) === String(editId));
         if (server) {
           editFromDetailId = parseInt(editId, 10);
-          openEditModal(server);
+          await openEditModal(server);
         }
         window.history.replaceState({}, '', window.location.pathname);
       }
@@ -242,10 +243,11 @@
     prevRackUnitsForAnchor = 1;
     testResult = null;
     testPassed = false;
+    capabilityStates = {};
     showModal = true;
   }
 
-  function openEditModal(server) {
+  async function openEditModal(server) {
     editingServer = server;
     previousPluginName = server.plugin_name;
     rackPositionAnchor = 'bottom';
@@ -294,6 +296,16 @@
     pluginConfigError = null;
     testResult = null;
     testPassed = false;
+    const plugin = plugins.find(p => p.name === server.plugin_name);
+    capabilityStates = getDefaultCapabilityStates(plugin);
+    if (server?.id) {
+      try {
+        const capabilityData = await getServerCapabilities(server.id);
+        capabilityStates = capabilityData?.capability_states || capabilityStates;
+      } catch (err) {
+        console.error('Failed to load server capability states:', err);
+      }
+    }
     // Update available racks when opening edit modal (after formData is set)
     updateAvailableRacks();
     showModal = true;
@@ -305,6 +317,7 @@
     editFromDetailId = null;
     formError = null;
     pluginConfigError = null;
+    capabilityStates = {};
     if (embeddedEditServer) {
       onEditComplete?.();
     }
@@ -362,13 +375,22 @@
     return plugins.find(p => p.name === formData.plugin_name);
   }
 
+  function getDefaultCapabilityStates(plugin) {
+    const states = {};
+    for (const cap of (plugin?.capabilities || [])) {
+      states[cap.id] = cap.optional ? false : true;
+    }
+    return states;
+  }
+
   let previousPluginName = null;
 
   function updatePluginConfig() {
     const plugin = getSelectedPlugin();
+    const pluginChanged = previousPluginName !== null && previousPluginName !== formData.plugin_name;
     
     // If plugin changed, clear config and test results
-    if (previousPluginName !== null && previousPluginName !== formData.plugin_name) {
+    if (pluginChanged) {
       formData.plugin_config = {};
       testResult = null;
       testPassed = false;
@@ -390,13 +412,8 @@
     const existingConfig = formData.plugin_config || {};
     const config = {};
     const properties = plugin.config_template.properties || {};
-    // Preserve enabled_capabilities (for optional capabilities)
-    if (existingConfig.enabled_capabilities && Array.isArray(existingConfig.enabled_capabilities)) {
-      config.enabled_capabilities = existingConfig.enabled_capabilities;
-    }
 
     for (const [key, schema] of Object.entries(properties)) {
-      if (key === 'enabled_capabilities') continue;
       // If value already exists in formData, preserve it (user may have changed it)
       if (existingConfig.hasOwnProperty(key)) {
         config[key] = existingConfig[key];
@@ -413,6 +430,9 @@
     }
     
     formData.plugin_config = config;
+    if (pluginChanged || Object.keys(capabilityStates || {}).length === 0) {
+      capabilityStates = getDefaultCapabilityStates(plugin);
+    }
     
     testResult = null;
     testPassed = false;
@@ -503,6 +523,7 @@
       formError = null;
       const submitData = {
         ...formData,
+        plugin_config: { ...(formData.plugin_config || {}) },
         disks: formData.disks.map(d => ({
           type: d.type,
           capacity_gb: parseInt(d.capacity_gb),
@@ -521,6 +542,7 @@
           description: p.description && p.description.trim() ? p.description.trim() : null
         }))
       };
+      delete submitData.plugin_config.enabled_capabilities;
 
       let savedId = editingServer?.id;
       if (editingServer) {
@@ -528,6 +550,9 @@
       } else {
         const created = await createServer(submitData);
         savedId = created?.id;
+      }
+      if (savedId) {
+        await updateServerCapabilities(savedId, capabilityStates || {});
       }
       const shouldReturnToDetail = editFromDetailId && !embeddedEditServer;
       closeModal();
@@ -863,17 +888,11 @@
                       <label class="checkbox-label">
                         <input
                           type="checkbox"
-                          checked={(formData.plugin_config.enabled_capabilities || []).includes(cap.id)}
+                          checked={!!capabilityStates[cap.id]}
                           on:change={(e) => {
-                            let enabled = formData.plugin_config.enabled_capabilities || [];
-                            if (e.target.checked) {
-                              enabled = [...enabled, cap.id];
-                            } else {
-                              enabled = enabled.filter(id => id !== cap.id);
-                            }
-                            formData.plugin_config = {
-                              ...formData.plugin_config,
-                              enabled_capabilities: enabled
+                            capabilityStates = {
+                              ...capabilityStates,
+                              [cap.id]: e.target.checked
                             };
                           }}
                         />

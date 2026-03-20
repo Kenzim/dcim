@@ -110,10 +110,11 @@
     </div>
 
     <div class="rack-visualization">
-      <!-- Units count down from top: 42 at top, 1 at bottom -->
+      <!-- Units can be numbered from bottom (default) or top, per rack setting -->
       <div class="rack-units">
         {#each Array(rack.units) as _, i}
-          {@const unit = rack.units - i}
+          {@const startFromBottom = rack.units_start_from_bottom !== false}
+          {@const unit = startFromBottom ? rack.units - i : i + 1}
           {@const device = getDeviceAtUnit(unit)}
           {@const startOfDevice = isStartOfDevice(unit)}
           {@const span = getSlotSpan(unit)}
