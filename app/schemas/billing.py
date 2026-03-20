@@ -51,6 +51,16 @@ class BillingServiceResponse(BaseModel):
     status: str
     description: Optional[str]
     config: Optional[Dict[str, Any]]
+    # Convenience fields for billing integrations (e.g. WHMCS)
+    # These are populated when available and may be null for legacy calls.
+    server_ip: Optional[str] = Field(
+        default=None,
+        description="Primary server IP address for this service (if available)",
+    )
+    credentials: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="OS / service credentials (e.g. admin username/password) when known",
+    )
     created_at: datetime
     updated_at: datetime
     

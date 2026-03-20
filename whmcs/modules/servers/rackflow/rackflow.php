@@ -110,6 +110,7 @@ function rackflow_ClientArea(array $vars)
     $serviceStatus = '';
     $powerAvailable = false;
     $powerMessage = '';
+    $installationStatusText = '';
     if (!empty($rackflowServiceId)) {
         $apiConfig = rackflow_getApiConfig($params);
         $statusData = rackflow_fetchServiceStatus($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
@@ -120,6 +121,18 @@ function rackflow_ClientArea(array $vars)
             $statusLabel = isset($statusData['status']) ? $statusData['status'] : (isset($statusData['power_state']) ? strtolower($statusData['power_state']) : 'unknown');
             $powerStatusLabel = $statusLabel;
             $powerStatusStyle = $statusLabel === 'on' ? 'background:#28a745;color:#fff;' : ($statusLabel === 'off' ? 'background:#6c757d;color:#fff;' : ($statusLabel === 'suspended' ? 'background:#ffc107;color:#212529;' : 'background:#6c757d;color:#fff;'));
+            // Optional installation status (OS install progress) from billing API
+            if (isset($statusData['installation']) && is_array($statusData['installation'])) {
+                $install = $statusData['installation'];
+                $istatus = isset($install['status']) ? (string)$install['status'] : '';
+                $iprogress = isset($install['progress_percent']) && $install['progress_percent'] !== null ? (int)$install['progress_percent'] : null;
+                if ($istatus !== '') {
+                    $installationStatusText = $istatus;
+                    if ($iprogress !== null) {
+                        $installationStatusText .= ' (' . $iprogress . '%)';
+                    }
+                }
+            }
         } else {
             $powerMessage = 'Unable to load server status.';
         }
@@ -134,6 +147,7 @@ function rackflow_ClientArea(array $vars)
             'rackflow_power_status_style' => $powerStatusStyle,
             'rackflow_server_name' => $serverName,
             'rackflow_service_status' => $serviceStatus,
+            'rackflow_installation_status' => $installationStatusText,
             'rackflow_power_message' => $powerMessage,
         ),
     );
@@ -318,6 +332,7 @@ function rackflow_TestConnection(array $params)
  */
 function rackflow_apiCall($apiUrl, $apiKey, $method, $endpoint, $data = null)
 {
+    $method = strtoupper($method);
     $url = rtrim($apiUrl, '/') . $endpoint;
     
     $ch = curl_init();
@@ -332,9 +347,11 @@ function rackflow_apiCall($apiUrl, $apiKey, $method, $endpoint, $data = null)
         'Content-Type: application/json',
     );
     
-    if ($method == 'POST' || $method == 'PUT') {
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    if ($method !== 'GET') {
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        if ($data !== null && in_array($method, array('POST', 'PUT', 'PATCH'))) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        }
     }
     
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
@@ -395,7 +412,7 @@ function rackflow_CreateAccount(array $params)
         }
         
         // Extract configuration options
-        // configoption1 = RackFlow Server Group ID
+        // configoption1 = RackFlow Server Group ID (backend server_groups.id)
         // Backend API details come from server configuration (serverip, serverhostname, serverpassword, etc.)
         $serverGroupId = isset($params['configoption1']) && !empty($params['configoption1']) ? (int)$params['configoption1'] : null;
         
@@ -414,6 +431,33 @@ function rackflow_CreateAccount(array $params)
         $externalUsername = isset($params['username']) ? $params['username'] : '';
         $externalEmail = isset($params['email']) ? $params['email'] : '';
         
+        // Optional OS template selection and parameters
+        // You can expose an "OS Template" configurable option and map it here.
+        $templateId = isset($params['configoptions']['os_template']) && $params['configoptions']['os_template'] !== ''
+            ? (string)$params['configoptions']['os_template']
+            : null;
+
+        // Template parameters: at minimum, pass the WHMCS service password as the admin password
+        $templateParameters = array();
+        if (!empty($params['password'])) {
+            $templateParameters['admin_password'] = (string)$params['password'];
+        }
+
+        // Service config drives advanced provisioning behaviour in the RackFlow billing API.
+        // When server_group_id is set, the backend will:
+        // - Pick a free server in that group
+        // - Queue an OS installation using the selected template
+        $serviceConfig = array();
+        if ($serverGroupId) {
+            $serviceConfig['server_group_id'] = $serverGroupId;
+        }
+        if (!empty($templateId)) {
+            $serviceConfig['template_id'] = $templateId;
+        }
+        if (!empty($templateParameters)) {
+            $serviceConfig['template_parameters'] = $templateParameters;
+        }
+
         // Build service creation data
         $serviceData = array(
             'name' => $serviceName,
@@ -433,6 +477,7 @@ function rackflow_CreateAccount(array $params)
             'os_boot_mode' => isset($params['configoptions']['os_boot_mode']) ? $params['configoptions']['os_boot_mode'] : 'uefi',
             'disks' => isset($params['configoptions']['disks']) ? $params['configoptions']['disks'] : array(),
             'network_ports' => isset($params['configoptions']['network_ports']) ? $params['configoptions']['network_ports'] : array(),
+            'service_config' => $serviceConfig,
         );
         
         // Create service via billing API
@@ -466,14 +511,184 @@ function rackflow_CreateAccount(array $params)
             }
         }
         
-        // Store service ID in custom field for future reference
-        if (isset($params['serviceid'])) {
-            // You may want to store $service['id'] in a custom field
+        // Store RackFlow service ID in custom field for future reference
+        if (isset($params['serviceid']) && isset($params['packageid']) && isset($service['id'])) {
+            $rackflowServiceId = (int)$service['id'];
+            rackflow_saveServiceIdCustomField((int)$params['serviceid'], (int)$params['packageid'], $rackflowServiceId);
         }
-        
 
         return 'success';
         
+    } catch (Exception $e) {
+        logModuleCall(
+            'rackflow',
+            __FUNCTION__,
+            $params,
+            $e->getMessage(),
+            $e->getTraceAsString()
+        );
+        return 'Error: ' . $e->getMessage();
+    }
+}
+
+/**
+ * Suspend a service in RackFlow when WHMCS suspends the account.
+ *
+ * This will power the server off first, then mark the service as suspended
+ * in RackFlow.
+ *
+ * @param array $params common module parameters
+ *
+ * @return string "success" or an error message
+ */
+function rackflow_SuspendAccount(array $params)
+{
+    try {
+        $rackflowServiceId = rackflow_getRackflowServiceId($params);
+        if (empty($rackflowServiceId)) {
+            return 'This service is not linked to RackFlow. Use Register in RackFlow first or set the RackFlow Service ID.';
+        }
+
+        $apiConfig = rackflow_getApiConfig($params);
+        if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+            return 'API URL and API key must be configured (Setup > Servers).';
+        }
+
+        // First ensure the server is powered off
+        $powerResult = rackflow_powerAction($params, 'off');
+        if ($powerResult !== 'success') {
+            return 'Failed to power off server before suspension: ' . $powerResult;
+        }
+
+        $reason = isset($params['suspendreason']) && $params['suspendreason'] !== ''
+            ? (string)$params['suspendreason']
+            : 'Suspended from WHMCS';
+
+        $result = rackflow_apiCall(
+            $apiConfig['url'],
+            $apiConfig['key'],
+            'POST',
+            '/api/billing/services/' . (int)$rackflowServiceId . '/suspend',
+            array('reason' => $reason)
+        );
+
+        if (!$result['success']) {
+            $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+            $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+            return 'Suspend failed: ' . $detail;
+        }
+
+        return 'success';
+    } catch (Exception $e) {
+        logModuleCall(
+            'rackflow',
+            __FUNCTION__,
+            $params,
+            $e->getMessage(),
+            $e->getTraceAsString()
+        );
+        return 'Error: ' . $e->getMessage();
+    }
+}
+
+/**
+ * Unsuspend a service in RackFlow when WHMCS unsuspends the account.
+ *
+ * This will mark the service as active again.
+ * Powering the server on remains a manual action via the Power On command.
+ *
+ * @param array $params common module parameters
+ *
+ * @return string "success" or an error message
+ */
+function rackflow_UnsuspendAccount(array $params)
+{
+    try {
+        $rackflowServiceId = rackflow_getRackflowServiceId($params);
+        if (empty($rackflowServiceId)) {
+            return 'This service is not linked to RackFlow. Use Register in RackFlow first or set the RackFlow Service ID.';
+        }
+
+        $apiConfig = rackflow_getApiConfig($params);
+        if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+            return 'API URL and API key must be configured (Setup > Servers).';
+        }
+
+        $reason = isset($params['unsuspendreason']) && $params['unsuspendreason'] !== ''
+            ? (string)$params['unsuspendreason']
+            : 'Unsuspended from WHMCS';
+
+        $result = rackflow_apiCall(
+            $apiConfig['url'],
+            $apiConfig['key'],
+            'POST',
+            '/api/billing/services/' . (int)$rackflowServiceId . '/unsuspend',
+            array('reason' => $reason)
+        );
+
+        if (!$result['success']) {
+            $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+            $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+            return 'Unsuspend failed: ' . $detail;
+        }
+
+        return 'success';
+    } catch (Exception $e) {
+        logModuleCall(
+            'rackflow',
+            __FUNCTION__,
+            $params,
+            $e->getMessage(),
+            $e->getTraceAsString()
+        );
+        return 'Error: ' . $e->getMessage();
+    }
+}
+
+/**
+ * Terminate a service in RackFlow when WHMCS terminates the account.
+ *
+ * This will power the server off and then terminate the RackFlow service,
+ * while leaving server-level administrative enablement unchanged.
+ *
+ * @param array $params common module parameters
+ *
+ * @return string "success" or an error message
+ */
+function rackflow_TerminateAccount(array $params)
+{
+    try {
+        $rackflowServiceId = rackflow_getRackflowServiceId($params);
+        if (empty($rackflowServiceId)) {
+            return 'This service is not linked to RackFlow. Use Register in RackFlow first or set the RackFlow Service ID.';
+        }
+
+        $apiConfig = rackflow_getApiConfig($params);
+        if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+            return 'API URL and API key must be configured (Setup > Servers).';
+        }
+
+        // First ensure the server is powered off
+        $powerResult = rackflow_powerAction($params, 'off');
+        if ($powerResult !== 'success') {
+            return 'Failed to power off server before termination: ' . $powerResult;
+        }
+
+        $result = rackflow_apiCall(
+            $apiConfig['url'],
+            $apiConfig['key'],
+            'DELETE',
+            '/api/billing/services/' . (int)$rackflowServiceId,
+            null
+        );
+
+        if (!$result['success']) {
+            $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+            $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+            return 'Terminate failed: ' . $detail;
+        }
+
+        return 'success';
     } catch (Exception $e) {
         logModuleCall(
             'rackflow',
@@ -1174,12 +1389,28 @@ function rackflow_AdminServicesTabFields(array $params)
             $statusLabel = isset($statusData['status']) ? $statusData['status'] : $powerState; // on / off / unknown / suspended
             $enabledText = $serverEnabled === true ? 'Yes' : ($serverEnabled === false ? 'No' : '—');
             $powerStyle = $statusLabel === 'on' ? 'background:#28a745;color:#fff;' : ($statusLabel === 'off' ? 'background:#6c757d;color:#fff;' : ($statusLabel === 'suspended' ? 'background:#ffc107;color:#212529;' : 'background:#6c757d;color:#fff;'));
+
+            // Optional installation status
+            $installStatus = '—';
+            if (isset($statusData['installation']) && is_array($statusData['installation'])) {
+                $inst = $statusData['installation'];
+                $istatus = isset($inst['status']) ? (string)$inst['status'] : '';
+                $iprogress = isset($inst['progress_percent']) && $inst['progress_percent'] !== null ? (int)$inst['progress_percent'] : null;
+                if ($istatus !== '') {
+                    $installStatus = htmlspecialchars($istatus);
+                    if ($iprogress !== null) {
+                        $installStatus .= ' (' . $iprogress . '%)';
+                    }
+                }
+            }
+
             $statusHtml = '<div class="row"><div class="col-sm-12">'
                 . '<table class="table table-condensed table-bordered" style="max-width: 500px;">'
                 . '<tr><th style="width: 140px;">Service status</th><td>' . $serviceStatus . '</td></tr>'
                 . '<tr><th>Server name</th><td>' . $serverName . '</td></tr>'
                 . '<tr><th>Server enabled</th><td>' . $enabledText . '</td></tr>'
                 . '<tr><th>Power state</th><td><span style="' . $powerStyle . 'padding:2px 8px;border-radius:4px;font-size:12px;">' . htmlspecialchars($statusLabel) . '</span></td></tr>'
+                . '<tr><th>Installation</th><td>' . $installStatus . '</td></tr>'
                 . '</table><p class="text-muted small">Live from RackFlow. Reload the page to refresh.</p></div></div>';
         } else {
             $statusHtml = '<span class="text-muted">Could not load status (check API and RackFlow service ID).</span>';
