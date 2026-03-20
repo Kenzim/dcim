@@ -10,18 +10,32 @@ This module handles all server-to-API communication, including:
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import PlainTextResponse, FileResponse, Response
 from sqlalchemy.orm import Session
-from typing import Optional
-from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
 from app.core.database import get_db
 from app.core.auth import require_admin, get_current_user
-from app.dao import NetworkPortDAO, ServerDAO, BootTaskDAO, DiskDAO
+from app.dao import (
+    NetworkPortDAO,
+    ServerDAO,
+    BootTaskDAO,
+    DiskDAO,
+    ServiceInstanceDAO,
+    InstallationTaskDAO,
+    HardwareDetectionReportDAO,
+)
 from app.models.network_port import NetworkPort
 from app.models.boot_task import BootType, BootTaskStatus
+from app.models.hardware_detection_report import HardwareDetectionReportStatus
 from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
 from app.services.dhcp_config_service import get_dhcp_config_service
 from app.services.dhcp_config_generator import get_next_server_ip_for_client, get_subnet_info_for_client
+from app.services.server_activity_logger import (
+    log_server_activity_attempt,
+    log_server_activity_success,
+)
+from app.models.server_activity import ServerActivityEventType
 import logging
 import re
 import os
@@ -32,8 +46,38 @@ router = APIRouter()
 
 
 def _get_base_url_for_pxe_ip(db, pxe_ip: Optional[str]) -> str:
-    """Base URL for boot resources (ISO, kernel, initrd, etc.) using next-server IP from DHCP interfaces for this client's subnet."""
-    config = get_dhcp_config_service().get_config(db)
+    """
+    Base URL for boot resources (ISO, kernel, initrd, etc.).
+
+    Prefer the per-location DHCP configuration used for this server's location,
+    so the IP matches what we configured in the DHCP settings for that location.
+    Falls back to the legacy global DHCP config when no per-location config
+    can be resolved.
+    """
+    dhcp_svc = get_dhcp_config_service()
+    config = None
+
+    # When we know the PXE IP, try to find the server and its location so we
+    # can use that location's DHCP service instance config.
+    if pxe_ip:
+        try:
+            port = db.query(NetworkPort).filter(NetworkPort.pxe_ip == pxe_ip).first()
+        except Exception:
+            port = None
+        if port and port.server_id:
+            server = ServerDAO.get_by_id(db, port.server_id)
+            location_id = getattr(server, "location_id", None) if server else None
+            if location_id:
+                instance = ServiceInstanceDAO.get_by_location_and_type(
+                    db, location_id, "dhcp"
+                )
+                if instance:
+                    config = dhcp_svc.get_config_by_service_instance(db, instance.id)
+
+    # Fallback to global config when no per-location config is available
+    if config is None:
+        config = dhcp_svc.get_config(db)
+
     ip = get_next_server_ip_for_client(config, pxe_ip)
     return f"http://{ip}:8000"
 
@@ -157,19 +201,13 @@ async def get_pxe_boot_file(
                         "Content-Disposition": f'inline; filename="script-{boot_task.id}.sh"'
                     }
                 )
-            elif boot_task.script_url:
-                # If script_url is set, redirect to it or fetch and serve
-                logger.info(f"Boot task {boot_task.id} has script_url, serving via redirect")
-                # For now, return a message - Alpine can fetch from script_url directly
-                raise HTTPException(
-                    status_code=status.HTTP_302_FOUND,
-                    detail=f"Script available at: {boot_task.script_url}"
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"No script content for boot task {boot_task.id}"
-                )
+
+            # When script=true but there is no inline script_content (even if script_url is set),
+            # treat this as "no script content available" for the purposes of the initramfs client.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No script content for boot task {boot_task.id}"
+            )
         
         if boot_task:
             # Basic DHCP only
@@ -456,6 +494,309 @@ async def get_pxe_info(
         )
 
 
+def _get_request_source_ip(request: Request) -> Optional[str]:
+    """Get caller IP, preferring X-Forwarded-For when present."""
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        first_ip = forwarded_for.split(",")[0].strip()
+        if first_ip:
+            return first_ip
+    if request.client:
+        return request.client.host
+    return None
+
+
+def _resolve_server_by_source_ip(db: Session, source_ip: Optional[str]):
+    """Resolve server from source IP using PXE IP first, then server primary IP."""
+    if not source_ip:
+        return None
+
+    pxe_port = NetworkPortDAO.get_by_pxe_ip(db, source_ip)
+    if pxe_port and pxe_port.server_id:
+        server = ServerDAO.get_by_id(db, pxe_port.server_id)
+        if server:
+            return server
+
+    return ServerDAO.get_by_ip(db, source_ip)
+
+
+def _get_cloud_init_installation_context(db: Session, server_id: int):
+    """Find installation context to render cloud-init data."""
+    active_boot_task = BootTaskDAO.get_active_by_server(db, server_id)
+    if active_boot_task:
+        by_boot_task = InstallationTaskDAO.get_by_boot_task(db, active_boot_task.id)
+        if by_boot_task:
+            return by_boot_task
+
+    active_install = InstallationTaskDAO.get_active_by_server(db, server_id)
+    if active_install:
+        return active_install
+
+    history = InstallationTaskDAO.get_by_server(db, server_id)
+    return history[0] if history else None
+
+
+def _safe_yaml_single_quoted(value: str) -> str:
+    text = str(value).replace("\r", "").replace("\n", " ").strip()
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _sanitize_username(value: Optional[str]) -> str:
+    candidate = (value or "").strip().lower()
+    if re.match(r"^[a-z_][a-z0-9_-]{0,31}$", candidate):
+        return candidate
+    return "rackflow"
+
+
+def _sanitize_hostname(value: Optional[str], fallback: str = "rackflow-host") -> str:
+    raw = (value or "").strip().lower()
+    if not raw:
+        raw = fallback
+    raw = re.sub(r"[^a-z0-9-]", "-", raw)
+    raw = re.sub(r"-{2,}", "-", raw).strip("-")
+    if not raw:
+        raw = fallback
+    return raw[:63]
+
+
+def _build_cloud_init_user_data(server, installation_task) -> str:
+    params = installation_task.template_parameters or {}
+
+    username = _sanitize_username(params.get("username"))
+    password = (params.get("password") or "").strip()
+    ssh_public_key = (params.get("ssh_public_key") or "").replace("\r", "").strip()
+    hostname = _sanitize_hostname(getattr(server, "name", None), fallback=f"rackflow-{server.id}")
+
+    if not password:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Installation parameters are missing required 'password' for cloud-init rendering",
+        )
+
+    lines = [
+        "#cloud-config",
+        "preserve_hostname: false",
+        f"hostname: {hostname}",
+        "manage_etc_hosts: true",
+        "users:",
+        "  - default",
+        "  - name: " + _safe_yaml_single_quoted(username),
+        "    shell: /bin/bash",
+        "    lock_passwd: false",
+        "    sudo: ALL=(ALL) NOPASSWD:ALL",
+        "    groups: [adm, sudo]",
+    ]
+
+    if ssh_public_key:
+        lines.extend(
+            [
+                "    ssh_authorized_keys:",
+                "      - " + _safe_yaml_single_quoted(ssh_public_key),
+            ]
+        )
+
+    lines.extend(
+        [
+            "chpasswd:",
+            "  expire: false",
+            "  users:",
+            "    - name: " + _safe_yaml_single_quoted(username),
+            "      password: " + _safe_yaml_single_quoted(password),
+            "ssh_pwauth: true",
+            "package_update: false",
+            "package_upgrade: false",
+            "final_message: " + _safe_yaml_single_quoted(f"Rackflow cloud-init completed for server {server.id}"),
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _build_cloud_init_meta_data(server, installation_task) -> str:
+    hostname = _sanitize_hostname(getattr(server, "name", None), fallback=f"rackflow-{server.id}")
+    install_id = getattr(installation_task, "id", "unknown")
+    instance_id = f"rackflow-{server.id}-{install_id}"
+    return (
+        f"instance-id: {instance_id}\n"
+        f"local-hostname: {hostname}\n"
+    )
+
+
+class HardwareNicEntry(BaseModel):
+    name: str
+    mac_address: Optional[str] = None
+    speed_mbps: Optional[int] = None
+    model: Optional[str] = None
+    pci_address: Optional[str] = None
+    is_physical: bool = True
+
+
+class HardwareDiskEntry(BaseModel):
+    name: Optional[str] = None
+    serial_number: Optional[str] = None
+    model: Optional[str] = None
+    capacity_gb: Optional[int] = None
+    type: Optional[str] = None
+    is_os_disk: bool = False
+
+
+class HardwareDetectionReportIngest(BaseModel):
+    cpu_count: Optional[int] = None
+    cpu_model: Optional[str] = None
+    ram_gb: Optional[int] = None
+    nics: List[HardwareNicEntry] = Field(default_factory=list)
+    disks: List[HardwareDiskEntry] = Field(default_factory=list)
+    detector_version: Optional[str] = None
+
+
+def _normalize_hardware_report_payload(payload: HardwareDetectionReportIngest) -> Dict[str, Any]:
+    normalized_nics: List[Dict[str, Any]] = []
+    for nic in payload.nics:
+        if not nic.is_physical:
+            continue
+        if not nic.pci_address:
+            continue
+        normalized_nics.append(
+            {
+                "name": nic.name.strip() if nic.name else "unknown",
+                "mac_address": (nic.mac_address or "").strip().lower() or None,
+                "speed_mbps": nic.speed_mbps if nic.speed_mbps and nic.speed_mbps > 0 else None,
+                "model": (nic.model or "").strip() or None,
+                "pci_address": (nic.pci_address or "").strip().lower() or None,
+                "is_physical": True,
+            }
+        )
+
+    normalized_disks: List[Dict[str, Any]] = []
+    for disk in payload.disks:
+        size = disk.capacity_gb if disk.capacity_gb and disk.capacity_gb > 0 else None
+        disk_type = (disk.type or "").strip().lower()
+        if disk_type not in ("ssd", "hdd"):
+            disk_type = None
+        normalized_disks.append(
+            {
+                "name": (disk.name or "").strip() or None,
+                "serial_number": (disk.serial_number or "").strip() or None,
+                "model": (disk.model or "").strip() or None,
+                "capacity_gb": size,
+                "type": disk_type,
+                "is_os_disk": bool(disk.is_os_disk),
+            }
+        )
+
+    return {
+        "cpu": {
+            "count": payload.cpu_count if payload.cpu_count and payload.cpu_count > 0 else None,
+            "model": (payload.cpu_model or "").strip() or None,
+        },
+        "ram_gb": payload.ram_gb if payload.ram_gb and payload.ram_gb > 0 else None,
+        "nics": normalized_nics,
+        "disks": normalized_disks,
+        "detector_version": (payload.detector_version or "").strip() or None,
+    }
+
+
+@router.get("/cloud-init/user-data", response_class=PlainTextResponse)
+async def get_cloud_init_user_data(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Serve generic cloud-init user-data for the server identified by requester IP."""
+    source_ip = _get_request_source_ip(request)
+    server = _resolve_server_by_source_ip(db, source_ip)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No server found for request source IP",
+        )
+
+    installation_task = _get_cloud_init_installation_context(db, server.id)
+    if not installation_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No installation context found for server",
+        )
+
+    return PlainTextResponse(
+        content=_build_cloud_init_user_data(server, installation_task),
+        media_type="text/plain",
+    )
+
+
+@router.get("/cloud-init/meta-data", response_class=PlainTextResponse)
+async def get_cloud_init_meta_data(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Serve cloud-init meta-data for the server identified by requester IP."""
+    source_ip = _get_request_source_ip(request)
+    server = _resolve_server_by_source_ip(db, source_ip)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No server found for request source IP",
+        )
+
+    installation_task = _get_cloud_init_installation_context(db, server.id)
+    if not installation_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No installation context found for server",
+        )
+
+    return PlainTextResponse(
+        content=_build_cloud_init_meta_data(server, installation_task),
+        media_type="text/plain",
+    )
+
+
+@router.post("/hardware-detection/report", response_model=dict)
+async def ingest_hardware_detection_report(
+    payload: HardwareDetectionReportIngest,
+    request: Request,
+    token: str = Query(..., description="download token tied to detection boot task"),
+    db: Session = Depends(get_db),
+):
+    """Receive hardware detection report from booted detection script."""
+    token_service = get_download_token_service()
+    token_data = token_service.validate_token(token, "hardware-detection-report-v1")
+    if not token_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired detection token",
+        )
+
+    boot_task = BootTaskDAO.get_by_id(db, token_data.get("boot_task_id"))
+    if not boot_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Boot task not found for detection token",
+        )
+
+    report = HardwareDetectionReportDAO.get_by_boot_task_id(db, boot_task.id)
+    if not report:
+        report = HardwareDetectionReportDAO.create(
+            db,
+            server_id=boot_task.server_id,
+            boot_task_id=boot_task.id,
+            status=HardwareDetectionReportStatus.PENDING,
+        )
+
+    normalized_payload = _normalize_hardware_report_payload(payload)
+    source_ip = _get_request_source_ip(request)
+    HardwareDetectionReportDAO.mark_submitted(
+        db,
+        report,
+        detected_inventory=normalized_payload,
+        source_ip=source_ip,
+    )
+
+    return {
+        "status": "ok",
+        "report_id": report.id,
+        "server_id": report.server_id,
+    }
+
+
 # Boot Task Management Endpoints
 
 class BootTaskCreate(BaseModel):
@@ -520,6 +861,26 @@ async def create_boot_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Server {server_id} not found"
         )
+    activity_action = "queue_boot_task"
+    activity_message = "Boot task requested"
+    activity_details = {"boot_type": boot_task_data.boot_type.lower()}
+    if boot_task_data.template_id:
+        activity_action = "queue_template_install"
+        activity_message = f"Template install requested for '{boot_task_data.template_id}'"
+        activity_details["template_id"] = boot_task_data.template_id
+    elif boot_task_data.custom_script:
+        activity_action = "run_script"
+        activity_message = f"Script run requested for '{boot_task_data.custom_script}'"
+        activity_details["custom_script"] = boot_task_data.custom_script
+    log_server_activity_attempt(
+        db,
+        server_id=server_id,
+        event_type=ServerActivityEventType.INSTALL,
+        action=activity_action,
+        source="admin_api",
+        message=activity_message,
+        details=activity_details,
+    )
     pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
     base_url = _get_base_url_for_pxe_ip(db, pxe_port.pxe_ip if pxe_port else None)
     
@@ -745,17 +1106,20 @@ async def create_boot_task(
         if template and template.template_dir:
             deploy_dir = template.template_dir / "deploy"
             if deploy_dir.exists() and deploy_dir.is_dir():
-                # Look for windows.img and efi.img in deploy directory
+                # Look for windows.img and efi.img in deploy directory (path relative to template dir for URL/token)
                 for img_file in ["windows.img", "efi.img"]:
                     img_path = deploy_dir / img_file
                     if img_path.exists():
                         template_image_files.append(img_file)
-                        allowed_files.append(img_file)
+                        allowed_files.append(f"deploy/{img_file}")
         
         # Fallback: check for old disk_image format
         if template and template.disk_image and not template_image_files:
             disk_image_filename = template.disk_image.split("/")[-1]
             allowed_files.append(disk_image_filename)
+        # For template installs, allow any file under the template (script fetches what it needs)
+        if boot_task_data.template_id:
+            allowed_patterns = ["*"]
     
     # Generate token (allow access to specific files or all files if none specified)
     download_token_service = get_download_token_service()
@@ -796,19 +1160,22 @@ async def create_boot_task(
         if download_token:
             replacements["DOWNLOAD_TOKEN"] = download_token
             replacements["API_BASE_URL"] = base_url
+            if boot_task_data.template_id:
+                replacements["TEMPLATE_ID"] = boot_task_data.template_id
             
             # Add template file URLs if template has deploy directory with image files
             if boot_task_data.template_id and template_image_files:
                 template_id = boot_task_data.template_id
                 
-                # Inject URLs for each image file found
+                # Inject URLs for each image file found (file_path must be relative to template dir, e.g. deploy/windows.img)
                 for img_file in template_image_files:
+                    file_path = f"deploy/{img_file}"
                     if img_file == "windows.img":
-                        windows_img_url = f"{base_url}/api/servers/interaction/template-files/{template_id}/{img_file}?token={download_token}"
+                        windows_img_url = f"{base_url}/api/servers/interaction/template-files/{template_id}/{file_path}?token={download_token}"
                         replacements["WINDOWS_IMG_URL"] = windows_img_url
                         logger.info(f"Injected WINDOWS_IMG_URL for boot task {boot_task.id}")
                     elif img_file == "efi.img":
-                        efi_img_url = f"{base_url}/api/servers/interaction/template-files/{template_id}/{img_file}?token={download_token}"
+                        efi_img_url = f"{base_url}/api/servers/interaction/template-files/{template_id}/{file_path}?token={download_token}"
                         replacements["EFI_IMG_URL"] = efi_img_url
                         logger.info(f"Injected EFI_IMG_URL for boot task {boot_task.id}")
             
@@ -869,12 +1236,19 @@ async def create_boot_task(
         
         # Add INSTALLATION_TASK_ID to script replacements so install script can upload logs
         replacements["INSTALLATION_TASK_ID"] = str(installation_task.id)
-        
-        # Re-apply replacements to script_content with the new INSTALLATION_TASK_ID
+        # Ensure template script gets TEMPLATE_ID and token for fetching firstboot.ps1 etc.
+        if download_token:
+            replacements["TEMPLATE_ID"] = boot_task_data.template_id
+            replacements["DOWNLOAD_TOKEN"] = download_token
+            replacements["API_BASE_URL"] = base_url
+
+        # Re-apply replacements to script_content with the new INSTALLATION_TASK_ID (include ${VAR:-default})
         for var_name, var_value in replacements.items():
             script_content = script_content.replace(f"${{{var_name}}}", var_value)
+            pattern = re.compile(r"\$\{" + re.escape(var_name) + r":-[^}]*\}")
+            script_content = pattern.sub(var_value, script_content)
             script_content = script_content.replace(f"${var_name}", var_value)
-        
+
         # Update boot task with the updated script content
         boot_task.script_content = script_content
         db.commit()
@@ -898,6 +1272,30 @@ async def create_boot_task(
             logger.info(f"Saved credentials for server {server_id}")
     
     logger.info(f"Created boot task {boot_task.id} for server {server_id}")
+    if boot_task_data.template_id:
+        log_server_activity_success(
+            db,
+            server_id=server_id,
+            event_type=ServerActivityEventType.INSTALL,
+            action="queue_template_install",
+            source="admin_api",
+            message=f"Queued template install '{boot_task_data.template_id}'",
+            details={
+                "boot_task_id": boot_task.id,
+                "installation_task_id": installation_task.id if installation_task else None,
+                "template_id": boot_task_data.template_id,
+            },
+        )
+    elif boot_task_data.custom_script:
+        log_server_activity_success(
+            db,
+            server_id=server_id,
+            event_type=ServerActivityEventType.INSTALL,
+            action="run_script",
+            source="admin_api",
+            message=f"Queued script '{boot_task_data.custom_script}'",
+            details={"boot_task_id": boot_task.id},
+        )
     
     return BootTaskResponse(
         id=boot_task.id,
@@ -1533,25 +1931,23 @@ async def get_disk_image(
 
 # Template Files Serving Endpoints
 
-@router.get("/template-files/{template_id}/{filename}")
-@router.head("/template-files/{template_id}/{filename}")
+@router.get("/template-files/{template_id}/{file_path:path}")
+@router.head("/template-files/{template_id}/{file_path:path}")
 async def get_template_file(
     template_id: str,
-    filename: str,
+    file_path: str,
     request: Request,
     token: Optional[str] = Query(None, description="One-time download token"),
     db: Session = Depends(get_db)
 ):
     """
-    Serve template files from os_templates/{template_id}/deploy/ directory.
+    Serve any file under os_templates/{template_id}/ (template root).
     
-    This endpoint serves image files (windows.img, efi.img, etc.) from template-specific directories.
-    Files should be placed in os_templates/{template_id}/deploy/ directory.
-    Supports both GET and HEAD requests.
-    
-    Requires a valid one-time download token for security.
+    file_path is relative to the template directory, e.g. "deploy/windows.img",
+    "deploy/efi.img", "firstboot.ps1", "user-login.ps1". Requires a valid
+    download token for security.
     """
-    # Validate token
+    # Validate token (token is validated against the same file_path for allowed_files)
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1559,7 +1955,7 @@ async def get_template_file(
         )
     
     download_token_service = get_download_token_service()
-    token_data = download_token_service.validate_token(token, filename)
+    token_data = download_token_service.validate_token(token, file_path)
     
     if not token_data:
         raise HTTPException(
@@ -1577,26 +1973,25 @@ async def get_template_file(
             detail=f"Template '{template_id}' not found"
         )
     
-    # Security: only allow files in the deploy directory
-    if ".." in filename or "/" in filename:
+    # Security: no directory traversal
+    if ".." in file_path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid filename"
+            detail="Invalid file path"
         )
     
-    # File should be in template_dir/deploy/ directory
-    deploy_dir = template.template_dir / "deploy"
-    file_path = deploy_dir / filename
+    base_dir = template.template_dir
+    full_path = base_dir / file_path
     
-    if not file_path.exists() or not file_path.is_file():
+    if not full_path.exists() or not full_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Template file '{filename}' not found for template '{template_id}'"
+            detail=f"Template file '{file_path}' not found for template '{template_id}'"
         )
     
-    # Security: ensure file is within deploy directory (prevent directory traversal)
+    # Security: ensure file is within the template directory (prevent traversal)
     try:
-        file_path.resolve().relative_to(deploy_dir.resolve())
+        full_path.resolve().relative_to(base_dir.resolve())
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1608,22 +2003,22 @@ async def get_template_file(
     
     # For HEAD requests, return headers only (no body)
     if request.method == "HEAD":
-        file_size = file_path.stat().st_size
+        file_size = full_path.stat().st_size
         return Response(
             status_code=200,
             headers={
                 "Content-Type": "application/octet-stream",
                 "Content-Length": str(file_size),
-                "Content-Disposition": f'inline; filename="{filename}"'
+                "Content-Disposition": f'inline; filename="{file_path}"'
             }
         )
     
-    logger.info(f"Serving template file: {template_id}/{filename} (boot_task: {token_data.get('boot_task_id')})")
+    logger.info(f"Serving template file: {template_id}/{file_path} (boot_task: {token_data.get('boot_task_id')})")
     return FileResponse(
-        str(file_path),
+        str(full_path),
         media_type="application/octet-stream",
         headers={
-            "Content-Disposition": f'inline; filename="{filename}"'
+            "Content-Disposition": f'inline; filename="{file_path}"'
         }
     )
 

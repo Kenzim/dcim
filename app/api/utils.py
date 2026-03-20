@@ -2,6 +2,7 @@
 Generic utility API endpoints
 """
 import secrets
+import random
 import string
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -57,7 +58,52 @@ async def generate_password(request: PasswordGenerateRequest = PasswordGenerateR
             detail="Character set too small after exclusions"
         )
     
-    # Generate password using secure random
-    password = "".join(secrets.choice(chars) for _ in range(request.length))
+    # Enforce composition:
+    # - at least one digit
+    # - at least one lowercase letter
+    # - at least one uppercase letter
+    # This is independent of request.charset as long as the selected charset still allows these categories.
+    digits = string.digits
+    lowercase = string.ascii_lowercase
+    uppercase = string.ascii_uppercase
+
+    if request.exclude_ambiguous:
+        ambiguous_chars = "0O1Il5S2Z"
+        digits = "".join(c for c in digits if c not in ambiguous_chars)
+        lowercase = "".join(c for c in lowercase if c not in ambiguous_chars)
+        uppercase = "".join(c for c in uppercase if c not in ambiguous_chars)
+
+    digits_allowed = "".join(c for c in digits if c in chars)
+    lowercase_allowed = "".join(c for c in lowercase if c in chars)
+    uppercase_allowed = "".join(c for c in uppercase if c in chars)
+
+    if not digits_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No digits available for password generation with the current charset/exclusions",
+        )
+    if not lowercase_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No lowercase letters available for password generation with the current charset/exclusions",
+        )
+    if not uppercase_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No uppercase letters available for password generation with the current charset/exclusions",
+        )
+
+    components: list[str] = [
+        secrets.choice(digits_allowed),
+        secrets.choice(lowercase_allowed),
+        secrets.choice(uppercase_allowed),
+    ]
+    # Fill remaining characters from the full allowed set.
+    components.extend(secrets.choice(chars) for _ in range(request.length - len(components)))
+
+    # Shuffle using a cryptographically secure RNG.
+    rng = random.SystemRandom()
+    rng.shuffle(components)
+    password = "".join(components)
     
     return PasswordGenerateResponse(password=password)

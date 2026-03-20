@@ -13,6 +13,9 @@ class NetworkPortDAO:
         name: str,
         speed_mbps: int,
         mac_address: Optional[str] = None,
+        model: Optional[str] = None,
+        pci_address: Optional[str] = None,
+        is_physical: bool = True,
         lag_group: Optional[str] = None,
         monitor_bandwidth: bool = False,
         pxe_boot: bool = False,
@@ -25,6 +28,9 @@ class NetworkPortDAO:
             name=name,
             mac_address=mac_address,
             speed_mbps=speed_mbps,
+            model=model,
+            pci_address=pci_address,
+            is_physical=is_physical,
             lag_group=lag_group,
             monitor_bandwidth=monitor_bandwidth,
             pxe_boot=pxe_boot,
@@ -110,3 +116,10 @@ class NetworkPortDAO:
             NetworkPort.server_id == server_id,
             NetworkPort.pxe_boot == True
         ).first()
+
+    @staticmethod
+    def get_by_pxe_ip(db: Session, pxe_ip: str) -> Optional[NetworkPort]:
+        """Get network port by PXE IP address."""
+        if not pxe_ip or not pxe_ip.strip():
+            return None
+        return db.query(NetworkPort).filter(NetworkPort.pxe_ip == pxe_ip.strip()).first()

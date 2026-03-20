@@ -2,19 +2,33 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel, Field, field_serializer
 from app.core.database import get_db
 from app.core.auth import require_admin
-from app.dao import ServerDAO, LocationDAO, RackDAO, DiskDAO, NetworkPortDAO, ServerGroupDAO, CableRunDAO, SwitchPortDAO, SwitchBandwidthSampleDAO, NetworkSwitchDAO
+from app.dao import ServerDAO, LocationDAO, RackDAO, DiskDAO, NetworkPortDAO, ServerGroupDAO, CableRunDAO, SwitchPortDAO, SwitchBandwidthSampleDAO, NetworkSwitchDAO, ServerCapabilityDAO
+from app.dao.boot_task_dao import BootTaskDAO
+from app.dao.hardware_detection_report_dao import HardwareDetectionReportDAO
+from app.dao.server_activity_dao import ServerActivityDAO
 from app.models.server import Server
 from app.models.network_switch import NetworkSwitch
-from app.plugins.capabilities import get_effective_capabilities, server_has_capability
+from app.models.server_activity import ServerActivity, ServerActivityEventType
+from app.models.hardware_detection_report import HardwareDetectionReport, HardwareDetectionReportStatus
 from app.models.disk import Disk, DiskType
 from app.models.network_port import NetworkPort
+from app.models.cable_run import CableRun
+from app.models.boot_task import BootType, BootTaskStatus
 from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
 from app.dao import ServiceInstanceDAO
+from app.services.temp_os_service import get_temp_os_service
+from app.services.download_token_service import get_download_token_service
+from app.services.server_activity_logger import (
+    log_server_activity_attempt,
+    log_server_activity_success,
+    log_server_activity_failure,
+)
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +118,9 @@ def convert_network_ports_to_response(db: Session, server_id: int, network_ports
             "name": port.name,
             "mac_address": port.mac_address,
             "speed_mbps": port.speed_mbps,
+            "model": getattr(port, "model", None),
+            "pci_address": getattr(port, "pci_address", None),
+            "is_physical": getattr(port, "is_physical", True),
             "lag_group": port.lag_group,
             "monitor_bandwidth": getattr(port, "monitor_bandwidth", False),
             "pxe_boot": port.pxe_boot,
@@ -149,6 +166,7 @@ def convert_disks_to_response(disks: List[Disk]) -> List[Dict[str, Any]]:
             "server_id": disk.server_id,
             "type": disk.type.value.lower() if hasattr(disk.type, 'value') else str(disk.type).lower(),
             "capacity_gb": disk.capacity_gb,
+            "model": getattr(disk, "model", None),
             "description": disk.description,
             "serial_number": disk.serial_number,
             "is_os_disk": disk.is_os_disk
@@ -160,6 +178,7 @@ def convert_disks_to_response(disks: List[Disk]) -> List[Dict[str, Any]]:
 class DiskCreate(BaseModel):
     type: str  # "ssd" or "hdd"
     capacity_gb: int
+    model: str | None = None
     description: str | None = None
     serial_number: str | None = None  # Disk serial number for matching
     is_os_disk: bool = False  # Flag to mark this as the OS installation disk
@@ -170,6 +189,7 @@ class DiskResponse(BaseModel):
     server_id: int
     type: str
     capacity_gb: int
+    model: str | None
     description: str | None
     serial_number: str | None
     is_os_disk: bool
@@ -195,6 +215,9 @@ class NetworkPortCreate(BaseModel):
     name: str
     mac_address: str | None = None
     speed_mbps: int
+    model: str | None = None
+    pci_address: str | None = None
+    is_physical: bool = True
     lag_group: str | None = None
     monitor_bandwidth: bool = False
     pxe_boot: bool = False
@@ -218,6 +241,9 @@ class NetworkPortResponse(BaseModel):
     name: str
     mac_address: str | None
     speed_mbps: int
+    model: str | None = None
+    pci_address: str | None = None
+    is_physical: bool = True
     lag_group: str | None
     monitor_bandwidth: bool
     pxe_boot: bool
@@ -332,24 +358,545 @@ class ServerTestRequest(BaseModel):
     plugin_config: dict
 
 
-def _get_effective_capabilities_for_server(server: Server) -> List[Dict[str, Any]]:
-    """Compute effective capabilities from plugin CAPABILITIES and server plugin_config."""
+class ServerCapabilitiesUpdateRequest(BaseModel):
+    capability_states: Dict[str, bool]
+
+
+class ServerBootSetRequest(BaseModel):
+    device: str
+    persistent: bool = False
+    uefi: bool | None = None
+
+
+def _build_server_capabilities_payload(db: Session, server: Server) -> Dict[str, Any]:
+    registry = get_registry()
+    plugin_class = registry.get_plugin_class(server.plugin_name)
+    if not plugin_class or not getattr(plugin_class, "CAPABILITIES", []):
+        return {
+            "server_id": server.id,
+            "plugin_name": server.plugin_name,
+            "declared_capabilities": [],
+            "effective_capabilities": [],
+            "capability_states": {},
+        }
+    rows = ServerCapabilityDAO.list_by_server(db, server.id)
+    override_enabled = {row.capability_id: bool(row.enabled) for row in rows}
+    declared_caps = []
+    capability_states: Dict[str, bool] = {}
+    for cap in plugin_class.CAPABILITIES:
+        enabled = override_enabled.get(cap.id, not cap.optional)
+        capability_states[cap.id] = enabled
+        cap_dict = cap.to_dict()
+        cap_dict["enabled"] = enabled
+        cap_dict["overridden"] = cap.id in override_enabled
+        declared_caps.append(cap_dict)
+    effective_caps = [c for c in declared_caps if c.get("enabled")]
+    return {
+        "server_id": server.id,
+        "plugin_name": server.plugin_name,
+        "declared_capabilities": declared_caps,
+        "effective_capabilities": effective_caps,
+        "capability_states": capability_states,
+    }
+
+
+class ServerActivityResponse(BaseModel):
+    id: int
+    server_id: int
+    event_type: str
+    action: str
+    status: str
+    message: str
+    source: str
+    details: Dict[str, Any] | None = None
+    created_at: str | None = None
+
+    @classmethod
+    def from_model(cls, entry: ServerActivity) -> "ServerActivityResponse":
+        return cls(
+            id=entry.id,
+            server_id=entry.server_id,
+            event_type=entry.event_type.value,
+            action=entry.action,
+            status=entry.status.value,
+            message=entry.message,
+            source=entry.source,
+            details=entry.details or {},
+            created_at=entry.created_at.isoformat() if entry.created_at else None,
+        )
+
+
+class HardwareDetectionRunResponse(BaseModel):
+    report_id: int
+    boot_task_id: int
+    status: str
+
+
+class HardwareDetectionReportResponse(BaseModel):
+    id: int
+    server_id: int
+    boot_task_id: int | None
+    status: str
+    source_ip: str | None
+    detected_inventory: Dict[str, Any] | None
+    created_by_user_id: int | None
+    reviewed_by_user_id: int | None
+    submitted_at: str | None
+    applied_at: str | None
+    rejected_at: str | None
+    created_at: str | None
+
+    @classmethod
+    def from_model(cls, report: HardwareDetectionReport) -> "HardwareDetectionReportResponse":
+        return cls(
+            id=report.id,
+            server_id=report.server_id,
+            boot_task_id=report.boot_task_id,
+            status=report.status.value,
+            source_ip=report.source_ip,
+            detected_inventory=report.detected_inventory or {},
+            created_by_user_id=report.created_by_user_id,
+            reviewed_by_user_id=report.reviewed_by_user_id,
+            submitted_at=report.submitted_at.isoformat() if report.submitted_at else None,
+            applied_at=report.applied_at.isoformat() if report.applied_at else None,
+            rejected_at=report.rejected_at.isoformat() if report.rejected_at else None,
+            created_at=report.created_at.isoformat() if report.created_at else None,
+        )
+
+
+class HardwareDetectionApplyRequest(BaseModel):
+    nic_remap: Dict[str, int] = Field(default_factory=dict)  # old_port_id -> detected_nic_index
+    notes: str | None = None
+
+
+def _normalize_mac(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    mac = value.replace("-", ":").replace(".", "").strip().lower()
+    if ":" not in mac and len(mac) == 12:
+        mac = ":".join(mac[i : i + 2] for i in range(0, 12, 2))
+    return mac
+
+
+def _disk_type_from_detected(disk: Dict[str, Any]) -> DiskType:
+    disk_type = str(disk.get("type") or "").lower()
+    return DiskType.HDD if disk_type == "hdd" else DiskType.SSD
+
+
+def _compute_hardware_detection_diff(
+    server: Server,
+    current_disks: List[Disk],
+    current_ports: List[NetworkPort],
+    detected: Dict[str, Any],
+) -> Dict[str, Any]:
+    cpu_detected = (detected.get("cpu") or {})
+    current_server = {
+        "cpu_count": server.cpu_count,
+        "cpu_model": server.cpu_model,
+        "ram_gb": server.ram_gb,
+    }
+    detected_server = {
+        "cpu_count": cpu_detected.get("count"),
+        "cpu_model": cpu_detected.get("model"),
+        "ram_gb": detected.get("ram_gb"),
+    }
+
+    current_disks_view = [
+        {
+            "id": d.id,
+            "serial_number": d.serial_number,
+            "model": getattr(d, "model", None),
+            "capacity_gb": d.capacity_gb,
+            "type": d.type.value.lower() if hasattr(d.type, "value") else str(d.type).lower(),
+            "is_os_disk": d.is_os_disk,
+        }
+        for d in current_disks
+    ]
+    detected_disks_view = detected.get("disks") or []
+
+    current_nics_view = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "mac_address": _normalize_mac(p.mac_address),
+            "speed_mbps": p.speed_mbps,
+            "model": getattr(p, "model", None),
+            "pci_address": getattr(p, "pci_address", None),
+            "is_physical": getattr(p, "is_physical", True),
+        }
+        for p in current_ports
+        if getattr(p, "is_physical", True)
+    ]
+    detected_nics_view = [n for n in (detected.get("nics") or []) if n.get("is_physical", True) and n.get("pci_address")]
+
+    return {
+        "server": {
+            "current": current_server,
+            "detected": detected_server,
+            "changed": current_server != detected_server,
+        },
+        "disks": {
+            "current": current_disks_view,
+            "detected": detected_disks_view,
+        },
+        "nics": {
+            "current": current_nics_view,
+            "detected": detected_nics_view,
+        },
+    }
+
+
+def _build_hardware_detection_script(base_url: str, report_token: str) -> str:
+    safe_base = (base_url or "").rstrip("/")
+    return f"""#!/bin/bash
+set -euo pipefail
+LOG_FILE="/tmp/rackflow-hardware-detection.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "Starting hardware detection"
+API_BASE="{safe_base}"
+REPORT_TOKEN="{report_token}"
+
+tmp_report="$(mktemp)"
+
+python3 - <<'PY' > "$tmp_report"
+import json
+import os
+import re
+from pathlib import Path
+
+def read(path, default=None):
+    try:
+        return Path(path).read_text().strip()
+    except Exception:
+        return default
+
+cpu_count = None
+cpu_model = None
+cpuinfo = read("/proc/cpuinfo", "") or ""
+physical_ids = set()
+for line in cpuinfo.splitlines():
+    if "physical id" in line:
+        physical_ids.add(line.split(":", 1)[1].strip())
+    if "model name" in line and cpu_model is None:
+        cpu_model = line.split(":", 1)[1].strip()
+if physical_ids:
+    cpu_count = len(physical_ids)
+
+ram_gb = None
+try:
+    import subprocess
+    out = subprocess.check_output(["dmidecode", "-t", "memory"], text=True, timeout=5)
+    total_mb = 0
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Size:") and "No Module" not in line and "Unknown" not in line:
+            m = re.search(r"Size:\\s*(\\d+)\\s*(MB|GB)", line, re.I)
+            if m:
+                val, unit = int(m.group(1)), (m.group(2) or "").upper()
+                total_mb += val if unit == "MB" else val * 1024
+    if total_mb > 0:
+        ram_gb = max(1, int(round(total_mb / 1024)))
+except Exception:
+    pass
+if ram_gb is None:
+    meminfo = read("/proc/meminfo", "") or ""
+    for line in meminfo.splitlines():
+        if line.startswith("MemTotal:"):
+            kb = int(re.findall(r"\\d+", line)[0])
+            ram_gb = max(1, int(round(kb / 1024 / 1024)))
+            break
+
+disks = []
+for dev in sorted(Path("/sys/block").glob("*")):
+    name = dev.name
+    if name.startswith(("loop", "ram", "sr", "fd", "dm-", "zram")):
+        continue
+    if not (Path("/dev") / name).exists():
+        continue
+    rotational = read(dev / "queue/rotational", "1")
+    dtype = "ssd" if rotational == "0" else "hdd"
+    size_sectors = read(dev / "size", "0")
+    try:
+        # Report size in decimal GB (10^9), not GiB
+        bytes_total = int(size_sectors) * 512
+        capacity_gb = int(round(bytes_total / 1_000_000_000))
+    except Exception:
+        capacity_gb = None
+    serial = read(dev / "device/serial")
+    model = read(dev / "device/model")
+    disks.append({{
+        "name": name,
+        "serial_number": serial,
+        "model": model,
+        "capacity_gb": capacity_gb,
+        "type": dtype,
+        "is_os_disk": False
+    }})
+
+nics = []
+for iface in sorted(Path("/sys/class/net").glob("*")):
+    name = iface.name
+    if name == "lo":
+        continue
+    device_path = (iface / "device")
+    if not device_path.exists():
+        continue
+    resolved = os.path.realpath(device_path)
+    if "/pci" not in resolved or "usb" in resolved.lower():
+        continue
+    mac = read(iface / "address")
+    pci_address = os.path.basename(resolved)
+    model = read(device_path / "uevent", "")
+    speed_mbps = None
+    try:
+        import subprocess
+        out = subprocess.check_output(["ethtool", name], text=True, timeout=2, stderr=subprocess.DEVNULL)
+        lines = out.splitlines()
+        in_modes = False
+        for line in lines:
+            if "Supported link modes" in line or "Advertised link modes" in line:
+                in_modes = True
+                continue
+            if in_modes:
+                # Indented lines list the actual modes; stop when the block ends
+                if not line.startswith(" "):
+                    in_modes = False
+                    continue
+                for part in re.findall(r"(\\d+)base", line):
+                    val = int(part)
+                    if val == 2500:
+                        val = 2000
+                    if speed_mbps is None or val > speed_mbps:
+                        speed_mbps = val
+        if speed_mbps is None:
+            for line in lines:
+                if line.strip().startswith("Speed:"):
+                    m = re.search(r"(\\d+)\\s*Mb/s", line)
+                    if m:
+                        speed_mbps = int(m.group(1))
+                        if speed_mbps == 2500:
+                            speed_mbps = 2000
+                    break
+    except Exception:
+        pass
+    if speed_mbps is None:
+        speed = read(iface / "speed")
+        try:
+            if speed and speed not in ("unknown", "-1"):
+                speed_mbps = int(speed)
+                if speed_mbps == 2500:
+                    speed_mbps = 2000
+        except Exception:
+            pass
+    nics.append({{
+        "name": name,
+        "mac_address": mac,
+        "speed_mbps": speed_mbps,
+        "model": model.splitlines()[0] if model else None,
+        "pci_address": pci_address,
+        "is_physical": True
+    }})
+
+def speed_tier(mbps):
+    if mbps is None or mbps <= 0:
+        return "1g"
+    if mbps >= 10000:
+        return "10g"
+    if mbps >= 2000:
+        return "2g"
+    return "1g"
+
+nics.sort(key=lambda n: (-(n["speed_mbps"] or 0), n.get("pci_address") or ""))
+tier_index = {{}}
+for nic in nics:
+    tier = speed_tier(nic.get("speed_mbps"))
+    idx = tier_index.get(tier, 0)
+    tier_index[tier] = idx + 1
+    nic["name"] = "en" + tier + str(idx)
+
+print(json.dumps({{
+    "cpu_count": cpu_count,
+    "cpu_model": cpu_model,
+    "ram_gb": ram_gb,
+    "nics": nics,
+    "disks": disks,
+    "detector_version": "v1"
+}}))
+PY
+
+curl -f -sS -X POST "$API_BASE/api/servers/interaction/hardware-detection/report?token=$REPORT_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "@$tmp_report"
+
+echo "Hardware detection report uploaded"
+"""
+
+
+_BOOT_ORDER_FIX_SCRIPT_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "finalize-pxe-bootorder.sh"
+
+
+def _apply_hardware_detection_report(
+    db: Session,
+    server: Server,
+    report: HardwareDetectionReport,
+    nic_remap: Dict[str, int],
+) -> Dict[str, Any]:
+    detected = report.detected_inventory or {}
+    detected_cpu = detected.get("cpu") or {}
+    detected_ram_gb = detected.get("ram_gb")
+    detected_nics = [n for n in (detected.get("nics") or []) if n.get("is_physical", True) and n.get("pci_address")]
+    detected_disks = detected.get("disks") or []
+
+    if detected_cpu.get("count"):
+        server.cpu_count = int(detected_cpu["count"])
+    if detected_cpu.get("model"):
+        server.cpu_model = str(detected_cpu["model"]).strip()
+    if detected_ram_gb:
+        server.ram_gb = int(detected_ram_gb)
+
+    current_ports = NetworkPortDAO.get_by_server(db, server.id)
+    current_physical_ports = [p for p in current_ports if getattr(p, "is_physical", True)]
+    by_pci = {str(getattr(p, "pci_address", "")).lower(): p for p in current_physical_ports if getattr(p, "pci_address", None)}
+    by_mac = {(_normalize_mac(p.mac_address) or ""): p for p in current_physical_ports if p.mac_address}
+
+    target_by_index: Dict[int, NetworkPort] = {}
+    target_ids = set()
+    for idx, nic in enumerate(detected_nics):
+        pci = str(nic.get("pci_address") or "").strip().lower()
+        mac = _normalize_mac(nic.get("mac_address"))
+        matched = by_pci.get(pci) or (by_mac.get(mac) if mac else None)
+        nic_name = str(nic.get("name") or f"eth{idx}").strip()
+        nic_speed = nic.get("speed_mbps") if nic.get("speed_mbps") else 1000
+        if matched:
+            matched.name = nic_name
+            matched.mac_address = mac
+            matched.speed_mbps = int(nic_speed)
+            matched.model = nic.get("model")
+            matched.pci_address = pci or None
+            matched.is_physical = True
+            target = matched
+        else:
+            target = NetworkPort(
+                server_id=server.id,
+                name=nic_name,
+                mac_address=mac,
+                speed_mbps=int(nic_speed),
+                model=nic.get("model"),
+                pci_address=pci or None,
+                is_physical=True,
+                monitor_bandwidth=True,
+                pxe_boot=False,
+            )
+            db.add(target)
+            db.flush()
+        target_by_index[idx] = target
+        target_ids.add(target.id)
+
+    for old_port_id_str, detected_idx in (nic_remap or {}).items():
+        try:
+            old_port_id = int(old_port_id_str)
+            idx = int(detected_idx)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Invalid NIC remap entry: {old_port_id_str}->{detected_idx}")
+        target_port = target_by_index.get(idx)
+        if not target_port:
+            raise HTTPException(status_code=400, detail=f"Invalid detected NIC index in remap: {idx}")
+        old_port = NetworkPortDAO.get_by_id(db, old_port_id)
+        if not old_port or old_port.server_id != server.id:
+            raise HTTPException(status_code=400, detail=f"Invalid old NIC id in remap: {old_port_id}")
+        for cr in CableRunDAO.get_by_server(db, server.id):
+            if cr.end_a_server_port_id == old_port_id:
+                cr.end_a_server_port_id = target_port.id
+            if cr.end_b_server_port_id == old_port_id:
+                cr.end_b_server_port_id = target_port.id
+
+    stale_ports = [p for p in current_physical_ports if p.id not in target_ids]
+    for stale in stale_ports:
+        if CableRunDAO.get_by_server_port(db, stale.id):
+            mapped = str(stale.id) in (nic_remap or {})
+            if not mapped:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Physical NIC '{stale.name}' is connected. Provide a remap before applying.",
+                )
+        db.delete(stale)
+
+    current_disks = DiskDAO.get_by_server(db, server.id)
+    by_serial = {str(d.serial_number).strip(): d for d in current_disks if d.serial_number}
+    target_disk_ids = set()
+    for disk in detected_disks:
+        serial = (disk.get("serial_number") or "").strip() or None
+        model = (disk.get("model") or "").strip() or None
+        capacity_gb = int(disk.get("capacity_gb") or 0)
+        if capacity_gb <= 0:
+            continue
+        disk_type = _disk_type_from_detected(disk)
+        existing = by_serial.get(serial) if serial else None
+        desc = model if model else (disk.get("name") or "").strip() or None
+        if existing:
+            existing.capacity_gb = capacity_gb
+            existing.model = model
+            existing.type = disk_type
+            existing.description = desc
+            existing.is_os_disk = bool(disk.get("is_os_disk"))
+            target_disk_ids.add(existing.id)
+        else:
+            new_disk = Disk(
+                server_id=server.id,
+                type=disk_type,
+                capacity_gb=capacity_gb,
+                model=model,
+                description=desc,
+                serial_number=serial,
+                is_os_disk=bool(disk.get("is_os_disk")),
+            )
+            db.add(new_disk)
+            db.flush()
+            target_disk_ids.add(new_disk.id)
+
+    for d in current_disks:
+        if d.id not in target_disk_ids:
+            db.delete(d)
+
+    db.commit()
+    return {
+        "updated_cpu_count": server.cpu_count,
+        "updated_ram_gb": server.ram_gb,
+        "updated_nic_count": len(target_ids),
+        "updated_disk_count": len(target_disk_ids),
+    }
+
+
+def _get_effective_capabilities_for_server(db: Session, server: Server) -> List[Dict[str, Any]]:
+    """Compute effective capabilities from plugin CAPABILITIES and SQL capability states."""
     registry = get_registry()
     plugin_class = registry.get_plugin_class(server.plugin_name)
     if not plugin_class or not getattr(plugin_class, "CAPABILITIES", []):
         return []
-    return get_effective_capabilities(plugin_class.CAPABILITIES, server.plugin_config or {})
+    override_rows = ServerCapabilityDAO.list_by_server(db, server.id)
+    override_enabled = {row.capability_id: bool(row.enabled) for row in override_rows}
+    effective: List[Dict[str, Any]] = []
+    for cap in plugin_class.CAPABILITIES:
+        enabled = override_enabled.get(cap.id, not cap.optional)
+        if enabled:
+            effective.append(cap.to_dict())
+    return effective
 
 
-def _server_has_capability(server: Server, capability_id: str) -> bool:
+def _server_has_capability(db: Session, server: Server, capability_id: str) -> bool:
     """Check if server has a specific capability enabled."""
     registry = get_registry()
     plugin_class = registry.get_plugin_class(server.plugin_name)
     if not plugin_class or not getattr(plugin_class, "CAPABILITIES", []):
         return False
-    return server_has_capability(
-        plugin_class.CAPABILITIES, server.plugin_config or {}, capability_id
-    )
+    row = ServerCapabilityDAO.get_by_server_and_capability(db, server.id, capability_id)
+    for cap in plugin_class.CAPABILITIES:
+        if cap.id == capability_id:
+            if row is not None:
+                return bool(row.enabled)
+            return not cap.optional
+    return False
 
 
 @router.post("/test", response_model=dict)
@@ -395,8 +942,7 @@ async def test_server_capabilities(
     """
     Return effective capabilities for a server (declaration-only, no probing).
     
-    Capabilities are declared by the plugin; optional ones are enabled per-server
-    via plugin_config.enabled_capabilities.
+    Capabilities are declared by the plugin and resolved via server_capabilities SQL overrides.
     """
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
@@ -404,14 +950,58 @@ async def test_server_capabilities(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Server not found"
         )
-    effective = _get_effective_capabilities_for_server(server)
+    effective = _get_effective_capabilities_for_server(db, server)
     return {
         "success": True,
         "server_id": server_id,
         "server_name": server.name,
         "effective_capabilities": effective,
-        "message": "Capabilities are declared by the plugin and optionally enabled per server.",
+        "message": "Capabilities are declared by plugins and resolved by SQL capability states.",
     }
+
+
+@router.get("/{server_id}/capabilities", response_model=dict)
+async def get_server_capabilities(
+    server_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    return _build_server_capabilities_payload(db, server)
+
+
+@router.post("/{server_id}/capabilities", response_model=dict)
+async def update_server_capabilities(
+    server_id: int,
+    payload: ServerCapabilitiesUpdateRequest,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    registry = get_registry()
+    plugin_class = registry.get_plugin_class(server.plugin_name)
+    declared_ids = {
+        cap.id for cap in getattr(plugin_class, "CAPABILITIES", []) or []
+    }
+    unknown = [cap_id for cap_id in payload.capability_states.keys() if cap_id not in declared_ids]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown capabilities for plugin '{server.plugin_name}': {', '.join(sorted(unknown))}",
+        )
+
+    ServerCapabilityDAO.set_capability_states(
+        db=db,
+        server_id=server.id,
+        capability_states=payload.capability_states,
+        source="manual",
+    )
+    return _build_server_capabilities_payload(db, server)
 
 
 @router.get("/", response_model=List[ServerResponse])
@@ -427,7 +1017,7 @@ async def list_servers(
     result = []
     for server in servers:
         disks = DiskDAO.get_by_server(db, server.id)
-        effective = _get_effective_capabilities_for_server(server)
+        effective = _get_effective_capabilities_for_server(db, server)
         plugin_categories = [c["id"] for c in effective]
         
         network_ports = NetworkPortDAO.get_by_server(db, server.id)
@@ -605,6 +1195,7 @@ async def create_server(
                     server_id=server.id,
                     type=disk_type,
                     capacity_gb=disk_data.capacity_gb,
+                    model=disk_data.model,
                     description=disk_data.description,
                     serial_number=disk_data.serial_number,
                     is_os_disk=disk_data.is_os_disk
@@ -619,6 +1210,9 @@ async def create_server(
                     name=port_data.name,
                     mac_address=port_data.mac_address,
                     speed_mbps=port_data.speed_mbps,
+                    model=port_data.model,
+                    pci_address=port_data.pci_address,
+                    is_physical=port_data.is_physical,
                     lag_group=port_data.lag_group,
                     monitor_bandwidth=port_data.monitor_bandwidth,
                     pxe_boot=port_data.pxe_boot,
@@ -646,7 +1240,7 @@ async def create_server(
         if server_dict.get("rack_units") is None:
             server_dict["rack_units"] = 1
         
-        effective = _get_effective_capabilities_for_server(server)
+        effective = _get_effective_capabilities_for_server(db, server)
         plugin_categories = [c["id"] for c in effective]
         
         # Regenerate per-location DHCP if this location has a runner
@@ -700,7 +1294,7 @@ async def get_server(
     network_ports = NetworkPortDAO.get_by_server(db, server.id)
     network_ports_with_cables = convert_network_ports_to_response(db, server.id, network_ports)
     
-    effective = _get_effective_capabilities_for_server(server)
+    effective = _get_effective_capabilities_for_server(db, server)
     plugin_categories = [c["id"] for c in effective]
     
     server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
@@ -746,6 +1340,323 @@ async def get_server(
         "effective_capabilities": effective,
         "server_groups": server_groups
     }
+
+
+@router.post("/{server_id}/hardware-detection/run", response_model=HardwareDetectionRunResponse)
+async def run_hardware_detection(
+    server_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Queue built-in hardware detection boot workflow for a server."""
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+    if not pxe_port:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Server has no PXE boot port configured",
+        )
+
+    from app.api.server_interaction import _get_base_url_for_pxe_ip
+
+    base_url = _get_base_url_for_pxe_ip(db, pxe_port.pxe_ip if pxe_port else None)
+    temp_os_service = get_temp_os_service()
+    os_config = temp_os_service.get_os_config("debian-live")
+    if not os_config:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="debian-live temporary OS not found",
+        )
+
+    kernel_url = temp_os_service.get_kernel_url("debian-live", base_url)
+    initrd_url = temp_os_service.get_initrd_url("debian-live", base_url)
+    kernel_params = temp_os_service.get_kernel_params("debian-live")
+    squashfs_url = temp_os_service.get_squashfs_url("debian-live", base_url)
+    if squashfs_url and "fetch=" not in kernel_params:
+        kernel_params = f"{kernel_params} fetch={squashfs_url}"
+
+    log_server_activity_attempt(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.INSTALL,
+        action="hardware_detection",
+        source="admin_api",
+        message="Hardware detection requested",
+        details={"requested_by_user_id": auth.get("user_id")},
+    )
+
+    boot_task = BootTaskDAO.create(
+        db=db,
+        server_id=server.id,
+        boot_type=BootType.TEMP_OS,
+        temp_os_id="debian-live",
+        kernel_url=kernel_url,
+        initrd_url=initrd_url,
+        kernel_params=kernel_params,
+        script_content="#!/bin/bash\necho 'Initializing hardware detection workflow'\n",
+        description="Run hardware detection",
+    )
+
+    report = HardwareDetectionReportDAO.create(
+        db,
+        server_id=server.id,
+        created_by_user_id=auth.get("user_id"),
+        boot_task_id=boot_task.id,
+        status=HardwareDetectionReportStatus.PENDING,
+    )
+
+    token_service = get_download_token_service()
+    report_token = token_service.generate_token(
+        boot_task_id=boot_task.id,
+        allowed_patterns=["hardware-detection-report-*"],
+        expires_in=3600,
+        single_use=False,
+    )
+    boot_task.script_content = _build_hardware_detection_script(base_url, report_token)
+    db.commit()
+    db.refresh(boot_task)
+
+    log_server_activity_success(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.INSTALL,
+        action="hardware_detection",
+        source="admin_api",
+        message="Hardware detection boot task queued",
+        details={"report_id": report.id, "boot_task_id": boot_task.id},
+    )
+
+    return HardwareDetectionRunResponse(
+        report_id=report.id,
+        boot_task_id=boot_task.id,
+        status=report.status.value,
+    )
+
+
+@router.post("/{server_id}/boot/fix-boot-order", response_model=dict)
+async def queue_boot_order_fix(
+    server_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Queue a one-time boot-order correction task.
+
+    This boots Debian Live with the finalize-pxe-bootorder.sh script so the
+    next PXE boot can reorder UEFI BootOrder and set BootNext appropriately.
+    """
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    if not _BOOT_ORDER_FIX_SCRIPT_PATH.exists():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Boot order fix script not found on server",
+        )
+
+    pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+    if not pxe_port:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Server has no PXE boot port configured",
+        )
+
+    from app.api.server_interaction import _get_base_url_for_pxe_ip
+
+    base_url = _get_base_url_for_pxe_ip(db, pxe_port.pxe_ip if pxe_port else None)
+    temp_os_service = get_temp_os_service()
+    os_config = temp_os_service.get_os_config("debian-live")
+    if not os_config:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="debian-live temporary OS not found",
+        )
+
+    kernel_url = temp_os_service.get_kernel_url("debian-live", base_url)
+    initrd_url = temp_os_service.get_initrd_url("debian-live", base_url)
+    kernel_params = temp_os_service.get_kernel_params("debian-live")
+    squashfs_url = temp_os_service.get_squashfs_url("debian-live", base_url)
+    if squashfs_url and "fetch=" not in kernel_params:
+        kernel_params = f"{kernel_params} fetch={squashfs_url}"
+
+    try:
+        script_content = _BOOT_ORDER_FIX_SCRIPT_PATH.read_text()
+        script_content = "export AUTO_REBOOT=0\n" + script_content
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read boot order fix script: {exc}",
+        )
+
+    log_server_activity_attempt(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.INSTALL,
+        action="boot_order_fix",
+        source="admin_api",
+        message="Boot order correction requested",
+        details={"requested_by_user_id": auth.get("user_id")},
+    )
+
+    boot_task = BootTaskDAO.create(
+        db=db,
+        server_id=server.id,
+        boot_type=BootType.TEMP_OS,
+        temp_os_id="debian-live",
+        kernel_url=kernel_url,
+        initrd_url=initrd_url,
+        kernel_params=kernel_params,
+        iso_url=None,
+        script_url=None,
+        script_content=script_content,
+        description="Boot order correction (Debian Live)",
+    )
+
+    log_server_activity_success(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.INSTALL,
+        action="boot_order_fix",
+        source="admin_api",
+        message="Boot order correction queued",
+        details={"boot_task_id": boot_task.id},
+    )
+
+    return {
+        "status": "queued",
+        "boot_task_id": boot_task.id,
+    }
+
+
+@router.get("/{server_id}/hardware-detection/reports", response_model=List[HardwareDetectionReportResponse])
+async def list_hardware_detection_reports(
+    server_id: int,
+    status_filter: Optional[str] = None,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    status_enum = None
+    if status_filter:
+        try:
+            status_enum = HardwareDetectionReportStatus(status_filter.lower())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid status_filter")
+    reports = HardwareDetectionReportDAO.list_by_server(db, server_id, status=status_enum, limit=100)
+    return [HardwareDetectionReportResponse.from_model(r) for r in reports]
+
+
+@router.get("/{server_id}/hardware-detection/reports/{report_id}", response_model=HardwareDetectionReportResponse)
+async def get_hardware_detection_report(
+    server_id: int,
+    report_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    report = HardwareDetectionReportDAO.get_by_id(db, report_id)
+    if not report or report.server_id != server_id:
+        raise HTTPException(status_code=404, detail="Hardware detection report not found")
+    return HardwareDetectionReportResponse.from_model(report)
+
+
+@router.get("/{server_id}/hardware-detection/reports/{report_id}/diff", response_model=dict)
+async def get_hardware_detection_diff(
+    server_id: int,
+    report_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    report = HardwareDetectionReportDAO.get_by_id(db, report_id)
+    if not report or report.server_id != server_id:
+        raise HTTPException(status_code=404, detail="Hardware detection report not found")
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    current_disks = DiskDAO.get_by_server(db, server_id)
+    current_ports = NetworkPortDAO.get_by_server(db, server_id)
+    diff = _compute_hardware_detection_diff(server, current_disks, current_ports, report.detected_inventory or {})
+    return {
+        "report_id": report.id,
+        "status": report.status.value,
+        "diff": diff,
+    }
+
+
+@router.post("/{server_id}/hardware-detection/reports/{report_id}/reject", response_model=HardwareDetectionReportResponse)
+async def reject_hardware_detection_report(
+    server_id: int,
+    report_id: int,
+    payload: HardwareDetectionApplyRequest,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    report = HardwareDetectionReportDAO.get_by_id(db, report_id)
+    if not report or report.server_id != server_id:
+        raise HTTPException(status_code=404, detail="Hardware detection report not found")
+    HardwareDetectionReportDAO.mark_rejected(
+        db,
+        report=report,
+        reviewed_by_user_id=auth.get("user_id"),
+        notes=payload.notes,
+    )
+    return HardwareDetectionReportResponse.from_model(report)
+
+
+@router.post("/{server_id}/hardware-detection/reports/{report_id}/apply", response_model=dict)
+async def apply_hardware_detection_report(
+    server_id: int,
+    report_id: int,
+    payload: HardwareDetectionApplyRequest,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    report = HardwareDetectionReportDAO.get_by_id(db, report_id)
+    if not report or report.server_id != server_id:
+        raise HTTPException(status_code=404, detail="Hardware detection report not found")
+    if report.status != HardwareDetectionReportStatus.SUBMITTED:
+        raise HTTPException(status_code=400, detail="Only submitted reports can be applied")
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    current_disks = DiskDAO.get_by_server(db, server_id)
+    current_ports = NetworkPortDAO.get_by_server(db, server_id)
+    diff = _compute_hardware_detection_diff(server, current_disks, current_ports, report.detected_inventory or {})
+    apply_summary = _apply_hardware_detection_report(db, server, report, payload.nic_remap or {})
+    HardwareDetectionReportDAO.mark_applied(
+        db,
+        report=report,
+        reviewed_by_user_id=auth.get("user_id"),
+        nic_remap=payload.nic_remap or {},
+        diff_snapshot=diff,
+        notes=payload.notes,
+    )
+    return {
+        "status": "applied",
+        "report_id": report.id,
+        "summary": apply_summary,
+    }
+
+
+@router.delete("/{server_id}/hardware-detection/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_hardware_detection_report(
+    server_id: int,
+    report_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Delete a hardware detection report (admin only)."""
+    report = HardwareDetectionReportDAO.get_by_id(db, report_id)
+    if not report or report.server_id != server_id:
+        raise HTTPException(status_code=404, detail="Hardware detection report not found")
+    HardwareDetectionReportDAO.delete(db, report)
 
 
 def _downsample_bandwidth_server(samples: list, resolution_minutes: int):
@@ -1048,6 +1959,7 @@ async def update_server(
                 server_id=server.id,
                 type=disk_type,
                 capacity_gb=disk_data.capacity_gb,
+                model=disk_data.model,
                 description=disk_data.description,
                 serial_number=disk_data.serial_number,
                 is_os_disk=disk_data.is_os_disk
@@ -1065,6 +1977,9 @@ async def update_server(
                 name=port_data.name,
                 mac_address=port_data.mac_address,
                 speed_mbps=port_data.speed_mbps,
+                model=port_data.model,
+                pci_address=port_data.pci_address,
+                is_physical=port_data.is_physical,
                 lag_group=port_data.lag_group,
                 monitor_bandwidth=port_data.monitor_bandwidth,
                 pxe_boot=port_data.pxe_boot,
@@ -1102,7 +2017,7 @@ async def update_server(
     if server_dict.get("rack_units") is None:
         server_dict["rack_units"] = 1
     
-    effective = _get_effective_capabilities_for_server(server)
+    effective = _get_effective_capabilities_for_server(db, server)
     plugin_categories = [c["id"] for c in effective]
 
     # Resolve location and rack names for display
@@ -1170,6 +2085,27 @@ async def delete_server(
 
 # ========== Power Control Endpoints ==========
 
+
+@router.get("/{server_id}/activity", response_model=List[ServerActivityResponse])
+async def get_server_activity(
+    server_id: int,
+    limit: int = 100,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Get unified server activity log entries for a server."""
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Server not found"
+        )
+
+    safe_limit = max(1, min(limit, 500))
+    entries = ServerActivityDAO.get_by_server(db, server_id, limit=safe_limit)
+    return [ServerActivityResponse.from_model(entry) for entry in entries]
+
+
 @router.get("/{server_id}/power-state", response_model=dict)
 async def get_server_power_state(
     server_id: int,
@@ -1184,7 +2120,7 @@ async def get_server_power_state(
             detail="Server not found"
         )
     
-    if not _server_has_capability(server, "power_control"):
+    if not _server_has_capability(db, server, "power_control"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Plugin '{server.plugin_name}' does not support power control"
@@ -1221,16 +2157,46 @@ async def power_on_server(
             detail="Server not found"
         )
     
-    if not _server_has_capability(server, "power_control"):
+    if not _server_has_capability(db, server, "power_control"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Server does not have power control capability enabled"
         )
-    
+
+    log_server_activity_attempt(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.POWER,
+        action="on",
+        source="admin_api",
+        message="Power on requested",
+        details={"requested_by_user_id": auth.get("user_id")},
+    )
+
     registry = get_registry()
     try:
         plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
         success = await plugin_instance.power_on()
+        if success:
+            log_server_activity_success(
+                db,
+                server_id=server.id,
+                event_type=ServerActivityEventType.POWER,
+                action="on",
+                source="admin_api",
+                message="Power on command sent successfully",
+                details={"requested_by_user_id": auth.get("user_id")},
+            )
+        else:
+            log_server_activity_failure(
+                db,
+                server_id=server.id,
+                event_type=ServerActivityEventType.POWER,
+                action="on",
+                source="admin_api",
+                message="Power on command failed",
+                details={"requested_by_user_id": auth.get("user_id")},
+            )
         return {
             "success": success,
             "message": "Power on command sent successfully" if success else "Power on command failed",
@@ -1238,6 +2204,16 @@ async def power_on_server(
             "server_name": server.name
         }
     except Exception as e:
+        log_server_activity_failure(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action="on",
+            source="admin_api",
+            message="Power on request failed",
+            details={"requested_by_user_id": auth.get("user_id")},
+            error=e,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to power on server: {str(e)}"
@@ -1259,16 +2235,46 @@ async def power_off_server(
             detail="Server not found"
         )
     
-    if not _server_has_capability(server, "power_control"):
+    if not _server_has_capability(db, server, "power_control"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Server does not have power control capability enabled"
         )
-    
+
+    log_server_activity_attempt(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.POWER,
+        action="off",
+        source="admin_api",
+        message="Power off requested",
+        details={"requested_by_user_id": auth.get("user_id"), "force": force},
+    )
+
     registry = get_registry()
     try:
         plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
         success = await plugin_instance.power_off(force=force)
+        if success:
+            log_server_activity_success(
+                db,
+                server_id=server.id,
+                event_type=ServerActivityEventType.POWER,
+                action="off",
+                source="admin_api",
+                message="Power off command sent successfully",
+                details={"requested_by_user_id": auth.get("user_id"), "force": force},
+            )
+        else:
+            log_server_activity_failure(
+                db,
+                server_id=server.id,
+                event_type=ServerActivityEventType.POWER,
+                action="off",
+                source="admin_api",
+                message="Power off command failed",
+                details={"requested_by_user_id": auth.get("user_id"), "force": force},
+            )
         return {
             "success": success,
             "message": "Power off command sent successfully" if success else "Power off command failed",
@@ -1277,6 +2283,16 @@ async def power_off_server(
             "force": force
         }
     except Exception as e:
+        log_server_activity_failure(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action="off",
+            source="admin_api",
+            message="Power off request failed",
+            details={"requested_by_user_id": auth.get("user_id"), "force": force},
+            error=e,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to power off server: {str(e)}"
@@ -1297,16 +2313,46 @@ async def power_reset_server(
             detail="Server not found"
         )
     
-    if not _server_has_capability(server, "power_control"):
+    if not _server_has_capability(db, server, "power_control"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Server does not have power control capability enabled"
         )
-    
+
+    log_server_activity_attempt(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.POWER,
+        action="reset",
+        source="admin_api",
+        message="Power reset requested",
+        details={"requested_by_user_id": auth.get("user_id")},
+    )
+
     registry = get_registry()
     try:
         plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
         success = await plugin_instance.power_reset()
+        if success:
+            log_server_activity_success(
+                db,
+                server_id=server.id,
+                event_type=ServerActivityEventType.POWER,
+                action="reset",
+                source="admin_api",
+                message="Power reset command sent successfully",
+                details={"requested_by_user_id": auth.get("user_id")},
+            )
+        else:
+            log_server_activity_failure(
+                db,
+                server_id=server.id,
+                event_type=ServerActivityEventType.POWER,
+                action="reset",
+                source="admin_api",
+                message="Power reset command failed",
+                details={"requested_by_user_id": auth.get("user_id")},
+            )
         return {
             "success": success,
             "message": "Reset command sent successfully" if success else "Reset command failed",
@@ -1314,8 +2360,154 @@ async def power_reset_server(
             "server_name": server.name
         }
     except Exception as e:
+        log_server_activity_failure(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action="reset",
+            source="admin_api",
+            message="Power reset request failed",
+            details={"requested_by_user_id": auth.get("user_id")},
+            error=e,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to reset server: {str(e)}"
+        )
+
+
+@router.get("/{server_id}/boot/options", response_model=dict)
+async def get_server_boot_options(
+    server_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    if not _server_has_capability(db, server, "boot_order"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Boot order capability is disabled for this server",
+        )
+
+    registry = get_registry()
+    try:
+        plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
+        options = await plugin_instance.get_boot_options()
+        current = await plugin_instance.get_boot_order()
+        return {
+            "server_id": server.id,
+            "server_name": server.name,
+            "options": options,
+            "current": current,
+        }
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load boot options: {str(exc)}",
+        )
+
+
+@router.post("/{server_id}/boot/set", response_model=dict)
+async def set_server_boot_option(
+    server_id: int,
+    payload: ServerBootSetRequest,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    if not _server_has_capability(db, server, "boot_order"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Boot order capability is disabled for this server",
+        )
+
+    log_server_activity_attempt(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.POWER,
+        action="set_boot_device",
+        source="admin_api",
+        message="Boot device change requested",
+        details={
+            "requested_by_user_id": auth.get("user_id"),
+            "device": payload.device,
+            "persistent": payload.persistent,
+            "uefi": payload.uefi,
+        },
+    )
+
+    registry = get_registry()
+    try:
+        plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
+        success = await plugin_instance.set_next_boot_device(
+            device=payload.device,
+            persistent=payload.persistent,
+            uefi=payload.uefi,
+        )
+        if not success:
+            log_server_activity_failure(
+                db,
+                server_id=server.id,
+                event_type=ServerActivityEventType.POWER,
+                action="set_boot_device",
+                source="admin_api",
+                message="Boot device change failed",
+                details={"device": payload.device, "persistent": payload.persistent, "uefi": payload.uefi},
+            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to set boot device")
+
+        log_server_activity_success(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action="set_boot_device",
+            source="admin_api",
+            message="Boot device updated",
+            details={"device": payload.device, "persistent": payload.persistent, "uefi": payload.uefi},
+        )
+
+        current = await plugin_instance.get_boot_order()
+        return {
+            "success": True,
+            "server_id": server.id,
+            "server_name": server.name,
+            "current": current,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        log_server_activity_failure(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action="set_boot_device",
+            source="admin_api",
+            message="Boot device validation failed",
+            details={"device": payload.device},
+            error=exc,
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        log_server_activity_failure(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action="set_boot_device",
+            source="admin_api",
+            message="Boot device request failed",
+            details={"device": payload.device, "persistent": payload.persistent, "uefi": payload.uefi},
+            error=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to set boot device: {str(exc)}",
         )
 

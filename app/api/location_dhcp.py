@@ -10,6 +10,12 @@ from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServiceInstanceDAO, LocationDAO
 from app.services.runner_client import call_dhcp_runner
+from app.services.dhcp_config_service import (
+    get_dhcp_config_service,
+    DHCPConfigService,
+    DHCPConfig,
+    DHCPInterfaceConfig,
+)
 
 router = APIRouter()
 
@@ -27,6 +33,19 @@ def _get_dhcp_instance(db: Session, location_id: int):
     return instance
 
 
+class DHCPConfigUpdate(BaseModel):
+    """Location-scoped DHCP configuration update model."""
+
+    enabled: bool | None = None
+    interfaces: list[DHCPInterfaceConfig] | None = None
+    dns_servers: list[str] | None = None
+    hand_out_leases: bool | None = None
+    default_lease_time: int | None = None
+    max_lease_time: int | None = None
+    config_file_path: str | None = None
+    lease_file_path: str | None = None
+
+
 @router.get("/locations/{location_id}/dhcp/status", response_model=Dict[str, Any])
 async def get_location_dhcp_status(
     location_id: int,
@@ -39,6 +58,68 @@ async def get_location_dhcp_status(
     if code != 200:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=body)
     return body
+
+
+@router.get("/locations/{location_id}/dhcp/settings", response_model=DHCPConfig)
+async def get_location_dhcp_settings(
+    location_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+    config_service: DHCPConfigService = Depends(get_dhcp_config_service),
+):
+    """
+    Get DHCP configuration for this location's service instance
+    (interfaces, subnets, lease settings).
+    """
+    instance = _get_dhcp_instance(db, location_id)
+    cfg = config_service.get_config_by_service_instance(db, instance.id)
+    if cfg is None:
+        cfg = config_service.get_or_create_config_for_service_instance(
+            db, instance.id, "/shared/dhcp/dhcpd.conf", "/shared/dhcp/dhcpd.leases"
+        )
+    return cfg
+
+
+@router.put("/locations/{location_id}/dhcp/settings", response_model=DHCPConfig)
+async def update_location_dhcp_settings(
+    location_id: int,
+    update: DHCPConfigUpdate,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+    config_service: DHCPConfigService = Depends(get_dhcp_config_service),
+):
+    """
+    Update DHCP configuration for this location's service instance.
+
+    After updating, regenerates dhcpd.conf and pushes it to the runner.
+    """
+    instance = _get_dhcp_instance(db, location_id)
+    kwargs = {k: v for k, v in update.model_dump(exclude_unset=True).items()}
+    cfg = config_service.update_config_for_service_instance(db, instance.id, **kwargs)
+
+    # Regenerate config for this location + instance and push to runner
+    from app.services.dhcp_config_generator import generate_dhcpd_conf
+    from app.services.dhcp_config_service import get_dhcp_config_service as _cfg_svc
+
+    cfg_svc = _cfg_svc()
+    cfg_for_gen = cfg_svc.get_config_by_service_instance(db, instance.id)
+    if cfg_for_gen is None:
+        cfg_for_gen = cfg
+    result = generate_dhcpd_conf(cfg_for_gen, db, location_id=location_id, return_content=True)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate DHCP configuration",
+        )
+    content, interface_names = result
+    headers = {"X-Runner-Interfaces": ",".join(interface_names)} if interface_names else None
+    code, body = await call_dhcp_runner(
+        instance, db, "PUT", "/config", raw_body=content.encode(), extra_headers=headers
+    )
+    if code not in (200, 201):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=body)
+
+    return cfg
 
 
 @router.post("/locations/{location_id}/dhcp/start", response_model=Dict[str, Any])

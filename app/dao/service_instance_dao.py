@@ -1,8 +1,11 @@
-"""Data access for service instances (per-location DHCP/TFTP runners)."""
+"""Data access for service instances (per-location DHCP/TFTP runners).
+
+API keys are stored in plaintext in the database so that deployments
+do not depend on an additional encryption key.
+"""
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.models.service_instance import ServiceInstance
-from app.core.service_instance_crypto import encrypt_api_key, decrypt_api_key
 
 
 class ServiceInstanceDAO:
@@ -13,17 +16,14 @@ class ServiceInstanceDAO:
         service_type: str,
         name: str,
         base_url: str,
-        api_key: str,
+        api_key: Optional[str] = None,
     ) -> Optional[ServiceInstance]:
-        encrypted = encrypt_api_key(api_key)
-        if encrypted is None:
-            return None
         row = ServiceInstance(
             location_id=location_id,
             service_type=service_type,
             name=name,
             base_url=base_url.rstrip("/"),
-            api_key_encrypted=encrypted,
+            api_key_encrypted=(api_key or ""),
         )
         db.add(row)
         db.commit()
@@ -54,8 +54,8 @@ class ServiceInstanceDAO:
 
     @staticmethod
     def get_api_key(row: ServiceInstance) -> Optional[str]:
-        """Decrypt and return the API key. Returns None if decryption fails."""
-        return decrypt_api_key(row.api_key_encrypted)
+        """Return the stored API key (plaintext)."""
+        return row.api_key_encrypted or None
 
     @staticmethod
     def update(
@@ -70,9 +70,7 @@ class ServiceInstanceDAO:
         if base_url is not None:
             row.base_url = base_url.rstrip("/")
         if api_key is not None:
-            encrypted = encrypt_api_key(api_key)
-            if encrypted:
-                row.api_key_encrypted = encrypted
+            row.api_key_encrypted = api_key
         db.commit()
         db.refresh(row)
         return row
@@ -97,6 +95,10 @@ class ServiceInstanceDAO:
 
     @staticmethod
     def verify_api_key(row: ServiceInstance, api_key: str) -> bool:
-        """Verify provided api_key matches stored (decrypt and compare)."""
-        stored = decrypt_api_key(row.api_key_encrypted)
-        return stored is not None and stored == api_key
+        """Verify provided api_key matches stored (simple string compare).
+
+        When no key is stored, verification always fails; callers can choose
+        to skip verification in that case.
+        """
+        stored = row.api_key_encrypted or ""
+        return stored != "" and stored == (api_key or "")

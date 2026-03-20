@@ -12,6 +12,7 @@ class DiskDAO:
         server_id: int,
         type: DiskType,
         capacity_gb: int,
+        model: Optional[str] = None,
         description: Optional[str] = None,
         serial_number: Optional[str] = None,
         is_os_disk: bool = False
@@ -21,6 +22,7 @@ class DiskDAO:
             server_id=server_id,
             type=type,
             capacity_gb=capacity_gb,
+            model=model,
             description=description,
             serial_number=serial_number,
             is_os_disk=is_os_disk

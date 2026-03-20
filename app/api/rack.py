@@ -14,6 +14,7 @@ class RackCreate(BaseModel):
     location_id: int
     name: str
     units: int = 42
+    units_start_from_bottom: bool = True
     description: str | None = None
     row: int | None = None
     row_position: int | None = None
@@ -22,6 +23,7 @@ class RackCreate(BaseModel):
 class RackUpdate(BaseModel):
     name: str | None = None
     units: int | None = None
+    units_start_from_bottom: bool | None = None
     description: str | None = None
     row: int | None = None
     row_position: int | None = None
@@ -33,6 +35,7 @@ class RackResponse(BaseModel):
     name: str
     description: str | None
     units: int
+    units_start_from_bottom: bool = True
     row: int | None = None
     row_position: int | None = None
 
@@ -92,6 +95,7 @@ async def create_rack(
         location_id=rack_data.location_id,
         name=rack_data.name,
         units=rack_data.units,
+        units_start_from_bottom=rack_data.units_start_from_bottom,
         description=rack_data.description,
         row=rack_data.row,
         row_position=rack_data.row_position
@@ -137,6 +141,10 @@ async def update_rack(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Units must be between 1 and 100"
             )
+    
+    # Update unit numbering orientation if provided
+    if rack_data.units_start_from_bottom is not None:
+        rack.units_start_from_bottom = rack_data.units_start_from_bottom
     
     # Check if name is being changed and if new name already exists in this location
     if rack_data.name is not None and rack_data.name != rack.name:

@@ -69,33 +69,29 @@ class Capability:
 
 def get_effective_capabilities(
     capabilities: List[Capability],
-    plugin_config: Dict[str, Any],
+    capability_states: Optional[Dict[str, bool]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Compute effective capabilities for a server from plugin CAPABILITIES
-    and plugin_config (which may contain enabled_capabilities for optional ones).
+    and per-server capability state overrides.
     """
-    enabled = set(plugin_config.get("enabled_capabilities") or [])
+    states = capability_states or {}
     result = []
     for cap in capabilities:
-        if cap.optional:
-            if cap.id in enabled:
-                result.append(cap.to_dict())
-        else:
+        enabled = states.get(cap.id, not cap.optional)
+        if enabled:
             result.append(cap.to_dict())
     return result
 
 
 def server_has_capability(
     capabilities: List[Capability],
-    plugin_config: Dict[str, Any],
+    capability_states: Optional[Dict[str, bool]],
     capability_id: str,
 ) -> bool:
     """Check if a server has a specific capability enabled."""
-    enabled = set(plugin_config.get("enabled_capabilities") or [])
+    states = capability_states or {}
     for cap in capabilities:
         if cap.id == capability_id:
-            if cap.optional:
-                return capability_id in enabled
-            return True
+            return states.get(cap.id, not cap.optional)
     return False

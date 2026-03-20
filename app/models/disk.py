@@ -65,6 +65,7 @@ class Disk(Base):
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True)
     type = Column(CaseInsensitiveEnum(DiskType), nullable=False)
     capacity_gb = Column(Integer, nullable=False)  # Capacity in GB
+    model = Column(String(255), nullable=True)  # Hardware model (e.g., Samsung PM9A3)
     description = Column(Text, nullable=True)
     serial_number = Column(String(255), nullable=True, index=True)  # Disk serial number for matching
     is_os_disk = Column(Boolean, default=False, nullable=False, index=True)  # Flag to mark this as the OS installation disk

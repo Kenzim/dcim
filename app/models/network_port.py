@@ -13,6 +13,9 @@ class NetworkPort(Base):
     name = Column(String(255), nullable=False)  # Port name (e.g., "eth0", "enp1s0", "Port 1")
     mac_address = Column(String(17), nullable=True)  # MAC address (e.g., "00:0e:1e:6f:16:b0")
     speed_mbps = Column(Integer, nullable=False)  # Port speed in Mbps (e.g., 1000 for 1Gbps, 10000 for 10Gbps)
+    model = Column(String(255), nullable=True)  # NIC model/chipset
+    pci_address = Column(String(32), nullable=True)  # PCI address for physical adapter matching
+    is_physical = Column(Boolean, default=True, nullable=False)  # True for physical PCIe adapters
     lag_group = Column(String(255), nullable=True)  # LAG/bonding group name (e.g., "bond0", "lag1") - ports with same group are bonded
     monitor_bandwidth = Column(Boolean, default=False, nullable=False)  # Whether to monitor bandwidth for this port
     pxe_boot = Column(Boolean, default=False, nullable=False)  # Whether this port is used for PXE boot (max 1 per server)

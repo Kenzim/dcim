@@ -383,11 +383,19 @@ class ProxmoxPlugin(ServerPlugin):
     async def list_users(self) -> list:
         raise NotImplementedError("Proxmox plugin does not support user account control")
     
+    async def get_boot_options(self) -> Dict[str, Any]:
+        raise NotImplementedError("Proxmox plugin does not support boot order control")
+
     async def set_boot_order(self, boot_order: list) -> bool:
         raise NotImplementedError("Proxmox plugin does not support boot order control")
     
-    async def get_boot_order(self) -> list:
+    async def get_boot_order(self) -> Dict[str, Any]:
         raise NotImplementedError("Proxmox plugin does not support boot order control")
     
-    async def set_next_boot_device(self, device: str) -> bool:
+    async def set_next_boot_device(
+        self,
+        device: str,
+        persistent: bool = False,
+        uefi: Optional[bool] = None,
+    ) -> bool:
         raise NotImplementedError("Proxmox plugin does not support boot order control")

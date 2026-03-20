@@ -20,6 +20,9 @@ from app.models.dhcp_config import DHCPConfigModel
 from app.models.tftp_config import TFTPConfigModel
 from app.models.service_instance import ServiceInstance
 from app.models.asset import Asset, AssetLabel
+from app.models.server_activity import ServerActivity, ServerActivityEventType, ServerActivityStatus
+from app.models.hardware_detection_report import HardwareDetectionReport, HardwareDetectionReportStatus
+from app.models.server_capability import ServerCapability
 
-__all__ = ["User", "Server", "Category", "Location", "Rack", "NetworkSwitch", "Disk", "DiskType", "BootTask", "BootType", "BootTaskStatus", "InstallationTask", "InstallationStatus", "BillingIntegration", "ExternalUser", "Service", "ServiceStatus", "Script", "NetworkPort", "SwitchPort", "CableRun", "ServerGroup", "server_group_association", "SwitchBandwidthSample", "DHCPConfigModel", "TFTPConfigModel", "ServiceInstance", "Asset", "AssetLabel"]
+__all__ = ["User", "Server", "Category", "Location", "Rack", "NetworkSwitch", "Disk", "DiskType", "BootTask", "BootType", "BootTaskStatus", "InstallationTask", "InstallationStatus", "BillingIntegration", "ExternalUser", "Service", "ServiceStatus", "Script", "NetworkPort", "SwitchPort", "CableRun", "ServerGroup", "server_group_association", "SwitchBandwidthSample", "DHCPConfigModel", "TFTPConfigModel", "ServiceInstance", "Asset", "AssetLabel", "ServerActivity", "ServerActivityEventType", "ServerActivityStatus", "HardwareDetectionReport", "HardwareDetectionReportStatus", "ServerCapability"]
 

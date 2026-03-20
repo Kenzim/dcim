@@ -7,7 +7,7 @@ Requires ipmitool to be installed on the host running the DCIM application.
 import asyncio
 import logging
 import shutil
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from app.plugins.base import (
     ServerPlugin,
@@ -242,5 +242,103 @@ class IPMIPlugin(ServerPlugin):
     async def update_user_password(self, username: str, new_password: str) -> bool:
         raise NotImplementedError("IPMI plugin does not support user control")
 
-    async def get_boot_order(self) -> List[Dict[str, Any]]:
-        raise NotImplementedError("IPMI plugin does not support boot order control")
+    def _normalize_boot_device(self, device: str) -> str:
+        value = (device or "").strip().lower()
+        alias_map = {
+            "network": "pxe",
+            "pxe": "pxe",
+            "disk": "disk",
+            "hdd": "disk",
+            "hd": "disk",
+            "cd": "cdrom",
+            "cdrom": "cdrom",
+            "dvd": "cdrom",
+            "bios": "bios",
+            "none": "none",
+        }
+        return alias_map.get(value, value)
+
+    async def get_boot_options(self) -> Dict[str, Any]:
+        return {
+            "available_devices": [
+                {"id": "bios", "label": "BIOS Setup"},
+                {"id": "cdrom", "label": "CD-ROM"},
+                {"id": "pxe", "label": "PXE / Network"},
+                {"id": "disk", "label": "Disk"},
+                {"id": "none", "label": "None"},
+            ],
+            "supports_persistent": True,
+            "supports_uefi_hint": True,
+            "discovery_source": "hardcoded",
+        }
+
+    async def get_boot_order(self) -> Dict[str, Any]:
+        stdout, stderr, rc = await self._run_ipmitool("chassis bootparam get 5")
+        if rc != 0:
+            message = (stderr or b"").decode("utf-8", errors="replace").strip()
+            raise RuntimeError(message or "Failed to read IPMI boot parameters")
+        text = (stdout or b"").decode("utf-8", errors="replace")
+        lower = text.lower()
+
+        current_device: Optional[str] = None
+        if "force pxe" in lower:
+            current_device = "pxe"
+        elif "force boot from default hard-drive" in lower or "force hard-drive" in lower:
+            current_device = "disk"
+        elif "force boot from cd/dvd" in lower or "force cd/dvd" in lower:
+            current_device = "cdrom"
+        elif "force boot into bios setup" in lower:
+            current_device = "bios"
+        elif "force boot from diagnostic partition" in lower:
+            current_device = "diag"
+        elif "force boot from safe mode drive" in lower:
+            current_device = "safe"
+        elif "force boot from floppy" in lower:
+            current_device = "floppy"
+
+        persistent = "options apply to all future boots" in lower
+        uefi = None
+        if "bios efi boot" in lower:
+            uefi = True
+        elif "bios pc compatible (legacy) boot" in lower:
+            uefi = False
+
+        return {
+            "current_device": current_device,
+            "persistent": persistent,
+            "uefi": uefi,
+            "raw": text.strip(),
+        }
+
+    async def set_boot_order(self, boot_order: list) -> bool:
+        if not boot_order:
+            raise ValueError("boot_order cannot be empty")
+        first = self._normalize_boot_device(str(boot_order[0]))
+        return await self.set_next_boot_device(first, persistent=True)
+
+    async def set_next_boot_device(
+        self,
+        device: str,
+        persistent: bool = False,
+        uefi: Optional[bool] = None,
+    ) -> bool:
+        normalized_device = self._normalize_boot_device(device)
+        allowed = {"bios", "cdrom", "pxe", "disk", "none"}
+        if normalized_device not in allowed:
+            raise ValueError(f"Unsupported boot device: {device}")
+
+        options: List[str] = []
+        if persistent:
+            options.append("persistent")
+        if uefi is True:
+            options.append("efiboot")
+
+        command = f"chassis bootdev {normalized_device}"
+        if options:
+            command = f"{command} options={','.join(options)}"
+        stdout, stderr, rc = await self._run_ipmitool(command)
+        if rc != 0:
+            msg = (stderr or b"").decode("utf-8", errors="replace").strip()
+            logger.warning(f"ipmitool set boot device failed: {msg}")
+            return False
+        return True
