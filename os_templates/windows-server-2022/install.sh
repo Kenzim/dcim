@@ -19,12 +19,23 @@ report_installation_status() {
     [ -n "${SERVER_ID:-}" ] || return 0
     [ -n "${API_BASE:-}" ] || return 0
     local url="${API_BASE}/api/servers/${SERVER_ID}/installation-tasks/${INSTALLATION_TASK_ID}/logs"
+    [ -n "${DOWNLOAD_TOKEN:-}" ] && url="${url}?token=${DOWNLOAD_TOKEN}"
+
+    # Read tail of log file (up to ~50KB) so failures show context in the UI
+    local logs=""
+    if [ -f "$LOG_FILE" ]; then
+        logs="$(tail -c 50000 "$LOG_FILE" 2>/dev/null | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g; :a;N;$!ba;s/\n/\\n/g')"
+    fi
+
     local payload
     if [ "$status" = "failed" ] && [ -n "$error_msg" ]; then
-        payload=$(printf '{"logs":"","status":"failed","error_message":"%s"}' "$(echo "$error_msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g')")
+        local escaped_error
+        escaped_error="$(echo "$error_msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g')"
+        payload=$(printf '{"logs":"%s","status":"failed","error_message":"%s"}' "$logs" "$escaped_error")
     else
-        payload=$(printf '{"logs":"","status":"%s"}' "$status")
+        payload=$(printf '{"logs":"%s","status":"%s"}' "$logs" "$status")
     fi
+
     curl -X POST "$url" -H "Content-Type: application/json" -d "$payload" -f -s >/dev/null 2>&1 || true
 }
 trap 'e=$?; if [ "$DCIM_STATUS_REPORTED" = 0 ] && [ "$e" -ne 0 ]; then report_installation_status failed "Installation script failed"; fi' EXIT
@@ -158,6 +169,23 @@ get_disk_type() {
 AVAILABLE_DISKS=()
 for disk in /dev/sd[a-z] /dev/nvme[0-9]n[0-9]; do
     if [ -b "$disk" ]; then
+        # Only consider real disks (lsblk TYPE=disk) and skip obvious virtual media
+        if command -v lsblk >/dev/null 2>&1; then
+            info=$(lsblk -dn -o TYPE,TRAN,RM "$disk" 2>/dev/null | head -1)
+            disk_type_field=$(echo "$info" | awk '{print $1}')
+            disk_tran_field=$(echo "$info" | awk '{print $2}')
+            disk_rm_field=$(echo "$info" | awk '{print $3}')
+            # TYPE must be "disk"
+            if [ "$disk_type_field" != "disk" ]; then
+                echo "Skipping $disk (lsblk TYPE=$disk_type_field, not a real disk)"
+                continue
+            fi
+            # Skip removable/USB devices (typically IPMI virtual media, ISO bridges, etc.)
+            if [ "$disk_tran_field" = "usb" ] || [ "$disk_rm_field" = "1" ]; then
+                echo "Skipping $disk (TRAN=$disk_tran_field, RM=$disk_rm_field – likely virtual/removable media)"
+                continue
+            fi
+        fi
         AVAILABLE_DISKS+=("$disk")
     fi
 done
@@ -340,13 +368,13 @@ echo "Streaming Windows image to $WINDOWS_PART..."
 echo "This will stream directly from the server to disk..."
 if ! curl -fL "${WINDOWS_IMG_URL}" | dd of="$WINDOWS_PART" bs=4M status=progress; then
     echo "ERROR: Failed to stream/write Windows image"
-    # Check exit codes
-    CURL_EXIT=${PIPESTATUS[0]}
-    DD_EXIT=${PIPESTATUS[1]}
-    if [ "$CURL_EXIT" -ne 0 ]; then
+    # Check exit codes (PIPESTATUS is bash-only; guard so we don't get 'integer expression expected' under sh)
+    CURL_EXIT=${PIPESTATUS[0]:-}
+    DD_EXIT=${PIPESTATUS[1]:-}
+    if [ -n "${CURL_EXIT}" ] && [ "${CURL_EXIT}" -ne 0 ] 2>/dev/null; then
         echo "  curl failed with exit code: $CURL_EXIT"
     fi
-    if [ "$DD_EXIT" -ne 0 ]; then
+    if [ -n "${DD_EXIT}" ] && [ "${DD_EXIT}" -ne 0 ] 2>/dev/null; then
         echo "  dd failed with exit code: $DD_EXIT"
     fi
     exit 1
@@ -355,19 +383,33 @@ sync
 echo "✓ Windows image written successfully"
 echo ""
 
+# Expand NTFS filesystem to fill the partition (image may be smaller than partition)
+if command -v ntfsresize >/dev/null 2>&1; then
+    echo "Expanding NTFS filesystem to fill partition..."
+    if ntfsresize --expand "$WINDOWS_PART" 2>/dev/null; then
+        echo "✓ NTFS filesystem expanded to fill partition"
+    else
+        echo "WARNING: ntfsresize failed (partition may already be full or image size matches); continuing"
+    fi
+    echo ""
+else
+    echo "Note: ntfsresize not found; NTFS partition not expanded (install ntfs-3g for ntfsresize)"
+    echo ""
+fi
+
 # Stream EFI image directly to partition (UEFI only)
 if [ "$BOOT_MODE" = "uefi" ]; then
     echo "Streaming EFI image to $EFI_PART..."
     echo "This will stream directly from the server to disk..."
     if ! curl -fL "${EFI_IMG_URL}" | dd of="$EFI_PART" bs=4M status=progress; then
         echo "ERROR: Failed to stream/write EFI image"
-        # Check exit codes
-        CURL_EXIT=${PIPESTATUS[0]}
-        DD_EXIT=${PIPESTATUS[1]}
-        if [ "$CURL_EXIT" -ne 0 ]; then
+        # Check exit codes (PIPESTATUS is bash-only; guard so we don't get 'integer expression expected' under sh)
+        CURL_EXIT=${PIPESTATUS[0]:-}
+        DD_EXIT=${PIPESTATUS[1]:-}
+        if [ -n "${CURL_EXIT}" ] && [ "${CURL_EXIT}" -ne 0 ] 2>/dev/null; then
             echo "  curl failed with exit code: $CURL_EXIT"
         fi
-        if [ "$DD_EXIT" -ne 0 ]; then
+        if [ -n "${DD_EXIT}" ] && [ "${DD_EXIT}" -ne 0 ] 2>/dev/null; then
             echo "  dd failed with exit code: $DD_EXIT"
         fi
         exit 1
@@ -375,6 +417,50 @@ if [ "$BOOT_MODE" = "uefi" ]; then
     sync
     echo "✓ EFI image written successfully"
     echo ""
+fi
+
+# UEFI: clean up stale boot entries and keep PXE automatic.
+if [ "$BOOT_MODE" = "uefi" ]; then
+    echo "=========================================="
+    echo "Removing all non-PXE EFI boot entries"
+    echo "=========================================="
+
+    mkdir -p /sys/firmware/efi/efivars 2>/dev/null || true
+    mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
+
+    BOOT_INFO="$(efibootmgr -v 2>/dev/null || true)"
+    BOOT_CURRENT="$(echo "$BOOT_INFO" | awk -F: '/BootCurrent/ {gsub(/[^0-9A-Fa-f]/, "", $2); print $2; exit}')"
+
+    while read -r bn; do
+        [ -n "$bn" ] || continue
+        # Never delete the entry we're currently booted from
+        [ "$bn" = "$BOOT_CURRENT" ] && continue
+        IS_PXE="$(echo "$BOOT_INFO" | awk -v bn="$bn" '
+            BEGIN{inblock=0;px=0}
+            $0 ~ "^Boot"bn"[^0-9A-Fa-f]" {inblock=1; next}
+            inblock && $0 ~ /^Boot[0-9A-Fa-f]{4}/ {inblock=0; next}
+            inblock && tolower($0) ~ /(pxe|http|network)/ {px=1}
+            END{print px}
+        ' | head -n1 || true)"
+        if [ "$IS_PXE" != "1" ]; then
+            echo "Deleting Boot${bn}"
+            efibootmgr -b "$bn" -B 2>/dev/null || true
+        fi
+    done < <(echo "$BOOT_INFO" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p')
+
+    echo "Remaining entries:"
+    efibootmgr -v 2>/dev/null || true
+
+    echo "=========================================="
+    echo "Setting BootNext to keep PXE automatic"
+    echo "=========================================="
+
+    if [ -n "$BOOT_CURRENT" ]; then
+        echo "Setting BootNext to current boot entry Boot${BOOT_CURRENT}."
+        efibootmgr -n "$BOOT_CURRENT" 2>/dev/null || true
+    else
+        echo "WARNING: Could not read BootCurrent; cannot set BootNext."
+    fi
 fi
 
 # Set up bootloader based on boot mode
@@ -428,29 +514,62 @@ if [ ${#EXTRA_DISKS[@]} -gt 0 ]; then
     echo "=========================================="
     for disk in "${EXTRA_DISKS[@]}"; do
         echo "Formatting $disk as NTFS..."
-        if command -v blkdiscard >/dev/null 2>&1; then
-            blkdiscard -f "$disk" 2>/dev/null || true
-        else
-            dd if=/dev/zero of="$disk" bs=4M count=100 2>/dev/null || true
-            sync
+
+        # Safety: re-check that this really looks like a local data disk
+        if command -v lsblk >/dev/null 2>&1; then
+            info=$(lsblk -dn -o TYPE,TRAN,RM "$disk" 2>/dev/null | head -1)
+            disk_type_field=$(echo "$info" | awk '{print $1}')
+            disk_tran_field=$(echo "$info" | awk '{print $2}')
+            disk_rm_field=$(echo "$info" | awk '{print $3}')
+            if [ "$disk_type_field" != "disk" ] || [ "$disk_tran_field" = "usb" ] || [ "$disk_rm_field" = "1" ]; then
+                echo "  [SKIP] $disk is TYPE=$disk_type_field, TRAN=$disk_tran_field, RM=$disk_rm_field (likely virtual/removable); not formatting."
+                continue
+            fi
         fi
-        parted -s "$disk" mklabel gpt
-        parted -s "$disk" mkpart primary ntfs 1MiB 100%
-        EXTRA_PART=$(partpath "$disk" 1)
-        mkfs.ntfs -f -L "Data" "$EXTRA_PART"
-        echo "✓ $disk formatted (partition $EXTRA_PART)"
+
+        # Never let a failure here abort the whole install; just warn and continue.
+        {
+            if command -v blkdiscard >/dev/null 2>&1; then
+                blkdiscard -f "$disk" 2>/dev/null || echo "  Warning: blkdiscard failed on $disk (continuing)..."
+            else
+                dd if=/dev/zero of="$disk" bs=4M count=100 2>/dev/null || echo "  Warning: dd wipe failed on $disk (continuing)..."
+                sync
+            fi
+
+            if ! parted -s "$disk" mklabel gpt; then
+                echo "  [SKIP] Failed to create GPT label on $disk; leaving disk unchanged."
+                continue
+            fi
+            if ! parted -s "$disk" mkpart primary ntfs 1MiB 100%; then
+                echo "  [SKIP] Failed to create partition on $disk; leaving disk unchanged."
+                continue
+            fi
+
+            EXTRA_PART=$(partpath "$disk" 1)
+            if ! mkfs.ntfs -f -L "Data" "$EXTRA_PART"; then
+                echo "  [SKIP] Failed to format $EXTRA_PART as NTFS; leaving disk unchanged."
+                continue
+            fi
+
+            echo "✓ $disk formatted (partition $EXTRA_PART)"
+        } || {
+            # Catch-all in case anything above unexpectedly propagates an error
+            echo "  [SKIP] An error occurred while handling $disk; continuing without failing installation."
+            continue
+        }
     done
     echo ""
 fi
 
-# Write password file (mount Windows partition temporarily)
-echo "Writing password configuration file..."
+# Write password file and PowerShell scripts (mount Windows partition temporarily)
+echo "Writing password configuration file and PowerShell scripts..."
 WINDOWS_MOUNT="/mnt/windows"
 mkdir -p "$WINDOWS_MOUNT"
 
-# Mount Windows partition read-write to write password file
+# Mount Windows partition read-write to write password + scripts
 if mount -t ntfs-3g "$WINDOWS_PART" "$WINDOWS_MOUNT" -o rw 2>/dev/null || \
    mount -t ntfs "$WINDOWS_PART" "$WINDOWS_MOUNT" -o rw 2>/dev/null; then
+    # 1) Password file for firstboot.ps1
     PASSWORD_FILE="${WINDOWS_MOUNT}/dcim_password.txt"
     echo -n "$ADMIN_PASSWORD" > "$PASSWORD_FILE" 2>/dev/null || true
     chmod 600 "$PASSWORD_FILE" 2>/dev/null || true
@@ -462,24 +581,34 @@ if mount -t ntfs-3g "$WINDOWS_PART" "$WINDOWS_MOUNT" -o rw 2>/dev/null || \
     else
         echo "WARNING: Password file verification failed"
     fi
+
+    # 2) Overwrite Windows Setup PowerShell scripts from API template-files (if TEMPLATE_ID + token set)
+    WIN_SETUP_SCRIPTS_DIR="${WINDOWS_MOUNT}/Windows/Setup/Scripts"
+    mkdir -p "$WIN_SETUP_SCRIPTS_DIR"
+
+    if [ -n "${TEMPLATE_ID:-}" ] && [ -n "${DOWNLOAD_TOKEN:-}" ] && [ -n "${API_BASE_URL:-}" ]; then
+        # Fetch template files we need; API serves any file under the template at template-files/{template_id}/{path}
+        for script in firstboot.ps1 user-login.ps1; do
+            echo "Updating Windows $script from API..."
+            url="${API_BASE_URL}/api/servers/interaction/template-files/${TEMPLATE_ID}/${script}?token=${DOWNLOAD_TOKEN}"
+            if ! curl -fsSL "$url" -o "${WIN_SETUP_SCRIPTS_DIR}/${script}"; then
+                echo "WARNING: Failed to download $script from API"
+            fi
+        done
+    else
+        echo "WARNING: TEMPLATE_ID or DOWNLOAD_TOKEN not set; leaving existing scripts in image"
+        echo "  (Create a new install/boot task from the API so the script gets these variables)"
+    fi
+
+    sync
     umount "$WINDOWS_MOUNT" 2>/dev/null || true
 else
-    echo "WARNING: Could not mount Windows partition to write password file"
-    echo "Password will need to be set manually"
+    echo "WARNING: Could not mount Windows partition to write password or scripts"
+    echo "Password and script updates will need to be handled manually"
 fi
 
 echo ""
 
-# Terminate download token (explicit cleanup)
-if [ -n "${DOWNLOAD_TOKEN:-}" ]; then
-    echo "Terminating download token..."
-    TERMINATE_URL="${API_BASE}/api/servers/interaction/download-token/${DOWNLOAD_TOKEN}/terminate"
-    curl -X POST "$TERMINATE_URL" -f -s >/dev/null 2>&1 || {
-        echo "WARNING: Failed to terminate download token (will expire automatically)"
-    }
-fi
-
-echo ""
 echo "=== Installation Complete ==="
 echo "Windows Server 2022 installed to $TARGET_DISK"
 echo "Boot mode: $BOOT_MODE"
@@ -487,48 +616,64 @@ echo "Password written to disk (Windows will read it on first boot)"
 echo ""
 
 # Upload logs and report success to DCIM API if INSTALLATION_TASK_ID is set
-if [ -n "${INSTALLATION_TASK_ID:-}" ] && [ -n "${SERVER_ID:-}" ]; then
+if [ -n "${INSTALLATION_TASK_ID:-}" ] && [ -n "${SERVER_ID:-}" ] && [ -n "${API_BASE:-}" ]; then
     DCIM_STATUS_REPORTED=1
-    echo "Uploading installation logs and reporting success..."
-    
-    # Read log file content
-    if [ -f "$LOG_FILE" ]; then
-        LOG_CONTENT=$(cat "$LOG_FILE" 2>/dev/null || echo "")
-        
-        # Upload logs via API
-        UPLOAD_URL="${API_BASE}/api/servers/${SERVER_ID}/installation-tasks/${INSTALLATION_TASK_ID}/logs"
-        
-        # Use Python to properly JSON-encode the logs if available, otherwise use simple escaping
-        if command -v python3 >/dev/null 2>&1; then
-            # Use Python to properly encode JSON
-            JSON_PAYLOAD=$(python3 -c "
+    echo "Uploading installation logs and reporting success to API..."
+
+    # Read log file content (or empty if file missing)
+    LOG_CONTENT=""
+    [ -f "$LOG_FILE" ] && LOG_CONTENT=$(cat "$LOG_FILE" 2>/dev/null || echo "")
+
+    UPLOAD_URL="${API_BASE}/api/servers/${SERVER_ID}/installation-tasks/${INSTALLATION_TASK_ID}/logs"
+    [ -n "${DOWNLOAD_TOKEN:-}" ] && UPLOAD_URL="${UPLOAD_URL}?token=${DOWNLOAD_TOKEN}"
+
+    if command -v python3 >/dev/null 2>&1; then
+        JSON_PAYLOAD=$(python3 -c "
 import json
 import sys
 logs = sys.stdin.read()
 payload = {'logs': logs, 'status': 'completed'}
 print(json.dumps(payload))
 " <<< "$LOG_CONTENT" 2>/dev/null || echo '{"logs": "", "status": "completed"}')
-        else
-            # Fallback: simple escaping (may break with special characters)
-            ESCAPED_LOGS=$(echo "$LOG_CONTENT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-            JSON_PAYLOAD="{\"logs\": \"${ESCAPED_LOGS}\", \"status\": \"completed\"}"
-        fi
-        
-        if command -v curl >/dev/null 2>&1; then
-            curl -X POST "$UPLOAD_URL" \
-                -H "Content-Type: application/json" \
-                -d "$JSON_PAYLOAD" \
-                >/dev/null 2>&1 || echo "Warning: Failed to upload logs"
-        elif command -v wget >/dev/null 2>&1; then
-            echo "$JSON_PAYLOAD" | wget --method=POST \
-                --header="Content-Type: application/json" \
-                --body-data="$JSON_PAYLOAD" \
-                "$UPLOAD_URL" \
-                -O /dev/null 2>&1 || echo "Warning: Failed to upload logs"
-        else
-            echo "Warning: curl or wget not available, cannot upload logs"
-        fi
+    else
+        ESCAPED_LOGS=$(echo "$LOG_CONTENT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+        JSON_PAYLOAD="{\"logs\": \"${ESCAPED_LOGS}\", \"status\": \"completed\"}"
     fi
+
+    if command -v curl >/dev/null 2>&1; then
+        HTTP_RESP=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" \
+            -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD" 2>/dev/null) || true
+        HTTP_CODE=$(echo "$HTTP_RESP" | tail -n1)
+        if [ "$HTTP_CODE" = "200" ]; then
+            echo "Logs uploaded and installation marked complete (HTTP 200)"
+        else
+            echo "WARNING: Log upload returned HTTP $HTTP_CODE (response: $(echo "$HTTP_RESP" | head -n-1 | head -c200))"
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if echo "$JSON_PAYLOAD" | wget --method=POST \
+            --header="Content-Type: application/json" \
+            --body-data="$JSON_PAYLOAD" \
+            "$UPLOAD_URL" \
+            -O /tmp/upload_response.txt 2>/dev/null; then
+            echo "Logs uploaded and installation marked complete"
+        else
+            echo "WARNING: Failed to upload logs (check /tmp/upload_response.txt)"
+        fi
+    else
+        echo "WARNING: curl or wget not available, cannot upload logs"
+    fi
+else
+    echo "Skipping log upload: INSTALLATION_TASK_ID, SERVER_ID, or API_BASE not set"
+fi
+
+# Terminate download token after log upload so the token is still valid for the logs API
+if [ -n "${DOWNLOAD_TOKEN:-}" ] && [ -n "${API_BASE:-}" ]; then
+    echo "Terminating download token..."
+    TERMINATE_URL="${API_BASE}/api/servers/interaction/download-token/${DOWNLOAD_TOKEN}/terminate"
+    curl -X POST "$TERMINATE_URL" -f -s >/dev/null 2>&1 || {
+        echo "WARNING: Failed to terminate download token (will expire automatically)"
+    }
 fi
 
 echo "Rebooting in 5 seconds..."

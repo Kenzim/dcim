@@ -6,6 +6,8 @@
   "script": "install.sh",
   "disk_image": "deploy/windows.img",
   "user_reinstallable": false,
+  "post_install_fix_boot_order": true,
+  "efi_boot_loader": "\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
   "parameters": {
     "admin_password": {
       "type": "password",

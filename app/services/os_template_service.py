@@ -50,6 +50,8 @@ class OSTemplate(BaseModel):
     kernel_url: Optional[str] = Field(default=None, description="Kernel URL for Linux templates")
     initrd_url: Optional[str] = Field(default=None, description="Initrd URL for Linux templates")
     user_reinstallable: bool = Field(default=False, description="Whether external users can reinstall this OS via billing API")
+    post_install_fix_boot_order: bool = Field(default=False, description="If true, schedule a one-time live OS boot after install to fix UEFI boot order (PXE first)")
+    efi_boot_loader: Optional[str] = Field(default=None, description="EFI path for installed OS boot entry (e.g. \\EFI\\Microsoft\\Boot\\bootmgfw.efi); used by finalize script for BootNext")
     template_dir: Optional[Path] = Field(default=None, exclude=True, description="Template directory path")
 
 
@@ -104,6 +106,8 @@ class OSTemplateService:
                     kernel_url=template_data.get("kernel_url"),
                     initrd_url=template_data.get("initrd_url"),
                     user_reinstallable=template_data.get("user_reinstallable", False),
+                    post_install_fix_boot_order=template_data.get("post_install_fix_boot_order", False),
+                    efi_boot_loader=template_data.get("efi_boot_loader"),
                     template_dir=template_dir
                 )
                 
