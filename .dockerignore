@@ -51,10 +51,7 @@ initrd*
 initramfs*
 *.cpio.gz
 *.modloop
-tftp
-tftp/pxe/temp_os
-tftp/squashfs-root
-squashfs-root
+# NOTE: tftp tree is baked into images (app, tftp_runner), so we keep it in the build context.
 
 # Logs and local state
 *.log

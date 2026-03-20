@@ -21,18 +21,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmariadb-dev-compat \
     libmariadb-dev \
     pkg-config \
+    ipmitool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Large/static assets first so they stay cached when app code changes
+# Plugins only; tftp, os_templates, disk_images, isos – mount at runtime
+COPY tftp/ ./tftp/
+COPY app/plugins/ ./app/plugins/
+
+# Application code and migrations (change frequently)
 COPY app/ ./app/
 COPY scripts/ ./scripts/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
-
-# Plugins only; tftp, os_templates, disk_images, isos – mount at runtime
-COPY app/plugins/ ./app/plugins/
 
 # Built frontend from stage above (npm run build → /build/dist)
 COPY --from=frontend /build/dist /app/static

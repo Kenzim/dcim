@@ -92,7 +92,7 @@ Then in `docker-compose.yml` under `app` and `bandwidth-poller` you can use `env
 
 ### Building images only
 
-- Main app (default): `docker build -t dcim-app .`
+- Main app: `docker build --target app -t dcim-app .` (required: default is last stage, bandwidth-poller)
 - Bandwidth poller only: `docker build --target bandwidth-poller -t dcim-bandwidth-poller .`
 
 ## Service Configuration
