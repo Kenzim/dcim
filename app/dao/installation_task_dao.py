@@ -1,6 +1,8 @@
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 from app.models.installation_task import InstallationTask, InstallationStatus
+from app.dao.service_dao import ServiceDAO
+from app.models.service import ServiceStatus
 from datetime import datetime
 
 
@@ -84,6 +86,14 @@ class InstallationTaskDAO:
                 task.progress_percent = 100
             db.commit()
             db.refresh(task)
+            # When an installation finishes, mark any pending services on this
+            # server as active so billing integrations can see it as ready.
+            services = ServiceDAO.get_by_server(db, task.server_id)
+            for svc in services:
+                if svc.status == ServiceStatus.PENDING:
+                    svc.status = ServiceStatus.ACTIVE
+            if services:
+                db.commit()
         return task
 
     @staticmethod

@@ -85,10 +85,14 @@ def get_subnet_info_for_client(config: DHCPConfig, client_ip: Optional[str] = No
             cidr = iface_config.get("cidr")
             netmask = iface_config.get("netmask")
             gateway = iface_config.get("gateway")
+            range_start = iface_config.get("range_start")
+            range_end = iface_config.get("range_end")
         else:
             ip = iface_config.ip
             cidr = getattr(iface_config, "cidr", None)
             netmask = getattr(iface_config, "netmask", None)
+            range_start = getattr(iface_config, "range_start", None)
+            range_end = getattr(iface_config, "range_end", None)
             gateway = getattr(iface_config, "gateway", None)
         subnet, subnet_netmask, _ = parse_cidr_or_netmask(ip, cidr, netmask)
         if ip_in_subnet(client_ip, subnet, subnet_netmask):
@@ -120,7 +124,13 @@ def get_next_server_ip_for_client(config: DHCPConfig, client_ip: Optional[str] =
             cidr = getattr(iface_config, "cidr", None)
             netmask = getattr(iface_config, "netmask", None)
         subnet, subnet_netmask, _ = parse_cidr_or_netmask(ip, cidr, netmask)
-        interface_subnets.append({"ip": ip, "subnet": subnet, "netmask": subnet_netmask})
+        interface_subnets.append(
+            {
+                "ip": ip,
+                "subnet": subnet,
+                "netmask": subnet_netmask,
+            }
+        )
 
     if client_ip and interface_subnets:
         for iface_info in interface_subnets:
@@ -183,6 +193,8 @@ def generate_dhcpd_conf(
             cidr = iface_config.get("cidr")
             netmask = iface_config.get("netmask")
             gateway = iface_config.get("gateway")
+            range_start = iface_config.get("range_start")
+            range_end = iface_config.get("range_end")
         else:
             # Pydantic model
             interface = iface_config.interface
@@ -190,6 +202,8 @@ def generate_dhcpd_conf(
             cidr = iface_config.cidr
             netmask = iface_config.netmask
             gateway = getattr(iface_config, "gateway", None)
+            range_start = getattr(iface_config, "range_start", None)
+            range_end = getattr(iface_config, "range_end", None)
         
         # Parse subnet from IP with CIDR or netmask
         subnet, subnet_netmask, prefix_len = parse_cidr_or_netmask(ip, cidr, netmask)
@@ -211,20 +225,30 @@ def generate_dhcpd_conf(
                 "subnet": subnet,
                 "netmask": subnet_netmask,
                 "prefix_len": prefix_len,
-                "interfaces": []
+                "interfaces": [],
+                "range_start": None,
+                "range_end": None,
             }
-        
-        subnets[subnet_key]["interfaces"].append({
-            "interface": interface,
-            "ip": ip,
-            "gateway": gateway,
-        })
+
+        subnets[subnet_key]["interfaces"].append(
+            {
+                "interface": interface,
+                "ip": ip,
+                "gateway": gateway,
+            }
+        )
+
+        # If this interface defines an explicit range, prefer the first non-empty
+        if range_start and not subnets[subnet_key]["range_start"]:
+            subnets[subnet_key]["range_start"] = range_start
+        if range_end and not subnets[subnet_key]["range_end"]:
+            subnets[subnet_key]["range_end"] = range_end
     
     # Generate subnet configurations
     for subnet_key, subnet_info in subnets.items():
-        subnet = subnet_info['subnet']
-        netmask = subnet_info['netmask']
-        prefix_len = subnet_info['prefix_len']
+        subnet = subnet_info["subnet"]
+        netmask = subnet_info["netmask"]
+        prefix_len = subnet_info["prefix_len"]
         
         lines.append(f"# Subnet configuration for {subnet}/{prefix_len}")
         lines.append(f"subnet {subnet} netmask {netmask} {{")
@@ -239,27 +263,38 @@ def generate_dhcpd_conf(
             broadcast = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.255"
         
         if config.hand_out_leases:
-            # Calculate range (exclude reserved IPs)
-            # For now, use a simple range - could be improved to exclude all reserved IPs
-            try:
-                network = ipaddress.IPv4Network(f"{subnet}/{netmask}", strict=False)
-                # Use .100 to .200 range, but adjust if subnet is too small
-                hosts = list(network.hosts())
-                if len(hosts) > 100:
-                    range_start = hosts[100] if len(hosts) > 100 else hosts[0]
-                    range_end = hosts[200] if len(hosts) > 200 else hosts[-1]
-                    lines.append(f"    # Range of IP addresses to lease")
-                    lines.append(f"    range {range_start} {range_end};")
-                else:
-                    # Small subnet, use all available hosts
-                    if len(hosts) > 0:
-                        lines.append(f"    # Range of IP addresses to lease")
-                        lines.append(f"    range {hosts[0]} {hosts[-1]};")
-            except Exception:
-                # Fallback for /24
-                ip_parts = subnet.split(".")
-                lines.append(f"    # Range of IP addresses to lease")
-                lines.append(f"    range {ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.100 {ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.200;")
+            explicit_start = subnet_info.get("range_start")
+            explicit_end = subnet_info.get("range_end")
+            if explicit_start and explicit_end:
+                lines.append("    # Range of IP addresses to lease (explicit)")
+                lines.append(f"    range {explicit_start} {explicit_end};")
+            else:
+                # Calculate range (exclude reserved IPs) with sensible defaults
+                try:
+                    network = ipaddress.IPv4Network(f"{subnet}/{netmask}", strict=False)
+                    hosts = list(network.hosts())
+                    if hosts:
+                        # Default: use middle chunk (approx .100-.200) when enough hosts,
+                        # otherwise use full host range.
+                        if len(hosts) > 200:
+                            start_index = min(100, len(hosts) - 2)
+                            end_index = min(200, len(hosts) - 1)
+                            auto_start = hosts[start_index]
+                            auto_end = hosts[end_index]
+                        else:
+                            auto_start = hosts[0]
+                            auto_end = hosts[-1]
+                        lines.append("    # Range of IP addresses to lease")
+                        lines.append(f"    range {auto_start} {auto_end};")
+                except Exception:
+                    # Fallback for /24-style subnet string
+                    ip_parts = subnet.split(".")
+                    if len(ip_parts) == 4:
+                        lines.append("    # Range of IP addresses to lease")
+                        lines.append(
+                            f"    range {ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.100 "
+                            f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.200;"
+                        )
         else:
             lines.append("    # DHCP leases disabled - only serving PXE boot")
         
@@ -314,18 +349,32 @@ def generate_dhcpd_conf(
         for iface_info in interface_subnets:
             if ip_in_subnet(pxe_ip, iface_info["subnet"], iface_info["netmask"]):
                 api_ip = iface_info["ip"]
-                logger.debug(f"Server {server.name} PXE IP {pxe_ip} is in subnet {iface_info['subnet']}/{iface_info['netmask']}, using next-server {api_ip}")
+                logger.debug(
+                    "Server %s PXE IP %s is in subnet %s/%s, using next-server %s",
+                    server.name,
+                    pxe_ip,
+                    iface_info["subnet"],
+                    iface_info["netmask"],
+                    api_ip,
+                )
                 break
-        
-        # Fallback to first interface IP if no match found
+
+        # If no matching interface/subnet was found, raise an error so the caller can
+        # surface this to the UI instead of silently generating a broken config.
         if api_ip is None:
-            if config.interfaces and len(config.interfaces) > 0:
-                first_iface = config.interfaces[0]
-                api_ip = first_iface.ip if hasattr(first_iface, 'ip') else first_iface["ip"]
-                logger.warning(f"Server {server.name} PXE IP {pxe_ip} not in any configured subnet, using first interface IP {api_ip} as next-server")
-            else:
-                api_ip = "192.168.12.74"
-                logger.warning(f"No interfaces configured, using default next-server IP {api_ip}")
+            configured_subnets = ", ".join(
+                f"{i['subnet']}/{i['netmask']}" for i in interface_subnets
+            ) or "none"
+            logger.error(
+                "Server %s PXE IP %s is not in any configured DHCP subnet (%s)",
+                server.name,
+                pxe_ip,
+                configured_subnets,
+            )
+            raise ValueError(
+                f"Server '{server.name}' PXE IP {pxe_ip} is not in any configured DHCP subnet "
+                f"({configured_subnets}). Update the DHCP interface settings for this location."
+            )
         
         lines.append(f"# Server: {server.name} (MAC: {mac})")
         lines.append(f"host reserved-host{host_num} {{")

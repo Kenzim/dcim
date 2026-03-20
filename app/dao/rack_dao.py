@@ -12,6 +12,7 @@ class RackDAO:
         location_id: int,
         name: str,
         units: int = 42,
+        units_start_from_bottom: bool = True,
         description: Optional[str] = None,
         row: Optional[int] = None,
         row_position: Optional[int] = None
@@ -21,6 +22,7 @@ class RackDAO:
             location_id=location_id,
             name=name,
             units=units,
+            units_start_from_bottom=units_start_from_bottom,
             description=description,
             row=row,
             row_position=row_position

@@ -14,7 +14,6 @@ from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServiceInstanceDAO, LocationDAO
 from app.models.service_instance import ServiceInstance
-from app.core.service_instance_crypto import is_encryption_configured
 
 
 router = APIRouter(prefix="/service-instances", tags=["service-instances"])
@@ -25,7 +24,7 @@ class ServiceInstanceCreate(BaseModel):
     service_type: str  # 'dhcp' | 'tftp'
     name: str
     base_url: str
-    api_key: str
+    api_key: str | None = None
 
 
 class ServiceInstanceUpdate(BaseModel):
@@ -50,7 +49,7 @@ class ServiceInstanceResponse(BaseModel):
 
 
 class ServiceInstanceTestBody(BaseModel):
-    api_key: str
+    api_key: Optional[str] = None
 
 
 class ServiceInstanceTestResponse(BaseModel):
@@ -62,8 +61,8 @@ class ServiceInstanceTestResponse(BaseModel):
 def _call_runner_health(base_url: str, api_key: str, use_auth: bool) -> tuple[bool, str]:
     """Call runner /health (no auth) or /status (auth). Returns (ok, message)."""
     base_url = base_url.rstrip("/")
-    # Try /health first (no auth required by runner) - but we want to verify the key works
-    # So we call /status which requires auth when API_KEY is set
+    # Call /status on the runner. When an API key is configured on the runner
+    # we send it in X-API-Key; otherwise we call without auth.
     url = f"{base_url}/status"
     headers = {}
     if use_auth and api_key:
@@ -98,11 +97,6 @@ async def create_service_instance(
     db: Session = Depends(get_db),
 ):
     """Create a new service instance."""
-    if not is_encryption_configured():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="SERVICE_INSTANCE_ENCRYPTION_KEY is not set. Configure it to create service instances.",
-        )
     if data.service_type not in ("dhcp", "tftp"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -126,7 +120,7 @@ async def create_service_instance(
         service_type=data.service_type,
         name=data.name,
         base_url=data.base_url,
-        api_key=data.api_key,
+        api_key=data.api_key or "",
     )
     if not instance:
         raise HTTPException(
@@ -201,11 +195,16 @@ async def test_service_instance(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Service instance not found",
         )
-    if not ServiceInstanceDAO.verify_api_key(instance, body.api_key):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="API key does not match the stored key for this instance",
-        )
-    ok, msg = _call_runner_health(instance.base_url, body.api_key, use_auth=True)
+    # If an API key is stored for this instance, verify it matches the
+    # provided key (when one is supplied). When no key is stored, skip
+    # verification so unauthenticated runners can be used.
+    if instance.api_key_encrypted:
+        if not body.api_key or not ServiceInstanceDAO.verify_api_key(instance, body.api_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="API key does not match the stored key for this instance",
+            )
+    api_key = body.api_key or instance.api_key_encrypted or ""
+    ok, msg = _call_runner_health(instance.base_url, api_key, use_auth=bool(api_key))
     ServiceInstanceDAO.update_connection_test(db, instance, ok)
     return ServiceInstanceTestResponse(success=ok, message=msg, connection_ok=ok)

@@ -5,8 +5,8 @@ All server plugins must inherit from ServerPlugin and implement
 the methods for the categories they support.
 
 Plugins define CAPABILITIES (list of Capability) with UI schema
-for config-driven frontend rendering. Optional capabilities are
-enabled per-server via plugin_config["enabled_capabilities"].
+for config-driven frontend rendering. Per-server capability enablement
+is managed by server capability state records.
 """
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
@@ -249,4 +249,32 @@ class ServerPlugin(ABC):
         """
         if PluginCategory.USER_CONTROL not in self.SUPPORTED_CATEGORIES:
             raise NotImplementedError(f"{self.PLUGIN_NAME} does not support user control")
+
+    # ========== Boot Control Methods ==========
+
+    async def get_boot_options(self) -> Dict[str, Any]:
+        """
+        Return plugin-supported boot devices/options metadata.
+
+        Returns:
+            Dict with available devices and optional feature flags.
+        """
+        raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
+
+    async def get_boot_order(self) -> Dict[str, Any]:
+        """
+        Return current/next boot state as reported by the management interface.
+        """
+        raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
+
+    async def set_next_boot_device(
+        self,
+        device: str,
+        persistent: bool = False,
+        uefi: Optional[bool] = None,
+    ) -> bool:
+        """
+        Set next boot device (or persistent boot if supported by the platform).
+        """
+        raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
 
