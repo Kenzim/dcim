@@ -98,8 +98,8 @@ def test_login_with_email(client, test_user):
     assert "token" in data
 
 
-def test_get_current_user_requires_admin(client, test_user):
-    """Test that getting current user details requires admin"""
+def test_get_current_user_for_non_admin(client, test_user):
+    """Test getting current user details as a non-admin user"""
     # First login to get token (non-admin user)
     login_response = client.post(
         "/api/users/login",
@@ -110,14 +110,17 @@ def test_get_current_user_requires_admin(client, test_user):
     )
     token = login_response.json()["token"]
     
-    # Get user details using Bearer token - should fail with 403
+    # Get user details using Bearer token
     response = client.get(
         "/api/users/me",
         headers={"Authorization": f"Bearer {token}"}
     )
-    
-    assert response.status_code == 403
-    assert "Admin access required" in response.json()["detail"]
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["username"] == "testuser"
+    assert data["email"] == "test@example.com"
+    assert data["is_admin"] is False
 
 
 def test_get_current_user_with_admin(client, test_admin_user):
@@ -146,8 +149,8 @@ def test_get_current_user_with_admin(client, test_admin_user):
     assert data["is_admin"] is True
 
 
-def test_get_current_user_with_cookie_requires_admin(client, test_user):
-    """Test that getting current user details with cookie requires admin"""
+def test_get_current_user_with_cookie_non_admin(client, test_user):
+    """Test getting current user details with cookie for non-admin user"""
     # First login to get cookie (non-admin user)
     login_response = client.post(
         "/api/users/login",
@@ -161,11 +164,11 @@ def test_get_current_user_with_cookie_requires_admin(client, test_user):
     token = login_response.cookies.get("auth_token")
     assert token is not None
     
-    # Get user details - should fail with 403
+    # Get user details
     response = client.get("/api/users/me")
-    
-    assert response.status_code == 403
-    assert "Admin access required" in response.json()["detail"]
+
+    assert response.status_code == 200
+    assert response.json()["username"] == "testuser"
 
 
 def test_logout_with_cookie(client, test_user, mock_redis):

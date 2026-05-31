@@ -23,6 +23,13 @@ from app.dao.asset_dao import AssetDAO
 from app.dao.server_activity_dao import ServerActivityDAO
 from app.dao.hardware_detection_report_dao import HardwareDetectionReportDAO
 from app.dao.server_capability_dao import ServerCapabilityDAO
+from app.dao.product_catalog_dao import ProductFamilyDAO, ProductDAO, OSProfileDAO, ProductFamilyOSProfileDAO, VMTemplateDAO
+from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
+from app.dao.ipam_dao import IPAMDAO
+from app.dao.vm_config_dao import FamilyVMConfigDAO, ProductVMConfigDAO
+from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
+from app.dao.vmid_reservation_dao import VMIDReservationDAO
+from app.dao.user_external_identity_link_dao import UserExternalIdentityLinkDAO
 
-__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ExternalUserDAO", "ServiceDAO", "BillingIntegrationDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO"]
+__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ExternalUserDAO", "ServiceDAO", "BillingIntegrationDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "OSProfileDAO", "ProductFamilyOSProfileDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "UserExternalIdentityLinkDAO"]
 

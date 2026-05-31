@@ -331,28 +331,6 @@
     gap: 6px;
   }
 
-  .capability-badge.tested {
-    background: var(--success-bg);
-    color: var(--success-text);
-  }
-
-  .capability-badge.untested {
-    background: var(--warning-bg);
-    color: var(--warning-text);
-  }
-
-  .capability-icon {
-    width: 14px;
-    height: 14px;
-  }
-
-  .plugin-actions {
-    margin-top: 20px;
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
   .capabilities-note {
     font-size: 12px;
     color: var(--text-secondary);

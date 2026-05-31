@@ -1289,6 +1289,20 @@ export async function runBootOrderFix(serverId) {
   return await response.json();
 }
 
+export async function previewServerKernelArgs(serverId, payload = {}) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/boot/kernel-args-preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to preview kernel args');
+  }
+  return await response.json();
+}
+
 /**
  * Call a server plugin action by method name (for config-driven capability UI).
  * Maps known actions to existing endpoints.
@@ -1634,9 +1648,12 @@ export async function rotateBillingIntegrationKey(integrationId) {
 export async function getServices(params = {}) {
   const url = new URL(`${API_BASE}/admin/services`, window.location.origin);
   Object.keys(params).forEach(key => {
-    if (params[key]) {
-      url.searchParams.append(key, params[key]);
-    }
+    const v = params[key];
+    if (v === undefined || v === null || v === '') return;
+    if (key === 'status_filter' && v === 'all') return;
+    if (key === 'provisioning_source' && v === 'all') return;
+    if (key === 'service_type' && v === 'all') return;
+    url.searchParams.append(key, v);
   });
 
   const response = await fetch(url.toString(), {
@@ -1651,6 +1668,38 @@ export async function getServices(params = {}) {
   return await response.json();
 }
 
+export async function getVmServices(params = {}) {
+  const url = new URL(`${API_BASE}/admin/services/vm`, window.location.origin);
+  Object.keys(params).forEach((key) => {
+    const v = params[key];
+    if (v === undefined || v === null || v === '') return;
+    if (key === 'status_filter' && v === 'all') return;
+    url.searchParams.append(key, v);
+  });
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) throw new Error('Failed to get VM services');
+  return await response.json();
+}
+
+export async function getBareMetalServices(params = {}) {
+  const url = new URL(`${API_BASE}/admin/services/bare-metal`, window.location.origin);
+  Object.keys(params).forEach((key) => {
+    const v = params[key];
+    if (v === undefined || v === null || v === '') return;
+    if (key === 'status_filter' && v === 'all') return;
+    url.searchParams.append(key, v);
+  });
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) throw new Error('Failed to get bare metal services');
+  return await response.json();
+}
+
 export async function getService(serviceId) {
   const response = await fetch(`${API_BASE}/admin/services/${serviceId}`, {
     method: 'GET',
@@ -1662,6 +1711,183 @@ export async function getService(serviceId) {
   }
 
   return await response.json();
+}
+
+export async function getVmService(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/vm/${serviceId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) throw new Error('Failed to get VM service');
+  return await response.json();
+}
+
+export async function getBareMetalService(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/bare-metal/${serviceId}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) throw new Error('Failed to get bare metal service');
+  return await response.json();
+}
+
+export async function deleteServiceCompletely(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete service');
+  }
+}
+
+export async function assignServiceOwner(serviceId, ownerUserId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/owner`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ owner_user_id: ownerUserId ?? null }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to assign service owner');
+  }
+  return await response.json();
+}
+
+export async function updateAdminServiceStatus(serviceId, nextStatus) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ status: nextStatus }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update service status');
+  }
+  return await response.json();
+}
+
+export async function listExternalUserLinks(userId = null) {
+  const url = new URL(`${API_BASE}/admin/services/external-user-links`, window.location.origin);
+  if (userId != null) url.searchParams.append('user_id', userId);
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) throw new Error('Failed to list external identity links');
+  return await response.json();
+}
+
+export async function createExternalUserLink(payload) {
+  const response = await fetch(`${API_BASE}/admin/services/external-user-links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create external identity link');
+  }
+  return await response.json();
+}
+
+export async function deleteExternalUserLink(linkId) {
+  const response = await fetch(`${API_BASE}/admin/services/external-user-links/${linkId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete external identity link');
+  }
+}
+
+/**
+ * Admin: clone template + cloud-init / sizing on Proxmox for a VM service.
+ * POST /admin/services/{serviceId}/provision-vm
+ */
+export async function provisionVmService(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/provision-vm`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    const detail = err.detail;
+    throw new Error(
+      typeof detail === 'string' ? detail : detail ? JSON.stringify(detail) : 'VM provisioning failed'
+    );
+  }
+  return await response.json();
+}
+
+export async function vmPowerAction(serviceId, action) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/vm/power`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ action }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed VM power action: ${action}`);
+  }
+  return await response.json();
+}
+
+export async function destroyVmGuest(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/vm/destroy`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to destroy VM');
+  }
+  return await response.json();
+}
+
+export async function recreateVmGuest(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/vm/recreate`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to recreate VM');
+  }
+  return await response.json();
+}
+
+/**
+ * Admin: create a pending VM service (optional Proxmox placement, optional billing user).
+ * POST /admin/services/vm
+ */
+export async function createAdminVmService(payload) {
+  const response = await fetch(`${API_BASE}/admin/services/vm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    const detail = err.detail;
+    throw new Error(
+      typeof detail === 'string' ? detail : detail ? JSON.stringify(detail) : 'Failed to create VM service'
+    );
+  }
+  return await response.json();
+}
+
+/** @deprecated Use createAdminVmService with placement fields set */
+export async function createInternalTestVmService(payload) {
+  return createAdminVmService(payload);
 }
 
 export async function getExternalUsers(integrationId = null) {
@@ -1692,6 +1918,20 @@ export async function getExternalUser(userId) {
     throw new Error('Failed to get external user');
   }
 
+  return await response.json();
+}
+
+export async function listMyServices(serviceType = null) {
+  const url = new URL(`${API_BASE}/services/me`, window.location.origin);
+  if (serviceType) url.searchParams.append('service_type', serviceType);
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to list my services');
+  }
   return await response.json();
 }
 
@@ -1961,6 +2201,470 @@ export async function deleteScript(scriptId) {
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || 'Failed to delete script');
+  }
+}
+
+// Product catalog API
+export async function listProductFamilies() {
+  const response = await fetch(`${API_BASE}/product-catalog/families`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list product families');
+  }
+  return await response.json();
+}
+
+export async function createProductFamily(data) {
+  const response = await fetch(`${API_BASE}/product-catalog/families`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create product family');
+  }
+  return await response.json();
+}
+
+export async function createCatalogProduct(data) {
+  const response = await fetch(`${API_BASE}/product-catalog/products`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create product');
+  }
+  return await response.json();
+}
+
+export async function listCatalogProducts() {
+  const response = await fetch(`${API_BASE}/product-catalog/products`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list products');
+  }
+  return await response.json();
+}
+
+export async function updateCatalogProduct(productId, data) {
+  const response = await fetch(`${API_BASE}/product-catalog/products/${productId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update product');
+  }
+  return await response.json();
+}
+
+export async function listVmTemplates() {
+  const response = await fetch(`${API_BASE}/product-catalog/vm-templates`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list VM templates');
+  }
+  return await response.json();
+}
+
+export async function listVmTemplateOsTypes() {
+  const response = await fetch(`${API_BASE}/product-catalog/vm-templates/os-types`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list VM template OS types');
+  }
+  return await response.json();
+}
+
+export async function createVmTemplate(data) {
+  const response = await fetch(`${API_BASE}/product-catalog/vm-templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create VM template');
+  }
+  return await response.json();
+}
+
+export async function updateVmTemplate(templateId, data) {
+  const response = await fetch(`${API_BASE}/product-catalog/vm-templates/${templateId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update VM template');
+  }
+  return await response.json();
+}
+
+export async function deleteVmTemplate(templateId) {
+  const response = await fetch(`${API_BASE}/product-catalog/vm-templates/${templateId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to delete VM template');
+  }
+}
+
+export async function listVmIpAllocations() {
+  const response = await fetch(`${API_BASE}/vm-ip-allocations`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list VM IP allocations');
+  }
+  return await response.json();
+}
+
+export async function createVmIpAllocation(data) {
+  const response = await fetch(`${API_BASE}/vm-ip-allocations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create VM IP allocation');
+  }
+  return await response.json();
+}
+
+export async function createVmIpAllocationsBulk(data) {
+  const response = await fetch(`${API_BASE}/vm-ip-allocations/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to bulk create VM IP allocations');
+  }
+  return await response.json();
+}
+
+export async function updateVmIpAllocation(id, data) {
+  const response = await fetch(`${API_BASE}/vm-ip-allocations/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update VM IP allocation');
+  }
+  return await response.json();
+}
+
+export async function bulkUpdateVmIpAllocations(data) {
+  const response = await fetch(`${API_BASE}/vm-ip-allocations/bulk`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to bulk update VM IP allocations');
+  }
+  return await response.json();
+}
+
+export async function deleteVmIpAllocation(id) {
+  const response = await fetch(`${API_BASE}/vm-ip-allocations/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to delete VM IP allocation');
+  }
+}
+
+export async function updateFamilyVmConfig(familyId, data) {
+  const response = await fetch(`${API_BASE}/product-catalog/families/${familyId}/vm-config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update family VM config');
+  }
+  return await response.json();
+}
+
+export async function updateProductVmConfig(productId, data) {
+  const response = await fetch(`${API_BASE}/product-catalog/products/${productId}/vm-config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update product VM config');
+  }
+  return await response.json();
+}
+
+export async function listCatalogOSProfiles() {
+  const response = await fetch(`${API_BASE}/product-catalog/os-profiles`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list OS profiles');
+  }
+  return await response.json();
+}
+
+export async function createCatalogOSProfile(data) {
+  const response = await fetch(`${API_BASE}/product-catalog/os-profiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create OS profile');
+  }
+  return await response.json();
+}
+
+export async function attachCatalogOSProfile(familyId, osProfileId) {
+  const response = await fetch(`${API_BASE}/product-catalog/families/${familyId}/os-profiles/${osProfileId}`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to attach OS profile');
+  }
+  return await response.json();
+}
+
+// Proxmox inventory API
+export async function listProxmoxClusters() {
+  const response = await fetch(`${API_BASE}/proxmox/clusters`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list Proxmox clusters');
+  }
+  return await response.json();
+}
+
+export async function createProxmoxCluster(data) {
+  const response = await fetch(`${API_BASE}/proxmox/clusters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create Proxmox cluster');
+  }
+  return await response.json();
+}
+
+export async function updateProxmoxCluster(clusterId, data) {
+  const response = await fetch(`${API_BASE}/proxmox/clusters/${clusterId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update Proxmox cluster');
+  }
+  return await response.json();
+}
+
+export async function syncProxmoxCluster(clusterId) {
+  const response = await fetch(`${API_BASE}/proxmox/clusters/${clusterId}/sync`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to sync Proxmox cluster');
+  }
+  return await response.json();
+}
+
+export async function getProxmoxClusterInventory(clusterId) {
+  const response = await fetch(`${API_BASE}/proxmox/clusters/${clusterId}/inventory`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load Proxmox inventory');
+  }
+  return await response.json();
+}
+
+export async function upsertProxmoxNode(clusterId, data) {
+  const response = await fetch(`${API_BASE}/proxmox/clusters/${clusterId}/nodes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to upsert Proxmox node');
+  }
+  return await response.json();
+}
+
+export async function upsertProxmoxStorage(nodeId, data) {
+  const response = await fetch(`${API_BASE}/proxmox/nodes/${nodeId}/storages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to upsert storage');
+  }
+  return await response.json();
+}
+
+export async function upsertProxmoxTemplate(nodeId, data) {
+  const response = await fetch(`${API_BASE}/proxmox/nodes/${nodeId}/templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to upsert template');
+  }
+  return await response.json();
+}
+
+export async function addProxmoxCapacitySnapshot(nodeId, data) {
+  const response = await fetch(`${API_BASE}/proxmox/nodes/${nodeId}/capacity`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to add capacity snapshot');
+  }
+  return await response.json();
+}
+
+// IPAM API
+export async function listIpamSubnets() {
+  const response = await fetch(`${API_BASE}/ipam/subnets`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list subnets');
+  }
+  return await response.json();
+}
+
+export async function createIpamSubnet(data) {
+  const response = await fetch(`${API_BASE}/ipam/subnets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create subnet');
+  }
+  return await response.json();
+}
+
+export async function assignIpamAddress(data) {
+  const response = await fetch(`${API_BASE}/ipam/assignments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to assign IP');
+  }
+  return await response.json();
+}
+
+export async function listIpamHistory(serviceId = null) {
+  const url = serviceId ? `${API_BASE}/ipam/history?service_id=${encodeURIComponent(serviceId)}` : `${API_BASE}/ipam/history`;
+  const response = await fetch(url, { method: 'GET', credentials: 'include' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list assignment history');
+  }
+  return await response.json();
+}
+
+export async function listServiceIpAssignments(serviceId) {
+  const response = await fetch(`${API_BASE}/ipam/services/${serviceId}/assignments`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list service assignments');
+  }
+  return await response.json();
+}
+
+export async function releaseIpamAssignment(assignmentId) {
+  const response = await fetch(`${API_BASE}/ipam/assignments/${assignmentId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to release assignment');
   }
 }
 

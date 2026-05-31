@@ -41,6 +41,8 @@ class Server(Base):
     boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # Boot mode: UEFI or BIOS (deprecated - use pxe_boot_mode and os_boot_mode)
     pxe_boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # PXE boot mode: controls what DHCP serves initially (UEFI or BIOS)
     os_boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # OS boot mode: controls how the server boots the installed OS (UEFI or BIOS)
+    pxe_kernel_args_general = Column(Text, nullable=True)  # Extra kernel args applied to PXE boots
+    pxe_kernel_args_network = Column(Text, nullable=True)  # Network-specific PXE kernel args; defaults to legacy behavior when empty
     # Capabilities tracking (per-server, since capabilities may differ per server)
     tested_capabilities = Column(JSON, nullable=True)  # List of capabilities that were successfully tested for this server
     test_logs = Column(Text, nullable=True)  # Logs from the last capability test run for this server

@@ -405,31 +405,31 @@
         <div class="card-body">
           <div class="info-grid">
             <div class="info-item">
-              <label>Name:</label>
+              <span class="info-field-label">Name:</span>
               <span>{switchData.name}</span>
             </div>
             <div class="info-item">
-              <label>Model:</label>
+              <span class="info-field-label">Model:</span>
               <span>{switchData.model || 'N/A'}</span>
             </div>
             <div class="info-item">
-              <label>Serial Number:</label>
+              <span class="info-field-label">Serial Number:</span>
               <span>{switchData.serial_number || 'N/A'}</span>
             </div>
             <div class="info-item">
-              <label>Firmware Version:</label>
+              <span class="info-field-label">Firmware Version:</span>
               <span>{switchData.firmware_version || 'N/A'}</span>
             </div>
             <div class="info-item">
-              <label>Port Count:</label>
+              <span class="info-field-label">Port Count:</span>
               <span>{switchData.port_count || ports.length || 'N/A'}</span>
             </div>
             <div class="info-item">
-              <label>Location:</label>
+              <span class="info-field-label">Location:</span>
               <span>{getLocationName(switchData.location_id)}</span>
             </div>
             <div class="info-item">
-              <label>Rack:</label>
+              <span class="info-field-label">Rack:</span>
               <span>
                 {#if switchData.rack_id}
                   {getRackName(switchData.rack_id)}
@@ -442,18 +442,18 @@
               </span>
             </div>
             <div class="info-item">
-              <label>Plugin:</label>
+              <span class="info-field-label">Plugin:</span>
               <span>{switchData.plugin_name || 'N/A'}</span>
             </div>
             <div class="info-item">
-              <label>Status:</label>
+              <span class="info-field-label">Status:</span>
               <span class="status-badge" class:enabled={switchData.enabled} class:disabled={!switchData.enabled}>
                 {switchData.enabled ? 'Enabled' : 'Disabled'}
               </span>
             </div>
             {#if switchData.description}
               <div class="info-item full-width">
-                <label>Description:</label>
+                <span class="info-field-label">Description:</span>
                 <span>{switchData.description}</span>
               </div>
             {/if}
@@ -661,8 +661,16 @@
 
   <!-- Connect port modal (class name avoids Bootstrap .modal which uses display:none) -->
   {#if connectModalPort}
-    <div class="connect-modal-backdrop" role="presentation" on:click={closeConnectModal} on:keydown={(e) => e.key === 'Escape' && closeConnectModal()}>
-      <div class="connect-modal-box" role="dialog" aria-labelledby="connect-modal-title" on:click|stopPropagation>
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div
+      class="connect-modal-backdrop"
+      tabindex="-1"
+      on:click={closeConnectModal}
+      on:keydown={(e) => e.key === 'Escape' && closeConnectModal()}
+    >
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div class="connect-modal-box" role="dialog" aria-labelledby="connect-modal-title" on:click|stopPropagation on:keydown|stopPropagation>
         <h2 id="connect-modal-title">Connect {connectModalPort.name} to server port</h2>
         {#if connectError}
           <div class="error-message" style="margin-bottom: 1rem; padding: 0.75rem; background: var(--danger-bg); color: var(--danger-text); border-radius: 0.25rem;">
@@ -843,7 +851,7 @@
     grid-column: 1 / -1;
   }
 
-  .info-item label {
+  .info-field-label {
     font-weight: 600;
     color: var(--text-secondary);
     font-size: 0.875rem;

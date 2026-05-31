@@ -68,7 +68,7 @@ async def generate_password(request: PasswordGenerateRequest = PasswordGenerateR
     uppercase = string.ascii_uppercase
 
     if request.exclude_ambiguous:
-        ambiguous_chars = "0O1Il5S2Z"
+        ambiguous_chars = "0O1Il5S2Zi"
         digits = "".join(c for c in digits if c not in ambiguous_chars)
         lowercase = "".join(c for c in lowercase if c not in ambiguous_chars)
         uppercase = "".join(c for c in uppercase if c not in ambiguous_chars)

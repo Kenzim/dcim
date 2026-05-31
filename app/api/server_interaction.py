@@ -39,10 +39,184 @@ from app.models.server_activity import ServerActivityEventType
 import logging
 import re
 import os
+import ipaddress
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+DEFAULT_PXE_NETWORK_KERNEL_ARGS = "ip=dhcp rd.neednet=1"
+
+
+def _normalize_kernel_args(value: Optional[str]) -> str:
+    return (value or "").strip()
+
+
+def _get_dhcp_config_for_server(db: Session, server, pxe_ip: Optional[str]):
+    dhcp_svc = get_dhcp_config_service()
+    location_id = getattr(server, "location_id", None) if server else None
+    if location_id:
+        instance = ServiceInstanceDAO.get_by_location_and_type(db, location_id, "dhcp")
+        if instance:
+            config = dhcp_svc.get_config_by_service_instance(db, instance.id)
+            if config:
+                return config
+    return dhcp_svc.get_config(db)
+
+
+def _build_kernel_arg_template_context(db: Session, server, boot_port: Optional[NetworkPort]) -> Dict[str, str]:
+    server_ip = (getattr(server, "server_ip", None) or "").strip()
+    mac = (getattr(boot_port, "mac_address", None) or "").strip()
+    pxe_ip = (getattr(boot_port, "pxe_ip", None) or "").strip()
+    server_name = (getattr(server, "name", None) or "").strip()
+    server_id = str(getattr(server, "id", "") or "").strip()
+    hostname = server_name
+
+    gateway = ""
+    netmask = ""
+    cidr = ""
+    subnet = ""
+    broadcast = ""
+    next_server = ""
+    try:
+        config = _get_dhcp_config_for_server(db, server, pxe_ip)
+        if config:
+            next_server = get_next_server_ip_for_client(config, pxe_ip)
+            subnet_info = get_subnet_info_for_client(config, pxe_ip)
+            if subnet_info:
+                gateway = str(subnet_info.get("gateway") or "").strip()
+                netmask = str(subnet_info.get("netmask") or "").strip()
+        if pxe_ip and netmask:
+            network = ipaddress.IPv4Network(f"{pxe_ip}/{netmask}", strict=False)
+            cidr = str(network.prefixlen)
+            subnet = str(network.network_address)
+            broadcast = str(network.broadcast_address)
+    except Exception as exc:
+        logger.debug("Failed to build extended kernel arg context for server %s: %s", server_id, exc)
+
+    return {
+        "ip": server_ip,
+        "server_ip": server_ip,
+        "mac": mac,
+        "server_mac": mac,
+        "pxe_ip": pxe_ip,
+        "hostname": hostname,
+        "name": server_name,
+        "server_name": server_name,
+        "id": server_id,
+        "server_id": server_id,
+        "gateway": gateway,
+        "gw": gateway,
+        "netmask": netmask,
+        "cidr": cidr,
+        "prefix": cidr,
+        "subnet": subnet,
+        "broadcast": broadcast,
+        "next_server": next_server,
+    }
+
+
+def _render_kernel_arg_templates(kernel_args: Optional[str], server, boot_port: Optional[NetworkPort], db: Session) -> str:
+    """
+    Resolve templated variables in kernel args.
+    Supported form: ${var}
+    """
+    value = _normalize_kernel_args(kernel_args)
+    if not value:
+        return value
+
+    context = _build_kernel_arg_template_context(db, server, boot_port)
+    token_re = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+    def _replace(match: re.Match[str]) -> str:
+        key = (match.group(1) or "").lower()
+        if key in context:
+            return context[key]
+        return match.group(0)
+
+    return token_re.sub(_replace, value)
+
+
+def _merge_server_kernel_args(
+    base_kernel_args: Optional[str],
+    server,
+    boot_port: Optional[NetworkPort],
+    db: Session,
+    general_args_override: Optional[str] = None,
+    network_args_override: Optional[str] = None,
+) -> str:
+    """
+    Merge task-level kernel args with server-level PXE kernel arg overrides.
+    Network args default to legacy behavior when unset.
+    """
+    kernel_params = _render_kernel_arg_templates(base_kernel_args, server, boot_port, db)
+    general_source = general_args_override if general_args_override is not None else getattr(server, "pxe_kernel_args_general", None)
+    network_source = network_args_override if network_args_override is not None else getattr(server, "pxe_kernel_args_network", None)
+    general_args = _render_kernel_arg_templates(general_source, server, boot_port, db)
+    network_args = _render_kernel_arg_templates(network_source, server, boot_port, db) or DEFAULT_PXE_NETWORK_KERNEL_ARGS
+
+    if general_args:
+        kernel_params = f"{kernel_params} {general_args}".strip()
+
+    ip_match = re.search(r"\bip=[^\s]+", network_args)
+    if ip_match:
+        ip_arg = ip_match.group(0)
+        orig = kernel_params
+        kernel_params = re.sub(r"\bip=[^\s]+", ip_arg, kernel_params, count=1)
+        if kernel_params == orig:
+            kernel_params = f"{kernel_params} {ip_arg}".strip()
+        remainder = f"{network_args[:ip_match.start()]} {network_args[ip_match.end():]}".strip()
+        if remainder:
+            kernel_params = f"{kernel_params} {remainder}".strip()
+    elif network_args:
+        kernel_params = f"{kernel_params} {network_args}".strip()
+
+    return kernel_params
+
+
+def build_temp_os_kernel_args_preview(
+    db: Session,
+    server,
+    temp_os_id: str = "debian-live",
+    general_args_override: Optional[str] = None,
+    network_args_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build a preview of effective TEMP_OS kernel args with server template variables resolved.
+    """
+    pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server.id)
+    base_url = _get_base_url_for_pxe_ip(db, pxe_port.pxe_ip if pxe_port else None)
+    temp_os_service = get_temp_os_service()
+    os_config = temp_os_service.get_os_config(temp_os_id)
+    if not os_config:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Temporary OS '{temp_os_id}' not found",
+        )
+
+    kernel_params = temp_os_service.get_kernel_params(temp_os_id)
+    squashfs_url = temp_os_service.get_squashfs_url(temp_os_id, base_url)
+    if squashfs_url and "fetch=" not in kernel_params:
+        kernel_params = f"{kernel_params} fetch={squashfs_url}"
+
+    effective = _merge_server_kernel_args(
+        kernel_params,
+        server,
+        pxe_port,
+        db,
+        general_args_override=general_args_override,
+        network_args_override=network_args_override,
+    )
+
+    return {
+        "temp_os_id": temp_os_id,
+        "temp_os_name": os_config.name,
+        "kernel_url": temp_os_service.get_kernel_url(temp_os_id, base_url),
+        "initrd_url": temp_os_service.get_initrd_url(temp_os_id, base_url),
+        "kernel_params": effective,
+        "context": _build_kernel_arg_template_context(db, server, pxe_port),
+        "template_format": "${var}",
+    }
 
 
 def _get_base_url_for_pxe_ip(db, pxe_ip: Optional[str]) -> str:
@@ -210,9 +384,6 @@ async def get_pxe_boot_file(
             )
         
         if boot_task:
-            # Basic DHCP only
-            ip_param = "ip=dhcp"
-
             if boot_task.boot_type == BootType.LINUX_SCRIPT:
                 # For Linux script boots, mark as in_progress when serving the boot script
                 # The script can report back via API when it completes
@@ -233,19 +404,10 @@ async def get_pxe_boot_file(
                 else:
                     script_url = None
                 
-                # Build kernel parameters (static IP + MAC pinning or MAC-based DHCP)
-                kernel_params = boot_task.kernel_params or ""
-                if ip_param is not None:
-                    orig = kernel_params
-                    kernel_params = re.sub(r"\bip=[^\s]+", ip_param, kernel_params, count=1)
-                    if kernel_params == orig:
-                        kernel_params = f"{kernel_params} {ip_param}".strip()
-                    else:
-                        kernel_params = kernel_params.strip()
+                # Build kernel parameters with per-server PXE args.
+                kernel_params = _merge_server_kernel_args(boot_task.kernel_params, server, port, db)
                 if script_url:
                     kernel_params += f" script_url={script_url}"
-                if "rd.neednet=" not in kernel_params:
-                    kernel_params = f"{kernel_params} rd.neednet=1".strip()
 
                 # Generate iPXE script to boot Linux
                 boot_script = f"""#!ipxe
@@ -359,13 +521,8 @@ exit
                         if squashfs_url and "fetch=" not in kernel_params:
                             kernel_params = f"{kernel_params} fetch={squashfs_url}"
                         
-                        # Pin by MAC: static IP or MAC-based DHCP (use ip_param computed above)
-                        orig = kernel_params
-                        kernel_params = re.sub(r"\bip=[^\s]+", ip_param, kernel_params, count=1)
-                        if kernel_params == orig:
-                            kernel_params = f"{kernel_params} {ip_param}".strip()
-                        else:
-                            kernel_params = kernel_params.strip()
+                        # Merge with per-server PXE args (network args default to legacy behavior).
+                        kernel_params = _merge_server_kernel_args(kernel_params, server, port, db)
                         # Add script URL if script exists
                         if boot_task.script_content:
                             script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
@@ -373,8 +530,6 @@ exit
                             encoded_script_url = quote(script_url, safe=':/?=&')
                             if "script_url=" not in kernel_params:
                                 kernel_params = f"{kernel_params} script_url={encoded_script_url}"
-                        if "rd.neednet=" not in kernel_params:
-                            kernel_params = f"{kernel_params} rd.neednet=1".strip()
 
                         # Generate iPXE script for temporary OS
                         if boot_task.status == BootTaskStatus.PENDING:

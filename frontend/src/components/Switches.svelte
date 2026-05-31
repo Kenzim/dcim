@@ -455,8 +455,16 @@
 </div>
 
 {#if showModal}
-  <div class="modal-overlay" on:click={closeModal}>
-    <div class="modal-content large" on:click|stopPropagation>
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+  <div
+    class="modal-overlay"
+    tabindex="-1"
+    on:click={closeModal}
+    on:keydown={(e) => e.key === 'Escape' && closeModal()}
+  >
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div class="modal-content large" on:click|stopPropagation on:keydown|stopPropagation>
       <div class="modal-header">
         <h3>{editingSwitch ? 'Edit Switch' : 'Add Switch'}</h3>
         <button class="btn-icon-only" on:click={closeModal}>

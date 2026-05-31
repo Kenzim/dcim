@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { currentRoute } from '../lib/router.js';
-  import { isAuthenticated, checkAuth } from '../stores/auth.js';
+  import { isAuthenticated, user, checkAuth } from '../stores/auth.js';
   import { navigate } from '../lib/router.js';
   import Sidebar from '../components/Sidebar.svelte';
   import PageHeader from '../components/PageHeader.svelte';
@@ -19,11 +19,30 @@
   import SwitchDetail from '../components/SwitchDetail.svelte';
   import OSTemplates from '../components/OSTemplates.svelte';
   import BillingIntegrations from '../components/BillingIntegrations.svelte';
-  import ServicesList from '../components/ServicesList.svelte';
+  import UnifiedServices from '../components/UnifiedServices.svelte';
+  import ProxmoxServices from '../components/ProxmoxServices.svelte';
+  import BareMetalServices from '../components/BareMetalServices.svelte';
+  import ClientServices from '../components/ClientServices.svelte';
+  import VMServiceDetail from '../components/VMServiceDetail.svelte';
+  import BareMetalServiceDetail from '../components/BareMetalServiceDetail.svelte';
   import Scripts from '../components/Scripts.svelte';
   import ServerGroups from '../components/ServerGroups.svelte';
   import ServerGroupDetail from '../components/ServerGroupDetail.svelte';
   import AssetManager from '../components/AssetManager.svelte';
+  import ProductCatalog from '../components/ProductCatalog.svelte';
+  import VMTemplates from '../components/VMTemplates.svelte';
+  import VMIpAllocations from '../components/VMIpAllocations.svelte';
+  import ProxmoxInventory from '../components/ProxmoxInventory.svelte';
+  import ProxyIpam from '../components/ProxyIpam.svelte';
+
+  function flagEnabled(name) {
+    const raw = import.meta.env[name];
+    if (raw === undefined || raw === null) return false;
+    const v = String(raw).trim().toLowerCase();
+    return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+  }
+  const showProxmoxArea = flagEnabled('VITE_ENABLE_PROXMOX');
+  const showIpamProxyArea = flagEnabled('VITE_ENABLE_IPAM_PROXY');
 
   let authChecked = false;
   
@@ -41,6 +60,8 @@
   let rowNumber = null;
   let groupId = null;
   let locationId = null;
+  let vmServiceId = null;
+  let bareMetalServiceId = null;
   
   $: {
     const path = $currentRoute || window.location.pathname;
@@ -109,6 +130,28 @@
     } else {
       locationId = null;
     }
+
+    if (routeName && routeName.startsWith('vm-services/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
+        vmServiceId = parseInt(routeParts[1], 10);
+      } else {
+        vmServiceId = null;
+      }
+    } else {
+      vmServiceId = null;
+    }
+
+    if (routeName && routeName.startsWith('bare-metal-services/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
+        bareMetalServiceId = parseInt(routeParts[1], 10);
+      } else {
+        bareMetalServiceId = null;
+      }
+    } else {
+      bareMetalServiceId = null;
+    }
     
     // Extract rack ID from URL if it's a rack view route (but not a row route)
     if (routeName && routeName.startsWith('racks/') && !routeName.startsWith('racks/rows/')) {
@@ -128,6 +171,9 @@
     <p>Loading...</p>
   </div>
 {:else if $isAuthenticated}
+  {#if !$user?.is_admin}
+    <ClientServices />
+  {:else}
   <div class="admin-container">
     <Sidebar />
     
@@ -162,11 +208,29 @@
       {:else if routeName === 'billing-integrations'}
         <BillingIntegrations />
       {:else if routeName === 'services-list'}
-        <ServicesList />
+        <UnifiedServices />
+      {:else if routeName === 'vm-services' && showProxmoxArea}
+        <ProxmoxServices />
+      {:else if routeName.startsWith('vm-services/') && vmServiceId && showProxmoxArea}
+        <VMServiceDetail serviceId={vmServiceId} />
+      {:else if routeName === 'bare-metal-services'}
+        <BareMetalServices />
+      {:else if routeName.startsWith('bare-metal-services/') && bareMetalServiceId}
+        <BareMetalServiceDetail serviceId={bareMetalServiceId} />
       {:else if routeName === 'scripts'}
         <Scripts />
       {:else if routeName === 'asset-manager'}
         <AssetManager />
+      {:else if routeName === 'product-catalog' && showProxmoxArea}
+        <ProductCatalog />
+      {:else if routeName === 'vm-templates' && showProxmoxArea}
+        <VMTemplates />
+      {:else if routeName === 'vm-ip-allocations' && showProxmoxArea}
+        <VMIpAllocations />
+      {:else if routeName === 'proxmox-inventory' && showProxmoxArea}
+        <ProxmoxInventory />
+      {:else if routeName === 'proxy-ipam' && showIpamProxyArea}
+        <ProxyIpam />
       {:else if routeName === 'server-groups'}
         <ServerGroups />
       {:else if routeName.startsWith('server-groups/') && groupId}
@@ -181,6 +245,7 @@
       {/if}
     </main>
   </div>
+  {/if}
 {:else}
   <!-- Show login page when not authenticated -->
   <Login />

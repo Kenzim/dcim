@@ -20,6 +20,7 @@ class PluginCategory(str, Enum):
     """Categories of functionality that server plugins can support"""
     POWER_CONTROL = "power_control"
     USER_CONTROL = "user_control"
+    VM_PROVISIONING = "vm_provisioning"
 
 
 class PowerState(str, Enum):
@@ -92,6 +93,14 @@ class ServerPlugin(ABC):
                 "create_user",
                 "delete_user",
                 "update_user_password"
+            ])
+
+        if PluginCategory.VM_PROVISIONING in self.SUPPORTED_CATEGORIES:
+            capabilities.extend([
+                "create_vm",
+                "clone_vm_from_template",
+                "configure_vm",
+                "delete_vm",
             ])
         
         return capabilities
@@ -277,4 +286,18 @@ class ServerPlugin(ABC):
         Set next boot device (or persistent boot if supported by the platform).
         """
         raise NotImplementedError(f"{self.PLUGIN_NAME} does not support boot order control")
+
+    # ========== VM Provisioning Methods ==========
+
+    async def create_vm(self, vm_config: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError(f"{self.PLUGIN_NAME} does not support VM provisioning")
+
+    async def clone_vm_from_template(self, template_ref: Dict[str, Any], vm_config: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError(f"{self.PLUGIN_NAME} does not support VM provisioning")
+
+    async def configure_vm(self, vm_ref: Dict[str, Any], vm_config: Dict[str, Any]) -> bool:
+        raise NotImplementedError(f"{self.PLUGIN_NAME} does not support VM provisioning")
+
+    async def delete_vm(self, vm_ref: Dict[str, Any]) -> bool:
+        raise NotImplementedError(f"{self.PLUGIN_NAME} does not support VM provisioning")
 

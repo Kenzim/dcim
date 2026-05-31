@@ -24,6 +24,9 @@
   tabindex="-1"
   on:click={(e) => e.target === e.currentTarget && onClose?.()}
 >
+  <!-- stopPropagation only (clicks inside must not close overlay) -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <div
     class="modal-content"
     class:modal-large={size === 'large'}
@@ -31,6 +34,7 @@
     aria-modal="true"
     aria-labelledby="modal-title"
     on:click|stopPropagation
+    on:keydown|stopPropagation
   >
     <div class="modal-header">
       <h3 id="modal-title">{title}</h3>

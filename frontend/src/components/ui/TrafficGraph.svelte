@@ -118,6 +118,8 @@
     height="100%"
     viewBox="0 0 {width} {height}"
     preserveAspectRatio="xMidYMid meet"
+    role="img"
+    aria-label="Traffic rate chart"
     on:mousemove={handleMove}
     on:mouseleave={clearHover}
   >

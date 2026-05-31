@@ -3,7 +3,7 @@
   import ServerControlsPanel from './ServerControlsPanel.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
-  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix } from '../lib/api.js';
+  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix, previewServerKernelArgs } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
 
@@ -116,6 +116,8 @@
   $: if (server) {
     generalNotesDraft = server.description ?? '';
     generalCommentsDraft = server.comments ?? '';
+    pxeKernelArgsGeneralDraft = server.pxe_kernel_args_general ?? '';
+    pxeKernelArgsNetworkDraft = server.pxe_kernel_args_network ?? DEFAULT_PXE_NETWORK_ARGS;
   }
 
   let leftPanePowerState = null; // 'on' | 'off' | 'unknown' | null (loading)
@@ -130,6 +132,13 @@
   let generalCommentsDraft = '';
   let savingGeneralNotes = false;
   let savingGeneralComments = false;
+  let pxeKernelArgsGeneralDraft = '';
+  let pxeKernelArgsNetworkDraft = '';
+  let savingPxeKernelArgs = false;
+  const DEFAULT_PXE_NETWORK_ARGS = 'ip=dhcp rd.neednet=1';
+  let kernelArgsPreview = null;
+  let loadingKernelArgsPreview = false;
+  let kernelArgsPreviewError = null;
 
   // Load when serverId is set (initial mount and when navigating between servers)
   $: if (serverId != null) {
@@ -144,6 +153,9 @@
   // Load boot options when opening Boot tab
   $: if (bottomTab === 'boot' && serverId && bootCapabilityEnabled && !loadingBootOptions && !bootOptionsData) {
     loadBootOptions();
+  }
+  $: if (bottomTab === 'boot' && serverId && !loadingKernelArgsPreview && !kernelArgsPreview) {
+    loadKernelArgsPreview();
   }
 
   // Sync plugin config edit state when viewing Credentials tab or server changes
@@ -525,6 +537,48 @@
       console.error('Failed to save comments:', err);
     } finally {
       savingGeneralComments = false;
+    }
+  }
+
+  async function savePxeKernelArgs() {
+    if (!serverId) return;
+    const currentGeneral = server?.pxe_kernel_args_general ?? '';
+    const currentNetwork = server?.pxe_kernel_args_network ?? DEFAULT_PXE_NETWORK_ARGS;
+    const nextGeneral = (pxeKernelArgsGeneralDraft || '').trim();
+    const nextNetwork = (pxeKernelArgsNetworkDraft || '').trim();
+
+    if (nextGeneral === currentGeneral && nextNetwork === currentNetwork) return;
+
+    savingPxeKernelArgs = true;
+    try {
+      await updateServer(serverId, {
+        pxe_kernel_args_general: nextGeneral || null,
+        pxe_kernel_args_network: nextNetwork || null,
+      });
+      await Promise.all([loadServer(), loadKernelArgsPreview()]);
+    } catch (err) {
+      console.error('Failed to save PXE kernel args:', err);
+      alert('Failed to save PXE kernel args: ' + (err?.message || err));
+    } finally {
+      savingPxeKernelArgs = false;
+    }
+  }
+
+  async function loadKernelArgsPreview() {
+    if (!serverId) return;
+    loadingKernelArgsPreview = true;
+    kernelArgsPreviewError = null;
+    try {
+      kernelArgsPreview = await previewServerKernelArgs(serverId, {
+        temp_os_id: 'debian-live',
+        pxe_kernel_args_general: (pxeKernelArgsGeneralDraft || '').trim() || null,
+        pxe_kernel_args_network: (pxeKernelArgsNetworkDraft || '').trim() || null,
+      });
+    } catch (err) {
+      kernelArgsPreview = null;
+      kernelArgsPreviewError = err.message;
+    } finally {
+      loadingKernelArgsPreview = false;
     }
   }
 
@@ -1459,11 +1513,11 @@
         </dl>
       </div>
       <div class="left-pane-tabs-wrap">
-        <nav class="left-pane-tabs" role="tablist">
+        <div class="left-pane-tabs" role="tablist">
           <button type="button" role="tab" class="left-pane-tab" class:active={leftPaneTab === 'general'} on:click={() => leftPaneTab = 'general'}>General</button>
           <button type="button" role="tab" class="left-pane-tab" class:active={leftPaneTab === 'additional'} on:click={() => leftPaneTab = 'additional'}>Additional Information</button>
           <button type="button" role="tab" class="left-pane-tab" class:active={leftPaneTab === 'files'} on:click={() => leftPaneTab = 'files'}>Files</button>
-        </nav>
+        </div>
         <div class="left-pane-tab-content">
           {#if leftPaneTab === 'general'}
             <div class="general-pane">
@@ -1636,14 +1690,14 @@
         </section>
       </div>
       <div class="right-bottom">
-        <nav class="bottom-tabs" role="tablist">
+        <div class="bottom-tabs" role="tablist">
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'management'} on:click={() => bottomTab = 'management'}>Management</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'network'} on:click={() => bottomTab = 'network'}>Network</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'disks'} on:click={() => bottomTab = 'disks'}>Disks</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'boot'} on:click={() => bottomTab = 'boot'}>Boot</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'hardware-detection'} on:click={() => bottomTab = 'hardware-detection'}>Hardware Detection</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'credentials'} on:click={() => bottomTab = 'credentials'}>Credentials</button>
-        </nav>
+        </div>
         <div class="bottom-tab-content" class:credentials-tab-active={bottomTab === 'credentials'}>
           {#if bottomTab === 'management'}
             <div class="boot-ops-management">
@@ -2007,6 +2061,54 @@
             </div>
           {:else if bottomTab === 'boot'}
             <div class="boot-tab-content">
+              <div class="boot-control-card">
+                <div class="boot-control-header">
+                  <h3>PXE Kernel Args</h3>
+                  <button type="button" class="btn-primary btn-sm" on:click={savePxeKernelArgs} disabled={savingPxeKernelArgs}>
+                    {savingPxeKernelArgs ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+                <div class="boot-control-form">
+                  <div class="form-group">
+                    <label for="pxe-kernel-args-general-detail">General args</label>
+                    <textarea
+                      id="pxe-kernel-args-general-detail"
+                      rows="2"
+                      bind:value={pxeKernelArgsGeneralDraft}
+                      placeholder="e.g. console=ttyS0,115200n8"
+                    ></textarea>
+                    <small class="field-help">Template format: <code>${"{var}"}</code>. Common vars: <code>${"{ip}"}</code>, <code>${"{mac}"}</code>, <code>${"{pxe_ip}"}</code>, <code>${"{gateway}"}</code>, <code>${"{cidr}"}</code>, <code>${"{netmask}"}</code>.</small>
+                  </div>
+                  <div class="form-group">
+                    <label for="pxe-kernel-args-network-detail">Network args</label>
+                    <textarea
+                      id="pxe-kernel-args-network-detail"
+                      rows="2"
+                      bind:value={pxeKernelArgsNetworkDraft}
+                      placeholder={DEFAULT_PXE_NETWORK_ARGS}
+                    ></textarea>
+                    <small class="field-help">Uses the same <code>${"{var}"}</code> templates. Default behavior: <code>{DEFAULT_PXE_NETWORK_ARGS}</code></small>
+                  </div>
+                  <div class="boot-control-actions">
+                    <button type="button" class="btn-secondary btn-sm" on:click={loadKernelArgsPreview} disabled={loadingKernelArgsPreview}>
+                      {loadingKernelArgsPreview ? 'Rendering…' : 'Preview effective args'}
+                    </button>
+                  </div>
+                  {#if kernelArgsPreviewError}
+                    <div class="connect-modal-error">{kernelArgsPreviewError}</div>
+                  {/if}
+                  {#if kernelArgsPreview}
+                    <div class="boot-current-state">
+                      <div><strong>Temp OS:</strong> {kernelArgsPreview.temp_os_name} ({kernelArgsPreview.temp_os_id})</div>
+                      <div><strong>Template format:</strong> <code>{kernelArgsPreview.template_format}</code></div>
+                    </div>
+                    <div class="form-group">
+                      <label>Effective kernel args (preview)</label>
+                      <textarea rows="4" readonly value={kernelArgsPreview.kernel_params || ''}></textarea>
+                    </div>
+                  {/if}
+                </div>
+              </div>
               {#if !bootCapabilityEnabled}
                 <p class="bottom-placeholder">Boot controls are disabled for this server. Enable the optional <code>boot_order</code> capability in server edit.</p>
               {:else}
@@ -2231,8 +2333,16 @@
 
   <!-- Installation logs modal -->
   {#if installationLogsView}
-    <div class="modal-overlay" on:click={() => installationLogsView = null} role="presentation">
-      <div class="modal installation-logs-modal" on:click|stopPropagation role="dialog" aria-labelledby="installation-logs-title">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div
+      class="modal-overlay"
+      tabindex="-1"
+      on:click={() => installationLogsView = null}
+      on:keydown={(e) => e.key === 'Escape' && (installationLogsView = null)}
+    >
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div class="modal installation-logs-modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-labelledby="installation-logs-title">
         <div class="modal-header">
           <h3 id="installation-logs-title">Installation logs – {installationLogsView.os_name || installationLogsView.template_id || 'Installation'}</h3>
           <button type="button" class="modal-close" on:click={() => installationLogsView = null} aria-label="Close">×</button>
@@ -2263,8 +2373,16 @@
 
   <!-- Preview image picker (asset manager) modal -->
   {#if showPreviewAssetPicker}
-    <div class="modal-overlay" on:click={closePreviewAssetPicker} role="presentation">
-      <div class="modal preview-asset-picker-modal" on:click|stopPropagation role="dialog" aria-labelledby="preview-picker-title">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div
+      class="modal-overlay"
+      tabindex="-1"
+      on:click={closePreviewAssetPicker}
+      on:keydown={(e) => e.key === 'Escape' && closePreviewAssetPicker()}
+    >
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div class="modal preview-asset-picker-modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-labelledby="preview-picker-title">
         <div class="modal-header">
           <h3 id="preview-picker-title">Select preview image</h3>
           <button type="button" class="modal-close" on:click={closePreviewAssetPicker} aria-label="Close">×</button>
@@ -2305,8 +2423,11 @@
 
   <!-- Connect server port to switch port modal -->
   {#if connectModalPort}
-    <div class="connect-modal-backdrop" role="presentation" on:click={closeConnectModal} on:keydown={(e) => e.key === 'Escape' && closeConnectModal()}>
-      <div class="connect-modal-box" role="dialog" aria-labelledby="connect-modal-title" on:click|stopPropagation>
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div class="connect-modal-backdrop" tabindex="-1" on:click={closeConnectModal} on:keydown={(e) => e.key === 'Escape' && closeConnectModal()}>
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div class="connect-modal-box" role="dialog" aria-labelledby="connect-modal-title" on:click|stopPropagation on:keydown|stopPropagation>
         <h2 id="connect-modal-title">Connect {connectModalPort.name} to switch port</h2>
         {#if connectError}
           <div class="connect-modal-error">{connectError}</div>
@@ -2350,8 +2471,16 @@
 
   <!-- Edit network config modal -->
   {#if showNetworkEditModal}
-    <div class="modal-overlay" on:click={closeNetworkEditModal}>
-      <div class="modal network-edit-modal" on:click|stopPropagation>
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div
+      class="modal-overlay"
+      tabindex="-1"
+      on:click={closeNetworkEditModal}
+      on:keydown={(e) => e.key === 'Escape' && closeNetworkEditModal()}
+    >
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div class="modal network-edit-modal" on:click|stopPropagation on:keydown|stopPropagation>
         <div class="modal-header">
           <h3>Edit network config</h3>
           <button type="button" class="modal-close" on:click={closeNetworkEditModal} aria-label="Close">×</button>
@@ -2375,20 +2504,20 @@
                   </div>
                   <div class="network-edit-fields">
                     <div class="form-group">
-                      <label>Name</label>
-                      <input type="text" bind:value={port.name} placeholder="e.g. eth0" />
+                      <label for={`net-edit-${i}-name`}>Name</label>
+                      <input id={`net-edit-${i}-name`} type="text" bind:value={port.name} placeholder="e.g. eth0" />
                     </div>
                     <div class="form-group">
-                      <label>MAC address</label>
-                      <input type="text" bind:value={port.mac_address} placeholder="XX:XX:XX:XX:XX:XX" />
+                      <label for={`net-edit-${i}-mac`}>MAC address</label>
+                      <input id={`net-edit-${i}-mac`} type="text" bind:value={port.mac_address} placeholder="XX:XX:XX:XX:XX:XX" />
                     </div>
                     <div class="form-group">
-                      <label>Speed (Mbps)</label>
-                      <input type="number" bind:value={port.speed_mbps} min="1" />
+                      <label for={`net-edit-${i}-speed`}>Speed (Mbps)</label>
+                      <input id={`net-edit-${i}-speed`} type="number" bind:value={port.speed_mbps} min="1" />
                     </div>
                     <div class="form-group">
-                      <label>LAG group</label>
-                      <input type="text" bind:value={port.lag_group} placeholder="e.g. bond0" />
+                      <label for={`net-edit-${i}-lag`}>LAG group</label>
+                      <input id={`net-edit-${i}-lag`} type="text" bind:value={port.lag_group} placeholder="e.g. bond0" />
                     </div>
                     <div class="form-group checkbox-group">
                       <label><input type="checkbox" bind:checked={port.monitor_bandwidth} /> Monitor bandwidth</label>
@@ -2398,13 +2527,13 @@
                     </div>
                     {#if port.pxe_boot}
                       <div class="form-group full-width">
-                        <label>PXE IP</label>
-                        <input type="text" bind:value={port.pxe_ip} placeholder="e.g. 192.168.1.100" />
+                        <label for={`net-edit-${i}-pxe-ip`}>PXE IP</label>
+                        <input id={`net-edit-${i}-pxe-ip`} type="text" bind:value={port.pxe_ip} placeholder="e.g. 192.168.1.100" />
                       </div>
                     {/if}
                     <div class="form-group full-width">
-                      <label>Description</label>
-                      <input type="text" bind:value={port.description} placeholder="Optional" />
+                      <label for={`net-edit-${i}-desc`}>Description</label>
+                      <input id={`net-edit-${i}-desc`} type="text" bind:value={port.description} placeholder="Optional" />
                     </div>
                   </div>
                 </div>
@@ -2424,8 +2553,16 @@
 
   <!-- Edit disks modal -->
   {#if showDiskEditModal}
-    <div class="modal-overlay" on:click={closeDiskEditModal}>
-      <div class="modal disk-edit-modal" on:click|stopPropagation>
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div
+      class="modal-overlay"
+      tabindex="-1"
+      on:click={closeDiskEditModal}
+      on:keydown={(e) => e.key === 'Escape' && closeDiskEditModal()}
+    >
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div class="modal disk-edit-modal" on:click|stopPropagation on:keydown|stopPropagation>
         <div class="modal-header">
           <h3>Edit disks</h3>
           <button type="button" class="modal-close" on:click={closeDiskEditModal} aria-label="Close">×</button>
@@ -2449,23 +2586,23 @@
                   </div>
                   <div class="disk-edit-fields">
                     <div class="form-group">
-                      <label>Type</label>
-                      <select bind:value={disk.type}>
+                      <label for={`disk-edit-${i}-type`}>Type</label>
+                      <select id={`disk-edit-${i}-type`} bind:value={disk.type}>
                         <option value="ssd">SSD</option>
                         <option value="hdd">HDD</option>
                       </select>
                     </div>
                     <div class="form-group">
-                      <label>Capacity (GB)</label>
-                      <input type="number" bind:value={disk.capacity_gb} min="0" />
+                      <label for={`disk-edit-${i}-cap`}>Capacity (GB)</label>
+                      <input id={`disk-edit-${i}-cap`} type="number" bind:value={disk.capacity_gb} min="0" />
                     </div>
                     <div class="form-group full-width">
-                      <label>Serial number</label>
-                      <input type="text" bind:value={disk.serial_number} placeholder="Optional" />
+                      <label for={`disk-edit-${i}-serial`}>Serial number</label>
+                      <input id={`disk-edit-${i}-serial`} type="text" bind:value={disk.serial_number} placeholder="Optional" />
                     </div>
                     <div class="form-group full-width">
-                      <label>Description</label>
-                      <input type="text" bind:value={disk.description} placeholder="Optional" />
+                      <label for={`disk-edit-${i}-desc`}>Description</label>
+                      <input id={`disk-edit-${i}-desc`} type="text" bind:value={disk.description} placeholder="Optional" />
                     </div>
                     <div class="form-group checkbox-group">
                       <label><input type="checkbox" bind:checked={disk.is_os_disk} /> OS disk (installation target)</label>

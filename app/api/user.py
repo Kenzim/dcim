@@ -176,10 +176,10 @@ async def change_password(
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_details(
-    auth: dict = Depends(require_admin),
+    auth: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get current user details (admin-only)"""
+    """Get current user details"""
     user_id = auth.get("user_id")
     if not user_id:
         raise HTTPException(

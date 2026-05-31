@@ -82,6 +82,7 @@
       <div 
         class="user-menu-container" 
         role="menu"
+        tabindex="-1"
         on:mouseenter={handleMouseEnter}
         on:mouseleave={handleMouseLeave}
       >

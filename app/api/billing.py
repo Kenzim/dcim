@@ -17,9 +17,10 @@ from app.core.database import get_db
 from app.core.billing_auth import get_billing_integration
 from app.models.billing_integration import BillingIntegration
 from app.models.server import Server, BootMode
-from app.models.service import Service, ServiceStatus
+from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
 from app.schemas.billing import (
-    BillingServiceCreate,
+    BillingBareMetalServiceCreate,
+    BillingVmServiceCreate,
     BillingRegisterService,
     BillingServiceResponse,
     BillingServiceDetailResponse,
@@ -27,7 +28,7 @@ from app.schemas.billing import (
     SuspendAction,
     ServerUsage,
     ServiceActionRunScript,
-    ServiceActionReinstallOS
+    ServiceActionReinstallOS,
 )
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
@@ -37,9 +38,12 @@ from app.plugins.registry import get_registry
 from app.dao.location_dao import LocationDAO
 from app.dao.external_user_dao import ExternalUserDAO
 from app.dao.service_dao import ServiceDAO
+from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.script_dao import ScriptDAO
 from app.dao.boot_task_dao import BootTaskDAO
+from app.dao.product_catalog_dao import ProductDAO, OSProfileDAO
+from app.dao.vm_config_dao import ProductVMConfigDAO
 from app.models.disk import DiskType
 from app.models.boot_task import BootTask, BootType, BootTaskStatus
 from app.plugins.registry import get_registry
@@ -53,14 +57,133 @@ from app.services.server_activity_logger import (
     log_server_activity_failure,
 )
 from app.models.server_activity import ServerActivityEventType
-from app.models.service import ServiceStatus
 from app.api.server_interaction import _get_base_url_for_pxe_ip
+from app.services.vm_provisioning_service import VMProvisioningService
+from app.services.service_product_snapshot import build_product_snapshot
+from app.services.service_resource import (
+    service_linked_server,
+    service_server_id_for_response,
+    vm_placement,
+)
+from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 import logging
 import os
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+def _assert_billing_owned_service(service: Service, integration: BillingIntegration) -> None:
+    """Reject internal-only services and services owned by another integration (404)."""
+    eu = service.external_user
+    if service.external_user_id is None or eu is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service not found",
+        )
+    if eu.integration_id != integration.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service not found",
+        )
+
+
+def _validate_optional_proxmox_cluster(db: Session, cid: Optional[int]) -> None:
+    if cid is not None and ProxmoxInventoryDAO.get_cluster(db, cid) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown proxmox_cluster_id {cid}",
+        )
+
+
+def _billing_service_response(db: Session, service: Service) -> BillingServiceResponse:
+    server = service_linked_server(db, service)
+    cid, node, vmid = vm_placement(service)
+    src = service.provisioning_source or ProvisioningSource.BILLING
+    vm_tid = service.vm.vm_template_id if service.vm else None
+    vm_ip_allocation_id = None
+    vm_ip_address = None
+    if service.vm:
+        vm_ip_allocation_id = service.vm.vm_ip_allocation_id
+        if service.vm.vm_ip_allocation:
+            vm_ip_address = service.vm.vm_ip_allocation.ip_address
+        elif service.config:
+            vm_ip_address = (service.config or {}).get("vm_ip_address")
+            vm_ip_allocation_id = vm_ip_allocation_id or (service.config or {}).get("vm_ip_allocation_id")
+    return BillingServiceResponse(
+        id=service.id,
+        name=service.name,
+        external_service_id=service.external_service_id,
+        service_type=service.service_type.value if service.service_type else None,
+        product_code=service.product_code,
+        os_code=service.os_code,
+        vm_template_id=vm_tid,
+        server_id=service_server_id_for_response(service),
+        external_user_id=service.external_user_id,
+        provisioning_source=src.value if hasattr(src, "value") else str(src),
+        proxmox_cluster_id=cid,
+        proxmox_node_name=node,
+        proxmox_vmid=vmid,
+        vm_ip_allocation_id=vm_ip_allocation_id,
+        vm_ip_address=vm_ip_address,
+        status=service.status.value,
+        description=service.description,
+        config=service.config,
+        server_ip=server.server_ip if server else None,
+        credentials=server.credentials if server else None,
+        created_at=service.created_at,
+        updated_at=service.updated_at,
+    )
+
+
+def _billing_get_plugin_instance(db: Session, service: Service):
+    """
+    Return (plugin_instance, server_or_none). For VM services server is None; plugin is Proxmox.
+    """
+    if service.service_type == ServiceType.VM:
+        cid, node, vmid = vm_placement(service)
+        if cid is None or not (node and str(node).strip()) or vmid is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="VM service is missing Proxmox placement (proxmox_cluster_id, proxmox_node_name, proxmox_vmid)",
+            )
+        cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
+        if not cluster:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown proxmox_cluster_id {cid}",
+            )
+        try:
+            plugin_config = cluster_to_proxmox_plugin_config(
+                cluster, str(node).strip(), int(vmid)
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        registry = get_registry()
+        inst = registry.get_plugin("proxmox", plugin_config)
+        return inst, None
+    server = service_linked_server(db, service)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Service has no linked server",
+        )
+    registry = get_registry()
+    inst = registry.get_plugin(server.plugin_name, server.plugin_config)
+    return inst, server
+
+
+def _billing_activity_log_kw(db: Session, service: Service) -> dict:
+    """Pass as ``log_server_activity_*(db, **kw, ...)`` — exactly one of server_id / service_id."""
+    srv = service_linked_server(db, service)
+    if srv:
+        return {"server_id": srv.id}
+    return {"service_id": service.id}
 
 
 @router.get("/server-by-ip")
@@ -111,7 +234,13 @@ async def register_service(
     )
     if existing:
         db.refresh(existing)
-        server = existing.server
+        server = service_linked_server(db, existing)
+        details = {
+            "service_id": existing.id,
+            "external_service_id": existing.external_service_id,
+            "integration_id": integration.id,
+            "idempotent": True,
+        }
         if server:
             log_server_activity_success(
                 db,
@@ -120,27 +249,19 @@ async def register_service(
                 action="register",
                 source="billing_api",
                 message="Service registration request reused existing service",
-                details={
-                    "service_id": existing.id,
-                    "external_service_id": existing.external_service_id,
-                    "integration_id": integration.id,
-                    "idempotent": True,
-                },
+                details=details,
             )
-        return BillingServiceResponse(
-            id=existing.id,
-            name=existing.name,
-            external_service_id=existing.external_service_id,
-            server_id=existing.server_id,
-            external_user_id=existing.external_user_id,
-            status=existing.status.value,
-            description=existing.description,
-            config=existing.config,
-            server_ip=server.server_ip if server else None,
-            credentials=server.credentials if server else None,
-            created_at=existing.created_at,
-            updated_at=existing.updated_at,
-        )
+        else:
+            log_server_activity_success(
+                db,
+                service_id=existing.id,
+                event_type=ServerActivityEventType.SERVICE,
+                action="register",
+                source="billing_api",
+                message="Service registration request reused existing service",
+                details=details,
+            )
+        return _billing_service_response(db, existing)
 
     # Validate server exists
     server = ServerDAO.get_by_id(db, data.server_id)
@@ -186,12 +307,13 @@ async def register_service(
             "integration_id": integration.id,
         },
     )
-    service = ServiceDAO.create(
+    service = ServiceDAO.create_bare_metal(
         db,
         name=name,
         server_id=server.id,
         external_user_id=external_user.id,
         external_service_id=data.external_service_id,
+        service_type=ServiceType.BARE_METAL,
         status=ServiceStatus.ACTIVE,
         description=None,
         config=None,
@@ -211,20 +333,7 @@ async def register_service(
             "integration_id": integration.id,
         },
     )
-    return BillingServiceResponse(
-        id=service.id,
-        name=service.name,
-        external_service_id=service.external_service_id,
-        server_id=service.server_id,
-        external_user_id=service.external_user_id,
-        status=service.status.value,
-        description=service.description,
-        config=service.config,
-        server_ip=server.server_ip,
-        credentials=server.credentials,
-        created_at=service.created_at,
-        updated_at=service.updated_at,
-    )
+    return _billing_service_response(db, service)
 
 
 def _select_free_server_in_group(db: Session, group_id: int) -> Server:
@@ -316,12 +425,12 @@ def _queue_template_install_for_service(
     template_parameters: dict | None,
 ) -> tuple[BootTask, object]:
     """
-    Queue a template-based OS installation for the given service.server.
+    Queue a template-based OS installation for the given service's linked server.
 
     This mirrors the template-handling logic in the server interaction API
     but is scoped for billing usage.
     """
-    server = service.server
+    server = service_linked_server(db, service)
     if not server:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -553,29 +662,17 @@ def _queue_template_install_for_service(
     return boot_task, installation_task
 
 
-@router.post("/services", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
-async def create_service(
-    service_data: BillingServiceCreate,
+@router.post("/bare-metal/services", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
+async def create_bare_metal_service(
+    service_data: BillingBareMetalServiceCreate,
     integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
-    Create a new service via billing API.
+    Create a bare-metal or http_proxy service (RackFlow Server + service_bare_metal).
 
-    External billing systems (WHMCS, etc.) use this to provision new services.
-    There are two modes:
-
-    1. Default mode (no server_group_id in service_config):
-       - Create a brand new server record using the provided server_* fields.
-       - No OS installation is queued automatically.
-
-    2. Server group provisioning mode (service_config.server_group_id set):
-       - Pick a "free" server from the specified server group (no active services).
-       - Link it to the external user via a new Service in PENDING state.
-       - Queue an OS installation using an OS template:
-         * Use service_config.template_id when specified (and permitted),
-         * Otherwise auto-select when the group has exactly one permitted_os_template.
-       - Store OS credentials in server.credentials and expose them via the response.
+    Modes match the legacy billing create: new server, or server_group provisioning with optional OS install.
+    VM products must use ``POST /billing/vm/services``.
     """
     logger.info(f"Billing API: Creating service '{service_data.name}' via integration '{integration.name}'")
     
@@ -596,23 +693,6 @@ async def create_service(
         )
         logger.info(f"Created external user (ID: {external_user.id}, external_user_id: {service_data.external_user_id})")
     
-    # Validate plugin exists (plugins are loaded from disk, not database)
-    registry = get_registry()
-    plugin_class = registry.get_plugin(service_data.plugin_name)
-    if not plugin_class:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Plugin '{service_data.plugin_name}' not found"
-        )
-    
-    # Validate location exists
-    location = LocationDAO.get_by_id(db, service_data.location_id)
-    if not location:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Location not found"
-        )
-    
     # Check if service with same name already exists
     existing_service = ServiceDAO.get_by_name(db, service_data.name)
     if existing_service:
@@ -620,13 +700,80 @@ async def create_service(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Service with this name already exists"
         )
+
+    try:
+        resolved_service_type = ServiceType((service_data.service_type or "bare_metal").lower())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid service_type. Must be bare_metal, vm, or http_proxy",
+        )
+
+    if resolved_service_type == ServiceType.VM:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="VM services must be created via POST /billing/vm/services",
+        )
+
+    product_snapshot = {}
+    if service_data.product_code:
+        product = ProductDAO.get_by_code(db, service_data.product_code)
+        if not product:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unknown product_code '{service_data.product_code}'",
+            )
+        family = product.family
+        if not family:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Product '{product.code}' has no catalog family",
+            )
+        if family.service_type != resolved_service_type.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Product '{product.code}' belongs to service_type '{family.service_type}', not '{resolved_service_type.value}'",
+            )
+        effective_specs = ProductVMConfigDAO.resolve_effective_config(db, product)
+        if not effective_specs:
+            effective_specs = {**(family.defaults or {}), **(product.overrides or {})}
+
+        product_snapshot = {
+            "family": {
+                "id": family.id,
+                "code": family.code,
+                "name": family.name,
+                "service_type": family.service_type,
+                "provisioning_backend": family.provisioning_backend,
+            },
+            "product": {
+                "id": product.id,
+                "code": product.code,
+                "name": product.name,
+            },
+            "effective_specs": effective_specs,
+        }
+        if service_data.os_code:
+            os_profile = OSProfileDAO.get_by_code(db, service_data.os_code)
+            if not os_profile:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Unknown os_code '{service_data.os_code}'",
+                )
+            product_snapshot["os_profile"] = {
+                "id": os_profile.id,
+                "code": os_profile.code,
+                "name": os_profile.name,
+                "family": os_profile.os_family,
+                "strategy_name": os_profile.strategy_name,
+            }
     
     # Decide whether to create a brand new server or reuse one from a server group
     service_config = service_data.service_config or {}
     server_group_id = service_config.get("server_group_id")
 
     if server_group_id:
-        # --- Server group provisioning mode: pick an existing free server ---
+        # --- Server group provisioning mode (bare metal only) ---
         server = _select_free_server_in_group(db, int(server_group_id))
 
         # Link server to external user
@@ -634,15 +781,19 @@ async def create_service(
         ServerDAO.update(db, server)
 
         # Create service in PENDING state and attach original service_config
-        service = ServiceDAO.create(
+        service = ServiceDAO.create_bare_metal(
             db,
             name=service_data.name,
             server_id=server.id,
             external_user_id=external_user.id,
             external_service_id=service_data.external_service_id,
+            service_type=resolved_service_type,
             status=ServiceStatus.PENDING,
             description=service_data.description,
             config=service_config,
+            product_code=service_data.product_code,
+            os_code=service_data.os_code,
+            product_snapshot=product_snapshot,
         )
         db.refresh(service)
         log_server_activity_attempt(
@@ -659,78 +810,79 @@ async def create_service(
             },
         )
 
-        # Determine OS template to install
-        explicit_template_id = service_config.get("template_id")
-        template_params = service_config.get("template_parameters") or {}
-        template_id = _determine_template_for_group(
-            db, int(server_group_id), explicit_template_id
-        )
-
-        # Queue installation
-        log_server_activity_attempt(
-            db,
-            server_id=server.id,
-            event_type=ServerActivityEventType.INSTALL,
-            action="queue_template_install",
-            source="billing_api",
-            message=f"Queueing template install '{template_id}'",
-            details={
-                "service_id": service.id,
-                "template_id": template_id,
-                "integration_id": integration.id,
-            },
-        )
-        try:
-            _, installation_task = _queue_template_install_for_service(
-                db=db,
-                service=service,
-                template_id=template_id,
-                template_parameters=template_params,
+        if resolved_service_type == ServiceType.BARE_METAL:
+            # Determine OS template to install
+            explicit_template_id = service_config.get("template_id")
+            template_params = service_config.get("template_parameters") or {}
+            template_id = _determine_template_for_group(
+                db, int(server_group_id), explicit_template_id
             )
-        except Exception as exc:
-            log_server_activity_failure(
+
+            # Queue installation
+            log_server_activity_attempt(
                 db,
                 server_id=server.id,
                 event_type=ServerActivityEventType.INSTALL,
                 action="queue_template_install",
                 source="billing_api",
-                message=f"Failed to queue template install '{template_id}'",
+                message=f"Queueing template install '{template_id}'",
                 details={
                     "service_id": service.id,
                     "template_id": template_id,
                     "integration_id": integration.id,
                 },
-                error=exc,
             )
-            log_server_activity_failure(
+            try:
+                _, installation_task = _queue_template_install_for_service(
+                    db=db,
+                    service=service,
+                    template_id=template_id,
+                    template_parameters=template_params,
+                )
+            except Exception as exc:
+                log_server_activity_failure(
+                    db,
+                    server_id=server.id,
+                    event_type=ServerActivityEventType.INSTALL,
+                    action="queue_template_install",
+                    source="billing_api",
+                    message=f"Failed to queue template install '{template_id}'",
+                    details={
+                        "service_id": service.id,
+                        "template_id": template_id,
+                        "integration_id": integration.id,
+                    },
+                    error=exc,
+                )
+                log_server_activity_failure(
+                    db,
+                    server_id=server.id,
+                    event_type=ServerActivityEventType.SERVICE,
+                    action="create",
+                    source="billing_api",
+                    message=f"Service '{service.name}' provisioning failed",
+                    details={
+                        "service_id": service.id,
+                        "integration_id": integration.id,
+                    },
+                    error=exc,
+                )
+                raise
+
+            log_server_activity_success(
                 db,
                 server_id=server.id,
-                event_type=ServerActivityEventType.SERVICE,
-                action="create",
+                event_type=ServerActivityEventType.INSTALL,
+                action="queue_template_install",
                 source="billing_api",
-                message=f"Service '{service.name}' provisioning failed",
+                message=f"Queued template install '{template_id}'",
                 details={
                     "service_id": service.id,
-                    "integration_id": integration.id,
+                    "template_id": template_id,
+                    "installation_task_id": installation_task.id,
+                    "boot_task_id": installation_task.boot_task_id,
                 },
-                error=exc,
             )
-            raise
-
-        log_server_activity_success(
-            db,
-            server_id=server.id,
-            event_type=ServerActivityEventType.INSTALL,
-            action="queue_template_install",
-            source="billing_api",
-            message=f"Queued template install '{template_id}'",
-            details={
-                "service_id": service.id,
-                "template_id": template_id,
-                "installation_task_id": installation_task.id,
-                "boot_task_id": installation_task.boot_task_id,
-            },
-        )
         log_server_activity_success(
             db,
             server_id=server.id,
@@ -754,8 +906,35 @@ async def create_service(
         )
     else:
         # --- Default mode: create a brand new server record ---
+        plugin_name = service_data.plugin_name or "proxmox"
+        location_id = service_data.location_id or 1
+        if service_data.product_code:
+            product = ProductDAO.get_by_code(db, service_data.product_code)
+            if product and product.family:
+                family_defaults = product.family.defaults or {}
+                plugin_name = family_defaults.get("plugin_name", plugin_name)
+                location_id = family_defaults.get("location_id", location_id)
+
+        # Validate plugin exists (plugins are loaded from disk, not database)
+        registry = get_registry()
+        plugin_class = registry.get_plugin(plugin_name)
+        if not plugin_class:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Plugin '{plugin_name}' not found"
+            )
+
+        # Validate location exists
+        location = LocationDAO.get_by_id(db, int(location_id))
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Location not found"
+            )
+
         # Check if server with same name already exists
-        existing_server = ServerDAO.get_by_name(db, service_data.server_name)
+        server_name = service_data.server_name or service_data.name
+        existing_server = ServerDAO.get_by_name(db, server_name)
         if existing_server:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -781,15 +960,15 @@ async def create_service(
         # Create server
         server = ServerDAO.create(
             db,
-            name=service_data.server_name,
-            server_ip=service_data.server_ip,
+            name=server_name,
+            server_ip=service_data.server_ip or "0.0.0.0",
             description=service_data.description,
             cpu_count=service_data.cpu_count,
             cpu_model=service_data.cpu_model,
             ram_gb=service_data.ram_gb,
             port_speed_mbps=service_data.port_speed_mbps,
-            location_id=service_data.location_id,
-            plugin_name=service_data.plugin_name,
+            location_id=int(location_id),
+            plugin_name=plugin_name,
             plugin_config=service_data.plugin_config,
             enabled=True,
             boot_mode=os_boot_mode,  # For backward compatibility
@@ -854,15 +1033,19 @@ async def create_service(
                 "integration_id": integration.id,
             },
         )
-        service = ServiceDAO.create(
+        service = ServiceDAO.create_bare_metal(
             db,
             name=service_data.name,
             server_id=server.id,
             external_user_id=external_user.id,
             external_service_id=service_data.external_service_id,
+            service_type=resolved_service_type,
             status=ServiceStatus.PENDING,
             description=service_data.description,
             config=service_data.service_config,
+            product_code=service_data.product_code,
+            os_code=service_data.os_code,
+            product_snapshot=product_snapshot,
         )
         db.refresh(service)
         log_server_activity_success(
@@ -886,20 +1069,140 @@ async def create_service(
             server.id,
         )
 
-    return BillingServiceResponse(
-        id=service.id,
-        name=service.name,
-        external_service_id=service.external_service_id,
-        server_id=service.server_id,
-        external_user_id=service.external_user_id,
-        status=service.status.value,
-        description=service.description,
-        config=service.config,
-        server_ip=server.server_ip,
-        credentials=server.credentials,
-        created_at=service.created_at,
-        updated_at=service.updated_at,
+    return _billing_service_response(db, service)
+
+
+@router.post("/vm/services", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
+async def create_vm_service(
+    body: BillingVmServiceCreate,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Create a VM service (no RackFlow Server row; Proxmox placement on service_vm)."""
+    logger.info("Billing API: Creating VM service '%s' via integration '%s'", body.name, integration.name)
+
+    if (body.service_config or {}).get("server_group_id"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="VM services cannot use server_group_id; use bare-metal provisioning for pooled servers",
+        )
+    if body.vm_template_id is not None and not body.product_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="vm_template_id requires product_code (template must be linked to that product in the catalog)",
+        )
+
+    external_user = ExternalUserDAO.get_by_external_id(db, integration.id, body.external_user_id)
+    if not external_user:
+        external_user = ExternalUserDAO.create(
+            db,
+            integration_id=integration.id,
+            external_user_id=body.external_user_id,
+            external_username=body.external_username,
+            external_email=body.external_email,
+        )
+
+    if ServiceDAO.get_by_name(db, body.name):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Service with this name already exists")
+
+    resolved_service_type = ServiceType.VM
+    product_snapshot: dict = {}
+    effective_os_code = body.os_code
+    if body.product_code:
+        try:
+            product_snapshot, effective_os_code = build_product_snapshot(
+                db,
+                body.product_code,
+                body.os_code,
+                resolved_service_type,
+                vm_template_id=body.vm_template_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    _validate_optional_proxmox_cluster(db, body.proxmox_cluster_id)
+
+    service = ServiceDAO.create_vm(
+        db,
+        name=body.name,
+        external_user_id=external_user.id,
+        external_service_id=body.external_service_id,
+        status=ServiceStatus.PENDING,
+        description=body.description,
+        config=body.service_config or {},
+        product_code=body.product_code,
+        os_code=effective_os_code,
+        product_snapshot=product_snapshot,
+        provisioning_source=ProvisioningSource.BILLING,
+        proxmox_cluster_id=body.proxmox_cluster_id,
+        proxmox_node_name=body.proxmox_node_name,
+        proxmox_vmid=body.proxmox_vmid,
+        vm_template_id=body.vm_template_id,
     )
+    db.refresh(service)
+
+    allocation = VMIPAllocationDAO.assign_next_free_to_service(
+        db,
+        service_id=service.id,
+        proxmox_cluster_id=body.proxmox_cluster_id,
+    )
+    if allocation is None:
+        ServiceDAO.delete(db, service.id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "No free VM IP address available to allocate. Add enabled addresses under VM IP allocations. "
+                "For services without Proxmox cluster placement, only pool rows with no cluster restriction apply; "
+                "when a cluster is set, rows restricted to that cluster (or unrestricted rows) may be used."
+            ),
+        )
+
+    log_server_activity_attempt(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="create",
+        source="billing_api",
+        message=f"Creating VM service '{service.name}'",
+        details={
+            "integration_id": integration.id,
+            "vm_ip_allocation_id": allocation.id,
+            "vm_ip_address": allocation.ip_address,
+        },
+    )
+
+    cfg = {
+        **(service.config or {}),
+        "vm_ip_allocation_id": allocation.id,
+        "vm_ip_address": allocation.ip_address,
+    }
+    if body.product_code and effective_os_code:
+        vm_plan = VMProvisioningService.plan_provisioning(
+            db=db,
+            service_id=service.id,
+            product_code=body.product_code,
+            os_code=body.os_code,
+            vm_template_id=body.vm_template_id,
+            context={"service_id": service.id, "vm_ip_allocation_id": allocation.id},
+        )
+        cfg["vm_plan"] = vm_plan
+    service.config = cfg
+    ServiceDAO.update(db, service)
+
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="create",
+        source="billing_api",
+        message=f"Created VM service '{service.name}'",
+        details={
+            "integration_id": integration.id,
+            "vm_ip_allocation_id": allocation.id,
+            "vm_ip_address": allocation.ip_address,
+        },
+    )
+    return _billing_service_response(db, service)
 
 
 @router.get("/services", response_model=List[BillingServiceResponse])
@@ -938,21 +1241,7 @@ async def list_services(
     
     services = query.order_by(Service.name).offset(skip).limit(limit).all()
     
-    return [
-        BillingServiceResponse(
-            id=s.id,
-            name=s.name,
-            external_service_id=s.external_service_id,
-            server_id=s.server_id,
-            external_user_id=s.external_user_id,
-            status=s.status.value,
-            description=s.description,
-            config=s.config,
-            created_at=s.created_at,
-            updated_at=s.updated_at
-        )
-        for s in services
-    ]
+    return [_billing_service_response(db, s) for s in services]
 
 
 @router.get("/services/{service_id}", response_model=BillingServiceDetailResponse)
@@ -969,27 +1258,12 @@ async def get_service(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
-        )
-    
-    server = service.server
-    
-    return BillingServiceDetailResponse(
-        id=service.id,
-        name=service.name,
-        external_service_id=service.external_service_id,
-        server_id=service.server_id,
-        external_user_id=service.external_user_id,
-        status=service.status.value,
-        description=service.description,
-        config=service.config,
-        created_at=service.created_at,
-        updated_at=service.updated_at,
-        server={
+    _assert_billing_owned_service(service, integration)
+
+    server = service_linked_server(db, service)
+    payload = _billing_service_response(db, service).model_dump()
+    payload["server"] = (
+        {
             "id": server.id,
             "name": server.name,
             "server_ip": server.server_ip,
@@ -999,15 +1273,23 @@ async def get_service(
             "ram_gb": server.ram_gb,
             "port_speed_mbps": server.port_speed_mbps,
             "enabled": server.enabled,
-            "os_boot_mode": server.os_boot_mode.value
-        },
-        external_user={
-            "id": service.external_user.id,
-            "external_user_id": service.external_user.external_user_id,
-            "external_username": service.external_user.external_username,
-            "external_email": service.external_user.external_email
+            "os_boot_mode": server.os_boot_mode.value,
         }
+        if server
+        else None
     )
+    eu = service.external_user
+    payload["external_user"] = (
+        {
+            "id": eu.id,
+            "external_user_id": eu.external_user_id,
+            "external_username": eu.external_username,
+            "external_email": eu.external_email,
+        }
+        if eu
+        else None
+    )
+    return BillingServiceDetailResponse(**payload)
 
 
 @router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1033,18 +1315,14 @@ async def terminate_service(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
-        )
-    
-    # Update service status
-    server = service.server
+    _assert_billing_owned_service(service, integration)
+
+    VMIPAllocationDAO.release_for_service(db, service.id)
+
+    log_kw = _billing_activity_log_kw(db, service)
     log_server_activity_attempt(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.SERVICE,
         action="terminate",
         source="billing_api",
@@ -1054,10 +1332,10 @@ async def terminate_service(
     service.status = ServiceStatus.TERMINATED
     service.terminated_at = datetime.now(timezone.utc)
     ServiceDAO.update(db, service)
-    
+
     log_server_activity_success(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.SERVICE,
         action="terminate",
         source="billing_api",
@@ -1092,18 +1370,12 @@ async def suspend_service(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
-        )
-    
-    # Update service status
-    server = service.server
+    _assert_billing_owned_service(service, integration)
+
+    log_kw = _billing_activity_log_kw(db, service)
     log_server_activity_attempt(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.SERVICE,
         action="suspend",
         source="billing_api",
@@ -1116,10 +1388,10 @@ async def suspend_service(
     )
     service.status = ServiceStatus.SUSPENDED
     ServiceDAO.update(db, service)
-    
+
     log_server_activity_success(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.SERVICE,
         action="suspend",
         source="billing_api",
@@ -1158,18 +1430,12 @@ async def unsuspend_service(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
-        )
-    
-    # Update service status
-    server = service.server
+    _assert_billing_owned_service(service, integration)
+
+    log_kw = _billing_activity_log_kw(db, service)
     log_server_activity_attempt(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.SERVICE,
         action="unsuspend",
         source="billing_api",
@@ -1178,10 +1444,10 @@ async def unsuspend_service(
     )
     service.status = ServiceStatus.ACTIVE
     ServiceDAO.update(db, service)
-    
+
     log_server_activity_success(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.SERVICE,
         action="unsuspend",
         source="billing_api",
@@ -1214,19 +1480,15 @@ async def power_control(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
-        )
-    
-    server = service.server
+    _assert_billing_owned_service(service, integration)
+
+    log_kw = _billing_activity_log_kw(db, service)
+    server = service_linked_server(db, service)
 
     action = power_action.action.lower()
     log_server_activity_attempt(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.POWER,
         action=action,
         source="billing_api",
@@ -1243,14 +1505,13 @@ async def power_control(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Cannot power on server for a {service.status.value} service",
                 )
-            if not server.enabled:
+            if server is not None and not server.enabled:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Cannot power on an administratively disabled server",
                 )
 
-        registry = get_registry()
-        plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
+        plugin_instance, _srv = _billing_get_plugin_instance(db, service)
         if not plugin_instance:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1279,7 +1540,7 @@ async def power_control(
     except NotImplementedError as exc:
         log_server_activity_failure(
             db,
-            server_id=server.id,
+            **log_kw,
             event_type=ServerActivityEventType.POWER,
             action=action,
             source="billing_api",
@@ -1294,7 +1555,7 @@ async def power_control(
     except HTTPException as exc:
         log_server_activity_failure(
             db,
-            server_id=server.id,
+            **log_kw,
             event_type=ServerActivityEventType.POWER,
             action=action,
             source="billing_api",
@@ -1310,7 +1571,7 @@ async def power_control(
         logger.error(f"Billing API: Power action failed: {e}", exc_info=True)
         log_server_activity_failure(
             db,
-            server_id=server.id,
+            **log_kw,
             event_type=ServerActivityEventType.POWER,
             action=action,
             source="billing_api",
@@ -1325,7 +1586,7 @@ async def power_control(
 
     log_server_activity_success(
         db,
-        server_id=server.id,
+        **log_kw,
         event_type=ServerActivityEventType.POWER,
         action=action,
         source="billing_api",
@@ -1352,32 +1613,44 @@ async def get_service_status(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
-        )
-    
-    server = service.server
-    
-    # Get power state from plugin
+    _assert_billing_owned_service(service, integration)
+
+    server = service_linked_server(db, service)
+
     power_state = PowerState.UNKNOWN
     try:
-        registry = get_registry()
-        plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
+        plugin_instance, _ = _billing_get_plugin_instance(db, service)
         if plugin_instance:
             power_state = await plugin_instance.get_power_state()
+    except HTTPException:
+        power_state = PowerState.UNKNOWN
     except Exception as e:
         logger.warning(f"Billing API: Could not get power state for service {service_id}: {e}")
-    
+
+    installation = None
+    if server:
+        active = InstallationTaskDAO.get_active_by_server(db, server.id)
+        hist = InstallationTaskDAO.get_by_server(db, server.id)
+        task = active or (hist[0] if hist else None)
+        if task:
+            installation = {
+                "task_id": task.id,
+                "status": task.status.value,
+                "progress_percent": task.progress_percent,
+                "os_name": task.os_name,
+                "error_message": task.error_message,
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+                "started_at": task.started_at.isoformat() if task.started_at else None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            }
+
     return {
         "service_id": service.id,
         "service_name": service.name,
         "service_status": service.status.value,
-        "server_id": server.id,
-        "server_name": server.name,
-        "server_enabled": server.enabled,
+        "server_id": server.id if server else None,
+        "server_name": server.name if server else None,
+        "server_enabled": server.enabled if server else None,
         "power_state": power_state.value,
         "status": "suspended"
         if service.status == ServiceStatus.SUSPENDED
@@ -1386,39 +1659,7 @@ async def get_service_status(
             if power_state == PowerState.ON
             else "off" if power_state == PowerState.OFF else "unknown"
         ),
-        # Latest installation task summary (if any) so GUIs can show OS install status
-        "installation": (
-            lambda task: {
-                "task_id": task.id,
-                "status": task.status.value,
-                "progress_percent": task.progress_percent,
-                "os_name": task.os_name,
-                "error_message": task.error_message,
-                "created_at": task.created_at.isoformat()
-                if task.created_at
-                else None,
-                "started_at": task.started_at.isoformat()
-                if task.started_at
-                else None,
-                "completed_at": task.completed_at.isoformat()
-                if task.completed_at
-                else None,
-            }
-        )(
-            (
-                InstallationTaskDAO.get_active_by_server(db, server.id)
-                or (
-                    InstallationTaskDAO.get_by_server(db, server.id)[0]
-                    if InstallationTaskDAO.get_by_server(db, server.id)
-                    else None
-                )
-            )
-        )
-        if (
-            InstallationTaskDAO.get_active_by_server(db, server.id)
-            or InstallationTaskDAO.get_by_server(db, server.id)
-        )
-        else None,
+        "installation": installation,
     }
 
 
@@ -1441,20 +1682,26 @@ async def get_service_usage(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+    _assert_billing_owned_service(service, integration)
+
+    server = service_linked_server(db, service)
+    if not server:
+        return ServerUsage(
+            server_id=None,
+            ram_total_gb=None,
+            disk_total_gb=None,
+            cpu_usage_percent=None,
+            ram_usage_gb=None,
+            disk_usage_gb=None,
+            network_rx_bytes=None,
+            network_tx_bytes=None,
+            uptime_seconds=None,
+            last_updated=None,
         )
-    
-    server = service.server
-    
-    # TODO: Implement actual usage collection from monitoring system
-    # For now, return basic info
+
     disks = DiskDAO.get_by_server(db, server.id)
     total_disk_gb = sum(d.capacity_gb for d in disks) if disks else 0
-    
+
     return ServerUsage(
         server_id=server.id,
         ram_total_gb=server.ram_gb,
@@ -1491,12 +1738,7 @@ async def run_script_on_service(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
-        )
+    _assert_billing_owned_service(service, integration)
     
     # Get script
     script = ScriptDAO.get_by_id(db, action.script_id)
@@ -1518,8 +1760,13 @@ async def run_script_on_service(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Script is not available for external users"
         )
-    
-    server = service.server
+
+    server = service_linked_server(db, service)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="PXE/script actions require a bare-metal RackFlow server; not available for VM-only services",
+        )
     log_server_activity_attempt(
         db,
         server_id=server.id,
@@ -1686,14 +1933,14 @@ async def reinstall_os_on_service(
             detail="Service not found"
         )
     
-    # Verify service belongs to this integration
-    if service.external_user.integration_id != integration.id:
+    _assert_billing_owned_service(service, integration)
+
+    server = service_linked_server(db, service)
+    if not server:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            status_code=status.HTTP_409_CONFLICT,
+            detail="OS reinstall via PXE requires a bare-metal RackFlow server; not available for VM-only services",
         )
-    
-    server = service.server
     log_server_activity_attempt(
         db,
         server_id=server.id,

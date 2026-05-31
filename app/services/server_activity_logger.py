@@ -34,10 +34,21 @@ def _sanitize_details(value: Any) -> Any:
     return value
 
 
+def _resolve_target(
+    *,
+    server_id: Optional[int],
+    service_id: Optional[int],
+) -> tuple[Optional[int], Optional[int]]:
+    if (server_id is None) == (service_id is None):
+        raise ValueError("Exactly one of server_id, service_id must be set")
+    return server_id, service_id
+
+
 def log_server_activity(
     db: Session,
     *,
-    server_id: int,
+    server_id: Optional[int] = None,
+    service_id: Optional[int] = None,
     event_type: ServerActivityEventType,
     action: str,
     status: ServerActivityStatus,
@@ -45,11 +56,13 @@ def log_server_activity(
     source: str,
     details: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Persist a server activity entry without breaking caller flow on logger failures."""
+    """Persist a server/service activity entry without breaking caller flow on logger failures."""
     try:
+        sid, scid = _resolve_target(server_id=server_id, service_id=service_id)
         ServerActivityDAO.create(
             db=db,
-            server_id=server_id,
+            server_id=sid,
+            service_id=scid,
             event_type=event_type,
             action=action,
             status=status,
@@ -64,7 +77,8 @@ def log_server_activity(
 def log_server_activity_attempt(
     db: Session,
     *,
-    server_id: int,
+    server_id: Optional[int] = None,
+    service_id: Optional[int] = None,
     event_type: ServerActivityEventType,
     action: str,
     source: str,
@@ -74,6 +88,7 @@ def log_server_activity_attempt(
     log_server_activity(
         db,
         server_id=server_id,
+        service_id=service_id,
         event_type=event_type,
         action=action,
         status=ServerActivityStatus.ATTEMPT,
@@ -86,7 +101,8 @@ def log_server_activity_attempt(
 def log_server_activity_success(
     db: Session,
     *,
-    server_id: int,
+    server_id: Optional[int] = None,
+    service_id: Optional[int] = None,
     event_type: ServerActivityEventType,
     action: str,
     source: str,
@@ -96,6 +112,7 @@ def log_server_activity_success(
     log_server_activity(
         db,
         server_id=server_id,
+        service_id=service_id,
         event_type=event_type,
         action=action,
         status=ServerActivityStatus.SUCCESS,
@@ -108,7 +125,8 @@ def log_server_activity_success(
 def log_server_activity_failure(
     db: Session,
     *,
-    server_id: int,
+    server_id: Optional[int] = None,
+    service_id: Optional[int] = None,
     event_type: ServerActivityEventType,
     action: str,
     source: str,
@@ -126,6 +144,7 @@ def log_server_activity_failure(
     log_server_activity(
         db,
         server_id=server_id,
+        service_id=service_id,
         event_type=event_type,
         action=action,
         status=ServerActivityStatus.FAILED,

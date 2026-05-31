@@ -58,6 +58,8 @@
     boot_mode: 'uefi', // Deprecated - kept for backward compatibility
     pxe_boot_mode: 'uefi', // Controls what DHCP serves initially
     os_boot_mode: 'uefi', // Controls how the server boots the installed OS
+    pxe_kernel_args_general: '',
+    pxe_kernel_args_network: 'ip=dhcp rd.neednet=1',
     disks: [],
     network_ports: [],
     server_group_ids: [],
@@ -229,6 +231,8 @@
       boot_mode: 'uefi', // Deprecated - kept for backward compatibility
       pxe_boot_mode: 'uefi', // Controls what DHCP serves initially
       os_boot_mode: 'uefi', // Controls how the server boots the installed OS
+      pxe_kernel_args_general: '',
+      pxe_kernel_args_network: 'ip=dhcp rd.neednet=1',
       disks: [],
       network_ports: [],
       // IPMI Web Management configuration
@@ -262,6 +266,8 @@
       boot_mode: server.boot_mode || 'uefi', // Deprecated - kept for backward compatibility
       pxe_boot_mode: server.pxe_boot_mode || server.boot_mode || 'uefi', // Fallback to boot_mode for backward compatibility
       os_boot_mode: server.os_boot_mode || server.boot_mode || 'uefi', // Fallback to boot_mode for backward compatibility
+      pxe_kernel_args_general: server.pxe_kernel_args_general || '',
+      pxe_kernel_args_network: server.pxe_kernel_args_network || 'ip=dhcp rd.neednet=1',
       location_id: server.location_id,
       rack_id: server.rack_id || null,
       rack_unit: server.rack_unit || null,
@@ -523,6 +529,12 @@
       formError = null;
       const submitData = {
         ...formData,
+        pxe_kernel_args_general: formData.pxe_kernel_args_general && formData.pxe_kernel_args_general.trim()
+          ? formData.pxe_kernel_args_general.trim()
+          : null,
+        pxe_kernel_args_network: formData.pxe_kernel_args_network && formData.pxe_kernel_args_network.trim()
+          ? formData.pxe_kernel_args_network.trim()
+          : null,
         plugin_config: { ...(formData.plugin_config || {}) },
         disks: formData.disks.map(d => ({
           type: d.type,
@@ -733,6 +745,26 @@
               </select>
               <small class="field-help">Controls how the server boots the installed OS</small>
             </div>
+          </div>
+          <div class="form-group">
+            <label for="pxe-kernel-args-general">PXE kernel args (general)</label>
+            <textarea
+              id="pxe-kernel-args-general"
+              bind:value={formData.pxe_kernel_args_general}
+              rows="2"
+              placeholder="e.g. console=ttyS0,115200n8"
+            ></textarea>
+            <small class="field-help">Appended to PXE boot kernel command line. Template format: <code>${"{var}"}</code> (e.g. <code>${"{ip}"}</code>, <code>${"{mac}"}</code>, <code>${"{gateway}"}</code>, <code>${"{cidr}"}</code>).</small>
+          </div>
+          <div class="form-group">
+            <label for="pxe-kernel-args-network">PXE kernel args (network)</label>
+            <textarea
+              id="pxe-kernel-args-network"
+              bind:value={formData.pxe_kernel_args_network}
+              rows="2"
+              placeholder="ip=dhcp rd.neednet=1"
+            ></textarea>
+            <small class="field-help">Network-specific PXE args. Supports the same <code>${"{var}"}</code> templates and defaults to the current behavior.</small>
           </div>
         </div>
 
