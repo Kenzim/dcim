@@ -102,6 +102,12 @@
 
 <PageHeader title={location ? `Row ${row} - ${location.name}` : `Row ${row}`} />
 
+{#if onBack}
+  <div class="row-view-back">
+    <button type="button" class="btn-back-row" on:click={onBack}>← Back to Racks</button>
+  </div>
+{/if}
+
 <div class="row-view-container">
   {#if loading}
     <div class="loading">Loading row...</div>
@@ -428,5 +434,24 @@
 
   .error {
     color: var(--danger-color);
+  }
+
+  .row-view-back {
+    padding: 0 32px 16px;
+  }
+
+  .btn-back-row {
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btn-back-row:hover {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
   }
 </style>

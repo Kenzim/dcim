@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum as SQLEnum, JSON
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum as SQLEnum, JSON, CheckConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
@@ -22,12 +22,19 @@ class ServerActivityStatus(str, enum.Enum):
 
 
 class ServerActivity(Base):
-    """Unified, append-only server activity log entry."""
+    """Append-only activity log: either tied to a Server (bare metal) or a Service (VM)."""
 
     __tablename__ = "server_activity"
+    __table_args__ = (
+        CheckConstraint(
+            "(server_id IS NOT NULL AND service_id IS NULL) OR (server_id IS NULL AND service_id IS NOT NULL)",
+            name="ck_server_activity_server_xor_service",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    server_id = Column(Integer, ForeignKey("servers.id"), nullable=False, index=True)
+    server_id = Column(Integer, ForeignKey("servers.id"), nullable=True, index=True)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=True, index=True)
     event_type = Column(
         SQLEnum(
             ServerActivityEventType,
@@ -51,10 +58,11 @@ class ServerActivity(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
     server = relationship("Server", backref="activity_log_entries")
+    service = relationship("Service", backref="activity_log_entries")
 
     def __repr__(self):
         return (
             "ServerActivity("
-            f"id={self.id}, server_id={self.server_id}, event_type={self.event_type.value}, "
-            f"action='{self.action}', status={self.status.value})"
+            f"id={self.id}, server_id={self.server_id}, service_id={self.service_id}, "
+            f"event_type={self.event_type.value}, action='{self.action}', status={self.status.value})"
         )

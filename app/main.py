@@ -31,6 +31,8 @@ async def lifespan(app: FastAPI):
     
     # Start keyspace notification listener in background
     listener_task = asyncio.create_task(start_keyspace_notification_listener())
+    from app.services.reconciliation_jobs import run_reconciliation_jobs
+    reconciliation_task = asyncio.create_task(run_reconciliation_jobs())
     
     # Seed default categories and optional initial admin
     from app.core.database import SessionLocal
@@ -72,8 +74,13 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     
     listener_task.cancel()
+    reconciliation_task.cancel()
     try:
         await listener_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await reconciliation_task
     except asyncio.CancelledError:
         pass
 
@@ -201,9 +208,33 @@ api_router.include_router(billing_api.router, tags=["billing"])
 from app.api import billing_admin as billing_admin_api
 api_router.include_router(billing_admin_api.router, tags=["billing-admin"])
 
+# Include product catalog admin routes
+from app.api import product_catalog as product_catalog_api
+api_router.include_router(product_catalog_api.router, tags=["product-catalog"])
+
+# Include Proxmox inventory routes
+from app.api import proxmox_inventory as proxmox_inventory_api
+api_router.include_router(proxmox_inventory_api.router, tags=["proxmox"])
+
+# Include IPAM routes
+from app.api import ipam as ipam_api
+api_router.include_router(ipam_api.router, tags=["ipam"])
+
+# Include proxy runner config routes
+from app.api import runner_proxy as runner_proxy_api
+api_router.include_router(runner_proxy_api.router, tags=["proxy-runner"])
+
+# Include VM IP allocation routes
+from app.api import vm_ip_allocations as vm_ip_allocations_api
+api_router.include_router(vm_ip_allocations_api.router, tags=["vm-ip-allocations"])
+
 # Include services admin routes
 from app.api import services_admin as services_admin_api
 api_router.include_router(services_admin_api.router, tags=["admin-services"])
+
+# Include client services routes
+from app.api import services_client as services_client_api
+api_router.include_router(services_client_api.router, tags=["services-client"])
 
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api

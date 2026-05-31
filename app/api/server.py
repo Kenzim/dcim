@@ -272,6 +272,8 @@ class ServerCreate(BaseModel):
     boot_mode: str = "uefi"  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
     pxe_boot_mode: str = "uefi"  # "uefi" or "bios" - controls what DHCP serves initially
     os_boot_mode: str = "uefi"  # "uefi" or "bios" - controls how the server boots the installed OS
+    pxe_kernel_args_general: str | None = None
+    pxe_kernel_args_network: str | None = None
     disks: List[DiskCreate] = []
     network_ports: List[NetworkPortCreate] = []
     # IPMI Web Proxy configuration
@@ -301,6 +303,8 @@ class ServerUpdate(BaseModel):
     boot_mode: str | None = None  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
     pxe_boot_mode: str | None = None  # "uefi" or "bios" - controls what DHCP serves initially
     os_boot_mode: str | None = None  # "uefi" or "bios" - controls how the server boots the installed OS
+    pxe_kernel_args_general: str | None = None
+    pxe_kernel_args_network: str | None = None
     disks: List[DiskCreate] | None = None
     network_ports: List[NetworkPortCreate] | None = None
     # IPMI Web Proxy configuration
@@ -334,6 +338,8 @@ class ServerResponse(BaseModel):
     boot_mode: str  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
     pxe_boot_mode: str  # "uefi" or "bios" - controls what DHCP serves initially
     os_boot_mode: str  # "uefi" or "bios" - controls how the server boots the installed OS
+    pxe_kernel_args_general: str | None = None
+    pxe_kernel_args_network: str | None = None
     tested_capabilities: List[str] | None = None
     test_logs: str | None = None
     credentials: dict | None = None  # OS installation passwords and credentials
@@ -366,6 +372,12 @@ class ServerBootSetRequest(BaseModel):
     device: str
     persistent: bool = False
     uefi: bool | None = None
+
+
+class ServerKernelArgsPreviewRequest(BaseModel):
+    temp_os_id: str = "debian-live"
+    pxe_kernel_args_general: str | None = None
+    pxe_kernel_args_network: str | None = None
 
 
 def _build_server_capabilities_payload(db: Session, server: Server) -> Dict[str, Any]:
@@ -1171,6 +1183,8 @@ async def create_server(
             boot_mode=boot_mode,
             pxe_boot_mode=pxe_boot_mode,
             os_boot_mode=os_boot_mode,
+            pxe_kernel_args_general=server_data.pxe_kernel_args_general.strip() if server_data.pxe_kernel_args_general and server_data.pxe_kernel_args_general.strip() else None,
+            pxe_kernel_args_network=server_data.pxe_kernel_args_network.strip() if server_data.pxe_kernel_args_network and server_data.pxe_kernel_args_network.strip() else None,
             ipmi_proxy_enabled=server_data.ipmi_proxy_enabled,
             ipmi_web_management_url=server_data.ipmi_web_management_url,
             ipmi_viewer_username=server_data.ipmi_viewer_username,
@@ -1928,6 +1942,18 @@ async def update_server(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid os_boot_mode: {server_data.os_boot_mode}. Must be 'uefi' or 'bios'"
             )
+    if "pxe_kernel_args_general" in server_data.model_fields_set:
+        server.pxe_kernel_args_general = (
+            server_data.pxe_kernel_args_general.strip()
+            if server_data.pxe_kernel_args_general and server_data.pxe_kernel_args_general.strip()
+            else None
+        )
+    if "pxe_kernel_args_network" in server_data.model_fields_set:
+        server.pxe_kernel_args_network = (
+            server_data.pxe_kernel_args_network.strip()
+            if server_data.pxe_kernel_args_network and server_data.pxe_kernel_args_network.strip()
+            else None
+        )
     
     # Update IPMI proxy settings
     if server_data.ipmi_proxy_enabled is not None:
@@ -2395,7 +2421,22 @@ async def get_server_boot_options(
     try:
         plugin_instance = registry.get_plugin(server.plugin_name, server.plugin_config)
         options = await plugin_instance.get_boot_options()
-        current = await plugin_instance.get_boot_order()
+        try:
+            current = await plugin_instance.get_boot_order()
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.warning(
+                "Failed to read current boot order for server %s: %s",
+                server.id,
+                exc,
+            )
+            current = {
+                "current_device": None,
+                "persistent": None,
+                "uefi": None,
+                "error": str(exc),
+            }
         return {
             "server_id": server.id,
             "server_name": server.name,
@@ -2510,4 +2551,26 @@ async def set_server_boot_option(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to set boot device: {str(exc)}",
         )
+
+
+@router.post("/{server_id}/boot/kernel-args-preview", response_model=dict)
+async def preview_server_kernel_args(
+    server_id: int,
+    payload: ServerKernelArgsPreviewRequest,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    from app.api.server_interaction import build_temp_os_kernel_args_preview
+
+    return build_temp_os_kernel_args_preview(
+        db=db,
+        server=server,
+        temp_os_id=(payload.temp_os_id or "debian-live").strip() or "debian-live",
+        general_args_override=payload.pxe_kernel_args_general,
+        network_args_override=payload.pxe_kernel_args_network,
+    )
 

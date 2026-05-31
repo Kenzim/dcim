@@ -21,7 +21,7 @@ router = APIRouter(prefix="/service-instances", tags=["service-instances"])
 
 class ServiceInstanceCreate(BaseModel):
     location_id: int
-    service_type: str  # 'dhcp' | 'tftp'
+    service_type: str  # 'dhcp' | 'tftp' | 'proxy'
     name: str
     base_url: str
     api_key: str | None = None
@@ -97,10 +97,10 @@ async def create_service_instance(
     db: Session = Depends(get_db),
 ):
     """Create a new service instance."""
-    if data.service_type not in ("dhcp", "tftp"):
+    if data.service_type not in ("dhcp", "tftp", "proxy"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="service_type must be 'dhcp' or 'tftp'",
+            detail="service_type must be 'dhcp', 'tftp', or 'proxy'",
         )
     location = LocationDAO.get_by_id(db, data.location_id)
     if not location:
@@ -109,7 +109,7 @@ async def create_service_instance(
             detail="Location not found",
         )
     existing = ServiceInstanceDAO.get_by_location_and_type(db, data.location_id, data.service_type)
-    if existing:
+    if existing and data.service_type in ("dhcp", "tftp"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"A {data.service_type} instance already exists for this location",

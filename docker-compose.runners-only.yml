@@ -26,5 +26,16 @@ services:
       TFTP_BIND: 0.0.0.0:69
     restart: unless-stopped
 
+  proxy-runner:
+    build:
+      context: proxy_runner
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      RACKFLOW_BASE_URL: ${RACKFLOW_BASE_URL}
+      RUNNER_API_KEY: ${PROXY_RUNNER_API_KEY}
+      SYNC_INTERVAL_SECONDS: ${PROXY_SYNC_INTERVAL_SECONDS:-10}
+    restart: unless-stopped
+
 volumes:
   dhcp_shared:

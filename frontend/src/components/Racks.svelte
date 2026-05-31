@@ -242,8 +242,16 @@
 </div>
 
 {#if showModal}
-  <div class="modal-overlay" on:click={closeModal}>
-    <div class="modal-content" on:click|stopPropagation>
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+  <div
+    class="modal-overlay"
+    tabindex="-1"
+    on:click={closeModal}
+    on:keydown={(e) => e.key === 'Escape' && closeModal()}
+  >
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div class="modal-content" on:click|stopPropagation on:keydown|stopPropagation>
       <div class="modal-header">
         <h3>{editingRack ? 'Edit Rack' : 'Add Rack'}</h3>
         <button class="btn-icon-only" on:click={closeModal}>
@@ -316,8 +324,8 @@
             <small class="field-help">Position within the row (1, 2, 3...)</small>
           </div>
         </div>
-        <div class="form-group">
-          <label>Rack unit numbering</label>
+        <fieldset class="form-group rack-unit-numbering-fieldset">
+          <legend>Rack unit numbering</legend>
           <div class="toggle-group">
             <label class:active={formData.units_start_from_bottom}>
               <input
@@ -341,7 +349,7 @@
             </label>
           </div>
           <small class="field-help">Controls how rack units are numbered and rendered in rack and row views.</small>
-        </div>
+        </fieldset>
         <div class="form-group">
           <label for="rack-description">Description</label>
           <textarea
@@ -450,10 +458,18 @@
     color: var(--text-primary);
   }
 
-  .rack-location {
+  .rack-unit-numbering-fieldset {
+    border: none;
     margin: 0;
-    font-size: 14px;
-    color: var(--text-secondary);
+    padding: 0;
+    min-width: 0;
+  }
+
+  .rack-unit-numbering-fieldset legend {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+    padding: 0;
   }
 
   .rack-actions {

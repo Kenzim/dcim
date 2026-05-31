@@ -164,6 +164,22 @@ function rackflow_ClientArea(array $vars)
 function rackflow_ConfigOptions()
 {
     return array(
+        'Product Code' => array(
+            'Type' => 'text',
+            'Size' => '40',
+            'Description' => 'RackFlow product code (recommended).',
+        ),
+        'OS Code' => array(
+            'Type' => 'text',
+            'Size' => '40',
+            'Description' => 'RackFlow OS profile code (optional).',
+        ),
+        'Service Type' => array(
+            'Type' => 'dropdown',
+            'Options' => 'bare_metal,vm,http_proxy',
+            'Default' => 'bare_metal',
+            'Description' => 'RackFlow service type.',
+        ),
         'RackFlow Server Group' => array(
             'Type' => 'text',
             'Size' => '25',
@@ -458,30 +474,85 @@ function rackflow_CreateAccount(array $params)
             $serviceConfig['template_parameters'] = $templateParameters;
         }
 
-        // Build service creation data
-        $serviceData = array(
-            'name' => $serviceName,
-            'external_service_id' => isset($params['serviceid']) ? (string)$params['serviceid'] : null,
-            'external_user_id' => $externalUserId,
-            'external_username' => $externalUsername,
-            'external_email' => $externalEmail,
-            'server_name' => $serverName,
-            'server_ip' => $serverIp ?: '0.0.0.0', // Will need to be configured
-            'description' => isset($params['productname']) ? $params['productname'] : null,
-            'cpu_count' => isset($params['configoptions']['cpu_count']) ? (int)$params['configoptions']['cpu_count'] : 1,
-            'ram_gb' => isset($params['configoptions']['ram_gb']) ? (int)$params['configoptions']['ram_gb'] : null,
-            'port_speed_mbps' => isset($params['configoptions']['port_speed_mbps']) ? (int)$params['configoptions']['port_speed_mbps'] : null,
-            'location_id' => $locationId,
-            'plugin_name' => $pluginName,
-            'plugin_config' => isset($params['configoptions']['plugin_config']) ? $params['configoptions']['plugin_config'] : array(),
-            'os_boot_mode' => isset($params['configoptions']['os_boot_mode']) ? $params['configoptions']['os_boot_mode'] : 'uefi',
-            'disks' => isset($params['configoptions']['disks']) ? $params['configoptions']['disks'] : array(),
-            'network_ports' => isset($params['configoptions']['network_ports']) ? $params['configoptions']['network_ports'] : array(),
-            'service_config' => $serviceConfig,
-        );
-        
-        // Create service via billing API
-        $result = rackflow_apiCall($apiUrl, $apiKey, 'POST', '/api/billing/services', $serviceData);
+        // RackFlow-authoritative catalog selectors
+        $productCode = isset($params['configoptions']['product_code']) && $params['configoptions']['product_code'] !== ''
+            ? (string)$params['configoptions']['product_code']
+            : ('whmcs-product-' . (isset($params['packageid']) ? (int)$params['packageid'] : 0));
+        $osCode = isset($params['configoptions']['os_code']) && $params['configoptions']['os_code'] !== ''
+            ? (string)$params['configoptions']['os_code']
+            : null;
+        // Preferred for VM products: RackFlow catalog vm_templates.id (must be linked to product + os_profile_id set)
+        $vmTemplateId = isset($params['configoptions']['vm_template_id']) && $params['configoptions']['vm_template_id'] !== ''
+            ? (int)$params['configoptions']['vm_template_id']
+            : null;
+        $serviceType = isset($params['configoptions']['service_type']) && $params['configoptions']['service_type'] !== ''
+            ? (string)$params['configoptions']['service_type']
+            : 'bare_metal';
+
+        $createPath = '/api/billing/bare-metal/services';
+        $serviceData = array();
+
+        if (strtolower($serviceType) === 'vm') {
+            $createPath = '/api/billing/vm/services';
+            $vmServiceConfig = array();
+            if (!empty($templateId)) {
+                $vmServiceConfig['template_id'] = $templateId;
+            }
+            if (!empty($templateParameters)) {
+                $vmServiceConfig['template_parameters'] = $templateParameters;
+            }
+            $serviceData = array(
+                'name' => $serviceName,
+                'external_service_id' => isset($params['serviceid']) ? (string)$params['serviceid'] : null,
+                'external_user_id' => $externalUserId,
+                'external_username' => $externalUsername,
+                'external_email' => $externalEmail,
+                'product_code' => $productCode,
+                'description' => isset($params['productname']) ? $params['productname'] : null,
+                'service_config' => $vmServiceConfig,
+            );
+            if ($vmTemplateId !== null && $vmTemplateId > 0) {
+                $serviceData['vm_template_id'] = $vmTemplateId;
+            }
+            if ($osCode !== null && $osCode !== '') {
+                $serviceData['os_code'] = $osCode;
+            }
+            if (isset($params['configoptions']['proxmox_cluster_id']) && $params['configoptions']['proxmox_cluster_id'] !== '') {
+                $serviceData['proxmox_cluster_id'] = (int)$params['configoptions']['proxmox_cluster_id'];
+            }
+            if (isset($params['configoptions']['proxmox_node_name']) && $params['configoptions']['proxmox_node_name'] !== '') {
+                $serviceData['proxmox_node_name'] = (string)$params['configoptions']['proxmox_node_name'];
+            }
+            if (isset($params['configoptions']['proxmox_vmid']) && $params['configoptions']['proxmox_vmid'] !== '') {
+                $serviceData['proxmox_vmid'] = (int)$params['configoptions']['proxmox_vmid'];
+            }
+        } else {
+            $serviceData = array(
+                'name' => $serviceName,
+                'external_service_id' => isset($params['serviceid']) ? (string)$params['serviceid'] : null,
+                'external_user_id' => $externalUserId,
+                'external_username' => $externalUsername,
+                'external_email' => $externalEmail,
+                'product_code' => $productCode,
+                'os_code' => $osCode,
+                'service_type' => $serviceType,
+                'server_name' => $serverName,
+                'server_ip' => $serverIp ?: '0.0.0.0',
+                'description' => isset($params['productname']) ? $params['productname'] : null,
+                'cpu_count' => isset($params['configoptions']['cpu_count']) ? (int)$params['configoptions']['cpu_count'] : 1,
+                'ram_gb' => isset($params['configoptions']['ram_gb']) ? (int)$params['configoptions']['ram_gb'] : null,
+                'port_speed_mbps' => isset($params['configoptions']['port_speed_mbps']) ? (int)$params['configoptions']['port_speed_mbps'] : null,
+                'location_id' => $locationId,
+                'plugin_name' => $pluginName,
+                'plugin_config' => isset($params['configoptions']['plugin_config']) ? $params['configoptions']['plugin_config'] : array(),
+                'os_boot_mode' => isset($params['configoptions']['os_boot_mode']) ? $params['configoptions']['os_boot_mode'] : 'uefi',
+                'disks' => isset($params['configoptions']['disks']) ? $params['configoptions']['disks'] : array(),
+                'network_ports' => isset($params['configoptions']['network_ports']) ? $params['configoptions']['network_ports'] : array(),
+                'service_config' => $serviceConfig,
+            );
+        }
+
+        $result = rackflow_apiCall($apiUrl, $apiKey, 'POST', $createPath, $serviceData);
         
         if (!$result['success']) {
             return 'Error creating service: ' . (isset($result['error']) ? $result['error'] : 'Unknown error');
@@ -490,7 +561,7 @@ function rackflow_CreateAccount(array $params)
         $service = $result['data'];
         
         // If server group is specified, assign server to group
-        if ($serverGroupId && isset($service['server_id'])) {
+        if ($serverGroupId && isset($service['server_id']) && $service['server_id'] !== null) {
             // Add server to group via admin API
             // Note: This requires admin API access, not billing API
             // If using billing API key, this will fail gracefully

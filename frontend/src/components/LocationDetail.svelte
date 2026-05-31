@@ -397,23 +397,32 @@
     </div>
 
     {#if showAddInstance}
-      <div class="modal-overlay" on:click|self={() => showAddInstance = false}>
-        <div class="modal-content" on:click|stopPropagation>
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div
+        class="modal-overlay"
+        tabindex="-1"
+        on:click|self={() => showAddInstance = false}
+        on:keydown={(e) => e.key === 'Escape' && (showAddInstance = false)}
+      >
+        <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+        <div class="modal-content" on:click|stopPropagation on:keydown|stopPropagation>
           <h3>Add {addInstanceType === 'dhcp' ? 'DHCP' : 'TFTP'} instance</h3>
           {#if addInstanceError}
             <div class="error" style="margin-bottom: 1rem;">{addInstanceError}</div>
           {/if}
           <div class="form-group">
-            <label>Name</label>
-            <input type="text" bind:value={addInstanceName} placeholder="e.g. US-East DHCP" />
+            <label for="add-instance-name">Name</label>
+            <input id="add-instance-name" type="text" bind:value={addInstanceName} placeholder="e.g. US-East DHCP" />
           </div>
           <div class="form-group">
-            <label>Base URL</label>
-            <input type="text" bind:value={addInstanceUrl} placeholder="http://192.168.1.50:9080" />
+            <label for="add-instance-url">Base URL</label>
+            <input id="add-instance-url" type="text" bind:value={addInstanceUrl} placeholder="http://192.168.1.50:9080" />
           </div>
           <div class="form-group">
-            <label>API Key</label>
+            <label for="add-instance-api-key">API Key</label>
             <input
+              id="add-instance-api-key"
               type="password"
               bind:value={addInstanceApiKey}
               placeholder="Optional – set API_KEY on the runner if you want auth"

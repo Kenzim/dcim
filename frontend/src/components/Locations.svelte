@@ -108,10 +108,22 @@
   {:else}
     <div class="locations-grid">
       {#each locations as location}
-        <div class="location-card" role="button" tabindex="0" on:click={() => navigate(`/admin/locations/${location.id}`)} on:keydown={(e) => e.key === 'Enter' && navigate(`/admin/locations/${location.id}`)}>
+        <div
+          class="location-card"
+          role="button"
+          tabindex="0"
+          on:click={() => navigate(`/admin/locations/${location.id}`)}
+          on:keydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              navigate(`/admin/locations/${location.id}`);
+            }
+          }}
+        >
           <div class="location-header">
             <h3>{location.name}</h3>
-            <div class="location-actions" role="group" on:click|stopPropagation>
+            <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+            <div class="location-actions" role="group" on:click|stopPropagation on:keydown|stopPropagation>
               <button class="btn-icon-only" on:click={() => openEditModal(location)} title="Edit">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -134,8 +146,16 @@
 </div>
 
 {#if showModal}
-  <div class="modal-overlay" on:click={closeModal}>
-    <div class="modal-content" on:click|stopPropagation>
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+  <div
+    class="modal-overlay"
+    tabindex="-1"
+    on:click={closeModal}
+    on:keydown={(e) => e.key === 'Escape' && closeModal()}
+  >
+    <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+    <div class="modal-content" on:click|stopPropagation on:keydown|stopPropagation>
       <div class="modal-header">
         <h3>{editingLocation ? 'Edit Location' : 'Add Location'}</h3>
         <button class="btn-icon-only" on:click={closeModal}>

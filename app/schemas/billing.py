@@ -7,28 +7,64 @@ from datetime import datetime
 
 
 # Service schemas for billing API
-class BillingServiceCreate(BaseModel):
-    """Request schema for creating a service via billing API"""
+class BillingBareMetalServiceCreate(BaseModel):
+    """Create bare-metal or http_proxy service (uses RackFlow Server + service_bare_metal)."""
     name: str = Field(..., description="Service name")
     external_service_id: Optional[str] = Field(None, description="Service ID in external system")
     external_user_id: str = Field(..., description="User ID in external system")
     external_username: Optional[str] = Field(None, description="Username in external system")
     external_email: Optional[str] = Field(None, description="Email in external system")
+    product_code: Optional[str] = Field(None, description="RackFlow product code")
+    os_code: Optional[str] = Field(None, description="RackFlow OS profile code")
+    service_type: Optional[str] = Field("bare_metal", description="bare_metal or http_proxy")
     # Server configuration
-    server_name: str = Field(..., description="Server name")
-    server_ip: str = Field(..., description="Server IP address")
+    server_name: Optional[str] = Field(None, description="Server name")
+    server_ip: Optional[str] = Field(None, description="Server IP address")
     description: Optional[str] = Field(None, description="Service/Server description")
     cpu_count: int = Field(1, description="Number of CPUs")
     cpu_model: Optional[str] = Field(None, description="CPU model")
     ram_gb: Optional[int] = Field(None, description="RAM in GB")
     port_speed_mbps: Optional[int] = Field(None, description="Port speed in Mbps")
-    location_id: int = Field(..., description="Location ID")
-    plugin_name: str = Field(..., description="Plugin name (folder name on disk)")
-    plugin_config: Dict[str, Any] = Field(..., description="Plugin configuration")
+    location_id: Optional[int] = Field(None, description="Location ID")
+    plugin_name: Optional[str] = Field(None, description="Plugin name (folder name on disk)")
+    plugin_config: Dict[str, Any] = Field(default_factory=dict, description="Plugin configuration")
     os_boot_mode: Optional[str] = Field("uefi", description="OS boot mode (uefi/bios)")
     disks: List[Dict[str, Any]] = Field(default_factory=list, description="Disks configuration")
     network_ports: List[Dict[str, Any]] = Field(default_factory=list, description="Network ports configuration")
     service_config: Optional[Dict[str, Any]] = Field(None, description="Service-specific configuration")
+    # Optional authoritative Proxmox placement (VM services); also mirrored on Server plugin_config when applicable
+    proxmox_cluster_id: Optional[int] = Field(None, description="Deprecated for BM create; ignored")
+    proxmox_node_name: Optional[str] = Field(None, description="Deprecated for BM create; ignored")
+    proxmox_vmid: Optional[int] = Field(None, description="Deprecated for BM create; ignored")
+
+
+class BillingVmServiceCreate(BaseModel):
+    """Create VM service (no RackFlow Server row; uses service_vm + Proxmox placement)."""
+    name: str = Field(..., description="Service name")
+    external_service_id: Optional[str] = Field(None, description="Service ID in external system")
+    external_user_id: str = Field(..., description="User ID in external system")
+    external_username: Optional[str] = Field(None, description="Username in external system")
+    external_email: Optional[str] = Field(None, description="Email in external system")
+    product_code: Optional[str] = Field(None, description="RackFlow product code")
+    vm_template_id: Optional[int] = Field(
+        None,
+        description="Catalog VM template id (preferred); linked to product. Strategy = template os_type (e.g. Linux - Cloudinit)",
+    )
+    os_code: Optional[str] = Field(
+        None,
+        description="Legacy: RackFlow OS profile code when not using vm_template_id",
+    )
+    description: Optional[str] = Field(None, description="Service description")
+    service_config: Optional[Dict[str, Any]] = Field(None, description="Service-specific configuration")
+    proxmox_cluster_id: Optional[int] = Field(None, description="Proxmox cluster id from RackFlow inventory")
+    proxmox_node_name: Optional[str] = Field(None, description="Proxmox node name")
+    proxmox_vmid: Optional[int] = Field(None, description="QEMU/KVM vmid")
+
+
+class BillingServiceCreate(BillingBareMetalServiceCreate):
+    """Deprecated: use POST /billing/bare-metal/services or POST /billing/vm/services."""
+
+    pass
 
 
 class BillingRegisterService(BaseModel):
@@ -46,8 +82,27 @@ class BillingServiceResponse(BaseModel):
     id: int
     name: str
     external_service_id: Optional[str]
-    server_id: int
-    external_user_id: int
+    service_type: Optional[str] = None
+    product_code: Optional[str] = None
+    os_code: Optional[str] = None
+    vm_template_id: Optional[int] = Field(
+        default=None,
+        description="Catalog VM template id when service was created with vm_template_id",
+    )
+    server_id: Optional[int] = None
+    external_user_id: Optional[int] = None
+    provisioning_source: Optional[str] = Field(default="billing", description="billing or internal")
+    proxmox_cluster_id: Optional[int] = None
+    proxmox_node_name: Optional[str] = None
+    proxmox_vmid: Optional[int] = None
+    vm_ip_allocation_id: Optional[int] = Field(
+        default=None,
+        description="VM IP pool row id when a customer IP was allocated from the VM pool",
+    )
+    vm_ip_address: Optional[str] = Field(
+        default=None,
+        description="Customer / primary IP from the VM IP pool when allocated",
+    )
     status: str
     description: Optional[str]
     config: Optional[Dict[str, Any]]
@@ -70,8 +125,8 @@ class BillingServiceResponse(BaseModel):
 
 class BillingServiceDetailResponse(BillingServiceResponse):
     """Extended service response with server details"""
-    server: Dict[str, Any]  # Server details
-    external_user: Dict[str, Any]  # External user details
+    server: Optional[Dict[str, Any]] = None  # Bare metal only
+    external_user: Optional[Dict[str, Any]] = None  # Absent for internal/test services
 
 
 class PowerAction(BaseModel):
@@ -86,7 +141,7 @@ class SuspendAction(BaseModel):
 
 class ServerUsage(BaseModel):
     """Response schema for server usage/stats"""
-    server_id: int
+    server_id: Optional[int] = None
     cpu_usage_percent: Optional[float] = None
     ram_usage_gb: Optional[float] = None
     ram_total_gb: Optional[int] = None

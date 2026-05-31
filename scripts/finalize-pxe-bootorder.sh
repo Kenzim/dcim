@@ -189,3 +189,5 @@ fi
 
 echo "Done. Inspect with efibootmgr -v, then reboot manually when ready."
 touch /tmp/dcim-no-reboot 2>/dev/null || true
+
+sleep 25

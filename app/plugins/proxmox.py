@@ -3,9 +3,12 @@ Proxmox plugin for VM management via Proxmox VE API.
 
 Uses Proxmox REST API for VM power control.
 """
-import httpx
+import asyncio
 import logging
+import urllib.parse
 from typing import Dict, Any, Optional
+
+import httpx
 from app.plugins.base import (
     ServerPlugin,
     PluginCategory,
@@ -34,6 +37,7 @@ class ProxmoxPlugin(ServerPlugin):
     PLUGIN_VERSION = "1.0.0"
     SUPPORTED_CATEGORIES = [
         PluginCategory.POWER_CONTROL,
+        PluginCategory.VM_PROVISIONING,
     ]
     CAPABILITIES = [
         Capability(
@@ -47,6 +51,17 @@ class ProxmoxPlugin(ServerPlugin):
                 ActionDef("power_on", "Power On", variant="success"),
                 ActionDef("power_off", "Power Off", variant="danger"),
                 ActionDef("power_reset", "Reset", variant="warning"),
+            ],
+        ),
+        Capability(
+            id="vm_provisioning",
+            display_name="VM Provisioning",
+            description="Create, clone, and configure virtual machines",
+            optional=True,
+            ui_pattern=UIPattern.ACTIONS_ONLY,
+            actions=[
+                ActionDef("create_vm", "Create VM", variant="primary"),
+                ActionDef("clone_vm_from_template", "Clone Template", variant="primary"),
             ],
         ),
     ]
@@ -399,3 +414,102 @@ class ProxmoxPlugin(ServerPlugin):
         uefi: Optional[bool] = None,
     ) -> bool:
         raise NotImplementedError("Proxmox plugin does not support boot order control")
+
+    async def create_vm(self, vm_config: Dict[str, Any]) -> Dict[str, Any]:
+        vmid = vm_config.get("vmid")
+        if vmid is None:
+            raise ValueError("vmid is required")
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu"
+        headers = await self._get_headers()
+        payload = {
+            "vmid": vmid,
+            "name": vm_config.get("name", f"vm-{vmid}"),
+            "memory": vm_config.get("memory_mb", 1024),
+            "cores": vm_config.get("cores", 1),
+        }
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.post(url, headers=headers, data=payload)
+            response.raise_for_status()
+            return {"vmid": vmid, "task": response.json().get("data")}
+
+    async def clone_vm_from_template(self, template_ref: Dict[str, Any], vm_config: Dict[str, Any]) -> Dict[str, Any]:
+        template_vmid = template_ref.get("vmid")
+        target_vmid = vm_config.get("vmid")
+        if template_vmid is None or target_vmid is None:
+            raise ValueError("template vmid and target vmid are required")
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{template_vmid}/clone"
+        headers = await self._get_headers()
+        payload = {
+            "newid": target_vmid,
+            "name": vm_config.get("name", f"vm-{target_vmid}"),
+            "full": int(bool(vm_config.get("full_clone", True))),
+        }
+        if vm_config.get("target_node"):
+            payload["target"] = vm_config["target_node"]
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.post(url, headers=headers, data=payload)
+            response.raise_for_status()
+            return {"vmid": target_vmid, "task": response.json().get("data")}
+
+    async def configure_vm(self, vm_ref: Dict[str, Any], vm_config: Dict[str, Any]) -> bool:
+        vmid = vm_ref.get("vmid") or self.vmid
+        if vmid is None:
+            raise ValueError("vmid is required")
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{vmid}/config"
+        headers = await self._get_headers()
+        payload = {}
+        if "memory_mb" in vm_config:
+            payload["memory"] = vm_config["memory_mb"]
+        if "cores" in vm_config:
+            payload["cores"] = vm_config["cores"]
+        if "sockets" in vm_config:
+            payload["sockets"] = vm_config["sockets"]
+        # Cloud-init / QEMU network (Proxmox native cloud-init drive)
+        if vm_config.get("ipconfig0"):
+            payload["ipconfig0"] = str(vm_config["ipconfig0"])
+        if vm_config.get("nameserver"):
+            payload["nameserver"] = str(vm_config["nameserver"])
+        if vm_config.get("ciuser"):
+            payload["ciuser"] = str(vm_config["ciuser"])
+        if vm_config.get("cipassword"):
+            payload["cipassword"] = str(vm_config["cipassword"])
+        if not payload:
+            return True
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.put(url, headers=headers, data=payload)
+            response.raise_for_status()
+            return True
+
+    async def wait_for_proxmox_task(self, upid: str, timeout: float = 300.0, interval: float = 1.5) -> None:
+        """Poll ``/nodes/{node}/tasks/{upid}/status`` until finished or timeout."""
+        if not upid:
+            return
+        encoded = urllib.parse.quote(upid, safe="")
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/tasks/{encoded}/status"
+        headers = await self._get_headers()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=60.0) as client:
+            while loop.time() < deadline:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                data = response.json().get("data") or {}
+                status = (data.get("status") or "").lower()
+                if status == "stopped":
+                    exitstatus = (data.get("exitstatus") or "").upper()
+                    if exitstatus == "OK":
+                        return
+                    raise RuntimeError(f"Proxmox task failed ({upid}): {data!r}")
+                await asyncio.sleep(interval)
+        raise TimeoutError(f"Proxmox task timed out after {timeout}s: {upid}")
+
+    async def delete_vm(self, vm_ref: Dict[str, Any]) -> bool:
+        vmid = vm_ref.get("vmid") or self.vmid
+        if vmid is None:
+            raise ValueError("vmid is required")
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{vmid}"
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.delete(url, headers=headers)
+            response.raise_for_status()
+            return True
