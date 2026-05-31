@@ -34,6 +34,11 @@ def _generate_family_code(db: Session, name: str) -> str:
 
 class ProductFamilyCreate(BaseModel):
     name: str
+    code: Optional[str] = None
+    service_type: str = "vm"
+    provisioning_backend: str = "proxmox"
+    defaults: dict[str, Any] = Field(default_factory=dict)
+    constraints: dict[str, Any] = Field(default_factory=dict)
     description: Optional[str] = None
     enabled: bool = True
 
@@ -143,12 +148,24 @@ async def create_family(
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    if data.service_type != "vm":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only VM families are supported by this catalog endpoint",
+        )
+    if data.provisioning_backend not in ("proxmox", ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="VM product families must use provisioning_backend 'proxmox'",
+        )
+
     payload = data.model_dump()
-    payload["code"] = _generate_family_code(db, data.name)
-    payload["service_type"] = "vm"
+    payload["code"] = data.code or _generate_family_code(db, data.name)
     payload["provisioning_backend"] = "proxmox"
-    payload["defaults"] = {}
-    payload["constraints"] = {}
+
+    if ProductFamilyDAO.get_by_code(db, payload["code"]):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Family code already exists")
+
     family = ProductFamilyDAO.create(db, **payload)
     return {"id": family.id}
 

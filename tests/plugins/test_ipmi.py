@@ -245,7 +245,7 @@ async def test_ipmi_plugin_power_reset():
 
 @pytest.mark.asyncio
 async def test_ipmi_plugin_not_implemented_methods():
-    """Test that IPMI plugin raises NotImplementedError for unsupported methods"""
+    """User control methods are unsupported; boot order command path is executable."""
     config = {
         "hostname": "192.168.1.100",
         "username": "admin",
@@ -263,5 +263,6 @@ async def test_ipmi_plugin_not_implemented_methods():
             await plugin.create_user("user", "pass")
         
         # Boot order control methods should raise NotImplementedError
-        with pytest.raises(NotImplementedError):
-            await plugin.get_boot_order()
+        with patch.object(plugin, "_run_ipmitool", new=AsyncMock(return_value=(b"Boot parameter data: force pxe\n", b"", 0))):
+            boot = await plugin.get_boot_order()
+            assert boot["current_device"] == "pxe"
