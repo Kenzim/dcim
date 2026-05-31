@@ -21,6 +21,10 @@ wheels/
 *.egg
 *.pyc
 
+# Frontend source lib files must be tracked
+!frontend/src/lib/
+!frontend/src/lib/*.js
+
 # Virtual environments
 venv/
 env/
