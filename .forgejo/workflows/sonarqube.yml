@@ -1,0 +1,61 @@
+# SonarQube Server analysis for dcim.
+#
+# Required repository secrets (Forgejo -> Settings -> Actions -> Secrets):
+#   SONAR_HOST_URL  - base URL of your SonarQube server (e.g. https://sonar.example.com)
+#   SONAR_TOKEN     - project or global analysis token from SonarQube
+
+name: SonarQube
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  sonarqube:
+    runs-on: docker
+    container:
+      image: ghcr.io/catthehacker/ubuntu:act-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Validate Sonar secrets
+        run: |
+          if [ -z "${{ secrets.SONAR_TOKEN }}" ] || [ -z "${{ secrets.SONAR_HOST_URL }}" ]; then
+            echo "Missing SONAR_TOKEN or SONAR_HOST_URL repository secrets." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=app --cov-report=xml:coverage.xml -q
+
+      - name: SonarQube Scan
+        uses: https://github.com/SonarSource/sonarqube-scan-action@v7
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: SonarQube Quality Gate
+        uses: https://github.com/SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
