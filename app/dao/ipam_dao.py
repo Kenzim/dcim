@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import ipaddress
 from typing import List, Optional
 
@@ -112,7 +112,7 @@ class IPAMDAO:
                     username=username,
                     assigned_by=assigned_by,
                     details={"strategy": strategy or subnet.allocation_strategy},
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(timezone.utc),
                 )
             )
             db.commit()
@@ -139,7 +139,7 @@ class IPAMDAO:
                 username=assignment.username,
                 assigned_by=released_by,
                 details={},
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
             )
         )
         db.delete(assignment)

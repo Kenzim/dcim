@@ -36,6 +36,7 @@ from app.services.server_activity_logger import (
     log_server_activity_success,
 )
 from app.models.server_activity import ServerActivityEventType
+import asyncio
 import logging
 import re
 import os
@@ -980,17 +981,17 @@ class BootTaskResponse(BaseModel):
     id: int
     server_id: int
     boot_type: str
-    kernel_url: Optional[str]
-    initrd_url: Optional[str]
-    kernel_params: Optional[str]
-    script_url: Optional[str]
+    kernel_url: Optional[str] = None
+    initrd_url: Optional[str] = None
+    kernel_params: Optional[str] = None
+    script_url: Optional[str] = None
     temp_os_id: Optional[str] = None
     description: Optional[str] = None
     status: str
-    error_message: Optional[str]
+    error_message: Optional[str] = None
     created_at: str
-    started_at: Optional[str]
-    completed_at: Optional[str]
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -1069,8 +1070,7 @@ async def create_boot_task(
             )
         
         # Read script content
-        with open(script_path, 'r') as f:
-            script_content = f.read()
+        script_content = await asyncio.to_thread(script_path.read_text, encoding="utf-8")
         
         # Replace template variables in script
         # Get server's PXE boot port MAC address

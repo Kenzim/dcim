@@ -93,11 +93,11 @@ class BootTaskDAO:
     @staticmethod
     def mark_in_progress(db: Session, task_id: int) -> Optional[BootTask]:
         """Mark a boot task as in progress"""
-        from datetime import datetime
+        from datetime import datetime, timezone
         task = BootTaskDAO.get_by_id(db, task_id)
         if task:
             task.status = BootTaskStatus.IN_PROGRESS
-            task.started_at = datetime.utcnow()
+            task.started_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(task)
         return task
@@ -105,11 +105,11 @@ class BootTaskDAO:
     @staticmethod
     def mark_completed(db: Session, task_id: int) -> Optional[BootTask]:
         """Mark a boot task as completed"""
-        from datetime import datetime
+        from datetime import datetime, timezone
         task = BootTaskDAO.get_by_id(db, task_id)
         if task:
             task.status = BootTaskStatus.COMPLETED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(task)
         return task
@@ -117,12 +117,12 @@ class BootTaskDAO:
     @staticmethod
     def mark_failed(db: Session, task_id: int, error_message: Optional[str] = None) -> Optional[BootTask]:
         """Mark a boot task as failed"""
-        from datetime import datetime
+        from datetime import datetime, timezone
         task = BootTaskDAO.get_by_id(db, task_id)
         if task:
             task.status = BootTaskStatus.FAILED
             task.error_message = error_message
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(task)
         return task

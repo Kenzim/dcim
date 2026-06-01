@@ -29,8 +29,8 @@ async def lifespan(app: FastAPI):
     _run_migrations()
     setup_keyspace_notifications()
     
-    # Start keyspace notification listener in background
-    listener_task = asyncio.create_task(start_keyspace_notification_listener())
+    # Start keyspace notification listener (it manages its own background thread)
+    start_keyspace_notification_listener()
     from app.services.reconciliation_jobs import run_reconciliation_jobs
     reconciliation_task = asyncio.create_task(run_reconciliation_jobs())
     
@@ -73,16 +73,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
     
-    listener_task.cancel()
     reconciliation_task.cancel()
-    try:
-        await listener_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await reconciliation_task
-    except asyncio.CancelledError:
-        pass
+    await asyncio.gather(reconciliation_task, return_exceptions=True)
 
 
 app = FastAPI(

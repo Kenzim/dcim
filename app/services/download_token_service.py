@@ -7,7 +7,7 @@ OS installation. Each token is single-use and expires after a set time.
 import secrets
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from app.core.redis import redis_client
 import logging
@@ -56,7 +56,7 @@ class DownloadTokenService:
         token_key = f"{TOKEN_KEY_PREFIX}{token_id}"
         
         # Store token metadata in Redis
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=expires_in)
         
         token_data = {
@@ -107,7 +107,9 @@ class DownloadTokenService:
         expires_at_str = token_data.get("expires_at")
         if expires_at_str:
             expires_at = datetime.fromisoformat(expires_at_str)
-            if datetime.utcnow() > expires_at:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > expires_at:
                 logger.warning(f"Download token expired: {token_id[:8]}...")
                 redis_client.delete(token_key)  # Clean up expired token
                 return None

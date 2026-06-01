@@ -7,14 +7,14 @@ from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from app.core.database import get_db
 from app.models.billing_integration import BillingIntegration
 
 security = HTTPBearer(auto_error=False)
 
 
-async def get_billing_integration(
+def get_billing_integration(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db)
@@ -58,7 +58,7 @@ async def get_billing_integration(
     if "x-forwarded-for" in request.headers:
         client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
     
-    integration.last_used_at = datetime.utcnow()
+    integration.last_used_at = datetime.now(timezone.utc)
     integration.last_used_ip = client_ip
     db.commit()
     db.refresh(integration)
