@@ -4,7 +4,7 @@ All images are stored in the DB (content column).
 """
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import Response
@@ -31,6 +31,7 @@ EXTENSION_TO_MEDIA_TYPE = {
     ".svg": "image/svg+xml",
 }
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+ASSET_NOT_FOUND = "Asset not found"
 
 
 class AssetResponse(BaseModel):
@@ -46,8 +47,8 @@ class AssetResponse(BaseModel):
 
 @router.get("", response_model=List[AssetResponse])
 def list_assets(
+    db: Annotated[Session, Depends(get_db)],
     label: Optional[str] = None,
-    db: Session = Depends(get_db),
 ):
     """List assets, optionally filtered by label. No auth required for listing (for picker UIs)."""
     label_enum = None
@@ -81,12 +82,12 @@ def list_labels():
 @router.get("/{asset_id}", response_model=AssetResponse)
 def get_asset(
     asset_id: int,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Get a single asset by ID."""
     asset = AssetDAO.get_by_id(db, asset_id)
     if not asset:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ASSET_NOT_FOUND)
     return AssetResponse(
         id=asset.id,
         filename=asset.filename,
@@ -99,12 +100,12 @@ def get_asset(
 @router.get("/{asset_id}/file")
 def serve_asset_file(
     asset_id: int,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Serve the asset image from DB."""
     asset = AssetDAO.get_by_id(db, asset_id)
     if not asset:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ASSET_NOT_FOUND)
     content = getattr(asset, "content", None)
     if not content or len(content) == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset has no content")
@@ -118,11 +119,11 @@ def serve_asset_file(
 
 @router.post("", response_model=AssetResponse, status_code=status.HTTP_201_CREATED)
 async def upload_asset(
-    file: UploadFile = File(...),
-    label: str = Form(AssetLabel.GENERIC.value),
-    description: Optional[str] = Form(None),
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    file: Annotated[UploadFile, File(...)],
+    label: Annotated[str, Form()] = AssetLabel.GENERIC.value,
+    description: Annotated[Optional[str], Form()] = None,
 ):
     """Upload a new image asset. Admin only."""
     suffix = Path(file.filename or "").suffix.lower()
@@ -169,13 +170,13 @@ async def upload_asset(
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_asset(
     asset_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Delete an asset. Clears server preview references first, then deletes the row."""
     asset = AssetDAO.get_by_id(db, asset_id)
     if not asset:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ASSET_NOT_FOUND)
     db.query(Server).filter(Server.preview_asset_id == asset_id).update({Server.preview_asset_id: None})
     AssetDAO.delete(db, asset_id)
     logger.info("Deleted asset id=%s", asset_id)

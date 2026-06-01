@@ -21,7 +21,7 @@ For port control or configuration changes, use a plugin that supports PORT_CONTR
 import logging
 import re
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pysnmp.hlapi.asyncio import (
     SnmpEngine,
     UsmUserData,
@@ -48,6 +48,24 @@ from pysnmp.hlapi.asyncio import (
 from app.plugins.switch_base import SwitchPlugin, SwitchPluginCategory
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_firmware_version_fallback(sys_descr: str) -> Optional[str]:
+    """Extract a likely firmware version token without regex backtracking risk."""
+    separators_normalized = sys_descr.replace(",", " ").replace(";", " ")
+    for raw_token in separators_normalized.split():
+        token = raw_token.strip("()[]{}")
+        if token.lower().startswith("v") and len(token) > 1 and token[1].isdigit():
+            token = token[1:]
+
+        # Require at least one dot and digits to avoid false positives.
+        if "." not in token or not any(ch.isdigit() for ch in token):
+            continue
+
+        # Permit only common version-token chars.
+        if all(ch.isalnum() or ch in ".-_" for ch in token):
+            return token
+    return None
 
 
 class SNMPv3Plugin(SwitchPlugin):
@@ -416,10 +434,10 @@ class SNMPv3Plugin(SwitchPlugin):
                         if version_match:
                             info["firmware_version"] = version_match.group(1)
                         elif not info["firmware_version"]:
-                            # Try other patterns
-                            version_match = re.search(r'v?(\d+\.\d+[^\s,]*)', sys_descr)
-                            if version_match:
-                                info["firmware_version"] = version_match.group(1)
+                            # Try non-regex fallback to avoid catastrophic-backtracking risks.
+                            version_fallback = _extract_firmware_version_fallback(sys_descr)
+                            if version_fallback:
+                                info["firmware_version"] = version_fallback
             except Exception as e:
                 logger.debug(f"Error querying sysDescr: {e}")
             
