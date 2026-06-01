@@ -54,6 +54,24 @@ def test_login_success(client, test_user, mock_redis):
     # Check cookie was set
     assert "auth_token" in response.cookies
     assert response.cookies["auth_token"] == data["token"]
+    assert "HttpOnly" in response.headers["set-cookie"]
+    assert "SameSite=lax" in response.headers["set-cookie"]
+    assert "Secure" not in response.headers["set-cookie"]
+
+
+def test_login_sets_secure_cookie_when_forwarded_proto_https(client, test_user):
+    """Ensure auth cookie is marked Secure when request is forwarded as HTTPS."""
+    response = client.post(
+        "/api/users/login",
+        json={
+            "username": "testuser",
+            "password": "testpassword123",
+        },
+        headers={"x-forwarded-proto": "https"},
+    )
+
+    assert response.status_code == 200
+    assert "Secure" in response.headers["set-cookie"]
 
 
 def test_login_invalid_username(client, test_user):

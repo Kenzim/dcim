@@ -1,7 +1,6 @@
 from fastapi import Depends, HTTPException, status, Request, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Union
-import asyncio
 import hashlib
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
@@ -58,7 +57,7 @@ def _get_user_from_token(token: str, client_ip: Optional[str] = None) -> Optiona
     return user_info
 
 
-async def get_current_user(
+def get_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     auth_token: Optional[str] = Cookie(None, alias="auth_token"),
@@ -135,7 +134,7 @@ async def get_current_user(
     )
 
 
-async def require_admin(
+def require_admin(
     auth: dict = Depends(get_current_user)
 ) -> dict:
     """
@@ -152,7 +151,5 @@ async def require_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
         )
-    # Keep this dependency async-compatible for callers/tests that await it.
-    await asyncio.sleep(0)
     return auth
 
