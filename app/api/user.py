@@ -82,13 +82,15 @@ async def login(
     redis_client.expire(user_toks_key, settings.auth_token_expire_seconds)
     
     # Set cookie with same expiration as Redis token
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    is_secure_cookie = request.url.scheme == "https" or forwarded_proto.split(",")[0].strip().lower() == "https"
     response.set_cookie(
         key="auth_token",
         value=token,
         max_age=settings.auth_token_expire_seconds,
         httponly=True,
         samesite="lax",
-        secure=False  # Set to True in production with HTTPS
+        secure=is_secure_cookie,
     )
     
     return UserLoginResponse(

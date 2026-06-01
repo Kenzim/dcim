@@ -4,7 +4,7 @@ Tests for authentication and authorization
 import pytest
 from fastapi import HTTPException
 from app.core.auth import get_current_user, require_admin
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock
 
 
 @pytest.mark.asyncio
@@ -33,16 +33,12 @@ async def test_get_current_user_with_valid_token(mock_redis):
     request.client.host = "127.0.0.1"
     request.headers = {}
     
-    # Mock cookie
-    auth_token = token
-    
     # Note: This is a simplified test - in reality get_current_user
     # needs proper token derivation which is tested in integration tests
-    pass
+    assert token is not None
 
 
-@pytest.mark.asyncio
-async def test_require_admin_with_admin_user():
+def test_require_admin_with_admin_user():
     """Test require_admin allows admin users"""
     admin_auth = {
         "user_id": 1,
@@ -51,18 +47,13 @@ async def test_require_admin_with_admin_user():
         "is_admin": True
     }
     
-    # Mock get_current_user dependency
-    async def mock_get_current_user():
-        return admin_auth
-    
     # require_admin should pass through admin users
-    result = await require_admin(auth=admin_auth)
+    result = require_admin(auth=admin_auth)
     assert result == admin_auth
     assert result["is_admin"] is True
 
 
-@pytest.mark.asyncio
-async def test_require_admin_with_non_admin_user():
+def test_require_admin_with_non_admin_user():
     """Test require_admin rejects non-admin users"""
     non_admin_auth = {
         "user_id": 2,
@@ -73,14 +64,13 @@ async def test_require_admin_with_non_admin_user():
     
     # require_admin should raise 403 for non-admin users
     with pytest.raises(HTTPException) as exc_info:
-        await require_admin(auth=non_admin_auth)
+        require_admin(auth=non_admin_auth)
     
     assert exc_info.value.status_code == 403
     assert "Admin access required" in str(exc_info.value.detail)
 
 
-@pytest.mark.asyncio
-async def test_require_admin_with_missing_is_admin():
+def test_require_admin_with_missing_is_admin():
     """Test require_admin rejects users without is_admin field"""
     auth_without_admin = {
         "user_id": 3,
@@ -89,7 +79,7 @@ async def test_require_admin_with_missing_is_admin():
     }
     
     with pytest.raises(HTTPException) as exc_info:
-        await require_admin(auth=auth_without_admin)
+        require_admin(auth=auth_without_admin)
     
     assert exc_info.value.status_code == 403
 

@@ -17,15 +17,6 @@ class UserLogin(BaseModel):
             raise ValueError("Password cannot be longer than 72 bytes")
         return v
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "username": "john",
-                "password": "secret123"
-            }
-        }
-
-
 class UserLoginResponse(BaseModel):
     """Login response schema"""
     token: str
