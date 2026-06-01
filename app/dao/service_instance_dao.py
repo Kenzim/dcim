@@ -77,8 +77,8 @@ class ServiceInstanceDAO:
 
     @staticmethod
     def update_connection_test(db: Session, row: ServiceInstance, ok: bool) -> ServiceInstance:
-        from datetime import datetime
-        row.last_connection_test = datetime.utcnow()
+        from datetime import datetime, timezone
+        row.last_connection_test = datetime.now(timezone.utc)
         row.connection_ok = ok
         db.commit()
         db.refresh(row)

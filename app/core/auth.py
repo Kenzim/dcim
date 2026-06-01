@@ -1,8 +1,9 @@
 from fastapi import Depends, HTTPException, status, Request, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Union
+import asyncio
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.core.redis import redis_client
 from app.core.database import get_db
@@ -45,7 +46,7 @@ def _get_user_from_token(token: str, client_ip: Optional[str] = None) -> Optiona
     
     # Update last seen IP and timestamp if provided
     if client_ip:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         # Update HASH fields
         redis_client.hset(token_key, mapping={
             "last_seen_ip": client_ip,
@@ -112,7 +113,7 @@ async def get_current_user(
     
     if integration:
         # Update last used timestamp and IP
-        integration.last_used_at = datetime.utcnow()
+        integration.last_used_at = datetime.now(timezone.utc)
         integration.last_used_ip = client_ip
         db.commit()
         db.refresh(integration)
@@ -151,5 +152,7 @@ async def require_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
         )
+    # Keep this dependency async-compatible for callers/tests that await it.
+    await asyncio.sleep(0)
     return auth
 

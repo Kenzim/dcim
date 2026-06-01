@@ -37,7 +37,7 @@ class AssetResponse(BaseModel):
     id: int
     filename: str
     label: str
-    description: Optional[str]
+    description: Optional[str] = None
     created_at: str
 
     class Config:

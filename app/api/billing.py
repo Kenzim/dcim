@@ -7,6 +7,7 @@ for billing systems to manage services (which link to servers).
 The integration instance is automatically derived from the API key used for authentication.
 All routes are generic and work for any integration type (WHMCS, custom, etc.).
 """
+import asyncio
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -917,7 +918,7 @@ async def create_bare_metal_service(
 
         # Validate plugin exists (plugins are loaded from disk, not database)
         registry = get_registry()
-        plugin_class = registry.get_plugin(plugin_name)
+        plugin_class = registry.get_plugin_class(plugin_name)
         if not plugin_class:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1981,8 +1982,7 @@ async def reinstall_os_on_service(
             )
 
         # Read script content
-        with open(script_path, 'r') as f:
-            script_content = f.read()
+        script_content = await asyncio.to_thread(script_path.read_text, encoding="utf-8")
 
         # Get server's PXE boot port MAC address
         pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server.id)

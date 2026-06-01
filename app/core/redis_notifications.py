@@ -2,7 +2,6 @@
 Redis keyspace notifications handler for cleaning up expired tokens
 """
 import json
-import asyncio
 import logging
 from app.core.redis import redis_client
 
@@ -37,7 +36,7 @@ def handle_expired_token(key: str):
         logger.error(f"Error handling expired token {key}: {e}")
 
 
-async def start_keyspace_notification_listener():
+def start_keyspace_notification_listener():
     """
     Start listening for Redis keyspace notifications.
     Requires Redis config: notify-keyspace-events Ex

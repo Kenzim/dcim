@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 import secrets
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from app.core.database import get_db
 from app.core.redis import redis_client
@@ -63,7 +63,7 @@ async def login(
     token_key = f"tok:{token_id}"
     
     # Store as Redis HASH (authoritative source for auth)
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     redis_client.hset(token_key, mapping={
         "user_id": str(user.id),
         "username": user.username,
@@ -78,7 +78,7 @@ async def login(
     # Track token_id in user's ZSET for listing (NOT used for auth)
     # Score = timestamp for sorting
     user_toks_key = f"user_toks:{user.id}"
-    redis_client.zadd(user_toks_key, {token_id: datetime.utcnow().timestamp()})
+    redis_client.zadd(user_toks_key, {token_id: datetime.now(timezone.utc).timestamp()})
     redis_client.expire(user_toks_key, settings.auth_token_expire_seconds)
     
     # Set cookie with same expiration as Redis token

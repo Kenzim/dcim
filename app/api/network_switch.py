@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_SWITCH_RACK_UNITS = 10
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _track_background_task(task: asyncio.Task) -> None:
+    """Keep a reference to background tasks until completion."""
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def _rack_placement_overlaps_switch(
@@ -260,9 +267,12 @@ async def create_switch(
             finally:
                 db_bg.close()
         
-        asyncio.create_task(_populate_ports_background(
-            switch.id, switch.name, switch_data.plugin_name, switch_data.plugin_config
-        ))
+        task = asyncio.create_task(
+            _populate_ports_background(
+                switch.id, switch.name, switch_data.plugin_name, switch_data.plugin_config
+            )
+        )
+        _track_background_task(task)
     
     switch_dict = {k: v.value if hasattr(v, 'value') else v for k, v in switch.__dict__.items()}
     if switch_dict.get("rack_units") is None:

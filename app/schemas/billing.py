@@ -81,7 +81,7 @@ class BillingServiceResponse(BaseModel):
     """Response schema for service details"""
     id: int
     name: str
-    external_service_id: Optional[str]
+    external_service_id: Optional[str] = None
     service_type: Optional[str] = None
     product_code: Optional[str] = None
     os_code: Optional[str] = None
@@ -104,8 +104,8 @@ class BillingServiceResponse(BaseModel):
         description="Customer / primary IP from the VM IP pool when allocated",
     )
     status: str
-    description: Optional[str]
-    config: Optional[Dict[str, Any]]
+    description: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
     # Convenience fields for billing integrations (e.g. WHMCS)
     # These are populated when available and may be null for legacy calls.
     server_ip: Optional[str] = Field(

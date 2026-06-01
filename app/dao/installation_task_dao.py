@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from app.models.installation_task import InstallationTask, InstallationStatus
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ServiceStatus
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class InstallationTaskDAO:
@@ -70,7 +70,7 @@ class InstallationTaskDAO:
         task = InstallationTaskDAO.get_by_id(db, task_id)
         if task:
             task.status = InstallationStatus.IN_PROGRESS
-            task.started_at = datetime.utcnow()
+            task.started_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(task)
         return task
@@ -81,7 +81,7 @@ class InstallationTaskDAO:
         task = InstallationTaskDAO.get_by_id(db, task_id)
         if task:
             task.status = InstallationStatus.COMPLETED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(timezone.utc)
             if task.progress_percent is None:
                 task.progress_percent = 100
             db.commit()
@@ -102,7 +102,7 @@ class InstallationTaskDAO:
         task = InstallationTaskDAO.get_by_id(db, task_id)
         if task:
             task.status = InstallationStatus.FAILED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(timezone.utc)
             if error_message:
                 task.error_message = error_message
             db.commit()
@@ -141,7 +141,7 @@ class InstallationTaskDAO:
         task = InstallationTaskDAO.get_by_id(db, task_id)
         if task and task.status in [InstallationStatus.PENDING, InstallationStatus.IN_PROGRESS]:
             task.status = InstallationStatus.CANCELLED
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(task)
         return task
