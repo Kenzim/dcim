@@ -175,3 +175,26 @@ def test_get_temp_os_modloop_no_modloop_os(client, temp_os_dir):
     response = client.get("/api/servers/interaction/temp-os/custom-initramfs/files/modloop-virt")
     
     assert response.status_code == 404
+
+
+def test_get_os_dir_rejects_traversal(tmp_path):
+    """get_os_dir must reject os_id values that escape the base directory."""
+    base_dir = tmp_path / "temp_os"
+    base_dir.mkdir()
+    # A sensitive file one level above the base dir.
+    secret = tmp_path / "secret.env"
+    secret.write_text("SECRET=1")
+
+    service = TempOSService(base_dir=base_dir)
+
+    for evil in ["..", "../", "../..", "../secret.env", "a/../..", "\x00", "foo/bar"]:
+        assert service.get_os_dir(evil) is None, f"os_id {evil!r} should be rejected"
+
+
+def test_get_temp_os_file_traversal_encoded(client, temp_os_dir):
+    """Encoded traversal in os_id must not read files outside the base dir."""
+    # %2e%2e%2f = ../ ; attempt to climb out of the temp_os base directory.
+    response = client.get(
+        "/api/servers/interaction/temp-os/%2e%2e/files/config.json"
+    )
+    assert response.status_code in (400, 404)

@@ -141,8 +141,23 @@ class TempOSService:
         return params
     
     def get_os_dir(self, os_id: str) -> Optional[Path]:
-        """Get the directory path for a temporary OS"""
-        os_dir = self.base_dir / os_id
+        """Get the directory path for a temporary OS.
+
+        The os_id is untrusted input from the URL. Reject any value that could
+        escape the temp_os base directory (path traversal) before touching the
+        filesystem.
+        """
+        if not os_id or "\x00" in os_id:
+            return None
+        # Disallow path separators and parent references outright.
+        if "/" in os_id or "\\" in os_id or ".." in os_id:
+            return None
+
+        base = self.base_dir.resolve()
+        os_dir = (base / os_id).resolve()
+        # Ensure the resolved path is still confined under the base directory.
+        if os_dir != base and base not in os_dir.parents:
+            return None
         if os_dir.exists() and os_dir.is_dir():
             return os_dir
         return None
