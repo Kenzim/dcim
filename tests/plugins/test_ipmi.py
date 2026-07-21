@@ -77,14 +77,41 @@ def test_ipmi_plugin_build_ipmitool_args():
         assert "192.168.1.100" in args
         assert "-U" in args
         assert "admin" in args
-        assert "-P" in args
-        assert "password" in args
+        # Password must be delivered via env (-E), never placed on argv.
+        assert "-E" in args
+        assert "-P" not in args
+        assert "password" not in args
         assert "-p" in args
         assert "623" in args
         assert "-I" in args
         assert "lanplus" in args
         assert "power" in args
         assert "status" in args
+
+
+@pytest.mark.asyncio
+async def test_ipmi_plugin_password_passed_via_env_not_argv():
+    """The IPMI password must reach ipmitool through IPMI_PASSWORD env, not argv."""
+    config = {
+        "hostname": "192.168.1.100",
+        "username": "admin",
+        "password": "s3cr3t-pass",
+        "port": 623,
+    }
+
+    with patch('shutil.which', return_value='/usr/bin/ipmitool'):
+        plugin = IPMIPlugin(config)
+
+        mock_process = Mock()
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+        mock_process.returncode = 0
+
+        with patch('asyncio.create_subprocess_exec', return_value=mock_process) as mock_exec:
+            await plugin._run_ipmitool("power status")
+
+        args, kwargs = mock_exec.call_args
+        assert "s3cr3t-pass" not in args
+        assert kwargs["env"]["IPMI_PASSWORD"] == "s3cr3t-pass"
 
 
 @pytest.mark.asyncio

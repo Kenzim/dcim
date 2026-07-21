@@ -6,6 +6,7 @@ Requires ipmitool to be installed on the host running the DCIM application.
 """
 import asyncio
 import logging
+import os
 import shutil
 from typing import Dict, Any, List, Optional
 
@@ -113,16 +114,19 @@ class IPMIPlugin(ServerPlugin):
         self.timeout = int(config.get("timeout", 30))
 
     def _build_ipmitool_args(self, subcommand: str) -> List[str]:
-        """Build argument list for ipmitool (for asyncio.create_subprocess_exec)."""
-        # Pass password via env or stdin to avoid process list exposure; ipmitool accepts -P -
-        # for stdin. We use -P with the password here for simplicity; consider using env
-        # IPMITOOL_PASSWORD or a temp file in production.
+        """Build argument list for ipmitool (for asyncio.create_subprocess_exec).
+
+        The password is NOT placed on argv (where it would be visible in the
+        process list). We use ``-E`` so ipmitool reads it from the
+        ``IPMI_PASSWORD`` environment variable, set in the subprocess env by
+        ``_run_ipmitool``.
+        """
         args = [
             "ipmitool",
             "-I", "lanplus",
             "-H", self.hostname,
             "-U", self.username,
-            "-P", self.password,
+            "-E",
             "-p", str(self.port),
             *subcommand.strip().split(),
         ]
@@ -131,11 +135,15 @@ class IPMIPlugin(ServerPlugin):
     async def _run_ipmitool(self, subcommand: str) -> tuple[bytes, bytes, int]:
         """Run ipmitool with subcommand; return (stdout, stderr, returncode)."""
         args = self._build_ipmitool_args(subcommand)
+        # Deliver the password out-of-band via the environment so it never
+        # appears on the command line / process table.
+        env = {**os.environ, "IPMI_PASSWORD": self.password or ""}
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
