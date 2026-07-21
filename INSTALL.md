@@ -60,6 +60,18 @@ This starts:
 
 When `DHCP_RUNNER_URL` and `TFTP_RUNNER_URL` are set, the UI’s DHCP/TFTP controls talk to those containers. The app writes `dhcpd.conf` and TFTP files to the shared volume; the runners read them. For DHCP to serve a real LAN you may need `network_mode: host` and `DHCP_INTERFACES` set (e.g. `eth0`).
 
+#### Runner authentication (required)
+
+The DHCP and TFTP runner APIs are **fail-closed**: if no `API_KEY` is configured they refuse every request (HTTP 503) except `/health`. The compose files therefore require `DHCP_RUNNER_API_KEY` and `TFTP_RUNNER_API_KEY` to be set (via `.env`), and `docker compose up` will error until they are. Generate strong random keys and set the matching value on each service instance in the UI (Services tab) so the app presents the same `X-API-Key`:
+
+```bash
+# .env (do not commit real secrets)
+DHCP_RUNNER_API_KEY=$(openssl rand -hex 32)
+TFTP_RUNNER_API_KEY=$(openssl rand -hex 32)
+```
+
+For isolated local development only, you may set `ALLOW_UNAUTHENTICATED=true` on a runner to disable the check; never do this in production.
+
 ### First run: migrations and initial admin
 
 Migrations run automatically on app startup. To create an initial admin user when the database has no users, set:
