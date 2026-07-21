@@ -37,6 +37,9 @@ handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"
 logger.addHandler(handler)
 
 API_KEY = os.environ.get("API_KEY")
+# Fail-closed by default: without an API_KEY the runner refuses all protected
+# requests. Set ALLOW_UNAUTHENTICATED=true ONLY for isolated local development.
+ALLOW_UNAUTHENTICATED = os.environ.get("ALLOW_UNAUTHENTICATED", "").lower() in ("1", "true", "yes")
 
 
 @asynccontextmanager
@@ -64,9 +67,15 @@ def _require_api_key(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     authorization: Optional[str] = Header(None),
 ) -> None:
-    """Require API key if API_KEY env is set."""
+    """Require a valid API key. Fail closed if none is configured."""
     if not API_KEY:
-        return
+        if ALLOW_UNAUTHENTICATED:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="Runner API_KEY is not configured; refusing requests. "
+                   "Set API_KEY (or ALLOW_UNAUTHENTICATED=true for local dev).",
+        )
     token = x_api_key
     if not token and authorization and authorization.startswith("Bearer "):
         token = authorization[7:]

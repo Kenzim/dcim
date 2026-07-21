@@ -39,6 +39,8 @@ services:
       DHCP_CONFIG_PATH: /shared/dhcp/dhcpd.conf
       DHCP_LEASE_PATH: /shared/dhcp/dhcpd.leases
       DHCP_INTERFACES: ${DHCP_INTERFACES:-eth0}
+      # Required: shared secret the app must present (per-instance API key).
+      API_KEY: ${DHCP_RUNNER_API_KEY:?set DHCP_RUNNER_API_KEY in .env}
     volumes:
       - dhcp_tftp_shared:/shared
     ports:
@@ -53,6 +55,8 @@ services:
     environment:
       TFTP_ROOT: /shared/tftp
       TFTP_BIND: 0.0.0.0:69
+      # Required: shared secret the app must present (per-instance API key).
+      API_KEY: ${TFTP_RUNNER_API_KEY:?set TFTP_RUNNER_API_KEY in .env}
     volumes:
       - dhcp_tftp_shared:/shared
     ports:
