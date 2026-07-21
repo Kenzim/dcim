@@ -71,6 +71,15 @@ def mock_redis():
     
     def mock_hgetall(key):
         return mock_redis_client._hashes.get(key, {})
+
+    def mock_hsetnx(key, field, value):
+        """Set field only if it does not already exist (atomic single-winner)."""
+        if key not in mock_redis_client._hashes:
+            mock_redis_client._hashes[key] = {}
+        if field in mock_redis_client._hashes[key]:
+            return 0
+        mock_redis_client._hashes[key][field] = value
+        return 1
     
     def mock_delete(*keys):
         count = 0
@@ -156,6 +165,7 @@ def mock_redis():
     
     mock_redis_client.hset = mock_hset
     mock_redis_client.hgetall = mock_hgetall
+    mock_redis_client.hsetnx = mock_hsetnx
     mock_redis_client.delete = mock_delete
     mock_redis_client.expire = mock_expire
     mock_redis_client.exists = mock_exists

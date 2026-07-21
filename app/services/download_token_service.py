@@ -150,6 +150,33 @@ class DownloadTokenService:
         return None
     
     @staticmethod
+    def consume_token(token: str, filename: str) -> Optional[Dict[str, Any]]:
+        """Validate a token and, for single-use tokens, atomically claim it.
+
+        This closes the check-then-mark race present when callers do
+        validate_token() followed by a separate mark_token_used(): the claim is
+        performed with HSETNX so only the first concurrent caller succeeds.
+
+        Returns the token metadata if the token is valid (and, for single-use
+        tokens, was successfully claimed by this call); otherwise None.
+        """
+        token_data = DownloadTokenService.validate_token(token, filename)
+        if not token_data:
+            return None
+
+        if token_data.get("single_use"):
+            token_id = _derive_token_id(token)
+            token_key = f"{TOKEN_KEY_PREFIX}{token_id}"
+            # Atomic single-winner claim; 0 means someone already consumed it.
+            claimed = redis_client.hsetnx(token_key, "consumed", "1")
+            if not claimed:
+                logger.warning(f"Download token already consumed: {token_id[:8]}...")
+                return None
+            redis_client.hset(token_key, "used", "true")
+
+        return token_data
+
+    @staticmethod
     def mark_token_used(token: str) -> bool:
         """
         Mark a token as used (one-time use).
