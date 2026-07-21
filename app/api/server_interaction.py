@@ -7,13 +7,14 @@ This module handles all server-to-API communication, including:
 - Password updates
 - Other server management operations
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Cookie
 from fastapi.responses import PlainTextResponse, FileResponse, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from app.core.database import get_db
-from app.core.auth import require_admin, get_current_user
+from app.core.auth import require_admin, get_current_user, security
 from app.dao import (
     NetworkPortDAO,
     ServerDAO,
@@ -47,6 +48,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 DEFAULT_PXE_NETWORK_KERNEL_ARGS = "ip=dhcp rd.neednet=1"
+
+
+def _script_token_filename(boot_task_id: int) -> str:
+    """Canonical filename a download token must allow to fetch a boot task script."""
+    return f"script-{boot_task_id}.sh"
+
+
+def _script_url_with_token(base_url: str, boot_task_id: int) -> str:
+    """Build the script URL for a boot task with an embedded download token.
+
+    The token is short-lived and multi-use (single_use=False) because the
+    initramfs/iPXE client may request the same script more than once during a
+    single boot. Without a valid token the /scripts/{task_id} endpoint refuses
+    to serve script content (which can contain injected credentials/tokens).
+    """
+    token = get_download_token_service().generate_token(
+        boot_task_id=boot_task_id,
+        allowed_files=[_script_token_filename(boot_task_id)],
+        expires_in=900,
+        single_use=False,
+    )
+    return f"{base_url}/api/servers/interaction/scripts/{boot_task_id}?token={token}"
 
 
 def _normalize_kernel_args(value: Optional[str]) -> str:
@@ -400,8 +423,8 @@ async def get_pxe_boot_file(
                 if boot_task.script_url:
                     script_url = boot_task.script_url
                 elif boot_task.script_content:
-                    # Script is stored in database, serve it via API
-                    script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
+                    # Script is stored in database, serve it via API (token-protected)
+                    script_url = _script_url_with_token(base_url, boot_task.id)
                 else:
                     script_url = None
                 
@@ -526,7 +549,7 @@ exit
                         kernel_params = _merge_server_kernel_args(kernel_params, server, port, db)
                         # Add script URL if script exists
                         if boot_task.script_content:
-                            script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
+                            script_url = _script_url_with_token(base_url, boot_task.id)
                             from urllib.parse import quote
                             encoded_script_url = quote(script_url, safe=':/?=&')
                             if "script_url=" not in kernel_params:
@@ -1363,7 +1386,7 @@ async def create_boot_task(
     
     # For Debian Live (squashfs), add script URL to kernel params if script exists
     if boot_task.temp_os_id == "debian-live" and boot_task.script_content:
-        script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
+        script_url = _script_url_with_token(base_url, boot_task.id)
         from urllib.parse import quote
         encoded_script_url = quote(script_url, safe=':/?=&')
         if "script_url=" not in boot_task.kernel_params:
@@ -1529,44 +1552,47 @@ async def cancel_boot_task(
 @router.get("/scripts/{task_id}", response_class=PlainTextResponse)
 async def get_script(
     task_id: int,
-    token: Optional[str] = Query(None, description="One-time download token (optional for backward compatibility)"),
+    token: Optional[str] = Query(None, description="Download token authorizing access to this boot task's script"),
     db: Session = Depends(get_db)
 ):
     """
     Serve script content for a boot task.
-    
+
     This endpoint is called by the Linux environment to fetch the script
-    that should be executed.
-    
-    Token validation is optional for backward compatibility, but recommended.
+    that should be executed. Boot task scripts may contain injected
+    credentials and download tokens, so a valid download token bound to this
+    boot task is REQUIRED. The token is generated (multi-use, short-lived) and
+    embedded in the script_url handed to the client during PXE boot.
     """
+    # Require and validate the token before revealing anything about the task.
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Download token required"
+        )
+    download_token_service = get_download_token_service()
+    token_data = download_token_service.validate_token(token, _script_token_filename(task_id))
+    if not token_data or token_data.get("boot_task_id") != task_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired download token"
+        )
+
     boot_task = BootTaskDAO.get_by_id(db, task_id)
     if not boot_task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Boot task {task_id} not found"
         )
-    
+
     if not boot_task.script_content:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No script content for boot task {task_id}"
         )
-    
-    # Validate token if provided
-    if token:
-        download_token_service = get_download_token_service()
-        token_data = download_token_service.validate_token(token, f"script-{task_id}.sh")
-        
-        if not token_data or token_data.get("boot_task_id") != task_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired download token"
-            )
-        
-        # Mark token as used
-        download_token_service.mark_token_used(token)
-    
+
+    # Token is intentionally multi-use for the duration of the boot (single_use=False),
+    # so it is not marked used here; it expires on its own short TTL.
     logger.info(f"Serving script for boot task {task_id}")
     
     return PlainTextResponse(
@@ -1695,8 +1721,10 @@ async def list_scripts(
 @router.get("/scripts/by-id/{script_id_or_name}")
 async def get_script_by_id_or_name(
     script_id_or_name: str,
-    token: Optional[str] = Query(None, description="One-time download token"),
-    request: Request = None,
+    request: Request,
+    token: Optional[str] = Query(None, description="Download token authorizing script access"),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    auth_token: Optional[str] = Cookie(None, alias="auth_token"),
     db: Session = Depends(get_db)
 ):
     """
@@ -1706,24 +1734,36 @@ async def get_script_by_id_or_name(
     This endpoint is for retrieving script definitions, not boot task scripts.
     Use /scripts/{task_id} to get boot task script content.
     
-    Requires authentication (admin) or a valid download token.
+    Requires an authenticated admin session OR a valid (unexpired, unused)
+    download token that authorizes this script filename.
     """
     from app.dao.script_dao import ScriptDAO
-    
-    # Try to get auth token from request
-    auth = None
+
+    # Determine admin session (if any). get_current_user raises on failure.
+    is_admin = False
     try:
-        auth = await get_current_user(request, None, None, db)
+        auth = get_current_user(request, credentials, auth_token, db)
+        is_admin = bool(auth.get("is_admin", False))
     except HTTPException:
-        pass  # Auth failed, will check token instead
-    
-    # Check authentication - either admin auth or valid token
-    if not auth and not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required (admin token or download token)"
+        is_admin = False
+
+    if not is_admin:
+        # Non-admin callers MUST present a valid download token. A bare token
+        # value is no longer sufficient; it must validate against the service.
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required (admin session or valid download token)"
+            )
+        token_data = get_download_token_service().validate_token(
+            token, f"script-{script_id_or_name}"
         )
-    
+        if not token_data:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired download token"
+            )
+
     # Try to parse as ID first, then as name
     script = None
     try:
