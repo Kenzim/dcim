@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from app.core.database import get_db
+from app.core.config import settings
 from app.core.auth import require_admin, get_current_user, security
 from app.dao import (
     NetworkPortDAO,
@@ -693,12 +694,19 @@ async def get_pxe_info(
 
 
 def _get_request_source_ip(request: Request) -> Optional[str]:
-    """Get caller IP, preferring X-Forwarded-For when present."""
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        first_ip = forwarded_for.split(",")[0].strip()
-        if first_ip:
-            return first_ip
+    """Get the caller's source IP.
+
+    X-Forwarded-For is only honored when the deployment explicitly opts in via
+    settings.trust_x_forwarded_for (i.e. the app is behind a trusted proxy).
+    Otherwise the header is ignored so a client cannot spoof its identity to
+    obtain another server's cloud-init credentials.
+    """
+    if settings.trust_x_forwarded_for:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            first_ip = forwarded_for.split(",")[0].strip()
+            if first_ip:
+                return first_ip
     if request.client:
         return request.client.host
     return None
@@ -719,7 +727,13 @@ def _resolve_server_by_source_ip(db: Session, source_ip: Optional[str]):
 
 
 def _get_cloud_init_installation_context(db: Session, server_id: int):
-    """Find installation context to render cloud-init data."""
+    """Find installation context to render cloud-init data.
+
+    Only an active boot task / in-progress installation is considered. We do
+    NOT fall back to the most recent historical install, because doing so would
+    serve installation credentials (plaintext password) long after an install
+    has completed.
+    """
     active_boot_task = BootTaskDAO.get_active_by_server(db, server_id)
     if active_boot_task:
         by_boot_task = InstallationTaskDAO.get_by_boot_task(db, active_boot_task.id)
@@ -730,8 +744,7 @@ def _get_cloud_init_installation_context(db: Session, server_id: int):
     if active_install:
         return active_install
 
-    history = InstallationTaskDAO.get_by_server(db, server_id)
-    return history[0] if history else None
+    return None
 
 
 def _safe_yaml_single_quoted(value: str) -> str:
@@ -799,6 +812,9 @@ def _build_cloud_init_user_data(server, installation_task) -> str:
             "  expire: false",
             "  users:",
             "    - name: " + _safe_yaml_single_quoted(username),
+            # type: text is required by modern cloud-init to treat the value as
+            # a plaintext password rather than a pre-hashed one.
+            "      type: text",
             "      password: " + _safe_yaml_single_quoted(password),
             "ssh_pwauth: true",
             "package_update: false",
