@@ -1004,6 +1004,10 @@ async def ingest_hardware_detection_report(
         source_ip=source_ip,
     )
 
+    # Detection tokens are single-use: burn the token once the report is
+    # accepted so it cannot be replayed to overwrite the inventory.
+    token_service.mark_token_used(token)
+
     return {
         "status": "ok",
         "report_id": report.id,
@@ -1330,9 +1334,19 @@ async def create_boot_task(
         if template and template.disk_image and not template_image_files:
             disk_image_filename = template.disk_image.split("/")[-1]
             allowed_files.append(disk_image_filename)
-        # For template installs, allow any file under the template (script fetches what it needs)
-        if boot_task_data.template_id:
-            allowed_patterns = ["*"]
+        # Scope the token to THIS template's own files (relative paths) plus log
+        # uploads, instead of a global "*" that would authorize fetching any
+        # file on the token-gated endpoints.
+        if template and template.template_dir:
+            try:
+                base = template.template_dir.resolve()
+                for f in base.rglob("*"):
+                    if f.is_file():
+                        allowed_files.append(str(f.resolve().relative_to(base)))
+            except (OSError, ValueError) as e:
+                logger.warning(f"Could not enumerate template files for token scope: {e}")
+        # Installation log uploads use a "logs-{installation_task_id}" filename.
+        allowed_patterns.append("logs-*")
     
     # Generate token (allow access to specific files or all files if none specified)
     download_token_service = get_download_token_service()
@@ -2122,28 +2136,26 @@ async def get_disk_image(
             detail="Invalid or expired download token"
         )
     
-    disk_image_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "disk_images", filename
-    )
-    
     # Security: only allow files in the disk_images directory
     if ".." in filename or "/" in filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid filename"
         )
-    
+
+    disk_image_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "disk_images", filename
+    )
+
     if not os.path.exists(disk_image_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Disk image '{filename}' not found"
         )
     
-    # Mark token as used (one-time use)
-    download_token_service.mark_token_used(token)
-    
-    # For HEAD requests, return headers only (no body)
+    # For HEAD requests, return headers only (no body) and do NOT consume the
+    # token (clients often HEAD-then-GET; consuming here would break the GET).
     if request.method == "HEAD":
         file_size = os.path.getsize(disk_image_path)
         return Response(
@@ -2155,6 +2167,14 @@ async def get_disk_image(
             }
         )
     
+    # GET: atomically claim the (single-use) token so a leaked/replayed token
+    # cannot fetch the image twice.
+    if not download_token_service.consume_token(token, filename):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired download token"
+        )
+
     logger.info(f"Serving disk image file: {filename} (boot_task: {token_data.get('boot_task_id')})")
     return FileResponse(
         disk_image_path,

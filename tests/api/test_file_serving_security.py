@@ -6,7 +6,35 @@ import os
 import tempfile
 from pathlib import Path
 from fastapi.testclient import TestClient
-from app.services.download_token_service import get_download_token_service
+from app.services.download_token_service import get_download_token_service, DownloadTokenService
+
+
+def test_consume_token_single_use_is_atomic(mock_redis, monkeypatch):
+    """consume_token claims a single-use token exactly once."""
+    import app.services.download_token_service as token_service_module
+    monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
+
+    svc = get_download_token_service()
+    token = svc.generate_token(boot_task_id=1, allowed_files=["install.wim"], single_use=True)
+
+    # First consume succeeds
+    assert svc.consume_token(token, "install.wim") is not None
+    # Second consume fails (already claimed)
+    assert svc.consume_token(token, "install.wim") is None
+    # And plain validation now also fails
+    assert svc.validate_token(token, "install.wim") is None
+
+
+def test_consume_token_multi_use_not_burned(mock_redis, monkeypatch):
+    """Multi-use tokens are validated but not consumed by consume_token."""
+    import app.services.download_token_service as token_service_module
+    monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
+
+    svc = get_download_token_service()
+    token = svc.generate_token(boot_task_id=2, allowed_files=["disk.img"], single_use=False)
+
+    assert svc.consume_token(token, "disk.img") is not None
+    assert svc.consume_token(token, "disk.img") is not None
 
 
 @pytest.fixture
