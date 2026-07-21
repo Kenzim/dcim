@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.requests import Request
 
-from app.core.billing_auth import get_billing_integration
+from app.core.billing_auth import get_billing_integration, hash_api_key
 from app.models.billing_integration import BillingIntegration
 
 
@@ -48,7 +48,8 @@ def test_get_billing_integration_updates_last_used_metadata(db_session):
     integration = BillingIntegration(
         name="WHMCS",
         integration_type="whmcs",
-        api_key="valid-key",
+        api_key=hash_api_key("valid-key"),
+        api_key_prefix="valid-ke",
         enabled=True,
     )
     db_session.add(integration)
@@ -63,3 +64,42 @@ def test_get_billing_integration_updates_last_used_metadata(db_session):
     assert result.id == integration.id
     assert result.last_used_ip == "203.0.113.55"
     assert isinstance(result.last_used_at, datetime)
+
+
+def test_api_key_stored_hashed_and_authenticates(db_session):
+    from app.dao.billing_integration_dao import BillingIntegrationDAO
+
+    created = BillingIntegrationDAO.create(
+        db_session, name="WHMCS Prod", integration_type="whmcs"
+    )
+    plaintext = created.plaintext_api_key
+    assert plaintext  # returned once at creation
+
+    # Stored value is the hash, not the plaintext.
+    assert created.api_key == hash_api_key(plaintext)
+    assert created.api_key != plaintext
+    assert created.api_key_prefix == plaintext[:8]
+
+    # Lookup and auth succeed with the plaintext key.
+    assert BillingIntegrationDAO.get_by_api_key(db_session, plaintext).id == created.id
+
+    request = _build_request()
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=plaintext)
+    result = get_billing_integration(request=request, credentials=credentials, db=db_session)
+    assert result.id == created.id
+
+
+def test_rotate_key_invalidates_old_key(db_session):
+    from app.dao.billing_integration_dao import BillingIntegrationDAO
+
+    created = BillingIntegrationDAO.create(
+        db_session, name="Rotate", integration_type="whmcs"
+    )
+    old_key = created.plaintext_api_key
+
+    rotated = BillingIntegrationDAO.rotate_api_key(db_session, created)
+    new_key = rotated.plaintext_api_key
+    assert new_key != old_key
+
+    assert BillingIntegrationDAO.get_by_api_key(db_session, old_key) is None
+    assert BillingIntegrationDAO.get_by_api_key(db_session, new_key).id == created.id

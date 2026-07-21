@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.models.billing_integration import BillingIntegration
+from app.core.billing_auth import hash_api_key
 import secrets
 
 
@@ -17,15 +18,21 @@ class BillingIntegrationDAO:
         enabled: bool = True,
         api_key: Optional[str] = None
     ) -> BillingIntegration:
-        """Create a new billing integration"""
+        """Create a new billing integration.
+
+        The plaintext API key is generated (or taken from `api_key`), stored
+        only as a SHA-256 hash, and exposed once via the transient
+        `plaintext_api_key` attribute on the returned object.
+        """
         # Generate API key if not provided
         if not api_key:
             api_key = secrets.token_urlsafe(32)
-        
+
         integration = BillingIntegration(
             name=name,
             integration_type=integration_type,
-            api_key=api_key,
+            api_key=hash_api_key(api_key),
+            api_key_prefix=api_key[:8],
             config=config or {},
             description=description,
             enabled=enabled
@@ -33,6 +40,8 @@ class BillingIntegrationDAO:
         db.add(integration)
         db.commit()
         db.refresh(integration)
+        # Expose plaintext once for the create response (not persisted).
+        integration.plaintext_api_key = api_key
         return integration
 
     @staticmethod
@@ -42,8 +51,10 @@ class BillingIntegrationDAO:
 
     @staticmethod
     def get_by_api_key(db: Session, api_key: str) -> Optional[BillingIntegration]:
-        """Get integration by API key"""
-        return db.query(BillingIntegration).filter(BillingIntegration.api_key == api_key).first()
+        """Get integration by (plaintext) API key, matched against its hash."""
+        return db.query(BillingIntegration).filter(
+            BillingIntegration.api_key == hash_api_key(api_key)
+        ).first()
 
     @staticmethod
     def get_by_type(db: Session, integration_type: str) -> List[BillingIntegration]:
@@ -69,10 +80,13 @@ class BillingIntegrationDAO:
 
     @staticmethod
     def rotate_api_key(db: Session, integration: BillingIntegration) -> BillingIntegration:
-        """Generate a new API key for an integration"""
-        integration.api_key = secrets.token_urlsafe(32)
+        """Generate a new API key for an integration (stored hashed)."""
+        new_key = secrets.token_urlsafe(32)
+        integration.api_key = hash_api_key(new_key)
+        integration.api_key_prefix = new_key[:8]
         db.commit()
         db.refresh(integration)
+        integration.plaintext_api_key = new_key
         return integration
 
     @staticmethod
