@@ -8,6 +8,16 @@ from app.dao import BootTaskDAO, NetworkPortDAO, ServerDAO
 from app.models.boot_task import BootType, BootTaskStatus
 from app.models.server import Server
 from app.models.location import Location
+from app.services.download_token_service import get_download_token_service
+
+
+def _script_token(boot_task_id: int) -> str:
+    """Mint a valid multi-use script token for a boot task (matches API contract)."""
+    return get_download_token_service().generate_token(
+        boot_task_id=boot_task_id,
+        allowed_files=[f"script-{boot_task_id}.sh"],
+        single_use=False,
+    )
 
 
 @pytest.fixture
@@ -62,10 +72,11 @@ def test_get_pxe_script_content(client, db_session, test_pxe_port, test_server):
         description="Test script"
     )
     
-    # Get script content with script=true parameter
+    # Get script content with script=true parameter and a valid token
+    token = _script_token(boot_task.id)
     response = client.get(
         "/api/servers/interaction/pxe",
-        params={"mac": "00:0e:1e:6f:16:b0", "script": "true"}
+        params={"mac": "00:0e:1e:6f:16:b0", "script": "true", "token": token}
     )
     
     assert response.status_code == 200
@@ -76,6 +87,33 @@ def test_get_pxe_script_content(client, db_session, test_pxe_port, test_server):
     # Check that boot task was marked as in_progress
     db_session.refresh(boot_task)
     assert boot_task.status == BootTaskStatus.IN_PROGRESS
+
+
+def test_get_pxe_script_content_requires_token(client, db_session, test_pxe_port, test_server):
+    """script=true without a valid token must be rejected."""
+    boot_task = BootTaskDAO.create(
+        db=db_session,
+        server_id=test_server.id,
+        boot_type="linux_script",
+        script_content="#!/bin/sh\necho secret\n",
+    )
+
+    # No token -> 401
+    response = client.get(
+        "/api/servers/interaction/pxe",
+        params={"mac": "00:0e:1e:6f:16:b0", "script": "true"},
+    )
+    assert response.status_code == 401
+
+    # Garbage token -> 401
+    response = client.get(
+        "/api/servers/interaction/pxe",
+        params={"mac": "00:0e:1e:6f:16:b0", "script": "true", "token": "garbage"},
+    )
+    assert response.status_code == 401
+    # Boot task must not have been marked in_progress by an unauthorized request
+    db_session.refresh(boot_task)
+    assert boot_task.status == BootTaskStatus.PENDING
 
 
 def test_get_pxe_script_content_no_boot_task(client, db_session, test_pxe_port):
@@ -100,10 +138,11 @@ def test_get_pxe_script_content_wrong_boot_type(client, db_session, test_pxe_por
         iso_url="http://example.com/test.iso"
     )
     
-    # Try to get script content
+    # Try to get script content with a valid token for this boot task
+    token = _script_token(boot_task.id)
     response = client.get(
         "/api/servers/interaction/pxe",
-        params={"mac": "00:0e:1e:6f:16:b0", "script": "true"}
+        params={"mac": "00:0e:1e:6f:16:b0", "script": "true", "token": token}
     )
     
     # Should return 404 for non-linux_script boot types
@@ -121,10 +160,11 @@ def test_get_pxe_script_content_no_script_content(client, db_session, test_pxe_p
         description="Test script"
     )
     
-    # Try to get script content
+    # Try to get script content with a valid token for this boot task
+    token = _script_token(boot_task.id)
     response = client.get(
         "/api/servers/interaction/pxe",
-        params={"mac": "00:0e:1e:6f:16:b0", "script": "true"}
+        params={"mac": "00:0e:1e:6f:16:b0", "script": "true", "token": token}
     )
     
     # Should return 404 when no script_content

@@ -314,6 +314,7 @@ def normalize_mac_address(mac: str) -> str:
 async def get_pxe_boot_file(
     mac: Optional[str] = Query(None, description="MAC address of the network port requesting PXE boot"),
     script: Optional[bool] = Query(False, description="Return script content instead of iPXE script (for initramfs)"),
+    token: Optional[str] = Query(None, description="Download token required when script=true"),
     db: Session = Depends(get_db)
 ):
     """
@@ -326,6 +327,8 @@ async def get_pxe_boot_file(
     Args:
         mac: MAC address of the network port (e.g., "00:0e:1e:6f:16:b0")
         script: If true, return script content instead of iPXE script (for initramfs)
+        token: Download token bound to the active boot task; REQUIRED when
+            script=true because the script body may contain injected credentials.
     
     Returns:
         iPXE boot script as plain text, or script content if script=true
@@ -380,6 +383,22 @@ async def get_pxe_boot_file(
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="No active boot task found for script request"
+                )
+            # Script bodies may contain injected credentials/tokens, so a valid
+            # download token bound to this boot task is required (MAC alone is
+            # not sufficient authorization).
+            if not token:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Download token required for script access"
+                )
+            token_data = get_download_token_service().validate_token(
+                token, _script_token_filename(boot_task.id)
+            )
+            if not token_data or token_data.get("boot_task_id") != boot_task.id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired download token"
                 )
             # Serve script content for LINUX_SCRIPT or TEMP_OS (Alpine) boot tasks
             if boot_task.boot_type not in [BootType.LINUX_SCRIPT, BootType.TEMP_OS]:
