@@ -148,26 +148,39 @@ def test_iso_endpoint_requires_token(client, mock_redis, monkeypatch):
     assert response.status_code == 401
 
 
-def test_scripts_endpoint_optional_token(client, mock_redis, db_session, monkeypatch):
-    """Test that scripts endpoint accepts optional token"""
+def test_scripts_endpoint_requires_token(client, mock_redis, db_session, monkeypatch):
+    """Boot task script endpoint must require a valid download token."""
     import app.services.download_token_service as token_service_module
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
-    
-    # Create a boot task
+
     from app.dao import BootTaskDAO
     from app.models.boot_task import BootType
-    
+
     boot_task = BootTaskDAO.create(
         db_session,
         server_id=1,
         boot_type=BootType.LINUX_SCRIPT,
         script_content="echo 'test script'"
     )
-    
-    # Access without token - should work (backward compatibility)
+
+    # No token -> 401
     response = client.get(f"/api/servers/interaction/scripts/{boot_task.id}")
-    # Should succeed (200) or require auth (401) depending on implementation
-    assert response.status_code in [200, 401]
+    assert response.status_code == 401
+
+    # Garbage token -> 401
+    response = client.get(f"/api/servers/interaction/scripts/{boot_task.id}?token=garbage")
+    assert response.status_code == 401
+
+    # Valid token bound to this boot task -> 200
+    token_service = get_download_token_service()
+    token = token_service.generate_token(
+        boot_task_id=boot_task.id,
+        allowed_files=[f"script-{boot_task.id}.sh"],
+        single_use=False,
+    )
+    response = client.get(f"/api/servers/interaction/scripts/{boot_task.id}?token={token}")
+    assert response.status_code == 200
+    assert response.text == "echo 'test script'"
 
 
 def test_scripts_by_id_requires_auth(client, mock_redis, db_session, monkeypatch):
@@ -205,14 +218,33 @@ def test_scripts_by_id_with_token(client, mock_redis, db_session, monkeypatch):
         enabled=True
     )
     
-    # Generate token
+    # Generate token authorizing this script filename
     token_service = get_download_token_service()
     token = token_service.generate_token(
         boot_task_id=999,
         allowed_files=[f"script-{script.id}"]
     )
     
-    # Access with token
+    # Valid token -> 200 with script content
     response = client.get(f"/api/servers/interaction/scripts/by-id/{script.id}?token={token}")
-    # Should succeed (200) or fail (401/404) depending on implementation
-    assert response.status_code in [200, 401, 404]
+    assert response.status_code == 200
+    assert response.text == "echo 'test'"
+
+
+def test_scripts_by_id_rejects_garbage_token(client, mock_redis, db_session, monkeypatch):
+    """scripts/by-id must reject an arbitrary non-empty token value."""
+    import app.services.download_token_service as token_service_module
+    monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
+
+    from app.dao.script_dao import ScriptDAO
+
+    script = ScriptDAO.create(
+        db_session,
+        name="test_script",
+        content="echo 'test'",
+        enabled=True
+    )
+
+    # A non-empty but invalid token used to bypass auth; must now be rejected.
+    response = client.get(f"/api/servers/interaction/scripts/by-id/{script.id}?token=not-a-real-token")
+    assert response.status_code == 401
