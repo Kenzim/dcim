@@ -44,9 +44,10 @@ Tests for file-serving endpoint security:
   - `test_iso_endpoint_requires_token` - Requires token for access
 
 - **Scripts Endpoint:**
-  - `test_scripts_endpoint_optional_token` - Backward compatible (optional token)
-  - `test_scripts_by_id_requires_auth` - Requires authentication
-  - `test_scripts_by_id_with_token` - Accepts tokens for access
+  - `test_scripts_endpoint_requires_token` - A valid download token is required; missing/garbage tokens return 401
+  - `test_scripts_by_id_requires_auth` - Requires admin auth or a valid token
+  - `test_scripts_by_id_with_token` - Accepts a valid token for access
+  - `test_scripts_by_id_rejects_garbage_token` - Rejects invalid tokens
 
 ### 3. `tests/api/test_boot_task_token_injection.py`
 
@@ -64,8 +65,39 @@ Tests for installation log upload security:
 - **Log Upload Security:**
   - `test_installation_logs_accepts_token` - Accepts valid tokens
   - `test_installation_logs_rejects_invalid_token` - Rejects invalid tokens
-  - `test_installation_logs_works_without_token` - Backward compatible (works without token)
+  - `test_installation_logs_requires_token` - A valid token is required; missing tokens return 401
   - `test_installation_logs_validates_boot_task_match` - Validates token matches boot task
+
+## Configuration & Hardening Requirements
+
+The following controls are now mandatory (no "optional token" fallbacks remain):
+
+- **Download tokens required for secret-bearing content.** Serving install
+  scripts (`/scripts/{task_id}`, `/scripts/by-id/{id_or_name}`,
+  `/pxe?script=true`), disk images, and installation log/status uploads all
+  require a valid download token bound to the boot task. Boot-task/PXE URL
+  generation embeds the token so legitimate installs keep working. Tokens are
+  scoped to concrete file patterns (not `*`) and single-use media tokens are
+  consumed atomically.
+- **Runner `API_KEY` (fail-closed).** The DHCP and TFTP runners return `503` on
+  every protected endpoint (all except `/health`) unless `API_KEY` is set. Set
+  `DHCP_RUNNER_API_KEY` / `TFTP_RUNNER_API_KEY` in the environment; compose
+  requires them. The app's `runner_client` sends the matching key.
+- **`SERVICE_INSTANCE_ENCRYPTION_KEY`.** Service-instance runner API keys are
+  Fernet-encrypted at rest when this key is configured; legacy plaintext keys
+  are re-encrypted on next successful verify. `REQUIRE_SERVICE_INSTANCE_ENCRYPTION`
+  enforces its presence.
+- **Billing integration API keys are hashed (SHA-256).** Plaintext is shown only
+  once on create/rotate; list/get return a masked prefix only.
+- **`TRUST_X_FORWARDED_FOR` (default off).** Cloud-init identity resolution uses
+  the direct client IP unless this setting is explicitly enabled, preventing
+  `X-Forwarded-For` spoofing.
+- **TFTP `put_config` path jail.** Config writes are confined via `resolve()` +
+  `is_relative_to(root)`.
+- **Assets require authentication; SVG uploads disallowed.** Non-raster assets
+  are served as downloads with `nosniff` and a restrictive CSP.
+- **IPMI password off argv.** `ipmitool` reads the BMC password from the
+  `IPMI_PASSWORD` env (`-E`), never the command line.
 
 ## Running the Tests
 
