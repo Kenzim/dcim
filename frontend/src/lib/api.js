@@ -1,5 +1,37 @@
 const API_BASE = '/api';
 
+// Central handling of expired/invalid sessions. A global fetch interceptor
+// watches for 401 responses on authenticated API calls and notifies the app so
+// it can clear auth state and route the user to the login screen. Passive auth
+// probes and the login/logout endpoints are excluded so they don't cause loops.
+let _onUnauthorized = null;
+
+export function setUnauthorizedHandler(fn) {
+  _onUnauthorized = fn;
+}
+
+const _UNAUTH_EXCLUDED = ['/users/login', '/users/logout', '/users/me'];
+
+export function installFetchAuthInterceptor() {
+  if (typeof window === 'undefined' || window.__rfFetchPatched) return;
+  const originalFetch = window.fetch.bind(window);
+  window.__rfFetchPatched = true;
+  window.fetch = async (input, init) => {
+    const response = await originalFetch(input, init);
+    try {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      const isApi = url.includes('/api/');
+      const excluded = _UNAUTH_EXCLUDED.some((p) => url.includes(p));
+      if (response.status === 401 && isApi && !excluded && typeof _onUnauthorized === 'function') {
+        _onUnauthorized();
+      }
+    } catch (_) {
+      // Never let interceptor bookkeeping break the actual request.
+    }
+    return response;
+  };
+}
+
 export async function getInstallationHistory(serverId) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/installation-tasks`, {
     method: 'GET',

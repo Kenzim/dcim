@@ -27,8 +27,8 @@
       });
       isAuthenticated.set(true);
       loading = false;
-      // Redirect to admin panel
-      navigate('/admin');
+      // Route by role: admins to the admin panel, everyone else to the client portal.
+      navigate(result.is_admin ? '/admin' : '/client');
     } catch (err) {
       error = err.message || 'Login failed';
       console.error('Login error:', err);
