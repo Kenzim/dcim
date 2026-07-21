@@ -124,8 +124,8 @@ def test_installation_logs_rejects_invalid_token(client, db_session, mock_redis,
     assert response.status_code == 401
 
 
-def test_installation_logs_works_without_token(client, db_session, mock_redis, monkeypatch):
-    """Test that installation logs endpoint works without token (backward compatibility)"""
+def test_installation_logs_requires_token(client, db_session, mock_redis, monkeypatch):
+    """Installation logs endpoint must reject requests without a token."""
     import app.services.download_token_service as token_service_module
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     
@@ -167,7 +167,7 @@ def test_installation_logs_works_without_token(client, db_session, mock_redis, m
         template_id="test-template"
     )
     
-    # Upload logs without token (backward compatibility)
+    # Upload logs without token -> now rejected
     response = client.post(
         f"/api/servers/{server.id}/installation-tasks/{installation_task.id}/logs",
         json={
@@ -176,8 +176,8 @@ def test_installation_logs_works_without_token(client, db_session, mock_redis, m
         }
     )
     
-    # Should succeed (backward compatibility)
-    assert response.status_code == 200
+    # Should fail without a token
+    assert response.status_code == 401
 
 
 def test_installation_logs_validates_boot_task_match(client, db_session, mock_redis, monkeypatch):

@@ -161,14 +161,16 @@ async def update_installation_logs(
     server_id: int,
     task_id: int,
     log_data: InstallationTaskLogUpdate,
-    token: Optional[str] = Query(None, description="One-time download token"),
+    token: Optional[str] = Query(None, description="Download token bound to the boot task"),
     db: Session = Depends(get_db)
 ):
     """
     Update installation task logs.
     
-    This endpoint is called by the installation script to upload logs.
-    Requires a valid download token from the boot task for security.
+    This endpoint is called by the installation script to upload logs and
+    report install status (including "completed", which can schedule a
+    privileged boot-order fix). A valid download token bound to the task's
+    boot task is REQUIRED.
     """
     # Verify server exists
     server = ServerDAO.get_by_id(db, server_id)
@@ -193,17 +195,20 @@ async def update_installation_logs(
             detail="Installation task does not belong to this server"
         )
     
-    # Validate token if provided (recommended for security)
-    if token:
-        download_token_service = get_download_token_service()
-        # Validate token - allow any filename for log uploads
-        token_data = download_token_service.validate_token(token, f"logs-{task_id}")
-        if not token_data or token_data.get("boot_task_id") != task.boot_task_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired download token"
-            )
-        # Don't mark token as used for log uploads (can be used multiple times for logs)
+    # A valid download token is required. It may be reused for the duration of
+    # the install (logs are uploaded repeatedly), so it is not marked used.
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Download token required"
+        )
+    download_token_service = get_download_token_service()
+    token_data = download_token_service.validate_token(token, f"logs-{task_id}")
+    if not token_data or token_data.get("boot_task_id") != task.boot_task_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired download token"
+        )
     
     # Update logs (replace existing logs with new ones) and persist first
     task.logs = log_data.logs
