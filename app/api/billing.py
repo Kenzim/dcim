@@ -10,7 +10,7 @@ All routes are generic and work for any integration type (WHMCS, custom, etc.).
 import asyncio
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timezone
@@ -67,6 +67,7 @@ from app.services.service_resource import (
     vm_placement,
 )
 from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+from app.services.vm_strategy_executor import schedule_vm_auto_provision
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 import logging
 import os
@@ -129,6 +130,7 @@ def _billing_service_response(db: Session, service: Service) -> BillingServiceRe
         proxmox_vmid=vmid,
         vm_ip_allocation_id=vm_ip_allocation_id,
         vm_ip_address=vm_ip_address,
+        vm_guest_state=service.vm.guest_state.value if service.vm and service.vm.guest_state else None,
         status=service.status.value,
         description=service.description,
         config=service.config,
@@ -1076,10 +1078,17 @@ async def create_bare_metal_service(
 @router.post("/vm/services", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
 async def create_vm_service(
     body: BillingVmServiceCreate,
+    background_tasks: BackgroundTasks,
     integration: BillingIntegration = Depends(get_billing_integration),
     db: Session = Depends(get_db),
 ):
-    """Create a VM service (no RackFlow Server row; Proxmox placement on service_vm)."""
+    """
+    Create a VM service (no RackFlow Server row; Proxmox placement on service_vm).
+
+    When ``auto_provision`` is true (default) and a product/OS strategy is resolved, RackFlow
+    resolves placement (auto-places from inventory if node omitted), reserves a VMID, and
+    provisions the guest in the background. Poll ``GET /billing/services/{id}``.
+    """
     logger.info("Billing API: Creating VM service '%s' via integration '%s'", body.name, integration.name)
 
     if (body.service_config or {}).get("server_group_id"):
@@ -1177,6 +1186,7 @@ async def create_vm_service(
         "vm_ip_allocation_id": allocation.id,
         "vm_ip_address": allocation.ip_address,
     }
+    has_plan = False
     if body.product_code and effective_os_code:
         vm_plan = VMProvisioningService.plan_provisioning(
             db=db,
@@ -1187,6 +1197,7 @@ async def create_vm_service(
             context={"service_id": service.id, "vm_ip_allocation_id": allocation.id},
         )
         cfg["vm_plan"] = vm_plan
+        has_plan = True
     service.config = cfg
     ServiceDAO.update(db, service)
 
@@ -1203,6 +1214,16 @@ async def create_vm_service(
             "vm_ip_address": allocation.ip_address,
         },
     )
+
+    # Auto-provision requires a resolved OS strategy (vm_plan). Without one the
+    # service stays pending for the manual two-phase flow.
+    if body.auto_provision and has_plan:
+        try:
+            schedule_vm_auto_provision(db, service, background_tasks)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        logger.info("Billing API: auto-provisioning queued for VM service %s", service.id)
+
     return _billing_service_response(db, service)
 
 
@@ -1498,18 +1519,19 @@ async def power_control(
     )
 
     try:
-        # Prevent powering on suspended/terminated services.
-        # Also block if server is administratively disabled.
-        if action == "on":
+        # Any action that can leave the machine running (on/reboot/reset) is
+        # forbidden for suspended/terminated services; only "off" is allowed so
+        # a suspended box can still be powered down.
+        if action in ("on", "reboot", "reset"):
             if service.status in (ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Cannot power on server for a {service.status.value} service",
+                    detail=f"Cannot '{action}' server for a {service.status.value} service",
                 )
             if server is not None and not server.enabled:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Cannot power on an administratively disabled server",
+                    detail=f"Cannot '{action}' an administratively disabled server",
                 )
 
         plugin_instance, _srv = _billing_get_plugin_instance(db, service)
