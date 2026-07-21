@@ -1911,15 +1911,21 @@ async def get_temp_os_file(
             detail=f"Temporary OS '{os_id}' not found"
         )
     
-    file_path = os_dir / filename
-    
-    # Security: only allow files in the temp OS directory
-    if ".." in filename or "/" in filename:
+    # Security: only allow files directly in the temp OS directory
+    if ".." in filename or "/" in filename or "\\" in filename or "\x00" in filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid filename"
         )
-    
+
+    file_path = (os_dir / filename).resolve()
+    # Ensure the resolved file stays confined under the OS directory.
+    if os_dir.resolve() not in file_path.parents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename"
+        )
+
     if not file_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
