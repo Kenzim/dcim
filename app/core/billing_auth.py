@@ -3,6 +3,7 @@ API key authentication for billing integrations.
 
 External systems (WHMCS, etc.) authenticate using API keys stored in the database.
 """
+import hashlib
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -12,6 +13,16 @@ from app.core.database import get_db
 from app.models.billing_integration import BillingIntegration
 
 security = HTTPBearer(auto_error=False)
+
+
+def hash_api_key(api_key: str) -> str:
+    """Deterministic SHA-256 hash used to store/look up billing API keys.
+
+    Billing API keys are high-entropy random tokens, so a fast deterministic
+    hash is appropriate (and keeps the O(1) unique-index lookup) while ensuring
+    the plaintext is never persisted.
+    """
+    return hashlib.sha256((api_key or "").strip().encode("utf-8")).hexdigest()
 
 
 def get_billing_integration(
@@ -40,9 +51,9 @@ def get_billing_integration(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Find integration by API key
+    # Find integration by hashed API key
     integration = db.query(BillingIntegration).filter(
-        BillingIntegration.api_key == api_key,
+        BillingIntegration.api_key == hash_api_key(api_key),
         BillingIntegration.enabled == True
     ).first()
     

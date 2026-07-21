@@ -18,7 +18,11 @@ class BillingIntegration(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False, index=True)  # User-friendly name (e.g., "WHMCS Production")
     integration_type = Column(String(50), nullable=False, index=True)  # Type identifier (e.g., "whmcs", "custom")
-    api_key = Column(String(255), nullable=False, unique=True, index=True)  # API key for authentication
+    # SHA-256 hash of the API key (never the plaintext). The plaintext is shown
+    # only once at create/rotate time and cannot be recovered afterwards.
+    api_key = Column(String(255), nullable=False, unique=True, index=True)
+    # First few characters of the plaintext key, kept for a masked display only.
+    api_key_prefix = Column(String(16), nullable=True)
     enabled = Column(Boolean, default=True, nullable=False, index=True)
     config = Column(JSON, nullable=True)  # Integration-specific configuration (e.g., WHMCS API endpoint, credentials)
     description = Column(Text, nullable=True)  # Optional description

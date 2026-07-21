@@ -38,6 +38,7 @@ class BillingIntegrationResponse(BaseModel):
     id: int
     name: str
     integration_type: str
+    # Masked key for list/get; full plaintext ONLY in create/rotate responses.
     api_key: str
     enabled: bool
     config: Optional[dict] = None
@@ -49,6 +50,33 @@ class BillingIntegrationResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+def _masked_key(integration) -> str:
+    """A non-secret masked representation for list/get responses."""
+    prefix = getattr(integration, "api_key_prefix", None) or ""
+    return f"{prefix}\u2026" if prefix else "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+
+
+def _to_response(integration, reveal: bool = False) -> BillingIntegrationResponse:
+    """Build a response. Only create/rotate (reveal=True) include the plaintext."""
+    if reveal and getattr(integration, "plaintext_api_key", None):
+        api_key = integration.plaintext_api_key
+    else:
+        api_key = _masked_key(integration)
+    return BillingIntegrationResponse(
+        id=integration.id,
+        name=integration.name,
+        integration_type=integration.integration_type,
+        api_key=api_key,
+        enabled=integration.enabled,
+        config=integration.config,
+        description=integration.description,
+        created_at=integration.created_at.isoformat(),
+        updated_at=integration.updated_at.isoformat(),
+        last_used_at=integration.last_used_at.isoformat() if integration.last_used_at else None,
+        last_used_ip=integration.last_used_ip,
+    )
 
 
 @router.post("", response_model=BillingIntegrationResponse, status_code=status.HTTP_201_CREATED)
@@ -89,19 +117,8 @@ async def create_integration(
     
     logger.info(f"Created billing integration '{integration.name}' (ID: {integration.id}, Type: {integration.integration_type})")
     
-    return BillingIntegrationResponse(
-        id=integration.id,
-        name=integration.name,
-        integration_type=integration.integration_type,
-        api_key=integration.api_key,
-        enabled=integration.enabled,
-        config=integration.config,
-        description=integration.description,
-        created_at=integration.created_at.isoformat(),
-        updated_at=integration.updated_at.isoformat(),
-        last_used_at=integration.last_used_at.isoformat() if integration.last_used_at else None,
-        last_used_ip=integration.last_used_ip
-    )
+    # Reveal the plaintext key once, at creation time only.
+    return _to_response(integration, reveal=True)
 
 
 @router.get("", response_model=List[BillingIntegrationResponse])
@@ -112,22 +129,7 @@ async def list_integrations(
 ):
     """List all billing integrations"""
     integrations = BillingIntegrationDAO.get_all(db, enabled_only=enabled_only)
-    return [
-        BillingIntegrationResponse(
-            id=i.id,
-            name=i.name,
-            integration_type=i.integration_type,
-            api_key=i.api_key,
-            enabled=i.enabled,
-            config=i.config,
-            description=i.description,
-            created_at=i.created_at.isoformat(),
-            updated_at=i.updated_at.isoformat(),
-            last_used_at=i.last_used_at.isoformat() if i.last_used_at else None,
-            last_used_ip=i.last_used_ip
-        )
-        for i in integrations
-    ]
+    return [_to_response(i) for i in integrations]
 
 
 @router.get("/types", response_model=List[dict])
@@ -163,19 +165,7 @@ async def get_integration(
             detail="Integration not found"
         )
     
-    return BillingIntegrationResponse(
-        id=integration.id,
-        name=integration.name,
-        integration_type=integration.integration_type,
-        api_key=integration.api_key,
-        enabled=integration.enabled,
-        config=integration.config,
-        description=integration.description,
-        created_at=integration.created_at.isoformat(),
-        updated_at=integration.updated_at.isoformat(),
-        last_used_at=integration.last_used_at.isoformat() if integration.last_used_at else None,
-        last_used_ip=integration.last_used_ip
-    )
+    return _to_response(integration)
 
 
 @router.put("/{integration_id}", response_model=BillingIntegrationResponse)
@@ -217,19 +207,7 @@ async def update_integration(
     BillingIntegrationDAO.update(db, integration)
     db.refresh(integration)
     
-    return BillingIntegrationResponse(
-        id=integration.id,
-        name=integration.name,
-        integration_type=integration.integration_type,
-        api_key=integration.api_key,
-        enabled=integration.enabled,
-        config=integration.config,
-        description=integration.description,
-        created_at=integration.created_at.isoformat(),
-        updated_at=integration.updated_at.isoformat(),
-        last_used_at=integration.last_used_at.isoformat() if integration.last_used_at else None,
-        last_used_ip=integration.last_used_ip
-    )
+    return _to_response(integration)
 
 
 @router.post("/{integration_id}/rotate-key", response_model=BillingIntegrationResponse)
@@ -249,19 +227,8 @@ async def rotate_api_key(
     integration = BillingIntegrationDAO.rotate_api_key(db, integration)
     logger.info(f"Rotated API key for integration '{integration.name}' (ID: {integration.id})")
     
-    return BillingIntegrationResponse(
-        id=integration.id,
-        name=integration.name,
-        integration_type=integration.integration_type,
-        api_key=integration.api_key,
-        enabled=integration.enabled,
-        config=integration.config,
-        description=integration.description,
-        created_at=integration.created_at.isoformat(),
-        updated_at=integration.updated_at.isoformat(),
-        last_used_at=integration.last_used_at.isoformat() if integration.last_used_at else None,
-        last_used_ip=integration.last_used_ip
-    )
+    # Reveal the new plaintext key once, in the rotate response only.
+    return _to_response(integration, reveal=True)
 
 
 @router.delete("/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)

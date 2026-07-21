@@ -104,9 +104,10 @@ def get_current_user(
     if user_info:
         return user_info
     
-    # If Redis token auth failed, try API key authentication
+    # If Redis token auth failed, try API key authentication (keys are hashed)
+    from app.core.billing_auth import hash_api_key
     integration = db.query(BillingIntegration).filter(
-        BillingIntegration.api_key == token,
+        BillingIntegration.api_key == hash_api_key(token),
         BillingIntegration.enabled == True
     ).first()
     

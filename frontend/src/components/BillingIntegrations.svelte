@@ -25,8 +25,9 @@
     config: {}
   };
   let formError = null;
-  let showingApiKey = {};
   let rotatingKey = {};
+  // One-time reveal of a newly created/rotated key.
+  let newKeyModal = { open: false, name: '', apiKey: '', copied: false };
 
   onMount(async () => {
     await Promise.all([loadIntegrations(), loadIntegrationTypes()]);
@@ -105,11 +106,15 @@
       formError = null;
       if (editingIntegration) {
         await updateBillingIntegration(editingIntegration.id, formData);
+        closeModal();
+        await loadIntegrations();
       } else {
-        await createBillingIntegration(formData);
+        const created = await createBillingIntegration(formData);
+        closeModal();
+        await loadIntegrations();
+        // Show the plaintext key once; it cannot be retrieved again.
+        showNewKey(created.name, created.api_key);
       }
-      closeModal();
-      await loadIntegrations();
     } catch (err) {
       formError = err.message;
     }
@@ -128,47 +133,38 @@
     }
   }
 
-  function toggleApiKey(integrationId) {
-    showingApiKey[integrationId] = !showingApiKey[integrationId];
-    showingApiKey = showingApiKey; // Trigger reactivity
+  function showNewKey(name, apiKey) {
+    newKeyModal = { open: true, name, apiKey, copied: false };
   }
 
-  async function copyApiKey(apiKey) {
+  function closeNewKeyModal() {
+    newKeyModal = { open: false, name: '', apiKey: '', copied: false };
+  }
+
+  async function copyNewKey() {
+    const apiKey = newKeyModal.apiKey;
     try {
-      // Try modern clipboard API first
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(apiKey);
-        alert('API key copied to clipboard!');
+        newKeyModal = { ...newKeyModal, copied: true };
         return;
       }
-      
-      // Fallback for browsers that don't support clipboard API
-      // Create a temporary textarea element
       const textarea = document.createElement('textarea');
       textarea.value = apiKey;
       textarea.style.position = 'fixed';
       textarea.style.left = '-999999px';
-      textarea.style.top = '-999999px';
       document.body.appendChild(textarea);
       textarea.focus();
       textarea.select();
-      
       try {
-        const successful = document.execCommand('copy');
-        if (successful) {
-          alert('API key copied to clipboard!');
-        } else {
-          throw new Error('execCommand copy failed');
-        }
-      } catch (e) {
-        // If execCommand fails, show prompt as last resort
-        prompt('Copy this API key (Ctrl+C to copy):', apiKey);
+        document.execCommand('copy');
+        newKeyModal = { ...newKeyModal, copied: true };
       } finally {
         document.body.removeChild(textarea);
       }
     } catch (err) {
-      // If all else fails, show the key in a prompt so user can manually copy
-      prompt('Copy this API key (Ctrl+C to copy):', apiKey);
+      // Leave the key visible in the modal for manual copy.
+      console.error('Copy failed', err);
     }
   }
 
@@ -181,7 +177,8 @@
       rotatingKey[integration.id] = true;
       const updated = await rotateBillingIntegrationKey(integration.id);
       await loadIntegrations();
-      alert('API key rotated successfully! New key: ' + updated.api_key);
+      // Show the new plaintext key once; it cannot be retrieved again.
+      showNewKey(integration.name, updated.api_key);
     } catch (err) {
       alert('Failed to rotate API key: ' + err.message);
     } finally {
@@ -240,26 +237,7 @@
             <div class="detail-item">
               <span class="detail-label">API Key:</span>
               <div class="api-key-container">
-                {#if showingApiKey[integration.id]}
-                  <code class="api-key">{integration.api_key}</code>
-                  <button class="btn-icon-small" on:click={() => copyApiKey(integration.api_key)} title="Copy">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                  </button>
-                {:else}
-                  <span class="api-key-hidden">••••••••••••••••</span>
-                {/if}
-                <button class="btn-icon-small" on:click={() => toggleApiKey(integration.id)} title={showingApiKey[integration.id] ? 'Hide' : 'Show'}>
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    {#if showingApiKey[integration.id]}
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.367 5.127m0 0L21 21" />
-                    {:else}
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    {/if}
-                  </svg>
-                </button>
+                <span class="api-key-hidden" title="Full key is shown only once, when created or rotated">{integration.api_key}</span>
               </div>
             </div>
             
@@ -342,6 +320,25 @@
       <Button variant="primary" on:click={handleSubmit}>
         {editingIntegration ? 'Update' : 'Create'}
       </Button>
+    </svelte:fragment>
+  </Modal>
+{/if}
+
+{#if newKeyModal.open}
+  <Modal title="Copy your API key now" onClose={closeNewKeyModal}>
+    <p class="new-key-warning">
+      This is the only time the full API key for <strong>{newKeyModal.name}</strong>
+      will be shown. Store it securely — it cannot be retrieved later. If you lose
+      it, rotate the key to generate a new one.
+    </p>
+    <div class="new-key-box">
+      <code class="new-key-value">{newKeyModal.apiKey}</code>
+    </div>
+    <svelte:fragment slot="footer">
+      <Button variant="secondary" on:click={copyNewKey}>
+        {newKeyModal.copied ? 'Copied!' : 'Copy to clipboard'}
+      </Button>
+      <Button variant="primary" on:click={closeNewKeyModal}>Done</Button>
     </svelte:fragment>
   </Modal>
 {/if}
@@ -487,6 +484,26 @@
     font-family: 'Courier New', monospace;
     font-size: 12px;
     color: var(--text-secondary);
+  }
+
+  .new-key-warning {
+    margin: 0 0 16px 0;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .new-key-box {
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    padding: 12px;
+    word-break: break-all;
+  }
+
+  .new-key-value {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    color: var(--text-primary);
   }
 
   .btn-icon-small {
