@@ -113,6 +113,37 @@
   let installationLogsView = null; // { id, os_name, template_id, status, logs, error_message, created_at }
   $: pendingInstallationCount = (installationHistory || []).filter(e => e.status === 'pending').length;
 
+  // Template parameter values whose key looks like a secret are masked in the UI
+  // until the operator explicitly reveals them. `revealedParams` tracks which
+  // (row identity + key) pairs are currently shown in plaintext.
+  const SENSITIVE_PARAM_RE = /password|secret|token|api[_-]?key/i;
+  let revealedParams = {};
+
+  function isSensitiveParam(key) {
+    return SENSITIVE_PARAM_RE.test(String(key));
+  }
+
+  function paramValueString(val) {
+    return typeof val === 'object' ? JSON.stringify(val) : String(val);
+  }
+
+  function paramRevealKey(rowId, key) {
+    return `${rowId}::${key}`;
+  }
+
+  function toggleParamReveal(rowId, key) {
+    const id = paramRevealKey(rowId, key);
+    revealedParams = { ...revealedParams, [id]: !revealedParams[id] };
+  }
+
+  async function copyParamValue(val) {
+    try {
+      await navigator.clipboard.writeText(paramValueString(val));
+    } catch (e) {
+      console.error('Copy failed:', e);
+    }
+  }
+
   $: if (server) {
     generalNotesDraft = server.description ?? '';
     generalCommentsDraft = server.comments ?? '';
@@ -2266,11 +2297,20 @@
                         · {mostRecent.status?.replace('_', ' ') || '—'}
                       </span>
                       {#if mostRecent.template_parameters && Object.keys(mostRecent.template_parameters).length > 0}
+                        {@const recentRowId = mostRecent.id ?? mostRecent.created_at ?? 'recent'}
                         <dl class="installation-credentials-params">
                           {#each Object.entries(mostRecent.template_parameters) as [paramKey, paramVal]}
                             <div class="param-row">
                               <dt>{paramKey}</dt>
-                              <dd>{typeof paramVal === 'object' ? JSON.stringify(paramVal) : String(paramVal)}</dd>
+                              {#if isSensitiveParam(paramKey)}
+                                <dd class="param-secret">
+                                  <span class="param-secret-value">{revealedParams[paramRevealKey(recentRowId, paramKey)] ? paramValueString(paramVal) : '••••••••'}</span>
+                                  <button type="button" class="param-secret-btn" on:click={() => toggleParamReveal(recentRowId, paramKey)}>{revealedParams[paramRevealKey(recentRowId, paramKey)] ? 'Hide' : 'Reveal'}</button>
+                                  <button type="button" class="param-secret-btn" on:click={() => copyParamValue(paramVal)}>Copy</button>
+                                </dd>
+                              {:else}
+                                <dd>{paramValueString(paramVal)}</dd>
+                              {/if}
                             </div>
                           {/each}
                         </dl>
@@ -2296,11 +2336,20 @@
                             </span>
                           </div>
                           {#if entry.template_parameters && Object.keys(entry.template_parameters).length > 0}
+                            {@const entryRowId = entry.id ?? entry.created_at ?? 'entry'}
                             <dl class="installation-credentials-params">
                               {#each Object.entries(entry.template_parameters) as [paramKey, paramVal]}
                                 <div class="param-row">
                                   <dt>{paramKey}</dt>
-                                  <dd>{typeof paramVal === 'object' ? JSON.stringify(paramVal) : String(paramVal)}</dd>
+                                  {#if isSensitiveParam(paramKey)}
+                                    <dd class="param-secret">
+                                      <span class="param-secret-value">{revealedParams[paramRevealKey(entryRowId, paramKey)] ? paramValueString(paramVal) : '••••••••'}</span>
+                                      <button type="button" class="param-secret-btn" on:click={() => toggleParamReveal(entryRowId, paramKey)}>{revealedParams[paramRevealKey(entryRowId, paramKey)] ? 'Hide' : 'Reveal'}</button>
+                                      <button type="button" class="param-secret-btn" on:click={() => copyParamValue(paramVal)}>Copy</button>
+                                    </dd>
+                                  {:else}
+                                    <dd>{paramValueString(paramVal)}</dd>
+                                  {/if}
                                 </div>
                               {/each}
                             </dl>
@@ -5011,6 +5060,33 @@
     margin: 0;
     word-break: break-all;
     color: var(--text-primary);
+  }
+
+  .installation-credentials-params dd.param-secret {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .param-secret-value {
+    font-family: var(--font-mono, monospace);
+    word-break: break-all;
+  }
+
+  .param-secret-btn {
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 1px 8px;
+    cursor: pointer;
+  }
+
+  .param-secret-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent-color);
   }
 
   .installation-credentials-empty {
