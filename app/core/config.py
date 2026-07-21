@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     
     # Auth settings
     auth_token_expire_seconds: int = 864000  # 10 days
+
+    # Trust the X-Forwarded-For header when determining the caller's source IP.
+    # This must ONLY be enabled when the app sits behind a trusted reverse proxy
+    # that sets/overwrites the header; otherwise clients can spoof their identity
+    # (e.g. to fetch another server's cloud-init credentials).
+    trust_x_forwarded_for: bool = False
     
     # Initial admin (created only when no users exist in DB)
     initial_admin_username: Optional[str] = None

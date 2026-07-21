@@ -1,9 +1,18 @@
+import pytest
+
+from app.core.config import settings
 from app.dao.boot_task_dao import BootTaskDAO
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.network_port_dao import NetworkPortDAO
 from app.models.location import Location
 from app.models.server import Server
 from app.models.boot_task import BootType
+
+
+@pytest.fixture(autouse=True)
+def _trust_forwarded_for(monkeypatch):
+    """These tests simulate a trusted reverse proxy via X-Forwarded-For."""
+    monkeypatch.setattr(settings, "trust_x_forwarded_for", True)
 
 
 def _create_server(db_session, *, name: str, server_ip: str) -> Server:
@@ -115,3 +124,62 @@ def test_cloud_init_user_data_returns_404_without_install_context(client, db_ses
     response = client.get("/api/servers/interaction/cloud-init/user-data", headers=headers)
     assert response.status_code == 404
     assert "No installation context found" in response.json()["detail"]
+
+
+def test_cloud_init_ignores_forwarded_for_when_untrusted(client, db_session, monkeypatch):
+    """With trust disabled, a spoofed X-Forwarded-For must not resolve a server."""
+    monkeypatch.setattr(settings, "trust_x_forwarded_for", False)
+    server = _create_server(db_session, name="cloud-init-spoof", server_ip="192.0.2.77")
+    NetworkPortDAO.create(
+        db_session,
+        server_id=server.id,
+        name="eth0",
+        speed_mbps=1000,
+        mac_address="00:99:88:77:66:55",
+        pxe_boot=True,
+        pxe_ip="10.9.9.9",
+    )
+    boot_task = BootTaskDAO.create(
+        db_session,
+        server_id=server.id,
+        boot_type=BootType.TEMP_OS,
+        temp_os_id="debian-live",
+        description="spoof test",
+    )
+    InstallationTaskDAO.create(
+        db_session,
+        server_id=server.id,
+        boot_task_id=boot_task.id,
+        template_id="ubuntu-cloud-image",
+        template_parameters={"username": "u", "password": "Secret123!"},
+        os_name="Ubuntu Cloud Image",
+    )
+
+    # Attacker spoofs the victim's PXE IP; must not be honored.
+    headers = {"X-Forwarded-For": "10.9.9.9"}
+    response = client.get("/api/servers/interaction/cloud-init/user-data", headers=headers)
+    assert response.status_code == 404
+
+
+def test_cloud_init_user_data_includes_chpasswd_type_text(client, db_session):
+    server = _create_server(db_session, name="cloud-init-type", server_ip="192.0.2.90")
+    boot_task = BootTaskDAO.create(
+        db_session,
+        server_id=server.id,
+        boot_type=BootType.TEMP_OS,
+        temp_os_id="debian-live",
+        description="type text",
+    )
+    InstallationTaskDAO.create(
+        db_session,
+        server_id=server.id,
+        boot_task_id=boot_task.id,
+        template_id="ubuntu-cloud-image",
+        template_parameters={"username": "u", "password": "Secret123!"},
+        os_name="Ubuntu Cloud Image",
+    )
+
+    headers = {"X-Forwarded-For": "192.0.2.90"}
+    response = client.get("/api/servers/interaction/cloud-init/user-data", headers=headers)
+    assert response.status_code == 200
+    assert "type: text" in response.text
