@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # For per-location service instances: encrypt stored API keys so backend can call runners.
     # Must be a base64-encoded 32-byte key. Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     service_instance_encryption_key: Optional[str] = None
+    # When True, creating/updating a service instance API key without a configured
+    # encryption key is rejected (recommended for production). Left False so dev/tests
+    # can run without a key; compose sets the key so this can be safely enabled.
+    require_service_instance_encryption: bool = False
 
     class Config:
         env_file = ".env"

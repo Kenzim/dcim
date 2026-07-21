@@ -1,11 +1,61 @@
 """Data access for service instances (per-location DHCP/TFTP runners).
 
-API keys are stored in plaintext in the database so that deployments
-do not depend on an additional encryption key.
+API keys are encrypted at rest with Fernet when SERVICE_INSTANCE_ENCRYPTION_KEY
+is configured. Legacy plaintext values remain readable and are transparently
+re-encrypted the next time they are successfully verified.
 """
+import logging
+import secrets
 from typing import List, Optional
+
 from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.core.service_instance_crypto import (
+    decrypt_api_key,
+    encrypt_api_key,
+    is_encryption_configured,
+)
 from app.models.service_instance import ServiceInstance
+
+logger = logging.getLogger(__name__)
+
+
+def _encode_api_key(api_key: Optional[str]) -> Optional[str]:
+    """Return the value to persist for a given plaintext API key.
+
+    Encrypts when an encryption key is configured. When it is not configured,
+    either stores plaintext (dev/tests) or raises if the deployment requires
+    encryption.
+    """
+    if api_key is None:
+        return None
+    if api_key == "":
+        return ""
+    if is_encryption_configured():
+        encrypted = encrypt_api_key(api_key)
+        if encrypted:
+            return encrypted
+        # Cipher configured but encryption failed - do not silently store plaintext.
+        raise ValueError("Failed to encrypt service instance API key")
+    if settings.require_service_instance_encryption:
+        raise ValueError(
+            "SERVICE_INSTANCE_ENCRYPTION_KEY must be configured to store service "
+            "instance API keys"
+        )
+    return api_key
+
+
+def _decode_api_key(stored: Optional[str]) -> Optional[str]:
+    """Return the plaintext API key from a stored (possibly encrypted) value."""
+    if not stored:
+        return None
+    if is_encryption_configured():
+        decrypted = decrypt_api_key(stored)
+        if decrypted is not None:
+            return decrypted
+        # Not a valid ciphertext for the current key -> treat as legacy plaintext.
+    return stored
 
 
 class ServiceInstanceDAO:
@@ -23,7 +73,7 @@ class ServiceInstanceDAO:
             service_type=service_type,
             name=name,
             base_url=base_url.rstrip("/"),
-            api_key_encrypted=(api_key or ""),
+            api_key_encrypted=(_encode_api_key(api_key) or ""),
         )
         db.add(row)
         db.commit()
@@ -54,8 +104,8 @@ class ServiceInstanceDAO:
 
     @staticmethod
     def get_api_key(row: ServiceInstance) -> Optional[str]:
-        """Return the stored API key (plaintext)."""
-        return row.api_key_encrypted or None
+        """Return the decrypted API key (or None)."""
+        return _decode_api_key(row.api_key_encrypted or None)
 
     @staticmethod
     def update(
@@ -70,7 +120,7 @@ class ServiceInstanceDAO:
         if base_url is not None:
             row.base_url = base_url.rstrip("/")
         if api_key is not None:
-            row.api_key_encrypted = api_key
+            row.api_key_encrypted = _encode_api_key(api_key) or ""
         db.commit()
         db.refresh(row)
         return row
@@ -94,11 +144,24 @@ class ServiceInstanceDAO:
         return False
 
     @staticmethod
-    def verify_api_key(row: ServiceInstance, api_key: str) -> bool:
-        """Verify provided api_key matches stored (simple string compare).
+    def verify_api_key(row: ServiceInstance, api_key: str, db: Optional[Session] = None) -> bool:
+        """Verify provided api_key matches the stored key (constant-time compare).
 
-        When no key is stored, verification always fails; callers can choose
-        to skip verification in that case.
+        When no key is stored, verification always fails. If a db session is
+        provided and the stored value is legacy plaintext, it is transparently
+        re-encrypted on a successful verify.
         """
-        stored = row.api_key_encrypted or ""
-        return stored != "" and stored == (api_key or "")
+        stored_plain = ServiceInstanceDAO.get_api_key(row)
+        if not stored_plain:
+            return False
+        ok = secrets.compare_digest(stored_plain, api_key or "")
+        if ok and db is not None and is_encryption_configured():
+            # Re-encrypt legacy plaintext (stored value not decryptable == plaintext).
+            if decrypt_api_key(row.api_key_encrypted or "") is None:
+                try:
+                    row.api_key_encrypted = _encode_api_key(stored_plain) or ""
+                    db.commit()
+                except Exception as e:  # pragma: no cover - best effort
+                    logger.warning("Failed to re-encrypt legacy API key: %s", e)
+                    db.rollback()
+        return ok

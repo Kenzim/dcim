@@ -22,6 +22,9 @@ services:
       DHCP_CONFIG_FILE_PATH: /shared/dhcp/dhcpd.conf
       DHCP_LEASE_FILE_PATH: /shared/dhcp/dhcpd.leases
       TFTP_ROOT_DIRECTORY: /shared/tftp
+      # Encrypt per-location service-instance API keys at rest (required in prod).
+      SERVICE_INSTANCE_ENCRYPTION_KEY: ${SERVICE_INSTANCE_ENCRYPTION_KEY:?set SERVICE_INSTANCE_ENCRYPTION_KEY in .env}
+      REQUIRE_SERVICE_INSTANCE_ENCRYPTION: "true"
     volumes:
       - dhcp_tftp_shared:/shared
     depends_on:
