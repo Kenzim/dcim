@@ -250,8 +250,10 @@ function rackflow_TestConnection(array $params)
         curl_setopt($ch, CURLOPT_URL, $testUrl);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        // Verify TLS: the RackFlow URL must present a valid certificate (use a
+        // publicly-trusted cert or add your CA to the WHMCS host's CA bundle).
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
         curl_setopt($ch, CURLOPT_HTTPHEADER, array(
             'Authorization: Bearer ' . $apiKey,
             'Content-Type: application/json',
@@ -355,8 +357,10 @@ function rackflow_apiCall($apiUrl, $apiKey, $method, $endpoint, $data = null)
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    // Verify TLS: the RackFlow URL must present a valid certificate (use a
+    // publicly-trusted cert or add your CA to the WHMCS host's CA bundle).
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
     
     $headers = array(
         'Authorization: Bearer ' . $apiKey,
@@ -526,6 +530,15 @@ function rackflow_CreateAccount(array $params)
             if (isset($params['configoptions']['proxmox_vmid']) && $params['configoptions']['proxmox_vmid'] !== '') {
                 $serviceData['proxmox_vmid'] = (int)$params['configoptions']['proxmox_vmid'];
             }
+            // Auto-provision (default on): RackFlow places, reserves a VMID, and provisions the
+            // guest in the background. Add an "auto_provision" config option set to No/0/off to
+            // instead create a pending VM for the manual two-phase flow.
+            $autoProvision = true;
+            if (isset($params['configoptions']['auto_provision']) && $params['configoptions']['auto_provision'] !== '') {
+                $apVal = strtolower((string)$params['configoptions']['auto_provision']);
+                $autoProvision = !in_array($apVal, array('0', 'no', 'off', 'false'), true);
+            }
+            $serviceData['auto_provision'] = $autoProvision;
         } else {
             $serviceData = array(
                 'name' => $serviceName,
