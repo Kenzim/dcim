@@ -1,23 +1,37 @@
 <script>
   import { onMount } from 'svelte';
   import { isAuthenticated, checkAuth } from '../stores/auth.js';
-  
+  import { navigate } from '../lib/router.js';
+  import ClientServices from '../components/ClientServices.svelte';
+
+  let authChecked = false;
+
   onMount(async () => {
     await checkAuth();
+    authChecked = true;
+    if (!$isAuthenticated && window.location.pathname !== '/login') {
+      navigate('/login');
+    }
   });
 </script>
 
-<div class="client-container">
-  <div class="client-content">
-    <h1>Client Portal</h1>
-    <p>This section is under development.</p>
-    {#if $isAuthenticated}
-      <a href="/admin" class="btn-link">Go to Admin Panel</a>
-    {:else}
-      <a href="/login" class="btn-link">Login</a>
-    {/if}
+{#if !authChecked}
+  <div class="client-container">
+    <div class="client-content">
+      <p>Loading...</p>
+    </div>
   </div>
-</div>
+{:else if $isAuthenticated}
+  <ClientServices />
+{:else}
+  <div class="client-container">
+    <div class="client-content">
+      <h1>Client Portal</h1>
+      <p>Please sign in to view your services.</p>
+      <a href="/login" class="btn-link">Login</a>
+    </div>
+  </div>
+{/if}
 
 <style>
   .client-container {

@@ -22,7 +22,6 @@
   import UnifiedServices from '../components/UnifiedServices.svelte';
   import ProxmoxServices from '../components/ProxmoxServices.svelte';
   import BareMetalServices from '../components/BareMetalServices.svelte';
-  import ClientServices from '../components/ClientServices.svelte';
   import VMServiceDetail from '../components/VMServiceDetail.svelte';
   import BareMetalServiceDetail from '../components/BareMetalServiceDetail.svelte';
   import Scripts from '../components/Scripts.svelte';
@@ -49,6 +48,10 @@
   onMount(async () => {
     await checkAuth();
     authChecked = true;
+    // Non-admins must not see the admin panel; send them to the client portal.
+    if ($isAuthenticated && !$user?.is_admin) {
+      navigate('/client');
+    }
   });
 
   // Get current route name from location
@@ -172,7 +175,9 @@
   </div>
 {:else if $isAuthenticated}
   {#if !$user?.is_admin}
-    <ClientServices />
+    <div class="loading-container">
+      <p>Redirecting...</p>
+    </div>
   {:else}
   <div class="admin-container">
     <Sidebar />

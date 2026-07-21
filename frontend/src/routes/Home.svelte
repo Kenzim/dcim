@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { isAuthenticated, checkAuth } from '../stores/auth.js';
+  import { isAuthenticated, user, checkAuth } from '../stores/auth.js';
   import { navigate } from '../lib/router.js';
   
   onMount(async () => {
@@ -8,7 +8,7 @@
   });
   
   function handleAdminLogin() {
-    navigate('/admin');
+    navigate('/login');
   }
 </script>
 
@@ -25,10 +25,12 @@
     </div>
     
     <div class="home-actions">
-      {#if $isAuthenticated}
+      {#if $isAuthenticated && $user?.is_admin}
         <a href="/admin" class="btn-primary">Go to Admin Panel</a>
+      {:else if $isAuthenticated}
+        <a href="/client" class="btn-primary">Go to My Services</a>
       {:else}
-        <button class="btn-primary" on:click={handleAdminLogin}>Admin Login</button>
+        <button class="btn-primary" on:click={handleAdminLogin}>Login</button>
       {/if}
       <a href="/client" class="btn-secondary">Client Portal</a>
     </div>
