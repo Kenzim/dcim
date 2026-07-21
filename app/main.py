@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.redis_notifications import setup_keyspace_notifications, start_keyspace_notification_listener
 import asyncio
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -84,47 +85,47 @@ app = FastAPI(
 )
 
 
+# Field names whose submitted value must never be logged or echoed back.
+_SENSITIVE_LOC_RE = re.compile(r"password|secret|token|api[_-]?key|credential", re.IGNORECASE)
+
+
+def _loc_is_sensitive(loc) -> bool:
+    for part in loc or ():
+        if isinstance(part, str) and _SENSITIVE_LOC_RE.search(part):
+            return True
+    return False
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Handle Pydantic validation errors with detailed logging"""
-    logger.error(f"Validation error on {request.method} {request.url.path}")
-    
-    # Convert errors to JSON-serializable format
-    # exc.errors() may contain non-serializable objects (like ValueError) in ctx field
-    errors = exc.errors()
-    serializable_errors = []
-    for error in errors:
-        serializable_error = {}
-        for key, value in error.items():
-            if isinstance(value, Exception):
-                # Convert exception objects to strings
-                serializable_error[key] = str(value)
-            elif isinstance(value, dict):
-                # Recursively handle nested dicts (like ctx field)
-                serializable_error[key] = {
-                    k: str(v) if isinstance(v, Exception) else v
-                    for k, v in value.items()
-                }
-            else:
-                serializable_error[key] = value
-        serializable_errors.append(serializable_error)
-    
-    logger.error(f"Validation errors: {serializable_errors}")
-    
-    try:
-        request_body = await request.body()
-        body_str = request_body.decode('utf-8', errors='replace') if request_body else ""
-    except Exception:
-        body_str = ""
-    
-    logger.error(f"Request body: {body_str}")
-    
+    """Handle Pydantic validation errors without leaking submitted values.
+
+    The raw request body and per-field ``input`` values are intentionally
+    dropped: they can contain plaintext passwords or tokens. We return the
+    field location, error type, and message only, and redact the message for
+    fields whose name looks sensitive.
+    """
+    safe_errors = []
+    for error in exc.errors():
+        loc = tuple(error.get("loc", ()))
+        sensitive = _loc_is_sensitive(loc)
+        safe_errors.append({
+            "loc": [str(p) for p in loc],
+            "type": error.get("type", "value_error"),
+            "msg": "invalid value" if sensitive else str(error.get("msg", "invalid value")),
+        })
+
+    error_codes = [(e["type"], "/".join(e["loc"])) for e in safe_errors]
+    logger.warning(
+        "Validation error on %s %s: %s",
+        request.method,
+        request.url.path,
+        error_codes,
+    )
+
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={
-            "detail": serializable_errors,
-            "body": body_str
-        }
+        content={"detail": safe_errors},
     )
 
 # Create API router with /api prefix
