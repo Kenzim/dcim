@@ -138,9 +138,11 @@ class ConfigWriteBody(BaseModel):
 @app.put("/config")
 async def put_config(body: ConfigWriteBody, auth: None = Depends(_require_api_key)):
     """Write a file under TFTP root. Path is relative; content is base64."""
-    root = Path(TFTP_ROOT)
+    root = Path(TFTP_ROOT).resolve()
     target = (root / body.path).resolve()
-    if not str(target).startswith(str(root.resolve())):
+    # Confine writes to the TFTP root. A string startswith() check is unsafe
+    # (e.g. "/shared/tftp" is a prefix of "/shared/tftp-evil"); compare paths.
+    if target != root and root not in target.parents:
         raise HTTPException(status_code=400, detail="Path escapes TFTP root")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
