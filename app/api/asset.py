@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.core.database import get_db
-from app.core.auth import require_admin
+from app.core.auth import require_admin, get_current_user
 from app.dao.asset_dao import AssetDAO
 from app.models.asset import AssetLabel
 from app.models.server import Server
@@ -21,15 +21,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
+# SVG is intentionally excluded: it can carry embedded scripts and is an XSS
+# vector when served inline from the same origin.
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 EXTENSION_TO_MEDIA_TYPE = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".gif": "image/gif",
     ".webp": "image/webp",
-    ".svg": "image/svg+xml",
 }
+# Media types safe to render inline in the browser. Anything else (including
+# legacy SVGs already stored) is served as a download to neutralize XSS.
+INLINE_SAFE_MEDIA_TYPES = set(EXTENSION_TO_MEDIA_TYPE.values())
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 ASSET_NOT_FOUND = "Asset not found"
 
@@ -47,10 +51,11 @@ class AssetResponse(BaseModel):
 
 @router.get("", response_model=List[AssetResponse])
 def list_assets(
+    auth: Annotated[dict, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     label: Optional[str] = None,
 ):
-    """List assets, optionally filtered by label. No auth required for listing (for picker UIs)."""
+    """List assets, optionally filtered by label. Requires authentication."""
     label_enum = None
     if label is not None:
         try:
@@ -82,9 +87,10 @@ def list_labels():
 @router.get("/{asset_id}", response_model=AssetResponse)
 def get_asset(
     asset_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Get a single asset by ID."""
+    """Get a single asset by ID. Requires authentication."""
     asset = AssetDAO.get_by_id(db, asset_id)
     if not asset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ASSET_NOT_FOUND)
@@ -100,9 +106,10 @@ def get_asset(
 @router.get("/{asset_id}/file")
 def serve_asset_file(
     asset_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Serve the asset image from DB."""
+    """Serve the asset image from DB. Requires authentication."""
     asset = AssetDAO.get_by_id(db, asset_id)
     if not asset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ASSET_NOT_FOUND)
@@ -110,11 +117,18 @@ def serve_asset_file(
     if not content or len(content) == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset has no content")
     media_type = getattr(asset, "content_type", None) or "application/octet-stream"
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Content-Disposition": f"inline; filename=\"{asset.filename}\""},
-    )
+
+    # Only render known-safe raster images inline. Everything else (SVG, unknown
+    # types) is forced to download and served with a restrictive CSP + nosniff so
+    # a malicious upload can't execute script in the app's origin.
+    inline = media_type in INLINE_SAFE_MEDIA_TYPES
+    disposition = "inline" if inline else "attachment"
+    headers = {
+        "Content-Disposition": f"{disposition}; filename=\"{asset.filename}\"",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+    }
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 @router.post("", response_model=AssetResponse, status_code=status.HTTP_201_CREATED)

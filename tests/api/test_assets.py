@@ -32,15 +32,55 @@ def _create_server_with_preview(db_session, preview_asset_id: int) -> Server:
     return server
 
 
-def test_list_labels_and_invalid_label_filter(client):
+def test_list_labels_and_invalid_label_filter(client, test_admin_user):
     labels = client.get("/api/assets/labels")
     assert labels.status_code == 200
     label_values = {row["value"] for row in labels.json()}
     assert "generic" in label_values
 
-    bad = client.get("/api/assets?label=does-not-exist")
+    headers = _admin_auth_headers(client, test_admin_user)
+    bad = client.get("/api/assets?label=does-not-exist", headers=headers)
     assert bad.status_code == 400
     assert "Invalid label" in bad.json()["detail"]
+
+
+def test_asset_endpoints_require_authentication(client, db_session, test_admin_user):
+    # Seed an asset so the file/detail routes have something to resolve.
+    headers = _admin_auth_headers(client, test_admin_user)
+    upload = client.post(
+        "/api/assets",
+        files={"file": ("logo.png", b"\x89PNG\r\n\x1a\npixels", "image/png")},
+        data={"label": "generic"},
+        headers=headers,
+    )
+    assert upload.status_code == 201
+    asset_id = upload.json()["id"]
+
+    # Drop the session cookie set by login so the calls are truly anonymous.
+    client.cookies.clear()
+    assert client.get("/api/assets").status_code == 401
+    assert client.get(f"/api/assets/{asset_id}").status_code == 401
+    assert client.get(f"/api/assets/{asset_id}/file").status_code == 401
+
+
+def test_serve_asset_forces_download_for_svg(client, db_session, test_admin_user):
+    from app.dao.asset_dao import AssetDAO
+    from app.models.asset import AssetLabel
+
+    asset = AssetDAO.create(
+        db_session,
+        filename="evil.svg",
+        label=AssetLabel.GENERIC,
+        description=None,
+        content=b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>",
+        content_type="image/svg+xml",
+    )
+    headers = _admin_auth_headers(client, test_admin_user)
+    served = client.get(f"/api/assets/{asset.id}/file", headers=headers)
+    assert served.status_code == 200
+    assert served.headers["content-disposition"].startswith("attachment")
+    assert served.headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'none'" in served.headers["content-security-policy"]
 
 
 def test_upload_requires_admin(client):
