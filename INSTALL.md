@@ -72,6 +72,17 @@ TFTP_RUNNER_API_KEY=$(openssl rand -hex 32)
 
 For isolated local development only, you may set `ALLOW_UNAUTHENTICATED=true` on a runner to disable the check; never do this in production.
 
+#### Service-instance key encryption (required)
+
+Per-location service-instance API keys are encrypted at rest with Fernet. The app compose requires `SERVICE_INSTANCE_ENCRYPTION_KEY` and enables `REQUIRE_SERVICE_INSTANCE_ENCRYPTION=true`, so creating/updating a key fails unless the encryption key is present. Generate one and add it to `.env`:
+
+```bash
+# .env (do not commit real secrets)
+SERVICE_INSTANCE_ENCRYPTION_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+```
+
+Existing plaintext keys remain usable and are re-encrypted automatically the next time they verify successfully. Rotating the encryption key invalidates stored keys (re-enter them in the UI).
+
 ### First run: migrations and initial admin
 
 Migrations run automatically on app startup. To create an initial admin user when the database has no users, set:

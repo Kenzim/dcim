@@ -199,12 +199,12 @@ async def test_service_instance(
     # provided key (when one is supplied). When no key is stored, skip
     # verification so unauthenticated runners can be used.
     if instance.api_key_encrypted:
-        if not body.api_key or not ServiceInstanceDAO.verify_api_key(instance, body.api_key):
+        if not body.api_key or not ServiceInstanceDAO.verify_api_key(instance, body.api_key, db=db):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="API key does not match the stored key for this instance",
             )
-    api_key = body.api_key or instance.api_key_encrypted or ""
+    api_key = body.api_key or ServiceInstanceDAO.get_api_key(instance) or ""
     ok, msg = _call_runner_health(instance.base_url, api_key, use_auth=bool(api_key))
     ServiceInstanceDAO.update_connection_test(db, instance, ok)
     return ServiceInstanceTestResponse(success=ok, message=msg, connection_ok=ok)
