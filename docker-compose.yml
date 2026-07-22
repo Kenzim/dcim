@@ -82,6 +82,31 @@ services:
       - "192.168.10.171:8080:8080"
     restart: unless-stopped
 
+  # End-user IPMI reverse proxy edge. Serves *.ipmi.<base> and forwards to the
+  # private BMC network after redeeming a one-time launch ticket for a session
+  # cookie. Requires a route to the BMC management network.
+  #
+  # The runner speaks PLAIN HTTP; put a TLS terminator (Cloudflare, nginx,
+  # Traefik, ...) in front for the wildcard *.ipmi.<base> cert. That terminator
+  # must forward the X-Forwarded-Proto header so cookies are marked Secure and
+  # absolute redirects are rewritten to https.
+  ipmi-proxy-runner:
+    build:
+      context: ipmi_proxy_runner
+      dockerfile: Dockerfile
+    environment:
+      RACKFLOW_BASE_URL: ${RACKFLOW_BASE_URL}
+      RUNNER_API_KEY: ${IPMI_PROXY_RUNNER_API_KEY}
+      IPMI_COOKIE_SECRET: ${IPMI_COOKIE_SECRET}
+      IPMI_PUBLIC_BASE: ${IPMI_PROXY_PUBLIC_BASE}
+      IPMI_SESSION_TTL_SECONDS: ${IPMI_SESSION_TTL_SECONDS:-1800}
+      SYNC_INTERVAL_SECONDS: ${IPMI_SYNC_INTERVAL_SECONDS:-30}
+      IPMI_UPSTREAM_VERIFY_TLS: ${IPMI_UPSTREAM_VERIFY_TLS:-0}
+      PORT: "8080"
+    ports:
+      - "${IPMI_RUNNER_HTTP_PORT:-9082}:8080"
+    restart: unless-stopped
+
   bandwidth-poller:
     build:
       context: .

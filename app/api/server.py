@@ -22,6 +22,7 @@ from app.plugins.base import PowerState
 from app.dao import ServiceInstanceDAO
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
+from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -1288,6 +1289,26 @@ async def create_server(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating server: {str(e)}"
         )
+
+
+@router.post("/{server_id}/ipmi-ticket")
+async def create_server_ipmi_ticket(
+    server_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a one-time IPMI proxy launch ticket for a server (admin)."""
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Server not found"
+        )
+    try:
+        return build_launch_payload(server)
+    except IPMIProxyUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=exc.detail
+        ) from exc
 
 
 @router.get("/{server_id}", response_model=ServerResponse)

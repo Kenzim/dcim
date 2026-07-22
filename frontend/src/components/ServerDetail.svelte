@@ -3,7 +3,7 @@
   import ServerControlsPanel from './ServerControlsPanel.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
-  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix, previewServerKernelArgs } from '../lib/api.js';
+  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix, previewServerKernelArgs, openServerIpmiConsole } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
 
@@ -170,6 +170,28 @@
   let kernelArgsPreview = null;
   let loadingKernelArgsPreview = false;
   let kernelArgsPreviewError = null;
+
+  // IPMI web proxy launch
+  let openingIpmi = false;
+  let ipmiLaunchInfo = null;
+  let ipmiLaunchError = null;
+
+  async function handleOpenIpmi() {
+    openingIpmi = true;
+    ipmiLaunchError = null;
+    try {
+      const info = await openServerIpmiConsole(serverId);
+      ipmiLaunchInfo = info;
+      // Open the BMC UI via the reverse proxy in a new tab.
+      if (info.launch_url) {
+        window.open(info.launch_url, '_blank', 'noopener');
+      }
+    } catch (err) {
+      ipmiLaunchError = err.message || 'Failed to open IPMI console';
+    } finally {
+      openingIpmi = false;
+    }
+  }
 
   // Load when serverId is set (initial mount and when navigating between servers)
   $: if (serverId != null) {
@@ -1528,6 +1550,24 @@
             {powerActionInProgress === 'reset' ? '…' : 'Reboot'}
           </button>
         </div>
+        {#if server.ipmi_proxy_enabled}
+          <div class="left-pane-ipmi">
+            <button type="button" class="btn-open-ipmi" on:click={handleOpenIpmi} disabled={openingIpmi} title="Open the BMC web UI via the IPMI proxy">
+              {openingIpmi ? 'Opening…' : 'Open IPMI'}
+            </button>
+            {#if ipmiLaunchError}
+              <div class="ipmi-launch-error">{ipmiLaunchError}</div>
+            {/if}
+            {#if ipmiLaunchInfo}
+              <div class="ipmi-launch-info">
+                <div>Opened <a href={ipmiLaunchInfo.launch_url} target="_blank" rel="noopener">IPMI console</a> in a new tab.</div>
+                {#if ipmiLaunchInfo.viewer_username}
+                  <div class="ipmi-creds">Login: <code>{ipmiLaunchInfo.viewer_username}</code>{#if ipmiLaunchInfo.viewer_password} / <code>{ipmiLaunchInfo.viewer_password}</code>{/if}</div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
         <dl class="server-preview-details">
           <div class="detail-row">
             <dt>IP Address</dt>
@@ -2868,6 +2908,41 @@
     flex-wrap: wrap;
   }
 
+  .left-pane-ipmi {
+    padding: 0 16px 12px;
+  }
+  .btn-open-ipmi {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid var(--accent-color, #4c8bf5);
+    border-radius: 4px;
+    cursor: pointer;
+    background: var(--accent-color, #4c8bf5);
+    color: #fff;
+    transition: opacity 0.2s, filter 0.2s;
+  }
+  .btn-open-ipmi:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .btn-open-ipmi:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .ipmi-launch-info {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-muted, #6c757d);
+  }
+  .ipmi-launch-info .ipmi-creds code {
+    font-size: 11px;
+  }
+  .ipmi-launch-error {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--danger-color, #dc3545);
+  }
+
   .btn-power-compact {
     padding: 5px 10px;
     font-size: 11px;
@@ -3658,6 +3733,46 @@
   @media (max-width: 900px) {
     .top-section {
       grid-template-columns: 1fr;
+    }
+  }
+
+  /* Phones: unlock the fixed-height dashboard layout so it flows vertically. */
+  @media (max-width: 768px) {
+    .detail-layout {
+      flex-direction: column;
+      overflow: visible;
+    }
+
+    .left-pane {
+      width: 100%;
+      min-width: 0;
+      max-width: none;
+    }
+
+    .content-body {
+      overflow: visible;
+    }
+
+    .right-top {
+      flex: none;
+      max-height: none;
+      grid-template-columns: 1fr;
+      overflow: visible;
+    }
+
+    .right-panel {
+      overflow: visible;
+    }
+
+    .right-bottom {
+      flex: none;
+      overflow: visible;
+    }
+
+    /* Keep long scrollable tab bodies bounded so the page stays navigable. */
+    .bottom-tab-content,
+    .left-pane-tab-content {
+      max-height: 70vh;
     }
   }
 

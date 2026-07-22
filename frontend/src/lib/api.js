@@ -598,6 +598,20 @@ export async function getServer(id) {
   return await response.json();
 }
 
+// Mint a one-time IPMI proxy launch ticket (admin) and return
+// { launch_url, proxy_url, viewer_username, viewer_password, expires_in }.
+export async function openServerIpmiConsole(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/ipmi-ticket`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to open IPMI console');
+  }
+  return await response.json();
+}
+
 export async function getServerCapabilities(serverId) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/capabilities`, {
     method: 'GET',

@@ -214,11 +214,13 @@ def client(db_session, mock_redis, monkeypatch):
     import app.api.user as user_api
     import app.core.auth as auth_module
     import app.services.download_token_service as token_service_module
+    import app.services.ipmi_ticket_service as ipmi_ticket_module
 
     monkeypatch.setattr(redis_module, "redis_client", mock_redis)
     monkeypatch.setattr(user_api, "redis_client", mock_redis)
     monkeypatch.setattr(auth_module, "redis_client", mock_redis)
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
+    monkeypatch.setattr(ipmi_ticket_module, "redis_client", mock_redis)
 
     app.dependency_overrides[get_db] = override_get_db
 

@@ -111,6 +111,11 @@ function rackflow_ClientArea(array $vars)
     $powerAvailable = false;
     $powerMessage = '';
     $installationStatusText = '';
+    $ipmiAvailable = false;
+    $ipmiLaunchUrl = '';
+    $ipmiViewerUsername = '';
+    $ipmiViewerPassword = '';
+    $ipmiError = '';
     if (!empty($rackflowServiceId)) {
         $apiConfig = rackflow_getApiConfig($params);
         $statusData = rackflow_fetchServiceStatus($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
@@ -121,6 +126,7 @@ function rackflow_ClientArea(array $vars)
             $statusLabel = isset($statusData['status']) ? $statusData['status'] : (isset($statusData['power_state']) ? strtolower($statusData['power_state']) : 'unknown');
             $powerStatusLabel = $statusLabel;
             $powerStatusStyle = $statusLabel === 'on' ? 'background:#28a745;color:#fff;' : ($statusLabel === 'off' ? 'background:#6c757d;color:#fff;' : ($statusLabel === 'suspended' ? 'background:#ffc107;color:#212529;' : 'background:#6c757d;color:#fff;'));
+            $ipmiAvailable = !empty($statusData['ipmi_proxy_available']);
             // Optional installation status (OS install progress) from billing API
             if (isset($statusData['installation']) && is_array($statusData['installation'])) {
                 $install = $statusData['installation'];
@@ -131,6 +137,18 @@ function rackflow_ClientArea(array $vars)
                     if ($iprogress !== null) {
                         $installationStatusText .= ' (' . $iprogress . '%)';
                     }
+                }
+            }
+            // Mint a launch ticket on demand only (when the user clicked "Open IPMI"),
+            // since tickets are single-use and short-lived.
+            if ($ipmiAvailable && !empty($_GET['rackflow_ipmi'])) {
+                $launch = rackflow_mintIpmiTicket($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
+                if ($launch && !empty($launch['launch_url'])) {
+                    $ipmiLaunchUrl = $launch['launch_url'];
+                    $ipmiViewerUsername = isset($launch['viewer_username']) ? (string)$launch['viewer_username'] : '';
+                    $ipmiViewerPassword = isset($launch['viewer_password']) ? (string)$launch['viewer_password'] : '';
+                } else {
+                    $ipmiError = 'Unable to open IPMI console. Please try again.';
                 }
             }
         } else {
@@ -149,6 +167,11 @@ function rackflow_ClientArea(array $vars)
             'rackflow_service_status' => $serviceStatus,
             'rackflow_installation_status' => $installationStatusText,
             'rackflow_power_message' => $powerMessage,
+            'rackflow_ipmi_available' => $ipmiAvailable,
+            'rackflow_ipmi_launch_url' => $ipmiLaunchUrl,
+            'rackflow_ipmi_viewer_username' => $ipmiViewerUsername,
+            'rackflow_ipmi_viewer_password' => $ipmiViewerPassword,
+            'rackflow_ipmi_error' => $ipmiError,
         ),
     );
 }
@@ -1407,6 +1430,26 @@ function rackflow_fetchServiceStatus($apiUrl, $apiKey, $rackflowSvcId)
         return null;
     }
     $result = rackflow_apiCall($apiUrl, $apiKey, 'GET', '/api/billing/services/' . (int)$rackflowSvcId . '/status', null);
+    if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
+        return null;
+    }
+    return $result['data'];
+}
+
+/**
+ * Mint a one-time IPMI proxy launch ticket for a service via the billing API.
+ *
+ * @param string $apiUrl        Base API URL
+ * @param string $apiKey        Billing API key
+ * @param int    $rackflowSvcId RackFlow service ID
+ * @return array|null Decoded launch payload (launch_url, viewer_username, ...) or null
+ */
+function rackflow_mintIpmiTicket($apiUrl, $apiKey, $rackflowSvcId)
+{
+    if (empty($apiUrl) || empty($apiKey) || empty($rackflowSvcId)) {
+        return null;
+    }
+    $result = rackflow_apiCall($apiUrl, $apiKey, 'POST', '/api/billing/services/' . (int)$rackflowSvcId . '/ipmi-ticket', array());
     if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
         return null;
     }

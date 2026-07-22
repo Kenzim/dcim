@@ -83,6 +83,39 @@ SERVICE_INSTANCE_ENCRYPTION_KEY=$(python -c "from cryptography.fernet import Fer
 
 Existing plaintext keys remain usable and are re-encrypted automatically the next time they verify successfully. Rotating the encryption key invalidates stored keys (re-enter them in the UI).
 
+#### End-user IPMI reverse proxy (optional)
+
+The `ipmi-proxy-runner` service gives end users authenticated, browser-based access to a bare-metal server's BMC web UI (and HTML5 KVM) without exposing the BMC publicly and without a RackFlow login. Each server is served at its own subdomain `https://{server.uuid}.ipmi.<base>`.
+
+How it works: a client (WHMCS via the billing API, or the RackFlow admin/client UI) mints a short-lived, single-use launch ticket. The browser is redirected to the server's subdomain, where the edge runner redeems the ticket for an HMAC-signed, host-only session cookie and then reverse-proxies HTTP + WebSocket traffic to the private BMC.
+
+Requirements:
+
+- **Wildcard DNS**: `*.ipmi.<base>` (e.g. `*.ipmi.rackflow.com`) pointing at the host running `ipmi-proxy-runner`.
+- **Wildcard TLS certificate** for `*.ipmi.<base>`, mounted into the runner. Set `IPMI_TLS_CERT_DIR` to a directory containing `tls.crt` and `tls.key` (mounted read-only at `/certs`).
+- **Private BMC network reachability**: the runner host must be able to reach each server's BMC web UI; the BMC must not be publicly routable.
+
+App and runner configuration (`.env`):
+
+```bash
+# .env (do not commit real secrets)
+# App side (used to build launch URLs and authenticate the runner):
+IPMI_PROXY_PUBLIC_BASE=ipmi.rackflow.com
+IPMI_PROXY_RUNNER_API_KEY=$(openssl rand -hex 32)
+IPMI_TICKET_TTL_SECONDS=60          # one-time launch ticket lifetime
+IPMI_SESSION_TTL_SECONDS=1800       # edge session cookie lifetime
+
+# Edge runner side:
+RACKFLOW_BASE_URL=https://rackflow.example.com   # how the runner reaches the app
+IPMI_COOKIE_SECRET=$(openssl rand -hex 32)       # signs edge session cookies
+IPMI_TLS_CERT_DIR=./ipmi_certs                   # dir with tls.crt + tls.key
+# IPMI_UPSTREAM_VERIFY_TLS=1                      # enforce BMC cert verification (default off; BMC certs are usually self-signed)
+```
+
+Per server, in the admin UI (Servers → edit → IPMI Web Management): enable the proxy, set the BMC web management URL (reachable from the runner), and optionally the read-only viewer username/password shown to the user on launch.
+
+Notes: the runner is set to `RUNNER_API_KEY=${IPMI_PROXY_RUNNER_API_KEY}` in compose (it must match the app's `IPMI_PROXY_RUNNER_API_KEY`). Launch tickets are single-use and expire after `IPMI_TICKET_TTL_SECONDS`; if a link stops working the user simply relaunches.
+
 ### First run: migrations and initial admin
 
 Migrations run automatically on app startup. To create an initial admin user when the database has no users, set:
