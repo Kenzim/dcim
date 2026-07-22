@@ -112,10 +112,8 @@ function rackflow_ClientArea(array $vars)
     $powerMessage = '';
     $installationStatusText = '';
     $ipmiAvailable = false;
-    $ipmiLaunchUrl = '';
     $ipmiViewerUsername = '';
     $ipmiViewerPassword = '';
-    $ipmiError = '';
     if (!empty($rackflowServiceId)) {
         $apiConfig = rackflow_getApiConfig($params);
         $statusData = rackflow_fetchServiceStatus($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
@@ -144,23 +142,6 @@ function rackflow_ClientArea(array $vars)
                     }
                 }
             }
-            // Mint a launch ticket on demand only (when the user clicked "Open IPMI"),
-            // since tickets are single-use and short-lived.
-            if ($ipmiAvailable && !empty($_GET['rackflow_ipmi'])) {
-                $launch = rackflow_mintIpmiTicket($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
-                if ($launch && !empty($launch['launch_url'])) {
-                    $ipmiLaunchUrl = $launch['launch_url'];
-                    // Prefer launch payload credentials if status omitted them.
-                    if ($ipmiViewerUsername === '' && !empty($launch['viewer_username'])) {
-                        $ipmiViewerUsername = (string)$launch['viewer_username'];
-                    }
-                    if ($ipmiViewerPassword === '' && !empty($launch['viewer_password'])) {
-                        $ipmiViewerPassword = (string)$launch['viewer_password'];
-                    }
-                } else {
-                    $ipmiError = 'Unable to open IPMI console. Please try again.';
-                }
-            }
         } else {
             $powerMessage = 'Unable to load server status.';
         }
@@ -178,10 +159,12 @@ function rackflow_ClientArea(array $vars)
             'rackflow_installation_status' => $installationStatusText,
             'rackflow_power_message' => $powerMessage,
             'rackflow_ipmi_available' => $ipmiAvailable,
-            'rackflow_ipmi_launch_url' => $ipmiLaunchUrl,
+            // One-click: opens redirect endpoint in a new tab (mints ticket server-side).
+            'rackflow_ipmi_open_url' => !empty($params['serviceid'])
+                ? rackflow_ipmiOpenEndpointUrl((int)$params['serviceid'])
+                : '',
             'rackflow_ipmi_viewer_username' => $ipmiViewerUsername,
             'rackflow_ipmi_viewer_password' => $ipmiViewerPassword,
-            'rackflow_ipmi_error' => $ipmiError,
         ),
     );
 }
@@ -1536,21 +1519,66 @@ function rackflow_fetchServiceStatus($apiUrl, $apiKey, $rackflowSvcId)
 }
 
 /**
+ * Build a same-page URL with an extra query parameter (e.g. rackflow_ipmi=1).
+ * Prefer a real href over inline onclick — WHMCS admin CSP often blocks onclick handlers.
+ *
+ * @param string $key
+ * @param string $value
+ * @return string
+ */
+function rackflow_urlWithQueryParam($key, $value)
+{
+    $params = $_GET;
+    $params[$key] = $value;
+    $script = isset($_SERVER['SCRIPT_NAME']) ? (string)$_SERVER['SCRIPT_NAME'] : '';
+    $query = http_build_query($params);
+    if ($script === '') {
+        return '?' . $query;
+    }
+    return $script . '?' . $query;
+}
+
+/**
+ * Same-origin URL for the one-click IPMI open redirect endpoint.
+ *
+ * Always root-relative so admin/client stay on whatever host they are already
+ * using (e.g. whmcs.lan.*) instead of jumping to SystemURL (often a public
+ * hostname that is broken/mis-TLS'd and surfaces as ERR_HTTP2_PROTOCOL_ERROR).
+ *
+ * @param int $whmcsServiceId tblhosting.id
+ * @return string
+ */
+function rackflow_ipmiOpenEndpointUrl($whmcsServiceId)
+{
+    return '/modules/servers/rackflow/ipmi_open.php?serviceid=' . (int)$whmcsServiceId;
+}
+
+/**
  * Mint a one-time IPMI proxy launch ticket for a service via the billing API.
  *
  * @param string $apiUrl        Base API URL
  * @param string $apiKey        Billing API key
  * @param int    $rackflowSvcId RackFlow service ID
- * @return array|null Decoded launch payload (launch_url, viewer_username, ...) or null
+ * @return array Decoded launch payload, or array with 'error' key on failure
  */
 function rackflow_mintIpmiTicket($apiUrl, $apiKey, $rackflowSvcId)
 {
     if (empty($apiUrl) || empty($apiKey) || empty($rackflowSvcId)) {
-        return null;
+        return array('error' => 'API URL, API key, or RackFlow service ID is missing.');
     }
     $result = rackflow_apiCall($apiUrl, $apiKey, 'POST', '/api/billing/services/' . (int)$rackflowSvcId . '/ipmi-ticket', array());
     if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
-        return null;
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        if (is_array($detail)) {
+            $detail = json_encode($detail);
+        }
+        rackflow_log('mintIpmiTicket failed', array(
+            'rackflow_service_id' => (int)$rackflowSvcId,
+            'error' => (string)$detail,
+            'http_code' => isset($result['http_code']) ? $result['http_code'] : null,
+        ));
+        return array('error' => (string)$detail);
     }
     return $result['data'];
 }
@@ -1642,22 +1670,6 @@ function rackflow_AdminServicesTabFields(array $params)
                 ? (string)$statusData['ipmi_viewer_username'] : '';
             $ipmiViewerPassword = $ipmiAvailable && isset($statusData['ipmi_viewer_password'])
                 ? (string)$statusData['ipmi_viewer_password'] : '';
-            $ipmiLaunchUrl = '';
-            $ipmiError = '';
-            if ($ipmiAvailable && !empty($_GET['rackflow_ipmi'])) {
-                $launch = rackflow_mintIpmiTicket($apiConfig['url'], $apiConfig['key'], (int)$rackflowSvcId);
-                if ($launch && !empty($launch['launch_url'])) {
-                    $ipmiLaunchUrl = (string)$launch['launch_url'];
-                    if ($ipmiViewerUsername === '' && !empty($launch['viewer_username'])) {
-                        $ipmiViewerUsername = (string)$launch['viewer_username'];
-                    }
-                    if ($ipmiViewerPassword === '' && !empty($launch['viewer_password'])) {
-                        $ipmiViewerPassword = (string)$launch['viewer_password'];
-                    }
-                } else {
-                    $ipmiError = 'Unable to open IPMI console. Please try again.';
-                }
-            }
 
             $ipmiRows = '';
             if ($ipmiAvailable) {
@@ -1670,23 +1682,12 @@ function rackflow_AdminServicesTabFields(array $params)
                 }
                 $credHtml = !empty($credParts) ? implode(' / ', $credParts) : '<span class="text-muted">Not set</span>';
                 $ipmiRows .= '<tr><th>IPMI login</th><td>' . $credHtml . '</td></tr>';
-                if ($ipmiLaunchUrl !== '') {
-                    $safeLaunch = htmlspecialchars($ipmiLaunchUrl, ENT_QUOTES, 'UTF-8');
-                    $ipmiRows .= '<tr><th>IPMI console</th><td>'
-                        . '<a href="' . $safeLaunch . '" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Launch IPMI console</a>'
-                        . '<p class="text-muted small" style="margin:6px 0 0;">This link is single-use and expires shortly.</p>'
-                        . '<script type="text/javascript">(function(){try{window.open(' . json_encode($ipmiLaunchUrl) . ', "_blank", "noopener");}catch(e){}})();</script>'
-                        . '</td></tr>';
-                } else {
-                    $openJs = "var u=new URL(window.location.href);u.searchParams.set('rackflow_ipmi','1');window.location.href=u.toString();return false;";
-                    $ipmiRows .= '<tr><th>IPMI console</th><td>'
-                        . '<a href="#" class="btn btn-primary btn-sm" onclick="' . htmlspecialchars($openJs, ENT_QUOTES, 'UTF-8') . '">Open IPMI console</a>';
-                    if ($ipmiError !== '') {
-                        $ipmiRows .= '<p class="text-danger small" style="margin:6px 0 0;">'
-                            . htmlspecialchars($ipmiError, ENT_QUOTES, 'UTF-8') . '</p>';
-                    }
-                    $ipmiRows .= '</td></tr>';
-                }
+                // One-click: new tab hits ipmi_open.php, which mints a ticket and 302s to the BMC proxy.
+                $openHref = htmlspecialchars(rackflow_ipmiOpenEndpointUrl($serviceId), ENT_QUOTES, 'UTF-8');
+                $ipmiRows .= '<tr><th>IPMI console</th><td>'
+                    . '<a href="' . $openHref . '" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Open IPMI console</a>'
+                    . '<p class="text-muted small" style="margin:6px 0 0;">Opens in a new tab. The console link is single-use and expires shortly.</p>'
+                    . '</td></tr>';
             }
 
             $statusHtml = '<div class="row"><div class="col-sm-12">'
