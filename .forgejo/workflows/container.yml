@@ -40,6 +40,10 @@ jobs:
             context: proxy_runner
             dockerfile: proxy_runner/Dockerfile
             target: ""
+          - image_suffix: ipmi-proxy-runner
+            context: ipmi_proxy_runner
+            dockerfile: ipmi_proxy_runner/Dockerfile
+            target: ""
 
     steps:
       - name: Checkout
