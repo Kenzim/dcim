@@ -112,10 +112,27 @@
 
 <style>
   .container { padding: 32px; display: grid; gap: 16px; }
+  @media (max-width: 768px) { .container { padding: 16px; } }
   .panel { border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; background: var(--bg-secondary); }
   .status-editor { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-bottom: 12px; }
   .status-editor label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-secondary); font-weight: 600; }
-  .status-editor select { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border-color); min-width: 180px; }
+  .status-editor select {
+    min-width: 180px;
+    padding: 8px 32px 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23475569' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px;
+    cursor: pointer;
+  }
+  :global([data-theme="dark"]) .status-editor select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  }
   .kv-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
   .kv-table th, .kv-table td { padding: 8px 10px; border-bottom: 1px solid var(--border-color); text-align: left; vertical-align: top; }
   .kv-table th { width: 180px; color: var(--text-secondary); font-weight: 700; }

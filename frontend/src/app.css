@@ -13,6 +13,7 @@
 /* Default/light - apply when no theme set (avoids FOUC) */
 :root,
 :root[data-theme="light"] {
+  color-scheme: light;
   --primary-color: #1e293b;
   --primary-dark: #0f172a;
   --primary-light: #334155;
@@ -48,6 +49,7 @@
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --primary-color: #f1f5f9;
   --primary-dark: #cbd5e1;
   --primary-light: #ffffff;
@@ -294,6 +296,22 @@ body {
   color: var(--text-primary);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
+.form-group select {
+  padding-right: 36px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23475569' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px;
+  cursor: pointer;
+}
+:root[data-theme="dark"] .form-group select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+}
+.form-group select option {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
 .form-group input:focus,
 .form-group textarea:focus,
 .form-group select:focus {
@@ -307,6 +325,12 @@ body {
 }
 .form-group input[type="checkbox"] {
   width: auto;
+}
+
+/* Help native <option> lists follow theme tokens (pairs with color-scheme above) */
+select option {
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 .field-help {
   display: block;
@@ -456,4 +480,63 @@ pre.code-block {
   overflow-y: auto;
   white-space: pre-wrap;
   word-wrap: break-word;
+}
+
+/* ==========================================================================
+   Responsive utilities
+   Shared helpers for making desktop-first pages usable on small screens.
+   Prefer these classes over per-page media queries.
+   ========================================================================== */
+
+/* Wrap wide tables / grids so they scroll horizontally instead of overflowing
+   the viewport. Apply to a wrapper around a <table> or wide grid. */
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 768px) {
+  /* Collapse common multi-column layouts into a single column on phones. */
+  .stack-sm {
+    grid-template-columns: 1fr !important;
+    display: grid;
+  }
+
+  .stack-sm,
+  .flex-stack-sm {
+    gap: 16px;
+  }
+
+  /* Flex rows (e.g. header + actions, toolbars) wrap gracefully. */
+  .flex-stack-sm {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* Full-width action buttons feel better than cramped inline ones. */
+  .btn-block-sm {
+    width: 100%;
+  }
+
+  /* Two-column form rows are used across many components; stack them on
+     phones. !important is needed to beat Svelte's scoped-class specificity. */
+  .form-row {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Roll-your-own modals (pages that use the global .modal-* classes rather
+     than the ui/Modal component) get near-fullscreen treatment on phones. */
+  .modal-overlay {
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .modal-content {
+    width: 100%;
+    max-width: 100%;
+    max-height: 100vh;
+    border-radius: 12px 12px 0 0;
+  }
 }

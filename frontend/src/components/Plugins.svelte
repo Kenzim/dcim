@@ -114,6 +114,12 @@
     padding: 32px;
   }
 
+  @media (max-width: 768px) {
+    .page-content {
+      padding: 16px;
+    }
+  }
+
   .loading-container {
     display: flex;
     flex-direction: column;
@@ -189,7 +195,7 @@
 
   .plugins-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
     gap: 24px;
   }
 

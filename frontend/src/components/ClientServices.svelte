@@ -59,6 +59,14 @@
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 16px;
   }
+  @media (max-width: 768px) {
+    .client-services {
+      padding: 16px;
+    }
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
   .card {
     border: 1px solid var(--border-color);
     border-radius: 10px;

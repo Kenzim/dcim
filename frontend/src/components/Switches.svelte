@@ -757,6 +757,14 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 24px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 768px) {
+    .switches-container {
+      padding: 16px;
+    }
   }
 
   .switches-header h2 {
@@ -806,6 +814,8 @@
     border: 1px solid var(--border-color);
     border-radius: 12px;
     overflow: hidden;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
     box-shadow: var(--shadow-sm);
     transition: background-color 0.3s ease, border-color 0.3s ease;
   }
@@ -813,6 +823,7 @@
   table {
     width: 100%;
     border-collapse: collapse;
+    min-width: 640px;
   }
 
   thead {

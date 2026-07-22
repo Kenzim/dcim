@@ -205,6 +205,12 @@
     padding: 16px 32px;
   }
 
+  @media (max-width: 768px) {
+    .row-view-container {
+      padding: 16px;
+    }
+  }
+
 
   .racks-row {
     display: flex;

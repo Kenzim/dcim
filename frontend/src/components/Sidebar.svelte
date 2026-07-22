@@ -2,6 +2,14 @@
   import { logout } from '../stores/auth.js';
   import { navigate } from '../lib/router.js';
   import { currentRoute } from '../lib/router.js';
+  import { sidebarOpen, closeSidebar } from '../lib/mobileNav.js';
+
+  // Close the mobile drawer whenever the route changes (e.g. nav link click).
+  $: if ($currentRoute) closeSidebar();
+
+  function handleKeydown(e) {
+    if (e.key === 'Escape') closeSidebar();
+  }
 
   function flagEnabled(name) {
     const raw = import.meta.env[name];
@@ -9,7 +17,6 @@
     const v = String(raw).trim().toLowerCase();
     return v === '1' || v === 'true' || v === 'yes' || v === 'on';
   }
-  const showProxmoxArea = flagEnabled('VITE_ENABLE_PROXMOX');
   const showIpamProxyArea = flagEnabled('VITE_ENABLE_IPAM_PROXY');
 
   async function handleLogout() {
@@ -45,7 +52,17 @@
   $: isUserActive = currentPath === '/admin/user' || currentPath === '/admin/user/';
 </script>
 
-<nav class="sidebar">
+<svelte:window on:keydown={handleKeydown} />
+
+{#if $sidebarOpen}
+  <div
+    class="sidebar-backdrop"
+    role="presentation"
+    on:click={closeSidebar}
+  ></div>
+{/if}
+
+<nav class="sidebar" class:open={$sidebarOpen}>
   <div class="sidebar-header">
     <a href="/admin" class="sidebar-logo-link">
       <div class="sidebar-logo">
@@ -140,8 +157,7 @@
       </ul>
     </div>
 
-    {#if showProxmoxArea}
-      <div class="nav-group">
+    <div class="nav-group">
         <div class="nav-group-label">PROXMOX</div>
         <ul class="nav-list">
           <li class="nav-item">
@@ -186,7 +202,6 @@
           </li>
         </ul>
       </div>
-    {/if}
 
     <div class="nav-group">
       <div class="nav-group-label">SERVICES</div>
@@ -444,10 +459,27 @@
     flex-shrink: 0;
   }
 
+  .sidebar-backdrop {
+    display: none;
+  }
+
   @media (max-width: 768px) {
     .sidebar {
       transform: translateX(-100%);
       transition: transform 0.3s ease;
+      z-index: 1100;
+    }
+
+    .sidebar.open {
+      transform: translateX(0);
+    }
+
+    .sidebar-backdrop {
+      display: block;
+      position: fixed;
+      inset: 0;
+      background: var(--overlay-bg);
+      z-index: 1050;
     }
   }
 </style>

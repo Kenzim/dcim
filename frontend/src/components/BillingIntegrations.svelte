@@ -348,6 +348,12 @@
     padding: 32px;
   }
 
+  @media (max-width: 768px) {
+    .integrations-container {
+      padding: 16px;
+    }
+  }
+
   .integrations-header {
     display: flex;
     justify-content: space-between;
@@ -374,7 +380,7 @@
 
   .integrations-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr));
     gap: 20px;
   }
 

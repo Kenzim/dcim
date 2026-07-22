@@ -380,6 +380,14 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 24px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 768px) {
+    .racks-container {
+      padding: 16px;
+    }
   }
 
   .racks-header h2 {
