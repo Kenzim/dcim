@@ -284,6 +284,22 @@ class ProxmoxPlugin(ServerPlugin):
                     }
                 }
     
+    async def vm_exists(self) -> bool:
+        """
+        Return True if a QEMU VM with this vmid exists on the node.
+
+        Used for idempotent provisioning so a retry after a mid-flight failure
+        does not attempt to clone over an already-created VMID.
+        """
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/current"
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
+            if response.status_code == 404:
+                return False
+            response.raise_for_status()
+            return True
+
     async def get_power_state(self) -> PowerState:
         """
         Get current VM power state from Proxmox API.

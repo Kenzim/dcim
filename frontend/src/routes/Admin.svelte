@@ -40,7 +40,6 @@
     const v = String(raw).trim().toLowerCase();
     return v === '1' || v === 'true' || v === 'yes' || v === 'on';
   }
-  const showProxmoxArea = flagEnabled('VITE_ENABLE_PROXMOX');
   const showIpamProxyArea = flagEnabled('VITE_ENABLE_IPAM_PROXY');
 
   let authChecked = false;
@@ -214,9 +213,9 @@
         <BillingIntegrations />
       {:else if routeName === 'services-list'}
         <UnifiedServices />
-      {:else if routeName === 'vm-services' && showProxmoxArea}
+      {:else if routeName === 'vm-services'}
         <ProxmoxServices />
-      {:else if routeName.startsWith('vm-services/') && vmServiceId && showProxmoxArea}
+      {:else if routeName.startsWith('vm-services/') && vmServiceId}
         <VMServiceDetail serviceId={vmServiceId} />
       {:else if routeName === 'bare-metal-services'}
         <BareMetalServices />
@@ -226,13 +225,13 @@
         <Scripts />
       {:else if routeName === 'asset-manager'}
         <AssetManager />
-      {:else if routeName === 'product-catalog' && showProxmoxArea}
+      {:else if routeName === 'product-catalog'}
         <ProductCatalog />
-      {:else if routeName === 'vm-templates' && showProxmoxArea}
+      {:else if routeName === 'vm-templates'}
         <VMTemplates />
-      {:else if routeName === 'vm-ip-allocations' && showProxmoxArea}
+      {:else if routeName === 'vm-ip-allocations'}
         <VMIpAllocations />
-      {:else if routeName === 'proxmox-inventory' && showProxmoxArea}
+      {:else if routeName === 'proxmox-inventory'}
         <ProxmoxInventory />
       {:else if routeName === 'proxy-ipam' && showIpamProxyArea}
         <ProxyIpam />
@@ -296,5 +295,6 @@
     .main-content {
       margin-left: 0;
     }
+
   }
 </style>

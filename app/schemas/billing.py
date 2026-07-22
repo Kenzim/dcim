@@ -59,6 +59,14 @@ class BillingVmServiceCreate(BaseModel):
     proxmox_cluster_id: Optional[int] = Field(None, description="Proxmox cluster id from RackFlow inventory")
     proxmox_node_name: Optional[str] = Field(None, description="Proxmox node name")
     proxmox_vmid: Optional[int] = Field(None, description="QEMU/KVM vmid")
+    auto_provision: bool = Field(
+        default=True,
+        description=(
+            "When true (default), RackFlow resolves placement (auto-places from inventory if node omitted), "
+            "reserves a VMID, and provisions the guest in the background. Poll GET /billing/services/{id} "
+            "(vm_guest_state / config.vm_provision.status). Set false to create a pending service only."
+        ),
+    )
 
 
 class BillingServiceCreate(BillingBareMetalServiceCreate):
@@ -102,6 +110,10 @@ class BillingServiceResponse(BaseModel):
     vm_ip_address: Optional[str] = Field(
         default=None,
         description="Customer / primary IP from the VM IP pool when allocated",
+    )
+    vm_guest_state: Optional[str] = Field(
+        default=None,
+        description="VM guest lifecycle state (unprovisioned/provisioning/running/stopped/error/destroyed)",
     )
     status: str
     description: Optional[str] = None

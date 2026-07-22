@@ -4,7 +4,7 @@ Admin API endpoints for managing services and external users.
 These endpoints are for admin users to view and manage services
 and external users created via billing integrations.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 import asyncio
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any, Dict
@@ -28,7 +28,11 @@ from app.services.server_activity_logger import (
 )
 from app.services.service_resource import service_linked_server, service_server_id_for_response, vm_placement
 from app.models.server_activity import ServerActivityEventType
-from app.services.vm_strategy_executor import run_provision_vm_service, resolve_vm_strategy_name_for_service
+from app.services.vm_strategy_executor import (
+    run_provision_vm_service,
+    resolve_vm_strategy_name_for_service,
+    schedule_vm_auto_provision,
+)
 from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
 from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
@@ -137,6 +141,14 @@ class AdminVmServiceCreate(BaseModel):
     proxmox_cluster_id: Optional[int] = None
     proxmox_node_name: Optional[str] = None
     proxmox_vmid: Optional[int] = None
+    auto_provision: bool = Field(
+        default=True,
+        description=(
+            "When true, resolve placement (auto-place from inventory if node omitted), reserve a VMID, "
+            "and provision the guest in the background. Set false to create a pending service for the "
+            "manual two-phase flow (POST /admin/services/{id}/provision-vm)."
+        ),
+    )
 
 
 class ServiceOwnerAssignBody(BaseModel):
@@ -271,6 +283,58 @@ def _set_guest_state(db: Session, service: Service, state: VMGuestState, error: 
     service.vm.guest_state = state
     service.vm.guest_last_error = error
     ServiceDAO.update(db, service)
+
+
+async def _sync_guest_state_from_proxmox(db: Session, service: Service) -> None:
+    """
+    Refresh ``service_vm.guest_state`` from live Proxmox (exists + power).
+
+    Used on VM detail page load so the UI does not show a stale cached state.
+    Skips while provisioning is in flight, or when placement is incomplete.
+    Proxmox unreachable leaves the previous state and records ``guest_last_error``.
+    """
+    if not service.vm:
+        return
+    prov_status = ((service.config or {}).get("vm_provision") or {}).get("status")
+    if service.vm.guest_state == VMGuestState.PROVISIONING or prov_status in ("queued", "running"):
+        return
+    cid, node, vmid = vm_placement(service)
+    if cid is None or not (node and str(node).strip()) or vmid is None:
+        return
+    try:
+        plugin, _ = _admin_get_vm_plugin(db, service)
+    except HTTPException:
+        return
+    try:
+        exists = await plugin.vm_exists()
+    except Exception as exc:
+        logger.warning("Proxmox guest sync failed (exists) for service %s: %s", service.id, exc)
+        _set_guest_state(
+            db,
+            service,
+            service.vm.guest_state,
+            error=f"Proxmox sync failed: {exc}",
+        )
+        return
+    if not exists:
+        _set_guest_state(db, service, VMGuestState.DESTROYED, error=None)
+        return
+    try:
+        power = await plugin.get_power_state()
+    except Exception as exc:
+        logger.warning("Proxmox guest sync failed (power) for service %s: %s", service.id, exc)
+        _set_guest_state(
+            db,
+            service,
+            service.vm.guest_state,
+            error=f"Proxmox sync failed: {exc}",
+        )
+        return
+    if power == PowerState.ON:
+        _set_guest_state(db, service, VMGuestState.RUNNING, error=None)
+    elif power == PowerState.OFF:
+        _set_guest_state(db, service, VMGuestState.STOPPED, error=None)
+    # UNKNOWN: leave stored state unchanged
 
 
 @router.get("/external-users", response_model=List[ExternalUserResponse])
@@ -495,9 +559,15 @@ async def get_vm_service_admin(
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    """
+    Return a VM service. Guest power/existence is refreshed from Proxmox on each
+    load (unless provisioning is in flight) so the detail page shows live state.
+    """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.service_type != ServiceType.VM:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM service not found")
+    await _sync_guest_state_from_proxmox(db, service)
+    db.refresh(service)
     return _service_to_admin_response(db, service)
 
 
@@ -924,7 +994,11 @@ async def delete_identity_link(
     return None
 
 
-def _create_admin_vm_core(db: Session, body: AdminVmServiceCreate) -> Service:
+def _create_admin_vm_core(
+    db: Session,
+    body: AdminVmServiceCreate,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> Service:
     """Shared create logic for POST /vm and legacy internal-test-vm."""
     if ServiceDAO.get_by_name(db, body.name):
         raise HTTPException(
@@ -1075,22 +1149,37 @@ def _create_admin_vm_core(db: Session, body: AdminVmServiceCreate) -> Service:
             "vm_ip_address": allocation.ip_address,
         },
     )
+
+    if body.auto_provision and background_tasks is not None:
+        try:
+            schedule_vm_auto_provision(db, service, background_tasks)
+        except ValueError as exc:
+            # Placement could not be resolved. Keep the pending service (IP is
+            # already allocated) so it can be fixed and provisioned manually.
+            _set_guest_state(db, service, VMGuestState.ERROR, error=str(exc))
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        logger.info("Admin API: auto-provisioning queued for VM service %s", service.id)
+
     return service
 
 
 @router.post("/vm", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
 async def create_vm_service_admin(
     body: AdminVmServiceCreate,
+    background_tasks: BackgroundTasks,
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """
-    Create a **pending** VM service (``services`` + ``service_vm``).
+    Create a VM service (``services`` + ``service_vm``).
 
-    Catalog product + VM template are required. Proxmox cluster/node/vmid are optional until placement exists.
-    Set ``external_user_id`` to attach a billing integration user; otherwise the service is internal/lab.
+    Catalog product + VM template are required. When ``auto_provision`` is true (default),
+    placement is resolved (auto-placed from inventory if node omitted), a VMID is reserved,
+    and the guest is provisioned in the background (poll ``vm_guest_state`` /
+    ``config.vm_provision.status``). Set ``auto_provision`` false to create a pending service
+    for the manual two-phase flow.
     """
-    service = _create_admin_vm_core(db, body)
+    service = _create_admin_vm_core(db, body, background_tasks)
     logger.info("Admin API: created VM service %s", service.id)
     return _service_to_admin_response(db, service)
 
@@ -1114,6 +1203,7 @@ async def create_internal_test_vm_service(
         proxmox_cluster_id=body.proxmox_cluster_id,
         proxmox_node_name=body.proxmox_node_name,
         proxmox_vmid=body.proxmox_vmid,
+        auto_provision=False,
     )
     service = _create_admin_vm_core(db, admin_body)
     logger.info("Admin API: created internal test VM service %s (legacy path)", service.id)

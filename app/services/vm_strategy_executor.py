@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 import httpx
+from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
+from app.core.database import SessionLocal
 from app.dao.product_catalog_dao import VMTemplateDAO
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.service_dao import ServiceDAO
@@ -20,9 +22,10 @@ from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.models.service_vm import VMGuestState
 from app.plugins.registry import get_registry
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+from app.services.proxmox_placement import auto_place_vm, cluster_to_proxmox_plugin_config
 from app.services.service_resource import vm_placement
 from app.services.vm_install_type_strategy import resolve_vm_template_strategy
+from app.services.vmid_allocator import reserve_vmid_for_service
 from app.utils.ipv4_netmask import ipv4_netmask_to_prefixlen
 
 logger = logging.getLogger(__name__)
@@ -88,7 +91,7 @@ async def _find_template_vmid_live(cluster, node_name: str, template_name: str) 
     return None
 
 
-async def provision_vm_service(db: Session, service_id: int) -> Service:
+async def provision_vm_service(db: Session, service_id: int, *, _from_queue: bool = False) -> Service:
     """
     Clone catalog template to target vmid, apply RAM/CPU, then:
 
@@ -96,6 +99,9 @@ async def provision_vm_service(db: Session, service_id: int) -> Service:
     - ``guest_agent``: sizing only + power on (no cloud-init network).
 
     Raises ``ValueError`` for missing prerequisites or unsupported strategy.
+
+    ``_from_queue`` marks the call as the background runner claiming a ``queued``
+    job; other callers are rejected while a job is queued or running.
     """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -104,6 +110,12 @@ async def provision_vm_service(db: Session, service_id: int) -> Service:
         raise ValueError("Not a VM service")
     if service.status == ServiceStatus.TERMINATED:
         raise ValueError("Cannot provision a terminated service")
+
+    prov_status = ((service.config or {}).get("vm_provision") or {}).get("status")
+    if prov_status == "running":
+        raise ValueError("VM provisioning is already running for this service")
+    if prov_status == "queued" and not _from_queue:
+        raise ValueError("VM provisioning is already queued for background execution")
 
     cid, node_name, target_vmid = vm_placement(service)
     if cid is None or not (node_name or "").strip() or target_vmid is None:
@@ -165,27 +177,44 @@ async def provision_vm_service(db: Session, service_id: int) -> Service:
     ServiceDAO.update(db, service)
 
     try:
-        clone_out = await plugin.clone_vm_from_template(
-            {"vmid": int(template_vmid)},
-            {
-                "vmid": int(target_vmid),
-                "name": (service.name or f"vm-{target_vmid}")[:90],
-                "full_clone": full_clone,
-            },
-        )
-        upid = clone_out.get("task")
-        logger.info(
-            "VM provision clone service=%s template_vmid=%s newid=%s task=%s",
-            service_id,
-            template_vmid,
-            target_vmid,
-            upid,
-        )
-        if upid:
-            await plugin.wait_for_proxmox_task(str(upid))
+        # Idempotency: if the target VMID already exists (retry after a partial
+        # failure), skip the clone and continue with configure/power-on.
+        already_exists = False
+        try:
+            already_exists = await plugin.vm_exists()
+        except Exception:
+            already_exists = False
 
-        _merge_provision_config(service, {"step": "configure", "clone_task": upid})
-        ServiceDAO.update(db, service)
+        if already_exists:
+            logger.info(
+                "VM provision: target vmid %s already exists on node, skipping clone (service=%s)",
+                target_vmid,
+                service_id,
+            )
+            _merge_provision_config(service, {"step": "configure", "clone_skipped": True})
+            ServiceDAO.update(db, service)
+        else:
+            clone_out = await plugin.clone_vm_from_template(
+                {"vmid": int(template_vmid)},
+                {
+                    "vmid": int(target_vmid),
+                    "name": (service.name or f"vm-{target_vmid}")[:90],
+                    "full_clone": full_clone,
+                },
+            )
+            upid = clone_out.get("task")
+            logger.info(
+                "VM provision clone service=%s template_vmid=%s newid=%s task=%s",
+                service_id,
+                template_vmid,
+                target_vmid,
+                upid,
+            )
+            if upid:
+                await plugin.wait_for_proxmox_task(str(upid))
+
+            _merge_provision_config(service, {"step": "configure", "clone_task": upid})
+            ServiceDAO.update(db, service)
 
         vm_ref = {"vmid": int(target_vmid)}
         net_payload: Dict[str, Any] = {"memory_mb": memory_mb, "cores": cores}
@@ -254,3 +283,104 @@ async def provision_vm_service(db: Session, service_id: int) -> Service:
 def run_provision_vm_service(db: Session, service_id: int) -> Service:
     """Sync entrypoint for FastAPI sync routes."""
     return asyncio.run(provision_vm_service(db, service_id))
+
+
+async def queue_provision_vm_service(service_id: int) -> None:
+    """
+    Background entrypoint (FastAPI ``BackgroundTasks``). Opens its own DB session
+    because the request session is already closed by the time this runs. Failures
+    are recorded on the service by the core (``guest_state=error``); here we only
+    log so the background task never raises into the event loop.
+    """
+    db = SessionLocal()
+    try:
+        await provision_vm_service(db, service_id, _from_queue=True)
+    except Exception as exc:
+        logger.exception("Background VM provisioning failed for service %s", service_id)
+        # Pre-flight failures (raised before the core's own try/except) would
+        # otherwise leave the service stuck in "queued"; record the error so
+        # pollers see the failure and can retry via provision-vm.
+        try:
+            service = ServiceDAO.get_by_id(db, service_id)
+            if service:
+                _merge_provision_config(
+                    service,
+                    {
+                        "status": "failed",
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "error": str(exc),
+                    },
+                )
+                if service.vm and service.vm.guest_state != VMGuestState.ERROR:
+                    service.vm.guest_state = VMGuestState.ERROR
+                    service.vm.guest_last_error = str(exc)
+                ServiceDAO.update(db, service)
+        except Exception:
+            logger.exception("Failed to record provisioning error for service %s", service_id)
+    finally:
+        db.close()
+
+
+def prepare_vm_placement_for_provisioning(db: Session, service: Service) -> None:
+    """
+    Ensure a VM service has full Proxmox placement before provisioning:
+
+    - Resolve the node (auto-place from inventory when none was supplied).
+    - Reserve a VMID for the service (idempotent; returns the existing reservation
+      when one already exists). Fixes the billing path that previously never
+      reserved a VMID.
+
+    Raises ``ValueError`` when placement cannot be resolved.
+    """
+    vm = service.vm
+    if not vm or not vm.vm_template_id:
+        raise ValueError("VM service has no vm_template_id")
+    tmpl = VMTemplateDAO.get_by_id(db, vm.vm_template_id)
+    if not tmpl:
+        raise ValueError("VM template catalog row not found")
+
+    cluster_id = vm.proxmox_cluster_id
+    node_name = (vm.proxmox_node_name or "").strip()
+    if not node_name:
+        cluster_id, node_name = auto_place_vm(
+            db, template_name=tmpl.proxmox_template_name, cluster_id=cluster_id
+        )
+        vm.proxmox_cluster_id = cluster_id
+        vm.proxmox_node_name = node_name
+
+    if cluster_id is None:
+        raise ValueError("Auto-provisioning requires a Proxmox cluster; none could be resolved")
+
+    reserved_vmid = reserve_vmid_for_service(
+        db,
+        cluster_id=cluster_id,
+        service_id=service.id,
+        requested_vmid=vm.proxmox_vmid,
+    )
+    vm.proxmox_vmid = int(reserved_vmid)
+    ServiceDAO.update(db, service)
+
+
+def mark_vm_provision_queued(db: Session, service: Service) -> None:
+    """Flag a service as queued for background provisioning (visible to pollers)."""
+    _merge_provision_config(
+        service,
+        {"status": "queued", "queued_at": datetime.now(timezone.utc).isoformat()},
+    )
+    if service.vm:
+        service.vm.guest_state = VMGuestState.PROVISIONING
+        service.vm.guest_last_error = None
+    ServiceDAO.update(db, service)
+
+
+def schedule_vm_auto_provision(
+    db: Session, service: Service, background_tasks: BackgroundTasks
+) -> None:
+    """
+    Shared create-path helper for both admin and billing VM create endpoints:
+    resolve placement, reserve the VMID, mark the service queued, and enqueue the
+    background provisioning task. Raises ``ValueError`` if placement fails.
+    """
+    prepare_vm_placement_for_provisioning(db, service)
+    mark_vm_provision_queued(db, service)
+    background_tasks.add_task(queue_provision_vm_service, service.id)
