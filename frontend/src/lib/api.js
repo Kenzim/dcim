@@ -1177,8 +1177,15 @@ export async function deleteServer(id) {
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || 'Failed to delete server');
+    const text = await response.text();
+    let message = 'Failed to delete server';
+    try {
+      const error = JSON.parse(text);
+      message = error.detail || message;
+    } catch {
+      if (text) message = text.slice(0, 200);
+    }
+    throw new Error(message);
   }
 }
 

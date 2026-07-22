@@ -1,6 +1,17 @@
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.models.server import Server, BootMode
+from app.models.boot_task import BootTask
+from app.models.installation_task import InstallationTask
+from app.models.hardware_detection_report import HardwareDetectionReport
+from app.models.server_activity import ServerActivity
+from app.models.server_capability import ServerCapability
+from app.models.disk import Disk
+from app.models.network_port import NetworkPort
+from app.models.cable_run import CableRun
+from app.models.service_bare_metal import ServiceBareMetal
+from app.models.server_group import server_group_association
 
 
 class ServerDAO:
@@ -114,10 +125,61 @@ class ServerDAO:
 
     @staticmethod
     def delete(db: Session, server_id: int) -> bool:
-        """Delete a server by ID"""
+        """Delete a server by ID.
+
+        Explicitly removes dependent rows first. Several child FKs are NOT NULL
+        without ON DELETE CASCADE, and SQLAlchemy's default relationship handling
+        would otherwise try to SET server_id=NULL and raise IntegrityError.
+        """
         server = db.query(Server).filter(Server.id == server_id).first()
-        if server:
-            db.delete(server)
-            db.commit()
-            return True
-        return False
+        if not server:
+            return False
+
+        if db.query(ServiceBareMetal).filter(ServiceBareMetal.server_id == server_id).first():
+            raise ValueError(
+                "Server is assigned to one or more services and cannot be deleted"
+            )
+
+        # Order matters: reports/install tasks reference boot_tasks.
+        db.query(HardwareDetectionReport).filter(
+            HardwareDetectionReport.server_id == server_id
+        ).delete(synchronize_session=False)
+        db.query(InstallationTask).filter(
+            InstallationTask.server_id == server_id
+        ).delete(synchronize_session=False)
+        db.query(BootTask).filter(BootTask.server_id == server_id).delete(
+            synchronize_session=False
+        )
+        db.query(ServerActivity).filter(ServerActivity.server_id == server_id).delete(
+            synchronize_session=False
+        )
+        db.query(ServerCapability).filter(ServerCapability.server_id == server_id).delete(
+            synchronize_session=False
+        )
+        db.query(Disk).filter(Disk.server_id == server_id).delete(synchronize_session=False)
+
+        port_ids = [
+            row[0]
+            for row in db.query(NetworkPort.id).filter(NetworkPort.server_id == server_id).all()
+        ]
+        if port_ids:
+            db.query(CableRun).filter(
+                or_(
+                    CableRun.end_a_server_port_id.in_(port_ids),
+                    CableRun.end_b_server_port_id.in_(port_ids),
+                )
+            ).delete(synchronize_session=False)
+            db.query(NetworkPort).filter(NetworkPort.server_id == server_id).delete(
+                synchronize_session=False
+            )
+
+        db.execute(
+            server_group_association.delete().where(
+                server_group_association.c.server_id == server_id
+            )
+        )
+
+        # Bulk delete avoids ORM relationship nullification of remaining children.
+        db.query(Server).filter(Server.id == server_id).delete(synchronize_session=False)
+        db.commit()
+        return True

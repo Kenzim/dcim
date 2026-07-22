@@ -2119,7 +2119,13 @@ async def delete_server(
             detail="Server not found"
         )
     location_id = server.location_id
-    success = ServerDAO.delete(db, server_id)
+    try:
+        success = ServerDAO.delete(db, server_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
