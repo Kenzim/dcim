@@ -284,7 +284,7 @@ async def register_service(
                 detail=f"Server is already linked to service '{svc.name}' (ID: {svc.id}). Unlink or terminate that service first."
             )
 
-    # Find or create external user
+    # Find or create external user (WHMCS / billing "virtual" owner)
     external_user = ExternalUserDAO.get_by_external_id(
         db, integration.id, data.external_user_id
     )
@@ -297,6 +297,18 @@ async def register_service(
             external_email=data.external_email,
         )
         logger.info(f"Created external user (ID: {external_user.id}, external_user_id: {data.external_user_id})")
+    elif data.external_username or data.external_email:
+        # Keep display fields fresh when re-registering / updating metadata
+        if data.external_username:
+            external_user.external_username = data.external_username
+        if data.external_email:
+            external_user.external_email = data.external_email
+        ExternalUserDAO.update(db, external_user)
+
+    # Mirror create-service behaviour: link the physical server to the billing owner
+    if server.external_user_id != external_user.id:
+        server.external_user_id = external_user.id
+        ServerDAO.update(db, server)
 
     name = data.name or f"service-{data.external_service_id}"
     log_server_activity_attempt(
@@ -308,6 +320,7 @@ async def register_service(
         message=f"Registering service '{name}'",
         details={
             "external_service_id": data.external_service_id,
+            "external_user_id": external_user.id,
             "integration_id": integration.id,
         },
     )
@@ -1683,6 +1696,13 @@ async def get_service_status(
         "server_enabled": server.enabled if server else None,
         "power_state": power_state.value,
         "ipmi_proxy_available": ipmi_proxy_available,
+        # Viewer BMC credentials (safe to show to the service owner / WHMCS).
+        "ipmi_viewer_username": (
+            getattr(server, "ipmi_viewer_username", None) if ipmi_proxy_available else None
+        ),
+        "ipmi_viewer_password": (
+            getattr(server, "ipmi_viewer_password", None) if ipmi_proxy_available else None
+        ),
         "status": "suspended"
         if service.status == ServiceStatus.SUSPENDED
         else (

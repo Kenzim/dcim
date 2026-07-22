@@ -24,6 +24,8 @@ RUNNER_KEY = "runner-key-1"
 def _ipmi_settings(monkeypatch):
     monkeypatch.setattr(settings, "ipmi_proxy_public_base", PUBLIC_BASE)
     monkeypatch.setattr(settings, "ipmi_proxy_runner_api_key", RUNNER_KEY)
+    monkeypatch.setattr(settings, "ipmi_proxy_scheme", "https")
+    monkeypatch.setattr(settings, "ipmi_proxy_port", None)
 
 
 def _make_integration(db_session, api_key="key-1", name="Integration A"):
@@ -108,6 +110,40 @@ def test_billing_mint_owner_ok(client, db_session, location):
     assert data["proxy_url"] == f"https://{server.uuid}.{PUBLIC_BASE}"
     assert data["viewer_username"] == "viewer"
     assert data["viewer_password"] == "secret"
+
+
+def test_billing_status_includes_viewer_credentials(client, db_session, location):
+    integration = _make_integration(db_session)
+    server = _make_server(db_session, location)
+    service = _make_service(db_session, integration, server)
+
+    resp = client.get(
+        f"/api/billing/services/{service.id}/status",
+        headers={"Authorization": "Bearer key-1"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["ipmi_proxy_available"] is True
+    assert data["ipmi_viewer_username"] == "viewer"
+    assert data["ipmi_viewer_password"] == "secret"
+
+
+def test_billing_status_hides_viewer_credentials_when_proxy_disabled(
+    client, db_session, location
+):
+    integration = _make_integration(db_session)
+    server = _make_server(db_session, location, enabled_proxy=False)
+    service = _make_service(db_session, integration, server)
+
+    resp = client.get(
+        f"/api/billing/services/{service.id}/status",
+        headers={"Authorization": "Bearer key-1"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["ipmi_proxy_available"] is False
+    assert data["ipmi_viewer_username"] is None
+    assert data["ipmi_viewer_password"] is None
 
 
 def test_billing_mint_non_owner_404(client, db_session, location):

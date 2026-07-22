@@ -1555,15 +1555,22 @@
             <button type="button" class="btn-open-ipmi" on:click={handleOpenIpmi} disabled={openingIpmi} title="Open the BMC web UI via the IPMI proxy">
               {openingIpmi ? 'Opening…' : 'Open IPMI'}
             </button>
+            {#if server.ipmi_viewer_username || server.ipmi_viewer_password}
+              <div class="ipmi-launch-info">
+                <div class="ipmi-creds">
+                  Login:
+                  {#if server.ipmi_viewer_username}<code>{server.ipmi_viewer_username}</code>{/if}
+                  {#if server.ipmi_viewer_username && server.ipmi_viewer_password} / {/if}
+                  {#if server.ipmi_viewer_password}<code>{server.ipmi_viewer_password}</code>{/if}
+                </div>
+              </div>
+            {/if}
             {#if ipmiLaunchError}
               <div class="ipmi-launch-error">{ipmiLaunchError}</div>
             {/if}
             {#if ipmiLaunchInfo}
               <div class="ipmi-launch-info">
-                <div>Opened <a href={ipmiLaunchInfo.launch_url} target="_blank" rel="noopener">IPMI console</a> in a new tab.</div>
-                {#if ipmiLaunchInfo.viewer_username}
-                  <div class="ipmi-creds">Login: <code>{ipmiLaunchInfo.viewer_username}</code>{#if ipmiLaunchInfo.viewer_password} / <code>{ipmiLaunchInfo.viewer_password}</code>{/if}</div>
-                {/if}
+                Opened <a href={ipmiLaunchInfo.launch_url} target="_blank" rel="noopener">IPMI console</a> in a new tab.
               </div>
             {/if}
           </div>

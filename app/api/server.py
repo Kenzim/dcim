@@ -353,7 +353,7 @@ class ServerResponse(BaseModel):
     ipmi_proxy_enabled: bool
     ipmi_web_management_url: str | None
     ipmi_viewer_username: str | None
-    ipmi_viewer_password: str | None = None  # Don't expose password in responses
+    ipmi_viewer_password: str | None = None  # Viewer BMC login shown when IPMI proxy is enabled
     preview_asset_id: int | None = None
 
     class Config:
@@ -1035,8 +1035,6 @@ async def list_servers(
         
         network_ports = NetworkPortDAO.get_by_server(db, server.id)
         server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
-        # Don't expose password in responses
-        server_dict["ipmi_viewer_password"] = None
         # Normalize rack_units: DB may have NULL for servers created before column existed
         if server_dict.get("rack_units") is None:
             server_dict["rack_units"] = 1
@@ -1249,9 +1247,7 @@ async def create_server(
         network_ports = NetworkPortDAO.get_by_server(db, server.id)
         network_ports_with_cables = convert_network_ports_to_response(db, server.id, network_ports)
         
-        # Build response, excluding password
         server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
-        server_dict["ipmi_viewer_password"] = None
         if server_dict.get("rack_units") is None:
             server_dict["rack_units"] = 1
         
@@ -1333,8 +1329,6 @@ async def get_server(
     plugin_categories = [c["id"] for c in effective]
     
     server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
-    # Don't expose password in responses
-    server_dict["ipmi_viewer_password"] = None
     if server_dict.get("rack_units") is None:
         server_dict["rack_units"] = 1
     
@@ -2058,9 +2052,7 @@ async def update_server(
         if server.location_id:
             await _regenerate_location_dhcp_if_present(db, server.location_id)
     
-    # Build response, excluding password
     server_dict = {k: v.value if hasattr(v, 'value') else v for k, v in server.__dict__.items()}
-    server_dict["ipmi_viewer_password"] = None
     if server_dict.get("rack_units") is None:
         server_dict["rack_units"] = 1
     

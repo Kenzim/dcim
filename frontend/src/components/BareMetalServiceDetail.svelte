@@ -80,6 +80,19 @@
           <tr><th>Name</th><td>{service.name}</td></tr>
           <tr><th>Status</th><td>{service.status}</td></tr>
           <tr><th>Owner</th><td>{service.owner_username || 'Unassigned'}</td></tr>
+          <tr>
+            <th>Billing owner</th>
+            <td>
+              {#if service.external_user_id}
+                {service.external_username || 'WHMCS user'}
+                {#if service.external_user_external_id}
+                  <span class="muted">(external id: {service.external_user_external_id})</span>
+                {/if}
+              {:else}
+                Unassigned
+              {/if}
+            </td>
+          </tr>
           <tr><th>Server</th><td>{service.server_name || '—'} (id: {service.server_id ?? '—'})</td></tr>
           <tr><th>Source</th><td>{service.provisioning_source || 'billing'}</td></tr>
         </tbody>
@@ -138,6 +151,7 @@
   .kv-table th { width: 180px; color: var(--text-secondary); font-weight: 700; }
   .kv-table tr:last-child th, .kv-table tr:last-child td { border-bottom: none; }
   .error { color: var(--danger-color); }
+  .muted { color: var(--text-secondary); margin-left: 6px; font-size: 13px; }
   .btn-secondary { padding: 8px 12px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-tertiary); cursor: pointer; width: fit-content; }
   .btn-danger { padding: 8px 12px; border: 0; border-radius: 8px; background: var(--danger-color); color: white; cursor: pointer; width: fit-content; }
 </style>
