@@ -151,6 +151,28 @@ Then in `docker-compose.yml` under `app` and `bandwidth-poller` you can use `env
 - Main app: `docker build --target app -t dcim-app .` (required: default is last stage, bandwidth-poller)
 - Bandwidth poller only: `docker build --target bandwidth-poller -t dcim-bandwidth-poller .`
 
+## Local development stack (Docker, bind mounts + autoreload)
+
+For iterating on the code, `docker-compose.dev.yml` runs the app and frontend from bind-mounted source with autoreload, so editing Python or Svelte files takes effect without rebuilding images:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
+- **Backend (`app`)** – uses the `app-dev` Dockerfile stage (`uvicorn --reload`, with `dhcpd`/`tftpd` baked in so DHCP/TFTP run as in-app subprocesses). `./app`, `./scripts`, `./alembic` are bind-mounted; edits trigger a reload.
+- **Frontend (`frontend`)** – `node:20-alpine` running the Vite dev server with HMR; it proxies `/api` to the backend.
+- **Database / Redis** – it does **not** start local MySQL/Redis. It reads `DATABASE_URL`, `REDIS_HOST`, etc. from `.env`, so it talks to whatever those point to (currently a shared remote host). Migrations (`alembic upgrade head`) run on startup against that DB, so this is not isolated from it.
+- **Ports** – host `8000`/`8001` are used by other processes on this box, so the stack publishes on `0.0.0.0`:
+  - UI (primary): `http://<host>:5173`
+  - API / docs: `http://<host>:8088/docs`
+- Runs under its own Compose project name (`rackflow-dev`), isolated from the production stack in `docker-compose.yml`.
+
+Stop it with:
+
+```bash
+docker compose -f docker-compose.dev.yml down
+```
+
 ## Service Configuration
 
 DHCP and TFTP configuration is stored in the **database** and managed via the web UI (Services tab). No JSON config files are used. After saving configuration, the generated config files (e.g. `dhcpd.conf`) are written to the shared volume and the runner services are started or restarted automatically when using the Docker setup.
