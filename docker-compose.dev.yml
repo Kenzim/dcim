@@ -1,0 +1,83 @@
+# Rackflow local development stack (bind mounts + autoreload).
+#
+#   docker compose -f docker-compose.dev.yml up --build
+#
+# - Reuses the `app-dev` Dockerfile target (uvicorn --reload, dhcpd/tftpd baked in).
+# - Source is bind-mounted, so editing Python (backend) or Svelte (frontend) files
+#   reloads automatically without rebuilding the image.
+# - Uses the DB/Redis from `.env` (currently the remote host 192.168.11.70), so no
+#   local database is provisioned. NOTE: this is NOT isolated from that shared DB —
+#   startup runs `alembic upgrade head` against it.
+# - Host ports 8000/8001 are occupied by other processes, so the API publishes on
+#   8088. Bound on 0.0.0.0 for LAN access.
+#   Primary UI: http://<host>:5173  |  API docs: http://<host>:8088/docs
+#
+# Uses a dedicated Compose project name so it stays isolated from the prod stack
+# (docker-compose.yml) and its runner containers.
+name: rackflow-dev
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app-dev
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file: .env
+    environment:
+      STATIC_FILES_PATH: /app/static
+      PYTHONUNBUFFERED: "1"
+      # DHCP/TFTP run as in-app subprocesses (dhcpd/tftpd are in the app-dev image);
+      # do NOT set DHCP_RUNNER_URL / TFTP_RUNNER_URL here.
+    volumes:
+      # Backend code + migrations for hot reload
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      # Boot media / assets (optional, for PXE/OS-template testing)
+      - ./tftp:/app/tftp
+      - ./os_templates:/app/os_templates
+      - ./isos:/app/isos
+      - ./disk_images:/app/disk_images
+    ports:
+      # Host ports 8000/8001 are occupied by other processes; expose the API on 8088.
+      - "0.0.0.0:8088:8000"
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    environment:
+      VITE_PROXY_TARGET: http://app:8000
+    volumes:
+      - ./frontend:/app
+      # Keep container-installed node_modules off the host bind mount
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "0.0.0.0:5173:5173"
+    depends_on:
+      - app
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Optional: SNMP bandwidth poller (uncomment to test polling against the DB).
+#   bandwidth-poller:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#       target: bandwidth-poller
+#     command: python -m scripts.snmp_bandwidth_poller --interval 60
+#     env_file: .env
+#     volumes:
+#       - ./app:/app/app
+#       - ./scripts:/app/scripts
+#     restart: unless-stopped
+#
+# Note: to serve DHCP on a real LAN, add `network_mode: host` and
+# `DHCP_INTERFACES=<iface>` to the app service (bridge networking is fine for
+# config generation and general testing).
+# ---------------------------------------------------------------------------
+
+volumes:
+  frontend_node_modules:
