@@ -66,6 +66,7 @@
     description: '',
     external_user_id: '',
     external_service_id: '',
+    auto_provision: true,
   };
 
   onMount(async () => {
@@ -400,6 +401,7 @@
       if (internalVmForm.external_service_id.trim()) {
         payload.external_service_id = internalVmForm.external_service_id.trim();
       }
+      payload.auto_provision = internalVmForm.auto_provision;
       if (vmFormSetPlacement) {
         const cid = parseInt(String(internalVmForm.proxmox_cluster_id), 10);
         const vmid = parseInt(String(internalVmForm.proxmox_vmid), 10);
@@ -421,6 +423,7 @@
         description: '',
         external_user_id: '',
         external_service_id: '',
+        auto_provision: true,
       };
       proxmoxClusterNodes = [];
       internalVmCustomNode = false;
@@ -585,6 +588,13 @@
               <input bind:value={internalVmForm.external_service_id} placeholder="e.g. WHMCS service id" />
             </label>
             <label class="full-width check-row">
+              <input type="checkbox" bind:checked={internalVmForm.auto_provision} />
+              <span>Auto provision now (place, reserve VMID, clone &amp; power on in background)</span>
+            </label>
+            {#if internalVmForm.auto_provision && !vmFormSetPlacement}
+              <p class="hint full-width">Node auto-selected from Proxmox inventory (by free RAM) for the chosen template.</p>
+            {/if}
+            <label class="full-width check-row">
               <input type="checkbox" bind:checked={vmFormSetPlacement} />
               <span>Set Proxmox placement now (cluster, node, vmid)</span>
             </label>
@@ -635,12 +645,18 @@
             {/if}
             <label>VMID <input type="number" bind:value={internalVmForm.proxmox_vmid} /></label>
             {:else}
-            <p class="hint full-width">Placement omitted — service stays pending until you set cluster/node/vmid (future admin edit or API).</p>
+            <p class="hint full-width">
+              {#if internalVmForm.auto_provision}
+                Placement omitted — RackFlow will auto-place from inventory and provision in the background.
+              {:else}
+                Placement omitted — service stays pending until you set cluster/node/vmid (future admin edit or API).
+              {/if}
+            </p>
             {/if}
             <label class="full-width">Description <input bind:value={internalVmForm.description} /></label>
           </div>
           <button type="button" class="btn-primary" disabled={internalVmBusy} on:click={submitInternalVm}>
-            {internalVmBusy ? 'Creating…' : 'Create pending VM'}
+            {internalVmBusy ? 'Creating…' : internalVmForm.auto_provision ? 'Create & provision VM' : 'Create pending VM'}
           </button>
         </div>
       {/if}
@@ -1011,6 +1027,12 @@
     padding: 32px;
   }
 
+  @media (max-width: 768px) {
+    .services-container {
+      padding: 16px;
+    }
+  }
+
   .tabs {
     display: flex;
     gap: 8px;
@@ -1090,10 +1112,21 @@
   }
 
   .filters select {
-    padding: 8px 12px;
-    border-color: var(--border-color);
+    padding: 8px 32px 8px 12px;
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     font-size: 14px;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23475569' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px;
+    cursor: pointer;
+  }
+  :global([data-theme="dark"]) .filters select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   }
 
   .loading, .error, .empty-state {
@@ -1493,6 +1526,20 @@
     border-radius: 8px;
     border: 1px solid var(--border-color);
     font-weight: 500;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+  }
+  .form-grid select {
+    padding-right: 32px;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23475569' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px;
+    cursor: pointer;
+  }
+  :global([data-theme="dark"]) .form-grid select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   }
 
   .btn-primary {
