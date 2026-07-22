@@ -1539,26 +1539,62 @@ function rackflow_urlWithQueryParam($key, $value)
 }
 
 /**
+ * WHMCS install's URL base path (e.g. "/billing", or "" if installed at the
+ * webroot), derived purely from filesystem paths so it works regardless of
+ * which hook/context calls it and doesn't depend on any module param being
+ * populated (WHMCS does NOT reliably pass a "systemurl" key into every
+ * hook - e.g. it's absent from AdminServicesTabFields).
+ *
+ * This file lives at WHMCS_ROOT/modules/servers/rackflow/rackflow.php, so
+ * three levels up from __DIR__ is WHMCS_ROOT on disk. Diffing that against
+ * DOCUMENT_ROOT gives the URL path prefix nginx/Apache actually uses to
+ * reach it.
+ *
+ * @return string|null Base path (may be ""), or null if it can't be determined.
+ */
+function rackflow_whmcsUrlBasePath()
+{
+    $docRoot = isset($_SERVER['DOCUMENT_ROOT']) ? rtrim((string)$_SERVER['DOCUMENT_ROOT'], '/') : '';
+    if ($docRoot === '') {
+        return null;
+    }
+    $whmcsRoot = realpath(__DIR__ . '/../../../');
+    if ($whmcsRoot === false) {
+        return null;
+    }
+    $whmcsRoot = rtrim($whmcsRoot, '/');
+    if (strpos($whmcsRoot, $docRoot) !== 0) {
+        return null;
+    }
+    return substr($whmcsRoot, strlen($docRoot));
+}
+
+/**
  * Same-origin URL for the one-click IPMI open redirect endpoint.
  *
  * Root-relative (no scheme/host) so admin/client stay on whatever host they
  * are already using (e.g. whmcs.lan.*) instead of jumping to the scheme/host
  * of SystemURL (often a public hostname that is broken/mis-TLS'd and surfaces
- * as ERR_HTTP2_PROTOCOL_ERROR). We DO still need the *path* portion of
- * SystemURL though: WHMCS is frequently installed in a subdirectory (e.g.
- * "/billing"), not at the domain root, and hardcoding "/" breaks that case
- * with a "Primary script unknown" / file-not-found from PHP-FPM.
+ * as ERR_HTTP2_PROTOCOL_ERROR). We DO still need the *path* portion though:
+ * WHMCS is frequently installed in a subdirectory (e.g. "/billing"), not at
+ * the domain root, and hardcoding "/" breaks that case with a "Primary
+ * script unknown" / file-not-found from PHP-FPM.
  *
  * @param int    $whmcsServiceId tblhosting.id
- * @param string $systemUrl      WHMCS "systemurl" module param (scheme+host+path)
+ * @param string $systemUrl      Optional WHMCS "systemurl" module param, used
+ *                                only as a fallback if the base path can't be
+ *                                derived from the filesystem.
  * @return string
  */
 function rackflow_ipmiOpenEndpointUrl($whmcsServiceId, $systemUrl = '')
 {
-    $basePath = '';
-    if (!empty($systemUrl)) {
-        $path = (string)parse_url($systemUrl, PHP_URL_PATH);
-        $basePath = rtrim($path, '/');
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $path = (string)parse_url($systemUrl, PHP_URL_PATH);
+            $basePath = rtrim($path, '/');
+        }
     }
     return $basePath . '/modules/servers/rackflow/ipmi_open.php?serviceid=' . (int)$whmcsServiceId;
 }
