@@ -5,8 +5,8 @@
  * This module allows WHMCS to provision and manage servers through the RackFlow backend API.
  *
  * For linking already-deployed servers (no provisioning): use "Register in RackFlow" from the
- * admin service tab. Create a Product Custom Field named exactly "RackFlow Service ID" for the
- * RackFlow product so the mapping is stored.
+ * admin service tab. That command creates/updates the product custom field "RackFlow Service ID"
+ * and stores the RackFlow service mapping automatically.
  *
  * @copyright Copyright (c) 2025
  * @license MIT
@@ -127,6 +127,11 @@ function rackflow_ClientArea(array $vars)
             $powerStatusLabel = $statusLabel;
             $powerStatusStyle = $statusLabel === 'on' ? 'background:#28a745;color:#fff;' : ($statusLabel === 'off' ? 'background:#6c757d;color:#fff;' : ($statusLabel === 'suspended' ? 'background:#ffc107;color:#212529;' : 'background:#6c757d;color:#fff;'));
             $ipmiAvailable = !empty($statusData['ipmi_proxy_available']);
+            // Always surface viewer credentials when the IPMI proxy is enabled.
+            if ($ipmiAvailable) {
+                $ipmiViewerUsername = isset($statusData['ipmi_viewer_username']) ? (string)$statusData['ipmi_viewer_username'] : '';
+                $ipmiViewerPassword = isset($statusData['ipmi_viewer_password']) ? (string)$statusData['ipmi_viewer_password'] : '';
+            }
             // Optional installation status (OS install progress) from billing API
             if (isset($statusData['installation']) && is_array($statusData['installation'])) {
                 $install = $statusData['installation'];
@@ -145,8 +150,13 @@ function rackflow_ClientArea(array $vars)
                 $launch = rackflow_mintIpmiTicket($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
                 if ($launch && !empty($launch['launch_url'])) {
                     $ipmiLaunchUrl = $launch['launch_url'];
-                    $ipmiViewerUsername = isset($launch['viewer_username']) ? (string)$launch['viewer_username'] : '';
-                    $ipmiViewerPassword = isset($launch['viewer_password']) ? (string)$launch['viewer_password'] : '';
+                    // Prefer launch payload credentials if status omitted them.
+                    if ($ipmiViewerUsername === '' && !empty($launch['viewer_username'])) {
+                        $ipmiViewerUsername = (string)$launch['viewer_username'];
+                    }
+                    if ($ipmiViewerPassword === '' && !empty($launch['viewer_password'])) {
+                        $ipmiViewerPassword = (string)$launch['viewer_password'];
+                    }
                 } else {
                     $ipmiError = 'Unable to open IPMI console. Please try again.';
                 }
@@ -1186,7 +1196,62 @@ function rackflow_getRackflowServiceId(array $params)
 }
 
 /**
+ * Ensure the product has an admin-only "RackFlow Service ID" custom field; create it if missing.
+ *
+ * @param int $productId WHMCS product/package ID (tblproducts.id)
+ * @return int|null Custom field ID, or null on failure
+ */
+function rackflow_ensureServiceIdCustomField($productId)
+{
+    if (empty($productId) || !class_exists('\Illuminate\Database\Capsule\Manager')) {
+        return null;
+    }
+    try {
+        $field = \Illuminate\Database\Capsule\Manager::table('tblcustomfields')
+            ->where('relid', (int)$productId)
+            ->where('fieldname', RACKFLOW_SERVICE_ID_FIELD_NAME)
+            ->first();
+        if (!$field || !isset($field->id)) {
+            \Illuminate\Database\Capsule\Manager::table('tblcustomfields')->insert(array(
+                'type' => 'product',
+                'relid' => (int)$productId,
+                'fieldname' => RACKFLOW_SERVICE_ID_FIELD_NAME,
+                'fieldtype' => 'text',
+                'adminonly' => 'on',
+            ));
+            $field = \Illuminate\Database\Capsule\Manager::table('tblcustomfields')
+                ->where('relid', (int)$productId)
+                ->where('fieldname', RACKFLOW_SERVICE_ID_FIELD_NAME)
+                ->first();
+            if (!$field || !isset($field->id)) {
+                rackflow_log('rackflow_ensureServiceIdCustomField: create failed', array(
+                    'productid' => $productId,
+                ));
+                return null;
+            }
+            rackflow_log('rackflow_ensureServiceIdCustomField: created', array(
+                'productid' => $productId,
+                'fieldid' => (int)$field->id,
+            ));
+        }
+        $fieldId = (int)$field->id;
+        // Keep admin-only so the mapping is not shown in the client area
+        \Illuminate\Database\Capsule\Manager::table('tblcustomfields')
+            ->where('id', $fieldId)
+            ->update(array('adminonly' => 'on'));
+        return $fieldId;
+    } catch (Exception $e) {
+        rackflow_log('rackflow_ensureServiceIdCustomField failed', array(
+            'error' => $e->getMessage(),
+            'productid' => $productId,
+        ));
+        return null;
+    }
+}
+
+/**
  * Save the RackFlow service ID into the product custom field for a given WHMCS service.
+ * Creates the "RackFlow Service ID" product custom field when it does not exist yet.
  *
  * @param int $serviceId   WHMCS service ID (tblhosting.id)
  * @param int $productId   WHMCS product/package ID (tblproducts.id)
@@ -1199,42 +1264,39 @@ function rackflow_saveServiceIdCustomField($serviceId, $productId, $rackflowServ
         return false;
     }
     try {
-        if (class_exists('\Illuminate\Database\Capsule\Manager')) {
-            $capsule = \Illuminate\Database\Capsule\Manager::getInstance();
-            $field = $capsule->table('tblcustomfields')
-                ->where('relid', (int)$productId)
-                ->where('fieldname', RACKFLOW_SERVICE_ID_FIELD_NAME)
-                ->first();
-            if (!$field || !isset($field->id)) {
-                rackflow_log('rackflow_saveServiceIdCustomField: no custom field found', array(
-                    'productid' => $productId,
-                    'fieldname' => RACKFLOW_SERVICE_ID_FIELD_NAME,
-                ));
-                return false;
-            }
-            $fieldId = (int)$field->id;
-            $existing = $capsule->table('tblcustomfieldsvalues')
+        if (!class_exists('\Illuminate\Database\Capsule\Manager')) {
+            return false;
+        }
+        $fieldId = rackflow_ensureServiceIdCustomField((int)$productId);
+        if (empty($fieldId)) {
+            rackflow_log('rackflow_saveServiceIdCustomField: no custom field found/created', array(
+                'productid' => $productId,
+                'fieldname' => RACKFLOW_SERVICE_ID_FIELD_NAME,
+            ));
+            return false;
+        }
+        $existing = \Illuminate\Database\Capsule\Manager::table('tblcustomfieldsvalues')
+            ->where('fieldid', $fieldId)
+            ->where('relid', (int)$serviceId)
+            ->first();
+        if ($existing) {
+            \Illuminate\Database\Capsule\Manager::table('tblcustomfieldsvalues')
                 ->where('fieldid', $fieldId)
                 ->where('relid', (int)$serviceId)
-                ->first();
-            if ($existing) {
-                $capsule->table('tblcustomfieldsvalues')
-                    ->where('fieldid', $fieldId)
-                    ->where('relid', (int)$serviceId)
-                    ->update(array('value' => (string)$rackflowServiceId));
-            } else {
-                $capsule->table('tblcustomfieldsvalues')->insert(array(
-                    'fieldid' => $fieldId,
-                    'relid' => (int)$serviceId,
-                    'value' => (string)$rackflowServiceId,
-                ));
-            }
-            rackflow_log('rackflow_saveServiceIdCustomField: saved', array(
-                'serviceid' => $serviceId,
-                'rackflow_service_id' => $rackflowServiceId,
+                ->update(array('value' => (string)$rackflowServiceId));
+        } else {
+            \Illuminate\Database\Capsule\Manager::table('tblcustomfieldsvalues')->insert(array(
+                'fieldid' => $fieldId,
+                'relid' => (int)$serviceId,
+                'value' => (string)$rackflowServiceId,
             ));
-            return true;
         }
+        rackflow_log('rackflow_saveServiceIdCustomField: saved', array(
+            'serviceid' => $serviceId,
+            'productid' => $productId,
+            'rackflow_service_id' => $rackflowServiceId,
+        ));
+        return true;
     } catch (Exception $e) {
         rackflow_log('rackflow_saveServiceIdCustomField failed', array(
             'error' => $e->getMessage(),
@@ -1275,16 +1337,30 @@ function rackflow_RegisterInRackflow(array $params)
             return 'Service ID is missing.';
         }
 
-        // Dedicated IP: prefer params (may be empty when WHMCS runs module command), then load from DB
+        // Dedicated IP / package / client: prefer params, then load from DB (module commands can omit some fields)
         $dedicatedIp = isset($params['dedicatedip']) ? trim($params['dedicatedip']) : '';
-        if (empty($dedicatedIp) && class_exists('\Illuminate\Database\Capsule\Manager')) {
+        if (class_exists('\Illuminate\Database\Capsule\Manager')) {
             $hosting = \Illuminate\Database\Capsule\Manager::table('tblhosting')->where('id', $serviceId)->first();
-            if ($hosting && isset($hosting->dedicatedip) && trim($hosting->dedicatedip) !== '') {
-                $dedicatedIp = trim($hosting->dedicatedip);
+            if ($hosting) {
+                if (empty($dedicatedIp) && isset($hosting->dedicatedip) && trim($hosting->dedicatedip) !== '') {
+                    $dedicatedIp = trim($hosting->dedicatedip);
+                }
+                if (empty($packageId) && isset($hosting->packageid)) {
+                    $packageId = (int)$hosting->packageid;
+                }
+                if (empty($userId) && isset($hosting->userid)) {
+                    $userId = (int)$hosting->userid;
+                }
             }
         }
         if (empty($dedicatedIp)) {
             return 'Dedicated IP is required. Set the Dedicated IP on this service and save, then run this command again.';
+        }
+        if (empty($packageId)) {
+            return 'Product/package ID is missing; cannot store the RackFlow Service ID link.';
+        }
+        if (empty($userId)) {
+            return 'Client/user ID is missing; cannot assign the billing owner in RackFlow.';
         }
 
         // Look up server in RackFlow by IP
@@ -1302,18 +1378,37 @@ function rackflow_RegisterInRackflow(array $params)
             return 'RackFlow server-by-ip returned no server ID.';
         }
 
-        // Get client details for external user
-        $externalUsername = isset($params['clientdetails']['firstname']) || isset($params['clientdetails']['lastname'])
-            ? trim((isset($params['clientdetails']['firstname']) ? $params['clientdetails']['firstname'] : '') . ' ' . (isset($params['clientdetails']['lastname']) ? $params['clientdetails']['lastname'] : ''))
-            : (isset($params['username']) ? $params['username'] : '');
-        $externalEmail = isset($params['clientdetails']['email']) ? $params['clientdetails']['email'] : (isset($params['email']) ? $params['email'] : '');
+        // WHMCS provisioning modules expose client profile as clientsdetails (with an "s")
+        $clientDetails = array();
+        if (isset($params['clientsdetails']) && is_array($params['clientsdetails'])) {
+            $clientDetails = $params['clientsdetails'];
+        } elseif (isset($params['clientdetails']) && is_array($params['clientdetails'])) {
+            $clientDetails = $params['clientdetails'];
+        }
+        $externalUsername = '';
+        if (!empty($clientDetails['firstname']) || !empty($clientDetails['lastname'])) {
+            $externalUsername = trim(
+                (isset($clientDetails['firstname']) ? $clientDetails['firstname'] : '')
+                . ' '
+                . (isset($clientDetails['lastname']) ? $clientDetails['lastname'] : '')
+            );
+        }
+        if ($externalUsername === '' && !empty($params['username'])) {
+            $externalUsername = (string)$params['username'];
+        }
+        $externalEmail = '';
+        if (!empty($clientDetails['email'])) {
+            $externalEmail = (string)$clientDetails['email'];
+        } elseif (!empty($params['email'])) {
+            $externalEmail = (string)$params['email'];
+        }
 
         $registerPayload = array(
             'server_id' => $serverId,
             'external_service_id' => (string)$serviceId,
             'external_user_id' => (string)$userId,
-            'external_username' => $externalUsername ?: null,
-            'external_email' => $externalEmail ?: null,
+            'external_username' => $externalUsername !== '' ? $externalUsername : null,
+            'external_email' => $externalEmail !== '' ? $externalEmail : null,
             'name' => 'service-' . $serviceId,
         );
 
@@ -1330,13 +1425,17 @@ function rackflow_RegisterInRackflow(array $params)
             return 'RackFlow did not return a service ID.';
         }
 
-        // Save RackFlow service ID to product custom field so we can map WHMCS service <-> RackFlow service
-        if ($packageId) {
-            rackflow_saveServiceIdCustomField($serviceId, $packageId, $rackflowServiceId);
+        // Persist WHMCS <-> RackFlow mapping (creates the product custom field when needed)
+        if (!rackflow_saveServiceIdCustomField($serviceId, $packageId, $rackflowServiceId)) {
+            return 'RackFlow service ' . $rackflowServiceId
+                . ' was created, but saving the RackFlow Service ID custom field on this WHMCS service failed.'
+                . ' Enter that ID manually on the service and save.';
         }
 
         rackflow_log('RegisterInRackflow success', array(
             'serviceid' => $serviceId,
+            'userid' => $userId,
+            'packageid' => $packageId,
             'rackflow_service_id' => $rackflowServiceId,
             'server_id' => $serverId,
         ));
@@ -1505,6 +1604,13 @@ function rackflow_AdminServicesTabFields(array $params)
     // Live server status from RackFlow when we have a linked service
     $statusHtml = '';
     $rackflowSvcId = trim($value);
+    if ($rackflowSvcId === '' || !is_numeric($rackflowSvcId)) {
+        // Fall back to custom-field helper (same source ClientArea uses).
+        $linkedId = rackflow_getRackflowServiceId($params);
+        if (!empty($linkedId)) {
+            $rackflowSvcId = (string)$linkedId;
+        }
+    }
     if ($rackflowSvcId !== '' && is_numeric($rackflowSvcId)) {
         $apiConfig = rackflow_getApiConfig($params);
         $statusData = rackflow_fetchServiceStatus($apiConfig['url'], $apiConfig['key'], (int)$rackflowSvcId);
@@ -1531,6 +1637,58 @@ function rackflow_AdminServicesTabFields(array $params)
                 }
             }
 
+            $ipmiAvailable = !empty($statusData['ipmi_proxy_available']);
+            $ipmiViewerUsername = $ipmiAvailable && isset($statusData['ipmi_viewer_username'])
+                ? (string)$statusData['ipmi_viewer_username'] : '';
+            $ipmiViewerPassword = $ipmiAvailable && isset($statusData['ipmi_viewer_password'])
+                ? (string)$statusData['ipmi_viewer_password'] : '';
+            $ipmiLaunchUrl = '';
+            $ipmiError = '';
+            if ($ipmiAvailable && !empty($_GET['rackflow_ipmi'])) {
+                $launch = rackflow_mintIpmiTicket($apiConfig['url'], $apiConfig['key'], (int)$rackflowSvcId);
+                if ($launch && !empty($launch['launch_url'])) {
+                    $ipmiLaunchUrl = (string)$launch['launch_url'];
+                    if ($ipmiViewerUsername === '' && !empty($launch['viewer_username'])) {
+                        $ipmiViewerUsername = (string)$launch['viewer_username'];
+                    }
+                    if ($ipmiViewerPassword === '' && !empty($launch['viewer_password'])) {
+                        $ipmiViewerPassword = (string)$launch['viewer_password'];
+                    }
+                } else {
+                    $ipmiError = 'Unable to open IPMI console. Please try again.';
+                }
+            }
+
+            $ipmiRows = '';
+            if ($ipmiAvailable) {
+                $credParts = array();
+                if ($ipmiViewerUsername !== '') {
+                    $credParts[] = '<code>' . htmlspecialchars($ipmiViewerUsername, ENT_QUOTES, 'UTF-8') . '</code>';
+                }
+                if ($ipmiViewerPassword !== '') {
+                    $credParts[] = '<code>' . htmlspecialchars($ipmiViewerPassword, ENT_QUOTES, 'UTF-8') . '</code>';
+                }
+                $credHtml = !empty($credParts) ? implode(' / ', $credParts) : '<span class="text-muted">Not set</span>';
+                $ipmiRows .= '<tr><th>IPMI login</th><td>' . $credHtml . '</td></tr>';
+                if ($ipmiLaunchUrl !== '') {
+                    $safeLaunch = htmlspecialchars($ipmiLaunchUrl, ENT_QUOTES, 'UTF-8');
+                    $ipmiRows .= '<tr><th>IPMI console</th><td>'
+                        . '<a href="' . $safeLaunch . '" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Launch IPMI console</a>'
+                        . '<p class="text-muted small" style="margin:6px 0 0;">This link is single-use and expires shortly.</p>'
+                        . '<script type="text/javascript">(function(){try{window.open(' . json_encode($ipmiLaunchUrl) . ', "_blank", "noopener");}catch(e){}})();</script>'
+                        . '</td></tr>';
+                } else {
+                    $openJs = "var u=new URL(window.location.href);u.searchParams.set('rackflow_ipmi','1');window.location.href=u.toString();return false;";
+                    $ipmiRows .= '<tr><th>IPMI console</th><td>'
+                        . '<a href="#" class="btn btn-primary btn-sm" onclick="' . htmlspecialchars($openJs, ENT_QUOTES, 'UTF-8') . '">Open IPMI console</a>';
+                    if ($ipmiError !== '') {
+                        $ipmiRows .= '<p class="text-danger small" style="margin:6px 0 0;">'
+                            . htmlspecialchars($ipmiError, ENT_QUOTES, 'UTF-8') . '</p>';
+                    }
+                    $ipmiRows .= '</td></tr>';
+                }
+            }
+
             $statusHtml = '<div class="row"><div class="col-sm-12">'
                 . '<table class="table table-condensed table-bordered" style="max-width: 500px;">'
                 . '<tr><th style="width: 140px;">Service status</th><td>' . $serviceStatus . '</td></tr>'
@@ -1538,6 +1696,7 @@ function rackflow_AdminServicesTabFields(array $params)
                 . '<tr><th>Server enabled</th><td>' . $enabledText . '</td></tr>'
                 . '<tr><th>Power state</th><td><span style="' . $powerStyle . 'padding:2px 8px;border-radius:4px;font-size:12px;">' . htmlspecialchars($statusLabel) . '</span></td></tr>'
                 . '<tr><th>Installation</th><td>' . $installStatus . '</td></tr>'
+                . $ipmiRows
                 . '</table><p class="text-muted small">Live from RackFlow. Reload the page to refresh.</p></div></div>';
         } else {
             $statusHtml = '<span class="text-muted">Could not load status (check API and RackFlow service ID).</span>';
@@ -1568,35 +1727,15 @@ function rackflow_AdminServicesTabFieldsSave(array $params)
         if (!class_exists('\Illuminate\Database\Capsule\Manager')) {
             return;
         }
-        $field = \Illuminate\Database\Capsule\Manager::table('tblcustomfields')
+        $existingField = \Illuminate\Database\Capsule\Manager::table('tblcustomfields')
             ->where('relid', $packageId)
             ->where('fieldname', RACKFLOW_SERVICE_ID_FIELD_NAME)
             ->first();
-        $weCreatedField = false;
-        if (!$field || !isset($field->id)) {
-            \Illuminate\Database\Capsule\Manager::table('tblcustomfields')->insert(array(
-                'type' => 'product',
-                'relid' => (int)$packageId,
-                'fieldname' => RACKFLOW_SERVICE_ID_FIELD_NAME,
-                'fieldtype' => 'text',
-                'adminonly' => 'on',
-            ));
-            $field = \Illuminate\Database\Capsule\Manager::table('tblcustomfields')
-                ->where('relid', $packageId)
-                ->where('fieldname', RACKFLOW_SERVICE_ID_FIELD_NAME)
-                ->first();
-            if (!$field || !isset($field->id)) {
-                return;
-            }
-            $fieldId = (int)$field->id;
-            $weCreatedField = true;
-        } else {
-            $fieldId = (int)$field->id;
+        $weCreatedField = !($existingField && isset($existingField->id));
+        $fieldId = rackflow_ensureServiceIdCustomField($packageId);
+        if (empty($fieldId)) {
+            return;
         }
-        // Ensure RackFlow Service ID is admin-only so it is not shown in client area
-        \Illuminate\Database\Capsule\Manager::table('tblcustomfields')
-            ->where('id', $fieldId)
-            ->update(array('adminonly' => 'on'));
         // Only write the value when we rendered the input (field didn't exist before). When the field
         // already existed, WHMCS saves it from its own form — we must not overwrite with our empty POST key.
         if ($weCreatedField) {

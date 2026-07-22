@@ -71,6 +71,8 @@ class ServiceResponse(BaseModel):
     server_name: str = ""
     external_user_id: Optional[int] = None
     external_user_external_id: Optional[str] = None
+    external_username: Optional[str] = None
+    external_email: Optional[str] = None
     service_type: Optional[str] = None
     provisioning_source: Optional[str] = None
     proxmox_cluster_id: Optional[int] = None
@@ -218,6 +220,8 @@ def _service_to_admin_response(db: Session, service) -> ServiceResponse:
         server_name=server.name if server else "",
         external_user_id=service.external_user_id,
         external_user_external_id=eu.external_user_id if eu else None,
+        external_username=eu.external_username if eu else None,
+        external_email=eu.external_email if eu else None,
         service_type=service.service_type.value if service.service_type else None,
         provisioning_source=src.value if hasattr(src, "value") else str(src),
         proxmox_cluster_id=cid,
