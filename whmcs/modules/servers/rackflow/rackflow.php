@@ -161,7 +161,7 @@ function rackflow_ClientArea(array $vars)
             'rackflow_ipmi_available' => $ipmiAvailable,
             // One-click: opens redirect endpoint in a new tab (mints ticket server-side).
             'rackflow_ipmi_open_url' => !empty($params['serviceid'])
-                ? rackflow_ipmiOpenEndpointUrl((int)$params['serviceid'])
+                ? rackflow_ipmiOpenEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
                 : '',
             'rackflow_ipmi_viewer_username' => $ipmiViewerUsername,
             'rackflow_ipmi_viewer_password' => $ipmiViewerPassword,
@@ -1541,16 +1541,26 @@ function rackflow_urlWithQueryParam($key, $value)
 /**
  * Same-origin URL for the one-click IPMI open redirect endpoint.
  *
- * Always root-relative so admin/client stay on whatever host they are already
- * using (e.g. whmcs.lan.*) instead of jumping to SystemURL (often a public
- * hostname that is broken/mis-TLS'd and surfaces as ERR_HTTP2_PROTOCOL_ERROR).
+ * Root-relative (no scheme/host) so admin/client stay on whatever host they
+ * are already using (e.g. whmcs.lan.*) instead of jumping to the scheme/host
+ * of SystemURL (often a public hostname that is broken/mis-TLS'd and surfaces
+ * as ERR_HTTP2_PROTOCOL_ERROR). We DO still need the *path* portion of
+ * SystemURL though: WHMCS is frequently installed in a subdirectory (e.g.
+ * "/billing"), not at the domain root, and hardcoding "/" breaks that case
+ * with a "Primary script unknown" / file-not-found from PHP-FPM.
  *
- * @param int $whmcsServiceId tblhosting.id
+ * @param int    $whmcsServiceId tblhosting.id
+ * @param string $systemUrl      WHMCS "systemurl" module param (scheme+host+path)
  * @return string
  */
-function rackflow_ipmiOpenEndpointUrl($whmcsServiceId)
+function rackflow_ipmiOpenEndpointUrl($whmcsServiceId, $systemUrl = '')
 {
-    return '/modules/servers/rackflow/ipmi_open.php?serviceid=' . (int)$whmcsServiceId;
+    $basePath = '';
+    if (!empty($systemUrl)) {
+        $path = (string)parse_url($systemUrl, PHP_URL_PATH);
+        $basePath = rtrim($path, '/');
+    }
+    return $basePath . '/modules/servers/rackflow/ipmi_open.php?serviceid=' . (int)$whmcsServiceId;
 }
 
 /**
@@ -1683,7 +1693,11 @@ function rackflow_AdminServicesTabFields(array $params)
                 $credHtml = !empty($credParts) ? implode(' / ', $credParts) : '<span class="text-muted">Not set</span>';
                 $ipmiRows .= '<tr><th>IPMI login</th><td>' . $credHtml . '</td></tr>';
                 // One-click: new tab hits ipmi_open.php, which mints a ticket and 302s to the BMC proxy.
-                $openHref = htmlspecialchars(rackflow_ipmiOpenEndpointUrl($serviceId), ENT_QUOTES, 'UTF-8');
+                $openHref = htmlspecialchars(
+                    rackflow_ipmiOpenEndpointUrl($serviceId, isset($params['systemurl']) ? (string)$params['systemurl'] : ''),
+                    ENT_QUOTES,
+                    'UTF-8'
+                );
                 $ipmiRows .= '<tr><th>IPMI console</th><td>'
                     . '<a href="' . $openHref . '" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Open IPMI console</a>'
                     . '<p class="text-muted small" style="margin:6px 0 0;">Opens in a new tab. The console link is single-use and expires shortly.</p>'
