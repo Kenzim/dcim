@@ -120,6 +120,7 @@
       <p>No server groups found. Create your first server group to organize servers.</p>
     </div>
   {:else}
+    <div class="table-scroll">
     <table class="table server-groups-table">
       <thead>
         <tr>
@@ -155,6 +156,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 </div>
 
@@ -192,6 +194,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
     margin-bottom: 24px;
     padding-bottom: 16px;
     border-bottom: 1px solid var(--border-color);
@@ -229,6 +233,7 @@
 
   .server-groups-table {
     width: 100%;
+    min-width: 560px;
     border-collapse: collapse;
     background: var(--bg-primary);
     border-radius: 12px;

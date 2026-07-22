@@ -521,6 +521,7 @@
                 <div class="error-message" style="margin-top: 0.5rem;">{bulkEditError}</div>
               {/if}
             </div>
+            <div class="table-wrap">
             <table class="ports-table">
               <thead>
                 <tr>
@@ -569,6 +570,7 @@
                 {/each}
               </tbody>
             </table>
+            </div>
           {/if}
         </div>
       </div>
@@ -726,6 +728,12 @@
     color: var(--text-primary);
   }
 
+  @media (max-width: 768px) {
+    .content-body {
+      padding: 1rem;
+    }
+  }
+
   .header-actions {
     display: flex;
     gap: 1rem;
@@ -865,6 +873,7 @@
     width: 100%;
     border-collapse: collapse;
     background: var(--bg-primary);
+    min-width: 640px;
   }
 
   .ports-table thead {

@@ -5,6 +5,7 @@
   import { getCurrentUser } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { theme, toggleTheme } from '../stores/theme.js';
+  import { toggleSidebar } from '../lib/mobileNav.js';
 
   export let title = 'Dashboard';
 
@@ -64,7 +65,14 @@
 </script>
 
 <div class="page-header">
-  <h1 class="page-title">{title}</h1>
+  <div class="header-title-group">
+    <button class="nav-toggle" on:click={toggleSidebar} aria-label="Open navigation menu" title="Menu">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+      </svg>
+    </button>
+    <h1 class="page-title">{title}</h1>
+  </div>
   <div class="header-actions">
     <slot name="actions" />
     <button class="theme-toggle" on:click={toggleTheme} title="Toggle theme">
@@ -134,6 +142,13 @@
     transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
+  .header-title-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
   .page-title {
     font-size: 22px;
     font-weight: 700;
@@ -141,6 +156,36 @@
     color: var(--text-primary);
     letter-spacing: -0.5px;
     line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Hamburger: hidden on desktop, shown when the sidebar is a drawer */
+  .nav-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    flex-shrink: 0;
+    background: var(--bg-primary);
+    border: 2px solid var(--accent-color);
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--accent-color);
+    transition: all 0.2s ease;
+  }
+
+  .nav-toggle:hover {
+    background: var(--accent-color);
+    color: white;
+  }
+
+  .nav-toggle svg {
+    width: 22px;
+    height: 22px;
   }
 
   .header-actions {
@@ -306,6 +351,29 @@
     height: 1px;
     background: var(--border-color);
     margin: 4px 0;
+  }
+
+  @media (max-width: 768px) {
+    .page-header {
+      padding: 12px 16px;
+    }
+
+    .nav-toggle {
+      display: flex;
+    }
+
+    .page-title {
+      font-size: 18px;
+    }
+
+    .header-actions {
+      gap: 8px;
+    }
+
+    /* Avatar initial is enough on narrow screens */
+    .user-name {
+      display: none;
+    }
   }
 </style>
 

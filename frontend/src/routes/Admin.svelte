@@ -296,5 +296,8 @@
       margin-left: 0;
     }
 
+    .content-body {
+      padding: 16px;
+    }
   }
 </style>

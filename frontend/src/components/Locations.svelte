@@ -208,6 +208,18 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 24px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 768px) {
+    .locations-container {
+      padding: 16px;
+    }
+
+    .locations-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .locations-header h2 {

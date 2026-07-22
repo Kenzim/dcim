@@ -342,6 +342,12 @@
     padding: 32px;
   }
 
+  @media (max-width: 768px) {
+    .page-content {
+      padding: 16px;
+    }
+  }
+
   .loading-container {
     display: flex;
     flex-direction: column;
@@ -586,6 +592,12 @@
 
   .card-body {
     padding: 32px;
+  }
+
+  @media (max-width: 768px) {
+    .card-body {
+      padding: 16px;
+    }
   }
 
   .sessions-loading {

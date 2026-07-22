@@ -116,4 +116,30 @@
     position: sticky;
     bottom: 0;
   }
+
+  @media (max-width: 768px) {
+    .modal-overlay {
+      padding: 0;
+      align-items: flex-end;
+    }
+
+    .modal-content,
+    .modal-content.modal-large {
+      width: 100%;
+      max-width: 100%;
+      max-height: 100vh;
+      border-radius: 12px 12px 0 0;
+    }
+
+    .modal-header,
+    .modal-body {
+      padding-left: 16px;
+      padding-right: 16px;
+    }
+
+    .modal-footer {
+      padding: 16px;
+      flex-wrap: wrap;
+    }
+  }
 </style>

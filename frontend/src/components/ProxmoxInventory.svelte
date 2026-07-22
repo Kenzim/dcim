@@ -244,10 +244,11 @@
 
 <style>
   .page { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  @media (max-width: 768px) { .page { padding: 16px; } }
   .top-actions { display: flex; gap: 8px; }
   .action-btn { padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: #fff; cursor: pointer; }
-  .table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
-  .row { display: grid; grid-template-columns: minmax(180px, 1.5fr) minmax(220px, 2fr) 70px 90px 90px 200px; gap: 8px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; }
+  .table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .row { display: grid; grid-template-columns: minmax(180px, 1.5fr) minmax(220px, 2fr) 70px 90px 90px 200px; gap: 8px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; min-width: 880px; }
   .head { background: var(--bg-secondary); font-size: 12px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; }
   .inventory-panel { padding: 10px; border-bottom: 1px solid var(--border-color); background: var(--bg-primary); display: flex; flex-direction: column; gap: 8px; }
   .meta-row { color: var(--text-secondary); font-size: 12px; }

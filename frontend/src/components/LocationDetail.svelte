@@ -317,6 +317,7 @@
                   <input type="checkbox" bind:checked={dhcpSettings.hand_out_leases} />
                   <span>Hand out dynamic leases (add a <code>range</code> block). When unchecked, only static reservations from servers are used.</span>
                 </label>
+                <div class="table-scroll">
                 <table class="table dhcp-table">
                   <thead>
                     <tr>
@@ -345,6 +346,7 @@
                     {/each}
                   </tbody>
                 </table>
+                </div>
                 <div class="dhcp-settings-footer">
                   <button class="btn-secondary btn-small" on:click={addDhcpInterfaceRow}>Add interface</button>
                   <button class="btn-primary btn-small" on:click={saveDhcpSettings} disabled={dhcpSettingsSaving}>
@@ -494,6 +496,16 @@
     align-items: flex-start;
   }
 
+  @media (max-width: 900px) {
+    .location-detail {
+      padding: 16px;
+    }
+
+    .cards-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
   .card {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
@@ -567,6 +579,7 @@
     margin-bottom: 0.5rem;
     table-layout: fixed;
     border-collapse: collapse;
+    min-width: 560px;
   }
 
   .dhcp-table input {

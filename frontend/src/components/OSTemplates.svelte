@@ -157,6 +157,12 @@
     padding: 32px;
   }
 
+  @media (max-width: 768px) {
+    .content-body {
+      padding: 16px;
+    }
+  }
+
   .loading, .error {
     padding: 32px;
     text-align: center;
@@ -200,7 +206,7 @@
 
   .templates-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr));
     gap: 24px;
   }
 

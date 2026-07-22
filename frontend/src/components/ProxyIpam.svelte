@@ -149,6 +149,7 @@
 
 <style>
   .page { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  @media (max-width: 768px) { .page { padding: 16px; } }
   section { background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
   input, select { background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 8px; }
   button { width: fit-content; padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: white; cursor: pointer; }

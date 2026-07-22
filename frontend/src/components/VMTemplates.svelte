@@ -219,6 +219,7 @@
 
 <style>
   .templates-page { padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+  @media (max-width: 768px) { .templates-page { padding: 16px; } }
   .page-hint {
     margin: 0;
     font-size: 13px;
@@ -230,8 +231,8 @@
   .top-actions { display: flex; gap: 8px; }
   .action-btn { padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: #fff; cursor: pointer; }
   .error { color: var(--danger-color); }
-  .template-table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
-  .row { display: grid; grid-template-columns: minmax(200px, 2fr) minmax(140px, 1.2fr) minmax(160px, 1.5fr) 72px 140px; gap: 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; }
+  .template-table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .row { display: grid; grid-template-columns: minmax(200px, 2fr) minmax(140px, 1.2fr) minmax(160px, 1.5fr) 72px 140px; gap: 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; min-width: 760px; }
   .field-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-top: 4px; }
   .field-hint { font-size: 12px; color: var(--text-tertiary); margin: -4px 0 4px 0; line-height: 1.35; }
   .row:last-child { border-bottom: none; }

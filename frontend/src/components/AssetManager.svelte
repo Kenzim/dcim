@@ -190,6 +190,12 @@
     padding: 32px;
   }
 
+  @media (max-width: 768px) {
+    .asset-manager {
+      padding: 16px;
+    }
+  }
+
   .toolbar {
     margin-bottom: 24px;
     display: flex;

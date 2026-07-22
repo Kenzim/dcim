@@ -526,12 +526,15 @@
     border-radius: 8px;
     border: 1px solid var(--border-color);
     overflow: hidden;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
     background: var(--bg-primary);
     box-shadow: var(--shadow-sm);
   }
 
   .servers-table {
     width: 100%;
+    min-width: 560px;
     margin-bottom: 0;
   }
 

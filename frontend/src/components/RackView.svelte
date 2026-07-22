@@ -199,6 +199,14 @@
     justify-content: space-between;
     align-items: flex-start;
     margin-bottom: 24px;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 768px) {
+    .rack-view-container {
+      padding: 16px;
+    }
   }
 
   .rack-info h2 {
