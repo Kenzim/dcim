@@ -47,6 +47,24 @@ class Settings(BaseSettings):
     # can run without a key; compose sets the key so this can be safely enabled.
     require_service_instance_encryption: bool = False
 
+    # End-user IPMI reverse proxy (subdomain + ticket).
+    # Public base domain used to build per-server BMC proxy URLs, e.g. "ipmi.rackflow.com"
+    # produces https://{server.uuid}.ipmi.rackflow.com. When unset, launch URLs cannot be
+    # built and the mint endpoints return 409.
+    ipmi_proxy_public_base: Optional[str] = None
+    # URL scheme and optional port for the proxy subdomain. Production defaults to
+    # https on the standard port; dev/self-hosted setups can use http + a custom
+    # port (e.g. http://{uuid}.ipmi.lan:9082).
+    ipmi_proxy_scheme: str = "https"
+    ipmi_proxy_port: Optional[int] = None
+    # Shared secret the ipmi_proxy_runner edge presents to the runner API (Bearer).
+    ipmi_proxy_runner_api_key: Optional[str] = None
+    # One-time launch ticket lifetime (seconds). Kept short: the ticket is only used
+    # for the browser -> edge handoff, then exchanged for a session cookie.
+    ipmi_ticket_ttl_seconds: int = 60
+    # Edge session cookie lifetime (seconds) after a ticket is redeemed.
+    ipmi_session_ttl_seconds: int = 1800
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

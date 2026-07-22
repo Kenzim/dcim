@@ -217,6 +217,10 @@ api_router.include_router(ipam_api.router, tags=["ipam"])
 from app.api import runner_proxy as runner_proxy_api
 api_router.include_router(runner_proxy_api.router, tags=["proxy-runner"])
 
+# IPMI reverse-proxy runner API (config + ticket redeem)
+from app.api import runner_ipmi as runner_ipmi_api
+api_router.include_router(runner_ipmi_api.router, tags=["ipmi-proxy-runner"])
+
 # Include VM IP allocation routes
 from app.api import vm_ip_allocations as vm_ip_allocations_api
 api_router.include_router(vm_ip_allocations_api.router, tags=["vm-ip-allocations"])

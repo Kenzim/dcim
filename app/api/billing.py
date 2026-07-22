@@ -52,6 +52,7 @@ from app.plugins.base import PowerState
 from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
+from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -1667,6 +1668,12 @@ async def get_service_status(
                 "completed_at": task.completed_at.isoformat() if task.completed_at else None,
             }
 
+    ipmi_proxy_available = bool(
+        server
+        and getattr(server, "ipmi_proxy_enabled", False)
+        and getattr(server, "ipmi_web_management_url", None)
+    )
+
     return {
         "service_id": service.id,
         "service_name": service.name,
@@ -1675,6 +1682,7 @@ async def get_service_status(
         "server_name": server.name if server else None,
         "server_enabled": server.enabled if server else None,
         "power_state": power_state.value,
+        "ipmi_proxy_available": ipmi_proxy_available,
         "status": "suspended"
         if service.status == ServiceStatus.SUSPENDED
         else (
@@ -1684,6 +1692,50 @@ async def get_service_status(
         ),
         "installation": installation,
     }
+
+
+@router.post("/services/{service_id}/ipmi-ticket", status_code=status.HTTP_200_OK)
+async def create_ipmi_ticket(
+    service_id: int,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """
+    Mint a one-time IPMI proxy launch ticket for a bare-metal service.
+
+    WHMCS (or any billing integration) calls this on behalf of the already
+    authenticated end user; the returned ``launch_url`` opens the BMC web UI via
+    the Rackflow IPMI reverse proxy. No Rackflow login is required.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+        )
+
+    _assert_billing_owned_service(service, integration)
+
+    server = service_linked_server(db, service)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service has no linked server",
+        )
+
+    try:
+        payload = build_launch_payload(server)
+    except IPMIProxyUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=exc.detail
+        ) from exc
+
+    logger.info(
+        "Billing API: Minted IPMI ticket for service %s (server %s) via integration '%s'",
+        service_id,
+        server.id,
+        integration.name,
+    )
+    return payload
 
 
 @router.get("/services/{service_id}/usage", response_model=ServerUsage)
