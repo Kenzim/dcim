@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
+  import MultiSelect from './ui/MultiSelect.svelte';
   import {
     listVmIpAllocations,
     createVmIpAllocation,
@@ -147,6 +148,11 @@
   }
 
   onMount(loadData);
+
+  $: clusterOptions = clusters.map((cluster) => ({
+    value: String(cluster.cluster_id),
+    label: cluster.cluster_name || `Cluster ${cluster.cluster_id}`,
+  }));
 </script>
 
 <PageHeader title="VM IP Allocations" />
@@ -197,9 +203,13 @@
     <input bind:value={createForm.subnet_mask} placeholder="Subnet mask (e.g. 255.255.240.0 or /20)" />
     <input bind:value={createForm.gateway} placeholder="Gateway IP" />
     <input bind:value={createForm.bridge_name} placeholder="Bridge name (optional)" />
-    <select bind:value={createForm.cluster_ids} multiple size="5">
-      {#each clusters as cluster}<option value={String(cluster.cluster_id)}>{cluster.cluster_name}</option>{/each}
-    </select>
+    <MultiSelect
+      label="Clusters"
+      options={clusterOptions}
+      bind:value={createForm.cluster_ids}
+      size={5}
+      emptyText="No clusters available"
+    />
     <label><input type="checkbox" bind:checked={createForm.enabled} /> Enabled</label>
     <div class="actions"><button class="tiny" on:click={() => (showCreateModal = false)}>Cancel</button><button on:click={submitCreate}>Save</button></div>
   </div></div>
@@ -213,9 +223,13 @@
     <input bind:value={bulkAddForm.subnet_mask} placeholder="Subnet mask" />
     <input bind:value={bulkAddForm.gateway} placeholder="Gateway IP" />
     <input bind:value={bulkAddForm.bridge_name} placeholder="Bridge name (optional)" />
-    <select bind:value={bulkAddForm.cluster_ids} multiple size="5">
-      {#each clusters as cluster}<option value={String(cluster.cluster_id)}>{cluster.cluster_name}</option>{/each}
-    </select>
+    <MultiSelect
+      label="Clusters"
+      options={clusterOptions}
+      bind:value={bulkAddForm.cluster_ids}
+      size={5}
+      emptyText="No clusters available"
+    />
     <label><input type="checkbox" bind:checked={bulkAddForm.enabled} /> Enabled</label>
     <div class="actions"><button class="tiny" on:click={() => (showBulkAddModal = false)}>Cancel</button><button on:click={submitBulkAdd}>Run Bulk Add</button></div>
   </div></div>
@@ -227,9 +241,13 @@
     <input bind:value={bulkEditForm.subnet_mask} placeholder="Subnet mask (leave empty to keep)" />
     <input bind:value={bulkEditForm.gateway} placeholder="Gateway (leave empty to keep)" />
     <input bind:value={bulkEditForm.bridge_name} placeholder="Bridge name (empty keeps, '-' clears)" />
-    <select bind:value={bulkEditForm.cluster_ids} multiple size="5">
-      {#each clusters as cluster}<option value={String(cluster.cluster_id)}>{cluster.cluster_name}</option>{/each}
-    </select>
+    <MultiSelect
+      label="Clusters (optional replace)"
+      options={clusterOptions}
+      bind:value={bulkEditForm.cluster_ids}
+      size={5}
+      emptyText="No clusters available"
+    />
     <select bind:value={bulkEditForm.enabled}>
       <option value="">Keep enabled state</option>
       <option value="true">Set enabled</option>
@@ -242,8 +260,9 @@
 <style>
   .page { padding: 24px; display: flex; flex-direction: column; gap: 10px; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-  .table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
-  .row { display: grid; grid-template-columns: 34px 140px 120px 140px 120px 220px 1fr 80px; gap: 8px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border-color); font-size: 12px; }
+  .table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .row { display: grid; grid-template-columns: 34px 140px 120px 140px 120px 220px 1fr 80px; gap: 8px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--border-color); font-size: 12px; min-width: 900px; }
+  @media (max-width: 768px) { .page { padding: 16px; } }
   .head { font-size: 11px; text-transform: uppercase; color: var(--text-secondary); background: var(--bg-secondary); font-weight: 600; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   .clusters { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -251,15 +270,25 @@
   .success { color: #7ef0b8; }
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 1000; }
   .modal { width: min(580px, 92vw); max-height: 90vh; overflow: auto; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
-  input, select { background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 8px; }
-  select[multiple] {
-    min-height: 130px;
-    height: 130px;
-    line-height: 1.35;
-    overflow-y: auto;
+  input, select {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 6px;
+    padding: 8px;
   }
-  select[multiple] option {
-    padding: 4px 6px;
+  select {
+    padding-right: 32px;
+    appearance: none;
+    background-color: var(--bg-secondary);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23475569' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px;
+    cursor: pointer;
+  }
+  :global([data-theme="dark"]) select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   }
   button { width: fit-content; padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: #fff; cursor: pointer; }
   .tiny { padding: 4px 8px; font-size: 11px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); }

@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
+  import MultiSelect from './ui/MultiSelect.svelte';
   import {
     listProductFamilies,
     listCatalogProducts,
@@ -97,6 +98,10 @@
   }
 
   $: ungroupedProducts = products.filter((p) => !p.family_id);
+  $: vmTemplateOptions = vmTemplates.map((tmpl) => ({
+    value: String(tmpl.id),
+    label: `${tmpl.name} (${tmpl.os_type})`,
+  }));
 
   async function submitFamily() {
     try {
@@ -204,6 +209,11 @@
     return vmTemplates.filter((tmpl) => allowed.has(Number(tmpl.id)));
   }
 
+  $: vmEditorTemplateOptions = getVmTemplateOptionsForEditor().map((tmpl) => ({
+    value: String(tmpl.id),
+    label: `${tmpl.name} (${tmpl.os_type})`,
+  }));
+
   function formatInheritedTemplates(templateIds = []) {
     if (!Array.isArray(templateIds) || templateIds.length === 0) return 'not set';
     const byId = new Map(vmTemplates.map((tmpl) => [Number(tmpl.id), tmpl]));
@@ -300,20 +310,21 @@
         {/each}
       </div>
 
-      <label class="template-select">
-        VM Templates
-        <select class="vm-template-list" bind:value={vmEditorForm.template_ids} multiple size="6">
-          {#each getVmTemplateOptionsForEditor() as tmpl}
-            <option value={String(tmpl.id)}>{tmpl.name} ({tmpl.os_type})</option>
-          {/each}
-        </select>
+      <div class="template-select">
+        <MultiSelect
+          label="VM Templates"
+          options={vmEditorTemplateOptions}
+          bind:value={vmEditorForm.template_ids}
+          size={6}
+          emptyText="No VM templates available"
+        />
         {#if vmEditor.kind === 'product' && vmEditorForm.extends_family && vmEditor.hasFamily}
           <div class="inherited-note">Group: {formatInheritedTemplates(vmEditorBaseConfig.template_ids || [])}</div>
         {/if}
         <div class="selected-note">
           Selected: {formatInheritedTemplates((vmEditorForm.template_ids || []).map((v) => Number(v)))}
         </div>
-      </label>
+      </div>
       {#if vmSaveSuccess}
         <div class="save-success">{vmSaveSuccess}</div>
       {/if}
@@ -448,11 +459,13 @@
       <input bind:value={productForm.name} placeholder="Product name" />
       <textarea bind:value={productForm.description} rows="3" placeholder="Description (optional)" />
       <input bind:value={productForm.code} placeholder="product-code" />
-      <select bind:value={productForm.vm_template_ids} multiple size="5">
-        {#each vmTemplates as tmpl}
-          <option value={String(tmpl.id)}>{tmpl.name} ({tmpl.os_type})</option>
-        {/each}
-      </select>
+      <MultiSelect
+        label="VM Templates"
+        options={vmTemplateOptions}
+        bind:value={productForm.vm_template_ids}
+        size={5}
+        emptyText="No VM templates available"
+      />
       <button on:click={submitProduct}>Create Product</button>
     </div>
   </div>
@@ -476,11 +489,13 @@
       <input bind:value={editProductForm.name} placeholder="Product name" />
       <textarea bind:value={editProductForm.description} rows="3" placeholder="Description (optional)" />
       <input bind:value={editProductForm.code} placeholder="product-code" />
-      <select bind:value={editProductForm.vm_template_ids} multiple size="5">
-        {#each vmTemplates as tmpl}
-          <option value={String(tmpl.id)}>{tmpl.name} ({tmpl.os_type})</option>
-        {/each}
-      </select>
+      <MultiSelect
+        label="VM Templates"
+        options={vmTemplateOptions}
+        bind:value={editProductForm.vm_template_ids}
+        size={5}
+        emptyText="No VM templates available"
+      />
       <button on:click={submitEditProduct}>Save Product</button>
     </div>
   </div>
@@ -488,15 +503,35 @@
 
 <style>
   .catalog-page { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  @media (max-width: 768px) { .catalog-page { padding: 16px; } }
   .top-actions { display: flex; gap: 10px; }
   .action-btn { padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: white; cursor: pointer; }
   .secondary-btn { padding: 8px 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
   .editor-page { background: var(--bg-primary); padding: 16px; border-radius: 10px; border: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 8px; }
-  input, select, textarea { background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 8px; }
+  input, select, textarea {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 6px;
+    padding: 8px;
+  }
+  select {
+    padding-right: 32px;
+    appearance: none;
+    background-color: var(--bg-secondary);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23475569' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px;
+    cursor: pointer;
+  }
+  :global([data-theme="dark"]) select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  }
   button { width: fit-content; padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: white; cursor: pointer; }
   .editor-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-  .catalog-table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
-  .table-row { display: grid; grid-template-columns: minmax(220px, 2fr) 120px minmax(120px, 1fr) 80px 250px; gap: 10px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; }
+  .catalog-table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-row { display: grid; grid-template-columns: minmax(220px, 2fr) 120px minmax(120px, 1fr) 80px 250px; gap: 10px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; min-width: 820px; }
   .table-row:last-child { border-bottom: none; }
   .table-head { background: var(--bg-secondary); font-size: 12px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
   .family-row { background: color-mix(in srgb, var(--bg-secondary) 45%, transparent); }
@@ -510,16 +545,6 @@
   .vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
   .vm-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
   .template-select { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-secondary); }
-  .vm-template-list {
-    height: 140px !important;
-    min-height: 140px;
-    max-height: 220px;
-    overflow-y: auto;
-    line-height: 1.35;
-  }
-  .vm-template-list option {
-    padding: 4px 6px;
-  }
   .inherited-note { font-size: 11px; color: var(--text-secondary); opacity: 0.9; }
   .selected-note { font-size: 11px; color: var(--text-primary); opacity: 0.95; }
   .save-success {
