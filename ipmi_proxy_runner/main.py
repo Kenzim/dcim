@@ -24,6 +24,7 @@ import logging
 import os
 import ssl
 import time
+from contextlib import asynccontextmanager
 from typing import Dict, Optional
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -462,10 +463,19 @@ async def health(request: Request) -> Response:
     return HTMLResponse(f'{{"ok": true, "upstreams": {count}}}', media_type="application/json")
 
 
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(app: Starlette):
     if not COOKIE_SECRET:
         logger.warning("IPMI_COOKIE_SECRET is not set; sessions cannot be signed securely")
-    asyncio.create_task(_sync_loop())
+    task = asyncio.create_task(_sync_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 routes = [
@@ -480,4 +490,4 @@ routes = [
     ),
 ]
 
-app = Starlette(routes=routes, on_startup=[_startup])
+app = Starlette(routes=routes, lifespan=lifespan)
