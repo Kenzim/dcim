@@ -1,0 +1,15 @@
+[Unit]
+Description=RackFlow customer HTTP/SOCKS5 proxy runner (proxy-runner)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/dcim
+EnvironmentFile=/root/dcim/proxy_runner.env
+ExecStart=/usr/local/bin/proxy-runner
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
