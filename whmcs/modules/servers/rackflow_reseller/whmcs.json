@@ -1,0 +1,23 @@
+{
+    "schema": "1.0",
+    "type": "whmcs-servers",
+    "name": "rackflow_reseller",
+    "license": "MIT",
+    "category": "provisioning",
+    "description": {
+        "name": "RackFlow Reseller Provisioning",
+        "tagline": "Provision reseller services through the tenant-scoped RackFlow API",
+        "long": "An independently installable WHMCS module for RackFlow resellers. RackFlow charges the reseller's effective wholesale rate while WHMCS retains complete control of customer-facing retail pricing.",
+        "features": [
+            "Tenant-scoped reseller API authentication",
+            "Bare-metal, VM, and HTTP proxy provisioning",
+            "Idempotent provisioning and stable payment-required errors",
+            "Lifecycle, power, status, and client portal SSO"
+        ]
+    },
+    "authors": [
+        {
+            "name": "RackFlow Team"
+        }
+    ]
+}
