@@ -4,6 +4,7 @@
   <testsuites>
     <testsuite name="WHMCS Sample Provisioning Module Tests">
       <directory suffix=".php">./tests/</directory>
+      <exclude>./tests/_bootstrap.php</exclude>
     </testsuite>
   </testsuites>
 </phpunit>
