@@ -143,9 +143,12 @@ def test_reset_network_windows_branch(monkeypatch):
 
     plugin = MagicMock()
     alloc = SimpleNamespace(ip_address="10.0.0.9", subnet_mask="255.255.255.0", gateway="10.0.0.1")
+    async def _fake_plugin_for_service(db, service):
+        return plugin
+
     monkeypatch.setattr(
         "app.services.strategy_actions._plugin_for_service",
-        lambda db, service: plugin,
+        _fake_plugin_for_service,
     )
 
     service = SimpleNamespace(
@@ -158,10 +161,13 @@ def test_reset_network_windows_branch(monkeypatch):
 
     orig_init = sa._ActionCtx.__init__
 
+    async def _fake_get_plugin():
+        return plugin
+
     def _init(self, db, service):
         orig_init(self, db, service)
         self.get_ip_allocation = lambda: alloc
-        self.get_plugin = lambda: plugin
+        self.get_plugin = _fake_get_plugin
 
     monkeypatch.setattr(sa._ActionCtx, "__init__", _init)
 

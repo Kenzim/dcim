@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 from app.dao.product_catalog_dao import VMTemplateDAO
 from app.dao.service_dao import ServiceDAO
 from app.models.service import Service, ServiceType
-from app.plugins.registry import get_registry
 from app.services.client_permission_resolver import resolve_client_permissions
 from app.services.deployment.guest_config import (
     apply_cloudinit_network_reset,
@@ -25,8 +24,7 @@ from app.services.deployment.guest_config import (
     strategy_options_from_ctx,
 )
 from app.services.deployment.registry import get_deployment_strategy_registry
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
-from app.services.service_resource import vm_placement
+from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 from app.services.vm_install_type_strategy import merge_strategy_options
 from app.services.vm_strategy_executor import (
     enqueue_apply_guest_password_job,
@@ -98,17 +96,12 @@ def list_actions(db: Session, service: Service, audience: Audience) -> List[Dict
     return out
 
 
-def _plugin_for_service(db: Session, service: Service):
-    from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
-
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not node or vmid is None:
-        raise StrategyActionError("VM has no Proxmox placement", 409)
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-    if not cluster:
-        raise StrategyActionError("Proxmox cluster not found", 404)
-    cfg = cluster_to_proxmox_plugin_config(cluster, node, int(vmid))
-    return get_registry().get_plugin("proxmox", cfg)
+async def _plugin_for_service(db: Session, service: Service):
+    try:
+        plugin, _cid, _node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError as exc:
+        raise StrategyActionError(str(exc), exc.status_code) from exc
+    return plugin
 
 
 class _ActionCtx:
@@ -134,8 +127,8 @@ class _ActionCtx:
             return VMIPAllocationDAO.get_by_id(self.db, vm.vm_ip_allocation_id)
         return None
 
-    def get_plugin(self):
-        return _plugin_for_service(self.db, self.service)
+    async def get_plugin(self):
+        return await _plugin_for_service(self.db, self.service)
 
 
 def _set_guest_password_apply(service: Service, **fields: Any) -> None:
@@ -339,4 +332,4 @@ async def run_action(
 
 
 async def _async_plugin(ctx: _ActionCtx):
-    return ctx.get_plugin()
+    return await ctx.get_plugin()

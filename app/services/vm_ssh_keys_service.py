@@ -10,8 +10,7 @@ from app.dao.product_catalog_dao import ProductDAO, VMTemplateDAO
 from app.dao.service_dao import ServiceDAO
 from app.models.service import Service, ServiceType
 from app.services.deployment.guest_config import apply_root_authorized_keys
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
-from app.services.service_resource import vm_placement
+from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 from app.services.ssh_public_keys import (
     SshPublicKeyError,
     parse_ssh_public_keys,
@@ -19,8 +18,6 @@ from app.services.ssh_public_keys import (
     set_ssh_public_keys_on_service,
     ssh_public_keys_from_service_config,
 )
-from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
-from app.plugins.registry import get_registry
 from app.services.service_product_snapshot import build_product_snapshot
 
 logger = logging.getLogger(__name__)
@@ -76,16 +73,10 @@ async def save_and_apply_ssh_public_keys(
 
 
 async def _try_apply_authorized_keys(db: Session, service: Service, keys: List[str]) -> bool:
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not node or vmid is None:
+    try:
+        plugin, _cid, _node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError:
         return False
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-    if not cluster:
-        return False
-    plugin = get_registry().get_plugin(
-        "proxmox",
-        cluster_to_proxmox_plugin_config(cluster, str(node).strip(), int(vmid)),
-    )
     try:
         ready = await plugin.guest_agent_ready()
     except Exception:

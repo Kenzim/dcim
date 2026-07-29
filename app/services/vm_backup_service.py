@@ -8,18 +8,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from app.dao.product_catalog_dao import ProductDAO
-from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.vm_config_dao import ProductVMConfigDAO
 from app.models.service import Service, ServiceType
 from app.plugins.base import PowerState
-from app.plugins.registry import get_registry
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
-from app.services.service_resource import vm_placement
+from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 
 logger = logging.getLogger(__name__)
 
@@ -81,22 +78,20 @@ def resolve_backup_settings(db: Session, service: Service) -> BackupSettings:
     )
 
 
-def _require_vm_placement(service: Service) -> Tuple[int, str, int]:
+async def get_vm_backup_plugin(db: Session, service: Service):
+    """Resolve the live Proxmox plugin for a VM service's backups.
+
+    Treats the cached node as a hint: if it's missing or stale (guest
+    migrated), searches the cluster for the VMID's current node and updates
+    the cache before erroring.
+    """
     if service.service_type != ServiceType.VM:
         raise BackupConfigError("Not a VM service")
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not (node and str(node).strip()) or vmid is None:
-        raise BackupConfigError("VM placement is not configured")
-    return int(cid), str(node).strip(), int(vmid)
-
-
-def get_vm_backup_plugin(db: Session, service: Service):
-    cid, node, vmid = _require_vm_placement(service)
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-    if cluster is None:
-        raise BackupConfigError("Unknown Proxmox cluster")
-    plugin_config = cluster_to_proxmox_plugin_config(cluster, node, vmid)
-    return get_registry().get_plugin("proxmox", plugin_config), cid, node, vmid
+    try:
+        plugin, cid, node, vmid = await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError as exc:
+        raise BackupConfigError(str(exc)) from exc
+    return plugin, cid, node, vmid
 
 
 def _normalize_volid(storage: str, volid: str) -> str:
@@ -173,7 +168,7 @@ async def _enrich_backup_identity(
 
 async def list_service_backups(db: Session, service: Service) -> List[dict[str, Any]]:
     settings = resolve_backup_settings(db, service)
-    plugin, _cid, _node, vmid = get_vm_backup_plugin(db, service)
+    plugin, _cid, _node, vmid = await get_vm_backup_plugin(db, service)
     platform_rows = await plugin.list_backups(settings.platform_storage, vmid=vmid)
     client_rows = await plugin.list_backups(settings.client_storage, vmid=vmid)
     items = [
@@ -196,7 +191,7 @@ _BACKUP_TASK_TYPES = frozenset({"vzdump", "qmrestore", "qrestore", "imgcopy"})
 
 async def list_running_backup_jobs(db: Session, service: Service) -> List[dict[str, Any]]:
     """Return active Proxmox tasks related to backup/restore for this VMID."""
-    plugin, _cid, node, vmid = get_vm_backup_plugin(db, service)
+    plugin, _cid, node, vmid = await get_vm_backup_plugin(db, service)
     client_storage = ""
     try:
         client_storage = resolve_backup_settings(db, service).client_storage
@@ -336,7 +331,7 @@ async def create_client_backup(
     from app.services.vm_identity_stamp import build_rf_sku_token, notes_with_rf_token
 
     settings = resolve_backup_settings(db, service)
-    plugin, _cid, _node, vmid = get_vm_backup_plugin(db, service)
+    plugin, _cid, _node, vmid = await get_vm_backup_plugin(db, service)
 
     running = await list_running_backup_jobs(db, service)
     if any(j.get("kind") == "backup" for j in running):
@@ -399,7 +394,7 @@ async def delete_client_backup(
     kind, normalized = _resolve_backup_kind(settings, storage or "", volid)
     if kind != "client":
         raise BackupForbiddenError("Platform backups cannot be deleted by clients")
-    plugin, *_ = get_vm_backup_plugin(db, service)
+    plugin, *_ = await get_vm_backup_plugin(db, service)
     await plugin.delete_backup(settings.client_storage, normalized)
 
 
@@ -446,7 +441,7 @@ async def start_restore_task(
     """Kick off a Proxmox restore (no wait). Caller must have stopped the guest."""
     settings = resolve_backup_settings(db, service)
     kind, normalized = _resolve_backup_kind(settings, storage or "", volid)
-    plugin, _cid, _node, vmid = get_vm_backup_plugin(db, service)
+    plugin, _cid, _node, vmid = await get_vm_backup_plugin(db, service)
     upid = await plugin.restore_backup(
         archive=normalized,
         vmid=vmid,
@@ -614,7 +609,7 @@ async def lookup_backup_notes(
 ) -> Optional[str]:
     """Return PBS/PVE notes for a backup volid (best-effort)."""
     settings = resolve_backup_settings(db, service)
-    plugin, _cid, _node, vmid = get_vm_backup_plugin(db, service)
+    plugin, _cid, _node, vmid = await get_vm_backup_plugin(db, service)
     storages: list[str] = []
     if storage:
         storages.append(str(storage))
@@ -665,7 +660,7 @@ async def restore_service_backup(
 
     from app.services.vm_identity_stamp import resolve_template_id_for_restore, stamp_vm_identity
 
-    plugin, _cid, _node, vmid = get_vm_backup_plugin(db, service)
+    plugin, _cid, _node, _vmid = await get_vm_backup_plugin(db, service)
     await stop_guest_for_restore(plugin)
     result = await start_restore_task(
         db, service, volid=volid, storage=storage, start=start
@@ -705,7 +700,7 @@ async def purge_client_backups(db: Session, service: Service) -> dict[str, Any]:
         return {"purged": 0, "skipped": True, "reason": str(exc)}
 
     try:
-        plugin, _cid, _node, vmid = get_vm_backup_plugin(db, service)
+        plugin, _cid, _node, vmid = await get_vm_backup_plugin(db, service)
     except BackupConfigError as exc:
         logger.info(
             "Skipping client backup purge for service %s: %s",

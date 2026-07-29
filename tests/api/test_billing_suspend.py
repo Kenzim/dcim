@@ -114,9 +114,12 @@ def _mock_plugin(monkeypatch, *, power_state=PowerState.ON, power_off_ok=True):
     plugin.get_power_state = AsyncMock(return_value=power_state)
     plugin.power_off = AsyncMock(return_value=power_off_ok)
 
+    async def _fake_get_plugin_instance(db, service):
+        return plugin, None
+
     monkeypatch.setattr(
         "app.api.billing._billing_get_plugin_instance",
-        lambda db, service: (plugin, None),
+        _fake_get_plugin_instance,
     )
     return plugin
 

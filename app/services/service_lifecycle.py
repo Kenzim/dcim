@@ -8,11 +8,12 @@ from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 
-from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
+import inspect
+
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.plugins.base import PowerState
 from app.plugins.registry import get_registry
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 from app.services.service_resource import service_linked_server, vm_placement
 
 
@@ -34,34 +35,18 @@ class ServiceLifecycle:
     ) -> None:
         self.plugin_resolver = plugin_resolver
 
-    def _plugin(self, db: Session, service: Service):
+    async def _plugin(self, db: Session, service: Service):
         if self.plugin_resolver is not None:
             resolved = self.plugin_resolver(db, service)
+            if inspect.isawaitable(resolved):
+                resolved = await resolved
             return resolved[0] if isinstance(resolved, tuple) else resolved
         if service.service_type == ServiceType.VM:
-            cluster_id, node, vmid = vm_placement(service)
-            if (
-                cluster_id is None
-                or not (node and str(node).strip())
-                or vmid is None
-            ):
-                raise ServiceLifecycleError(
-                    "VM service is missing Proxmox placement",
-                    status_code=400,
-                )
-            cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
-            if cluster is None:
-                raise ServiceLifecycleError(
-                    f"Unknown proxmox_cluster_id {cluster_id}",
-                    status_code=404,
-                )
             try:
-                config = cluster_to_proxmox_plugin_config(
-                    cluster, str(node).strip(), int(vmid)
-                )
-            except ValueError as exc:
-                raise ServiceLifecycleError(str(exc), status_code=400) from exc
-            return get_registry().get_plugin("proxmox", config)
+                plugin, _cid, _node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
+            except ProxmoxPlacementError as exc:
+                raise ServiceLifecycleError(str(exc), status_code=exc.status_code) from exc
+            return plugin
 
         server = service_linked_server(db, service)
         if server is None:
@@ -73,15 +58,11 @@ class ServiceLifecycle:
         if service.service_type == ServiceType.HTTP_PROXY:
             return
         if service.service_type == ServiceType.VM:
-            cluster_id, node, vmid = vm_placement(service)
-            if (
-                cluster_id is None
-                or not (node and str(node).strip())
-                or vmid is None
-            ):
+            cluster_id, _node, vmid = vm_placement(service)
+            if cluster_id is None or vmid is None:
                 return
 
-        plugin = self._plugin(db, service)
+        plugin = await self._plugin(db, service)
         try:
             power_state = await plugin.get_power_state()
         except Exception:

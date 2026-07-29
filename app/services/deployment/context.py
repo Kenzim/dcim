@@ -18,7 +18,7 @@ from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.models.service import Service
 from app.plugins.registry import get_registry
 from app.services.deployment.step import DeploymentError
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+from app.services.proxmox_placement import attach_relocator, cluster_to_proxmox_plugin_config
 from app.services.service_resource import vm_placement
 
 logger = logging.getLogger(__name__)
@@ -106,11 +106,20 @@ class DeploymentContext:
         return self._cluster
 
     def get_plugin(self):
+        """Return the (cached) Proxmox plugin for this deployment run.
+
+        Provisioning trusts the placement node outright -- the guest may not
+        exist there yet (create/clone), so a cluster-wide search would just
+        fail. A relocator is still attached so a guest migrated *during* a
+        long-running deployment (e.g. by an admin/HA event, not by us) can
+        self-heal on the next node-scoped call instead of hard-failing.
+        """
         if self._plugin is None:
             _cid, node, vmid = self.require_placement()
             cluster = self.get_cluster()
             plugin_config = cluster_to_proxmox_plugin_config(cluster, node, vmid)
             self._plugin = get_registry().get_plugin("proxmox", plugin_config)
+            attach_relocator(self._plugin, self.db, self.service, cluster, vmid)
         return self._plugin
 
     def get_template(self):

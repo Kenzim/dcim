@@ -140,9 +140,12 @@ def test_reset_network_cloudinit_clone_uses_cloudinit_path(monkeypatch):
         "app.services.strategy_actions.configure_linux_network",
         fake_linux,
     )
+    async def _fake_plugin_for_service(db, service):
+        return plugin
+
     monkeypatch.setattr(
         "app.services.strategy_actions._plugin_for_service",
-        lambda db, service: plugin,
+        _fake_plugin_for_service,
     )
     monkeypatch.setattr(
         "app.dao.vm_ip_allocation_dao.VMIPAllocationDAO.get_by_id",

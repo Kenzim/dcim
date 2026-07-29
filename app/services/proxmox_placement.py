@@ -86,6 +86,14 @@ async def _relocate_vm(db: Session, service, cluster: _ProxmoxClusterLike, vmid:
     return found
 
 
+def attach_relocator(plugin, db: Session, service, cluster: _ProxmoxClusterLike, vmid: int) -> None:
+    """Register the standard 404 relocator on a plugin built outside
+    :func:`resolve_proxmox_plugin_for_service` (e.g. :class:`DeploymentContext`,
+    which keeps its own cached plugin for the lifetime of a provisioning run
+    but still benefits from self-healing if the guest is migrated mid-run)."""
+    plugin.set_relocator(functools.partial(_relocate_vm, db, service, cluster, int(vmid)))
+
+
 async def resolve_proxmox_plugin_for_service(
     db: Session,
     service,

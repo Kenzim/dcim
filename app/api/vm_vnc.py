@@ -36,19 +36,32 @@ from app.schemas.vm_vnc import (
     VmVncRedeemRequest,
     VmVncSessionResponse,
 )
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
-from app.services.service_resource import vm_placement
+from app.services.proxmox_placement import (
+    ProxmoxPlacementError,
+    cluster_to_proxmox_plugin_config,
+    resolve_proxmox_plugin_for_service,
+)
 from app.services.vm_guest_credentials import session_guest_fields
 from app.services.vm_vnc_ticket_service import (
     get_ws_session,
     mint_ws_session,
     redeem_launch_ticket,
     refresh_ws_session,
+    update_ws_session_node,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/vnc", tags=["vm-vnc"])
+
+
+def _placement_http_error(exc: ProxmoxPlacementError) -> HTTPException:
+    """Map a resolver failure to the status code these public console
+    endpoints have always used: missing/incomplete placement (400 from the
+    resolver) reads as 409 Conflict here -- "VM isn't ready for a console
+    yet" -- while a genuinely unknown cluster/VMID keeps its own status."""
+    status_code = status.HTTP_409_CONFLICT if exc.status_code == 400 else exc.status_code
+    return HTTPException(status_code=status_code, detail=str(exc))
 
 
 @router.post("/redeem", response_model=VmVncSessionResponse)
@@ -68,19 +81,10 @@ async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: Session = Depen
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
 
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not (node and str(node).strip()) or vmid is None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM placement is not configured")
-
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-    if cluster is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown Proxmox cluster")
-
     try:
-        plugin_config = cluster_to_proxmox_plugin_config(cluster, str(node).strip(), int(vmid))
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    plugin = get_registry().get_plugin("proxmox", plugin_config)
+        plugin, cid, _node, vmid = await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError as exc:
+        raise _placement_http_error(exc) from exc
 
     try:
         power_state = await plugin.get_power_state()
@@ -100,8 +104,10 @@ async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: Session = Depen
             status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to open console: {exc}"
         ) from exc
 
+    # ``plugin.node`` reflects any mid-call relocation (see ProxmoxPlugin
+    # relocator) that may have happened during the power/console calls above.
     session = mint_ws_session(
-        service.id, cid, str(node).strip(), int(vmid), console["port"], console["ticket"], console["console_type"]
+        service.id, cid, plugin.node, vmid, console["port"], console["ticket"], console["console_type"]
     )
     logger.info("Redeemed VM %s launch ticket for service %s", console["console_type"], service.id)
     return VmVncSessionResponse(
@@ -129,17 +135,16 @@ async def refresh_vnc_session(body: VmVncRedeemRequest, db: Session = Depends(ge
     if session is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Console session is invalid or has expired")
 
-    cluster = ProxmoxInventoryDAO.get_cluster(db, session["cluster_id"])
-    if cluster is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown Proxmox cluster")
+    service = ServiceDAO.get_by_id(db, session["service_id"])
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
 
+    # Rebuild from the service's current placement (not the frozen session
+    # node) so a migrate mid-console can recover on refresh.
     try:
-        plugin_config = cluster_to_proxmox_plugin_config(
-            cluster, session["node_name"], session["vmid"]
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    plugin = get_registry().get_plugin("proxmox", plugin_config)
+        plugin, _cid, node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError as exc:
+        raise _placement_http_error(exc) from exc
 
     try:
         power_state = await plugin.get_power_state()
@@ -160,19 +165,18 @@ async def refresh_vnc_session(body: VmVncRedeemRequest, db: Session = Depends(ge
         ) from exc
 
     updated = refresh_ws_session(
-        body.token, console["port"], console["ticket"], console["console_type"]
+        body.token,
+        console["port"],
+        console["ticket"],
+        console["console_type"],
+        node_name=plugin.node if plugin.node != node else None,
     )
     if updated is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Console session is invalid or has expired")
 
     # Remaining TTL is whatever Redis still has; surface the configured
     # session TTL as a conservative upper bound for the client UI.
-    service = ServiceDAO.get_by_id(db, session["service_id"])
-    guest_fields = session_guest_fields(service) if service else {
-        "service_id": session["service_id"],
-        "guest_username": "",
-        "guest_password": "",
-    }
+    guest_fields = session_guest_fields(service)
     logger.info(
         "Refreshed VM %s WS session for service %s", console["console_type"], session["service_id"]
     )
@@ -203,17 +207,16 @@ async def console_power_action(body: VmVncPowerRequest, db: Session = Depends(ge
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
 
-    cluster = ProxmoxInventoryDAO.get_cluster(db, session["cluster_id"])
-    if cluster is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown Proxmox cluster")
-
+    # Rebuild from the service's current placement (not the frozen session
+    # node) so a migrate mid-console can still be power-controlled.
     try:
-        plugin_config = cluster_to_proxmox_plugin_config(
-            cluster, session["node_name"], session["vmid"]
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    plugin = get_registry().get_plugin("proxmox", plugin_config)
+        plugin, _cid, node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError as exc:
+        raise _placement_http_error(exc) from exc
+    if node != session["node_name"]:
+        # Node changed since the session was minted/refreshed -- keep the
+        # Redis cache fresh so a subsequent /refresh doesn't retry a stale node.
+        update_ws_session_node(body.token, node)
 
     action = (body.action or "").strip().lower()
     try:

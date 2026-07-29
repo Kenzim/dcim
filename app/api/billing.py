@@ -90,7 +90,10 @@ from app.services.service_resource import (
     service_server_id_for_response,
     vm_placement,
 )
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+from app.services.proxmox_placement import (
+    ProxmoxPlacementError,
+    resolve_proxmox_plugin_for_service,
+)
 from app.services.vm_strategy_executor import schedule_vm_auto_provision
 from app.services.billing_provisioning_service import (
     ProvisioningActor,
@@ -222,34 +225,19 @@ def _billing_service_response(db: Session, service: Service) -> BillingServiceRe
     )
 
 
-def _billing_get_plugin_instance(db: Session, service: Service):
+async def _billing_get_plugin_instance(db: Session, service: Service):
     """
     Return (plugin_instance, server_or_none). For VM services server is None; plugin is Proxmox.
+
+    VM placement's cached node is treated as a hint: if it's missing or
+    stale, this searches the Proxmox cluster for the VMID's current node and
+    updates the cache before erroring.
     """
     if service.service_type == ServiceType.VM:
-        cid, node, vmid = vm_placement(service)
-        if cid is None or not (node and str(node).strip()) or vmid is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="VM service is missing Proxmox placement (proxmox_cluster_id, proxmox_node_name, proxmox_vmid)",
-            )
-        cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-        if not cluster:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Unknown proxmox_cluster_id {cid}",
-            )
         try:
-            plugin_config = cluster_to_proxmox_plugin_config(
-                cluster, str(node).strip(), int(vmid)
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
-        registry = get_registry()
-        inst = registry.get_plugin("proxmox", plugin_config)
+            inst, _cid, _node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
+        except ProxmoxPlacementError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         return inst, None
     server = service_linked_server(db, service)
     if not server:
@@ -2231,7 +2219,7 @@ async def power_control(
                     detail=f"Cannot '{action}' an administratively disabled server",
                 )
 
-        plugin_instance, _srv = _billing_get_plugin_instance(db, service)
+        plugin_instance, _srv = await _billing_get_plugin_instance(db, service)
         if not plugin_instance:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2339,7 +2327,7 @@ async def get_service_status(
 
     power_state = PowerState.UNKNOWN
     try:
-        plugin_instance, _ = _billing_get_plugin_instance(db, service)
+        plugin_instance, _ = await _billing_get_plugin_instance(db, service)
         if plugin_instance:
             power_state = await plugin_instance.get_power_state()
     except HTTPException:
@@ -2376,12 +2364,10 @@ async def get_service_status(
     )
 
     vnc_console_granted = bool(client_permissions.get(PermissionKey.VM_CONSOLE, False))
-    vnc_cid, vnc_node, vnc_vmid = vm_placement(service)
+    vnc_cid, _vnc_node, vnc_vmid = vm_placement(service)
     vnc_console_available = bool(
         service.service_type == ServiceType.VM
         and vnc_cid is not None
-        and vnc_node
-        and str(vnc_node).strip()
         and vnc_vmid is not None
         and vnc_console_granted
     )
@@ -2873,8 +2859,8 @@ async def create_vnc_ticket(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
     require_client_permission(db, service, PermissionKey.VM_CONSOLE)
 
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not (node and str(node).strip()) or vmid is None:
+    cid, _node, vmid = vm_placement(service)
+    if cid is None or vmid is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM placement is not configured")
 
     try:

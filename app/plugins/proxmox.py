@@ -8,7 +8,7 @@ import logging
 import re
 import shlex
 import urllib.parse
-from typing import Dict, Any, List, Optional, Sequence
+from typing import Awaitable, Callable, Dict, Any, List, Optional, Sequence
 
 import httpx
 from app.plugins.base import (
@@ -145,7 +145,81 @@ class ProxmoxPlugin(ServerPlugin):
         # Proxmox API requires a ticket (CSRF token) for authentication
         self.ticket = None
         self.csrf_token = None
-    
+
+        # Optional cluster-wide relocate callback (see set_relocator), used
+        # to recover from a 404 caused by HA/live migration racing this
+        # exact request.
+        self._relocator: Optional[Callable[[], Awaitable[Optional[str]]]] = None
+        self._relocated = False
+
+    def set_relocator(self, relocator: Callable[[], Awaitable[Optional[str]]]) -> None:
+        """Register a same-VMID cluster-wide node lookup for 404 recovery.
+
+        ``relocator`` is an async callable ``() -> Optional[str]`` that finds
+        the node currently hosting this plugin's ``vmid`` cluster-wide (and
+        persists it). Invoked at most once per plugin instance, only when a
+        node-scoped request 404s -- i.e. the guest was migrated in the race
+        between whoever resolved this plugin's placement and this request.
+        """
+        self._relocator = relocator
+
+    async def _relocate_and_retry(self) -> bool:
+        """Try the registered relocator once; update ``self.node`` on success.
+
+        Returns True (and updates ``self.node``) only if a relocator is set,
+        hasn't been used yet on this instance, and finds a *different* node
+        than the one we're already using -- callers should retry the request
+        exactly once when this returns True.
+        """
+        if self._relocator is None or self._relocated:
+            return False
+        self._relocated = True
+        try:
+            new_node = await self._relocator()
+        except Exception:
+            logger.debug("[ProxmoxPlugin] relocate lookup failed for VM %s", self.vmid, exc_info=True)
+            return False
+        if not new_node or new_node == self.node:
+            return False
+        logger.info(
+            "[ProxmoxPlugin] VM %s not on node %s; relocated to %s",
+            self.vmid, self.node, new_node,
+        )
+        self.node = new_node
+        return True
+
+    async def _get_with_relocate(self, url_for_node: Callable[[], str], *, timeout: float = 10.0):
+        """GET a node-scoped URL; on 404, try one relocate + retry.
+
+        ``url_for_node`` is a zero-arg callable that builds the URL from
+        ``self.node`` at call time, since a successful relocate updates
+        ``self.node`` before the retry.
+        """
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+            response = await client.get(url_for_node(), headers=headers)
+        if response.status_code == 404 and await self._relocate_and_retry():
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+                response = await client.get(url_for_node(), headers=headers)
+        return response
+
+    async def _post_with_relocate(
+        self,
+        url_for_node: Callable[[], str],
+        *,
+        data: Optional[Dict[str, Any]] = None,
+        timeout: float = 15.0,
+    ):
+        """POST a node-scoped URL; on 404, try one relocate + retry (see
+        :meth:`_get_with_relocate`)."""
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+            response = await client.post(url_for_node(), headers=headers, data=data)
+        if response.status_code == 404 and await self._relocate_and_retry():
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+                response = await client.post(url_for_node(), headers=headers, data=data)
+        return response
+
     async def _get_auth_ticket(self) -> Dict[str, str]:
         """
         Authenticate with Proxmox API and get ticket/CSRF token.
@@ -299,16 +373,18 @@ class ProxmoxPlugin(ServerPlugin):
         Return True if a QEMU VM with this vmid exists on the node.
 
         Used for idempotent provisioning so a retry after a mid-flight failure
-        does not attempt to clone over an already-created VMID.
+        does not attempt to clone over an already-created VMID. Also the
+        primary cache-probe for placement resolution: a 404 here first tries
+        a one-shot cluster-wide relocate (see :meth:`set_relocator`) before
+        being reported as "doesn't exist" to the caller.
         """
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/current"
-        headers = await self._get_headers()
-        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=10.0) as client:
-            response = await client.get(url, headers=headers)
-            if response.status_code == 404:
-                return False
-            response.raise_for_status()
-            return True
+        response = await self._get_with_relocate(
+            lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/current"
+        )
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return True
 
     async def guest_agent_ready(self) -> bool:
         """Return True if the QEMU guest agent responds to a ping.
@@ -318,12 +394,11 @@ class ProxmoxPlugin(ServerPlugin):
         (agent not up yet, VM stopped, transient API failure) yields False so a
         deployment step can keep waiting.
         """
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/agent/ping"
         try:
-            headers = await self._get_headers()
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=10.0) as client:
-                response = await client.post(url, headers=headers)
-                return response.status_code == 200
+            response = await self._post_with_relocate(
+                lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/agent/ping"
+            )
+            return response.status_code == 200
         except Exception as exc:
             logger.debug("[ProxmoxPlugin.guest_agent_ready] agent ping failed for VM %s: %s", self.vmid, exc)
             return False
@@ -575,22 +650,20 @@ class ProxmoxPlugin(ServerPlugin):
             PowerState enum value (on/off/unknown)
         """
         try:
-            url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/current"
-            headers = await self._get_headers()
-            
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=10.0) as client:
-                response = await client.get(url, headers=headers)
-                response.raise_for_status()
-                
-                vm_data = response.json().get("data", {})
-                status = vm_data.get("status", "unknown").lower()
-                
-                if status == "running":
-                    return PowerState.ON
-                elif status == "stopped":
-                    return PowerState.OFF
-                else:
-                    return PowerState.UNKNOWN
+            response = await self._get_with_relocate(
+                lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/current"
+            )
+            response.raise_for_status()
+
+            vm_data = response.json().get("data", {})
+            status = vm_data.get("status", "unknown").lower()
+
+            if status == "running":
+                return PowerState.ON
+            elif status == "stopped":
+                return PowerState.OFF
+            else:
+                return PowerState.UNKNOWN
                     
         except Exception as e:
             logger.error(f"[ProxmoxPlugin.get_power_state] Failed to get power state: {str(e)}")
@@ -604,15 +677,14 @@ class ProxmoxPlugin(ServerPlugin):
             True if successful, False otherwise
         """
         try:
-            url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/start"
-            headers = await self._get_headers()
-            
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
-                response = await client.post(url, headers=headers)
-                response.raise_for_status()
-                
-                logger.info(f"[ProxmoxPlugin.power_on] Successfully sent power on command for VM {self.vmid}")
-                return True
+            response = await self._post_with_relocate(
+                lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/start",
+                timeout=30.0,
+            )
+            response.raise_for_status()
+
+            logger.info(f"[ProxmoxPlugin.power_on] Successfully sent power on command for VM {self.vmid}")
+            return True
                 
         except Exception as e:
             logger.error(f"[ProxmoxPlugin.power_on] Failed to power on VM: {str(e)}")
@@ -631,15 +703,14 @@ class ProxmoxPlugin(ServerPlugin):
         try:
             # Use shutdown for graceful, stop for force
             action = "stop" if force else "shutdown"
-            url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/{action}"
-            headers = await self._get_headers()
-            
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
-                response = await client.post(url, headers=headers)
-                response.raise_for_status()
-                
-                logger.info(f"[ProxmoxPlugin.power_off] Successfully sent power off command for VM {self.vmid} (force={force})")
-                return True
+            response = await self._post_with_relocate(
+                lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/{action}",
+                timeout=30.0,
+            )
+            response.raise_for_status()
+
+            logger.info(f"[ProxmoxPlugin.power_off] Successfully sent power off command for VM {self.vmid} (force={force})")
+            return True
                 
         except Exception as e:
             logger.error(f"[ProxmoxPlugin.power_off] Failed to power off VM: {str(e)}")
@@ -654,15 +725,14 @@ class ProxmoxPlugin(ServerPlugin):
             True if successful, False otherwise
         """
         try:
-            url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/reset"
-            headers = await self._get_headers()
-            
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
-                response = await client.post(url, headers=headers)
-                response.raise_for_status()
-                
-                logger.info(f"[ProxmoxPlugin.power_reset] Successfully sent reset command for VM {self.vmid}")
-                return True
+            response = await self._post_with_relocate(
+                lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/reset",
+                timeout=30.0,
+            )
+            response.raise_for_status()
+
+            logger.info(f"[ProxmoxPlugin.power_reset] Successfully sent reset command for VM {self.vmid}")
+            return True
                 
         except Exception as e:
             logger.error(f"[ProxmoxPlugin.power_reset] Failed to reset VM: {str(e)}")
@@ -685,20 +755,21 @@ class ProxmoxPlugin(ServerPlugin):
             Dict with ``port`` (int), ``ticket`` (str VNC/RFB password),
             ``upid``, and ``cert`` (server certificate fingerprint, if any).
         """
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/vncproxy"
-        headers = await self._get_headers()
-        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=15.0) as client:
-            response = await client.post(url, headers=headers, data={"websocket": 1})
-            response.raise_for_status()
-            data = response.json().get("data") or {}
-            if not data.get("port") or not data.get("ticket"):
-                raise Exception("Proxmox did not return a VNC proxy port/ticket")
-            return {
-                "port": int(data["port"]),
-                "ticket": str(data["ticket"]),
-                "upid": data.get("upid"),
-                "cert": data.get("cert"),
-            }
+        response = await self._post_with_relocate(
+            lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/vncproxy",
+            data={"websocket": 1},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        data = response.json().get("data") or {}
+        if not data.get("port") or not data.get("ticket"):
+            raise Exception("Proxmox did not return a VNC proxy port/ticket")
+        return {
+            "port": int(data["port"]),
+            "ticket": str(data["ticket"]),
+            "upid": data.get("upid"),
+            "cert": data.get("cert"),
+        }
 
     async def get_available_console_types(self) -> Dict[str, bool]:
         """
@@ -721,12 +792,12 @@ class ProxmoxPlugin(ServerPlugin):
         Checked via ``GET .../config`` rather than assumed, since it varies
         per VM.
         """
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/config"
-        headers = await self._get_headers()
-        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=15.0) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json().get("data") or {}
+        response = await self._get_with_relocate(
+            lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/config",
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        data = response.json().get("data") or {}
 
         vga = str(data.get("vga") or "").strip().lower()
         serial_available = any(
@@ -748,20 +819,20 @@ class ProxmoxPlugin(ServerPlugin):
         :meth:`vnc_websocket_url`) -- but the byte stream carries Proxmox's
         xterm.js line-protocol (see ``app.api.vm_vnc``) instead of RFB.
         """
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/termproxy"
-        headers = await self._get_headers()
-        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=15.0) as client:
-            response = await client.post(url, headers=headers)
-            response.raise_for_status()
-            data = response.json().get("data") or {}
-            if not data.get("port") or not data.get("ticket"):
-                raise Exception("Proxmox did not return a terminal proxy port/ticket")
-            return {
-                "port": int(data["port"]),
-                "ticket": str(data["ticket"]),
-                "upid": data.get("upid"),
-                "user": data.get("user") or self.username,
-            }
+        response = await self._post_with_relocate(
+            lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/termproxy",
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        data = response.json().get("data") or {}
+        if not data.get("port") or not data.get("ticket"):
+            raise Exception("Proxmox did not return a terminal proxy port/ticket")
+        return {
+            "port": int(data["port"]),
+            "ticket": str(data["ticket"]),
+            "upid": data.get("upid"),
+            "user": data.get("user") or self.username,
+        }
 
     async def open_console_proxy(self, console_type: Optional[str] = None) -> Dict[str, Any]:
         """
