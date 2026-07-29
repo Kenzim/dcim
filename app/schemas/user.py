@@ -23,6 +23,7 @@ class UserLoginResponse(BaseModel):
     user_id: int
     username: str
     is_admin: bool
+    is_reseller: bool
 
 
 class UserResponse(BaseModel):
@@ -31,6 +32,7 @@ class UserResponse(BaseModel):
     username: str
     email: str
     is_admin: bool
+    is_reseller: bool
 
     class Config:
         from_attributes = True
