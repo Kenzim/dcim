@@ -839,7 +839,7 @@ async def power_service(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Server is administratively disabled",
             )
-    plugin, _ = _billing_get_plugin_instance(db, service)
+    plugin, _ = await _billing_get_plugin_instance(db, service)
     try:
         if action == "on":
             success = await plugin.power_on()
@@ -873,7 +873,7 @@ async def get_service_status(
     power_available = service.service_type != ServiceType.HTTP_PROXY
     if power_available:
         try:
-            plugin, _ = _billing_get_plugin_instance(db, service)
+            plugin, _ = await _billing_get_plugin_instance(db, service)
             power_state = await plugin.get_power_state()
         except Exception:
             power_state = PowerState.UNKNOWN
