@@ -24,17 +24,19 @@ class CloneFromTemplateStep(DeploymentStep):
         return StepOutcome.ready()
 
     async def execute(self, ctx) -> None:
-        _cid, _node, target_vmid = ctx.require_placement()
-        template_vmid = await ctx.resolve_template_vmid()
+        _cid, placed_node, target_vmid = ctx.require_placement()
+        template_node, template_vmid = await ctx.resolve_template_location()
         plugin = ctx.get_plugin()
         specs = ctx.get_specs()
         # Linked clones are the default; products may opt into full clones via VM config.
         full_clone = bool(specs.get("full_clone", False))
         name = (ctx.service.name or f"vm-{target_vmid}")[:90]
-        clone_out = await plugin.clone_vm_from_template(
-            {"vmid": int(template_vmid)},
-            {"vmid": int(target_vmid), "name": name, "full_clone": full_clone},
-        )
+        template_ref: dict = {"vmid": int(template_vmid), "node": template_node}
+        vm_config: dict = {"vmid": int(target_vmid), "name": name, "full_clone": full_clone}
+        # Shared storage: template may live on another node; clone onto the placed node.
+        if (template_node or "").strip() != (placed_node or "").strip():
+            vm_config["target_node"] = placed_node
+        clone_out = await plugin.clone_vm_from_template(template_ref, vm_config)
         upid = clone_out.get("task")
         if upid:
             await plugin.wait_for_proxmox_task(str(upid))

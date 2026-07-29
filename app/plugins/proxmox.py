@@ -871,7 +871,9 @@ class ProxmoxPlugin(ServerPlugin):
         target_vmid = vm_config.get("vmid")
         if template_vmid is None or target_vmid is None:
             raise ValueError("template vmid and target vmid are required")
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{template_vmid}/clone"
+        # Optional template home node (shared storage: template may live elsewhere).
+        source_node = (template_ref.get("node") or self.node or "").strip() or self.node
+        url = f"{self.base_url}/api2/json/nodes/{source_node}/qemu/{template_vmid}/clone"
         headers = await self._get_headers()
         payload = {
             "newid": target_vmid,

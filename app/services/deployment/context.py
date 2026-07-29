@@ -7,7 +7,7 @@ context is created for each worker tick, so cached values are per-tick.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from sqlalchemy.orm import Session
@@ -30,6 +30,16 @@ async def _find_template_vmid_live(cluster, node_name: str, template_name: str) 
     Mirrors the previous linear executor so we do not hard-depend on synced
     template inventory.
     """
+    found = await _find_template_on_nodes_live(cluster, [node_name], template_name)
+    return found[1] if found else None
+
+
+async def _find_template_on_nodes_live(
+    cluster,
+    node_names: List[str],
+    template_name: str,
+) -> Optional[Tuple[str, int]]:
+    """Scan the given nodes via the Proxmox API for a QEMU template by name."""
     auth_url = f"{cluster.api_url.rstrip('/')}/api2/json/access/ticket"
     base = f"{cluster.api_url.rstrip('/')}/api2/json"
     async with httpx.AsyncClient(verify=cluster.verify_ssl, timeout=20.0) as client:
@@ -46,16 +56,19 @@ async def _find_template_vmid_live(cluster, node_name: str, template_name: str) 
         headers = {"Cookie": f"PVEAuthCookie={ticket}"}
         if csrf:
             headers["CSRFPreventionToken"] = csrf
-        qemu_resp = await client.get(f"{base}/nodes/{node_name}/qemu", headers=headers)
-        qemu_resp.raise_for_status()
-        for row in qemu_resp.json().get("data") or []:
-            if int(row.get("template") or 0) != 1:
+        for node_name in node_names:
+            if not (node_name or "").strip():
                 continue
-            if str(row.get("name") or "") != template_name:
-                continue
-            vmid = row.get("vmid")
-            if vmid is not None:
-                return int(vmid)
+            qemu_resp = await client.get(f"{base}/nodes/{node_name}/qemu", headers=headers)
+            qemu_resp.raise_for_status()
+            for row in qemu_resp.json().get("data") or []:
+                if int(row.get("template") or 0) != 1:
+                    continue
+                if str(row.get("name") or "") != template_name:
+                    continue
+                vmid = row.get("vmid")
+                if vmid is not None:
+                    return str(node_name).strip(), int(vmid)
     return None
 
 
@@ -109,23 +122,55 @@ class DeploymentContext:
             raise DeploymentError("VM template catalog row not found")
         return tmpl
 
-    async def resolve_template_vmid(self) -> int:
+    async def resolve_template_location(self) -> Tuple[str, int]:
+        """Return ``(template_home_node, template_vmid)`` for the catalog template.
+
+        With ``shared_storage``, search the whole cluster (inventory then live API).
+        Otherwise require the template on the placed node.
+        """
         cid, node, _ = self.require_placement()
         tmpl = self.get_template()
+        template_name = tmpl.proxmox_template_name
+        shared = bool(tmpl.shared_storage)
+
+        if shared:
+            found = ProxmoxInventoryDAO.find_template_in_cluster(
+                self.db, cluster_id=cid, template_name=template_name
+            )
+            if found is None:
+                cluster = self.get_cluster()
+                node_names = [
+                    str(n.node_name)
+                    for n in (cluster.nodes or [])
+                    if n.enabled and (n.node_name or "").strip()
+                ]
+                if not node_names:
+                    node_names = [node]
+                found = await _find_template_on_nodes_live(cluster, node_names, template_name)
+            if found is None:
+                raise DeploymentError(
+                    f"No Proxmox template named '{template_name}' found in cluster {cid}."
+                )
+            return found
+
         template_vmid = ProxmoxInventoryDAO.find_template_vmid_on_node(
             self.db,
             cluster_id=cid,
             node_name=node,
-            template_name=tmpl.proxmox_template_name,
+            template_name=template_name,
         )
         if template_vmid is None:
-            template_vmid = await _find_template_vmid_live(self.get_cluster(), node, tmpl.proxmox_template_name)
+            template_vmid = await _find_template_vmid_live(self.get_cluster(), node, template_name)
         if template_vmid is None:
             raise DeploymentError(
-                f"No Proxmox template named '{tmpl.proxmox_template_name}' found on node "
+                f"No Proxmox template named '{template_name}' found on node "
                 f"'{node}' in cluster {cid}."
             )
-        return int(template_vmid)
+        return node, int(template_vmid)
+
+    async def resolve_template_vmid(self) -> int:
+        _node, vmid = await self.resolve_template_location()
+        return int(vmid)
 
     def get_specs(self) -> Dict[str, Any]:
         vm_plan = (self.service.config or {}).get("vm_plan") or {}

@@ -53,6 +53,7 @@ class FakePlugin:
 
     async def clone_vm_from_template(self, template_ref, vm_config):
         self.calls.append(("clone", dict(vm_config)))
+        self.last_template_ref = dict(template_ref)
         self._exists = True
         return {"vmid": vm_config.get("vmid"), "task": None}
 
@@ -141,8 +142,12 @@ class FakeCtx:
     def require_placement(self):
         return (1, "pve1", 5000)
 
+    async def resolve_template_location(self):
+        return ("pve1", 9000)
+
     async def resolve_template_vmid(self):
-        return 9000
+        _node, vmid = await self.resolve_template_location()
+        return vmid
 
 
 def _run(coro):
@@ -223,6 +228,30 @@ def test_clone_honors_full_clone_opt_in():
     ctx = FakeCtx(plugin, specs={"memory_mb": 2048, "cores": 2, "full_clone": True})
     _run(CloneFromTemplateStep().execute(ctx))
     assert plugin.calls == [("clone", {"vmid": 5000, "name": "unit-vm", "full_clone": True})]
+
+
+def test_clone_sets_target_node_when_template_on_other_node():
+    plugin = FakePlugin(exists=False)
+    ctx = FakeCtx(plugin, specs={"memory_mb": 2048, "cores": 2, "full_clone": False})
+
+    async def _loc():
+        return ("pve-template", 9000)
+
+    ctx.resolve_template_location = _loc  # type: ignore[method-assign]
+    # Placement remains pve1; template lives elsewhere (shared storage).
+    _run(CloneFromTemplateStep().execute(ctx))
+    assert plugin.calls == [
+        (
+            "clone",
+            {
+                "vmid": 5000,
+                "name": "unit-vm",
+                "full_clone": False,
+                "target_node": "pve1",
+            },
+        )
+    ]
+    assert plugin.last_template_ref == {"vmid": 9000, "node": "pve-template"}
 
 
 def test_power_on_precheck_skips_when_running():
@@ -319,9 +348,13 @@ def _patch_context(monkeypatch, plugin, alloc=None):
     monkeypatch.setattr(DeploymentContext, "get_plugin", lambda self: plugin)
     monkeypatch.setattr(DeploymentContext, "get_ip_allocation", lambda self: alloc)
 
+    async def _tmpl_loc(self):
+        return ("pve1", 9000)
+
     async def _tmpl(self):
         return 9000
 
+    monkeypatch.setattr(DeploymentContext, "resolve_template_location", _tmpl_loc)
     monkeypatch.setattr(DeploymentContext, "resolve_template_vmid", _tmpl)
 
 
