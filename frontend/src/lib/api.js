@@ -10,7 +10,40 @@ export function setUnauthorizedHandler(fn) {
   _onUnauthorized = fn;
 }
 
-const _UNAUTH_EXCLUDED = ['/users/login', '/users/logout', '/users/me'];
+const _UNAUTH_EXCLUDED = ['/client/login', '/client/logout', '/client/me'];
+
+// Admin "sign in as" impersonation: when an admin opens a client profile's
+// "Sign in as" link, the new tab lands on /client?impersonate=<token>. That
+// token is stashed in sessionStorage (per-tab, so it never touches the
+// admin's own cookie session in the original tab) and sent as a Bearer
+// header on client-portal calls so the backend resolves the impersonated
+// user instead of falling back to any shared cookie.
+const IMPERSONATION_TOKEN_KEY = 'rf_impersonate_token';
+
+export function setImpersonationToken(token) {
+  try {
+    if (token) {
+      window.sessionStorage.setItem(IMPERSONATION_TOKEN_KEY, token);
+    } else {
+      window.sessionStorage.removeItem(IMPERSONATION_TOKEN_KEY);
+    }
+  } catch (_) {
+    // sessionStorage unavailable (e.g. privacy mode) — impersonation just won't work.
+  }
+}
+
+export function clearImpersonationToken() {
+  setImpersonationToken(null);
+}
+
+function _impersonationHeaders() {
+  try {
+    const token = window.sessionStorage.getItem(IMPERSONATION_TOKEN_KEY);
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch (_) {
+    return {};
+  }
+}
 
 export function installFetchAuthInterceptor() {
   if (typeof window === 'undefined' || window.__rfFetchPatched) return;
@@ -221,7 +254,7 @@ export async function login(username, password) {
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
   try {
-    const response = await fetch(`${API_BASE}/users/login`, {
+    const response = await fetch(`${API_BASE}/client/login`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -259,10 +292,12 @@ export async function login(username, password) {
 }
 
 export async function logout() {
-  const response = await fetch(`${API_BASE}/users/logout`, {
+  const response = await fetch(`${API_BASE}/client/logout`, {
     method: 'POST',
     credentials: 'include',
+    headers: { ..._impersonationHeaders() },
   });
+  clearImpersonationToken();
 
   if (!response.ok) {
     throw new Error('Logout failed');
@@ -272,9 +307,10 @@ export async function logout() {
 }
 
 export async function getCurrentUser() {
-  const response = await fetch(`${API_BASE}/users/me`, {
+  const response = await fetch(`${API_BASE}/client/me`, {
     method: 'GET',
     credentials: 'include', // Important for cookies
+    headers: { ..._impersonationHeaders() },
   });
 
   if (!response.ok) {
@@ -1189,14 +1225,14 @@ export async function deleteServer(id) {
   }
 }
 
-export async function testServerConnection(pluginName, pluginConfig) {
+export async function testServerConnection(pluginName, pluginConfig, serverId = null) {
   const response = await fetch(`${API_BASE}/servers/test`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     credentials: 'include',
-    body: JSON.stringify({ plugin_name: pluginName, plugin_config: pluginConfig }),
+    body: JSON.stringify({ plugin_name: pluginName, plugin_config: pluginConfig, server_id: serverId }),
   });
 
   if (!response.ok) {
@@ -1893,6 +1929,65 @@ export async function vmPowerAction(serviceId, action) {
   return await response.json();
 }
 
+// Mint a VNC console session (admin) and return
+// { ws_token, ws_path, vnc_password, expires_in }.
+export async function listDeploymentJobs(serviceId, limit = 50) {
+  const response = await fetch(
+    `${API_BASE}/admin/services/${serviceId}/deployment-jobs?limit=${limit}`,
+    { method: 'GET', credentials: 'include' }
+  );
+  if (!response.ok) throw new Error('Failed to list deployment jobs');
+  return await response.json();
+}
+
+export async function getDeploymentJob(serviceId, jobId) {
+  const response = await fetch(
+    `${API_BASE}/admin/services/${serviceId}/deployment-jobs/${jobId}`,
+    { method: 'GET', credentials: 'include' }
+  );
+  if (!response.ok) throw new Error('Failed to get deployment job');
+  return await response.json();
+}
+
+// Which console types (noVNC/serial) a VM actually supports, e.g.
+// { vnc: true, serial: false }. Fetched before showing "Open Console"
+// controls so a picker only appears when the VM genuinely supports both.
+export async function getAdminVmConsoleTypes(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/vm/console-types`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to check console availability');
+  }
+  return await response.json();
+}
+
+export async function getClientVmConsoleTypes(serviceId) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}/vm/console-types`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to check console availability');
+  }
+  return await response.json();
+}
+
+export async function createAdminVmVncSession(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/vm/vnc-session`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to open VNC console');
+  }
+  return await response.json();
+}
+
 export async function destroyVmGuest(serviceId) {
   const response = await fetch(`${API_BASE}/admin/services/${serviceId}/vm/destroy`, {
     method: 'POST',
@@ -1943,6 +2038,28 @@ export async function createInternalTestVmService(payload) {
   return createAdminVmService(payload);
 }
 
+/**
+ * Admin: create an http_proxy service with no linked server; IP(s) are
+ * auto-assigned from IPAM immediately.
+ * POST /admin/services/http-proxy
+ */
+export async function createAdminHttpProxyService(payload) {
+  const response = await fetch(`${API_BASE}/admin/services/http-proxy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    const detail = err.detail;
+    throw new Error(
+      typeof detail === 'string' ? detail : detail ? JSON.stringify(detail) : 'Failed to create proxy service'
+    );
+  }
+  return await response.json();
+}
+
 export async function getExternalUsers(integrationId = null) {
   const url = new URL(`${API_BASE}/admin/services/external-users`, window.location.origin);
   if (integrationId) {
@@ -1975,11 +2092,12 @@ export async function getExternalUser(userId) {
 }
 
 export async function listMyServices(serviceType = null) {
-  const url = new URL(`${API_BASE}/services/me`, window.location.origin);
+  const url = new URL(`${API_BASE}/client/services/me`, window.location.origin);
   if (serviceType) url.searchParams.append('service_type', serviceType);
   const response = await fetch(url.toString(), {
     method: 'GET',
     credentials: 'include',
+    headers: { ..._impersonationHeaders() },
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
@@ -1988,11 +2106,261 @@ export async function listMyServices(serviceType = null) {
   return await response.json();
 }
 
+// Owner-scoped service detail (client portal): base list fields plus live
+// power_state, primary_ip, availability flags, and the effective
+// `permissions` map so the UI can hide actions instead of probing 403s.
+export async function getClientService(serviceId) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { ..._impersonationHeaders() },
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to load service');
+  }
+  return await response.json();
+}
+
+// Power on/off/reboot/reset for a service the caller owns (client portal).
+// `action` is one of 'on' | 'off' | 'reboot' | 'reset'.
+export async function clientServicePower(serviceId, action) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}/power`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ..._impersonationHeaders() },
+    credentials: 'include',
+    body: JSON.stringify({ action }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to power ${action}`);
+  }
+  return await response.json();
+}
+
+// Mint a one-time IPMI proxy launch ticket (client portal, for a bare-metal
+// service the caller owns). Returns { launch_url, viewer_username, ... }.
+export async function createClientIpmiTicket(serviceId) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}/ipmi-ticket`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { ..._impersonationHeaders() },
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to open IPMI console');
+  }
+  return await response.json();
+}
+
+// List assigned proxy IP(s) + credentials + ready-to-use URLs (client
+// portal, for an http_proxy service the caller owns).
+export async function getClientProxyCredentials(serviceId) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}/proxy/credentials`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: { ..._impersonationHeaders() },
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to load proxy credentials');
+  }
+  return await response.json();
+}
+
+// Rotate credentials (new username+password, same IP(s)) for an http_proxy
+// service the caller owns.
+export async function rotateClientProxyCredentials(serviceId) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}/proxy/rotate`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { ..._impersonationHeaders() },
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to rotate proxy credentials');
+  }
+  return await response.json();
+}
+
+// Mint a VNC console session (client portal, for a VM service the caller
+// owns) and return { ws_token, ws_path, vnc_password, expires_in }.
+export async function createClientVmVncSession(serviceId) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}/vm/vnc-session`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { ..._impersonationHeaders() },
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to open VNC console');
+  }
+  return await response.json();
+}
+
+// Redeem a one-time VM VNC launch ticket (e.g. from a WHMCS popup landing on
+// /vnc?t=...). Unauthenticated: the ticket itself is the credential. Returns
+// the same session shape as the admin/client mint endpoints.
+export async function redeemVmVncLaunchTicket(token) {
+  const response = await fetch(`${API_BASE}/vnc/redeem`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Console link is invalid or has expired');
+  }
+  return await response.json();
+}
+
+// Mint a fresh Proxmox console proxy for an existing WS session (same
+// ws_token, new vnc_password/port). Required for Reconnect: Proxmox's
+// vncproxy/termproxy tickets die when the upstream WebSocket closes.
+export async function refreshVmVncSession(wsToken) {
+  const response = await fetch(`${API_BASE}/vnc/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: wsToken }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to reconnect console');
+  }
+  return await response.json();
+}
+
+// Power on/off/reboot the VM bound to a console WS session (unauthenticated
+// /vnc popup uses the session token as the credential).
+export async function consoleVmPowerAction(wsToken, action) {
+  const response = await fetch(`${API_BASE}/vnc/power`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: wsToken, action }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Power action '${action}' failed`);
+  }
+  return await response.json();
+}
+
+// Admin: clients (non-admin users) API functions. Every client always has
+// full portal access (impersonation / billing SSO) — there is no separate
+// "enable portal" step; `has_password` just reflects whether direct
+// username/password login is also enabled.
+export async function listClients(params = {}) {
+  const url = new URL(`${API_BASE}/admin/clients`, window.location.origin);
+  Object.keys(params).forEach((key) => {
+    const v = params[key];
+    if (v === undefined || v === null || v === '' || v === 'all') return;
+    url.searchParams.append(key, v);
+  });
+  const response = await fetch(url.toString(), { method: 'GET', credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to list clients');
+  return await response.json();
+}
+
+export async function getClientProfile(userId) {
+  const response = await fetch(`${API_BASE}/admin/clients/${userId}`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to load client');
+  }
+  return await response.json();
+}
+
+export async function createClient(payload) {
+  const response = await fetch(`${API_BASE}/admin/clients`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create client');
+  }
+  return await response.json();
+}
+
+export async function setClientPassword(userId, password) {
+  const response = await fetch(`${API_BASE}/admin/clients/${userId}/password`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ password }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to set password');
+  }
+  return await response.json();
+}
+
+export async function impersonateClient(userId) {
+  const response = await fetch(`${API_BASE}/admin/clients/${userId}/impersonate`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to sign in as client');
+  }
+  return await response.json();
+}
+
+// Admin: admins (staff) API functions
+export async function listAdmins() {
+  const response = await fetch(`${API_BASE}/admin/admins`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) throw new Error('Failed to list admins');
+  return await response.json();
+}
+
+export async function createAdminAccount(payload) {
+  const response = await fetch(`${API_BASE}/admin/admins`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create admin');
+  }
+  return await response.json();
+}
+
+export async function updateAdminAccount(adminId, payload) {
+  const response = await fetch(`${API_BASE}/admin/admins/${adminId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update admin');
+  }
+  return await response.json();
+}
+
+export async function deleteAdminAccount(adminId) {
+  const response = await fetch(`${API_BASE}/admin/admins/${adminId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete admin');
+  }
+  return true;
+}
+
 // Scripts API functions
 export async function getScripts() {
   const url = `${API_BASE}/admin/scripts`;
-  console.log('Fetching scripts from:', url);
-  
+
   // Create an AbortController for timeout
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
@@ -2005,7 +2373,6 @@ export async function getScripts() {
     });
 
     clearTimeout(timeoutId);
-    console.log('Scripts response status:', response.status, response.statusText);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -2021,7 +2388,6 @@ export async function getScripts() {
     }
 
     const scripts = await response.json();
-    console.log('Scripts response data:', scripts);
     // Calculate size_bytes for each script
     return scripts.map(script => ({
       ...script,
@@ -2284,6 +2650,20 @@ export async function createProductFamily(data) {
   return await response.json();
 }
 
+export async function updateProductFamily(familyId, data) {
+  const response = await fetch(`${API_BASE}/product-catalog/families/${familyId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update product family');
+  }
+  return await response.json();
+}
+
 export async function createCatalogProduct(data) {
   const response = await fetch(`${API_BASE}/product-catalog/products`, {
     method: 'POST',
@@ -2324,6 +2704,17 @@ export async function updateCatalogProduct(productId, data) {
   return await response.json();
 }
 
+export async function deleteCatalogProduct(productId) {
+  const response = await fetch(`${API_BASE}/product-catalog/products/${productId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to delete product');
+  }
+}
+
 export async function listVmTemplates() {
   const response = await fetch(`${API_BASE}/product-catalog/vm-templates`, {
     method: 'GET',
@@ -2336,14 +2727,72 @@ export async function listVmTemplates() {
   return await response.json();
 }
 
-export async function listVmTemplateOsTypes() {
-  const response = await fetch(`${API_BASE}/product-catalog/vm-templates/os-types`, {
+export async function listVmTemplateOsTypes(opts = {}) {
+  const qs = opts.detailed ? '?detailed=true' : '';
+  const response = await fetch(`${API_BASE}/product-catalog/vm-templates/os-types${qs}`, {
     method: 'GET',
     credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(error.detail || 'Failed to list VM template OS types');
+  }
+  return await response.json();
+}
+
+export async function listServiceStrategyActions(serviceId, { client = false } = {}) {
+  const base = client ? `${API_BASE}/client/services` : `${API_BASE}/admin/services`;
+  const response = await fetch(`${base}/${serviceId}/actions`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list strategy actions');
+  }
+  return await response.json();
+}
+
+export async function runServiceStrategyAction(serviceId, actionName, params = {}, { client = false } = {}) {
+  const base = client ? `${API_BASE}/client/services` : `${API_BASE}/admin/services`;
+  const response = await fetch(`${base}/${serviceId}/actions/${encodeURIComponent(actionName)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ params }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Failed to run action ${actionName}`);
+  }
+  return await response.json();
+}
+
+export async function listServiceAvailableIps(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/available-ips`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list available IPs');
+  }
+  return await response.json();
+}
+
+export async function reassignServiceIp(serviceId, allocationId, { resetNetwork = true } = {}) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/reassign-ip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      allocation_id: allocationId,
+      reset_network: resetNetwork,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to reassign IP');
   }
   return await response.json();
 }
@@ -2387,14 +2836,34 @@ export async function deleteVmTemplate(templateId) {
   }
 }
 
-export async function listVmIpAllocations() {
-  const response = await fetch(`${API_BASE}/vm-ip-allocations`, {
+export async function listVmIpAllocations(filters = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== null && value !== undefined && value !== '') {
+      params.set(key, value);
+    }
+  }
+  const qs = params.toString();
+  const url = qs ? `${API_BASE}/vm-ip-allocations?${qs}` : `${API_BASE}/vm-ip-allocations`;
+  const response = await fetch(url, {
     method: 'GET',
     credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(error.detail || 'Failed to list VM IP allocations');
+  }
+  return await response.json();
+}
+
+export async function listVmIpAllocationTags() {
+  const response = await fetch(`${API_BASE}/vm-ip-allocations/tags`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list VM IP allocation tags');
   }
   return await response.json();
 }
@@ -2542,6 +3011,19 @@ export async function listProxmoxClusters() {
   return await response.json();
 }
 
+/** Distinct backup-capable storage names for product catalog dropdowns. */
+export async function listProxmoxBackupStorages() {
+  const response = await fetch(`${API_BASE}/proxmox/backup-storages`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list Proxmox backup storages');
+  }
+  return await response.json();
+}
+
 export async function createProxmoxCluster(data) {
   const response = await fetch(`${API_BASE}/proxmox/clusters`, {
     method: 'POST',
@@ -2590,6 +3072,118 @@ export async function getProxmoxClusterInventory(clusterId) {
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(error.detail || 'Failed to load Proxmox inventory');
+  }
+  return await response.json();
+}
+
+function _vmBackupBase(serviceId, { client = false } = {}) {
+  return client
+    ? `${API_BASE}/client/services/${serviceId}/vm`
+    : `${API_BASE}/admin/services/${serviceId}/vm`;
+}
+
+export async function listVmBackups(serviceId, { client = false } = {}) {
+  const response = await fetch(`${_vmBackupBase(serviceId, { client })}/backups`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list backups');
+  }
+  return await response.json();
+}
+
+export async function createVmBackup(serviceId, data = {}, { client = false } = {}) {
+  const response = await fetch(`${_vmBackupBase(serviceId, { client })}/backups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create backup');
+  }
+  return await response.json();
+}
+
+export async function deleteVmBackup(serviceId, data, { client = false } = {}) {
+  const response = await fetch(`${_vmBackupBase(serviceId, { client })}/backups/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to delete backup');
+  }
+  return await response.json();
+}
+
+export async function restoreVmBackup(serviceId, data, { client = false } = {}) {
+  const response = await fetch(`${_vmBackupBase(serviceId, { client })}/backups/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to restore backup');
+  }
+  return await response.json();
+}
+
+export async function reinstallVmGuest(serviceId, data = {}, { client = false } = {}) {
+  const response = await fetch(`${_vmBackupBase(serviceId, { client })}/reinstall`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data || {}),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to reinstall VM');
+  }
+  return await response.json();
+}
+
+export async function getVmSshKeys(serviceId, { client = false } = {}) {
+  const response = await fetch(`${_vmBackupBase(serviceId, { client })}/ssh-keys`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load SSH keys');
+  }
+  return await response.json();
+}
+
+export async function putVmSshKeys(serviceId, sshPublicKeys, { client = false } = {}) {
+  const response = await fetch(`${_vmBackupBase(serviceId, { client })}/ssh-keys`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ ssh_public_keys: sshPublicKeys }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to save SSH keys');
+  }
+  return await response.json();
+}
+
+export async function getProxmoxClusterOverview(clusterId) {
+  const response = await fetch(`${API_BASE}/proxmox/clusters/${clusterId}/overview`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load Proxmox cluster overview');
   }
   return await response.json();
 }
@@ -2674,6 +3268,40 @@ export async function createIpamSubnet(data) {
   return await response.json();
 }
 
+export async function updateIpamSubnet(subnetId, data) {
+  const response = await fetch(`${API_BASE}/ipam/subnets/${subnetId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update subnet');
+  }
+  return await response.json();
+}
+
+export async function deleteIpamSubnet(subnetId) {
+  const response = await fetch(`${API_BASE}/ipam/subnets/${subnetId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to delete subnet');
+  }
+}
+
+export async function listIpamAssignments() {
+  const response = await fetch(`${API_BASE}/ipam/assignments`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to list assignments');
+  }
+  return await response.json();
+}
+
 export async function assignIpamAddress(data) {
   const response = await fetch(`${API_BASE}/ipam/assignments`, {
     method: 'POST',
@@ -2720,4 +3348,325 @@ export async function releaseIpamAssignment(assignmentId) {
     throw new Error(error.detail || 'Failed to release assignment');
   }
 }
+
+export async function rotateIpamAssignment(assignmentId) {
+  const response = await fetch(`${API_BASE}/ipam/assignments/${assignmentId}/rotate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({}),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to rotate credentials');
+  }
+  return await response.json();
+}
+
+// Client permission presets API
+export async function getPermissionSetsCatalog() {
+  const response = await fetch(`${API_BASE}/admin/permission-sets/catalog`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load permission catalog');
+  }
+  return await response.json();
+}
+
+export async function listPermissionSets() {
+  const response = await fetch(`${API_BASE}/admin/permission-sets`, { method: 'GET', credentials: 'include' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load permission sets');
+  }
+  return await response.json();
+}
+
+export async function createPermissionSet(data) {
+  const response = await fetch(`${API_BASE}/admin/permission-sets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to create permission set');
+  }
+  return await response.json();
+}
+
+export async function updatePermissionSet(permissionSetId, data) {
+  const response = await fetch(`${API_BASE}/admin/permission-sets/${permissionSetId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update permission set');
+  }
+  return await response.json();
+}
+
+export async function deletePermissionSet(permissionSetId) {
+  const response = await fetch(`${API_BASE}/admin/permission-sets/${permissionSetId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to delete permission set');
+  }
+}
+
+export async function updateClientPermissionSet(userId, permissionSetId) {
+  const response = await fetch(`${API_BASE}/admin/clients/${userId}/permission-set`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ permission_set_id: permissionSetId }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to assign permission set');
+  }
+  return await response.json();
+}
+
+export async function updateServicePermissions(serviceId, data) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/permissions`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to update service permissions');
+  }
+  return await response.json();
+}
+
+export async function getServiceEffectivePermissions(serviceId) {
+  const response = await fetch(`${API_BASE}/admin/services/${serviceId}/effective-permissions`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load effective permissions');
+  }
+  return await response.json();
+}
+
+// Reseller platform administration
+async function resellerAdminRequest(path, options = {}) {
+  let requestHeaders = options.headers;
+  if (options.body) {
+    requestHeaders = { 'Content-Type': 'application/json' };
+    if (options.headers) {
+      Object.assign(requestHeaders, options.headers);
+    }
+  }
+  const response = await fetch(`${API_BASE}/admin${path}`, {
+    credentials: 'include',
+    ...options,
+    headers: requestHeaders,
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail?.message || detail?.code || options.errorMessage || 'Reseller administration request failed');
+    const requestError = new Error(message);
+    requestError.status = response.status;
+    requestError.detail = detail;
+    throw requestError;
+  }
+  if (response.status === 204) return null;
+  return await response.json();
+}
+
+function resellerAdminQuery(filters = {}) {
+  const query = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') query.set(key, value);
+  });
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : '';
+}
+
+export const listResellerGroups = () =>
+  resellerAdminRequest('/reseller-groups', { errorMessage: 'Failed to list reseller groups' });
+export const createResellerGroup = (data) =>
+  resellerAdminRequest('/reseller-groups', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create reseller group' });
+export const updateResellerGroup = (groupId, data) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update reseller group' });
+export const deleteResellerGroup = (groupId) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}`, { method: 'DELETE', errorMessage: 'Failed to delete reseller group' });
+
+export const listResellers = (filters = {}) =>
+  resellerAdminRequest(`/resellers${resellerAdminQuery(filters)}`, { errorMessage: 'Failed to list resellers' });
+export const getReseller = (resellerId) =>
+  resellerAdminRequest(`/resellers/${resellerId}`, { errorMessage: 'Failed to load reseller' });
+export const createReseller = (data) =>
+  resellerAdminRequest('/resellers', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create reseller' });
+export const updateReseller = (resellerId, data) =>
+  resellerAdminRequest(`/resellers/${resellerId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update reseller' });
+export const disableReseller = (resellerId) =>
+  resellerAdminRequest(`/resellers/${resellerId}`, { method: 'DELETE', errorMessage: 'Failed to disable reseller' });
+export const rotateResellerKey = (resellerId) =>
+  resellerAdminRequest(`/resellers/${resellerId}/rotate-key`, { method: 'POST', errorMessage: 'Failed to rotate reseller API key' });
+
+export const listResellerBasePrices = () =>
+  resellerAdminRequest('/resellers/prices', { errorMessage: 'Failed to load base prices' });
+export const upsertResellerBasePrice = (productId, data) =>
+  resellerAdminRequest(`/resellers/prices/${productId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update base price' });
+export const listResellerGroupPrices = (groupId) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}/prices`, { errorMessage: 'Failed to load group prices' });
+export const upsertResellerGroupPrice = (groupId, productId, data) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}/prices/${productId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update group price' });
+export const deleteResellerGroupPrice = (groupId, productId) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}/prices/${productId}`, { method: 'DELETE', errorMessage: 'Failed to clear group price' });
+
+export const listResellerProductAccess = (resellerId) =>
+  resellerAdminRequest(`/resellers/${resellerId}/product-access`, { errorMessage: 'Failed to load reseller product access' });
+export const setResellerProductAccess = (resellerId, productId, allowed) =>
+  resellerAdminRequest(`/resellers/${resellerId}/product-access/${productId}`, { method: 'PUT', body: JSON.stringify({ allowed }), errorMessage: 'Failed to update reseller product access' });
+export const deleteResellerProductAccess = (resellerId, productId) =>
+  resellerAdminRequest(`/resellers/${resellerId}/product-access/${productId}`, { method: 'DELETE', errorMessage: 'Failed to clear reseller product access' });
+export const listResellerGroupAccess = (groupId) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}/product-access`, { errorMessage: 'Failed to load group product access' });
+export const setResellerGroupAccess = (groupId, productId, allowed) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}/product-access/${productId}`, { method: 'PUT', body: JSON.stringify({ allowed }), errorMessage: 'Failed to update group product access' });
+export const deleteResellerGroupAccess = (groupId, productId) =>
+  resellerAdminRequest(`/reseller-groups/${groupId}/product-access/${productId}`, { method: 'DELETE', errorMessage: 'Failed to clear group product access' });
+
+export const listResellerQuotas = (filters = {}) =>
+  resellerAdminRequest(`/resellers/quotas${resellerAdminQuery(filters)}`, { errorMessage: 'Failed to load reseller quotas' });
+export const createResellerQuota = (data) =>
+  resellerAdminRequest('/resellers/quotas', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create reseller quota' });
+export const updateResellerQuota = (quotaId, data) =>
+  resellerAdminRequest(`/resellers/quotas/${quotaId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update reseller quota' });
+export const deleteResellerQuota = (quotaId) =>
+  resellerAdminRequest(`/resellers/quotas/${quotaId}`, { method: 'DELETE', errorMessage: 'Failed to delete reseller quota' });
+
+export const adjustResellerCredit = (resellerId, data) =>
+  resellerAdminRequest(`/resellers/${resellerId}/credit-adjustments`, { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to adjust reseller credit' });
+export const listResellerLedger = (resellerId, filters = {}) =>
+  resellerAdminRequest(`/resellers/${resellerId}/ledger${resellerAdminQuery(filters)}`, { errorMessage: 'Failed to load credit ledger' });
+export const listResellerInvoices = (filters = {}) =>
+  resellerAdminRequest(`/resellers/invoices${resellerAdminQuery(filters)}`, { errorMessage: 'Failed to load reseller invoices' });
+export const getResellerInvoice = (invoiceId) =>
+  resellerAdminRequest(`/resellers/invoices/${invoiceId}`, { errorMessage: 'Failed to load reseller invoice' });
+export const listResellerPayments = (filters = {}) =>
+  resellerAdminRequest(`/resellers/payments${resellerAdminQuery(filters)}`, { errorMessage: 'Failed to load reseller payments' });
+export const getResellerPayment = (paymentId) =>
+  resellerAdminRequest(`/resellers/payments/${paymentId}`, { errorMessage: 'Failed to load reseller payment' });
+export const refundResellerPayment = (paymentId, data = {}) =>
+  resellerAdminRequest(`/resellers/payments/${paymentId}/refund`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+    errorMessage: 'Failed to refund payment',
+  });
+
+// Session-authenticated reseller control panel. Keep this helper private so
+// panel calls consistently use the HttpOnly session cookie and preserve
+// structured payment errors such as Stripe's SCA client secret.
+async function resellerPanelRequest(path, options = {}) {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(`${API_BASE}/reseller-panel${path}`, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const detail = payload.detail;
+    let message = options.errorMessage || 'Reseller panel request failed';
+    if (typeof detail === 'string') {
+      message = detail;
+    } else if (detail?.message || detail?.code) {
+      message = detail.message || detail.code;
+    }
+    const error = new Error(message);
+    error.status = response.status;
+    error.detail = detail;
+    throw error;
+  }
+  if (response.status === 204) return null;
+  return await response.json();
+}
+
+export const getResellerDashboard = () => resellerPanelRequest('/dashboard');
+export const getResellerPaymentConfig = () => resellerPanelRequest('/payment-config');
+export const createResellerTopUp = (amountCents) =>
+  resellerPanelRequest('/top-up-invoices', { method: 'POST', body: JSON.stringify({ amount_cents: amountCents }) });
+export const createResellerStripeSetupIntent = () =>
+  resellerPanelRequest('/stripe/setup-intent', { method: 'POST' });
+export const createResellerPayPalSetup = () =>
+  resellerPanelRequest('/paypal/setup-token', { method: 'POST' });
+export const completeResellerPayPalSetup = (setupTokenId, tier = 1, label = null) =>
+  resellerPanelRequest('/paypal/payment-methods', {
+    method: 'POST',
+    body: JSON.stringify({ setup_token_id: setupTokenId, tier, label }),
+  });
+export const listResellerPanelPaymentMethods = () => resellerPanelRequest('/payment-methods');
+export const registerResellerStripeMethod = (paymentMethodId, tier = 1, label = null) =>
+  resellerPanelRequest('/payment-methods', {
+    method: 'POST',
+    body: JSON.stringify({ payment_method_id: paymentMethodId, tier, label }),
+  });
+export const deleteResellerPanelPaymentMethod = (methodId) =>
+  resellerPanelRequest(`/payment-methods/${methodId}`, { method: 'DELETE' });
+export const reorderResellerPanelPaymentMethods = (methods) =>
+  resellerPanelRequest('/payment-methods/reorder', {
+    method: 'PUT',
+    body: JSON.stringify({ methods }),
+  });
+export const updateResellerChargePreference = (chargePreference) =>
+  resellerPanelRequest('/charge-preference', {
+    method: 'PUT',
+    body: JSON.stringify({ charge_preference: chargePreference }),
+  });
+export const listResellerPanelInvoices = (filters = {}) =>
+  resellerPanelRequest(`/invoices${resellerAdminQuery(filters)}`);
+export const getResellerPanelInvoice = (invoiceId) =>
+  resellerPanelRequest(`/invoices/${invoiceId}`);
+export const payResellerPanelInvoice = (invoiceId, paymentMethodId = null) =>
+  resellerPanelRequest(`/invoices/${invoiceId}/pay`, {
+    method: 'POST',
+    body: JSON.stringify({ payment_method_id: paymentMethodId }),
+  });
+export const createResellerUsdtDeposit = (invoiceId) =>
+  resellerPanelRequest(`/invoices/${invoiceId}/usdt-deposit`, { method: 'POST' });
+export const getResellerUsdtDeposit = (invoiceId) =>
+  resellerPanelRequest(`/invoices/${invoiceId}/usdt-deposit`);
+export const listResellerPanelProducts = () => resellerPanelRequest('/products');
+export const updateResellerProductClientPermissions = (productId, data) =>
+  resellerPanelRequest(`/products/${productId}/client-permissions`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+export const listResellerPanelClients = (filters = {}) =>
+  resellerPanelRequest(`/clients${resellerAdminQuery(filters)}`);
+export const getResellerPanelClient = (clientId) =>
+  resellerPanelRequest(`/clients/${clientId}`);
+export const listResellerPanelServices = (filters = {}) =>
+  resellerPanelRequest(`/services${resellerAdminQuery(filters)}`);
+export const getResellerPanelService = (serviceId) =>
+  resellerPanelRequest(`/services/${serviceId}`);
+export const getResellerPanelQuotas = () => resellerPanelRequest('/quotas');
+export const getResellerApiKey = () => resellerPanelRequest('/api-key');
+export const rotateOwnResellerApiKey = (currentPassword) =>
+  resellerPanelRequest('/api-key/rotate', {
+    method: 'POST',
+    body: JSON.stringify({ current_password: currentPassword }),
+  });
 

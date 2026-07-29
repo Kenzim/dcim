@@ -84,19 +84,18 @@
   }
 </script>
 
-<PageHeader title="Locations" />
-
-<div class="locations-container">
-  <div class="locations-header">
-    <h2>Locations</h2>
+<PageHeader title="Locations">
+  <svelte:fragment slot="actions">
     <button class="btn-primary" on:click={openAddModal}>
       <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
       </svg>
       Add Location
     </button>
-  </div>
+  </svelte:fragment>
+</PageHeader>
 
+<div class="admin-page locations-container">
   {#if loading}
     <div class="loading">Loading locations...</div>
   {:else if error}
@@ -199,60 +198,34 @@
 {/if}
 
 <style>
-  .locations-container {
-    padding: 32px;
-  }
-
-  .locations-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 24px;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-
   @media (max-width: 768px) {
-    .locations-container {
-      padding: 16px;
-    }
-
     .locations-grid {
       grid-template-columns: 1fr;
     }
   }
 
-  .locations-header h2 {
-    margin: 0;
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .btn-primary {
-    display: flex;
+  .modal-content .btn-primary {
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 20px;
+    gap: 6px;
+    padding: 9px 16px;
     background: var(--accent-color);
-    color: white;
-    border: 1px solid var(--accent-color);
-    border-radius: 8px;
+    color: var(--accent-contrast, white);
+    border: none;
+    border-radius: var(--radius-sm);
     font-weight: 600;
+    font-size: 13.5px;
     cursor: pointer;
-    transition: all 0.2s ease;
   }
 
-  .btn-primary:hover:not(:disabled) {
+  .modal-content .btn-primary:hover:not(:disabled) {
     background: var(--accent-dark);
-    border-color: var(--accent-dark);
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-lg);
   }
 
+  .modal-content .btn-icon,
   .btn-icon {
-    width: 18px;
-    height: 18px;
+    width: 15px;
+    height: 15px;
   }
 
   .loading, .error, .empty-state {

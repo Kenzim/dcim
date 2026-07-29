@@ -1,5 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
+  import { Button } from './ui/index.js';
   import { getOSTemplates, reloadOSTemplates } from '../lib/api.js';
   import { onMount } from 'svelte';
 
@@ -55,25 +56,25 @@
   }
 </script>
 
-<PageHeader title="OS Installation Templates" />
+<PageHeader title="OS Installation Templates">
+  <svelte:fragment slot="actions">
+    <Button variant="secondary" disabled={reloading} on:click={handleReload}>
+      {reloading ? 'Reloading…' : 'Reload Templates'}
+    </Button>
+  </svelte:fragment>
+</PageHeader>
 
 {#if loading}
-  <div class="content-body">
+  <div class="admin-page">
     <div class="loading">Loading templates...</div>
   </div>
 {:else if error}
-  <div class="content-body">
+  <div class="admin-page">
     <div class="error">Error: {error}</div>
-    <button class="btn-primary" on:click={loadTemplates}>Retry</button>
+    <Button variant="primary" on:click={loadTemplates}>Retry</Button>
   </div>
 {:else}
-  <div class="content-body">
-    <div class="header-actions">
-      <button class="btn-secondary" on:click={handleReload} disabled={reloading}>
-        {reloading ? 'Reloading...' : 'Reload Templates'}
-      </button>
-    </div>
-
+  <div class="admin-page">
     {#if templates.length === 0}
       <div class="no-templates">
         <p>No OS installation templates found.</p>
@@ -153,16 +154,6 @@
 {/if}
 
 <style>
-  .content-body {
-    padding: 32px;
-  }
-
-  @media (max-width: 768px) {
-    .content-body {
-      padding: 16px;
-    }
-  }
-
   .loading, .error {
     padding: 32px;
     text-align: center;
@@ -171,12 +162,6 @@
 
   .error {
     color: var(--danger-color);
-  }
-
-  .header-actions {
-    display: flex;
-    justify-content: flex-end;
-    margin-bottom: 24px;
   }
 
   .no-templates {
@@ -361,46 +346,6 @@
   .boot-url code {
     font-size: 11px;
     word-break: break-all;
-  }
-
-  .btn-primary {
-    padding: 10px 20px;
-    background: #3b82f6;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: 600;
-    transition: background 0.2s ease;
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: #2563eb;
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    padding: 10px 20px;
-    background: #f3f4f6;
-    color: var(--text-primary);
-    border: none;
-    border-radius: 8px;
-    cursor: pointer;
-    font-weight: 600;
-    transition: background 0.2s ease;
-  }
-
-  .btn-secondary:hover:not(:disabled) {
-    background: #e5e7eb;
-  }
-
-  .btn-secondary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   .btn-text {

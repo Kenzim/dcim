@@ -1,347 +1,803 @@
 <script>
-  import User from './User.svelte';
-  import Plugins from './Plugins.svelte';
-  import Locations from './Locations.svelte';
-  import Servers from './Servers.svelte';
-  import ServerDetail from './ServerDetail.svelte';
-  import OSTemplates from './OSTemplates.svelte';
-  import BillingIntegrations from './BillingIntegrations.svelte';
-  import ServicesList from './ServicesList.svelte';
-  import Scripts from './Scripts.svelte';
-  import PageHeader from './PageHeader.svelte';
-  import { logout } from '../stores/auth.js';
+  import { onMount } from 'svelte';
+  import Spinner from './ui/Spinner.svelte';
+  import Alert from './ui/Alert.svelte';
+  import HoverTip from './ui/HoverTip.svelte';
+  import AggregateTrafficPanel from './AggregateTrafficPanel.svelte';
+  import {
+    getLocations,
+    getRacks,
+    getServers,
+    getSwitches,
+    getServerGroups,
+    getServices,
+    listClients,
+    listAdmins,
+    listServiceInstances,
+    getLocationDHCPStatus,
+    getLocationTFTPStatus,
+    getBillingIntegrations,
+    listProxmoxClusters,
+    listIpamSubnets,
+    listVmIpAllocations,
+    getOSTemplates,
+    getPlugins,
+  } from '../lib/api.js';
 
-  let currentPage = 'dashboard';
-  let selectedServerId = null;
+  let loading = true;
+  let sectionErrors = {};
 
-  function navigate(page) {
-    currentPage = page;
-    selectedServerId = null;
+  let locations = [];
+  let racks = [];
+  let servers = [];
+  let switches = [];
+  let serverGroups = [];
+  let services = [];
+  let clients = [];
+  let admins = [];
+  let billingIntegrations = [];
+  let proxmoxClusters = [];
+  let ipamSubnets = [];
+  let vmIpAllocations = [];
+  let osTemplates = [];
+  let plugins = [];
+
+  // [{ id, name, health: 'healthy' | 'issues' | 'unconfigured', dhcp, tftp }]
+  let locationHealth = [];
+  let healthLoading = false;
+
+  onMount(load);
+
+  async function load() {
+    loading = true;
+    sectionErrors = {};
+
+    const results = await Promise.allSettled([
+      getLocations(),
+      getRacks(),
+      getServers(),
+      getSwitches(),
+      getServerGroups(),
+      getServices(),
+      listClients(),
+      listAdmins(),
+      getBillingIntegrations(),
+      listProxmoxClusters(),
+      listIpamSubnets(),
+      listVmIpAllocations(),
+      getOSTemplates(),
+      getPlugins(),
+    ]);
+
+    const [
+      locationsRes,
+      racksRes,
+      serversRes,
+      switchesRes,
+      serverGroupsRes,
+      servicesRes,
+      clientsRes,
+      adminsRes,
+      billingRes,
+      proxmoxRes,
+      ipamRes,
+      vmIpRes,
+      osTemplatesRes,
+      pluginsRes,
+    ] = results;
+
+    locations = pick(locationsRes, 'locations');
+    racks = pick(racksRes, 'racks');
+    servers = pick(serversRes, 'servers');
+    switches = pick(switchesRes, 'switches');
+    serverGroups = pick(serverGroupsRes, 'serverGroups');
+    services = pick(servicesRes, 'services');
+    clients = pick(clientsRes, 'clients');
+    admins = pick(adminsRes, 'admins');
+    billingIntegrations = pick(billingRes, 'billing');
+    proxmoxClusters = pick(proxmoxRes, 'proxmox');
+    ipamSubnets = pick(ipamRes, 'ipam');
+    vmIpAllocations = pick(vmIpRes, 'vmIp');
+    osTemplates = pick(osTemplatesRes, 'osTemplates');
+    plugins = pick(pluginsRes, 'plugins');
+
+    loading = false;
+    await loadLocationHealth();
   }
 
-  function viewServer(serverId) {
-    selectedServerId = serverId;
-    currentPage = 'server-detail';
+  function pick(result, key) {
+    if (result.status === 'fulfilled') return result.value || [];
+    sectionErrors = { ...sectionErrors, [key]: true };
+    return [];
   }
 
-  function backToServers() {
-    currentPage = 'servers';
-    selectedServerId = null;
-  }
-
-  async function handleLogout() {
-    try {
-      await logout();
-      window.location.href = '/';
-    } catch (err) {
-      console.error('Logout error:', err);
+  async function loadLocationHealth() {
+    if (!locations.length) {
+      locationHealth = [];
+      return;
     }
+    healthLoading = true;
+    locationHealth = await Promise.all(
+      locations.map(async (loc) => {
+        try {
+          const instances = await listServiceInstances(loc.id);
+          const dhcpInstance = instances.find((i) => i.service_type === 'dhcp');
+          const tftpInstance = instances.find((i) => i.service_type === 'tftp');
+
+          let dhcp = null;
+          let tftp = null;
+          const checks = [];
+
+          if (dhcpInstance) {
+            dhcp = await getLocationDHCPStatus(loc.id).catch(() => ({ status: 'error', running: false }));
+            checks.push(!!dhcp.running);
+          }
+          if (tftpInstance) {
+            tftp = await getLocationTFTPStatus(loc.id).catch(() => ({ status: 'error', running: false }));
+            checks.push(!!tftp.running);
+          }
+
+          let health = 'unconfigured';
+          if (checks.length) {
+            health = checks.every(Boolean) ? 'healthy' : 'issues';
+          }
+
+          return { id: loc.id, name: loc.name, health, dhcp, tftp };
+        } catch (_) {
+          return { id: loc.id, name: loc.name, health: 'issues', dhcp: null, tftp: null };
+        }
+      })
+    );
+    healthLoading = false;
   }
+
+  function groupCount(list, field) {
+    const counts = {};
+    for (const item of list) {
+      const key = item?.[field] || 'unknown';
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return counts;
+  }
+
+  function statusLabel(status) {
+    if (!status) return 'Not configured';
+    if (status.running) return 'Running';
+    if (status.status === 'error') return 'Error';
+    return 'Stopped';
+  }
+
+  $: enabledServers = servers.filter((s) => s.enabled).length;
+  $: disabledServers = servers.length - enabledServers;
+  $: servicesByStatus = groupCount(services, 'status');
+  $: issueLocations = locationHealth.filter((l) => l.health === 'issues');
+  $: healthySummary =
+    locations.length === 0
+      ? 'No locations yet'
+      : issueLocations.length === 0
+        ? 'All locations healthy'
+        : `${issueLocations.length} of ${locations.length} location${locations.length === 1 ? '' : 's'} need attention`;
 </script>
 
-<div class="dashboard-container">
-  <!-- Sidebar -->
-  <nav class="sidebar">
-    <div class="sidebar-header">
-      <div class="sidebar-logo">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-        </svg>
-      </div>
-      <h2 class="sidebar-title">Rackflow</h2>
-    </div>
-    
-    <div class="sidebar-nav">
-      <ul class="nav-list">
-        <li class="nav-item" class:active={currentPage === 'dashboard'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('dashboard')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-            </svg>
-            <span>Dashboard</span>
-          </a>
-        </li>
-        <li class="nav-item" class:active={currentPage === 'servers'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('servers')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
-            </svg>
-            <span>Servers</span>
-          </a>
-        </li>
-        <li class="nav-item" class:active={currentPage === 'locations'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('locations')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            <span>Locations</span>
-          </a>
-        </li>
-        <li class="nav-item" class:active={currentPage === 'plugins'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('plugins')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-            </svg>
-            <span>Plugins</span>
-          </a>
-        </li>
-        <li class="nav-item" class:active={currentPage === 'os-templates'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('os-templates')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-            </svg>
-            <span>OS Templates</span>
-          </a>
-        </li>
-        <li class="nav-item" class:active={currentPage === 'billing-integrations'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('billing-integrations')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>Billing Integrations</span>
-          </a>
-        </li>
-        <li class="nav-item" class:active={currentPage === 'services-list'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('services-list')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            <span>Services & Users</span>
-          </a>
-        </li>
-        <li class="nav-item" class:active={currentPage === 'scripts'}>
-          <a href="#" class="nav-link" on:click|preventDefault={() => navigate('scripts')}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-            </svg>
-            <span>Scripts</span>
-          </a>
-        </li>
-      </ul>
-    </div>
-
-    <div class="sidebar-footer">
-      <button class="btn-logout" on:click={handleLogout}>
-        <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-        </svg>
-        <span>Logout</span>
-      </button>
-    </div>
-
-  </nav>
-
-  <!-- Main content -->
-  <main class="main-content">
-    {#if currentPage === 'dashboard'}
-      <PageHeader title="Dashboard" onNavigate={navigate} />
-      <div class="content-body">
-        <!-- Dashboard content will go here -->
-      </div>
-    {:else if currentPage === 'servers'}
-      <Servers onViewServer={viewServer} />
-    {:else if currentPage === 'server-detail'}
-      <ServerDetail serverId={selectedServerId} onBack={backToServers} />
-    {:else if currentPage === 'locations'}
-      <Locations />
-    {:else if currentPage === 'plugins'}
-      <Plugins />
-    {:else if currentPage === 'os-templates'}
-      <OSTemplates />
-    {:else if currentPage === 'billing-integrations'}
-      <BillingIntegrations />
-    {:else if currentPage === 'services-list'}
-      <ServicesList />
-    {:else if currentPage === 'scripts'}
-      <Scripts />
-    {:else if currentPage === 'user'}
-      <User />
+{#if loading}
+  <div class="dashboard-loading">
+    <Spinner />
+  </div>
+{:else}
+  <div class="dashboard">
+    {#if Object.keys(sectionErrors).length > 0}
+      <Alert type="warning">Some overview data couldn't be loaded. The rest of the page is still up to date.</Alert>
     {/if}
-  </main>
-</div>
+
+    <div class="dashboard-top">
+      <!-- KPI strip: compact counts, hover for a short breakdown -->
+      <div class="kpi-strip">
+        <HoverTip>
+          <a href="/admin/locations" class="kpi-tile accent-info">
+            <span class="kpi-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </span>
+            <span class="kpi-text">
+              <span class="kpi-value">{locations.length}</span>
+              <span class="kpi-label">Locations</span>
+            </span>
+          </a>
+          <svelte:fragment slot="content">
+            <div class="tip-title">Locations</div>
+            {#if locations.length}
+              <div class="tip-row">Healthy: {locations.length - issueLocations.length}</div>
+              <div class="tip-row">Need attention: {issueLocations.length}</div>
+            {:else}
+              <div class="tip-row">No locations configured yet.</div>
+            {/if}
+          </svelte:fragment>
+        </HoverTip>
+
+        <HoverTip>
+          <a href="/admin/racks" class="kpi-tile accent-secondary">
+            <span class="kpi-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+              </svg>
+            </span>
+            <span class="kpi-text">
+              <span class="kpi-value">{racks.length}</span>
+              <span class="kpi-label">Racks</span>
+            </span>
+          </a>
+          <svelte:fragment slot="content">
+            <div class="tip-title">Racks</div>
+            <div class="tip-row">Click to view all racks.</div>
+          </svelte:fragment>
+        </HoverTip>
+
+        <HoverTip>
+          <a href="/admin/servers" class="kpi-tile accent-accent">
+            <span class="kpi-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+              </svg>
+            </span>
+            <span class="kpi-text">
+              <span class="kpi-value">{servers.length}</span>
+              <span class="kpi-label">Servers</span>
+            </span>
+          </a>
+          <svelte:fragment slot="content">
+            <div class="tip-title">Servers</div>
+            <div class="tip-row">Enabled: {enabledServers}</div>
+            <div class="tip-row">Disabled: {disabledServers}</div>
+          </svelte:fragment>
+        </HoverTip>
+
+        <HoverTip>
+          <a href="/admin/switches" class="kpi-tile accent-success">
+            <span class="kpi-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+              </svg>
+            </span>
+            <span class="kpi-text">
+              <span class="kpi-value">{switches.length}</span>
+              <span class="kpi-label">Switches</span>
+            </span>
+          </a>
+          <svelte:fragment slot="content">
+            <div class="tip-title">Switches</div>
+            <div class="tip-row">Click to view all switches.</div>
+          </svelte:fragment>
+        </HoverTip>
+
+        <HoverTip>
+          <a href="/admin/server-groups" class="kpi-tile accent-warning">
+            <span class="kpi-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+            </span>
+            <span class="kpi-text">
+              <span class="kpi-value">{serverGroups.length}</span>
+              <span class="kpi-label">Server groups</span>
+            </span>
+          </a>
+          <svelte:fragment slot="content">
+            <div class="tip-title">Server groups</div>
+            <div class="tip-row">Click to view all groups.</div>
+          </svelte:fragment>
+        </HoverTip>
+
+        <HoverTip>
+          <a href="/admin/services" class="kpi-tile accent-danger">
+            <span class="kpi-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </span>
+            <span class="kpi-text">
+              <span class="kpi-value">{services.length}</span>
+              <span class="kpi-label">Services</span>
+            </span>
+          </a>
+          <svelte:fragment slot="content">
+            <div class="tip-title">Services</div>
+            {#if services.length}
+              {#each Object.entries(servicesByStatus) as [status, count]}
+                <div class="tip-row">{count} {status}</div>
+              {/each}
+            {:else}
+              <div class="tip-row">No services yet.</div>
+            {/if}
+          </svelte:fragment>
+        </HoverTip>
+      </div>
+
+      <!-- Location health: one summary + a simple per-location chip -->
+      <section class="panel health-panel">
+        <div class="panel-header">
+          <h2>Location health</h2>
+          <span
+            class="health-summary"
+            class:health-ok={locations.length > 0 && issueLocations.length === 0}
+            class:health-warn={issueLocations.length > 0}
+          >
+            {healthLoading ? 'Checking…' : healthySummary}
+          </span>
+        </div>
+        {#if sectionErrors.locations}
+          <Alert type="warning">Couldn't load locations.</Alert>
+        {:else if locations.length === 0}
+          <p class="panel-empty">No locations configured yet.</p>
+        {:else}
+          <div class="location-chip-row">
+            {#each locationHealth as loc}
+              <HoverTip>
+                <a
+                  href={`/admin/locations/${loc.id}`}
+                  class="location-chip"
+                  class:chip-healthy={loc.health === 'healthy'}
+                  class:chip-issues={loc.health === 'issues'}
+                  class:chip-unconfigured={loc.health === 'unconfigured'}
+                >
+                  <span class="chip-dot" />
+                  <span class="chip-name">{loc.name}</span>
+                </a>
+                <svelte:fragment slot="content">
+                  <div class="tip-title">{loc.name}</div>
+                  <div class="tip-row">DHCP: {statusLabel(loc.dhcp)}</div>
+                  <div class="tip-row">TFTP: {statusLabel(loc.tftp)}</div>
+                </svelte:fragment>
+              </HoverTip>
+            {/each}
+          </div>
+        {/if}
+      </section>
+
+      <!-- Domain panels: everything else, one glance per area -->
+      <div class="domain-grid">
+        <div class="domain-panel accent-accent">
+          <div class="domain-header">
+            <a href="/admin/services" class="domain-title">Services</a>
+            <span class="domain-count">{services.length}</span>
+          </div>
+          <div class="domain-body">
+            {#if services.length}
+              {#each Object.entries(servicesByStatus) as [status, count]}
+                <span class="status-chip status-{status}">{count} {status}</span>
+              {/each}
+            {:else}
+              <span class="domain-empty">No services yet</span>
+            {/if}
+          </div>
+        </div>
+
+        <div class="domain-panel accent-info">
+          <div class="domain-header">
+            <span class="domain-title-static">Clients &amp; admins</span>
+          </div>
+          <div class="domain-body">
+            <a href="/admin/users" class="domain-stat"><strong>{clients.length}</strong> clients</a>
+            <a href="/admin/admins" class="domain-stat"><strong>{admins.length}</strong> admins</a>
+          </div>
+        </div>
+
+        <div class="domain-panel accent-warning">
+          <div class="domain-header">
+            <a href="/admin/proxmox-inventory" class="domain-title">Proxmox</a>
+          </div>
+          <div class="domain-body">
+            <a href="/admin/proxmox-inventory" class="domain-stat"><strong>{proxmoxClusters.length}</strong> clusters</a>
+          </div>
+        </div>
+
+        <div class="domain-panel accent-success">
+          <div class="domain-header">
+            <span class="domain-title-static">IPAM &amp; proxy</span>
+          </div>
+          <div class="domain-body">
+            <a href="/admin/proxy-ipam" class="domain-stat"><strong>{ipamSubnets.length}</strong> subnets</a>
+            <a href="/admin/vm-ip-allocations" class="domain-stat"><strong>{vmIpAllocations.length}</strong> VM IPs</a>
+          </div>
+        </div>
+
+        <div class="domain-panel accent-secondary">
+          <div class="domain-header">
+            <a href="/admin/billing-integrations" class="domain-title">Billing</a>
+          </div>
+          <div class="domain-body">
+            <a href="/admin/billing-integrations" class="domain-stat"
+              ><strong>{billingIntegrations.length}</strong> integrations</a
+            >
+          </div>
+        </div>
+
+        <div class="domain-panel accent-neutral">
+          <div class="domain-header">
+            <span class="domain-title-static">Bare-metal tooling</span>
+          </div>
+          <div class="domain-body">
+            <a href="/admin/os-templates" class="domain-stat"><strong>{osTemplates.length}</strong> OS templates</a>
+            <a href="/admin/plugins" class="domain-stat"><strong>{plugins.length}</strong> plugins</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Aggregate traffic: fills the remaining viewport height -->
+    <section class="panel traffic-shell">
+      <AggregateTrafficPanel {locations} {switches} {serverGroups} />
+    </section>
+  </div>
+{/if}
 
 <style>
-  .dashboard-container {
+  .dashboard-loading {
     display: flex;
-    min-height: 100vh;
-    background: var(--bg-secondary);
+    justify-content: center;
+    padding: 80px 0;
   }
 
-  .sidebar {
-    position: fixed;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    width: 260px;
-    background: var(--bg-secondary);
-    color: white;
+  .dashboard {
     display: flex;
     flex-direction: column;
-    z-index: 100;
-    box-shadow: 4px 0 20px rgba(0, 0, 0, 0.1);
-  }
-
-  .sidebar-header {
-    padding: 24px 20px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .sidebar-logo {
-    width: 40px;
-    height: 40px;
-    background: var(--accent-color);
-    border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .sidebar-logo svg {
-    width: 24px;
-    height: 24px;
-  }
-
-  .sidebar-title {
-    font-size: 20px;
-    font-weight: 700;
-    margin: 0;
-    letter-spacing: -0.5px;
-  }
-
-  .sidebar-nav {
+    gap: 20px;
     flex: 1;
-    padding: 20px 0;
-    overflow-y: auto;
+    min-height: 0;
+    height: 100%;
   }
 
-  .sidebar-footer {
-    padding: 20px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-  }
-
-  .btn-logout {
-    width: 100%;
-    padding: 12px 16px;
-    background: rgba(239, 68, 68, 0.1);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.2);
-    border-radius: 10px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s ease;
+  .dashboard-top {
     display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
+    flex-direction: column;
+    gap: 20px;
+    flex-shrink: 0;
   }
 
-  .btn-logout:hover {
-    background: rgba(239, 68, 68, 0.2);
-    border-color: rgba(239, 68, 68, 0.3);
-    transform: translateY(-1px);
+  /* KPI strip */
+  .kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 12px;
   }
 
-  .btn-icon {
-    width: 18px;
-    height: 18px;
-  }
-
-  .nav-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-
-  .nav-item {
-    margin: 4px 12px;
-  }
-
-  .nav-item.active .nav-link {
-    background: var(--accent-color);
-    color: white;
-    box-shadow: var(--shadow-md);
-  }
-
-  .nav-link {
+  .kpi-tile {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 12px 16px;
-    color: rgba(255, 255, 255, 0.7);
+    padding: 14px 16px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
     text-decoration: none;
-    border-radius: 10px;
-    transition: all 0.2s ease;
-    font-weight: 500;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.15s ease;
   }
 
-  .nav-link:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: white;
+  .kpi-tile::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    background: var(--tile-accent, var(--accent-color));
   }
 
-  .nav-icon {
+  .kpi-tile:hover {
+    border-color: color-mix(in srgb, var(--tile-accent, var(--accent-color)) 45%, var(--border-color));
+  }
+
+  .kpi-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--tile-accent, var(--accent-color)) 16%, transparent);
+    color: var(--tile-accent, var(--accent-color));
+  }
+
+  .kpi-icon svg {
     width: 20px;
     height: 20px;
   }
 
-
-  .main-content {
-    flex: 1;
-    margin-left: 260px;
-    min-height: 100vh;
+  .kpi-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
   }
 
-
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-
-  .user-badge {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 16px;
-    background: var(--bg-secondary);
-    border-radius: 12px;
-  }
-
-  .user-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: var(--accent-color);
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  .kpi-value {
+    font-size: 23px;
     font-weight: 700;
-    font-size: 14px;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+    line-height: 1.1;
   }
 
-  .user-name {
-    font-weight: 600;
+  .kpi-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    letter-spacing: 0.01em;
+  }
+
+  /* Accent palette shared by KPI tiles and domain panels */
+  .accent-accent {
+    --tile-accent: var(--accent-color);
+  }
+  .accent-info {
+    --tile-accent: var(--info-color);
+  }
+  .accent-success {
+    --tile-accent: var(--success-color);
+  }
+  .accent-warning {
+    --tile-accent: var(--warning-color);
+  }
+  .accent-danger {
+    --tile-accent: var(--danger-color);
+  }
+  .accent-secondary {
+    --tile-accent: var(--secondary-color);
+  }
+  .accent-neutral {
+    --tile-accent: var(--primary-light);
+  }
+
+  /* Shared panel shell */
+  .panel {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+
+  .panel-header h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
     color: var(--text-primary);
   }
 
-  .content-body {
-    padding: 32px;
+  .panel-empty {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+
+  .health-summary {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+  }
+
+  .health-summary.health-ok {
+    background: var(--success-bg);
+    color: var(--success-text);
+  }
+
+  .health-summary.health-warn {
+    background: var(--danger-bg);
+    color: var(--danger-text);
+  }
+
+  /* Location chips */
+  .location-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .location-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    text-decoration: none;
+    color: var(--text-primary);
+    font-size: 12.5px;
+    font-weight: 600;
+    transition: border-color 0.15s ease;
+  }
+
+  .location-chip:hover {
+    border-color: var(--accent-color);
+  }
+
+  .chip-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+    flex-shrink: 0;
+  }
+
+  .chip-healthy .chip-dot {
+    background: var(--success-color);
+  }
+
+  .chip-issues .chip-dot {
+    background: var(--danger-color);
+  }
+
+  .chip-unconfigured .chip-dot {
+    background: var(--text-tertiary);
+  }
+
+  /* Domain panels */
+  .domain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+  }
+
+  .domain-panel {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .domain-panel::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    background: var(--tile-accent, var(--accent-color));
+  }
+
+  .domain-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .domain-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-decoration: none;
+  }
+
+  .domain-title:hover {
+    color: var(--accent-color);
+  }
+
+  .domain-title-static {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .domain-count {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-secondary);
+  }
+
+  .domain-body {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .domain-empty {
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+
+  .domain-stat {
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-decoration: none;
+  }
+
+  .domain-stat strong {
+    color: var(--text-primary);
+    font-weight: 700;
+  }
+
+  .domain-stat:hover {
+    color: var(--accent-color);
+  }
+
+  .domain-stat:hover strong {
+    color: var(--accent-color);
+  }
+
+  .status-chip {
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: capitalize;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+  }
+
+  .status-chip.status-active {
+    background: var(--success-bg);
+    color: var(--success-text);
+  }
+
+  .status-chip.status-pending {
+    background: var(--info-bg);
+    color: var(--info-text);
+  }
+
+  .status-chip.status-suspended {
+    background: var(--warning-bg);
+    color: var(--warning-text);
+  }
+
+  .status-chip.status-terminated {
+    background: var(--danger-bg);
+    color: var(--danger-text);
+  }
+
+  /* Traffic panel shell — flexes to fill the remaining viewport height */
+  .traffic-shell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 380px;
+  }
+
+  /* Hover tip content typography (rendered inside HoverTip's popover) */
+  .tip-title {
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+  }
+
+  .tip-row {
+    color: var(--text-secondary);
+    font-size: 12.5px;
   }
 
   @media (max-width: 768px) {
-    .sidebar {
-      transform: translateX(-100%);
-      transition: transform 0.3s ease;
+    .kpi-strip {
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     }
 
-    .main-content {
-      margin-left: 0;
+    .panel {
+      padding: 16px;
+    }
+
+    .traffic-shell {
+      min-height: 320px;
     }
   }
 </style>
-

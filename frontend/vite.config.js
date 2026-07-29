@@ -8,17 +8,32 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
-        changeOrigin: true
+        changeOrigin: true,
+        // Required for /api/vnc/ws: without this, Vite's dev proxy never
+        // upgrades the WebSocket handshake and the noVNC client hangs on
+        // "Connecting..." forever.
+        ws: true
       }
     },
     // Handle SPA routing - serve index.html for all routes
     historyApiFallback: true
   },
   build: {
+    // es2022 (top-level await) is required by @novnc/novnc's feature
+    // detection; supported by all evergreen browsers since 2022.
+    target: 'es2022',
     rollupOptions: {
       output: {
         manualChunks: undefined
       }
+    }
+  },
+  optimizeDeps: {
+    // Vite's dev-time dependency pre-bundler defaults to an older esbuild
+    // target than `build.target` above, which fails on @novnc/novnc's
+    // top-level await feature detection. Match it here too.
+    esbuildOptions: {
+      target: 'es2022'
     }
   }
 });

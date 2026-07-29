@@ -4,9 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rackflow</title>
-    <script>
-      (function(){var t=localStorage.getItem('theme');if(t==='dark'||t==='light'){document.documentElement.setAttribute('data-theme',t);}else if(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches){document.documentElement.setAttribute('data-theme','dark');}else{document.documentElement.setAttribute('data-theme','light');}})();
-    </script>
+    <!-- External file (not inline) so the CSP script-src can stay 'self'
+         without needing 'unsafe-inline'; see app/main.py's security headers. -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="app"></div>

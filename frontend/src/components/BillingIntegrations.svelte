@@ -188,11 +188,8 @@
   }
 </script>
 
-<PageHeader title="Billing Integrations" />
-
-<div class="integrations-container">
-  <div class="integrations-header">
-    <h2>Billing Integrations</h2>
+<PageHeader title="Billing Integrations">
+  <svelte:fragment slot="actions">
     <Button variant="primary" on:click={openAddModal}>
       <svelte:fragment slot="icon">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -201,8 +198,10 @@
       </svelte:fragment>
       Add Integration
     </Button>
-  </div>
+  </svelte:fragment>
+</PageHeader>
 
+<div class="admin-page integrations-container">
   {#if loading}
     <div class="loading">Loading integrations...</div>
   {:else if error}
@@ -309,6 +308,23 @@
         rows="3"
       ></textarea>
     </FormGroup>
+    {#if formData.integration_type === 'whmcs'}
+      <FormGroup label="WHMCS public base URL" forId="integration-public-base-url">
+        <input
+          id="integration-public-base-url"
+          type="url"
+          value={formData.config?.public_base_url || ''}
+          on:input={(e) => {
+            formData.config = {
+              ...(formData.config || {}),
+              public_base_url: e.currentTarget.value.trim(),
+            };
+          }}
+          placeholder="https://billing.example.com"
+        />
+        <p class="field-hint">Used for admin client/service links in Proxmox VM Notes.</p>
+      </FormGroup>
+    {/if}
     <FormGroup>
       <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
         <input type="checkbox" bind:checked={formData.enabled} />
@@ -344,30 +360,6 @@
 {/if}
 
 <style>
-  .integrations-container {
-    padding: 32px;
-  }
-
-  @media (max-width: 768px) {
-    .integrations-container {
-      padding: 16px;
-    }
-  }
-
-  .integrations-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 24px;
-  }
-
-  .integrations-header h2 {
-    margin: 0;
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
   .loading, .error, .empty-state {
     text-align: center;
     padding: 48px;
@@ -488,6 +480,12 @@
 
   .api-key-hidden {
     font-family: 'Courier New', monospace;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .field-hint {
+    margin: 6px 0 0;
     font-size: 12px;
     color: var(--text-secondary);
   }

@@ -11,14 +11,6 @@
     if (e.key === 'Escape') closeSidebar();
   }
 
-  function flagEnabled(name) {
-    const raw = import.meta.env[name];
-    if (raw === undefined || raw === null) return false;
-    const v = String(raw).trim().toLowerCase();
-    return v === '1' || v === 'true' || v === 'yes' || v === 'on';
-  }
-  const showIpamProxyArea = flagEnabled('VITE_ENABLE_IPAM_PROXY');
-
   async function handleLogout() {
     try {
       await logout();
@@ -38,10 +30,14 @@
   $: isPluginsActive = currentPath.startsWith('/admin/plugins');
   $: isOSTemplatesActive = currentPath.startsWith('/admin/os-templates');
   $: isBillingIntegrationsActive = currentPath.startsWith('/admin/billing-integrations');
-  $: isServicesListActive = currentPath.startsWith('/admin/services-list');
-  $: isVmServicesActive = currentPath.startsWith('/admin/vm-services');
-  $: isBareMetalServicesActive = currentPath.startsWith('/admin/bare-metal-services');
+  $: isBillingActive = currentPath === '/admin/billing' || currentPath.startsWith('/admin/billing/');
+  $: isResellersActive = currentPath.startsWith('/admin/resellers');
+  $: isResellerGroupsActive = currentPath.startsWith('/admin/reseller-groups');
+  $: isServicesActive = currentPath.startsWith('/admin/services');
+  $: isUsersActive = currentPath.startsWith('/admin/users');
+  $: isAdminsActive = currentPath.startsWith('/admin/admins');
   $: isScriptsActive = currentPath.startsWith('/admin/scripts');
+  $: isPermissionSetsActive = currentPath.startsWith('/admin/permission-sets');
   $: isAssetManagerActive = currentPath.startsWith('/admin/asset-manager');
   $: isProductCatalogActive = currentPath.startsWith('/admin/product-catalog');
   $: isVmTemplatesActive = currentPath.startsWith('/admin/vm-templates');
@@ -67,10 +63,13 @@
     <a href="/admin" class="sidebar-logo-link">
       <div class="sidebar-logo">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         </svg>
       </div>
-      <h2 class="sidebar-title">Rackflow</h2>
+      <div class="sidebar-brand-text">
+        <h2 class="sidebar-title">Rackflow</h2>
+        <span class="sidebar-subtitle">Admin</span>
+      </div>
     </a>
   </div>
   
@@ -119,14 +118,6 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
             </svg>
             <span>Server Groups</span>
-          </a>
-        </li>
-        <li class="nav-item">
-          <a href="/admin/bare-metal-services" class="nav-link" class:active={isBareMetalServicesActive}>
-            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h16M4 17h16" />
-            </svg>
-            <span>Bare Metal Services</span>
           </a>
         </li>
         <li class="nav-item">
@@ -192,36 +183,26 @@
               <span>Proxmox Inventory</span>
             </a>
           </li>
-          <li class="nav-item">
-            <a href="/admin/vm-services" class="nav-link" class:active={isVmServicesActive}>
-              <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h18M3 12h18M3 19h18" />
-              </svg>
-              <span>VM Services</span>
-            </a>
-          </li>
         </ul>
       </div>
 
     <div class="nav-group">
       <div class="nav-group-label">SERVICES</div>
       <ul class="nav-list">
-        {#if showIpamProxyArea}
-          <li class="nav-item">
-            <a href="/admin/proxy-ipam" class="nav-link" class:active={isProxyIpamActive}>
-              <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-              <span>IPAM & Proxy</span>
-            </a>
-          </li>
-        {/if}
         <li class="nav-item">
-          <a href="/admin/services-list" class="nav-link" class:active={isServicesListActive}>
+          <a href="/admin/proxy-ipam" class="nav-link" class:active={isProxyIpamActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <span>IPAM & Proxy</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/services" class="nav-link" class:active={isServicesActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
-            <span>Unified Services & Users</span>
+            <span>Services</span>
           </a>
         </li>
         <li class="nav-item">
@@ -230,6 +211,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
             </svg>
             <span>Scripts</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/permission-sets" class="nav-link" class:active={isPermissionSetsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-12V7a4 4 0 10-8 0v2" />
+            </svg>
+            <span>Permission Presets</span>
           </a>
         </li>
         <li class="nav-item">
@@ -244,14 +233,60 @@
     </div>
 
     <div class="nav-group">
+      <div class="nav-group-label">USERS</div>
+      <ul class="nav-list">
+        <li class="nav-item">
+          <a href="/admin/users" class="nav-link" class:active={isUsersActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+            </svg>
+            <span>Users</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/admins" class="nav-link" class:active={isAdminsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-12V7a4 4 0 10-8 0v2" />
+            </svg>
+            <span>Admins</span>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <div class="nav-group">
       <div class="nav-group-label">BILLING</div>
       <ul class="nav-list">
+        <li class="nav-item">
+          <a href="/admin/billing" class="nav-link" class:active={isBillingActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z" />
+            </svg>
+            <span>Billing</span>
+          </a>
+        </li>
         <li class="nav-item">
           <a href="/admin/billing-integrations" class="nav-link" class:active={isBillingIntegrationsActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             <span>Billing Integrations</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/resellers" class="nav-link" class:active={isResellersActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2a5 5 0 00-10 0v2m8-13a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span>Resellers</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/reseller-groups" class="nav-link" class:active={isResellerGroupsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h10" />
+            </svg>
+            <span>Reseller Groups & Pricing</span>
           </a>
         </li>
       </ul>
@@ -280,20 +315,21 @@
     top: 0;
     bottom: 0;
     left: 0;
-    width: 260px;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    border-right: 1px solid var(--border-color);
+    width: var(--admin-sidebar-width, 260px);
+    background:
+      radial-gradient(120% 60% at 0% 0%, var(--admin-sidebar-glow), transparent 55%),
+      linear-gradient(180deg, var(--admin-sidebar-elevated) 0%, var(--admin-sidebar-bg) 100%);
+    color: var(--admin-sidebar-text);
+    border-right: 1px solid var(--admin-sidebar-border);
     display: flex;
     flex-direction: column;
     z-index: 100;
-    box-shadow: var(--shadow-md);
     transition: background-color 0.3s ease, border-color 0.3s ease;
   }
 
   .sidebar-header {
-    padding: 16px 16px;
-    border-bottom: 1px solid var(--border-color);
+    padding: 14px 14px 12px;
+    border-bottom: 1px solid var(--admin-sidebar-border);
   }
 
   .sidebar-logo-link {
@@ -305,102 +341,120 @@
   }
 
   .sidebar-logo {
-    width: 36px;
-    height: 36px;
-    background: var(--accent-color);
+    width: 30px;
+    height: 30px;
+    background: linear-gradient(145deg, #155e75 0%, #0e7490 55%, #22d3ee 130%);
     border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 18px -10px rgba(34, 211, 238, 0.7);
   }
 
   .sidebar-logo svg {
-    width: 20px;
-    height: 20px;
-    color: white;
+    width: 15px;
+    height: 15px;
+    color: #f0f9ff;
+  }
+
+  .sidebar-brand-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: 0;
   }
 
   .sidebar-title {
-    font-size: 18px;
+    font-size: 16px;
     font-weight: 700;
     margin: 0;
-    letter-spacing: -0.5px;
+    letter-spacing: -0.03em;
+    color: var(--admin-sidebar-text);
+    line-height: 1.15;
+  }
+
+  .sidebar-subtitle {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--admin-sidebar-muted);
   }
 
   .sidebar-nav {
     flex: 1;
-    padding: 8px 0;
+    padding: 8px 8px;
     overflow-y: auto;
   }
 
   .nav-group {
-    margin-top: 16px;
+    margin-top: 12px;
   }
 
   .nav-group:first-of-type {
-    margin-top: 8px;
+    margin-top: 6px;
   }
 
   .nav-group-label {
-    padding: 8px 16px 6px 16px;
-    font-size: 11px;
-    font-weight: 600;
+    padding: 0 8px 5px;
+    font-size: 10.5px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-secondary);
+    letter-spacing: 0.1em;
+    color: var(--admin-sidebar-muted);
   }
 
   .sidebar-footer {
-    padding: 12px 16px;
-    border-top: 1px solid var(--border-color);
+    padding: 8px 8px 10px;
+    border-top: 1px solid var(--admin-sidebar-border);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 4px;
   }
 
   .footer-link {
-    padding: 8px 12px;
-    border-radius: 6px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm, 4px);
     text-align: left;
   }
 
   .btn-logout {
     width: 100%;
-    padding: 8px 12px;
-    background: var(--danger-color);
-    color: white;
-    border: 2px solid var(--danger-color);
-    border-radius: 6px;
+    padding: 7px 10px;
+    background: var(--admin-sidebar-logout-bg);
+    color: var(--admin-sidebar-logout-text);
+    border: 1px solid var(--admin-sidebar-logout-border);
+    border-radius: var(--radius-sm, 4px);
     font-weight: 600;
-    font-size: 14px;
+    font-size: 13px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 6px;
   }
 
   .btn-logout:hover {
-    background: var(--danger-color);
-    border-color: var(--danger-color);
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
+    background: var(--admin-sidebar-logout-hover-bg);
   }
 
   .btn-icon {
-    width: 18px;
-    height: 18px;
+    width: 15px;
+    height: 15px;
   }
 
   .nav-list {
     list-style: none;
     padding: 0;
     margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
   }
 
   .sidebar-nav > .nav-list:first-child {
-    margin-bottom: 8px;
+    margin-bottom: 2px;
   }
 
   .nav-item {
@@ -410,52 +464,57 @@
   .nav-link {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    color: var(--text-secondary);
+    gap: 8px;
+    padding: 5px 8px;
+    color: var(--admin-sidebar-muted);
     text-decoration: none;
-    border-radius: 0;
-    transition: all 0.2s ease;
+    border-radius: var(--radius-sm, 4px);
+    transition: background 0.15s ease, color 0.15s ease;
     font-weight: 500;
-    font-size: 14px;
+    font-size: 13.5px;
     position: relative;
+    border: 1px solid transparent;
   }
 
   .nav-link .nav-icon {
-    color: var(--text-secondary);
+    color: inherit;
+    opacity: 0.9;
   }
 
   .nav-link:hover {
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
+    background: var(--admin-sidebar-hover);
+    color: var(--admin-sidebar-text);
   }
 
   .nav-link:hover .nav-icon {
-    color: var(--text-primary);
+    color: var(--admin-sidebar-text);
   }
 
   .nav-link.active {
-    background: var(--accent-color);
-    color: white;
+    background: var(--admin-sidebar-active-bg);
+    color: var(--admin-sidebar-active-text);
+    border-color: color-mix(in srgb, var(--admin-sidebar-accent) 28%, transparent);
+    font-weight: 600;
   }
 
   .nav-link.active .nav-icon {
-    color: white;
+    color: var(--admin-sidebar-accent);
   }
 
   .nav-link.active::before {
     content: '';
     position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 3px;
-    background: var(--accent-color);
+    left: -1px;
+    top: 5px;
+    bottom: 5px;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
+    background: var(--admin-sidebar-accent);
   }
 
   .nav-icon {
-    width: 18px;
-    height: 18px;
+    width: 15px;
+    height: 15px;
     flex-shrink: 0;
   }
 

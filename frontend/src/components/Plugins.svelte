@@ -63,11 +63,6 @@
                 <h3 class="plugin-name">{plugin.name}</h3>
                 <span class="plugin-version">v{plugin.version}</span>
               </div>
-              {#if plugin.registered}
-                <span class="plugin-badge registered">Registered</span>
-              {:else}
-                <span class="plugin-badge unregistered">Not Registered</span>
-              {/if}
             </div>
 
             <div class="plugin-body">
@@ -252,25 +247,6 @@
     font-size: 12px;
     color: var(--text-secondary);
     font-weight: 500;
-  }
-
-  .plugin-badge {
-    padding: 4px 12px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .plugin-badge.registered {
-    background: var(--success-bg);
-    color: var(--success-text);
-  }
-
-  .plugin-badge.unregistered {
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
   }
 
   .plugin-body {

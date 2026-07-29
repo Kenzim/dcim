@@ -32,7 +32,6 @@
   }
 
   function openModal(group = null) {
-    console.log('openModal called', group);
     editingGroup = group;
     if (group) {
       formData = {
@@ -47,7 +46,6 @@
     }
     formError = null;
     showModal = true;
-    console.log('showModal set to:', showModal);
   }
 
   function closeModal() {
@@ -94,11 +92,8 @@
   }
 </script>
 
-<PageHeader title="Server Groups" />
-
-<div class="server-groups-container">
-  <div class="server-groups-header">
-    <h2>Server Groups</h2>
+<PageHeader title="Server Groups">
+  <svelte:fragment slot="actions">
     <Button variant="primary" on:click={() => openModal()}>
       <svelte:fragment slot="icon">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -107,8 +102,10 @@
       </svelte:fragment>
       Add Server Group
     </Button>
-  </div>
+  </svelte:fragment>
+</PageHeader>
 
+<div class="admin-page server-groups-container">
   {#if error}
     <Alert type="danger">{error}</Alert>
   {/if}
@@ -120,7 +117,7 @@
       <p>No server groups found. Create your first server group to organize servers.</p>
     </div>
   {:else}
-    <div class="table-scroll">
+    <div class="table-scroll admin-data-table">
     <table class="table server-groups-table">
       <thead>
         <tr>
@@ -183,38 +180,7 @@
 {/if}
 
 <style>
-  .server-groups-container {
-    padding: 20px;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    min-height: 100%;
-  }
-
-  .server-groups-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-bottom: 24px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-color);
-  }
-
-  .server-groups-header h2 {
-    color: var(--text-primary);
-    font-size: 28px;
-    font-weight: 600;
-    margin: 0;
-  }
-
-  .loading {
-    text-align: center;
-    padding: 40px;
-    color: var(--text-secondary);
-    font-size: 16px;
-  }
-
+  .loading,
   .empty-state {
     text-align: center;
     padding: 40px;
@@ -222,56 +188,16 @@
   }
 
   .empty-state p {
-    font-size: 16px;
+    font-size: 14px;
     margin: 0;
   }
 
-  /* Table styles */
   .server-groups-table {
-    box-shadow: var(--shadow-md);
-  }
-
-  .server-groups-table {
-    width: 100%;
     min-width: 560px;
-    border-collapse: collapse;
-    background: var(--bg-primary);
-    border-radius: 12px;
-    overflow: hidden;
-    border: 1px solid var(--border-color);
-  }
-
-  .server-groups-table thead {
-    background: var(--bg-tertiary);
-  }
-
-  .server-groups-table thead th {
-    padding: 14px 16px;
-    text-align: left;
-    font-weight: 600;
-    color: var(--text-primary);
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    border-bottom: 2px solid var(--border-color);
-    background: var(--bg-tertiary);
   }
 
   .server-groups-table thead th:last-child {
     text-align: center;
-  }
-
-  .server-groups-table td {
-    padding: 16px;
-    border-top: 1px solid var(--border-color);
-    color: var(--text-primary);
-    background: var(--bg-primary);
-    vertical-align: middle;
-  }
-
-  .server-groups-table tbody tr {
-    transition: background-color 0.2s ease;
-    background: var(--bg-primary);
   }
 
   .server-groups-table tbody tr:hover {

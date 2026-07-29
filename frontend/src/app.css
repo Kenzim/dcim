@@ -1,34 +1,102 @@
 /* Global styles and theme */
 :root {
-  /* Fonts - consistent across themes */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-    Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-  --font-mono: 'Courier New', 'Monaco', 'Menlo', 'Consolas', monospace;
+  /* Fonts - IBM Plex for a technical ops feel (self-hosted; CSP font-src 'self') */
+  --font-sans: 'IBM Plex Sans', 'Segoe UI', 'Helvetica Neue', sans-serif;
+  --font-mono: 'Menlo', 'Consolas', 'Courier New', monospace;
   /* Semantic tokens used across components */
   --overlay-bg: rgba(0, 0, 0, 0.5);
   --focus-ring: 0 0 0 3px rgba(8, 145, 178, 0.25);
   --focus-ring-accent: 0 0 0 3px rgba(8, 145, 178, 0.15);
+  /* Radius scale — keep admin surfaces sharp; avoid soft Bootstrap cards */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* Admin shell — theme-aware; light defaults, dark overrides below */
+  --admin-sidebar-width: 260px;
+  --admin-sidebar-bg: #f4f7fb;
+  --admin-sidebar-elevated: #ffffff;
+  --admin-sidebar-text: #0f172a;
+  --admin-sidebar-muted: #64748b;
+  --admin-sidebar-hover: rgba(15, 23, 42, 0.05);
+  --admin-sidebar-active-bg: rgba(14, 116, 144, 0.1);
+  --admin-sidebar-active-text: #0e7490;
+  --admin-sidebar-border: #d7dee8;
+  --admin-sidebar-accent: #0e7490;
+  --admin-header-bg: rgba(255, 255, 255, 0.86);
+  --admin-header-border: rgba(15, 23, 42, 0.08);
+  --admin-canvas-from: #eef2f7;
+  --admin-canvas-to: #f7f9fc;
+  --admin-surface-shadow: 0 1px 0 rgba(15, 23, 42, 0.04), 0 8px 24px -12px rgba(15, 23, 42, 0.12);
+  --admin-sidebar-logout-bg: rgba(220, 38, 38, 0.08);
+  --admin-sidebar-logout-border: rgba(220, 38, 38, 0.22);
+  --admin-sidebar-logout-text: #b91c1c;
+  --admin-sidebar-logout-hover-bg: rgba(220, 38, 38, 0.14);
+  --admin-sidebar-glow: rgba(14, 116, 144, 0.08);
+}
+
+/* ==========================================================================
+   Client portal design tokens
+   The portal (/client) uses a distinct, deeper accent and elevated cards so
+   it reads as a customer product rather than the internal admin tool. All
+   values reference the theme-aware base tokens above where possible.
+   ========================================================================== */
+:root,
+:root[data-theme="light"] {
+  --portal-accent: #0e7490;
+  --portal-accent-strong: #155e75;
+  --portal-accent-soft: rgba(8, 145, 178, 0.1);
+  --portal-accent-contrast: #ffffff;
+  --portal-hero-from: #0f2a3d;
+  --portal-hero-to: #155e75;
+  --portal-hero-text: #f0f9ff;
+  --portal-hero-muted: rgba(240, 249, 255, 0.72);
+  --portal-card-bg: var(--bg-primary);
+  --portal-card-border: var(--border-color);
+  --portal-card-shadow: var(--shadow-sm);
+  --portal-card-shadow-hover: var(--shadow-lg);
+  --portal-nav-bg: rgba(255, 255, 255, 0.86);
+  --portal-nav-border: var(--border-color);
+}
+
+:root[data-theme="dark"] {
+  --portal-accent: #22d3ee;
+  --portal-accent-strong: #67e8f9;
+  --portal-accent-soft: rgba(34, 211, 238, 0.12);
+  --portal-accent-contrast: #082f3d;
+  --portal-hero-from: #0b1220;
+  --portal-hero-to: #164e63;
+  --portal-hero-text: #f0f9ff;
+  --portal-hero-muted: rgba(240, 249, 255, 0.66);
+  --portal-card-bg: var(--bg-secondary);
+  --portal-card-border: var(--border-color);
+  --portal-card-shadow: var(--shadow-sm);
+  --portal-card-shadow-hover: var(--shadow-lg);
+  --portal-nav-bg: rgba(15, 23, 42, 0.82);
+  --portal-nav-border: var(--border-color);
 }
 
 /* Default/light - apply when no theme set (avoids FOUC) */
 :root,
 :root[data-theme="light"] {
   color-scheme: light;
-  --primary-color: #1e293b;
-  --primary-dark: #0f172a;
-  --primary-light: #334155;
-  --accent-color: #0891b2;
-  --accent-dark: #0e7490;
-  --accent-light: #06b6d4;
+  --primary-color: #152033;
+  --primary-dark: #0b1220;
+  --primary-light: #2a3a52;
+  --accent-color: #0e7490;
+  --accent-dark: #155e75;
+  --accent-light: #22d3ee;
+  --accent-contrast: #ffffff;
   --secondary-color: #64748b;
   --success-color: #059669;
   --danger-color: #dc2626;
   --warning-color: #d97706;
   --info-color: #0284c7;
   --bg-primary: #ffffff;
-  --bg-secondary: #f8fafc;
-  --bg-tertiary: #f1f5f9;
-  --border-color: #e2e8f0;
+  --bg-secondary: #f1f4f8;
+  --bg-tertiary: #e8edf4;
+  --border-color: #d7dee8;
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --text-tertiary: #64748b;
@@ -40,12 +108,12 @@
   --warning-text: #92400e;
   --info-bg: #dbeafe;
   --info-text: #1e40af;
-  --code-bg: #f1f5f9;
+  --code-bg: #eef2f7;
   --code-text: #0f172a;
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 12px -2px rgba(15, 23, 42, 0.08), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
+  --shadow-lg: 0 12px 24px -8px rgba(15, 23, 42, 0.12), 0 4px 8px -4px rgba(15, 23, 42, 0.06);
+  --shadow-xl: 0 24px 40px -12px rgba(15, 23, 42, 0.16);
 }
 
 :root[data-theme="dark"] {
@@ -53,42 +121,66 @@
   --primary-color: #f1f5f9;
   --primary-dark: #cbd5e1;
   --primary-light: #ffffff;
-  --accent-color: #0e7490;
-  --accent-dark: #155e75;
-  --accent-light: #22d3ee;
+  --accent-color: #22d3ee;
+  --accent-dark: #67e8f9;
+  --accent-light: #a5f3fc;
+  --accent-contrast: #082f3d;
   --secondary-color: #94a3b8;
-  --success-color: #10b981;
+  --success-color: #34d399;
   --danger-color: #f87171;
   --warning-color: #fbbf24;
   --info-color: #38bdf8;
-  --bg-primary: #0f172a;
-  --bg-secondary: #1e293b;
-  --bg-tertiary: #475569;
-  --border-color: #475569;
-  --text-primary: #f8fafc;
-  --text-secondary: #e2e8f0;
-  --text-tertiary: #cbd5e1;
-  --success-bg: rgba(16, 185, 129, 0.2);
-  --success-text: #10b981;
-  --danger-bg: rgba(248, 113, 113, 0.2);
-  --danger-text: #f87171;
-  --warning-bg: rgba(251, 191, 36, 0.2);
-  --warning-text: #fbbf24;
-  --info-bg: rgba(56, 189, 248, 0.2);
-  --info-text: #38bdf8;
-  --code-bg: #1e293b;
+  --bg-primary: #121a2b;
+  --bg-secondary: #0b1220;
+  --bg-tertiary: #1c2740;
+  --border-color: #2a3650;
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-tertiary: #94a3b8;
+  --success-bg: rgba(52, 211, 153, 0.14);
+  --success-text: #6ee7b7;
+  --danger-bg: rgba(248, 113, 113, 0.14);
+  --danger-text: #fca5a5;
+  --warning-bg: rgba(251, 191, 36, 0.14);
+  --warning-text: #fcd34d;
+  --info-bg: rgba(56, 189, 248, 0.14);
+  --info-text: #7dd3fc;
+  --code-bg: #1c2740;
   --code-text: #e2e8f0;
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.4);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 10px 10px -5px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 24px -8px rgba(0, 0, 0, 0.55);
+  --shadow-xl: 0 24px 40px -12px rgba(0, 0, 0, 0.65);
+
+  --admin-sidebar-bg: #070d18;
+  --admin-sidebar-elevated: #0f172a;
+  --admin-sidebar-text: #f1f5f9;
+  --admin-sidebar-muted: #8b9bb4;
+  --admin-sidebar-hover: rgba(255, 255, 255, 0.05);
+  --admin-sidebar-active-bg: rgba(34, 211, 238, 0.14);
+  --admin-sidebar-active-text: #a5f3fc;
+  --admin-sidebar-border: rgba(148, 163, 184, 0.12);
+  --admin-sidebar-accent: #22d3ee;
+  --admin-header-bg: rgba(12, 18, 32, 0.78);
+  --admin-header-border: rgba(148, 163, 184, 0.12);
+  --admin-canvas-from: #0b1220;
+  --admin-canvas-to: #101827;
+  --admin-surface-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 28px -14px rgba(0, 0, 0, 0.55);
+  --admin-sidebar-logout-bg: rgba(248, 113, 113, 0.12);
+  --admin-sidebar-logout-border: rgba(248, 113, 113, 0.28);
+  --admin-sidebar-logout-text: #fca5a5;
+  --admin-sidebar-logout-hover-bg: rgba(248, 113, 113, 0.22);
+  --admin-sidebar-glow: rgba(34, 211, 238, 0.1);
 }
 
 body {
   margin: 0;
   font-family: var(--font-sans);
+  font-feature-settings: 'ss01' on, 'cv05' on;
   color: var(--text-primary);
   background: var(--bg-secondary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
@@ -182,95 +274,132 @@ body {
   margin-bottom: 16px;
 }
 
-/* Buttons - base styles components can use */
-.btn-primary {
+/* ==========================================================================
+   Buttons — single source of truth
+   Prefer <Button> from ui/, or class="btn btn-primary|secondary|danger".
+   Page-local .btn-primary overrides fight consistency; avoid them.
+   ========================================================================== */
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-danger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 10px 20px;
-  background: var(--accent-color);
-  color: white;
-  border: none;
-  border-radius: 8px;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
   font-family: inherit;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+  box-sizing: border-box;
   cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, filter 0.15s ease;
 }
-.btn-primary:hover:not(:disabled) {
-  background: var(--accent-dark);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-lg);
-}
-.btn-primary:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.btn svg,
+.btn-primary svg,
+.btn-secondary svg,
+.btn-danger svg,
+.btn .btn-icon,
+.btn-primary .btn-icon,
+.btn-secondary .btn-icon,
+.btn-danger .btn-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
 }
 
-.btn-secondary {
-  padding: 10px 20px;
-  background: var(--bg-tertiary);
+.btn-primary,
+.btn.btn-primary {
+  background: var(--accent-color);
+  color: var(--accent-contrast);
+  border: 1px solid transparent;
+}
+.btn-primary:hover:not(:disabled),
+.btn.btn-primary:hover:not(:disabled) {
+  background: var(--accent-dark);
+}
+
+.btn-secondary,
+.btn.btn-secondary {
+  background: transparent;
   color: var(--text-primary);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 14px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
-.btn-secondary:hover:not(:disabled) {
-  background: var(--accent-color);
-  color: white;
-  border-color: var(--accent-color);
-}
-.btn-secondary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.btn-secondary:hover:not(:disabled),
+.btn.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  border-color: var(--text-tertiary);
+  color: var(--text-primary);
 }
 
-.btn-danger {
+.btn-danger,
+.btn.btn-danger {
   background: var(--danger-color);
-  color: white;
+  color: #fff;
   border: 1px solid var(--danger-color);
 }
-.btn-danger:hover:not(:disabled) {
-  background: var(--danger-text);
-  border-color: var(--danger-text);
+.btn-danger:hover:not(:disabled),
+.btn.btn-danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn:disabled,
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-danger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+  filter: none;
+}
+
+.btn-small,
+.btn.btn-small,
+.btn-sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .btn-icon-only {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  color: var(--text-primary);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 .btn-icon-only:hover {
-  background: var(--bg-secondary);
-  border-color: var(--accent-color);
+  background: var(--bg-tertiary);
+  border-color: var(--border-color);
   color: var(--accent-color);
-  transform: translateY(-1px);
 }
-.btn-icon-only.btn-danger {
-  border-color: var(--danger-color);
+.btn-icon-only.btn-danger,
+.btn-icon-only.btn-icon-only-danger {
+  border-color: transparent;
+  color: var(--text-tertiary);
+}
+.btn-icon-only.btn-danger:hover,
+.btn-icon-only.btn-icon-only-danger:hover {
+  background: var(--danger-bg);
   color: var(--danger-color);
-}
-.btn-icon-only.btn-danger:hover {
-  background: var(--danger-color);
-  color: white;
-  border-color: var(--danger-color);
+  border-color: transparent;
 }
 .btn-icon-only svg {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
 }
 
 /* Form groups - shared structure */
@@ -292,7 +421,7 @@ body {
   border-radius: 8px;
   font-size: 14px;
   font-family: inherit;
-  background: var(--bg-primary);
+  background-color: var(--bg-primary);
   color: var(--text-primary);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
@@ -307,6 +436,9 @@ body {
 }
 :root[data-theme="dark"] .form-group select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px;
 }
 .form-group select option {
   background: var(--bg-primary);
@@ -494,6 +626,109 @@ pre.code-block {
   width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+/* Header actions use the shared .btn-* system; kill per-page size overrides */
+.page-header .header-actions .btn-primary,
+.page-header .header-actions .btn-secondary,
+.page-header .header-actions .btn-danger,
+.page-header .header-actions .btn.btn-primary,
+.page-header .header-actions .btn.btn-secondary,
+.page-header .header-actions .btn.btn-danger,
+.page-header .header-actions button.btn-primary,
+.page-header .header-actions button.btn-secondary {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  box-shadow: none;
+  transform: none;
+}
+.page-header .header-actions .btn-primary svg,
+.page-header .header-actions .btn-secondary svg,
+.page-header .header-actions .btn svg,
+.page-header .header-actions .btn-icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* Shared admin list/detail page body — use under <PageHeader>, never duplicate the title */
+.admin-page {
+  padding: 16px 24px 28px;
+  color: var(--text-primary);
+  min-width: 0;
+}
+.admin-page-lead {
+  margin: 0 0 14px;
+  max-width: 72ch;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+@media (max-width: 768px) {
+  .admin-page {
+    padding: 12px 16px 20px;
+  }
+}
+
+/* Dense inventory tables (servers, switches, …) — compact rows for long lists */
+.admin-data-table {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.admin-data-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.admin-data-table thead {
+  background: var(--bg-tertiary);
+}
+.admin-data-table th {
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+.admin-data-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  vertical-align: middle;
+}
+.admin-data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.admin-data-table tbody tr:hover {
+  background: color-mix(in srgb, var(--accent-color) 6%, var(--bg-primary));
+}
+.admin-data-table .status-badge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.admin-data-table .table-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.admin-data-table .btn-icon-only {
+  padding: 3px;
+  border-radius: 3px;
+}
+.admin-data-table .btn-icon-only svg {
+  width: 15px;
+  height: 15px;
 }
 
 @media (max-width: 768px) {
