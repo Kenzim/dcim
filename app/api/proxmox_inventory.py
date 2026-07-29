@@ -2,17 +2,19 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 import httpx
 
 from app.core.auth import require_admin
 from app.core.database import get_db
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
-from app.models.proxmox_inventory import ProxmoxNode, ProxmoxStorage
+from app.models.proxmox_inventory import ProxmoxCapacitySnapshot, ProxmoxNode, ProxmoxStorage
 from app.services.vm_provisioning_service import VMProvisioningService
 
 
 router = APIRouter(prefix="/proxmox", tags=["proxmox"])
+
+CLUSTER_NOT_FOUND = "Cluster not found"
 
 
 class ClusterCreate(BaseModel):
@@ -20,7 +22,10 @@ class ClusterCreate(BaseModel):
     api_url: str
     username: str
     password: str
-    verify_ssl: bool = False
+    # Defaults to True (verify certs) so a management-network MITM can't
+    # silently steal Proxmox session cookies/VM console credentials; admins
+    # managing clusters with self-signed certs must opt out explicitly.
+    verify_ssl: bool = True
     vmid_min: Optional[int] = None
     vmid_max: Optional[int] = None
     details: dict[str, Any] = Field(default_factory=dict)
@@ -90,6 +95,19 @@ async def list_clusters(
     return VMProvisioningService.get_cluster_capacity_summary(db)
 
 
+@router.get("/backup-storages")
+async def list_backup_storages(
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Distinct synced storage names suitable for product backup config dropdowns."""
+    rows = ProxmoxInventoryDAO.list_distinct_storage_names(db, backup_capable_only=True)
+    if not rows:
+        # Fall back to all known storages so admins can still pick names before sync tags content.
+        rows = ProxmoxInventoryDAO.list_distinct_storage_names(db, backup_capable_only=False)
+    return rows
+
+
 @router.post("/clusters", status_code=status.HTTP_201_CREATED)
 async def create_cluster(
     data: ClusterCreate,
@@ -109,7 +127,7 @@ async def update_cluster(
 ):
     row = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CLUSTER_NOT_FOUND)
     update_data = data.model_dump(exclude_unset=True)
     ProxmoxInventoryDAO.update_cluster(db, row, **update_data)
     return {"status": "ok"}
@@ -145,7 +163,7 @@ async def sync_cluster_inventory(
 ):
     cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not cluster:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CLUSTER_NOT_FOUND)
 
     try:
         headers = await _proxmox_auth(cluster)
@@ -201,6 +219,9 @@ async def sync_cluster_inventory(
                     storage_used_bytes=status_data.get("rootfs", {}).get("used"),
                     overcommit_ratio=None,
                 )
+                # Snapshots accumulate every sync; keep only recent history per
+                # node so the table (and any full-collection load of it) stays bounded.
+                ProxmoxInventoryDAO.prune_capacity_snapshots(db, node_id=node.id)
 
                 db.query(ProxmoxStorage).filter(
                     ProxmoxStorage.node_id == node.id,
@@ -239,7 +260,7 @@ async def get_cluster_inventory(
 ):
     cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not cluster:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CLUSTER_NOT_FOUND)
 
     return {
         "cluster_id": cluster.id,
@@ -277,6 +298,122 @@ async def get_cluster_inventory(
     }
 
 
+def _capacity_payload(snapshot: Optional[ProxmoxCapacitySnapshot]) -> Optional[dict[str, Any]]:
+    if not snapshot:
+        return None
+    return {
+        "cpu_total": snapshot.cpu_total,
+        "cpu_used": snapshot.cpu_used,
+        "ram_total_bytes": snapshot.ram_total_bytes,
+        "ram_used_bytes": snapshot.ram_used_bytes,
+        "storage_total_bytes": snapshot.storage_total_bytes,
+        "storage_used_bytes": snapshot.storage_used_bytes,
+        "overcommit_ratio": snapshot.overcommit_ratio,
+        "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+    }
+
+
+def _latest_snapshot(db: Session, node_id: int) -> Optional[ProxmoxCapacitySnapshot]:
+    return (
+        db.query(ProxmoxCapacitySnapshot)
+        .filter(ProxmoxCapacitySnapshot.node_id == node_id)
+        .order_by(ProxmoxCapacitySnapshot.created_at.desc(), ProxmoxCapacitySnapshot.id.desc())
+        .first()
+    )
+
+
+def _accumulate_totals(totals: dict[str, float], snapshot: ProxmoxCapacitySnapshot) -> None:
+    if snapshot.cpu_total is not None:
+        totals["cpu_total_cores"] += snapshot.cpu_total
+        totals["cpu_used_cores"] += (snapshot.cpu_used or 0) * snapshot.cpu_total
+    totals["ram_total_bytes"] += snapshot.ram_total_bytes or 0
+    totals["ram_used_bytes"] += snapshot.ram_used_bytes or 0
+    totals["storage_total_bytes"] += snapshot.storage_total_bytes or 0
+    totals["storage_used_bytes"] += snapshot.storage_used_bytes or 0
+
+
+def _node_overview_payload(node: ProxmoxNode, snapshot: Optional[ProxmoxCapacitySnapshot]) -> dict[str, Any]:
+    return {
+        "id": node.id,
+        "node_name": node.node_name,
+        "enabled": node.enabled,
+        "capacity": _capacity_payload(snapshot),
+        "template_count": len(node.templates or []),
+        "storage_count": len(node.storages or []),
+        "templates": [
+            {"id": t.id, "vmid": t.vmid, "name": t.name, "storage_name": t.storage_name}
+            for t in sorted(node.templates or [], key=lambda t: t.name)
+        ],
+        "storages": [
+            {
+                "id": s.id,
+                "storage_name": s.storage_name,
+                "storage_type": s.storage_type,
+                "total_bytes": s.total_bytes,
+                "used_bytes": s.used_bytes,
+            }
+            for s in sorted(node.storages or [], key=lambda s: s.storage_name)
+        ],
+    }
+
+
+@router.get("/clusters/{cluster_id}/overview")
+async def get_cluster_overview(
+    cluster_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Detailed single-cluster view: cluster identity, cluster-wide capacity
+    totals (from each node's latest snapshot), and one panel per node with
+    its own capacity + templates + storages.
+    """
+    cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
+    if not cluster:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CLUSTER_NOT_FOUND)
+
+    nodes = (
+        db.query(ProxmoxNode)
+        .options(joinedload(ProxmoxNode.storages), joinedload(ProxmoxNode.templates))
+        .filter(ProxmoxNode.cluster_id == cluster_id)
+        .order_by(ProxmoxNode.node_name)
+        .all()
+    )
+
+    totals = {
+        "cpu_total_cores": 0.0,
+        "cpu_used_cores": 0.0,
+        "ram_total_bytes": 0,
+        "ram_used_bytes": 0,
+        "storage_total_bytes": 0,
+        "storage_used_bytes": 0,
+    }
+    has_capacity = False
+    node_payloads = []
+    for node in nodes:
+        latest = _latest_snapshot(db, node.id)
+        if latest:
+            has_capacity = True
+            _accumulate_totals(totals, latest)
+        node_payloads.append(_node_overview_payload(node, latest))
+
+    return {
+        "cluster": {
+            "id": cluster.id,
+            "name": cluster.name,
+            "api_url": cluster.api_url,
+            "enabled": cluster.enabled,
+            "verify_ssl": cluster.verify_ssl,
+            "vmid_min": cluster.vmid_min,
+            "vmid_max": cluster.vmid_max,
+        },
+        "totals": totals if has_capacity else None,
+        "template_count": sum(n["template_count"] for n in node_payloads),
+        "storage_count": sum(n["storage_count"] for n in node_payloads),
+        "nodes": node_payloads,
+    }
+
+
 @router.post("/clusters/{cluster_id}/nodes", status_code=status.HTTP_201_CREATED)
 async def upsert_node(
     cluster_id: int,
@@ -286,7 +423,7 @@ async def upsert_node(
 ):
     cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not cluster:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CLUSTER_NOT_FOUND)
     row = ProxmoxInventoryDAO.upsert_node(db, cluster_id=cluster_id, **data.model_dump())
     return {"id": row.id}
 
@@ -321,6 +458,8 @@ async def add_capacity_snapshot(
     db: Session = Depends(get_db),
 ):
     row = ProxmoxInventoryDAO.add_capacity_snapshot(db, node_id=node_id, **data.model_dump())
+    ProxmoxInventoryDAO.prune_capacity_snapshots(db, node_id=node_id)
+    db.commit()
     return {"id": row.id}
 
 

@@ -91,12 +91,64 @@ class GuestAgentVMOSStrategy(VMOSStrategy):
         )
 
 
+class MacosGuestAgentVMOSStrategy(VMOSStrategy):
+    """Clone macOS template; configure via AppleQEMUGuestAgent + OpenCore."""
+
+    name = "macos_guest_agent"
+
+    def build_plan(self, request: VMProvisionRequest, strategy_config: Optional[Dict[str, Any]] = None) -> VMProvisionPlan:
+        cfg = strategy_config or {}
+        return VMProvisionPlan(
+            strategy_name=self.name,
+            payload={
+                "mode": "macos_guest_agent",
+                "service_id": request.service_id,
+                "product_code": request.product_code,
+                "os_code": request.os_code,
+                "specs": request.specs,
+                "context": request.context,
+                "strategy_config": cfg,
+                "network": {
+                    "source": "vm_ip_allocation",
+                    "description": "Static IP via guest-agent networksetup (or DHCP if configured).",
+                },
+            },
+        )
+
+
+class WindowsGuestAgentVMOSStrategy(VMOSStrategy):
+    """Clone Windows template; configure network/password via QEMU guest agent."""
+
+    name = "windows_guest_agent"
+
+    def build_plan(self, request: VMProvisionRequest, strategy_config: Optional[Dict[str, Any]] = None) -> VMProvisionPlan:
+        cfg = strategy_config or {}
+        return VMProvisionPlan(
+            strategy_name=self.name,
+            payload={
+                "mode": "windows_guest_agent",
+                "service_id": request.service_id,
+                "product_code": request.product_code,
+                "os_code": request.os_code,
+                "specs": request.specs,
+                "context": request.context,
+                "strategy_config": cfg,
+                "network": {
+                    "source": "vm_ip_allocation",
+                    "description": "Static IP via guest-agent PowerShell (or DHCP if configured).",
+                },
+            },
+        )
+
+
 class VMOSStrategyRegistry:
     def __init__(self) -> None:
         self._strategies: dict[str, VMOSStrategy] = {}
         self.register(StubVMOSStrategy())
         self.register(CloudinitCloneVMOSStrategy())
         self.register(GuestAgentVMOSStrategy())
+        self.register(MacosGuestAgentVMOSStrategy())
+        self.register(WindowsGuestAgentVMOSStrategy())
 
     def register(self, strategy: VMOSStrategy) -> None:
         self._strategies[strategy.name] = strategy

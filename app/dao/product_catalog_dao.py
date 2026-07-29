@@ -80,6 +80,7 @@ class ProductDAO:
         code: str,
         overrides: Optional[dict] = None,
         enabled: bool = True,
+        permission_set_id: Optional[int] = None,
     ) -> Product:
         row = Product(
             family_id=family_id,
@@ -88,6 +89,7 @@ class ProductDAO:
             code=code,
             overrides=overrides or {},
             enabled=enabled,
+            permission_set_id=permission_set_id,
         )
         db.add(row)
         db.commit()
@@ -250,15 +252,19 @@ class VMTemplateDAO:
         name: str,
         os_type: str,
         proxmox_template_name: str,
+        code: str,
         description: Optional[str] = None,
         enabled: bool = True,
+        strategy_options: Optional[dict] = None,
     ) -> VMTemplate:
         row = VMTemplate(
+            code=code,
             name=name,
             os_type=os_type,
             proxmox_template_name=proxmox_template_name,
             description=description,
             enabled=enabled,
+            strategy_options=strategy_options or {},
         )
         db.add(row)
         db.commit()
@@ -270,6 +276,10 @@ class VMTemplateDAO:
         return db.query(VMTemplate).filter(VMTemplate.id == vm_template_id).first()
 
     @staticmethod
+    def get_by_code(db: Session, code: str) -> Optional[VMTemplate]:
+        return db.query(VMTemplate).filter(VMTemplate.code == code).first()
+
+    @staticmethod
     def get_by_proxmox_name(db: Session, proxmox_template_name: str) -> Optional[VMTemplate]:
         return db.query(VMTemplate).filter(VMTemplate.proxmox_template_name == proxmox_template_name).first()
 
@@ -279,6 +289,8 @@ class VMTemplateDAO:
 
     @staticmethod
     def update(db: Session, row: VMTemplate, **kwargs) -> VMTemplate:
+        # ``code`` is immutable after create.
+        kwargs.pop("code", None)
         for key, value in kwargs.items():
             setattr(row, key, value)
         db.commit()

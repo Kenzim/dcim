@@ -13,7 +13,7 @@ class ProxmoxCluster(Base):
     api_url = Column(String(512), nullable=False)
     username = Column(String(255), nullable=False)
     password = Column(String(255), nullable=False)
-    verify_ssl = Column(Boolean, nullable=False, default=False)
+    verify_ssl = Column(Boolean, nullable=False, default=True)
     enabled = Column(Boolean, nullable=False, default=True)
     vmid_min = Column(Integer, nullable=True)
     vmid_max = Column(Integer, nullable=True)

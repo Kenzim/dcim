@@ -72,6 +72,8 @@ def build_product_snapshot(
                 f"vm_template_id {vm_template_id} is not linked to product '{product.code}' "
                 "(assign VM templates on the product in the catalog)"
             )
+        from app.services.vm_install_type_strategy import merge_strategy_options
+
         spec = resolve_vm_template_strategy(vm_template_row.os_type)
         effective_os_code = spec["billing_os_code"]
         if os_code and os_code != effective_os_code:
@@ -79,11 +81,16 @@ def build_product_snapshot(
                 f"os_code '{os_code}' does not match strategy billing code '{effective_os_code}' "
                 f"for vm_template_id {vm_template_id}"
             )
+        merged_cfg = merge_strategy_options(
+            vm_template_row.os_type,
+            getattr(vm_template_row, "strategy_options", None) or {},
+        )
         snapshot["vm_template"] = {
             "id": vm_template_row.id,
             "name": vm_template_row.name,
             "os_type": vm_template_row.os_type,
             "proxmox_template_name": vm_template_row.proxmox_template_name,
+            "strategy_options": dict(getattr(vm_template_row, "strategy_options", None) or {}),
         }
         snapshot["os_profile"] = {
             "id": None,
@@ -91,7 +98,7 @@ def build_product_snapshot(
             "name": vm_template_row.os_type,
             "family": "vm_template_strategy",
             "strategy_name": spec["strategy_name"],
-            "strategy_config": spec["strategy_config"],
+            "strategy_config": merged_cfg,
             "source": "vm_template_os_type",
         }
     elif os_code:

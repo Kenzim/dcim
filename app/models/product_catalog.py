@@ -35,11 +35,16 @@ class Product(Base):
     code = Column(String(128), nullable=False, unique=True, index=True)
     overrides = Column(JSON, nullable=False, default=dict)
     enabled = Column(Boolean, nullable=False, default=True)
+    # Client permission preset for services created from this product. Sits
+    # below a per-user preset and above per-service overrides in the
+    # resolution hierarchy (see app.services.client_permission_resolver).
+    permission_set_id = Column(Integer, ForeignKey("permission_sets.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     family = relationship("ProductFamily", back_populates="products")
     vm_template_mappings = relationship("ProductVMTemplate", back_populates="product", cascade="all, delete-orphan")
+    permission_set = relationship("PermissionSet", foreign_keys=[permission_set_id])
 
 
 class OSProfile(Base):
@@ -62,10 +67,13 @@ class VMTemplate(Base):
     __tablename__ = "vm_templates"
 
     id = Column(Integer, primary_key=True, index=True)
+    # Immutable catalog identity (e.g. debian-13). Stamped into Proxmox smbios1 sku.
+    code = Column(String(128), nullable=False, unique=True, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     os_type = Column(String(128), nullable=False, index=True)
     proxmox_template_name = Column(String(255), nullable=False, unique=True, index=True)
+    strategy_options = Column(JSON, nullable=False, default=dict)
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

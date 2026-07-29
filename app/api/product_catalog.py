@@ -9,12 +9,18 @@ from app.core.auth import require_admin
 from app.core.database import get_db
 from app.dao.product_catalog_dao import ProductFamilyDAO, ProductDAO, OSProfileDAO, ProductFamilyOSProfileDAO, VMTemplateDAO
 from app.dao.vm_config_dao import FamilyVMConfigDAO, ProductVMConfigDAO
-from app.services.vm_install_type_strategy import INSTALL_TYPE_STRATEGIES
+from app.dao.permission_set_dao import PermissionSetDAO
+from app.models.service import Service, ServiceStatus
+from app.services.vm_install_type_strategy import INSTALL_TYPE_STRATEGIES, list_os_type_schemas
 
 
 router = APIRouter(prefix="/product-catalog", tags=["product-catalog"])
 # VM template os_type values are the provisioning strategy keys (model + strategy merged).
 ALLOWED_VM_OS_TYPES = sorted(INSTALL_TYPE_STRATEGIES.keys())
+# Service types this catalog can define families/products for. bare_metal
+# isn't included: those products are still ad hoc (server_group driven) and
+# don't have a dedicated catalog UI yet.
+ALLOWED_FAMILY_SERVICE_TYPES = ("vm", "http_proxy")
 
 
 def _slugify(text: str) -> str:
@@ -60,6 +66,9 @@ class ProductCreate(BaseModel):
     vm_template_ids: list[int] = Field(default_factory=list)
     overrides: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+    permission_set_id: Optional[int] = Field(
+        None, description="Client permission preset applied to services created from this product"
+    )
 
 
 class ProductUpdate(BaseModel):
@@ -70,6 +79,9 @@ class ProductUpdate(BaseModel):
     vm_template_ids: Optional[list[int]] = None
     overrides: Optional[dict[str, Any]] = None
     enabled: Optional[bool] = None
+    permission_set_id: Optional[int] = Field(
+        None, description="Client permission preset applied to services created from this product; null clears it"
+    )
 
 
 class FamilyVMConfigUpsert(BaseModel):
@@ -81,12 +93,30 @@ class ProductVMConfigUpsert(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+_VM_TEMPLATE_CODE_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,126}[a-z0-9])?$")
+
+
+def _validate_vm_template_code(code: str) -> str:
+    value = (code or "").strip().lower()
+    if not _VM_TEMPLATE_CODE_RE.match(value):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "code must be 1–128 chars, lowercase letters/digits/hyphens, "
+                "and must start and end with a letter or digit"
+            ),
+        )
+    return value
+
+
 class VMTemplateCreate(BaseModel):
+    code: str
     name: str
     os_type: str
     proxmox_template_name: str
     description: Optional[str] = None
     enabled: bool = True
+    strategy_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class VMTemplateUpdate(BaseModel):
@@ -95,6 +125,7 @@ class VMTemplateUpdate(BaseModel):
     proxmox_template_name: Optional[str] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
+    strategy_options: Optional[dict[str, Any]] = None
 
 
 class OSProfileCreate(BaseModel):
@@ -142,26 +173,54 @@ async def list_families(
     return result
 
 
+def _validate_proxy_defaults(defaults: dict) -> None:
+    """Light validation for the http_proxy family/product ``defaults``/
+    ``overrides`` JSON blob: ip_count/subnet_id/location_id, when present,
+    must be sane. Everything else in the dict is passed through untouched."""
+    if "ip_count" in defaults and defaults["ip_count"] is not None:
+        try:
+            ip_count = int(defaults["ip_count"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be an integer")
+        if ip_count < 1 or ip_count > 32:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be between 1 and 32")
+    for key in ("subnet_id", "location_id"):
+        if key in defaults and defaults[key] is not None:
+            try:
+                int(defaults[key])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"defaults.{key} must be an integer")
+    if "allocation_strategy" in defaults and defaults["allocation_strategy"] is not None:
+        if not isinstance(defaults["allocation_strategy"], str):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.allocation_strategy must be a string")
+
+
 @router.post("/families", status_code=status.HTTP_201_CREATED)
 async def create_family(
     data: ProductFamilyCreate,
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    if data.service_type != "vm":
+    if data.service_type not in ALLOWED_FAMILY_SERVICE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only VM families are supported by this catalog endpoint",
-        )
-    if data.provisioning_backend not in ("proxmox", ""):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="VM product families must use provisioning_backend 'proxmox'",
+            detail=f"service_type must be one of {list(ALLOWED_FAMILY_SERVICE_TYPES)}",
         )
 
     payload = data.model_dump()
     payload["code"] = data.code or _generate_family_code(db, data.name)
-    payload["provisioning_backend"] = "proxmox"
+
+    if data.service_type == "vm":
+        if data.provisioning_backend not in ("proxmox", ""):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="VM product families must use provisioning_backend 'proxmox'",
+            )
+        payload["provisioning_backend"] = "proxmox"
+    else:
+        # http_proxy: no hardware/hypervisor backend — IPs come from IPAM.
+        _validate_proxy_defaults(data.defaults or {})
+        payload["provisioning_backend"] = data.provisioning_backend or "ipam"
 
     if ProductFamilyDAO.get_by_code(db, payload["code"]):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Family code already exists")
@@ -180,20 +239,24 @@ async def update_family(
     row = ProductFamilyDAO.get_by_id(db, family_id)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
-    if row.service_type != "vm":
+    if row.service_type not in ALLOWED_FAMILY_SERVICE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only VM families are editable from this catalog",
+            detail="Only VM/http_proxy families are editable from this catalog",
         )
     update_data = data.model_dump(exclude_unset=True)
-    if "provisioning_backend" in update_data:
-        backend = update_data["provisioning_backend"]
-        if backend not in (None, "", "proxmox"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="VM product families must use provisioning_backend 'proxmox'",
-            )
-        update_data["provisioning_backend"] = "proxmox"
+    if row.service_type == "vm":
+        if "provisioning_backend" in update_data:
+            backend = update_data["provisioning_backend"]
+            if backend not in (None, "", "proxmox"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="VM product families must use provisioning_backend 'proxmox'",
+                )
+            update_data["provisioning_backend"] = "proxmox"
+    else:
+        if "defaults" in update_data and update_data["defaults"] is not None:
+            _validate_proxy_defaults(update_data["defaults"])
     ProductFamilyDAO.update(db, row, **update_data)
     return {"status": "ok"}
 
@@ -224,6 +287,10 @@ async def create_product(
         family = ProductFamilyDAO.get_by_id(db, data.family_id)
         if not family:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
+        if family.service_type == "http_proxy":
+            _validate_proxy_defaults(data.overrides or {})
+    if data.permission_set_id is not None and PermissionSetDAO.get_by_id(db, data.permission_set_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
     if ProductDAO.get_by_code(db, data.code):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Product code already exists")
     payload = data.model_dump()
@@ -267,6 +334,8 @@ async def list_products(
                 "vm_config": (vm_row.config if vm_row else {}),
                 "extends_group_vm_config": (vm_row.extends_family if vm_row else True),
                 "effective_vm_config": ProductVMConfigDAO.resolve_effective_config(db, p),
+                "permission_set_id": p.permission_set_id,
+                "permission_set_name": p.permission_set.name if p.permission_set else None,
             }
         )
     return result
@@ -287,6 +356,15 @@ async def update_product(
         family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
         if not family:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
+    if "overrides" in update_data and update_data["overrides"] is not None:
+        target_family = row.family
+        if "family_id" in update_data and update_data["family_id"] is not None:
+            target_family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
+        if target_family and target_family.service_type == "http_proxy":
+            _validate_proxy_defaults(update_data["overrides"])
+    if "permission_set_id" in update_data and update_data["permission_set_id"] is not None:
+        if PermissionSetDAO.get_by_id(db, update_data["permission_set_id"]) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
     if "code" in update_data:
         existing = ProductDAO.get_by_code(db, update_data["code"])
         if existing and existing.id != row.id:
@@ -308,10 +386,42 @@ async def update_product(
     return {"status": "ok"}
 
 
+@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_product(
+    product_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    row = ProductDAO.get_by_id(db, product_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+
+    in_use = (
+        db.query(Service)
+        .filter(Service.product_code == row.code, Service.status != ServiceStatus.TERMINATED)
+        .count()
+    )
+    if in_use:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Product '{row.code}' is still linked to {in_use} non-terminated service(s). "
+                "Disable the product instead, or reassign/terminate those services first."
+            ),
+        )
+
+    ProductDAO.delete(db, product_id)
+    return None
+
+
 @router.get("/vm-templates/os-types")
 async def list_vm_template_os_types(
     auth: dict = Depends(require_admin),
+    detailed: bool = False,
 ):
+    """Return allowed os_type strings, or detailed strategy schemas when ``detailed=true``."""
+    if detailed:
+        return list_os_type_schemas()
     return ALLOWED_VM_OS_TYPES
 
 
@@ -320,16 +430,21 @@ async def list_vm_templates(
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    from app.services.ssh_public_keys import os_type_accepts_ssh_key
+
     rows = VMTemplateDAO.get_all(db)
     return [
         {
             "id": t.id,
+            "code": t.code,
             "name": t.name,
             "description": t.description,
             "os_type": t.os_type,
             "proxmox_template_name": t.proxmox_template_name,
+            "strategy_options": t.strategy_options or {},
             "enabled": t.enabled,
             "product_ids": [m.product_id for m in t.product_mappings],
+            "accepts_ssh_key": os_type_accepts_ssh_key(t.os_type),
         }
         for t in rows
     ]
@@ -346,14 +461,21 @@ async def create_vm_template(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported os_type '{data.os_type}'",
         )
+    code = _validate_vm_template_code(data.code)
+    if VMTemplateDAO.get_by_code(db, code):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code already exists",
+        )
     if VMTemplateDAO.get_by_proxmox_name(db, data.proxmox_template_name):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="proxmox_template_name already exists",
         )
     payload = data.model_dump()
+    payload["code"] = code
     row = VMTemplateDAO.create(db, **payload)
-    return {"id": row.id}
+    return {"id": row.id, "code": row.code}
 
 
 @router.put("/vm-templates/{template_id}")
@@ -367,6 +489,11 @@ async def update_vm_template(
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM template not found")
     update_data = data.model_dump(exclude_unset=True)
+    if "code" in update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="code is immutable after create",
+        )
     if "os_type" in update_data and update_data["os_type"] not in ALLOWED_VM_OS_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -420,6 +547,8 @@ async def upsert_family_vm_config(
     family = ProductFamilyDAO.get_by_id(db, family_id)
     if not family:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
+    if family.service_type != "vm":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="vm-config only applies to VM families")
     FamilyVMConfigDAO.upsert(db, family, data.config or {})
     db.commit()
     return {"status": "ok"}
@@ -453,6 +582,8 @@ async def upsert_product_vm_config(
     product = ProductDAO.get_by_id(db, product_id)
     if not product:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+    if not product.family or product.family.service_type != "vm":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="vm-config only applies to VM products")
     ProductVMConfigDAO.upsert(
         db,
         product=product,
