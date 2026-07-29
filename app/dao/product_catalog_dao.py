@@ -255,6 +255,7 @@ class VMTemplateDAO:
         code: str,
         description: Optional[str] = None,
         enabled: bool = True,
+        shared_storage: bool = False,
         strategy_options: Optional[dict] = None,
     ) -> VMTemplate:
         row = VMTemplate(
@@ -264,6 +265,7 @@ class VMTemplateDAO:
             proxmox_template_name=proxmox_template_name,
             description=description,
             enabled=enabled,
+            shared_storage=bool(shared_storage),
             strategy_options=strategy_options or {},
         )
         db.add(row)

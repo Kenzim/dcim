@@ -32,6 +32,7 @@
       os_type: 'Linux - Cloudinit',
       proxmox_template_name: '',
       enabled: true,
+      shared_storage: false,
       strategy_options: {},
     };
   }
@@ -111,6 +112,7 @@
       os_type: osType,
       proxmox_template_name: template.proxmox_template_name || '',
       enabled: !!template.enabled,
+      shared_storage: !!template.shared_storage,
       strategy_options: { ...defaultsFor(osType), ...(template.strategy_options || {}) },
     };
     showEditModal = true;
@@ -243,6 +245,14 @@
       </select>
       <label class="field-label">Proxmox clone template name</label>
       <input bind:value={createForm.proxmox_template_name} placeholder="e.g. macos-tahoe" />
+      <label class="check">
+        <input type="checkbox" bind:checked={createForm.shared_storage} />
+        Shared storage — place on any node
+      </label>
+      <p class="field-hint">
+        Enable when the template disks are on shared storage. Auto-placement may pick any
+        enabled node in the cluster; the template QEMU may live on a different node.
+      </p>
       {#each schemaFor(createForm.os_type).option_schema || [] as field}
         {#if field.name !== 'client_actions'}
           <label class="field-label">{field.label}</label>
@@ -305,6 +315,14 @@
       </select>
       <label class="field-label">Proxmox clone template name</label>
       <input bind:value={editForm.proxmox_template_name} />
+      <label class="check">
+        <input type="checkbox" bind:checked={editForm.shared_storage} />
+        Shared storage — place on any node
+      </label>
+      <p class="field-hint">
+        Enable when the template disks are on shared storage. Auto-placement may pick any
+        enabled node in the cluster; the template QEMU may live on a different node.
+      </p>
       {#each schemaFor(editForm.os_type).option_schema || [] as field}
         {#if field.name !== 'client_actions'}
           <label class="field-label">{field.label}</label>

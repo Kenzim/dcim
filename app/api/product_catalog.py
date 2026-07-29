@@ -116,6 +116,7 @@ class VMTemplateCreate(BaseModel):
     proxmox_template_name: str
     description: Optional[str] = None
     enabled: bool = True
+    shared_storage: bool = False
     strategy_options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -125,6 +126,7 @@ class VMTemplateUpdate(BaseModel):
     proxmox_template_name: Optional[str] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
+    shared_storage: Optional[bool] = None
     strategy_options: Optional[dict[str, Any]] = None
 
 
@@ -443,6 +445,7 @@ async def list_vm_templates(
             "proxmox_template_name": t.proxmox_template_name,
             "strategy_options": t.strategy_options or {},
             "enabled": t.enabled,
+            "shared_storage": bool(t.shared_storage),
             "product_ids": [m.product_id for m in t.product_mappings],
             "accepts_ssh_key": os_type_accepts_ssh_key(t.os_type),
         }

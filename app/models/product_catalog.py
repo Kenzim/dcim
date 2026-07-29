@@ -73,6 +73,9 @@ class VMTemplate(Base):
     description = Column(Text, nullable=True)
     os_type = Column(String(128), nullable=False, index=True)
     proxmox_template_name = Column(String(255), nullable=False, unique=True, index=True)
+    # When True, auto-place may use any enabled node in a cluster that has this
+    # template somewhere (shared storage); clone resolves the template cluster-wide.
+    shared_storage = Column(Boolean, nullable=False, default=False)
     strategy_options = Column(JSON, nullable=False, default=dict)
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

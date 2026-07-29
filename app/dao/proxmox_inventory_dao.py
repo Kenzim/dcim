@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -273,6 +273,32 @@ class ProxmoxInventoryDAO:
             .first()
         )
         return row.vmid if row else None
+
+    @staticmethod
+    def find_template_in_cluster(
+        db: Session,
+        *,
+        cluster_id: int,
+        template_name: str,
+    ) -> Optional[Tuple[str, int]]:
+        """
+        Resolve a synced template name to ``(node_name, vmid)`` anywhere in the cluster.
+        Prefer an enabled node when multiple copies exist.
+        """
+        row = (
+            db.query(ProxmoxTemplate, ProxmoxNode)
+            .join(ProxmoxNode, ProxmoxTemplate.node_id == ProxmoxNode.id)
+            .filter(
+                ProxmoxNode.cluster_id == cluster_id,
+                ProxmoxTemplate.name == template_name,
+            )
+            .order_by(ProxmoxNode.enabled.desc(), ProxmoxNode.node_name.asc())
+            .first()
+        )
+        if not row:
+            return None
+        tmpl, node = row
+        return str(node.node_name), int(tmpl.vmid)
 
     @staticmethod
     def add_capacity_snapshot(

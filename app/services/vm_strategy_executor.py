@@ -74,7 +74,10 @@ def prepare_vm_placement_for_provisioning(db: Session, service: Service) -> None
     node_name = (vm.proxmox_node_name or "").strip()
     if not node_name:
         cluster_id, node_name = auto_place_vm(
-            db, template_name=tmpl.proxmox_template_name, cluster_id=cluster_id
+            db,
+            template_name=tmpl.proxmox_template_name,
+            cluster_id=cluster_id,
+            shared_storage=bool(tmpl.shared_storage),
         )
         vm.proxmox_cluster_id = cluster_id
         vm.proxmox_node_name = node_name
