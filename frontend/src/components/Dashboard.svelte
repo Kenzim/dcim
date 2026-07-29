@@ -427,7 +427,7 @@
 
     <!-- Aggregate traffic: fills the remaining viewport height -->
     <section class="panel traffic-shell">
-      <AggregateTrafficPanel {locations} {switches} {serverGroups} />
+      <AggregateTrafficPanel />
     </section>
   </div>
 {/if}

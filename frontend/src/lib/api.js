@@ -1497,6 +1497,19 @@ export async function getSwitchBandwidth(switchId, hours = 24, portIdentifier = 
   return await response.json();
 }
 
+export async function getAggregateBandwidth(hours = 24) {
+  const params = new URLSearchParams();
+  params.append('hours', String(hours));
+  const response = await fetch(`${API_BASE}/network-switches/bandwidth/aggregate?${params}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error('Failed to get aggregate bandwidth');
+  }
+  return await response.json();
+}
+
 export async function getServerBandwidth(serverId, hours = 24, resolutionMinutes = 0) {
   const params = new URLSearchParams();
   params.append('hours', String(hours));

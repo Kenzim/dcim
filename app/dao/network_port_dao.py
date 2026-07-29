@@ -53,6 +53,17 @@ class NetworkPortDAO:
         return db.query(NetworkPort).filter(NetworkPort.server_id == server_id).order_by(NetworkPort.lag_group, NetworkPort.name).all()
 
     @staticmethod
+    def get_monitored(db: Session, limit: int = 5000) -> List[NetworkPort]:
+        """Get server network ports with bandwidth monitoring enabled."""
+        return (
+            db.query(NetworkPort)
+            .filter(NetworkPort.monitor_bandwidth.is_(True))
+            .order_by(NetworkPort.server_id, NetworkPort.name)
+            .limit(limit)
+            .all()
+        )
+
+    @staticmethod
     def update(db: Session, port: NetworkPort) -> NetworkPort:
         """Update a network port"""
         db.commit()

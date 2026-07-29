@@ -3,25 +3,12 @@
   import Spinner from './ui/Spinner.svelte';
   import Alert from './ui/Alert.svelte';
   import AggregateTrafficChart from './ui/AggregateTrafficChart.svelte';
-  import { getServerGroup, getSwitchBandwidth, getServerBandwidth } from '../lib/api.js';
+  import { getAggregateBandwidth } from '../lib/api.js';
 
-  // Already-loaded lists from the parent dashboard — no duplicate fetching.
-  export let locations = [];
-  export let switches = [];
-  export let serverGroups = [];
-
-  const PALETTE = [
-    '#0891b2',
-    '#f97316',
-    '#22c55e',
-    '#a855f7',
-    '#ef4444',
-    '#3b82f6',
-    '#eab308',
-    '#14b8a6',
-    '#ec4899',
-    '#64748b',
-  ];
+  const SERIES_META = {
+    in: { color: '#0891b2', label: 'Traffic in' },
+    out: { color: '#f97316', label: 'Traffic out' },
+  };
 
   const RANGE_OPTIONS = [
     { hours: 6, label: '6h' },
@@ -30,110 +17,62 @@
     { hours: 168, label: '7d' },
   ];
 
-  let groupBy = 'location'; // 'location' | 'group'
   let hoursRange = 24;
   let loading = false;
   let error = null;
   let series = [];
+  let trackedPorts = 0;
 
   let chartWidth = 960;
   let chartHeight = 280;
 
-  const groupMembersCache = new Map();
-
   onMount(loadSeries);
-
-  function bucketSpanMs(hours) {
-    const totalMs = hours * 3600 * 1000;
-    const targetPoints = 96;
-    return Math.max(60_000, Math.round(totalMs / targetPoints));
-  }
-
-  function aggregateFromResults(results, spanMs) {
-    const buckets = new Map();
-    for (const res of results) {
-      if (!res || res.status !== 'fulfilled' || !res.value) continue;
-      for (const port of res.value.ports || []) {
-        for (const s of port.samples || []) {
-          if (!s.sampled_at) continue;
-          const t = new Date(s.sampled_at).getTime();
-          if (Number.isNaN(t)) continue;
-          const bucketT = Math.floor(t / spanMs) * spanMs;
-          const val = (s.rate_in_mbps || 0) + (s.rate_out_mbps || 0);
-          buckets.set(bucketT, (buckets.get(bucketT) || 0) + val);
-        }
-      }
-    }
-    return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([t, value]) => ({ t, value }));
-  }
-
-  async function buildLocationSeries(spanMs) {
-    const candidates = locations.filter((loc) => switches.some((sw) => sw.location_id === loc.id));
-    return Promise.all(
-      candidates.map(async (loc) => {
-        const locSwitches = switches.filter((sw) => sw.location_id === loc.id);
-        const results = await Promise.allSettled(locSwitches.map((sw) => getSwitchBandwidth(sw.id, hoursRange)));
-        return { id: `loc-${loc.id}`, label: loc.name, samples: aggregateFromResults(results, spanMs) };
-      })
-    );
-  }
-
-  async function buildGroupSeries(spanMs) {
-    const candidates = serverGroups.filter((g) => (g.server_count || 0) > 0);
-    return Promise.all(
-      candidates.map(async (group) => {
-        let memberIds = groupMembersCache.get(group.id);
-        if (!memberIds) {
-          const detail = await getServerGroup(group.id).catch(() => null);
-          memberIds = (detail?.servers || []).map((s) => s.id);
-          groupMembersCache.set(group.id, memberIds);
-        }
-        const results = await Promise.allSettled(memberIds.map((id) => getServerBandwidth(id, hoursRange)));
-        return { id: `grp-${group.id}`, label: group.name, samples: aggregateFromResults(results, spanMs) };
-      })
-    );
-  }
 
   async function loadSeries() {
     loading = true;
     error = null;
     try {
-      const spanMs = bucketSpanMs(hoursRange);
-      const built = groupBy === 'location' ? await buildLocationSeries(spanMs) : await buildGroupSeries(spanMs);
-      applySeries(built);
+      const data = await getAggregateBandwidth(Number(hoursRange));
+      trackedPorts = data.tracked_ports || 0;
+      const previousVisible = new Map(series.map((s) => [s.id, s.visible]));
+      series = (data.series || []).map((s) => {
+        const meta = SERIES_META[s.id] || { color: '#64748b', label: s.label || s.id };
+        return {
+          id: s.id,
+          label: meta.label,
+          color: meta.color,
+          samples: s.samples || [],
+          visible: previousVisible.has(s.id) ? previousVisible.get(s.id) : true,
+        };
+      });
     } catch (e) {
       error = e.message || 'Failed to load traffic data.';
+      series = [];
     } finally {
       loading = false;
     }
   }
 
-  function applySeries(built) {
-    const withData = built.filter((b) => b.samples.length > 0);
-    const previousVisible = new Map(series.map((s) => [s.id, s.visible]));
-    series = withData
-      .map((b, idx) => ({
-        ...b,
-        color: PALETTE[idx % PALETTE.length],
-        visible: previousVisible.has(b.id) ? previousVisible.get(b.id) : true,
-        total: b.samples.reduce((sum, s) => sum + s.value, 0),
-      }))
-      .sort((a, b) => b.total - a.total);
-  }
-
   function toggleSeries(id) {
     series = series.map((s) => (s.id === id ? { ...s, visible: !s.visible } : s));
   }
+
+  $: hasSamples = series.some((s) => (s.samples || []).length > 0);
 </script>
 
 <div class="traffic-panel">
   <div class="traffic-header">
-    <h2>Aggregate traffic</h2>
+    <div class="traffic-title-block">
+      <h2>Aggregate traffic</h2>
+      <p class="traffic-sub">
+        {#if trackedPorts > 0}
+          Sum of {trackedPorts} monitored server port{trackedPorts === 1 ? '' : 's'}
+        {:else}
+          Monitored server ports only
+        {/if}
+      </p>
+    </div>
     <div class="traffic-controls">
-      <select class="control-select" bind:value={groupBy} on:change={loadSeries} aria-label="Group traffic by">
-        <option value="location">By location</option>
-        <option value="group">By server group</option>
-      </select>
       <select class="control-select" bind:value={hoursRange} on:change={loadSeries} aria-label="Time range">
         {#each RANGE_OPTIONS as opt}
           <option value={opt.hours}>{opt.label}</option>
@@ -146,9 +85,9 @@
     <div class="traffic-loading"><Spinner size="small" /> <span>Loading traffic…</span></div>
   {:else if error}
     <Alert type="warning">{error}</Alert>
-  {:else if series.length === 0}
+  {:else if !hasSamples}
     <div class="traffic-empty">
-      No bandwidth history yet for {groupBy === 'location' ? 'any location' : 'any server group'}.
+      No bandwidth history yet for monitored server ports. Enable “Monitor bandwidth” on a cabled port and run the SNMP poller.
     </div>
   {:else}
     <div class="chart-wrap" bind:clientWidth={chartWidth} bind:clientHeight={chartHeight}>
@@ -188,11 +127,17 @@
     flex-wrap: wrap;
   }
 
-  .traffic-header h2 {
+  .traffic-title-block h2 {
     margin: 0;
     font-size: 16px;
     font-weight: 700;
     color: var(--text-primary);
+  }
+
+  .traffic-sub {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    color: var(--text-secondary);
   }
 
   .traffic-controls {
