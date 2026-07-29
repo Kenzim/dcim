@@ -1,6 +1,6 @@
 from app.dao.service_instance_dao import ServiceInstanceDAO
 from app.models.billing_integration import BillingIntegration
-from app.models.external_user import ExternalUser
+from app.models.user import User
 from app.models.location import Location
 from app.models.server import Server
 from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
@@ -78,6 +78,10 @@ def test_product_catalog_and_vm_plan(client, test_admin_user):
     assert payload["strategy_name"] == "stub"
     assert payload["effective_specs"]["cpu_count"] == 2
     assert payload["effective_specs"]["ram_mb"] == 4096
+    # Canonical keys the Proxmox executor reads must be derived from the
+    # legacy cpu_count/ram_mb aliases so provisioning applies real sizing.
+    assert payload["effective_specs"]["cores"] == 2
+    assert payload["effective_specs"]["memory_mb"] == 4096
 
 
 def test_vm_plan_via_vm_template_id(client, test_admin_user):
@@ -100,6 +104,7 @@ def test_vm_plan_via_vm_template_id(client, test_admin_user):
         "/api/product-catalog/vm-templates",
         headers=headers,
         json={
+            "code": "debian-12",
             "name": "Debian 12 cloud",
             "os_type": "Linux - Cloudinit",
             "proxmox_template_name": "ci-debian12-unique-test",
@@ -107,6 +112,7 @@ def test_vm_plan_via_vm_template_id(client, test_admin_user):
     )
     assert tmpl.status_code == 201, tmpl.text
     tmpl_id = tmpl.json()["id"]
+    assert tmpl.json()["code"] == "debian-12"
 
     upd = client.put(
         f"/api/product-catalog/products/{product_id}",
@@ -147,12 +153,15 @@ def test_ipam_assignment_and_runner_config(client, test_admin_user, db_session):
     db_session.commit()
     db_session.refresh(integration)
 
-    ext_user = ExternalUser(
-        integration_id=integration.id,
+    ext_user = User(
+        username="client1",
+        email="client1@example.com",
+        billing_integration_id=integration.id,
         external_user_id="client-1",
         external_username="client1",
         external_email="client1@example.com",
     )
+    ext_user.set_password(None)
     db_session.add(ext_user)
     db_session.commit()
     db_session.refresh(ext_user)
@@ -173,7 +182,7 @@ def test_ipam_assignment_and_runner_config(client, test_admin_user, db_session):
     service = Service(
         name="proxy-service",
         external_service_id="svc-1",
-        external_user_id=ext_user.id,
+        owner_user_id=ext_user.id,
         service_type=ServiceType.HTTP_PROXY,
         status=ServiceStatus.ACTIVE,
         config={},
@@ -233,3 +242,30 @@ def test_ipam_assignment_and_runner_config(client, test_admin_user, db_session):
     history = client.get("/api/ipam/history", headers=headers)
     assert history.status_code == 200
     assert any(item["action"] == "assigned" and item["service_id"] == service.id for item in history.json())
+
+    all_assignments = client.get("/api/ipam/assignments", headers=headers)
+    assert all_assignments.status_code == 200
+    assert any(row["ip_address"] == assigned_ip and row["service_name"] == "proxy-service" for row in all_assignments.json())
+
+    patched = client.patch(
+        f"/api/ipam/subnets/{subnet_id}",
+        headers=headers,
+        json={"name": "proxy-subnet-renamed", "enabled": True},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["name"] == "proxy-subnet-renamed"
+
+    # Cannot delete while assigned
+    deny_delete = client.delete(f"/api/ipam/subnets/{subnet_id}", headers=headers)
+    assert deny_delete.status_code == 409
+
+    # Auto-generated credentials when omitted
+    auto = client.post(
+        "/api/ipam/assignments",
+        headers=headers,
+        json={"service_id": service.id, "subnet_id": subnet_id},
+    )
+    assert auto.status_code == 201, auto.text
+    assert auto.json()["username"]
+    assert auto.json()["password"]
+    assert len(auto.json()["password"]) >= 16

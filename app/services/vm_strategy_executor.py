@@ -1,37 +1,37 @@
 """
-Execute VM OS strategies against Proxmox (clone template, cloud-init IP, sizing).
+VM provisioning facade: resolve placement, then enqueue a durable deployment job.
 
-Used by admin API; keeps billing/plugin patterns in one place.
+Execution itself lives in ``app/services/deployment`` (class-based strategies +
+steps) and is carried out by the deployment worker. This module only prepares a
+VM service for provisioning (placement + VMID) and creates the job row; it no
+longer runs the clone/configure/power-on inline.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
-import httpx
-from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
-from app.core.database import SessionLocal
 from app.dao.product_catalog_dao import VMTemplateDAO
-from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.service_dao import ServiceDAO
-from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
+from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.models.service_vm import VMGuestState
-from app.plugins.registry import get_registry
-from app.services.proxmox_placement import auto_place_vm, cluster_to_proxmox_plugin_config
-from app.services.service_resource import vm_placement
+from app.models.vm_deployment_job import VMDeploymentJob
+from app.services.deployment.registry import get_deployment_strategy_registry
+from app.services.proxmox_placement import auto_place_vm
 from app.services.vm_install_type_strategy import resolve_vm_template_strategy
 from app.services.vmid_allocator import reserve_vmid_for_service
-from app.utils.ipv4_netmask import ipv4_netmask_to_prefixlen
 
 logger = logging.getLogger(__name__)
 
+APPLY_GUEST_PASSWORD_STRATEGY = "apply_guest_password"
+
 
 def resolve_vm_strategy_name_for_service(db: Session, service: Service) -> str:
+    """Resolve the deployment strategy name from ``vm_plan`` or the template os_type."""
     cfg = service.config or {}
     plan = cfg.get("vm_plan") or {}
     name = plan.get("strategy_name")
@@ -53,282 +53,13 @@ def _merge_provision_config(service: Service, patch: Dict[str, Any]) -> None:
     service.config = base
 
 
-async def _find_template_vmid_live(cluster, node_name: str, template_name: str) -> int | None:
-    """
-    Resolve template VMID directly from Proxmox API at provision time.
-    This avoids hard dependency on synced template inventory.
-    """
-    auth_url = f"{cluster.api_url.rstrip('/')}/api2/json/access/ticket"
-    base = f"{cluster.api_url.rstrip('/')}/api2/json"
-    async with httpx.AsyncClient(verify=cluster.verify_ssl, timeout=20.0) as client:
-        auth_resp = await client.post(
-            auth_url,
-            data={
-                "username": cluster.username,
-                "password": cluster.password,
-            },
-        )
-        auth_resp.raise_for_status()
-        payload = auth_resp.json().get("data") or {}
-        ticket = payload.get("ticket")
-        csrf = payload.get("CSRFPreventionToken")
-        if not ticket:
-            raise ValueError("Failed to authenticate with Proxmox while resolving template")
-        headers = {"Cookie": f"PVEAuthCookie={ticket}"}
-        if csrf:
-            headers["CSRFPreventionToken"] = csrf
-        qemu_resp = await client.get(f"{base}/nodes/{node_name}/qemu", headers=headers)
-        qemu_resp.raise_for_status()
-        qemu_rows = qemu_resp.json().get("data") or []
-        for row in qemu_rows:
-            if int(row.get("template") or 0) != 1:
-                continue
-            if str(row.get("name") or "") != template_name:
-                continue
-            vmid = row.get("vmid")
-            if vmid is not None:
-                return int(vmid)
-    return None
-
-
-async def provision_vm_service(db: Session, service_id: int, *, _from_queue: bool = False) -> Service:
-    """
-    Clone catalog template to target vmid, apply RAM/CPU, then:
-
-    - ``cloudinit_clone``: Proxmox ``ipconfig0`` from VM IP pool + optional power on.
-    - ``guest_agent``: sizing only + power on (no cloud-init network).
-
-    Raises ``ValueError`` for missing prerequisites or unsupported strategy.
-
-    ``_from_queue`` marks the call as the background runner claiming a ``queued``
-    job; other callers are rejected while a job is queued or running.
-    """
-    service = ServiceDAO.get_by_id(db, service_id)
-    if not service:
-        raise ValueError("Service not found")
-    if service.service_type != ServiceType.VM:
-        raise ValueError("Not a VM service")
-    if service.status == ServiceStatus.TERMINATED:
-        raise ValueError("Cannot provision a terminated service")
-
-    prov_status = ((service.config or {}).get("vm_provision") or {}).get("status")
-    if prov_status == "running":
-        raise ValueError("VM provisioning is already running for this service")
-    if prov_status == "queued" and not _from_queue:
-        raise ValueError("VM provisioning is already queued for background execution")
-
-    cid, node_name, target_vmid = vm_placement(service)
-    if cid is None or not (node_name or "").strip() or target_vmid is None:
-        raise ValueError(
-            "VM needs proxmox_cluster_id, proxmox_node_name, and proxmox_vmid before provisioning"
-        )
-    node_name = node_name.strip()
-    if not service.vm or not service.vm.vm_template_id:
-        raise ValueError("VM service has no vm_template_id")
-
-    strategy = resolve_vm_strategy_name_for_service(db, service)
-    if strategy == "stub":
-        raise ValueError(
-            "Service has no provisioning strategy (stub). Ensure vm_plan exists or template os_type maps to a strategy."
-        )
-    if strategy not in ("cloudinit_clone", "guest_agent"):
-        raise ValueError(f"Provisioning not implemented for strategy '{strategy}'")
-
-    tmpl = VMTemplateDAO.get_by_id(db, service.vm.vm_template_id)
-    if not tmpl:
-        raise ValueError("VM template catalog row not found")
-
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-    if not cluster:
-        raise ValueError("Proxmox cluster not found")
-
-    template_vmid = ProxmoxInventoryDAO.find_template_vmid_on_node(
-        db,
-        cluster_id=cid,
-        node_name=node_name,
-        template_name=tmpl.proxmox_template_name,
-    )
-    if template_vmid is None:
-        # Live fallback: resolve directly from Proxmox at create/provision time.
-        template_vmid = await _find_template_vmid_live(cluster, node_name, tmpl.proxmox_template_name)
-    if template_vmid is None:
-        raise ValueError(
-            f"No Proxmox template named '{tmpl.proxmox_template_name}' found on node '{node_name}' in cluster {cid}."
-        )
-
-    plugin_config = cluster_to_proxmox_plugin_config(cluster, node_name, int(target_vmid))
-    registry = get_registry()
-    plugin = registry.get_plugin("proxmox", plugin_config)
-
-    vm_plan = (service.config or {}).get("vm_plan") or {}
-    specs: Dict[str, Any] = dict(vm_plan.get("effective_specs") or {})
-    memory_mb = int(specs.get("memory_mb", 2048))
-    cores = int(specs.get("cores", 2))
-    full_clone = bool(specs.get("full_clone", True))
-
-    started = datetime.now(timezone.utc).isoformat()
-    _merge_provision_config(
-        service,
-        {"status": "running", "started_at": started, "strategy": strategy, "step": "clone"},
-    )
-    if service.vm:
-        service.vm.guest_state = VMGuestState.PROVISIONING
-        service.vm.guest_last_error = None
-    ServiceDAO.update(db, service)
-
-    try:
-        # Idempotency: if the target VMID already exists (retry after a partial
-        # failure), skip the clone and continue with configure/power-on.
-        already_exists = False
-        try:
-            already_exists = await plugin.vm_exists()
-        except Exception:
-            already_exists = False
-
-        if already_exists:
-            logger.info(
-                "VM provision: target vmid %s already exists on node, skipping clone (service=%s)",
-                target_vmid,
-                service_id,
-            )
-            _merge_provision_config(service, {"step": "configure", "clone_skipped": True})
-            ServiceDAO.update(db, service)
-        else:
-            clone_out = await plugin.clone_vm_from_template(
-                {"vmid": int(template_vmid)},
-                {
-                    "vmid": int(target_vmid),
-                    "name": (service.name or f"vm-{target_vmid}")[:90],
-                    "full_clone": full_clone,
-                },
-            )
-            upid = clone_out.get("task")
-            logger.info(
-                "VM provision clone service=%s template_vmid=%s newid=%s task=%s",
-                service_id,
-                template_vmid,
-                target_vmid,
-                upid,
-            )
-            if upid:
-                await plugin.wait_for_proxmox_task(str(upid))
-
-            _merge_provision_config(service, {"step": "configure", "clone_task": upid})
-            ServiceDAO.update(db, service)
-
-        vm_ref = {"vmid": int(target_vmid)}
-        net_payload: Dict[str, Any] = {"memory_mb": memory_mb, "cores": cores}
-
-        if strategy == "cloudinit_clone":
-            alloc = None
-            if service.vm.vm_ip_allocation_id:
-                alloc = VMIPAllocationDAO.get_by_id(db, service.vm.vm_ip_allocation_id)
-            if not alloc:
-                raise ValueError("No VM IP pool row linked (service_vm.vm_ip_allocation_id)")
-            prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
-            gw = (alloc.gateway or "").strip()
-            ip = (alloc.ip_address or "").strip()
-            if not ip or not gw:
-                raise ValueError("VM IP allocation is missing ip_address or gateway")
-            net_payload["ipconfig0"] = f"ip={ip}/{prefix},gw={gw}"
-            if specs.get("cloudinit_ciuser"):
-                net_payload["ciuser"] = str(specs["cloudinit_ciuser"])
-            if specs.get("cloudinit_cipassword"):
-                net_payload["cipassword"] = str(specs["cloudinit_cipassword"])
-
-        ok = await plugin.configure_vm(vm_ref, net_payload)
-        if not ok:
-            raise RuntimeError("Proxmox VM config update failed")
-
-        _merge_provision_config(service, {"step": "power_on"})
-        ServiceDAO.update(db, service)
-
-        powered = await plugin.power_on()
-        if not powered:
-            logger.warning("VM provision: power_on returned False for service %s", service_id)
-
-        _merge_provision_config(
-            service,
-            {
-                "status": "success",
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "power_on": powered,
-            },
-        )
-        if service.vm:
-            service.vm.guest_state = VMGuestState.RUNNING if powered else VMGuestState.STOPPED
-            service.vm.guest_last_error = None
-        service.status = ServiceStatus.ACTIVE
-        ServiceDAO.update(db, service)
-        db.refresh(service)
-        return service
-
-    except Exception as exc:
-        logger.exception("VM provision failed service=%s", service_id)
-        _merge_provision_config(
-            service,
-            {
-                "status": "failed",
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "error": str(exc),
-            },
-        )
-        if service.vm:
-            service.vm.guest_state = VMGuestState.ERROR
-            service.vm.guest_last_error = str(exc)
-        ServiceDAO.update(db, service)
-        raise
-
-
-def run_provision_vm_service(db: Session, service_id: int) -> Service:
-    """Sync entrypoint for FastAPI sync routes."""
-    return asyncio.run(provision_vm_service(db, service_id))
-
-
-async def queue_provision_vm_service(service_id: int) -> None:
-    """
-    Background entrypoint (FastAPI ``BackgroundTasks``). Opens its own DB session
-    because the request session is already closed by the time this runs. Failures
-    are recorded on the service by the core (``guest_state=error``); here we only
-    log so the background task never raises into the event loop.
-    """
-    db = SessionLocal()
-    try:
-        await provision_vm_service(db, service_id, _from_queue=True)
-    except Exception as exc:
-        logger.exception("Background VM provisioning failed for service %s", service_id)
-        # Pre-flight failures (raised before the core's own try/except) would
-        # otherwise leave the service stuck in "queued"; record the error so
-        # pollers see the failure and can retry via provision-vm.
-        try:
-            service = ServiceDAO.get_by_id(db, service_id)
-            if service:
-                _merge_provision_config(
-                    service,
-                    {
-                        "status": "failed",
-                        "finished_at": datetime.now(timezone.utc).isoformat(),
-                        "error": str(exc),
-                    },
-                )
-                if service.vm and service.vm.guest_state != VMGuestState.ERROR:
-                    service.vm.guest_state = VMGuestState.ERROR
-                    service.vm.guest_last_error = str(exc)
-                ServiceDAO.update(db, service)
-        except Exception:
-            logger.exception("Failed to record provisioning error for service %s", service_id)
-    finally:
-        db.close()
-
-
 def prepare_vm_placement_for_provisioning(db: Session, service: Service) -> None:
     """
     Ensure a VM service has full Proxmox placement before provisioning:
 
     - Resolve the node (auto-place from inventory when none was supplied).
     - Reserve a VMID for the service (idempotent; returns the existing reservation
-      when one already exists). Fixes the billing path that previously never
-      reserved a VMID.
+      when one already exists).
 
     Raises ``ValueError`` when placement cannot be resolved.
     """
@@ -362,7 +93,7 @@ def prepare_vm_placement_for_provisioning(db: Session, service: Service) -> None
 
 
 def mark_vm_provision_queued(db: Session, service: Service) -> None:
-    """Flag a service as queued for background provisioning (visible to pollers)."""
+    """Mirror a queued deployment on the service (visible to UI / guest sync)."""
     _merge_provision_config(
         service,
         {"status": "queued", "queued_at": datetime.now(timezone.utc).isoformat()},
@@ -373,14 +104,129 @@ def mark_vm_provision_queued(db: Session, service: Service) -> None:
     ServiceDAO.update(db, service)
 
 
-def schedule_vm_auto_provision(
-    db: Session, service: Service, background_tasks: BackgroundTasks
-) -> None:
+def enqueue_vm_deployment_job(db: Session, service: Service) -> VMDeploymentJob:
     """
-    Shared create-path helper for both admin and billing VM create endpoints:
-    resolve placement, reserve the VMID, mark the service queued, and enqueue the
-    background provisioning task. Raises ``ValueError`` if placement fails.
+    Create a durable deployment job for a VM service (idempotent per active job).
+
+    The service must already have a resolved strategy (``vm_plan`` or template
+    os_type). Returns the existing non-terminal job when one is already queued /
+    running / waiting so repeated create/provision calls don't stack jobs.
+
+    Raises ``ValueError`` for non-VM services, terminated services, or a missing
+    provisioning strategy.
+    """
+    if service.service_type != ServiceType.VM:
+        raise ValueError("Not a VM service")
+    if service.status == ServiceStatus.TERMINATED:
+        raise ValueError("Cannot provision a terminated service")
+    if not service.vm or not service.vm.vm_template_id:
+        raise ValueError("VM service has no vm_template_id")
+
+    strategy_name = resolve_vm_strategy_name_for_service(db, service)
+    if strategy_name == "stub":
+        raise ValueError(
+            "Service has no provisioning strategy (stub). Ensure vm_plan exists or "
+            "template os_type maps to a strategy."
+        )
+    strategy = get_deployment_strategy_registry().resolve(strategy_name)
+    if strategy is None:
+        raise ValueError(f"No deployment strategy registered for '{strategy_name}'")
+
+    existing = VMDeploymentJobDAO.get_active_for_service(db, service.id)
+    if existing is not None:
+        return existing
+
+    job = VMDeploymentJobDAO.create_job(
+        db,
+        service_id=service.id,
+        strategy_name=strategy_name,
+        step_names=strategy.step_names(),
+        max_attempts=strategy.max_attempts,
+    )
+    mark_vm_provision_queued(db, service)
+    logger.info(
+        "Enqueued deployment job %s for VM service %s (strategy=%s)",
+        job.id,
+        service.id,
+        strategy_name,
+    )
+    return job
+
+
+def provision_vm_service_async(
+    db: Session, service_id: int
+) -> Tuple[Service, VMDeploymentJob]:
+    """
+    Resolve placement and enqueue a deployment job for a VM service.
+
+    Non-blocking: the deployment worker performs the clone/configure/power-on.
+    Returns the (refreshed) service and the enqueued job.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise ValueError("Service not found")
+    if service.service_type != ServiceType.VM:
+        raise ValueError("Not a VM service")
+    if service.status == ServiceStatus.TERMINATED:
+        raise ValueError("Cannot provision a terminated service")
+
+    prepare_vm_placement_for_provisioning(db, service)
+    job = enqueue_vm_deployment_job(db, service)
+    db.refresh(service)
+    return service, job
+
+
+def schedule_vm_auto_provision(
+    db: Session, service: Service, background_tasks: Optional[Any] = None
+) -> VMDeploymentJob:
+    """
+    Shared create-path helper for admin and billing VM create endpoints: resolve
+    placement, reserve the VMID, and enqueue the deployment job. Raises
+    ``ValueError`` if placement or strategy resolution fails.
+
+    ``background_tasks`` is accepted for backward compatibility but unused; the
+    deployment worker (not FastAPI BackgroundTasks) executes the job now.
     """
     prepare_vm_placement_for_provisioning(db, service)
-    mark_vm_provision_queued(db, service)
-    background_tasks.add_task(queue_provision_vm_service, service.id)
+    return enqueue_vm_deployment_job(db, service)
+
+
+def enqueue_apply_guest_password_job(
+    db: Session, service: Service
+) -> Optional[VMDeploymentJob]:
+    """
+    Enqueue a deferred guest-password apply job, or return an existing one.
+
+    Returns ``None`` when another non-terminal job (typically provision) is
+    already active — the desired password is expected to live in
+    ``template_parameters`` and be applied by that job's configure step.
+    """
+    if service.service_type != ServiceType.VM:
+        raise ValueError("Not a VM service")
+
+    existing = VMDeploymentJobDAO.get_active_for_service(db, service.id)
+    if existing is not None:
+        if existing.strategy_name == APPLY_GUEST_PASSWORD_STRATEGY:
+            return existing
+        logger.info(
+            "Skipping apply_guest_password enqueue for service %s; active job %s (%s)",
+            service.id,
+            existing.id,
+            existing.strategy_name,
+        )
+        return None
+
+    strategy = get_deployment_strategy_registry().get(APPLY_GUEST_PASSWORD_STRATEGY)
+    job = VMDeploymentJobDAO.create_job(
+        db,
+        service_id=service.id,
+        strategy_name=strategy.name,
+        step_names=strategy.step_names(),
+        max_attempts=strategy.max_attempts,
+    )
+    logger.info(
+        "Enqueued apply_guest_password job %s for VM service %s",
+        job.id,
+        service.id,
+    )
+    return job

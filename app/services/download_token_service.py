@@ -26,6 +26,18 @@ def _derive_token_id(token: str) -> str:
     return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
 
+def template_file_scope(template_id: str, relative_path: str) -> str:
+    """Build the canonical scoped filename used to authorize access to a
+    specific file within a specific OS template via download tokens.
+
+    Binding the template_id into the scope string (rather than just the bare
+    relative path, e.g. "deploy/windows.img") prevents a token minted for one
+    template's install from being replayed against a same-named file that
+    happens to exist in a different template.
+    """
+    return f"template:{template_id}:{relative_path}"
+
+
 class DownloadTokenService:
     """Service for managing one-time download tokens"""
     

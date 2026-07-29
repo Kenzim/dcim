@@ -24,10 +24,20 @@ def reserve_vmid_for_service(
     cluster_id: int,
     service_id: int,
     requested_vmid: Optional[int] = None,
+    suggested_vmid: Optional[int] = None,
+    allow_outside_range: bool = False,
 ) -> int:
     """
     Reserve a non-reused VMID for a service in the given cluster.
     Reservation rows are intentionally never auto-released.
+
+    ``suggested_vmid`` (e.g. from Proxmox ``/cluster/nextid``) is tried first
+    when auto-allocating, so new IDs stay aligned with unique-next-id / used_vmids.
+    Sticky re-provision must pass the service's existing reservation (or omit
+    both args) and must not treat used_vmids membership as a hard reject.
+
+    ``allow_outside_range`` is for adopting an existing guest whose VMID sits
+    outside the cluster's auto-allocation window.
     """
     existing = VMIDReservationDAO.get_by_service_id(db, service_id)
     if existing:
@@ -48,13 +58,24 @@ def reserve_vmid_for_service(
 
     if requested_vmid is not None:
         requested = int(requested_vmid)
-        if requested < vmid_min or requested > vmid_max:
+        if not allow_outside_range and (requested < vmid_min or requested > vmid_max):
             raise ValueError(f"Requested VMID {requested} is outside cluster range {vmid_min}-{vmid_max}")
+        if requested <= 0:
+            raise ValueError("Requested VMID must be positive")
         taken = VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, requested)
         if taken:
             raise ValueError(f"VMID {requested} is already reserved in cluster {cluster_id}")
         VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=requested)
         return requested
+
+    if suggested_vmid is not None:
+        suggested = int(suggested_vmid)
+        if (
+            vmid_min <= suggested <= vmid_max
+            and VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, suggested) is None
+        ):
+            VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=suggested)
+            return suggested
 
     for vmid in range(vmid_min, vmid_max + 1):
         if VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, vmid) is None:
@@ -62,3 +83,70 @@ def reserve_vmid_for_service(
             return vmid
 
     raise ValueError(f"No free VMID left in cluster {cluster_id} range {vmid_min}-{vmid_max}")
+
+
+async def reserve_vmid_aligned_with_proxmox(
+    db: Session,
+    *,
+    cluster_id: int,
+    service_id: int,
+    node_name: str,
+    requested_vmid: Optional[int] = None,
+    adopt_existing: bool = False,
+) -> int:
+    """
+    Reserve a VMID, consulting Proxmox nextid for *new* allocations.
+
+    Existing sticky reservations are returned unchanged (no nextid / used_vmids reject).
+    When ``adopt_existing`` is true, bind a VMID that already exists on Proxmox
+    (skip nextid availability; allow outside auto-allocation range).
+    """
+    existing = VMIDReservationDAO.get_by_service_id(db, service_id)
+    if existing and existing.cluster_id == cluster_id and (
+        requested_vmid is None or int(requested_vmid) == int(existing.vmid)
+    ):
+        return int(existing.vmid)
+
+    from app.plugins.registry import get_registry
+    from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+
+    cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
+    if cluster is None:
+        raise ValueError("Proxmox cluster not found")
+
+    placeholder_vmid = int(requested_vmid) if requested_vmid is not None else 0
+    plugin_config = cluster_to_proxmox_plugin_config(cluster, str(node_name).strip(), placeholder_vmid or 1)
+    plugin = get_registry().get_plugin("proxmox", plugin_config)
+
+    if requested_vmid is not None:
+        if not adopt_existing:
+            ok = await plugin.check_vmid_available_for_new(int(requested_vmid))
+            if not ok:
+                raise ValueError(
+                    f"VMID {requested_vmid} is not available for new allocation on Proxmox "
+                    "(may already be marked non-reusable)"
+                )
+        else:
+            if not await plugin.vm_exists():
+                raise ValueError(
+                    f"No Proxmox guest with VMID {requested_vmid} on node {node_name}"
+                )
+        return reserve_vmid_for_service(
+            db,
+            cluster_id=cluster_id,
+            service_id=service_id,
+            requested_vmid=int(requested_vmid),
+            allow_outside_range=bool(adopt_existing),
+        )
+
+    suggested = None
+    try:
+        suggested = await plugin.get_next_vmid()
+    except Exception:
+        suggested = None
+    return reserve_vmid_for_service(
+        db,
+        cluster_id=cluster_id,
+        service_id=service_id,
+        suggested_vmid=suggested,
+    )

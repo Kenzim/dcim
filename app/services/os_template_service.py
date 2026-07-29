@@ -158,6 +158,30 @@ class OSTemplateService:
                 files.append(file_path)
         
         return files
+
+    def enumerate_relative_files(self, template_id: str) -> List[str]:
+        """Recursively list every file under a template directory as POSIX-style
+        relative paths (e.g. "deploy/windows.img", "firstboot.ps1").
+
+        Used to scope download tokens to exactly the files that belong to a
+        given template, instead of a wildcard pattern that would authorize
+        fetching arbitrary files via the token-gated file-serving endpoints.
+        """
+        template = self.get_template(template_id)
+        if not template or not template.template_dir:
+            return []
+        try:
+            base = template.template_dir.resolve()
+        except OSError:
+            return []
+        relative_files: List[str] = []
+        for f in base.rglob("*"):
+            if f.is_file():
+                try:
+                    relative_files.append(f.resolve().relative_to(base).as_posix())
+                except (OSError, ValueError):
+                    continue
+        return relative_files
     
     def reload_templates(self) -> None:
         """Reload templates from disk"""

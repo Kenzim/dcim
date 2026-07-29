@@ -11,6 +11,41 @@ from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.services.vm_os_strategy import VMProvisionRequest, get_vm_os_strategy_registry
 
 
+def _normalize_vm_specs(specs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Catalog VM config and legacy family/product defaults use several historical
+    key names for the same sizing values (``cpu_cores`` / ``cpu_count`` for core
+    count, ``ram_mb`` for memory), but the Proxmox executor
+    (``app/services/vm_strategy_executor.py``) reads canonical ``cores`` /
+    ``memory_mb`` keys when applying sizing to the cloned VM.
+
+    Populate the canonical keys from whichever alias is present without
+    removing the originals, so existing catalog fields/tests that read the
+    alias names keep working while provisioning actually applies the
+    configured values.
+    """
+    normalized = dict(specs)
+    if normalized.get("cores") in (None, ""):
+        for alias in ("cpu_cores", "cpu_count"):
+            if normalized.get(alias) not in (None, ""):
+                normalized["cores"] = normalized[alias]
+                break
+    if normalized.get("memory_mb") in (None, ""):
+        if normalized.get("ram_mb") not in (None, ""):
+            normalized["memory_mb"] = normalized["ram_mb"]
+    if normalized.get("disk_gb") in (None, ""):
+        for alias in ("storage_gb", "disk_size_gb"):
+            if normalized.get(alias) not in (None, ""):
+                normalized["disk_gb"] = normalized[alias]
+                break
+    # Linked clones are the default; catalog may set full_clone=true for full copies.
+    if "full_clone" not in normalized or normalized.get("full_clone") in (None, ""):
+        normalized["full_clone"] = False
+    else:
+        normalized["full_clone"] = bool(normalized["full_clone"])
+    return normalized
+
+
 class VMProvisioningService:
     """Orchestrates VM provisioning flow with strategy framework stubs."""
 
@@ -49,6 +84,7 @@ class VMProvisioningService:
         if not effective_specs:
             effective_specs = dict(family.defaults or {})
             effective_specs.update(product.overrides or {})
+        effective_specs = _normalize_vm_specs(effective_specs)
         # Per-IP bridge overrides default network bridge from VM config.
         vm_ip_allocation_id = (context or {}).get("vm_ip_allocation_id")
         if vm_ip_allocation_id:
@@ -79,28 +115,7 @@ class VMProvisioningService:
 
     @staticmethod
     def get_cluster_capacity_summary(db: Session) -> list[dict]:
-        result: list[dict] = []
-        clusters = ProxmoxInventoryDAO.list_clusters(db)
-        for cluster in clusters:
-            nodes = cluster.nodes or []
-            result.append(
-                {
-                    "cluster_id": cluster.id,
-                    "cluster_name": cluster.name,
-                    # Aliases for admin UIs that expect id/name (same as list endpoints elsewhere)
-                    "id": cluster.id,
-                    "name": cluster.name,
-                    "api_url": cluster.api_url,
-                    "vmid_min": cluster.vmid_min,
-                    "vmid_max": cluster.vmid_max,
-                    "node_count": len(nodes),
-                    "template_count": sum(len(n.templates or []) for n in nodes),
-                    "storage_count": sum(len(n.storages or []) for n in nodes),
-                    "last_snapshots": [
-                        n.capacity_snapshots[-1].created_at.isoformat()
-                        for n in nodes
-                        if n.capacity_snapshots
-                    ],
-                }
-            )
-        return result
+        # Delegates to a handful of aggregate queries (DAO) instead of hydrating
+        # every node's full templates/storages/capacity_snapshots collections,
+        # which grow unbounded across syncs and made this list slow to load.
+        return ProxmoxInventoryDAO.get_cluster_capacity_summary(db)
