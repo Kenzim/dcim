@@ -23,12 +23,12 @@
         id: result.user_id,
         username: result.username,
         email: '', // Will be fetched from /me endpoint when needed
-        is_admin: result.is_admin
+        is_admin: result.is_admin,
+        is_reseller: result.is_reseller
       });
       isAuthenticated.set(true);
       loading = false;
-      // Route by role: admins to the admin panel, everyone else to the client portal.
-      navigate(result.is_admin ? '/admin' : '/client');
+      navigate(result.is_admin ? '/admin' : (result.is_reseller ? '/reseller' : '/client'));
     } catch (err) {
       error = err.message || 'Login failed';
       console.error('Login error:', err);
@@ -151,15 +151,15 @@
     align-items: center;
     justify-content: center;
     background: var(--bg-primary);
-    border: 2px solid var(--accent-color);
+    border: 2px solid var(--portal-accent, var(--accent-color));
     border-radius: 8px;
-    color: var(--accent-color);
+    color: var(--portal-accent, var(--accent-color));
     cursor: pointer;
     transition: all 0.2s ease;
   }
   .theme-toggle-login:hover {
-    background: var(--accent-color);
-    color: white;
+    background: var(--portal-accent, var(--accent-color));
+    color: var(--portal-accent-contrast, white);
   }
   .theme-toggle-login svg {
     width: 22px;
@@ -194,10 +194,10 @@
   }
 
   .login-header {
-    background: var(--accent-color);
+    background: linear-gradient(135deg, var(--portal-hero-from) 0%, var(--portal-hero-to) 100%);
     padding: 40px 30px;
     text-align: center;
-    color: white;
+    color: var(--portal-hero-text, white);
   }
 
   .logo-icon {
@@ -270,8 +270,8 @@
   .btn-login {
     width: 100%;
     padding: 14px 24px;
-    background: var(--accent-color);
-    color: white;
+    background: var(--portal-accent, var(--accent-color));
+    color: var(--portal-accent-contrast, white);
     border: none;
     border-radius: 10px;
     font-size: 16px;
@@ -287,7 +287,7 @@
   }
 
   .btn-login:hover:not(:disabled) {
-    background: var(--accent-dark);
+    background: var(--portal-accent-strong, var(--accent-dark));
     transform: translateY(-2px);
     box-shadow: var(--shadow-lg);
   }

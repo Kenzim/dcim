@@ -28,9 +28,7 @@
     try {
       loading = true;
       error = null;
-      console.log('Loading scripts...');
       scripts = await getScripts();
-      console.log('Scripts loaded:', scripts);
     } catch (err) {
       error = err.message || 'Failed to load scripts';
       console.error('Failed to load scripts:', err);
@@ -128,19 +126,18 @@
   });
 </script>
 
-<PageHeader title="Scripts" />
-
-<div class="scripts-container">
-  <div class="scripts-header">
-    <h2>Scripts</h2>
+<PageHeader title="Scripts">
+  <svelte:fragment slot="actions">
     <button class="btn-primary" on:click={openAddModal}>
       <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
       </svg>
       Add Script
     </button>
-  </div>
+  </svelte:fragment>
+</PageHeader>
 
+<div class="admin-page scripts-container">
   {#if loading}
     <div class="loading">Loading scripts...</div>
   {:else if error}
@@ -266,52 +263,28 @@
 {/if}
 
 <style>
-  .scripts-container {
-    padding: 32px;
-  }
-
-  @media (max-width: 768px) {
-    .scripts-container {
-      padding: 16px;
-    }
-  }
-
-  .scripts-header {
-    display: flex;
-    justify-content: space-between;
+  .modal-content .btn-primary {
+    display: inline-flex;
     align-items: center;
-    margin-bottom: 24px;
-  }
-
-  .scripts-header h2 {
-    margin: 0;
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .btn-primary {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 20px;
+    gap: 6px;
+    padding: 9px 16px;
     background: var(--accent-color);
-    color: white;
+    color: var(--accent-contrast, white);
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     font-weight: 600;
+    font-size: 13.5px;
     cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
   }
 
-  .btn-primary:hover {
-    transform: translateY(-2px);
+  .modal-content .btn-primary:hover {
+    background: var(--accent-dark);
     box-shadow: var(--shadow-lg);
   }
 
   .btn-icon {
-    width: 18px;
-    height: 18px;
+    width: 15px;
+    height: 15px;
   }
 
   .loading, .error, .empty-state {

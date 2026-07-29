@@ -363,19 +363,18 @@
   }
 </script>
 
-<PageHeader title="Network Switches" />
-
-<div class="switches-container">
-  <div class="switches-header">
-    <h2>Network Switches</h2>
+<PageHeader title="Network Switches">
+  <svelte:fragment slot="actions">
     <button class="btn-primary" on:click={openAddModal}>
       <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
       </svg>
       Add Switch
     </button>
-  </div>
+  </svelte:fragment>
+</PageHeader>
 
+<div class="admin-page switches-container">
   {#if loading}
     <div class="loading">Loading switches...</div>
   {:else if error}
@@ -385,7 +384,7 @@
       <p>No switches found. Click "Add Switch" to create one.</p>
     </div>
   {:else}
-    <div class="switches-table">
+    <div class="switches-table admin-data-table">
       <table>
         <thead>
           <tr>
@@ -748,55 +747,9 @@
 {/if}
 
 <style>
-  .switches-container {
-    padding: 32px;
-  }
-
-  .switches-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 24px;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-
-  @media (max-width: 768px) {
-    .switches-container {
-      padding: 16px;
-    }
-  }
-
-  .switches-header h2 {
-    margin: 0;
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .btn-primary {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 20px;
-    background: var(--accent-color);
-    color: white;
-    border: none;
-    border-radius: 8px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-  }
-
-  .btn-primary:hover {
-    background: var(--accent-dark);
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-lg);
-  }
-
   .btn-icon {
-    width: 18px;
-    height: 18px;
+    width: 15px;
+    height: 15px;
   }
 
   .loading, .error, .empty-state {
@@ -809,100 +762,56 @@
     color: var(--danger-color);
   }
 
-  .switches-table {
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    overflow: hidden;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    box-shadow: var(--shadow-sm);
-    transition: background-color 0.3s ease, border-color 0.3s ease;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
+  .switches-table table {
     min-width: 640px;
   }
 
-  thead {
-    background: var(--bg-tertiary);
-  }
-
-  th {
-    padding: 16px;
-    text-align: left;
-    font-weight: 600;
-    color: var(--text-primary);
-    border-bottom: 2px solid var(--border-color);
-  }
-
-  td {
-    padding: 16px;
-    border-bottom: 1px solid var(--border-color);
-    color: var(--text-primary);
-  }
-
-  tbody tr:hover {
-    background: var(--bg-secondary);
-  }
-
-  .status-badge {
-    padding: 4px 12px;
-    border-radius: 12px;
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-
   .status-badge.enabled {
-    background: #dcfce7;
-    color: #166534;
+    background: var(--success-bg);
+    color: var(--success-text);
   }
 
   .status-badge.disabled {
-    background: #fee2e2;
-    color: #991b1b;
+    background: var(--danger-bg);
+    color: var(--danger-text);
   }
 
   .table-actions {
     display: flex;
-    gap: 8px;
+    gap: 4px;
     align-items: center;
   }
 
   .btn-icon-only {
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    padding: 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 3px;
     cursor: pointer;
-    color: var(--text-primary);
-    border-radius: 6px;
-    transition: all 0.2s ease;
+    color: var(--text-tertiary);
+    border-radius: 3px;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
   }
 
   .btn-icon-only:hover {
-    background: var(--bg-secondary);
-    border-color: var(--accent-color);
+    background: var(--bg-tertiary);
+    border-color: var(--border-color);
     color: var(--accent-color);
-    transform: translateY(-1px);
   }
 
   .btn-icon-only.btn-danger {
-    border-color: var(--danger-color);
-    color: var(--danger-color);
+    border-color: transparent;
+    color: var(--text-tertiary);
   }
-  
+
   .btn-icon-only.btn-danger:hover {
-    background: var(--danger-color);
-    color: white;
-    border-color: var(--danger-color);
+    background: var(--danger-bg);
+    color: var(--danger-color);
+    border-color: transparent;
   }
 
   .btn-icon-only svg {
-    width: 18px;
-    height: 18px;
+    width: 15px;
+    height: 15px;
   }
 
   .modal-overlay {

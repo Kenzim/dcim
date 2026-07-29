@@ -130,10 +130,11 @@
     position: sticky;
     top: 0;
     z-index: 100;
-    background: var(--bg-primary);
-    padding: 16px 32px;
-    border-bottom: 1px solid var(--border-color);
-    box-shadow: var(--shadow-sm);
+    background: var(--admin-header-bg, var(--bg-primary));
+    backdrop-filter: blur(12px) saturate(1.2);
+    -webkit-backdrop-filter: blur(12px) saturate(1.2);
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--admin-header-border, var(--border-color));
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -150,11 +151,11 @@
   }
 
   .page-title {
-    font-size: 22px;
-    font-weight: 700;
+    font-size: 20px;
+    font-weight: 600;
     margin: 0;
     color: var(--text-primary);
-    letter-spacing: -0.5px;
+    letter-spacing: -0.03em;
     line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
@@ -166,33 +167,37 @@
     display: none;
     align-items: center;
     justify-content: center;
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
     padding: 0;
     flex-shrink: 0;
     background: var(--bg-primary);
-    border: 2px solid var(--accent-color);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     cursor: pointer;
-    color: var(--accent-color);
-    transition: all 0.2s ease;
+    color: var(--text-secondary);
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   }
 
   .nav-toggle:hover {
-    background: var(--accent-color);
-    color: white;
+    background: var(--bg-tertiary);
+    border-color: var(--text-tertiary);
+    color: var(--text-primary);
   }
 
   .nav-toggle svg {
-    width: 22px;
-    height: 22px;
+    width: 20px;
+    height: 20px;
   }
 
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
+    flex-shrink: 0;
   }
+
+  /* Action buttons: shared .btn-* styles in app.css */
 
   .theme-toggle {
     display: flex;
@@ -202,28 +207,26 @@
     height: 36px;
     padding: 0;
     background: var(--bg-primary);
-    border: 2px solid var(--accent-color);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     cursor: pointer;
-    transition: all 0.2s ease;
-    color: var(--accent-color);
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    color: var(--text-secondary);
   }
 
   .theme-toggle:hover {
-    background: var(--accent-color);
-    color: white;
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
+    background: var(--bg-tertiary);
+    border-color: var(--text-tertiary);
+    color: var(--text-primary);
   }
 
   .theme-icon {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
   }
 
   .user-menu-container {
     position: relative;
-    /* Create invisible bridge to prevent gap issues */
   }
 
   .user-menu-container::after {
@@ -233,42 +236,37 @@
     left: 0;
     right: 0;
     height: 8px;
-    /* Invisible bridge to keep hover active when moving to dropdown */
   }
 
   .user-badge {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 12px;
+    padding: 4px 10px 4px 4px;
     background: var(--bg-primary);
-    border: 2px solid var(--accent-color);
-    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background 0.15s ease, border-color 0.15s ease;
     font-size: 14px;
   }
 
   .user-badge:hover {
-    background: var(--accent-color);
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-md);
+    background: var(--bg-tertiary);
+    border-color: var(--text-tertiary);
   }
-  
-  .user-badge:hover .user-name {
-    color: white;
-  }
-  
+
+  .user-badge:hover .user-name,
   .user-badge:hover .chevron-icon {
-    color: white;
+    color: var(--text-primary);
   }
 
   .user-avatar {
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    background: var(--accent-color);
-    color: white;
+    background: linear-gradient(145deg, #155e75, #0e7490);
+    color: #f0f9ff;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -286,7 +284,7 @@
   .chevron-icon {
     width: 16px;
     height: 16px;
-    color: var(--text-secondary);
+    color: var(--text-tertiary);
     transition: transform 0.2s ease;
   }
 
@@ -315,12 +313,12 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 12px 16px;
+    padding: 11px 14px;
     color: var(--text-primary);
     text-decoration: none;
-    font-size: 14px;
+    font-size: 13.5px;
     font-weight: 500;
-    transition: background 0.2s ease;
+    transition: background 0.15s ease;
     border: none;
     background: none;
     width: 100%;
@@ -337,8 +335,7 @@
   }
 
   .dropdown-item.logout-item:hover {
-    background: var(--bg-tertiary);
-    opacity: 0.9;
+    background: var(--danger-bg);
   }
 
   .dropdown-icon {
@@ -363,14 +360,13 @@
     }
 
     .page-title {
-      font-size: 18px;
+      font-size: 17px;
     }
 
     .header-actions {
       gap: 8px;
     }
 
-    /* Avatar initial is enough on narrow screens */
     .user-name {
       display: none;
     }

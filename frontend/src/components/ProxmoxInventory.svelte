@@ -1,12 +1,12 @@
 <script>
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
+  import { navigate } from '../lib/router.js';
   import {
     listProxmoxClusters,
     createProxmoxCluster,
     updateProxmoxCluster,
     syncProxmoxCluster,
-    getProxmoxClusterInventory,
   } from '../lib/api.js';
 
   let clusters = [];
@@ -18,8 +18,6 @@
   let showCreateModal = false;
   let showEditModal = false;
   let editingClusterId = null;
-  let expandedClusterIds = [];
-  let inventoryByClusterId = {};
 
   let createForm = { name: '', api_url: '', username: '', password: '', verify_ssl: false };
   let editForm = { name: '', api_url: '', username: '', password: '', verify_ssl: false, enabled: true };
@@ -90,9 +88,6 @@
       await syncProxmoxCluster(clusterId);
       success = 'Cluster inventory synced from Proxmox.';
       await load();
-      if (expandedClusterIds.includes(clusterId)) {
-        await loadInventory(clusterId);
-      }
     } catch (err) {
       error = err.message;
     } finally {
@@ -100,32 +95,13 @@
     }
   }
 
-  async function loadInventory(clusterId) {
-    try {
-      inventoryByClusterId = {
-        ...inventoryByClusterId,
-        [clusterId]: await getProxmoxClusterInventory(clusterId),
-      };
-    } catch (err) {
-      error = err.message;
-    }
+  function viewDetails(clusterId) {
+    navigate(`/admin/proxmox-inventory/${clusterId}`);
   }
 
-  async function toggleExpand(clusterId) {
-    if (expandedClusterIds.includes(clusterId)) {
-      expandedClusterIds = expandedClusterIds.filter((id) => id !== clusterId);
-      return;
-    }
-    expandedClusterIds = [...expandedClusterIds, clusterId];
-    if (!inventoryByClusterId[clusterId]) await loadInventory(clusterId);
-  }
-
-  function totalTemplates(inv) {
-    return (inv?.nodes || []).reduce((sum, node) => sum + (node.templates?.length || 0), 0);
-  }
-
-  function totalStorages(inv) {
-    return (inv?.nodes || []).reduce((sum, node) => sum + (node.storages?.length || 0), 0);
+  function formatLastSynced(iso) {
+    if (!iso) return 'never';
+    return new Date(iso).toLocaleString();
   }
 
   onMount(load);
@@ -149,6 +125,7 @@
         <div>Nodes</div>
         <div>Templates</div>
         <div>Storages</div>
+        <div>Last Synced</div>
         <div>Actions</div>
       </div>
       {#each clusters as c}
@@ -158,50 +135,15 @@
           <div>{c.node_count}</div>
           <div>{c.template_count}</div>
           <div>{c.storage_count}</div>
+          <div class="muted">{formatLastSynced(c.last_synced_at)}</div>
           <div class="row-actions">
             <button class="tiny-btn" on:click={() => runSync(c.cluster_id)} disabled={syncingClusterId === c.cluster_id}>
               {syncingClusterId === c.cluster_id ? 'Syncing...' : 'Sync'}
             </button>
             <button class="tiny-btn" on:click={() => openEdit(c)}>Edit</button>
-            <button class="tiny-btn" on:click={() => toggleExpand(c.cluster_id)}>
-              {expandedClusterIds.includes(c.cluster_id) ? 'Hide' : 'View'}
-            </button>
+            <button class="tiny-btn" on:click={() => viewDetails(c.cluster_id)}>Details</button>
           </div>
         </div>
-        {#if expandedClusterIds.includes(c.cluster_id)}
-          {#if inventoryByClusterId[c.cluster_id]}
-            <div class="inventory-panel">
-              <div class="meta-row">
-                Nodes: {inventoryByClusterId[c.cluster_id].nodes.length} |
-                Templates: {totalTemplates(inventoryByClusterId[c.cluster_id])} |
-                Storages: {totalStorages(inventoryByClusterId[c.cluster_id])}
-              </div>
-              {#each inventoryByClusterId[c.cluster_id].nodes as node}
-                <div class="node-card">
-                  <strong>{node.node_name}</strong>
-                  <div class="small-list">
-                    <span class="label">Templates:</span>
-                    {#if node.templates.length}
-                      {node.templates.map((t) => `${t.vmid}:${t.name}`).join(', ')}
-                    {:else}
-                      -
-                    {/if}
-                  </div>
-                  <div class="small-list">
-                    <span class="label">Storages:</span>
-                    {#if node.storages.length}
-                      {node.storages.map((s) => `${s.storage_name}${s.storage_type ? ` (${s.storage_type})` : ''}`).join(', ')}
-                    {:else}
-                      -
-                    {/if}
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {:else}
-            <div class="inventory-panel">Loading inventory...</div>
-          {/if}
-        {/if}
       {/each}
     </div>
   {/if}
@@ -248,13 +190,9 @@
   .top-actions { display: flex; gap: 8px; }
   .action-btn { padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: #fff; cursor: pointer; }
   .table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .row { display: grid; grid-template-columns: minmax(180px, 1.5fr) minmax(220px, 2fr) 70px 90px 90px 200px; gap: 8px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; min-width: 880px; }
+  .row { display: grid; grid-template-columns: minmax(160px, 1.3fr) minmax(200px, 1.8fr) 70px 90px 90px 150px 220px; gap: 8px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; min-width: 980px; }
   .head { background: var(--bg-secondary); font-size: 12px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; }
-  .inventory-panel { padding: 10px; border-bottom: 1px solid var(--border-color); background: var(--bg-primary); display: flex; flex-direction: column; gap: 8px; }
-  .meta-row { color: var(--text-secondary); font-size: 12px; }
-  .node-card { border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-  .small-list { font-size: 12px; color: var(--text-secondary); }
-  .label { color: var(--text-primary); }
+  .muted { color: var(--text-secondary); font-size: 12px; }
   input { background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 8px; }
   button { width: fit-content; padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: white; cursor: pointer; }
   .row-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }

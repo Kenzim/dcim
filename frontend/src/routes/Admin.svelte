@@ -7,6 +7,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Login from '../components/Login.svelte';
   import User from '../components/User.svelte';
+  import Dashboard from '../components/Dashboard.svelte';
   import Plugins from '../components/Plugins.svelte';
   import Locations from '../components/Locations.svelte';
   import LocationDetail from '../components/LocationDetail.svelte';
@@ -19,11 +20,12 @@
   import SwitchDetail from '../components/SwitchDetail.svelte';
   import OSTemplates from '../components/OSTemplates.svelte';
   import BillingIntegrations from '../components/BillingIntegrations.svelte';
-  import UnifiedServices from '../components/UnifiedServices.svelte';
-  import ProxmoxServices from '../components/ProxmoxServices.svelte';
-  import BareMetalServices from '../components/BareMetalServices.svelte';
-  import VMServiceDetail from '../components/VMServiceDetail.svelte';
-  import BareMetalServiceDetail from '../components/BareMetalServiceDetail.svelte';
+  import AdminBilling from '../components/AdminBilling.svelte';
+  import Services from '../components/Services.svelte';
+  import ServiceDetail from '../components/ServiceDetail.svelte';
+  import Users from '../components/Users.svelte';
+  import UserProfile from '../components/UserProfile.svelte';
+  import Admins from '../components/Admins.svelte';
   import Scripts from '../components/Scripts.svelte';
   import ServerGroups from '../components/ServerGroups.svelte';
   import ServerGroupDetail from '../components/ServerGroupDetail.svelte';
@@ -32,24 +34,21 @@
   import VMTemplates from '../components/VMTemplates.svelte';
   import VMIpAllocations from '../components/VMIpAllocations.svelte';
   import ProxmoxInventory from '../components/ProxmoxInventory.svelte';
+  import ProxmoxClusterDetail from '../components/ProxmoxClusterDetail.svelte';
   import ProxyIpam from '../components/ProxyIpam.svelte';
-
-  function flagEnabled(name) {
-    const raw = import.meta.env[name];
-    if (raw === undefined || raw === null) return false;
-    const v = String(raw).trim().toLowerCase();
-    return v === '1' || v === 'true' || v === 'yes' || v === 'on';
-  }
-  const showIpamProxyArea = flagEnabled('VITE_ENABLE_IPAM_PROXY');
+  import PermissionSets from '../components/PermissionSets.svelte';
+  import Resellers from '../components/Resellers.svelte';
+  import ResellerDetail from '../components/ResellerDetail.svelte';
+  import ResellerGroups from '../components/ResellerGroups.svelte';
 
   let authChecked = false;
   
   onMount(async () => {
     await checkAuth();
     authChecked = true;
-    // Non-admins must not see the admin panel; send them to the client portal.
+    // Non-admins must not see the admin panel; route by account role.
     if ($isAuthenticated && !$user?.is_admin) {
-      navigate('/client');
+      navigate($user?.is_reseller ? '/reseller' : '/client');
     }
   });
 
@@ -62,9 +61,27 @@
   let rowNumber = null;
   let groupId = null;
   let locationId = null;
-  let vmServiceId = null;
-  let bareMetalServiceId = null;
-  
+  let serviceId = null;
+  let userId = null;
+  let resellerId = null;
+  let proxmoxClusterId = null;
+  let redirecting = false;
+
+  // Legacy routes removed by the services/users/admins split. Old bookmarks
+  // and links still work: this maps them onto the new URLs.
+  function legacyRedirectTarget(routePath) {
+    if (routePath === 'services-list' || routePath === 'vm-services' || routePath === 'bare-metal-services') {
+      return '/admin/services';
+    }
+    if (routePath.startsWith('vm-services/')) {
+      return `/admin/services/${routePath.slice('vm-services/'.length)}`;
+    }
+    if (routePath.startsWith('bare-metal-services/')) {
+      return `/admin/services/${routePath.slice('bare-metal-services/'.length)}`;
+    }
+    return null;
+  }
+
   $: {
     const path = $currentRoute || window.location.pathname;
     // Remove leading slash and split
@@ -77,6 +94,12 @@
       routeName = parts.slice(1).join('/');
     } else {
       routeName = 'dashboard';
+    }
+
+    const redirectTarget = legacyRedirectTarget(routeName);
+    redirecting = !!redirectTarget;
+    if (redirectTarget) {
+      navigate(redirectTarget);
     }
     
     // Extract server ID from URL if it's a server detail route
@@ -133,26 +156,48 @@
       locationId = null;
     }
 
-    if (routeName && routeName.startsWith('vm-services/')) {
+    if (routeName && routeName.startsWith('services/')) {
       const routeParts = routeName.split('/');
       if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
-        vmServiceId = parseInt(routeParts[1], 10);
+        serviceId = parseInt(routeParts[1], 10);
       } else {
-        vmServiceId = null;
+        serviceId = null;
       }
     } else {
-      vmServiceId = null;
+      serviceId = null;
     }
 
-    if (routeName && routeName.startsWith('bare-metal-services/')) {
+    if (routeName && routeName.startsWith('proxmox-inventory/')) {
       const routeParts = routeName.split('/');
       if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
-        bareMetalServiceId = parseInt(routeParts[1], 10);
+        proxmoxClusterId = parseInt(routeParts[1], 10);
       } else {
-        bareMetalServiceId = null;
+        proxmoxClusterId = null;
       }
     } else {
-      bareMetalServiceId = null;
+      proxmoxClusterId = null;
+    }
+
+    if (routeName && routeName.startsWith('users/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
+        userId = parseInt(routeParts[1], 10);
+      } else {
+        userId = null;
+      }
+    } else {
+      userId = null;
+    }
+
+    if (routeName && routeName.startsWith('resellers/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
+        resellerId = parseInt(routeParts[1], 10);
+      } else {
+        resellerId = null;
+      }
+    } else {
+      resellerId = null;
     }
     
     // Extract rack ID from URL if it's a rack view route (but not a row route)
@@ -182,10 +227,12 @@
     <Sidebar />
     
     <main class="main-content">
-      {#if routeName === 'dashboard' || routeName === ''}
+      {#if redirecting}
+        <div class="loading-container"><p>Redirecting…</p></div>
+      {:else if routeName === 'dashboard' || routeName === ''}
         <PageHeader title="Dashboard" />
-        <div class="content-body">
-          <!-- Dashboard content will go here -->
+        <div class="content-body content-body-fill">
+          <Dashboard />
         </div>
       {:else if routeName === 'servers'}
         <Servers />
@@ -211,18 +258,28 @@
         <OSTemplates />
       {:else if routeName === 'billing-integrations'}
         <BillingIntegrations />
-      {:else if routeName === 'services-list'}
-        <UnifiedServices />
-      {:else if routeName === 'vm-services'}
-        <ProxmoxServices />
-      {:else if routeName.startsWith('vm-services/') && vmServiceId}
-        <VMServiceDetail serviceId={vmServiceId} />
-      {:else if routeName === 'bare-metal-services'}
-        <BareMetalServices />
-      {:else if routeName.startsWith('bare-metal-services/') && bareMetalServiceId}
-        <BareMetalServiceDetail serviceId={bareMetalServiceId} />
+      {:else if routeName === 'billing'}
+        <AdminBilling />
+      {:else if routeName === 'resellers'}
+        <Resellers />
+      {:else if routeName.startsWith('resellers/') && resellerId}
+        <ResellerDetail {resellerId} />
+      {:else if routeName === 'reseller-groups'}
+        <ResellerGroups />
+      {:else if routeName === 'services'}
+        <Services />
+      {:else if routeName.startsWith('services/') && serviceId}
+        <ServiceDetail serviceId={serviceId} />
+      {:else if routeName === 'users'}
+        <Users />
+      {:else if routeName.startsWith('users/') && userId}
+        <UserProfile {userId} />
+      {:else if routeName === 'admins'}
+        <Admins />
       {:else if routeName === 'scripts'}
         <Scripts />
+      {:else if routeName === 'permission-sets'}
+        <PermissionSets />
       {:else if routeName === 'asset-manager'}
         <AssetManager />
       {:else if routeName === 'product-catalog'}
@@ -233,7 +290,9 @@
         <VMIpAllocations />
       {:else if routeName === 'proxmox-inventory'}
         <ProxmoxInventory />
-      {:else if routeName === 'proxy-ipam' && showIpamProxyArea}
+      {:else if routeName.startsWith('proxmox-inventory/') && proxmoxClusterId}
+        <ProxmoxClusterDetail clusterId={proxmoxClusterId} />
+      {:else if routeName === 'proxy-ipam'}
         <ProxyIpam />
       {:else if routeName === 'server-groups'}
         <ServerGroups />
@@ -259,13 +318,15 @@
   .admin-container {
     display: flex;
     min-height: 100vh;
-    background: var(--bg-secondary);
+    background:
+      radial-gradient(900px 420px at 100% -10%, rgba(14, 116, 144, 0.08), transparent 60%),
+      linear-gradient(180deg, var(--admin-canvas-from) 0%, var(--admin-canvas-to) 100%);
     transition: background-color 0.3s ease;
   }
 
   .main-content {
     flex: 1;
-    margin-left: 260px;
+    margin-left: var(--admin-sidebar-width, 260px);
     height: 100vh;
     max-height: 100vh;
     min-height: 0;
@@ -277,10 +338,19 @@
   }
 
   .content-body {
-    padding: 32px;
-    background: var(--bg-secondary);
+    padding: 28px 32px 36px;
     color: var(--text-primary);
-    transition: background-color 0.3s ease, color 0.3s ease;
+    transition: color 0.3s ease;
+  }
+
+  /* Dashboard only: fill the full viewport height available beside the
+     sidebar/header instead of shrinking to its content, so the aggregate
+     traffic chart can flex to occupy the remaining space. */
+  .content-body-fill {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
   }
 
   .loading-container {

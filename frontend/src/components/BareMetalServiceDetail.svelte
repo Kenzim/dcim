@@ -4,6 +4,7 @@
   import { navigate } from '../lib/router.js';
   import { getBareMetalService, deleteServiceCompletely, updateAdminServiceStatus } from '../lib/api.js';
   import ServerDetail from './ServerDetail.svelte';
+  import ServicePermissionsPanel from './ServicePermissionsPanel.svelte';
 
   export let serviceId;
 
@@ -35,7 +36,7 @@
     error = null;
     try {
       await deleteServiceCompletely(service.id);
-      navigate('/admin/bare-metal-services');
+      navigate('/admin/services');
     } catch (e) {
       error = e.message || String(e);
     } finally {
@@ -67,7 +68,7 @@
 
 <PageHeader title="Bare Metal Service Detail" />
 <div class="container">
-  <button class="btn-secondary" on:click={() => navigate('/admin/bare-metal-services')}>Back to Bare Metal Services</button>
+  <button class="btn-secondary" on:click={() => navigate('/admin/services')}>Back to Services</button>
   {#if loading}
     <p>Loading...</p>
   {:else if error}
@@ -114,6 +115,13 @@
       </div>
       <button class="btn-danger" disabled={busy} on:click={deleteService}>Delete Service Completely</button>
     </section>
+    <ServicePermissionsPanel
+      serviceId={service.id}
+      serviceType={service.service_type || 'bare_metal'}
+      permissionSetId={service.permission_set_id}
+      permissionOverrides={service.permission_overrides}
+      on:saved={load}
+    />
     {#if service.server_id}
       <section class="panel">
         <h3>Hardware Control</h3>
