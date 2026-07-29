@@ -3,6 +3,7 @@ from __future__ import annotations
 from ipaddress import ip_address, IPv4Address
 from typing import Optional
 
+import sqlalchemy as sa
 from sqlalchemy import and_, update
 from sqlalchemy.orm import Session
 
@@ -13,8 +14,64 @@ from app.models.vm_ip_allocation import VMIPAllocation
 
 class VMIPAllocationDAO:
     @staticmethod
-    def list_all(db: Session) -> list[VMIPAllocation]:
-        return db.query(VMIPAllocation).order_by(VMIPAllocation.ip_address.asc()).all()
+    def list_all(
+        db: Session,
+        *,
+        q: Optional[str] = None,
+        batch_tag: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        assigned: Optional[bool] = None,
+        cluster_id: Optional[int] = None,
+    ) -> list[VMIPAllocation]:
+        """
+        List pool rows, newest filters first. All filters are optional and
+        combine with AND:
+
+        - ``q``: case-insensitive substring match against IP/gateway/bridge.
+        - ``batch_tag``: exact match against the batch label.
+        - ``enabled``: enabled/disabled rows only.
+        - ``assigned``: ``True`` for rows with a service attached, ``False`` for free rows.
+        - ``cluster_id``: rows linked to this cluster (rows with no cluster
+          restriction are considered usable everywhere, so they are not
+          excluded by this filter).
+        """
+        query = db.query(VMIPAllocation)
+        if q:
+            like = f"%{q.strip()}%"
+            query = query.filter(
+                sa.or_(
+                    VMIPAllocation.ip_address.ilike(like),
+                    VMIPAllocation.gateway.ilike(like),
+                    VMIPAllocation.bridge_name.ilike(like),
+                )
+            )
+        if batch_tag:
+            query = query.filter(VMIPAllocation.batch_tag == batch_tag)
+        if enabled is not None:
+            query = query.filter(VMIPAllocation.enabled.is_(enabled))
+        if assigned is True:
+            query = query.filter(VMIPAllocation.assigned_service_id.isnot(None))
+        elif assigned is False:
+            query = query.filter(VMIPAllocation.assigned_service_id.is_(None))
+        if cluster_id is not None:
+            query = query.filter(
+                sa.or_(
+                    ~VMIPAllocation.clusters.any(),
+                    VMIPAllocation.clusters.any(ProxmoxCluster.id == cluster_id),
+                )
+            )
+        return query.order_by(VMIPAllocation.ip_address.asc()).all()
+
+    @staticmethod
+    def list_distinct_tags(db: Session) -> list[str]:
+        rows = (
+            db.query(VMIPAllocation.batch_tag)
+            .filter(VMIPAllocation.batch_tag.isnot(None))
+            .distinct()
+            .order_by(VMIPAllocation.batch_tag.asc())
+            .all()
+        )
+        return [row[0] for row in rows if row[0]]
 
     @staticmethod
     def get_by_id(db: Session, allocation_id: int) -> Optional[VMIPAllocation]:
@@ -33,6 +90,7 @@ class VMIPAllocationDAO:
         bridge_name: Optional[str],
         cluster_ids: list[int],
         enabled: bool = True,
+        batch_tag: Optional[str] = None,
     ) -> VMIPAllocation:
         row = VMIPAllocation(
             ip_address=ip_address_value,
@@ -40,6 +98,7 @@ class VMIPAllocationDAO:
             gateway=gateway,
             bridge_name=bridge_name,
             enabled=enabled,
+            batch_tag=(batch_tag or None),
         )
         if cluster_ids:
             clusters = (
@@ -61,6 +120,7 @@ class VMIPAllocationDAO:
         bridge_name: Optional[str] = None,
         cluster_ids: Optional[list[int]] = None,
         enabled: Optional[bool] = None,
+        batch_tag: Optional[str] = None,
     ) -> VMIPAllocation:
         if subnet_mask is not None:
             row.subnet_mask = subnet_mask
@@ -70,6 +130,8 @@ class VMIPAllocationDAO:
             row.bridge_name = bridge_name
         if enabled is not None:
             row.enabled = enabled
+        if batch_tag is not None:
+            row.batch_tag = batch_tag or None
         if cluster_ids is not None:
             clusters = (
                 db.query(ProxmoxCluster)
@@ -170,3 +232,61 @@ class VMIPAllocationDAO:
             .values(assigned_service_id=None)
         )
         return int(result.rowcount or 0)
+
+    @staticmethod
+    def assign_specific_to_service(
+        db: Session,
+        *,
+        service_id: int,
+        allocation_id: int,
+        proxmox_cluster_id: Optional[int] = None,
+    ) -> VMIPAllocation:
+        """
+        Atomically claim a specific free (enabled, unassigned) pool row for ``service_id``.
+
+        Raises ``ValueError`` when the row is missing, disabled, already assigned,
+        or not usable on the service's Proxmox cluster.
+        """
+        alloc = VMIPAllocationDAO.get_by_id(db, allocation_id)
+        if not alloc:
+            raise ValueError(f"VM IP allocation {allocation_id} not found")
+        if not alloc.enabled:
+            raise ValueError(f"VM IP allocation {allocation_id} is disabled")
+        if alloc.assigned_service_id is not None:
+            if alloc.assigned_service_id == service_id:
+                # Already linked — ensure service_vm pointer matches and return.
+                db.execute(
+                    update(ServiceVm)
+                    .where(ServiceVm.service_id == service_id)
+                    .values(vm_ip_allocation_id=alloc.id)
+                )
+                db.flush()
+                return alloc
+            raise ValueError(f"VM IP {alloc.ip_address} is already assigned to another service")
+        if not VMIPAllocationDAO._allocation_matches_cluster(alloc, proxmox_cluster_id):
+            raise ValueError(
+                f"VM IP {alloc.ip_address} is not available for Proxmox cluster "
+                f"{proxmox_cluster_id!r}"
+            )
+        result = db.execute(
+            update(VMIPAllocation)
+            .where(
+                and_(
+                    VMIPAllocation.id == alloc.id,
+                    VMIPAllocation.assigned_service_id.is_(None),
+                    VMIPAllocation.enabled.is_(True),
+                )
+            )
+            .values(assigned_service_id=service_id)
+        )
+        if result.rowcount != 1:
+            raise ValueError(f"VM IP {alloc.ip_address} was claimed by another request")
+        db.flush()
+        db.refresh(alloc)
+        db.execute(
+            update(ServiceVm)
+            .where(ServiceVm.service_id == service_id)
+            .values(vm_ip_allocation_id=alloc.id)
+        )
+        db.flush()
+        return alloc

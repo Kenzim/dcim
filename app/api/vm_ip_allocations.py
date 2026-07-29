@@ -21,6 +21,7 @@ class VMIPCreate(BaseModel):
     bridge_name: Optional[str] = None
     cluster_ids: list[int] = Field(default_factory=list)
     enabled: bool = True
+    batch_tag: Optional[str] = None
 
 
 class VMIPBulkCreate(BaseModel):
@@ -31,6 +32,9 @@ class VMIPBulkCreate(BaseModel):
     bridge_name: Optional[str] = None
     cluster_ids: list[int] = Field(default_factory=list)
     enabled: bool = True
+    # Required: every batch add must be labeled (existing or new tag) so the
+    # rows it created can be found/filtered/cleaned up together later.
+    batch_tag: str = Field(..., min_length=1, max_length=100)
 
 
 class VMIPUpdate(BaseModel):
@@ -39,6 +43,7 @@ class VMIPUpdate(BaseModel):
     bridge_name: Optional[str] = None
     cluster_ids: Optional[list[int]] = None
     enabled: Optional[bool] = None
+    batch_tag: Optional[str] = None
 
 
 class VMIPBulkUpdate(BaseModel):
@@ -48,6 +53,7 @@ class VMIPBulkUpdate(BaseModel):
     bridge_name: Optional[str] = None
     cluster_ids: Optional[list[int]] = None
     enabled: Optional[bool] = None
+    batch_tag: Optional[str] = None
 
 
 def _serialize(row):
@@ -59,6 +65,7 @@ def _serialize(row):
         "gateway": row.gateway,
         "bridge_name": row.bridge_name,
         "enabled": row.enabled,
+        "batch_tag": row.batch_tag,
         "assigned_service_id": row.assigned_service_id,
         "assigned_service_name": svc.name if svc else None,
         "assigned_service_type": svc.service_type.value if svc and svc.service_type else None,
@@ -91,11 +98,32 @@ def _validate_clusters(db: Session, cluster_ids: list[int]) -> None:
 
 @router.get("")
 async def list_vm_ip_allocations(
+    q: Optional[str] = None,
+    batch_tag: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    assigned: Optional[bool] = None,
+    cluster_id: Optional[int] = None,
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    rows = VMIPAllocationDAO.list_all(db)
+    rows = VMIPAllocationDAO.list_all(
+        db,
+        q=q,
+        batch_tag=batch_tag,
+        enabled=enabled,
+        assigned=assigned,
+        cluster_id=cluster_id,
+    )
     return [_serialize(row) for row in rows]
+
+
+@router.get("/tags")
+async def list_vm_ip_allocation_tags(
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Distinct batch tags already in use, for the bulk-add autocomplete."""
+    return VMIPAllocationDAO.list_distinct_tags(db)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -117,6 +145,7 @@ async def create_vm_ip_allocation(
         bridge_name=data.bridge_name,
         cluster_ids=data.cluster_ids,
         enabled=data.enabled,
+        batch_tag=data.batch_tag,
     )
     db.commit()
     return {"id": row.id}
@@ -151,6 +180,7 @@ async def create_vm_ip_allocations_bulk(
             bridge_name=data.bridge_name,
             cluster_ids=data.cluster_ids,
             enabled=data.enabled,
+            batch_tag=data.batch_tag,
         )
         created += 1
     db.commit()
@@ -183,6 +213,7 @@ async def bulk_update_vm_ip_allocations(
             bridge_name=data.bridge_name,
             cluster_ids=data.cluster_ids,
             enabled=data.enabled,
+            batch_tag=data.batch_tag,
         )
         updated += 1
     db.commit()
@@ -211,6 +242,7 @@ async def update_vm_ip_allocation(
         bridge_name=data.bridge_name,
         cluster_ids=data.cluster_ids,
         enabled=data.enabled,
+        batch_tag=data.batch_tag,
     )
     db.commit()
     return {"status": "ok"}
