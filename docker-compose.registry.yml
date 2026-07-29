@@ -1,18 +1,15 @@
+# Pull pre-built images from the Forgejo registry (git.stackken.com).
+# Workers reuse dcim-app (also tagged as dcim-<worker> aliases by CI).
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: app
+    image: git.stackken.com/kenzim/dcim-app:latest
     ports:
-      - "10.16.251.240:8000:8000"
-      - "192.168.10.171:8000:8000"
+      - "8000:8000"
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       STATIC_FILES_PATH: /app/static
-      # Initial admin (only created when no users exist)
       INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-admin}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
@@ -28,15 +25,10 @@ services:
       RESELLER_TOPUP_MAX_CENTS: ${RESELLER_TOPUP_MAX_CENTS:-1000000}
       RECURRING_BILLING_RETRY_DAYS: ${RECURRING_BILLING_RETRY_DAYS:-1,3,5}
       RECURRING_BILLING_GRACE_DAYS: ${RECURRING_BILLING_GRACE_DAYS:-7}
-      RECURRING_BILLING_WORKER_INTERVAL_SECONDS: ${RECURRING_BILLING_WORKER_INTERVAL_SECONDS:-60}
-      RECURRING_BILLING_WORKER_LEASE_SECONDS: ${RECURRING_BILLING_WORKER_LEASE_SECONDS:-300}
-      RECURRING_BILLING_WORKER_BATCH_SIZE: ${RECURRING_BILLING_WORKER_BATCH_SIZE:-100}
-      RUN_RECURRING_BILLING_WORKER: ${RUN_RECURRING_BILLING_WORKER:-false}
-      RUN_DEPLOYMENT_WORKER: ${RUN_DEPLOYMENT_WORKER:-false}
-      NOTIFICATION_WORKER_INTERVAL_SECONDS: ${NOTIFICATION_WORKER_INTERVAL_SECONDS:-30}
-      NOTIFICATION_WORKER_LEASE_SECONDS: ${NOTIFICATION_WORKER_LEASE_SECONDS:-120}
-      NOTIFICATION_WORKER_BATCH_SIZE: ${NOTIFICATION_WORKER_BATCH_SIZE:-100}
-      RUN_NOTIFICATION_OUTBOX_WORKER: ${RUN_NOTIFICATION_OUTBOX_WORKER:-false}
+      RUN_RECURRING_BILLING_WORKER: "false"
+      RUN_NOTIFICATION_OUTBOX_WORKER: "false"
+      RUN_USDT_WATCHER: "false"
+      RUN_DEPLOYMENT_WORKER: "false"
       SMTP_ENABLED: ${SMTP_ENABLED:-false}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -50,32 +42,18 @@ services:
       USDT_CONTRACT_ADDRESS: ${USDT_CONTRACT_ADDRESS:-}
       USDT_DECIMALS: ${USDT_DECIMALS:-6}
       USDT_CONFIRMATIONS: ${USDT_CONFIRMATIONS:-12}
-      USDT_SCAN_INTERVAL_SECONDS: ${USDT_SCAN_INTERVAL_SECONDS:-15}
-      USDT_SCAN_CHUNK_SIZE: ${USDT_SCAN_CHUNK_SIZE:-2000}
-      USDT_INVOICE_EXPIRY_SECONDS: ${USDT_INVOICE_EXPIRY_SECONDS:-86400}
       USDT_HD_MNEMONIC_CIPHERTEXT: ${USDT_HD_MNEMONIC_CIPHERTEXT:-}
       USDT_FERNET_KEY: ${USDT_FERNET_KEY:-}
       USDT_TREASURY_ADDRESS: ${USDT_TREASURY_ADDRESS:-}
       USDT_GAS_WALLET_PRIVATE_KEY_CIPHERTEXT: ${USDT_GAS_WALLET_PRIVATE_KEY_CIPHERTEXT:-}
-      USDT_GAS_RESERVE_WEI: ${USDT_GAS_RESERVE_WEI:-0}
-      USDT_TOLERANCE_TOKEN_UNITS: ${USDT_TOLERANCE_TOKEN_UNITS:-0}
-      USDT_RPC_TIMEOUT_SECONDS: ${USDT_RPC_TIMEOUT_SECONDS:-10}
-      USDT_RPC_RETRIES: ${USDT_RPC_RETRIES:-2}
-      USDT_REORG_RECHECK_BLOCKS: ${USDT_REORG_RECHECK_BLOCKS:-128}
-      USDT_SWEEP_MAX_ATTEMPTS: ${USDT_SWEEP_MAX_ATTEMPTS:-5}
-      USDT_WATCHER_LEASE_SECONDS: ${USDT_WATCHER_LEASE_SECONDS:-120}
       USDT_WATCHER_ENABLED: ${USDT_WATCHER_ENABLED:-false}
-      RUN_USDT_WATCHER: ${RUN_USDT_WATCHER:-false}
-      # Separate runner containers (optional; comment out to run in-app subprocesses)
-      DHCP_RUNNER_URL: http://dhcp-runner:9080
-      TFTP_RUNNER_URL: http://tftp-runner:9081
       DHCP_CONFIG_FILE_PATH: /shared/dhcp/dhcpd.conf
       DHCP_LEASE_FILE_PATH: /shared/dhcp/dhcpd.leases
       TFTP_ROOT_DIRECTORY: /shared/tftp
-      # Encrypt per-location service-instance API keys at rest (required in prod).
       SERVICE_INSTANCE_ENCRYPTION_KEY: ${SERVICE_INSTANCE_ENCRYPTION_KEY:?set SERVICE_INSTANCE_ENCRYPTION_KEY in .env}
       REQUIRE_SERVICE_INSTANCE_ENCRYPTION: "true"
     volumes:
+      - /os_templates:/app/os_templates
       - dhcp_tftp_shared:/shared
     depends_on:
       mysql:
@@ -85,46 +63,30 @@ services:
     restart: unless-stopped
 
   dhcp-runner:
-    build:
-      context: dhcp_runner
-      dockerfile: Dockerfile
+    image: git.stackken.com/kenzim/dcim-dhcp-runner:latest
+    network_mode: host
     environment:
       DHCP_CONFIG_PATH: /shared/dhcp/dhcpd.conf
       DHCP_LEASE_PATH: /shared/dhcp/dhcpd.leases
       DHCP_INTERFACES: ${DHCP_INTERFACES:-eth0}
-      # Required: shared secret the app must present (per-instance API key).
       API_KEY: ${DHCP_RUNNER_API_KEY:?set DHCP_RUNNER_API_KEY in .env}
     volumes:
       - dhcp_tftp_shared:/shared
-    ports:
-      - "10.16.251.240:9080:9080"
-      - "192.168.10.171:9080:9080"
     restart: unless-stopped
 
   tftp-runner:
-    build:
-      context: tftp_runner
-      dockerfile: Dockerfile
+    image: git.stackken.com/kenzim/dcim-tftp-runner:latest
+    network_mode: host
     environment:
       TFTP_ROOT: /shared/tftp
       TFTP_BIND: 0.0.0.0:69
-      # Required: shared secret the app must present (per-instance API key).
       API_KEY: ${TFTP_RUNNER_API_KEY:?set TFTP_RUNNER_API_KEY in .env}
     volumes:
       - dhcp_tftp_shared:/shared
-    ports:
-      - "10.16.251.240:9081:9081"
-      - "192.168.10.171:9081:9081"
-      - "10.16.251.240:69:69/udp"
-      - "192.168.10.171:69:69/udp"
     restart: unless-stopped
 
-  # Customer HTTP/SOCKS5 proxy forwarder. Host networking so customer bind IPs
-  # on the host are connection LocalAddr (IPAM assignment identity).
   proxy-runner:
-    build:
-      context: proxy_runner
-      dockerfile: Dockerfile
+    image: git.stackken.com/kenzim/dcim-proxy-runner:latest
     network_mode: host
     environment:
       RACKFLOW_BASE_URL: ${RACKFLOW_BASE_URL}
@@ -134,18 +96,8 @@ services:
       HEALTH_LISTEN: ${PROXY_HEALTH_LISTEN:-:8081}
     restart: unless-stopped
 
-  # End-user IPMI reverse proxy edge. Serves *.ipmi.<base> and forwards to the
-  # private BMC network after redeeming a one-time launch ticket for a session
-  # cookie. Requires a route to the BMC management network.
-  #
-  # The runner speaks PLAIN HTTP; put a TLS terminator (Cloudflare, nginx,
-  # Traefik, ...) in front for the wildcard *.ipmi.<base> cert. That terminator
-  # must forward the X-Forwarded-Proto header so cookies are marked Secure and
-  # absolute redirects are rewritten to https.
   ipmi-proxy-runner:
-    build:
-      context: ipmi_proxy_runner
-      dockerfile: Dockerfile
+    image: git.stackken.com/kenzim/dcim-ipmi-proxy-runner:latest
     environment:
       RACKFLOW_BASE_URL: ${RACKFLOW_BASE_URL}
       RUNNER_API_KEY: ${IPMI_PROXY_RUNNER_API_KEY}
@@ -160,10 +112,7 @@ services:
     restart: unless-stopped
 
   bandwidth-poller:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: bandwidth-poller
+    image: git.stackken.com/kenzim/dcim-bandwidth-poller:latest
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
       POLL_INTERVAL: "60"
@@ -172,15 +121,8 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # VM deployment worker. Same image as `app`, but only claims and advances
-  # deployment jobs (no HTTP). The API enqueues jobs; this container executes
-  # them, so deploys survive API restarts/scaling. DB leases make it safe to
-  # scale this to multiple replicas for failover.
   deployment-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: app
+    image: git.stackken.com/kenzim/dcim-deployment-worker:latest
     command: ["python", "-m", "app.workers.deployment"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -189,6 +131,7 @@ services:
       SERVICE_INSTANCE_ENCRYPTION_KEY: ${SERVICE_INSTANCE_ENCRYPTION_KEY:?set SERVICE_INSTANCE_ENCRYPTION_KEY in .env}
       DEPLOYMENT_WORKER_INTERVAL_SECONDS: ${DEPLOYMENT_WORKER_INTERVAL_SECONDS:-3}
       DEPLOYMENT_WORKER_LEASE_TTL_SECONDS: ${DEPLOYMENT_WORKER_LEASE_TTL_SECONDS:-60}
+      RUN_DEPLOYMENT_WORKER: "false"
     depends_on:
       mysql:
         condition: service_healthy
@@ -196,14 +139,8 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Non-custodial USDT chain watcher and treasury sweeper. Idles safely when
-  # USDT_WATCHER_ENABLED / RPC / keys are not configured (no crash-loop).
-  # Keep RUN_USDT_WATCHER=false on the API so only this container scans.
   usdt-watcher:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: app
+    image: git.stackken.com/kenzim/dcim-usdt-watcher:latest
     command: ["python", "-m", "app.workers.usdt_watcher"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -233,13 +170,8 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # Recurring reseller charges and dunning. API stays enqueue-only
-  # (RUN_RECURRING_BILLING_WORKER=false); this container owns the charge loop.
   recurring-billing-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: app
+    image: git.stackken.com/kenzim/dcim-recurring-billing-worker:latest
     command: ["python", "-m", "app.workers.recurring_billing"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -258,12 +190,8 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # SMTP outbox delivery (separate retry loop from the API process).
   notification-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: app
+    image: git.stackken.com/kenzim/dcim-notification-worker:latest
     command: ["python", "-m", "app.workers.notification_outbox"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -306,4 +234,6 @@ services:
 
 volumes:
   mysql_data:
+    external: true
+    name: dcim_mysql_data
   dhcp_tftp_shared:

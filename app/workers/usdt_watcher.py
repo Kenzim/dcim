@@ -78,22 +78,29 @@ async def run_usdt_watcher(
     worker_id: str | None = None,
 ) -> None:
     owner = worker_id or make_worker_id()
+    # Stay alive when USDT is not configured so compose can always start this
+    # service without a crash-loop; enable via USDT_WATCHER_ENABLED + RPC/keys.
     if not config.usdt_enabled:
-        logger.warning("USDT watcher disabled or incompletely configured")
-        return
-    logger.info(
-        "USDT watcher %s started (chain=%s interval=%ss)",
-        owner,
-        config.usdt_chain_id,
-        config.usdt_scan_interval_seconds,
-    )
+        logger.warning(
+            "USDT watcher %s idle (disabled or incompletely configured); "
+            "sleeping until process restart with full USDT settings",
+            owner,
+        )
+    else:
+        logger.info(
+            "USDT watcher %s started (chain=%s interval=%ss)",
+            owner,
+            config.usdt_chain_id,
+            config.usdt_scan_interval_seconds,
+        )
     while True:
         try:
-            await asyncio.to_thread(
-                run_usdt_iteration,
-                owner=owner,
-                config=config,
-            )
+            if config.usdt_enabled:
+                await asyncio.to_thread(
+                    run_usdt_iteration,
+                    owner=owner,
+                    config=config,
+                )
         except asyncio.CancelledError:
             logger.info("USDT watcher %s stopping", owner)
             raise
