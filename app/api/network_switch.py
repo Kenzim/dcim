@@ -11,6 +11,7 @@ from app.models.network_switch import NetworkSwitch
 from app.models.server import Server
 from app.plugins.switch_registry import get_switch_registry
 from app.core.plugin_capabilities import get_switch_plugin_capabilities, switch_plugin_supports
+from app.services.aggregate_bandwidth_service import get_aggregate_monitored_bandwidth
 import logging
 
 logger = logging.getLogger(__name__)
@@ -278,6 +279,16 @@ async def create_switch(
     if switch_dict.get("rack_units") is None:
         switch_dict["rack_units"] = 1
     return switch_dict
+
+
+@router.get("/bandwidth/aggregate", response_model=dict)
+async def get_aggregate_bandwidth(
+    hours: int = 24,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Aggregate Traffic in / Traffic out across server ports with monitor_bandwidth enabled."""
+    return get_aggregate_monitored_bandwidth(db, hours=hours)
 
 
 @router.get("/{switch_id}", response_model=NetworkSwitchResponse)

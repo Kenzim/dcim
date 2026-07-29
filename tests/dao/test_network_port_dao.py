@@ -112,6 +112,27 @@ def test_get_network_ports_by_server(db_session, test_server):
     assert "eth1" in port_names
 
 
+def test_get_monitored_network_ports(db_session, test_server):
+    """Only ports with monitor_bandwidth enabled are returned."""
+    NetworkPortDAO.create(
+        db_session,
+        server_id=test_server.id,
+        name="eth0",
+        speed_mbps=1000,
+        monitor_bandwidth=False,
+    )
+    tracked = NetworkPortDAO.create(
+        db_session,
+        server_id=test_server.id,
+        name="eth1",
+        speed_mbps=1000,
+        monitor_bandwidth=True,
+    )
+
+    ports = NetworkPortDAO.get_monitored(db_session)
+    assert [p.id for p in ports] == [tracked.id]
+
+
 def test_update_network_port(db_session, test_server):
     """Test updating a network port"""
     port = NetworkPortDAO.create(
