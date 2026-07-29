@@ -12,7 +12,7 @@ from fastapi.responses import PlainTextResponse, FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from app.core.database import get_db
 from app.core.config import settings
 from app.core.auth import require_admin, get_current_user, security
@@ -30,13 +30,14 @@ from app.models.boot_task import BootType, BootTaskStatus
 from app.models.hardware_detection_report import HardwareDetectionReportStatus
 from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
-from app.services.download_token_service import get_download_token_service
+from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.dhcp_config_service import get_dhcp_config_service
 from app.services.dhcp_config_generator import get_next_server_ip_for_client, get_subnet_info_for_client
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
 )
+from app.utils.shell_escape import shell_escape_double_quoted
 from app.models.server_activity import ServerActivityEventType
 import asyncio
 import logging
@@ -835,6 +836,9 @@ def _build_cloud_init_meta_data(server, installation_task) -> str:
     )
 
 
+_STRICT_MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
+
+
 class HardwareNicEntry(BaseModel):
     name: str
     mac_address: Optional[str] = None
@@ -842,6 +846,25 @@ class HardwareNicEntry(BaseModel):
     model: Optional[str] = None
     pci_address: Optional[str] = None
     is_physical: bool = True
+
+    @field_validator("mac_address")
+    @classmethod
+    def _validate_mac_address(cls, value: Optional[str]) -> Optional[str]:
+        """Reject anything that isn't a well-formed MAC address.
+
+        Hardware-detection reports feed this value verbatim into generated
+        ``dhcpd.conf`` stanzas (see ``dhcp_config_generator.py``), so a strict
+        allowlist here prevents injecting extra config directives/lines via a
+        malformed MAC from an untrusted/compromised agent.
+        """
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if not _STRICT_MAC_RE.match(stripped):
+            raise ValueError("mac_address must be a valid MAC address (e.g. 00:11:22:33:44:55)")
+        return stripped
 
 
 class HardwareDiskEntry(BaseModel):
@@ -1173,10 +1196,16 @@ async def create_boot_task(
         if template.disk_image:
             disk_image_filename = template.disk_image.split("/")[-1]
         
-        # Add template parameters as PARAM_* variables
+        # Add template parameters as PARAM_* variables. These values are
+        # customer/admin-supplied (e.g. admin_password) and are embedded via
+        # literal text substitution into a shell script that gets executed
+        # as root on the target server, so they must be escaped for the
+        # double-quoted shell-string context templates use (e.g.
+        # ADMIN_PASSWORD="${PARAM_ADMIN_PASSWORD}") to prevent shell/command
+        # injection.
         if boot_task_data.template_parameters:
             for param_name, param_value in boot_task_data.template_parameters.items():
-                replacements[f"PARAM_{param_name.upper()}"] = str(param_value)
+                replacements[f"PARAM_{param_name.upper()}"] = shell_escape_double_quoted(param_value)
         
         # Note: Variable replacement will happen AFTER token generation (below)
         # This ensures all variables including DISK_IMAGE_URL and DOWNLOAD_TOKEN are replaced in one pass
@@ -1328,23 +1357,18 @@ async def create_boot_task(
                     img_path = deploy_dir / img_file
                     if img_path.exists():
                         template_image_files.append(img_file)
-                        allowed_files.append(f"deploy/{img_file}")
         
         # Fallback: check for old disk_image format
         if template and template.disk_image and not template_image_files:
             disk_image_filename = template.disk_image.split("/")[-1]
             allowed_files.append(disk_image_filename)
-        # Scope the token to THIS template's own files (relative paths) plus log
-        # uploads, instead of a global "*" that would authorize fetching any
-        # file on the token-gated endpoints.
+        # Scope the token to THIS template's own files, bound to this
+        # specific template_id (not a bare relative path, and never a
+        # global "*"), so it can't be replayed against a same-named file in
+        # a different template or an unrelated endpoint, plus log uploads.
         if template and template.template_dir:
-            try:
-                base = template.template_dir.resolve()
-                for f in base.rglob("*"):
-                    if f.is_file():
-                        allowed_files.append(str(f.resolve().relative_to(base)))
-            except (OSError, ValueError) as e:
-                logger.warning(f"Could not enumerate template files for token scope: {e}")
+            for rel_path in template_service.enumerate_relative_files(boot_task_data.template_id):
+                allowed_files.append(template_file_scope(boot_task_data.template_id, rel_path))
         # Installation log uploads use a "logs-{installation_task_id}" filename.
         allowed_patterns.append("logs-*")
     
@@ -1924,11 +1948,8 @@ async def get_iso(
             detail=f"ISO file '{filename}' not found"
         )
     
-    # Mark token as used only if single-use (ISO boot reuses the same URL for initrd + chain/sanboot)
-    if token_data.get("single_use", True):
-        download_token_service.mark_token_used(token)
-    
-    # For HEAD requests, return headers only (no body)
+    # For HEAD requests, return headers only (no body) and do NOT consume the
+    # token (clients often HEAD-then-GET; consuming here would break the GET).
     if request.method == "HEAD":
         file_size = os.path.getsize(iso_path)
         return Response(
@@ -1939,6 +1960,18 @@ async def get_iso(
                 "Content-Disposition": f'inline; filename="{filename}"'
             }
         )
+    
+    # GET: atomically claim single-use tokens (ISO boot legitimately reuses
+    # the same URL for initrd + chain/sanboot when single_use=False, so only
+    # single-use tokens are consumed here). Using consume_token rather than a
+    # separate validate-then-mark step closes a check-then-mark race that
+    # would otherwise let a single-use token be redeemed twice concurrently.
+    if token_data.get("single_use", True):
+        if not download_token_service.consume_token(token, filename):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired download token"
+            )
     
     logger.info(f"Serving ISO file: {filename} (boot_task: {token_data.get('boot_task_id')})")
     return FileResponse(
@@ -2203,7 +2236,10 @@ async def get_template_file(
     "deploy/efi.img", "firstboot.ps1", "user-login.ps1". Requires a valid
     download token for security.
     """
-    # Validate token (token is validated against the same file_path for allowed_files)
+    # Validate token. The token is checked against a template_id-bound scope
+    # string (not the bare file_path) so a token minted for one template's
+    # install can't be replayed against a same-named file in a different
+    # template (e.g. "deploy/windows.img" existing under two templates).
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2211,7 +2247,9 @@ async def get_template_file(
         )
     
     download_token_service = get_download_token_service()
-    token_data = download_token_service.validate_token(token, file_path)
+    token_data = download_token_service.validate_token(
+        token, template_file_scope(template_id, file_path)
+    )
     
     if not token_data:
         raise HTTPException(

@@ -5,23 +5,28 @@ These endpoints are for admin users to view and manage services
 and external users created via billing integrations.
 """
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi.responses import RedirectResponse
 import asyncio
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao.service_dao import ServiceDAO
-from app.dao.external_user_dao import ExternalUserDAO
 from app.dao.user_dao import UserDAO
-from app.dao.user_external_identity_link_dao import UserExternalIdentityLinkDAO
 from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
+from app.dao.ipam_dao import IPAMDAO
+from app.services.proxy_provisioning import assignment_payload, auto_assign_proxy_ips, resolve_proxy_ip_request
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
+from app.dao.permission_set_dao import PermissionSetDAO
+from app.services.client_permission_resolver import resolve_client_permissions
 from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
 from app.models.service_bare_metal import ServiceBareMetal
+from app.models.user import User
 from app.services.service_product_snapshot import build_product_snapshot
 from app.services.vm_provisioning_service import VMProvisioningService
-from app.services.vmid_allocator import reserve_vmid_for_service
+from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox, reserve_vmid_for_service
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -29,14 +34,32 @@ from app.services.server_activity_logger import (
 from app.services.service_resource import service_linked_server, service_server_id_for_response, vm_placement
 from app.models.server_activity import ServerActivityEventType
 from app.services.vm_strategy_executor import (
-    run_provision_vm_service,
+    provision_vm_service_async,
     resolve_vm_strategy_name_for_service,
     schedule_vm_auto_provision,
 )
+from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
 from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
+from app.plugins.proxmox import ConsoleTypeUnavailable
 from app.models.service_vm import VMGuestState
+from app.services.vm_guest_credentials import session_guest_fields
+from app.services.vm_vnc_ticket_service import (
+    build_relative_error_url,
+    build_relative_launch_url,
+    mint_launch_ticket,
+    mint_ws_session,
+)
+from app.schemas.vm_vnc import VmConsoleTypesResponse, VmVncSessionResponse
+from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody, map_backup_error
+from app.services.vm_backup_service import (
+    create_client_backup,
+    delete_client_backup,
+    list_service_backups_and_jobs,
+    purge_client_backups,
+    restore_service_backup,
+)
 import logging
 from datetime import datetime, timezone
 
@@ -95,15 +118,50 @@ class ServiceResponse(BaseModel):
     )
     vm_guest_state: Optional[str] = None
     vm_guest_last_error: Optional[str] = None
+    accepts_ssh_key: bool = False
+    has_ssh_public_keys: bool = False
+    ssh_public_keys_text: str = ""
+    needs_ssh_key_prompt: bool = False
     status: str
     description: Optional[str] = None
     config: Optional[dict] = None
+    permission_set_id: Optional[int] = None
+    permission_set_name: Optional[str] = None
+    permission_overrides: Optional[Dict[str, bool]] = None
+    proxy_assignments: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="For http_proxy services: assigned IP(s) + credentials + ready-to-use proxy URLs",
+    )
     created_at: str
     updated_at: str
     terminated_at: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class VmReinstallBody(BaseModel):
+    vm_template_id: Optional[int] = Field(
+        None, description="Optional new catalog VM template (must be linked to product)"
+    )
+    ssh_public_keys: Optional[Any] = Field(
+        None,
+        description="Multiline text or list of OpenSSH public keys to store before reinstall",
+    )
+
+
+class VmSshKeysBody(BaseModel):
+    ssh_public_keys: Any = Field(
+        ...,
+        description="Multiline text or list of OpenSSH public keys (one key per line)",
+    )
+
+
+class ServicePermissionsAssignBody(BaseModel):
+    permission_set_id: Optional[int] = Field(None, description="null clears the service-level preset")
+    permission_overrides: Optional[Dict[str, bool]] = Field(
+        None, description="Sparse per-key overrides; null clears all overrides"
+    )
 
 
 class InternalTestVMServiceCreate(BaseModel):
@@ -131,13 +189,12 @@ class AdminVmServiceCreate(BaseModel):
     vm_template_id: int = Field(..., description="Catalog VM template id linked to product")
     description: Optional[str] = None
     service_config: Optional[Dict[str, Any]] = None
-    external_user_id: Optional[int] = Field(
-        None,
-        description="external_users.id — if set, provisioning_source is billing (WHMCS-style owner)",
-    )
     owner_user_id: Optional[int] = Field(
         None,
-        description="users.id canonical owner in RackFlow (client-facing ownership)",
+        description=(
+            "users.id canonical owner in RackFlow. provisioning_source is "
+            "billing when this user has a linked billing identity, internal otherwise."
+        ),
     )
     external_service_id: Optional[str] = Field(None, description="Optional external line-item id (e.g. WHMCS service id)")
     proxmox_cluster_id: Optional[int] = None
@@ -153,28 +210,38 @@ class AdminVmServiceCreate(BaseModel):
     )
 
 
+class AdminHttpProxyServiceCreate(BaseModel):
+    """
+    Create an http_proxy service (``services`` + ``service_bare_metal`` with
+    no linked Server) with IP(s) auto-assigned from IPAM.
+
+    ``ip_count``/``subnet_id``/``allocation_strategy`` override the
+    product/family catalog defaults when set; a bare service with no
+    ``product_code`` falls back to a single auto-picked IP.
+    """
+
+    name: str = Field(..., description="Unique service name")
+    product_code: Optional[str] = Field(None, description="Catalog product code (http_proxy family)")
+    description: Optional[str] = None
+    service_config: Optional[Dict[str, Any]] = None
+    owner_user_id: Optional[int] = Field(
+        None,
+        description=(
+            "users.id canonical owner in RackFlow. provisioning_source is "
+            "billing when this user has a linked billing identity, internal otherwise."
+        ),
+    )
+    external_service_id: Optional[str] = Field(None, description="Optional external line-item id (e.g. WHMCS service id)")
+    ip_count: Optional[int] = Field(None, description="Override how many IPs to auto-assign (default 1)")
+    subnet_id: Optional[int] = Field(None, description="Override which subnet to assign from")
+    allocation_strategy: Optional[str] = Field(None, description="Override allocation strategy")
+
+
 class ServiceOwnerAssignBody(BaseModel):
     owner_user_id: Optional[int] = Field(
         None,
         description="users.id canonical owner; null unassigns owner",
     )
-
-
-class UserExternalIdentityLinkCreate(BaseModel):
-    user_id: int
-    external_user_id: int
-
-
-class UserExternalIdentityLinkResponse(BaseModel):
-    id: int
-    user_id: int
-    username: str
-    email: str
-    external_user_id: int
-    external_user_external_id: str
-    integration_id: int
-    integration_name: str
-    created_at: str
 
 
 class VmPowerActionBody(BaseModel):
@@ -191,10 +258,81 @@ class ServiceStatusUpdateBody(BaseModel):
     status: str = Field(..., description="active | suspended | terminated | pending")
 
 
+class DeploymentJobStepResponse(BaseModel):
+    id: int
+    position: int
+    name: str
+    status: str
+    attempt_count: int
+    message: Optional[str] = None
+    detail: Optional[Dict[str, Any]] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DeploymentJobResponse(BaseModel):
+    id: int
+    service_id: int
+    strategy_name: str
+    status: str
+    current_step_index: int
+    attempt: int
+    max_attempts: int
+    error_message: Optional[str] = None
+    next_run_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    created_at: str
+    updated_at: str
+    steps: List[DeploymentJobStepResponse] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
+
+
+def _deployment_job_to_response(job) -> DeploymentJobResponse:
+    def _iso(dt):
+        return dt.isoformat() if dt else None
+
+    steps = [
+        DeploymentJobStepResponse(
+            id=s.id,
+            position=s.position,
+            name=s.name,
+            status=s.status.value if hasattr(s.status, "value") else str(s.status),
+            attempt_count=s.attempt_count,
+            message=s.message,
+            detail=s.detail,
+            started_at=_iso(s.started_at),
+            finished_at=_iso(s.finished_at),
+        )
+        for s in sorted(job.steps, key=lambda x: x.position)
+    ]
+    return DeploymentJobResponse(
+        id=job.id,
+        service_id=job.service_id,
+        strategy_name=job.strategy_name,
+        status=job.status.value if hasattr(job.status, "value") else str(job.status),
+        current_step_index=job.current_step_index,
+        attempt=job.attempt,
+        max_attempts=job.max_attempts,
+        error_message=job.error_message,
+        next_run_at=_iso(job.next_run_at),
+        started_at=_iso(job.started_at),
+        finished_at=_iso(job.finished_at),
+        created_at=job.created_at.isoformat(),
+        updated_at=job.updated_at.isoformat(),
+        steps=steps,
+    )
+
+
 def _service_to_admin_response(db: Session, service) -> ServiceResponse:
     server = service_linked_server(db, service)
-    eu = service.external_user
     owner = service.owner_user
+    billed = owner if (owner is not None and owner.billing_integration_id) else None
     src = service.provisioning_source or ProvisioningSource.BILLING
     cid, node, vmid = vm_placement(service)
     vm_ip_allocation_id = None
@@ -206,9 +344,23 @@ def _service_to_admin_response(db: Session, service) -> ServiceResponse:
         elif service.config:
             vm_ip_address = (service.config or {}).get("vm_ip_address")
             vm_ip_allocation_id = vm_ip_allocation_id or (service.config or {}).get("vm_ip_allocation_id")
+    from app.services.ssh_public_keys import ssh_key_fields_for_service
+
     vm_strategy_name = None
+    ssh_fields = {
+        "accepts_ssh_key": False,
+        "has_ssh_public_keys": False,
+        "ssh_public_keys_text": "",
+        "needs_ssh_key_prompt": False,
+    }
     if service.service_type == ServiceType.VM:
         vm_strategy_name = resolve_vm_strategy_name_for_service(db, service)
+        ssh_fields = ssh_key_fields_for_service(db, service)
+    proxy_assignments = None
+    if service.service_type == ServiceType.HTTP_PROXY:
+        proxy_assignments = [
+            assignment_payload(a) for a in IPAMDAO.get_assignment_by_service(db, service.id)
+        ]
     return ServiceResponse(
         id=service.id,
         name=service.name,
@@ -218,10 +370,10 @@ def _service_to_admin_response(db: Session, service) -> ServiceResponse:
         owner_email=owner.email if owner else None,
         server_id=service_server_id_for_response(service),
         server_name=server.name if server else "",
-        external_user_id=service.external_user_id,
-        external_user_external_id=eu.external_user_id if eu else None,
-        external_username=eu.external_username if eu else None,
-        external_email=eu.external_email if eu else None,
+        external_user_id=billed.id if billed else None,
+        external_user_external_id=billed.external_user_id if billed else None,
+        external_username=billed.external_username if billed else None,
+        external_email=billed.external_email if billed else None,
         service_type=service.service_type.value if service.service_type else None,
         provisioning_source=src.value if hasattr(src, "value") else str(src),
         proxmox_cluster_id=cid,
@@ -235,29 +387,20 @@ def _service_to_admin_response(db: Session, service) -> ServiceResponse:
         vm_strategy_name=vm_strategy_name,
         vm_guest_state=service.vm.guest_state.value if service.vm and service.vm.guest_state else None,
         vm_guest_last_error=service.vm.guest_last_error if service.vm else None,
+        accepts_ssh_key=bool(ssh_fields.get("accepts_ssh_key")),
+        has_ssh_public_keys=bool(ssh_fields.get("has_ssh_public_keys")),
+        ssh_public_keys_text=str(ssh_fields.get("ssh_public_keys_text") or ""),
+        needs_ssh_key_prompt=bool(ssh_fields.get("needs_ssh_key_prompt")),
         status=service.status.value,
         description=service.description,
         config=service.config,
+        permission_set_id=service.permission_set_id,
+        permission_set_name=service.permission_set.name if service.permission_set else None,
+        permission_overrides=service.permission_overrides,
+        proxy_assignments=proxy_assignments,
         created_at=service.created_at.isoformat(),
         updated_at=service.updated_at.isoformat(),
         terminated_at=service.terminated_at.isoformat() if service.terminated_at else None,
-    )
-
-
-def _identity_link_to_response(link) -> UserExternalIdentityLinkResponse:
-    user = link.user
-    ext = link.external_user
-    integration = ext.integration if ext else None
-    return UserExternalIdentityLinkResponse(
-        id=link.id,
-        user_id=link.user_id,
-        username=user.username if user else "",
-        email=user.email if user else "",
-        external_user_id=link.external_user_id,
-        external_user_external_id=ext.external_user_id if ext else "",
-        integration_id=integration.id if integration else 0,
-        integration_name=integration.name if integration else "",
-        created_at=link.created_at.isoformat(),
     )
 
 
@@ -349,29 +492,30 @@ async def list_external_users(
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """List all external users"""
-    from app.models.external_user import ExternalUser
+    """List all users with a linked billing identity.
 
-    query = db.query(ExternalUser)
+    Named "external users" for backwards compatibility with the admin UI,
+    but these are now just ``User`` rows with ``billing_integration_id`` set.
+    """
+    query = db.query(User).filter(User.billing_integration_id.isnot(None))
     if integration_id:
-        query = query.filter(ExternalUser.integration_id == integration_id)
+        query = query.filter(User.billing_integration_id == integration_id)
 
-    external_users = query.order_by(ExternalUser.created_at.desc()).offset(skip).limit(limit).all()
+    users = query.order_by(User.created_at.desc()).offset(skip).limit(limit).all()
 
     result = []
-    for eu in external_users:
-        services = ServiceDAO.get_by_external_user(db, eu.id)
-
+    for u in users:
+        services = ServiceDAO.get_by_owner_user(db, u.id)
         result.append(
             ExternalUserResponse(
-                id=eu.id,
-                integration_id=eu.integration_id,
-                integration_name=eu.integration.name,
-                external_user_id=eu.external_user_id,
-                external_username=eu.external_username,
-                external_email=eu.external_email,
-                created_at=eu.created_at.isoformat(),
-                updated_at=eu.updated_at.isoformat(),
+                id=u.id,
+                integration_id=u.billing_integration_id,
+                integration_name=u.billing_integration.name if u.billing_integration else "",
+                external_user_id=u.external_user_id or "",
+                external_username=u.external_username,
+                external_email=u.external_email,
+                created_at=u.created_at.isoformat(),
+                updated_at=u.updated_at.isoformat(),
                 service_count=len(services),
             )
         )
@@ -385,31 +529,32 @@ async def get_external_user(
     auth: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Get external user details"""
-    external_user = ExternalUserDAO.get_by_id(db, external_user_id)
-    if not external_user:
+    """Get billing-identity details for a user (see ``list_external_users``)."""
+    user = UserDAO.get_by_id(db, external_user_id)
+    if not user or not user.billing_integration_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="External user not found",
         )
 
-    services = ServiceDAO.get_by_external_user(db, external_user.id)
+    services = ServiceDAO.get_by_owner_user(db, user.id)
 
     return ExternalUserResponse(
-        id=external_user.id,
-        integration_id=external_user.integration_id,
-        integration_name=external_user.integration.name,
-        external_user_id=external_user.external_user_id,
-        external_username=external_user.external_username,
-        external_email=external_user.external_email,
-        created_at=external_user.created_at.isoformat(),
-        updated_at=external_user.updated_at.isoformat(),
+        id=user.id,
+        integration_id=user.billing_integration_id,
+        integration_name=user.billing_integration.name if user.billing_integration else "",
+        external_user_id=user.external_user_id or "",
+        external_username=user.external_username,
+        external_email=user.external_email,
+        created_at=user.created_at.isoformat(),
+        updated_at=user.updated_at.isoformat(),
         service_count=len(services),
     )
 
 
 @router.get("", response_model=List[ServiceResponse])
 async def list_services(
+    q: Optional[str] = None,
     status_filter: Optional[str] = None,
     external_user_id: Optional[int] = None,
     owner_user_id: Optional[int] = None,
@@ -423,6 +568,20 @@ async def list_services(
 ):
     """List all services"""
     query = db.query(Service)
+
+    if q and q.strip():
+        needle = f"%{q.strip()}%"
+        query = (
+            query.outerjoin(User, User.id == Service.owner_user_id)
+            .filter(
+                or_(
+                    Service.name.ilike(needle),
+                    Service.external_service_id.ilike(needle),
+                    User.username.ilike(needle),
+                    User.external_username.ilike(needle),
+                )
+            )
+        )
 
     if service_type:
         try:
@@ -445,7 +604,9 @@ async def list_services(
             )
 
     if external_user_id is not None:
-        query = query.filter(Service.external_user_id == external_user_id)
+        # Kept for backwards compatibility: "external user id" is now simply
+        # the owner user's id (a billing identity lives on the User row).
+        query = query.filter(Service.owner_user_id == external_user_id)
 
     if owner_user_id is not None:
         query = query.filter(Service.owner_user_id == owner_user_id)
@@ -486,31 +647,6 @@ async def list_unassigned_services(
         .all()
     )
     return [_service_to_admin_response(db, s) for s in services]
-
-
-@router.post("/backfill-owners")
-async def backfill_service_owners_from_identity_links(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    links = UserExternalIdentityLinkDAO.list_all(db)
-    ext_to_user = {link.external_user_id: link.user_id for link in links}
-    if not ext_to_user:
-        return {"updated": 0}
-    candidates = (
-        db.query(Service)
-        .filter(Service.owner_user_id.is_(None), Service.external_user_id.isnot(None))
-        .all()
-    )
-    updated = 0
-    for service in candidates:
-        owner = ext_to_user.get(service.external_user_id)
-        if owner:
-            service.owner_user_id = owner
-            updated += 1
-    if updated:
-        db.commit()
-    return {"updated": updated}
 
 
 @router.get("/vm", response_model=List[ServiceResponse])
@@ -575,6 +711,35 @@ async def get_vm_service_admin(
     return _service_to_admin_response(db, service)
 
 
+@router.get("/{service_id}/deployment-jobs", response_model=List[DeploymentJobResponse])
+async def list_deployment_jobs(
+    service_id: int,
+    limit: int = 50,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """List deployment jobs (with ordered step timelines) for a VM service."""
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    jobs = VMDeploymentJobDAO.list_by_service(db, service_id, limit=limit)
+    return [_deployment_job_to_response(j) for j in jobs]
+
+
+@router.get("/{service_id}/deployment-jobs/{job_id}", response_model=DeploymentJobResponse)
+async def get_deployment_job(
+    service_id: int,
+    job_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Return a single deployment job and its ordered step timeline."""
+    job = VMDeploymentJobDAO.get_by_id(db, job_id)
+    if not job or job.service_id != service_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment job not found")
+    return _deployment_job_to_response(job)
+
+
 @router.get("/bare-metal/{service_id}", response_model=ServiceResponse)
 async def get_bare_metal_service_admin(
     service_id: int,
@@ -594,25 +759,23 @@ def admin_provision_vm_service(
     db: Session = Depends(get_db),
 ):
     """
-    Clone the catalog template on Proxmox to this service's vmid, apply RAM/CPU, then:
-
-    - **cloudinit_clone**: set Proxmox ``ipconfig0`` from the linked VM IP pool row and start the VM.
-    - **guest_agent**: apply sizing and start (no cloud-init network).
-
-    Requires synced inventory (template name = catalog ``proxmox_template_name`` on the target node).
+    Resolve placement (auto-place + reserve VMID if needed) and enqueue a durable
+    deployment job. Non-blocking: the deployment worker clones the catalog
+    template, applies sizing, and (per strategy) configures cloud-init / waits for
+    the guest agent, then powers on. Poll ``vm_guest_state`` /
+    ``config.vm_provision`` or ``GET .../deployment-jobs`` for progress.
     """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM service not found")
     try:
-        service = run_provision_vm_service(db, service_id)
+        service, _job = provision_vm_service_async(db, service_id)
     except ValueError as exc:
+        _set_guest_state(db, service, VMGuestState.ERROR, error=str(exc))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except TimeoutError as exc:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Admin VM provision failed for service %s", service_id)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
-        ) from exc
+        logger.exception("Admin VM provision enqueue failed for service %s", service_id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     return _service_to_admin_response(db, service)
 
 
@@ -639,18 +802,28 @@ async def admin_update_vm_placement(
     )
 
     requested = body.proxmox_vmid
+    node_name = (body.proxmox_node_name or "").strip()
     try:
-        reserved_vmid = reserve_vmid_for_service(
-            db,
-            cluster_id=body.proxmox_cluster_id,
-            service_id=service.id,
-            requested_vmid=requested,
-        )
+        if node_name:
+            reserved_vmid = await reserve_vmid_aligned_with_proxmox(
+                db,
+                cluster_id=body.proxmox_cluster_id,
+                service_id=service.id,
+                node_name=node_name,
+                requested_vmid=requested,
+            )
+        else:
+            reserved_vmid = reserve_vmid_for_service(
+                db,
+                cluster_id=body.proxmox_cluster_id,
+                service_id=service.id,
+                requested_vmid=requested,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     service.vm.proxmox_cluster_id = body.proxmox_cluster_id
-    service.vm.proxmox_node_name = (body.proxmox_node_name or "").strip()
+    service.vm.proxmox_node_name = node_name
     service.vm.proxmox_vmid = int(reserved_vmid)
     ServiceDAO.update(db, service)
     log_server_activity_success(
@@ -714,6 +887,110 @@ async def admin_vm_power_action(
     )
     db.refresh(service)
     return _service_to_admin_response(db, service)
+
+
+@router.get("/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse)
+async def admin_get_vm_console_types(
+    service_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Report which console types (noVNC/serial) this VM actually supports.
+
+    Fetched by the admin UI before showing the "Open Console" control(s), so
+    it can offer a picker only when the VM genuinely supports both.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    plugin, _vmid = _admin_get_vm_plugin(db, service)
+    try:
+        available = await plugin.get_available_console_types()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not reach Proxmox: {exc}"
+        ) from exc
+    return VmConsoleTypesResponse(**available)
+
+
+@router.post("/{service_id}/vm/vnc-session", response_model=VmVncSessionResponse)
+async def admin_create_vm_vnc_session(
+    service_id: int,
+    console_type: Optional[str] = None,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a VNC/serial console session for a VM service (admin).
+
+    Opens a Proxmox console proxy for the guest and wraps it in a Rackflow
+    WS session token; the browser never sees Proxmox account credentials.
+    ``console_type`` (``"vnc"``/``"serial"``) picks a specific type when the
+    VM supports both; omit it to use the default preference (noVNC first).
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    plugin, vmid = _admin_get_vm_plugin(db, service)
+    cid, node, _ = vm_placement(service)
+    try:
+        power_state = await plugin.get_power_state()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not reach Proxmox: {exc}"
+        ) from exc
+    if power_state != PowerState.ON:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM must be running to open a console")
+    try:
+        console = await plugin.open_console_proxy(console_type=console_type)
+    except ConsoleTypeUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to open console: {exc}"
+        ) from exc
+    session = mint_ws_session(
+        service.id, cid, node, vmid, console["port"], console["ticket"], console["console_type"]
+    )
+    logger.info(
+        "Admin API: minted VM %s session for service %s", console["console_type"], service.id
+    )
+    return VmVncSessionResponse(
+        ws_token=session["ws_token"],
+        ws_path="/api/vnc/ws",
+        vnc_password=console["ticket"],
+        expires_in=session["expires_in"],
+        console_type=console["console_type"],
+        **session_guest_fields(service),
+    )
+
+
+@router.get("/{service_id}/vm/vnc-popup")
+async def admin_vm_vnc_popup(
+    service_id: int,
+    type: Optional[str] = None,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a one-time console launch ticket and redirect to ``/vnc?t=...``.
+
+    Meant as the target of ``window.open(...)`` (a real browser popup,
+    authenticated by the admin's own session cookie) rather than a fetch --
+    a real top-level window gives the console its own clipboard/focus
+    context, unlike the in-page modal. Placement/power-state are validated
+    by the redeem step on the ``/vnc`` page itself (same as the WHMCS popup
+    flow in ``whmcs/.../vnc_open.php``), so this only needs to check the
+    service exists and is a VM before minting the ticket. ``type``
+    (``"vnc"``/``"serial"``) carries the console type the UI's picker chose,
+    if any.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        return RedirectResponse(url=build_relative_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+    if service.service_type != ServiceType.VM:
+        return RedirectResponse(url=build_relative_error_url("Not a VM service"), status_code=status.HTTP_302_FOUND)
+    token = mint_launch_ticket(service.id, console_type=type)
+    logger.info("Admin API: minted VM console popup ticket for service %s", service.id)
+    return RedirectResponse(url=build_relative_launch_url(token), status_code=status.HTTP_302_FOUND)
 
 
 @router.post("/{service_id}/vm/destroy", response_model=ServiceResponse)
@@ -806,13 +1083,10 @@ def admin_recreate_vm_guest(
         details={"service_id": service.id},
     )
     try:
-        service = run_provision_vm_service(db, service_id)
+        service, _job = provision_vm_service_async(db, service_id)
     except ValueError as exc:
         _set_guest_state(db, service, VMGuestState.ERROR, error=str(exc))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except TimeoutError as exc:
-        _set_guest_state(db, service, VMGuestState.ERROR, error=str(exc))
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Admin VM recreate failed for service %s", service_id)
         _set_guest_state(db, service, VMGuestState.ERROR, error=str(exc))
@@ -827,6 +1101,200 @@ def admin_recreate_vm_guest(
         details={"service_id": service.id},
     )
     return _service_to_admin_response(db, service)
+
+
+@router.put("/{service_id}/vm/ssh-keys")
+async def admin_put_vm_ssh_keys(
+    service_id: int,
+    body: VmSshKeysBody,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Validate, store SSH public keys, and best-effort apply via guest agent."""
+    from app.services.vm_ssh_keys_service import VmSshKeysError, save_and_apply_ssh_public_keys
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    if service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+    try:
+        return await save_and_apply_ssh_public_keys(db, service, body.ssh_public_keys)
+    except VmSshKeysError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/{service_id}/vm/ssh-keys")
+async def admin_get_vm_ssh_keys(
+    service_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    from app.services.ssh_public_keys import ssh_key_fields_for_service
+    from app.services.vm_ssh_keys_service import list_reinstall_templates_for_service
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    if service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+    fields = ssh_key_fields_for_service(db, service)
+    return {
+        **fields,
+        "vm_template_id": service.vm.vm_template_id if service.vm else None,
+        "reinstall_templates": list_reinstall_templates_for_service(db, service),
+    }
+
+
+@router.post("/{service_id}/vm/reinstall", response_model=ServiceResponse)
+async def admin_reinstall_vm_guest(
+    service_id: int,
+    body: Optional[VmReinstallBody] = None,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Destroy the guest (if present) then reprovision at the same reserved VMID."""
+    from app.services.vm_ssh_keys_service import VmSshKeysError, apply_template_change_for_reinstall
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    if service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+
+    payload = body or VmReinstallBody()
+    if payload.vm_template_id is not None or payload.ssh_public_keys is not None:
+        try:
+            service = apply_template_change_for_reinstall(
+                db,
+                service,
+                vm_template_id=payload.vm_template_id,
+                ssh_public_keys=payload.ssh_public_keys,
+            )
+        except VmSshKeysError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    log_server_activity_attempt(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="reinstall_vm_guest",
+        source="admin_api",
+        message="Reinstalling VM guest (destroy + recreate, same VMID)",
+        details={
+            "service_id": service.id,
+            "vmid": service.vm.proxmox_vmid if service.vm else None,
+            "vm_template_id": payload.vm_template_id,
+        },
+    )
+    # Destroy first when a guest exists; ignore missing-guest / already-gone errors.
+    try:
+        plugin, _vmid = _admin_get_vm_plugin(db, service)
+        try:
+            exists = await plugin.vm_exists()
+        except Exception:
+            exists = False
+        if exists:
+            await admin_destroy_vm_guest(service_id, auth, db)
+    except HTTPException as exc:
+        if exc.status_code not in (
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_409_CONFLICT,
+            status.HTTP_502_BAD_GATEWAY,
+        ):
+            raise
+        logger.info("Admin reinstall: destroy skipped/failed for service %s: %s", service_id, exc.detail)
+
+    result = admin_recreate_vm_guest(service_id, auth, db)
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="reinstall_vm_guest",
+        source="admin_api",
+        message="Queued VM reinstall at reserved VMID",
+        details={"service_id": service.id},
+    )
+    return result
+
+
+@router.get("/{service_id}/vm/backups")
+async def admin_list_vm_backups(
+    service_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    try:
+        items, jobs = await list_service_backups_and_jobs(db, service)
+    except Exception as exc:
+        raise map_backup_error(exc) from exc
+    return {"backups": items, "jobs": jobs}
+
+
+@router.post("/{service_id}/vm/backups")
+async def admin_create_vm_backup(
+    service_id: int,
+    body: BackupCreateBody,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    try:
+        return await create_client_backup(
+            db, service, notes=body.notes, mode=body.mode, wait=body.wait
+        )
+    except Exception as exc:
+        raise map_backup_error(exc) from exc
+
+
+@router.post("/{service_id}/vm/backups/delete")
+async def admin_delete_vm_backup(
+    service_id: int,
+    body: BackupMutateBody,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    try:
+        await delete_client_backup(db, service, volid=body.volid, storage=body.storage)
+    except Exception as exc:
+        raise map_backup_error(exc) from exc
+    return {"status": "ok"}
+
+
+@router.post("/{service_id}/vm/backups/restore")
+async def admin_restore_vm_backup(
+    service_id: int,
+    body: BackupMutateBody,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    try:
+        result = await restore_service_backup(
+            db,
+            service,
+            volid=body.volid,
+            storage=body.storage,
+            wait=body.wait,
+            start=body.start,
+            vm_template_id=getattr(body, "vm_template_id", None),
+        )
+    except Exception as exc:
+        raise map_backup_error(exc) from exc
+    if body.wait and service.vm:
+        _set_guest_state(db, service, VMGuestState.STOPPED if not body.start else VMGuestState.RUNNING)
+        ServiceDAO.update(db, service)
+    return result
 
 
 @router.get("/{service_id}", response_model=ServiceResponse)
@@ -891,6 +1359,136 @@ async def assign_service_owner(
     return _service_to_admin_response(db, service)
 
 
+@router.put("/{service_id}/permissions", response_model=ServiceResponse)
+async def assign_service_permissions(
+    service_id: int,
+    body: ServicePermissionsAssignBody,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Set this service's permission preset and/or sparse per-key overrides
+    (the two most-specific layers in the resolution hierarchy — see
+    ``app.services.client_permission_resolver``)."""
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    if body.permission_set_id is not None and PermissionSetDAO.get_by_id(db, body.permission_set_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
+    service.permission_set_id = body.permission_set_id
+    service.permission_overrides = body.permission_overrides
+    ServiceDAO.update(db, service)
+    return _service_to_admin_response(db, service)
+
+
+@router.get("/{service_id}/effective-permissions", response_model=Dict[str, bool])
+async def get_service_effective_permissions(
+    service_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Preview the fully-resolved client permission map for this service."""
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    return resolve_client_permissions(db, service)
+
+
+class StrategyActionBody(BaseModel):
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/{service_id}/actions")
+async def admin_list_strategy_actions(
+    service_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    from app.services.strategy_actions import list_actions
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    return {"actions": list_actions(db, service, "admin")}
+
+
+@router.post("/{service_id}/actions/{action_name}")
+async def admin_run_strategy_action(
+    service_id: int,
+    action_name: str,
+    body: StrategyActionBody,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    from app.services.strategy_actions import StrategyActionError, run_action
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    try:
+        return await run_action(db, service, action_name, body.params, "admin")
+    except StrategyActionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc) or "Strategy action failed",
+        ) from exc
+
+
+class ReassignVmIpBody(BaseModel):
+    allocation_id: int = Field(..., description="Free VM IP pool row id to assign")
+    reset_network: bool = Field(
+        True,
+        description=(
+            "After swapping the pool row, run strategy reset_network. "
+            "For Linux cloud-init guests this regenerates cloud-init and reboots the VM."
+        ),
+    )
+
+
+@router.get("/{service_id}/available-ips")
+async def admin_list_available_vm_ips(
+    service_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Browse free VM IP pool rows usable on this service's Proxmox cluster."""
+    from app.services.vm_ip_reassign import VmIpReassignError, list_available_ips_for_service
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    try:
+        return list_available_ips_for_service(db, service)
+    except VmIpReassignError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/{service_id}/reassign-ip")
+async def admin_reassign_vm_ip(
+    service_id: int,
+    body: ReassignVmIpBody,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Release the current VM IP, claim a free pool row, and optionally reset guest networking."""
+    from app.services.vm_ip_reassign import VmIpReassignError, reassign_vm_ip
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    try:
+        return await reassign_vm_ip(
+            db,
+            service,
+            allocation_id=body.allocation_id,
+            reset_network=body.reset_network,
+            source="admin_api",
+        )
+    except VmIpReassignError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @router.put("/{service_id}/status", response_model=ServiceResponse)
 async def update_service_status(
     service_id: int,
@@ -925,6 +1523,14 @@ async def update_service_status(
     if new_status == ServiceStatus.TERMINATED:
         service.terminated_at = datetime.now(timezone.utc)
         VMIPAllocationDAO.release_for_service(db, service.id)
+        IPAMDAO.release_all_for_service(db, service.id, released_by="admin")
+        if service.service_type == ServiceType.VM:
+            try:
+                await purge_client_backups(db, service)
+            except Exception:
+                logger.exception(
+                    "Failed to purge client backups on terminate for service %s", service.id
+                )
     else:
         service.terminated_at = None
     ServiceDAO.update(db, service)
@@ -939,63 +1545,6 @@ async def update_service_status(
         details={"old_status": old_status.value, "new_status": new_status.value},
     )
     return _service_to_admin_response(db, service)
-
-
-@router.get("/external-user-links", response_model=List[UserExternalIdentityLinkResponse])
-async def list_identity_links(
-    user_id: Optional[int] = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    if user_id is not None:
-        links = UserExternalIdentityLinkDAO.list_for_user(db, user_id)
-    else:
-        links = UserExternalIdentityLinkDAO.list_all(db)
-    return [_identity_link_to_response(link) for link in links]
-
-
-@router.post("/external-user-links", response_model=UserExternalIdentityLinkResponse, status_code=status.HTTP_201_CREATED)
-async def create_identity_link(
-    body: UserExternalIdentityLinkCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    if UserDAO.get_by_id(db, body.user_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    ext_user = ExternalUserDAO.get_by_id(db, body.external_user_id)
-    if ext_user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="External user not found")
-    existing = UserExternalIdentityLinkDAO.get_by_external_user_id(db, body.external_user_id)
-    if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="External user is already linked")
-    try:
-        link = UserExternalIdentityLinkDAO.create(
-            db,
-            user_id=body.user_id,
-            external_user_id=body.external_user_id,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    updated = (
-        db.query(Service)
-        .filter(Service.external_user_id == body.external_user_id, Service.owner_user_id.is_(None))
-        .update({"owner_user_id": body.user_id}, synchronize_session=False)
-    )
-    if updated:
-        db.commit()
-    db.refresh(link)
-    return _identity_link_to_response(link)
-
-
-@router.delete("/external-user-links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_identity_link(
-    link_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    if not UserExternalIdentityLinkDAO.delete(db, link_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Identity link not found")
-    return None
 
 
 def _create_admin_vm_core(
@@ -1017,22 +1566,18 @@ def _create_admin_vm_core(
                 detail="Proxmox cluster not found",
             )
 
-    ext_uid = body.external_user_id
     owner_uid = body.owner_user_id
-    if owner_uid is not None and UserDAO.get_by_id(db, owner_uid) is None:
+    owner_user = UserDAO.get_by_id(db, owner_uid) if owner_uid is not None else None
+    if owner_uid is not None and owner_user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Owner user not found",
         )
-    if ext_uid is not None:
-        if ExternalUserDAO.get_by_id(db, ext_uid) is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="External user not found",
-            )
-        prov = ProvisioningSource.BILLING
-    else:
-        prov = ProvisioningSource.INTERNAL
+    prov = (
+        ProvisioningSource.BILLING
+        if owner_user is not None and owner_user.billing_integration_id
+        else ProvisioningSource.INTERNAL
+    )
 
     try:
         product_snapshot, effective_os_code = build_product_snapshot(
@@ -1060,7 +1605,6 @@ def _create_admin_vm_core(
         db,
         name=body.name,
         owner_user_id=owner_uid,
-        external_user_id=ext_uid,
         external_service_id=body.external_service_id,
         status=ServiceStatus.PENDING,
         description=body.description,
@@ -1211,4 +1755,96 @@ async def create_internal_test_vm_service(
     )
     service = _create_admin_vm_core(db, admin_body)
     logger.info("Admin API: created internal test VM service %s (legacy path)", service.id)
+    return _service_to_admin_response(db, service)
+
+
+@router.post("/http-proxy", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
+async def create_http_proxy_service_admin(
+    body: AdminHttpProxyServiceCreate,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Create an http_proxy service with no linked rack Server; IP(s) are
+    auto-assigned from IPAM immediately (status becomes ``active`` as soon
+    as at least one IP is assigned, ``pending`` if the pool is exhausted).
+    """
+    if ServiceDAO.get_by_name(db, body.name):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A service with this name already exists")
+
+    owner_uid = body.owner_user_id
+    owner_user = UserDAO.get_by_id(db, owner_uid) if owner_uid is not None else None
+    if owner_uid is not None and owner_user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner user not found")
+    prov = (
+        ProvisioningSource.BILLING
+        if owner_user is not None and owner_user.billing_integration_id
+        else ProvisioningSource.INTERNAL
+    )
+
+    product_snapshot: Dict[str, Any] = {}
+    if body.product_code:
+        try:
+            product_snapshot, _os_code = build_product_snapshot(
+                db, body.product_code, None, ServiceType.HTTP_PROXY
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    service = ServiceDAO.create_bare_metal(
+        db,
+        name=body.name,
+        server_id=None,
+        owner_user_id=owner_uid,
+        external_service_id=body.external_service_id,
+        service_type=ServiceType.HTTP_PROXY,
+        status=ServiceStatus.PENDING,
+        description=body.description,
+        config=body.service_config or {},
+        product_code=body.product_code,
+        product_snapshot=product_snapshot,
+        provisioning_source=prov,
+    )
+    db.refresh(service)
+
+    log_server_activity_attempt(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="create_admin_http_proxy",
+        source="admin_api",
+        message=f"Creating proxy service '{body.name}' (pending)",
+        details={"provisioning_source": prov.value},
+    )
+
+    ip_count, subnet_id, ip_strategy = resolve_proxy_ip_request(
+        product_snapshot.get("effective_specs"),
+        override_ip_count=body.ip_count,
+        override_subnet_id=body.subnet_id,
+        override_strategy=body.allocation_strategy,
+    )
+    try:
+        assignments = auto_assign_proxy_ips(
+            db,
+            service,
+            ip_count=ip_count,
+            subnet_id=subnet_id,
+            strategy=ip_strategy,
+            assigned_by="admin",
+        )
+    except Exception as exc:
+        ServiceDAO.delete(db, service.id)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    ServiceDAO.update(db, service)
+
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="create_admin_http_proxy",
+        source="admin_api",
+        message=f"Created proxy service '{body.name}' ({len(assignments)}/{ip_count} IP(s) assigned)",
+        details={"assigned_ip_count": len(assignments), "requested_ip_count": ip_count},
+    )
+    logger.info("Admin API: created http_proxy service %s (%s/%s IPs)", service.id, len(assignments), ip_count)
     return _service_to_admin_response(db, service)

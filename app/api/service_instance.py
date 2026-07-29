@@ -5,11 +5,12 @@ CRUD for service instances. Test connection uses api_key to call the runner's /s
 Requires SERVICE_INSTANCE_ENCRYPTION_KEY for creating instances (API keys stored encrypted).
 """
 from datetime import datetime
+from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServiceInstanceDAO, LocationDAO
@@ -17,6 +18,23 @@ from app.models.service_instance import ServiceInstance
 
 
 router = APIRouter(prefix="/service-instances", tags=["service-instances"])
+
+# DHCP/TFTP/proxy runner base_urls legitimately point at RFC1918 addresses
+# inside the DC network by design (that's how these runners are deployed),
+# so this intentionally does not allowlist/denylist IP ranges the way the
+# Go proxy runner's customer-facing destination ACL does. It only rejects
+# non-HTTP(S) schemes, which would let an admin-supplied value be used for
+# SSRF-adjacent tricks (e.g. file://, gopher://) when passed to httpx.
+_ALLOWED_BASE_URL_SCHEMES = {"http", "https"}
+
+
+def _validate_runner_base_url(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme.lower() not in _ALLOWED_BASE_URL_SCHEMES or not parsed.hostname:
+        raise ValueError("base_url must be an http:// or https:// URL")
+    return value
 
 
 class ServiceInstanceCreate(BaseModel):
@@ -26,11 +44,21 @@ class ServiceInstanceCreate(BaseModel):
     base_url: str
     api_key: str | None = None
 
+    @field_validator("base_url")
+    @classmethod
+    def _check_base_url(cls, value: str) -> str:
+        return _validate_runner_base_url(value)
+
 
 class ServiceInstanceUpdate(BaseModel):
     name: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_base_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_runner_base_url(value)
 
 
 class ServiceInstanceResponse(BaseModel):

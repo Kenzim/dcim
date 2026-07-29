@@ -11,7 +11,9 @@ import asyncio
 import re
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
+from sqlalchemy import String, cast, or_
+from sqlalchemy.orm import Session, aliased
 from typing import List, Optional
 from datetime import datetime, timezone
 from app.core.database import get_db
@@ -23,23 +25,35 @@ from app.schemas.billing import (
     BillingBareMetalServiceCreate,
     BillingVmServiceCreate,
     BillingRegisterService,
+    BillingLinkService,
+    BillingAdoptVmService,
+    BillingVmPlacementUpdate,
     BillingServiceResponse,
     BillingServiceDetailResponse,
+    BillingServiceLookupItem,
     PowerAction,
     SuspendAction,
     ServerUsage,
     ServiceActionRunScript,
     ServiceActionReinstallOS,
 )
+from app.models.user import User
+from app.models.service_bare_metal import ServiceBareMetal
+from app.models.service_vm import ServiceVm
+from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
+from app.utils.shell_escape import shell_escape_double_quoted
 from app.dao.disk_dao import DiskDAO
 from app.dao.network_port_dao import NetworkPortDAO
 from app.plugins.registry import get_registry
 from app.dao.location_dao import LocationDAO
-from app.dao.external_user_dao import ExternalUserDAO
+from app.dao.user_dao import UserDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
+from app.dao.ipam_dao import IPAMDAO
+from app.services.proxy_provisioning import assignment_payload, auto_assign_proxy_ips, resolve_proxy_ip_request
+from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.script_dao import ScriptDAO
 from app.dao.boot_task_dao import BootTaskDAO
@@ -51,8 +65,17 @@ from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
 from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
-from app.services.download_token_service import get_download_token_service
+from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
+from app.services.vm_vnc_ticket_service import mint_launch_ticket, build_launch_url, VmVncUnavailable
+from app.schemas.vm_vnc import VmVncTicketResponse
+from app.services.client_portal_service import ensure_user_for_billing_identity, mint_sso_ticket
+from app.services.client_permission_resolver import (
+    resolve_client_permissions,
+    require_client_permission,
+)
+from app.core.client_permissions import PermissionKey
+from app.core.config import settings
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -69,6 +92,20 @@ from app.services.service_resource import (
 )
 from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
 from app.services.vm_strategy_executor import schedule_vm_auto_provision
+from app.services.billing_provisioning_service import (
+    ProvisioningActor,
+    provision_bare_metal_service,
+    provision_vm_service,
+)
+from app.services.service_lifecycle import (
+    ServiceLifecycle,
+    ServiceLifecycleError,
+)
+from app.services.strategy_actions import (
+    StrategyActionError,
+    list_actions,
+    run_action,
+)
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 import logging
 import os
@@ -80,17 +117,50 @@ router = APIRouter(prefix="/billing", tags=["billing"])
 
 def _assert_billing_owned_service(service: Service, integration: BillingIntegration) -> None:
     """Reject internal-only services and services owned by another integration (404)."""
-    eu = service.external_user
-    if service.external_user_id is None or eu is None:
+    owner = service.owner_user
+    if owner is None or owner.billing_integration_id is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Service not found",
         )
-    if eu.integration_id != integration.id:
+    if owner.billing_integration_id != integration.id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Service not found",
         )
+
+
+def _assert_linkable_service(service: Service, integration: BillingIntegration) -> None:
+    """
+    Allow linking services owned by this integration, or unowned/internal services
+    that an admin is claiming for billing.
+    """
+    owner = service.owner_user
+    if owner is None or owner.billing_integration_id is None:
+        return
+    if owner.billing_integration_id != integration.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service not found",
+        )
+
+
+def _lookup_item_from_service(db: Session, service: Service) -> BillingServiceLookupItem:
+    resp = _billing_service_response(db, service)
+    server = service_linked_server(db, service)
+    return BillingServiceLookupItem(
+        id=resp.id,
+        name=resp.name,
+        external_service_id=resp.external_service_id,
+        service_type=resp.service_type,
+        status=resp.status,
+        proxmox_cluster_id=resp.proxmox_cluster_id,
+        proxmox_node_name=resp.proxmox_node_name,
+        proxmox_vmid=resp.proxmox_vmid,
+        server_ip=resp.server_ip,
+        server_name=server.name if server else None,
+        source="rackflow",
+    )
 
 
 def _validate_optional_proxmox_cluster(db: Session, cid: Optional[int]) -> None:
@@ -104,6 +174,11 @@ def _validate_optional_proxmox_cluster(db: Session, cid: Optional[int]) -> None:
 def _billing_service_response(db: Session, service: Service) -> BillingServiceResponse:
     server = service_linked_server(db, service)
     cid, node, vmid = vm_placement(service)
+    proxy_assignments = None
+    if service.service_type == ServiceType.HTTP_PROXY:
+        proxy_assignments = [
+            assignment_payload(a) for a in IPAMDAO.get_assignment_by_service(db, service.id)
+        ]
     src = service.provisioning_source or ProvisioningSource.BILLING
     vm_tid = service.vm.vm_template_id if service.vm else None
     vm_ip_allocation_id = None
@@ -124,7 +199,11 @@ def _billing_service_response(db: Session, service: Service) -> BillingServiceRe
         os_code=service.os_code,
         vm_template_id=vm_tid,
         server_id=service_server_id_for_response(service),
-        external_user_id=service.external_user_id,
+        external_user_id=(
+            service.owner_user_id
+            if service.owner_user and service.owner_user.billing_integration_id
+            else None
+        ),
         provisioning_source=src.value if hasattr(src, "value") else str(src),
         proxmox_cluster_id=cid,
         proxmox_node_name=node,
@@ -137,6 +216,7 @@ def _billing_service_response(db: Session, service: Service) -> BillingServiceRe
         config=service.config,
         server_ip=server.server_ip if server else None,
         credentials=server.credentials if server else None,
+        proxy_assignments=proxy_assignments,
         created_at=service.created_at,
         updated_at=service.updated_at,
     )
@@ -173,6 +253,13 @@ def _billing_get_plugin_instance(db: Session, service: Service):
         return inst, None
     server = service_linked_server(db, service)
     if not server:
+        if service.service_type == ServiceType.HTTP_PROXY:
+            # Server-less proxy (provisioned purely from the IP pool): power
+            # and IPMI are not applicable, not a data-integrity error.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This proxy service has no linked server; power/IPMI control is not applicable",
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Service has no linked server",
@@ -180,6 +267,29 @@ def _billing_get_plugin_instance(db: Session, service: Service):
     registry = get_registry()
     inst = registry.get_plugin(server.plugin_name, server.plugin_config)
     return inst, server
+
+
+def _power_permission_key(service: Service) -> str:
+    """The client permission key gating power actions for this service type."""
+    return PermissionKey.VM_POWER if service.service_type == ServiceType.VM else PermissionKey.BMS_POWER
+
+
+async def _ensure_service_powered_off(db: Session, service: Service) -> None:
+    """
+    Force-stop the linked machine for billing lifecycle (suspend).
+
+    Skips http_proxy and VMs missing Proxmox placement. Already-off is success.
+    Raises HTTPException on failure so the caller must not mark the service suspended.
+    """
+    try:
+        await ServiceLifecycle(
+            plugin_resolver=_billing_get_plugin_instance
+        ).ensure_powered_off(db, service)
+    except ServiceLifecycleError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
 
 
 def _billing_activity_log_kw(db: Session, service: Service) -> dict:
@@ -284,31 +394,16 @@ async def register_service(
                 detail=f"Server is already linked to service '{svc.name}' (ID: {svc.id}). Unlink or terminate that service first."
             )
 
-    # Find or create external user (WHMCS / billing "virtual" owner)
-    external_user = ExternalUserDAO.get_by_external_id(
-        db, integration.id, data.external_user_id
+    # Find or create the billing owner (WHMCS / billing "virtual" owner) and
+    # its linked portal account in one step.
+    billing_user = ensure_user_for_billing_identity(
+        db,
+        billing_integration_id=integration.id,
+        external_user_id=data.external_user_id,
+        external_username=data.external_username,
+        external_email=data.external_email,
     )
-    if not external_user:
-        external_user = ExternalUserDAO.create(
-            db,
-            integration_id=integration.id,
-            external_user_id=data.external_user_id,
-            external_username=data.external_username,
-            external_email=data.external_email,
-        )
-        logger.info(f"Created external user (ID: {external_user.id}, external_user_id: {data.external_user_id})")
-    elif data.external_username or data.external_email:
-        # Keep display fields fresh when re-registering / updating metadata
-        if data.external_username:
-            external_user.external_username = data.external_username
-        if data.external_email:
-            external_user.external_email = data.external_email
-        ExternalUserDAO.update(db, external_user)
-
-    # Mirror create-service behaviour: link the physical server to the billing owner
-    if server.external_user_id != external_user.id:
-        server.external_user_id = external_user.id
-        ServerDAO.update(db, server)
+    logger.info(f"Resolved billing user (ID: {billing_user.id}, external_user_id: {data.external_user_id})")
 
     name = data.name or f"service-{data.external_service_id}"
     log_server_activity_attempt(
@@ -320,7 +415,7 @@ async def register_service(
         message=f"Registering service '{name}'",
         details={
             "external_service_id": data.external_service_id,
-            "external_user_id": external_user.id,
+            "owner_user_id": billing_user.id,
             "integration_id": integration.id,
         },
     )
@@ -328,7 +423,7 @@ async def register_service(
         db,
         name=name,
         server_id=server.id,
-        external_user_id=external_user.id,
+        owner_user_id=billing_user.id,
         external_service_id=data.external_service_id,
         service_type=ServiceType.BARE_METAL,
         status=ServiceStatus.ACTIVE,
@@ -510,10 +605,15 @@ def _queue_template_install_for_service(
         replacements["OS_DISK_SIZE_GB"] = ""
         replacements["OS_DISK_TYPE"] = ""
 
-    # Template parameters (e.g. admin_password)
+    # Template parameters (e.g. admin_password). These are customer-supplied
+    # (set at WHMCS checkout / change-password) and are embedded via literal
+    # text substitution into a shell script executed as root on the target
+    # server, so they must be escaped for the double-quoted shell-string
+    # context templates use (e.g. ADMIN_PASSWORD="${PARAM_ADMIN_PASSWORD}")
+    # to prevent shell/command injection.
     template_parameters = template_parameters or {}
     for param_name, param_value in template_parameters.items():
-        replacements[f"PARAM_{param_name.upper()}"] = str(param_value)
+        replacements[f"PARAM_{param_name.upper()}"] = shell_escape_double_quoted(param_value)
 
     # Use debian-live temp OS for installation (same as other template flows)
     temp_os_service = get_temp_os_service()
@@ -540,11 +640,18 @@ def _queue_template_install_for_service(
             if img_path.exists():
                 rel_name = f"deploy/{img_file}"
                 template_image_files.append(rel_name)
-                allowed_files.append(rel_name)
 
     if template.disk_image and not template_image_files:
         disk_image_filename = template.disk_image.split("/")[-1]
         allowed_files.append(disk_image_filename)
+
+    # Scope the token to THIS template's own files, bound to this specific
+    # template_id (never a global "*"), so it can't be replayed to read
+    # arbitrary scripts/templates/ISOs elsewhere in the system, or against a
+    # same-named file in a different template.
+    if template.template_dir:
+        for rel_path in template_service.enumerate_relative_files(template_id):
+            allowed_files.append(template_file_scope(template_id, rel_path))
 
     # Create boot task
     boot_task = BootTaskDAO.create(
@@ -561,12 +668,13 @@ def _queue_template_install_for_service(
         description=f"Install OS template '{template.name}' via billing API",
     )
 
-    # Generate download token for template files (any file under template allowed; script fetches what it needs)
+    # Generate download token scoped to this template's own files plus log
+    # uploads for this installation task (never a global "*").
     download_token_service = get_download_token_service()
     download_token = download_token_service.generate_token(
         boot_task_id=boot_task.id,
         allowed_files=allowed_files if allowed_files else None,
-        allowed_patterns=["*"],
+        allowed_patterns=["logs-*"],
         expires_in=900,
     )
 
@@ -679,10 +787,10 @@ def _queue_template_install_for_service(
     return boot_task, installation_task
 
 
-@router.post("/bare-metal/services", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
-async def create_bare_metal_service(
+async def _provision_bare_metal_service(
     service_data: BillingBareMetalServiceCreate,
-    integration: BillingIntegration = Depends(get_billing_integration),
+    owner_user_id: int,
+    actor: ProvisioningActor,
     db: Session = Depends(get_db),
 ):
     """
@@ -691,25 +799,13 @@ async def create_bare_metal_service(
     Modes match the legacy billing create: new server, or server_group provisioning with optional OS install.
     VM products must use ``POST /billing/vm/services``.
     """
-    logger.info(f"Billing API: Creating service '{service_data.name}' via integration '{integration.name}'")
-    
-    # Find or create external user
-    external_user = ExternalUserDAO.get_by_external_id(
-        db,
-        integration.id,
-        service_data.external_user_id
+    logger.info(
+        "Provisioning service '%s' via %s '%s'",
+        service_data.name,
+        actor.kind,
+        actor.name,
     )
-    
-    if not external_user:
-        external_user = ExternalUserDAO.create(
-            db,
-            integration_id=integration.id,
-            external_user_id=service_data.external_user_id,
-            external_username=service_data.external_username,
-            external_email=service_data.external_email
-        )
-        logger.info(f"Created external user (ID: {external_user.id}, external_user_id: {service_data.external_user_id})")
-    
+
     # Check if service with same name already exists
     existing_service = ServiceDAO.get_by_name(db, service_data.name)
     if existing_service:
@@ -793,16 +889,12 @@ async def create_bare_metal_service(
         # --- Server group provisioning mode (bare metal only) ---
         server = _select_free_server_in_group(db, int(server_group_id))
 
-        # Link server to external user
-        server.external_user_id = external_user.id
-        ServerDAO.update(db, server)
-
         # Create service in PENDING state and attach original service_config
         service = ServiceDAO.create_bare_metal(
             db,
             name=service_data.name,
             server_id=server.id,
-            external_user_id=external_user.id,
+            owner_user_id=owner_user_id,
             external_service_id=service_data.external_service_id,
             service_type=resolved_service_type,
             status=ServiceStatus.PENDING,
@@ -818,11 +910,11 @@ async def create_bare_metal_service(
             server_id=server.id,
             event_type=ServerActivityEventType.SERVICE,
             action="create",
-            source="billing_api",
+            source=actor.source,
             message=f"Creating service '{service.name}'",
             details={
                 "service_id": service.id,
-                "integration_id": integration.id,
+                **actor.details,
                 "server_group_id": int(server_group_id),
             },
         )
@@ -841,12 +933,12 @@ async def create_bare_metal_service(
                 server_id=server.id,
                 event_type=ServerActivityEventType.INSTALL,
                 action="queue_template_install",
-                source="billing_api",
+                source=actor.source,
                 message=f"Queueing template install '{template_id}'",
                 details={
                     "service_id": service.id,
                     "template_id": template_id,
-                    "integration_id": integration.id,
+                    **actor.details,
                 },
             )
             try:
@@ -862,12 +954,12 @@ async def create_bare_metal_service(
                     server_id=server.id,
                     event_type=ServerActivityEventType.INSTALL,
                     action="queue_template_install",
-                    source="billing_api",
+                    source=actor.source,
                     message=f"Failed to queue template install '{template_id}'",
                     details={
                         "service_id": service.id,
                         "template_id": template_id,
-                        "integration_id": integration.id,
+                        **actor.details,
                     },
                     error=exc,
                 )
@@ -876,11 +968,11 @@ async def create_bare_metal_service(
                     server_id=server.id,
                     event_type=ServerActivityEventType.SERVICE,
                     action="create",
-                    source="billing_api",
+                    source=actor.source,
                     message=f"Service '{service.name}' provisioning failed",
                     details={
                         "service_id": service.id,
-                        "integration_id": integration.id,
+                        **actor.details,
                     },
                     error=exc,
                 )
@@ -891,7 +983,7 @@ async def create_bare_metal_service(
                 server_id=server.id,
                 event_type=ServerActivityEventType.INSTALL,
                 action="queue_template_install",
-                source="billing_api",
+                source=actor.source,
                 message=f"Queued template install '{template_id}'",
                 details={
                     "service_id": service.id,
@@ -905,11 +997,11 @@ async def create_bare_metal_service(
             server_id=server.id,
             event_type=ServerActivityEventType.SERVICE,
             action="create",
-            source="billing_api",
+            source=actor.source,
             message=f"Created service '{service.name}'",
             details={
                 "service_id": service.id,
-                "integration_id": integration.id,
+                **actor.details,
                 "server_group_id": int(server_group_id),
             },
         )
@@ -920,6 +1012,70 @@ async def create_bare_metal_service(
             service.id,
             server.id,
             server_group_id,
+        )
+    elif resolved_service_type == ServiceType.HTTP_PROXY:
+        # --- Server-less proxy provisioning: IP(s) come from IPAM, no rack Server needed ---
+        service = ServiceDAO.create_bare_metal(
+            db,
+            name=service_data.name,
+            server_id=None,
+            owner_user_id=owner_user_id,
+            external_service_id=service_data.external_service_id,
+            service_type=resolved_service_type,
+            status=ServiceStatus.PENDING,
+            description=service_data.description,
+            config=service_config,
+            product_code=service_data.product_code,
+            os_code=service_data.os_code,
+            product_snapshot=product_snapshot,
+        )
+        db.refresh(service)
+        log_server_activity_attempt(
+            db,
+            service_id=service.id,
+            event_type=ServerActivityEventType.SERVICE,
+            action="create",
+            source=actor.source,
+            message=f"Creating proxy service '{service.name}'",
+            details={"service_id": service.id, **actor.details},
+        )
+
+        ip_count, subnet_id, ip_strategy = resolve_proxy_ip_request(
+            product_snapshot.get("effective_specs"),
+            override_ip_count=service_config.get("ip_count"),
+            override_subnet_id=service_config.get("subnet_id"),
+            override_strategy=service_config.get("allocation_strategy"),
+        )
+        assignments = auto_assign_proxy_ips(
+            db,
+            service,
+            ip_count=ip_count,
+            subnet_id=subnet_id,
+            strategy=ip_strategy,
+            assigned_by=actor.assigned_by,
+        )
+        ServiceDAO.update(db, service)
+
+        log_server_activity_success(
+            db,
+            service_id=service.id,
+            event_type=ServerActivityEventType.SERVICE,
+            action="create",
+            source=actor.source,
+            message=f"Created proxy service '{service.name}' ({len(assignments)}/{ip_count} IP(s) assigned)",
+            details={
+                "service_id": service.id,
+                **actor.details,
+                "assigned_ip_count": len(assignments),
+                "requested_ip_count": ip_count,
+            },
+        )
+        logger.info(
+            "Billing API: Proxy service '%s' (ID: %s) created with %s/%s IP(s) assigned",
+            service.name,
+            service.id,
+            len(assignments),
+            ip_count,
         )
     else:
         # --- Default mode: create a brand new server record ---
@@ -993,10 +1149,6 @@ async def create_bare_metal_service(
             pxe_boot_mode=os_boot_mode,  # Default to same as OS boot mode
         )
 
-        # Link server to external user
-        server.external_user_id = external_user.id
-        ServerDAO.update(db, server)
-
         # Create disks
         if service_data.disks:
             for disk_data in service_data.disks:
@@ -1043,18 +1195,18 @@ async def create_bare_metal_service(
             server_id=server.id,
             event_type=ServerActivityEventType.SERVICE,
             action="create",
-            source="billing_api",
+            source=actor.source,
             message=f"Creating service '{service_data.name}'",
             details={
                 "external_service_id": service_data.external_service_id,
-                "integration_id": integration.id,
+                **actor.details,
             },
         )
         service = ServiceDAO.create_bare_metal(
             db,
             name=service_data.name,
             server_id=server.id,
-            external_user_id=external_user.id,
+            owner_user_id=owner_user_id,
             external_service_id=service_data.external_service_id,
             service_type=resolved_service_type,
             status=ServiceStatus.PENDING,
@@ -1070,12 +1222,12 @@ async def create_bare_metal_service(
             server_id=server.id,
             event_type=ServerActivityEventType.SERVICE,
             action="create",
-            source="billing_api",
+            source=actor.source,
             message=f"Created service '{service.name}'",
             details={
                 "service_id": service.id,
                 "external_service_id": service.external_service_id,
-                "integration_id": integration.id,
+                **actor.details,
             },
         )
 
@@ -1086,14 +1238,45 @@ async def create_bare_metal_service(
             server.id,
         )
 
+    return service
+
+
+@router.post(
+    "/bare-metal/services",
+    response_model=BillingServiceResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_bare_metal_service(
+    service_data: BillingBareMetalServiceCreate,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    billing_user = ensure_user_for_billing_identity(
+        db,
+        billing_integration_id=integration.id,
+        external_user_id=service_data.external_user_id,
+        external_username=service_data.external_username,
+        external_email=service_data.external_email,
+    )
+    service = await provision_bare_metal_service(
+        db=db,
+        service_data=service_data,
+        owner_user_id=billing_user.id,
+        actor=ProvisioningActor(
+            kind="integration",
+            actor_id=integration.id,
+            name=integration.name,
+            source="billing_api",
+        ),
+    )
     return _billing_service_response(db, service)
 
 
-@router.post("/vm/services", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
-async def create_vm_service(
+async def _provision_vm_service(
     body: BillingVmServiceCreate,
+    owner_user_id: int,
+    actor: ProvisioningActor,
     background_tasks: BackgroundTasks,
-    integration: BillingIntegration = Depends(get_billing_integration),
     db: Session = Depends(get_db),
 ):
     """
@@ -1103,7 +1286,12 @@ async def create_vm_service(
     resolves placement (auto-places from inventory if node omitted), reserves a VMID, and
     provisions the guest in the background. Poll ``GET /billing/services/{id}``.
     """
-    logger.info("Billing API: Creating VM service '%s' via integration '%s'", body.name, integration.name)
+    logger.info(
+        "Provisioning VM service '%s' via %s '%s'",
+        body.name,
+        actor.kind,
+        actor.name,
+    )
 
     if (body.service_config or {}).get("server_group_id"):
         raise HTTPException(
@@ -1114,16 +1302,6 @@ async def create_vm_service(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="vm_template_id requires product_code (template must be linked to that product in the catalog)",
-        )
-
-    external_user = ExternalUserDAO.get_by_external_id(db, integration.id, body.external_user_id)
-    if not external_user:
-        external_user = ExternalUserDAO.create(
-            db,
-            integration_id=integration.id,
-            external_user_id=body.external_user_id,
-            external_username=body.external_username,
-            external_email=body.external_email,
         )
 
     if ServiceDAO.get_by_name(db, body.name):
@@ -1149,7 +1327,7 @@ async def create_vm_service(
     service = ServiceDAO.create_vm(
         db,
         name=body.name,
-        external_user_id=external_user.id,
+        owner_user_id=owner_user_id,
         external_service_id=body.external_service_id,
         status=ServiceStatus.PENDING,
         description=body.description,
@@ -1186,10 +1364,10 @@ async def create_vm_service(
         service_id=service.id,
         event_type=ServerActivityEventType.SERVICE,
         action="create",
-        source="billing_api",
+        source=actor.source,
         message=f"Creating VM service '{service.name}'",
         details={
-            "integration_id": integration.id,
+            **actor.details,
             "vm_ip_allocation_id": allocation.id,
             "vm_ip_address": allocation.ip_address,
         },
@@ -1220,10 +1398,10 @@ async def create_vm_service(
         service_id=service.id,
         event_type=ServerActivityEventType.SERVICE,
         action="create",
-        source="billing_api",
+        source=actor.source,
         message=f"Created VM service '{service.name}'",
         details={
-            "integration_id": integration.id,
+            **actor.details,
             "vm_ip_allocation_id": allocation.id,
             "vm_ip_address": allocation.ip_address,
         },
@@ -1238,6 +1416,39 @@ async def create_vm_service(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         logger.info("Billing API: auto-provisioning queued for VM service %s", service.id)
 
+    return service
+
+
+@router.post(
+    "/vm/services",
+    response_model=BillingServiceResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_vm_service(
+    body: BillingVmServiceCreate,
+    background_tasks: BackgroundTasks,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    billing_user = ensure_user_for_billing_identity(
+        db,
+        billing_integration_id=integration.id,
+        external_user_id=body.external_user_id,
+        external_username=body.external_username,
+        external_email=body.external_email,
+    )
+    service = await provision_vm_service(
+        db=db,
+        body=body,
+        owner_user_id=billing_user.id,
+        actor=ProvisioningActor(
+            kind="integration",
+            actor_id=integration.id,
+            name=integration.name,
+            source="billing_api",
+        ),
+        background_tasks=background_tasks,
+    )
     return _billing_service_response(db, service)
 
 
@@ -1252,17 +1463,17 @@ async def list_services(
     """
     List services accessible via billing API.
     
-    Only returns services for external users belonging to this integration.
+    Only returns services owned by users belonging to this integration.
     """
-    # Get all external users for this integration
-    external_users = ExternalUserDAO.get_by_integration(db, integration.id)
-    external_user_ids = [eu.id for eu in external_users]
+    # Get all users with a billing identity under this integration
+    billing_users = UserDAO.get_by_billing_integration(db, integration.id)
+    owner_user_ids = [u.id for u in billing_users]
     
-    if not external_user_ids:
+    if not owner_user_ids:
         return []
     
-    # Filter services by external user IDs
-    query = db.query(Service).filter(Service.external_user_id.in_(external_user_ids))
+    # Filter services by owner user IDs
+    query = db.query(Service).filter(Service.owner_user_id.in_(owner_user_ids))
     
     # Apply status filter if provided
     if status_filter:
@@ -1278,6 +1489,250 @@ async def list_services(
     services = query.order_by(Service.name).offset(skip).limit(limit).all()
     
     return [_billing_service_response(db, s) for s in services]
+
+
+@router.get("/services/lookup", response_model=List[BillingServiceLookupItem])
+async def lookup_services(
+    q: Optional[str] = None,
+    service_id: Optional[int] = None,
+    proxmox_vmid: Optional[int] = None,
+    server_ip: Optional[str] = None,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """
+    Look up services for WHMCS admin linking.
+
+    Accepts exact filters (``service_id``, ``proxmox_vmid``, ``server_ip``) and/or
+    a free-text ``q`` that matches service id, service name, VMID (prefix/substring),
+    server IP, or server name. Unowned/internal services are included so they can
+    be claimed. When ``q`` or ``proxmox_vmid`` is set, also searches live Proxmox
+    guests and returns unmanaged matches with ``source=proxmox``.
+    """
+    ip = (server_ip or "").strip() or None
+    text = (q or "").strip() or None
+    if service_id is None and proxmox_vmid is None and ip is None and text is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide q, service_id, proxmox_vmid, and/or server_ip",
+        )
+
+    owner = aliased(User)
+    query = (
+        db.query(Service)
+        .outerjoin(owner, Service.owner_user_id == owner.id)
+        .outerjoin(ServiceVm, ServiceVm.service_id == Service.id)
+        .outerjoin(ServiceBareMetal, ServiceBareMetal.service_id == Service.id)
+        .outerjoin(Server, Server.id == ServiceBareMetal.server_id)
+        .filter(
+            or_(
+                Service.owner_user_id.is_(None),
+                owner.billing_integration_id.is_(None),
+                owner.billing_integration_id == integration.id,
+            )
+        )
+    )
+    if service_id is not None:
+        query = query.filter(Service.id == int(service_id))
+    if proxmox_vmid is not None:
+        query = query.filter(ServiceVm.proxmox_vmid == int(proxmox_vmid))
+    if ip is not None:
+        server = ServerDAO.get_by_ip(db, ip)
+        if not server:
+            # Still allow Proxmox guest search below when q/vmid provided.
+            if text is None and proxmox_vmid is None:
+                return []
+            query = query.filter(Service.id == -1)
+        else:
+            query = query.filter(ServiceBareMetal.server_id == server.id)
+
+    if text is not None:
+        like = f"%{text}%"
+        vmid_prefix = f"{text}%"
+        clauses = [
+            Service.name.ilike(like),
+            cast(ServiceVm.proxmox_vmid, String).like(vmid_prefix),
+            cast(ServiceVm.proxmox_vmid, String).like(like),
+            Server.server_ip.ilike(like),
+            Server.name.ilike(like),
+        ]
+        if text.isdigit():
+            clauses.append(Service.id == int(text))
+            clauses.append(ServiceVm.proxmox_vmid == int(text))
+        query = query.filter(or_(*clauses))
+
+    services = query.distinct().order_by(Service.id).limit(50).all()
+    results: List[BillingServiceLookupItem] = [
+        _lookup_item_from_service(db, s) for s in services
+    ]
+    seen_vmids = {
+        (r.proxmox_cluster_id, r.proxmox_vmid)
+        for r in results
+        if r.proxmox_cluster_id is not None and r.proxmox_vmid is not None
+    }
+
+    proxmox_q = text
+    if proxmox_q is None and proxmox_vmid is not None:
+        proxmox_q = str(int(proxmox_vmid))
+    if proxmox_q:
+        from app.services.proxmox_vm_search import search_proxmox_vms
+
+        for guest in await search_proxmox_vms(db, proxmox_q, limit=25):
+            key = (guest["cluster_id"], guest["vmid"])
+            if key in seen_vmids:
+                continue
+            seen_vmids.add(key)
+            results.append(
+                BillingServiceLookupItem(
+                    id=None,
+                    name=guest["name"],
+                    service_type="vm",
+                    status=guest.get("status") or None,
+                    proxmox_cluster_id=guest["cluster_id"],
+                    proxmox_node_name=guest["node_name"],
+                    proxmox_vmid=guest["vmid"],
+                    source="proxmox",
+                    proxmox_status=guest.get("status") or None,
+                )
+            )
+
+    return results[:50]
+
+
+@router.post("/services/adopt-vm", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
+async def adopt_vm_service(
+    body: BillingAdoptVmService,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """
+    Create a billing VM service bound to an existing Proxmox guest (no clone/provision).
+    """
+    from app.models.service_vm import VMGuestState
+
+    cluster_id = int(body.proxmox_cluster_id)
+    node_name = (body.proxmox_node_name or "").strip()
+    vmid = int(body.proxmox_vmid)
+    if cluster_id <= 0 or node_name == "" or vmid <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="proxmox_cluster_id, proxmox_node_name, and proxmox_vmid are required",
+        )
+    if ProxmoxInventoryDAO.get_cluster(db, cluster_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxmox cluster not found")
+
+    conflict = (
+        db.query(ServiceVm)
+        .filter(
+            ServiceVm.proxmox_cluster_id == cluster_id,
+            ServiceVm.proxmox_vmid == vmid,
+        )
+        .first()
+    )
+    if conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"VMID {vmid} is already bound to RackFlow service {conflict.service_id}",
+        )
+
+    external_service_id = (body.external_service_id or "").strip()
+    if not external_service_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="external_service_id is required",
+        )
+    existing = ServiceDAO.get_by_external_service_id_and_integration(
+        db, external_service_id, integration.id
+    )
+    if existing and existing.status != ServiceStatus.TERMINATED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"External service id '{external_service_id}' is already linked to "
+                f"RackFlow service {existing.id}"
+            ),
+        )
+
+    billing_user = ensure_user_for_billing_identity(
+        db,
+        billing_integration_id=integration.id,
+        external_user_id=body.external_user_id,
+        external_username=body.external_username,
+        external_email=body.external_email,
+    )
+
+    base_name = (body.name or "").strip() or f"vm-{vmid}"
+    name = base_name
+    suffix = 1
+    while ServiceDAO.get_by_name(db, name):
+        suffix += 1
+        name = f"{base_name}-{suffix}"
+
+    product_snapshot: dict = {}
+    effective_os_code = body.os_code
+    if body.product_code:
+        try:
+            product_snapshot, effective_os_code = build_product_snapshot(
+                db,
+                body.product_code,
+                body.os_code,
+                ServiceType.VM,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    service = ServiceDAO.create_vm(
+        db,
+        name=name,
+        owner_user_id=billing_user.id,
+        external_service_id=external_service_id,
+        status=ServiceStatus.ACTIVE,
+        product_code=body.product_code,
+        os_code=effective_os_code,
+        product_snapshot=product_snapshot,
+        provisioning_source=ProvisioningSource.BILLING,
+        proxmox_cluster_id=cluster_id,
+        proxmox_node_name=node_name,
+        proxmox_vmid=vmid,
+    )
+    try:
+        reserved = await reserve_vmid_aligned_with_proxmox(
+            db,
+            cluster_id=cluster_id,
+            service_id=service.id,
+            node_name=node_name,
+            requested_vmid=vmid,
+            adopt_existing=True,
+        )
+    except ValueError as exc:
+        ServiceDAO.delete(db, service.id)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    service.vm.proxmox_vmid = int(reserved)
+    service.vm.guest_state = VMGuestState.STOPPED
+    # Best-effort IP pool assign; adopted guests often already have networking.
+    VMIPAllocationDAO.assign_next_free_to_service(
+        db,
+        service_id=service.id,
+        proxmox_cluster_id=cluster_id,
+    )
+    ServiceDAO.update(db, service)
+    db.refresh(service)
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="adopt_vm",
+        source="billing_api",
+        message=f"Adopted existing Proxmox VMID {vmid}",
+        details={
+            "cluster_id": cluster_id,
+            "node_name": node_name,
+            "vmid": int(reserved),
+            "external_service_id": external_service_id,
+        },
+    )
+    return _billing_service_response(db, service)
 
 
 @router.get("/services/{service_id}", response_model=BillingServiceDetailResponse)
@@ -1314,18 +1769,208 @@ async def get_service(
         if server
         else None
     )
-    eu = service.external_user
+    owner = service.owner_user
     payload["external_user"] = (
         {
-            "id": eu.id,
-            "external_user_id": eu.external_user_id,
-            "external_username": eu.external_username,
-            "external_email": eu.external_email,
+            "id": owner.id,
+            "external_user_id": owner.external_user_id,
+            "external_username": owner.external_username,
+            "external_email": owner.external_email,
         }
-        if eu
+        if owner is not None and owner.billing_integration_id
         else None
     )
     return BillingServiceDetailResponse(**payload)
+
+
+@router.post("/services/{service_id}/link", response_model=BillingServiceResponse)
+async def link_service(
+    service_id: int,
+    data: BillingLinkService,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """
+    Bind an existing RackFlow service to an external line item (e.g. WHMCS hosting id).
+
+    Sets ``external_service_id``. When ``external_user_id`` is provided, finds or creates
+    that external user under this integration and assigns ownership.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_linkable_service(service, integration)
+
+    external_service_id = (data.external_service_id or "").strip()
+    if not external_service_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="external_service_id is required",
+        )
+
+    existing = ServiceDAO.get_by_external_service_id_and_integration(
+        db, external_service_id, integration.id
+    )
+    if existing and existing.id != service.id and existing.status != ServiceStatus.TERMINATED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"External service id '{external_service_id}' is already linked to "
+                f"RackFlow service {existing.id}"
+            ),
+        )
+
+    # Claiming an unowned/internal service requires a billing owner.
+    currently_billed = service.owner_user is not None and service.owner_user.billing_integration_id is not None
+    need_user = not currently_billed or (
+        data.external_user_id is not None and str(data.external_user_id).strip() != ""
+    )
+    if need_user:
+        ext_id = (
+            str(data.external_user_id).strip()
+            if data.external_user_id is not None and str(data.external_user_id).strip() != ""
+            else None
+        )
+        if not ext_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="external_user_id is required when claiming an unowned service",
+            )
+        billing_user = ensure_user_for_billing_identity(
+            db,
+            billing_integration_id=integration.id,
+            external_user_id=ext_id,
+            external_username=data.external_username,
+            external_email=data.external_email,
+        )
+        service.owner_user_id = billing_user.id
+        if service.provisioning_source == ProvisioningSource.INTERNAL:
+            service.provisioning_source = ProvisioningSource.BILLING
+
+    service.external_service_id = external_service_id
+    ServiceDAO.update(db, service)
+    db.refresh(service)
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="link",
+        source="billing_api",
+        message=f"Linked external_service_id={external_service_id}",
+        details={"external_service_id": external_service_id},
+    )
+    return _billing_service_response(db, service)
+
+
+@router.post("/services/{service_id}/unlink", response_model=BillingServiceResponse)
+async def unlink_service(
+    service_id: int,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Clear ``external_service_id`` on a billing-owned service (does not terminate)."""
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+
+    previous = service.external_service_id
+    service.external_service_id = None
+    ServiceDAO.update(db, service)
+    db.refresh(service)
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="unlink",
+        source="billing_api",
+        message="Cleared external_service_id",
+        details={"previous_external_service_id": previous},
+    )
+    return _billing_service_response(db, service)
+
+
+@router.put("/services/{service_id}/vm/placement", response_model=BillingServiceResponse)
+async def update_vm_placement(
+    service_id: int,
+    body: BillingVmPlacementUpdate,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Update Proxmox cluster/node/VMID for a VM billing service."""
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.service_type != ServiceType.VM or not service.vm:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM service not found")
+    _assert_billing_owned_service(service, integration)
+
+    if ProxmoxInventoryDAO.get_cluster(db, body.proxmox_cluster_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxmox cluster not found")
+
+    node_name = (body.proxmox_node_name or "").strip()
+    if not node_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="proxmox_node_name is required",
+        )
+
+    log_server_activity_attempt(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="update_vm_placement",
+        source="billing_api",
+        message="Updating VM placement",
+        details={
+            "cluster_id": body.proxmox_cluster_id,
+            "node_name": node_name,
+            "requested_vmid": body.proxmox_vmid,
+        },
+    )
+    try:
+        reserved_vmid = await reserve_vmid_aligned_with_proxmox(
+            db,
+            cluster_id=body.proxmox_cluster_id,
+            service_id=service.id,
+            node_name=node_name,
+            requested_vmid=body.proxmox_vmid,
+            adopt_existing=bool(body.adopt_existing),
+        )
+    except ValueError as exc:
+        log_server_activity_failure(
+            db,
+            service_id=service.id,
+            event_type=ServerActivityEventType.SERVICE,
+            action="update_vm_placement",
+            source="billing_api",
+            message=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    service.vm.proxmox_cluster_id = body.proxmox_cluster_id
+    service.vm.proxmox_node_name = node_name
+    service.vm.proxmox_vmid = int(reserved_vmid)
+    if body.adopt_existing and body.proxmox_vmid is not None:
+        from app.models.service_vm import VMGuestState
+
+        service.vm.guest_state = VMGuestState.STOPPED
+        service.status = ServiceStatus.ACTIVE
+    ServiceDAO.update(db, service)
+    db.refresh(service)
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="update_vm_placement",
+        source="billing_api",
+        message="Updated VM placement",
+        details={
+            "cluster_id": body.proxmox_cluster_id,
+            "node_name": node_name,
+            "vmid": int(reserved_vmid),
+            "adopt_existing": bool(body.adopt_existing),
+        },
+    )
+    return _billing_service_response(db, service)
 
 
 @router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1336,24 +1981,35 @@ async def terminate_service(
 ):
     """
     Terminate a service.
-    
+
     This marks the service as terminated.
     The server and service records are not deleted (for audit purposes).
     Server enabled/disabled is an administrative server-level flag and is not
     changed by service lifecycle actions.
     """
     logger.info(f"Billing API: Terminating service {service_id} via integration '{integration.name}'")
-    
+
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Service not found"
         )
-    
+
     _assert_billing_owned_service(service, integration)
 
     VMIPAllocationDAO.release_for_service(db, service.id)
+    IPAMDAO.release_all_for_service(db, service.id, released_by=f"billing:{integration.name}")
+
+    if service.service_type == ServiceType.VM:
+        try:
+            from app.services.vm_backup_service import purge_client_backups
+
+            await purge_client_backups(db, service)
+        except Exception:
+            logger.exception(
+                "Billing API: failed to purge client backups for service %s", service_id
+            )
 
     log_kw = _billing_activity_log_kw(db, service)
     log_server_activity_attempt(
@@ -1392,10 +2048,11 @@ async def suspend_service(
 ):
     """
     Suspend a service.
-    
-    Suspended services are blocked from power-on actions via service status.
-    Server enabled/disabled is an administrative server-level flag and is not
-    changed by service lifecycle actions.
+
+    Ensures the linked machine is force-powered off (when applicable), then
+    marks the service suspended. Suspended services are blocked from power-on
+    actions via service status. Server enabled/disabled is an administrative
+    server-level flag and is not changed by service lifecycle actions.
     """
     logger.info(f"Billing API: Suspending service {service_id} via integration '{integration.name}'")
     
@@ -1422,6 +2079,26 @@ async def suspend_service(
             "reason": action.reason,
         },
     )
+    try:
+        await _ensure_service_powered_off(db, service)
+    except HTTPException as exc:
+        log_server_activity_failure(
+            db,
+            **log_kw,
+            event_type=ServerActivityEventType.SERVICE,
+            action="suspend",
+            source="billing_api",
+            message=f"Suspend failed for service {service.id}",
+            details={
+                "service_id": service.id,
+                "integration_id": integration.id,
+                "reason": action.reason,
+                "detail": exc.detail,
+            },
+            error=exc,
+        )
+        raise
+
     service.status = ServiceStatus.SUSPENDED
     ServiceDAO.update(db, service)
 
@@ -1478,8 +2155,10 @@ async def unsuspend_service(
         message=f"Unsuspending service {service.id}",
         details={"service_id": service.id, "integration_id": integration.id},
     )
-    service.status = ServiceStatus.ACTIVE
-    ServiceDAO.update(db, service)
+    await ServiceLifecycle().unsuspend(
+        db, service, reason=action.reason or "billing_api"
+    )
+    db.commit()
 
     log_server_activity_success(
         db,
@@ -1504,8 +2183,12 @@ async def power_control(
 ):
     """
     Control server power state via service.
-    
-    Actions: on, off, reboot, reset
+
+    Actions: on, off, reboot, reset.
+
+    Authenticated via billing API key (operator authority). Client portal
+    power gating uses client-facing routes and permission resolution separately;
+    this endpoint is not gated by VM_POWER / BMS_POWER.
     """
     logger.info(f"Billing API: Power action '{power_action.action}' on service {service_id} via integration '{integration.name}'")
     
@@ -1681,20 +2364,73 @@ async def get_service_status(
                 "completed_at": task.completed_at.isoformat() if task.completed_at else None,
             }
 
+    client_permissions = resolve_client_permissions(db, service)
+    power_key = _power_permission_key(service)
+    ipmi_granted = bool(client_permissions.get(PermissionKey.BMS_IPMI, False))
+
     ipmi_proxy_available = bool(
         server
         and getattr(server, "ipmi_proxy_enabled", False)
         and getattr(server, "ipmi_web_management_url", None)
+        and ipmi_granted
     )
 
+    vnc_console_granted = bool(client_permissions.get(PermissionKey.VM_CONSOLE, False))
+    vnc_cid, vnc_node, vnc_vmid = vm_placement(service)
+    vnc_console_available = bool(
+        service.service_type == ServiceType.VM
+        and vnc_cid is not None
+        and vnc_node
+        and str(vnc_node).strip()
+        and vnc_vmid is not None
+        and vnc_console_granted
+    )
+    backups_available = bool(
+        service.service_type == ServiceType.VM
+        and vnc_cid is not None
+        and vnc_vmid is not None
+        and client_permissions.get(PermissionKey.VM_BACKUPS, False)
+    )
+
+    proxy_credentials_available = bool(
+        service.service_type == ServiceType.HTTP_PROXY
+        and client_permissions.get(PermissionKey.PROXY_VIEW_CREDENTIALS, False)
+    )
+    proxy_rotate_available = bool(
+        service.service_type == ServiceType.HTTP_PROXY
+        and client_permissions.get(PermissionKey.PROXY_ROTATE_CREDENTIALS, False)
+    )
+    proxy_assignments = (
+        [assignment_payload(a) for a in IPAMDAO.get_assignment_by_service(db, service.id)]
+        if proxy_credentials_available
+        else None
+    )
+
+    cid, node, vmid = vm_placement(service)
+    vm_ip_address = None
+    vm_ip_allocation_id = None
+    if service.service_type == ServiceType.VM and service.vm:
+        vm_ip_allocation_id = service.vm.vm_ip_allocation_id
+        if service.vm.vm_ip_allocation:
+            vm_ip_address = service.vm.vm_ip_allocation.ip_address
+        if not vm_ip_address:
+            vm_ip_address = (service.config or {}).get("vm_ip_address")
+        if not vm_ip_allocation_id:
+            vm_ip_allocation_id = (service.config or {}).get("vm_ip_allocation_id")
     return {
         "service_id": service.id,
         "service_name": service.name,
         "service_status": service.status.value,
+        "service_type": service.service_type.value if service.service_type else None,
         "server_id": server.id if server else None,
         "server_name": server.name if server else None,
         "server_enabled": server.enabled if server else None,
         "power_state": power_state.value,
+        "proxmox_cluster_id": cid,
+        "proxmox_node_name": node,
+        "proxmox_vmid": vmid,
+        "vm_ip_address": vm_ip_address,
+        "vm_ip_allocation_id": vm_ip_allocation_id,
         "ipmi_proxy_available": ipmi_proxy_available,
         # Viewer BMC credentials (safe to show to the service owner / WHMCS).
         "ipmi_viewer_username": (
@@ -1703,6 +2439,11 @@ async def get_service_status(
         "ipmi_viewer_password": (
             getattr(server, "ipmi_viewer_password", None) if ipmi_proxy_available else None
         ),
+        "vnc_console_available": vnc_console_available,
+        "backups_available": backups_available,
+        "proxy_credentials_available": proxy_credentials_available,
+        "proxy_rotate_available": proxy_rotate_available,
+        "proxy_assignments": proxy_assignments,
         "status": "suspended"
         if service.status == ServiceStatus.SUSPENDED
         else (
@@ -1711,7 +2452,354 @@ async def get_service_status(
             else "off" if power_state == PowerState.OFF else "unknown"
         ),
         "installation": installation,
+        # Effective client permissions (see app.core.client_permissions) so
+        # billing integrations (e.g. WHMCS) can gate their own UI without
+        # duplicating the resolution hierarchy. power_available mirrors the
+        # power permission for this service's type for convenience.
+        "client_permissions": client_permissions,
+        # VM power always goes through Proxmox placement (no linked Server
+        # row by design); bare_metal/http_proxy power requires an actual
+        # linked server, which a server-less proxy service may not have.
+        "power_available": bool(
+            client_permissions.get(power_key, False)
+            and (service.service_type == ServiceType.VM or server is not None)
+        ),
+        # Strategy actions for WHMCS admin/client button arrays
+        "admin_actions": list_actions(db, service, "admin"),
+        "client_actions": list_actions(db, service, "client"),
     }
+
+
+@router.post("/services/{service_id}/proxy/rotate", status_code=status.HTTP_200_OK)
+async def rotate_proxy_credentials(
+    service_id: int,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Rotate credentials for every IP assigned to an http_proxy service.
+
+    Gated by the ``proxy.rotate_credentials`` client permission so WHMCS
+    can offer this from the client area only when the product/preset grants
+    it; operator/admin use goes through the admin IPAM API instead.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.HTTP_PROXY:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a proxy service")
+    require_client_permission(db, service, PermissionKey.PROXY_ROTATE_CREDENTIALS)
+
+    assignments = IPAMDAO.get_assignment_by_service(db, service.id)
+    if not assignments:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Service has no assigned IPs to rotate")
+
+    rotated = []
+    for assignment in assignments:
+        updated = IPAMDAO.rotate_credentials(
+            db,
+            assignment_id=assignment.id,
+            username=generate_proxy_username(),
+            password=generate_proxy_password(),
+            rotated_by=f"billing:{integration.name}",
+        )
+        if updated:
+            rotated.append(assignment_payload(updated))
+
+    logger.info("Billing API: rotated proxy credentials for service %s (%s IP(s))", service_id, len(rotated))
+    return {"status": "ok", "proxy_assignments": rotated}
+
+
+class StrategyActionRequest(BaseModel):
+    params: dict = Field(default_factory=dict)
+
+
+class BillingReassignVmIpBody(BaseModel):
+    allocation_id: int = Field(..., description="Free VM IP pool row id to assign")
+    reset_network: bool = Field(
+        True,
+        description=(
+            "After swapping the pool row, run strategy reset_network. "
+            "For Linux cloud-init guests this regenerates cloud-init and reboots the VM."
+        ),
+    )
+
+
+@router.get("/services/{service_id}/available-ips", status_code=status.HTTP_200_OK)
+async def billing_list_available_vm_ips(
+    service_id: int,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Admin: browse free VM IP pool rows for this service's Proxmox cluster."""
+    from app.services.vm_ip_reassign import VmIpReassignError, list_available_ips_for_service
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    try:
+        return list_available_ips_for_service(db, service)
+    except VmIpReassignError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/services/{service_id}/reassign-ip", status_code=status.HTTP_200_OK)
+async def billing_reassign_vm_ip(
+    service_id: int,
+    body: BillingReassignVmIpBody,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Admin: release current VM IP, claim a free pool row, optionally reset guest networking."""
+    from app.services.vm_ip_reassign import VmIpReassignError, reassign_vm_ip
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    try:
+        return await reassign_vm_ip(
+            db,
+            service,
+            allocation_id=body.allocation_id,
+            reset_network=body.reset_network,
+            source="billing_api",
+        )
+    except VmIpReassignError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/services/{service_id}/actions", status_code=status.HTTP_200_OK)
+async def billing_list_strategy_actions(
+    service_id: int,
+    audience: str = "client",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    return {"actions": list_actions(db, service, audience)}  # type: ignore[arg-type]
+
+
+class BillingBackupCreate(BaseModel):
+    notes: Optional[str] = None
+    mode: str = "snapshot"
+    wait: bool = False
+
+
+class BillingBackupMutate(BaseModel):
+    volid: str
+    storage: Optional[str] = None
+    wait: bool = False
+    start: bool = True
+    vm_template_id: Optional[int] = None
+
+
+def _billing_backup_service(
+    db: Session,
+    service_id: int,
+    integration: BillingIntegration,
+    *,
+    audience: str,
+):
+    from app.api.vm_backup_routes import map_backup_error
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+    if audience == "client":
+        require_client_permission(db, service, PermissionKey.VM_BACKUPS)
+    return service, map_backup_error
+
+
+@router.get("/services/{service_id}/backups", status_code=status.HTTP_200_OK)
+async def billing_list_backups(
+    service_id: int,
+    audience: str = "client",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    from app.services.vm_backup_service import list_service_backups_and_jobs
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
+    try:
+        items, jobs = await list_service_backups_and_jobs(db, service)
+    except Exception as exc:
+        raise map_err(exc) from exc
+    return {"backups": items, "jobs": jobs}
+
+
+@router.get("/services/{service_id}/backup-jobs", status_code=status.HTTP_200_OK)
+async def billing_list_backup_jobs(
+    service_id: int,
+    audience: str = "client",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    from app.services.vm_backup_service import list_running_backup_jobs
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
+    try:
+        jobs = await list_running_backup_jobs(db, service)
+    except Exception as exc:
+        raise map_err(exc) from exc
+    return {"jobs": jobs}
+
+
+@router.post("/services/{service_id}/backups", status_code=status.HTTP_200_OK)
+async def billing_create_backup(
+    service_id: int,
+    body: BillingBackupCreate,
+    audience: str = "client",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    from app.services.vm_backup_service import create_client_backup
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
+    try:
+        return await create_client_backup(
+            db, service, notes=body.notes, mode=body.mode, wait=body.wait
+        )
+    except Exception as exc:
+        raise map_err(exc) from exc
+
+
+@router.post("/services/{service_id}/backups/delete", status_code=status.HTTP_200_OK)
+async def billing_delete_backup(
+    service_id: int,
+    body: BillingBackupMutate,
+    audience: str = "client",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    from app.services.vm_backup_service import delete_client_backup
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
+    try:
+        await delete_client_backup(db, service, volid=body.volid, storage=body.storage)
+    except Exception as exc:
+        raise map_err(exc) from exc
+    return {"status": "ok"}
+
+
+@router.post("/services/{service_id}/backups/restore", status_code=status.HTTP_200_OK)
+async def billing_restore_backup(
+    service_id: int,
+    body: BillingBackupMutate,
+    audience: str = "client",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    from app.models.service_vm import VMGuestState
+    from app.services.vm_backup_service import restore_service_backup
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
+    try:
+        result = await restore_service_backup(
+            db,
+            service,
+            volid=body.volid,
+            storage=body.storage,
+            wait=body.wait,
+            start=body.start,
+            vm_template_id=body.vm_template_id,
+        )
+    except Exception as exc:
+        raise map_err(exc) from exc
+    # Async enqueue already sets PROVISIONING; only sync wait path finalizes power state here.
+    if body.wait and service.vm:
+        service.vm.guest_state = VMGuestState.RUNNING if body.start else VMGuestState.STOPPED
+        service.vm.guest_last_error = None
+        ServiceDAO.update(db, service)
+    return result
+
+
+class BillingVmReinstallBody(BaseModel):
+    vm_template_id: Optional[int] = None
+    ssh_public_keys: Optional[str] = None
+
+
+@router.get("/services/{service_id}/vm/reinstall-options", status_code=status.HTTP_200_OK)
+async def billing_vm_reinstall_options(
+    service_id: int,
+    audience: str = "admin",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Templates available for VM reinstall (product-linked catalog rows)."""
+    from app.services.ssh_public_keys import ssh_key_fields_for_service
+    from app.services.vm_ssh_keys_service import list_reinstall_templates_for_service
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+    if audience == "client":
+        require_client_permission(db, service, PermissionKey.VM_REINSTALL)
+    fields = ssh_key_fields_for_service(db, service)
+    return {
+        **fields,
+        "vm_template_id": service.vm.vm_template_id if service.vm else None,
+        "reinstall_templates": list_reinstall_templates_for_service(db, service),
+    }
+
+
+@router.post("/services/{service_id}/vm/reinstall", status_code=status.HTTP_200_OK)
+async def billing_vm_reinstall(
+    service_id: int,
+    body: Optional[BillingVmReinstallBody] = None,
+    audience: str = "admin",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Destroy guest (if any) and reprovision at the reserved VMID (WHMCS / billing)."""
+    from app.services.vm_reinstall_service import VmReinstallError, reinstall_vm_guest
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+    if audience == "client":
+        require_client_permission(db, service, PermissionKey.VM_REINSTALL)
+
+    payload = body or BillingVmReinstallBody()
+    try:
+        result = await reinstall_vm_guest(
+            db,
+            service,
+            vm_template_id=payload.vm_template_id,
+            ssh_public_keys=payload.ssh_public_keys,
+        )
+    except VmReinstallError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return result
 
 
 @router.post("/services/{service_id}/ipmi-ticket", status_code=status.HTTP_200_OK)
@@ -1734,6 +2822,7 @@ async def create_ipmi_ticket(
         )
 
     _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_IPMI)
 
     server = service_linked_server(db, service)
     if not server:
@@ -1756,6 +2845,86 @@ async def create_ipmi_ticket(
         integration.name,
     )
     return payload
+
+
+@router.post("/services/{service_id}/vnc-ticket", status_code=status.HTTP_200_OK, response_model=VmVncTicketResponse)
+async def create_vnc_ticket(
+    service_id: int,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """
+    Mint a one-time VM VNC console launch ticket.
+
+    WHMCS (or any billing integration) calls this on behalf of the already
+    authenticated end user; the returned ``launch_url`` opens Rackflow's
+    ``/vnc`` page (typically in a popup), which redeems the ticket for a
+    console session. No Rackflow login is required, and Proxmox account
+    credentials never reach the browser.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+        )
+
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+    require_client_permission(db, service, PermissionKey.VM_CONSOLE)
+
+    cid, node, vmid = vm_placement(service)
+    if cid is None or not (node and str(node).strip()) or vmid is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM placement is not configured")
+
+    try:
+        token = mint_launch_ticket(service.id)
+        launch_url = build_launch_url(token)
+    except VmVncUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
+
+    logger.info(
+        "Billing API: Minted VM VNC launch ticket for service %s via integration '%s'",
+        service_id,
+        integration.name,
+    )
+    return VmVncTicketResponse(launch_url=launch_url, expires_in=settings.vm_vnc_launch_ttl_seconds)
+
+
+@router.post("/services/{service_id}/portal-sso", status_code=status.HTTP_200_OK)
+async def create_portal_sso_ticket(
+    service_id: int,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """One-click client portal sign-in for the billing platform's own logged-in user.
+
+    Mirrors ``/ipmi-ticket``: the billing platform calls this on behalf of the
+    already-authenticated end user for one of their own services. If that
+    billing identity has no linked Rackflow portal account yet, one is
+    created automatically (no password; login stays SSO/impersonation-only
+    until an admin sets one). Returns a one-time ``token`` to redeem at
+    ``GET /api/client/sso/redeem?token=...``, which sets a normal client
+    session cookie and redirects to ``/client``.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+
+    _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.SERVICE_PORTAL)
+
+    # _assert_billing_owned_service guarantees owner_user is set and billed.
+    user = service.owner_user
+    token = mint_sso_ticket(user.id)
+
+    logger.info(
+        "Billing API: minted portal SSO ticket for service %s (user %s) via integration '%s'",
+        service_id,
+        user.id,
+        integration.name,
+    )
+    return {"token": token, "redeem_path": "/api/client/sso/redeem", "expires_in": settings.client_sso_ticket_ttl_seconds}
 
 
 @router.get("/services/{service_id}/usage", response_model=ServerUsage)
@@ -1834,6 +3003,7 @@ async def run_script_on_service(
         )
     
     _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_RUN_SCRIPT)
     
     # Get script
     script = ScriptDAO.get_by_id(db, action.script_id)
@@ -2029,6 +3199,7 @@ async def reinstall_os_on_service(
         )
     
     _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_REINSTALL)
 
     server = service_linked_server(db, service)
     if not server:
@@ -2107,10 +3278,23 @@ async def reinstall_os_on_service(
         if template.disk_image:
             disk_image_filename = template.disk_image.split("/")[-1]
 
-        # Add template parameters
+        # Scope the eventual download token to this template's own files,
+        # bound to this specific template_id (never a global "*"), so it
+        # can't be replayed to read arbitrary scripts/templates/ISOs
+        # elsewhere in the system, or against a same-named file in a
+        # different template.
+        template_allowed_files: list[str] = []
+        if template.template_dir:
+            for rel_path in template_service.enumerate_relative_files(action.template_id):
+                template_allowed_files.append(template_file_scope(action.template_id, rel_path))
+
+        # Add template parameters. Escape for double-quoted shell-string
+        # context (see _queue_template_install_for_service) since these are
+        # customer-supplied values embedded via literal text substitution
+        # into a root-executed install script.
         if action.template_parameters:
             for param_name, param_value in action.template_parameters.items():
-                replacements[f"PARAM_{param_name.upper()}"] = str(param_value)
+                replacements[f"PARAM_{param_name.upper()}"] = shell_escape_double_quoted(param_value)
 
         # Template installations use debian-live
         temp_os_service = get_temp_os_service()
@@ -2139,13 +3323,15 @@ async def reinstall_os_on_service(
             status=BootTaskStatus.PENDING
         )
 
-        # Generate download token for file access (any template file allowed; script fetches what it needs)
-        allowed_files = [disk_image_filename] if disk_image_filename else []
+        # Generate download token scoped to this template's own files (never
+        # a global "*").
+        allowed_files = list(template_allowed_files)
+        if disk_image_filename:
+            allowed_files.append(disk_image_filename)
         download_token_service = get_download_token_service()
         download_token = download_token_service.generate_token(
             boot_task_id=boot_task.id,
             allowed_files=allowed_files if allowed_files else None,
-            allowed_patterns=["*"],
             expires_in=900,
         )
 
@@ -2233,6 +3419,160 @@ async def reinstall_os_on_service(
     }
 
 
+# Registered after static /actions/run-script and /actions/reinstall-os so those
+# BMS endpoints are not swallowed by the {action_name} path parameter.
+@router.post("/services/{service_id}/actions/{action_name}", status_code=status.HTTP_200_OK)
+async def billing_run_strategy_action(
+    service_id: int,
+    action_name: str,
+    body: StrategyActionRequest,
+    audience: str = "client",
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+    try:
+        return await run_action(db, service, action_name, body.params, audience)  # type: ignore[arg-type]
+    except StrategyActionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc) or "Strategy action failed",
+        ) from exc
+
+
+def _billing_product_catalog_item(db: Session, product) -> dict:
+    """Serialize a catalog product for WHMCS module settings / checkout sync."""
+    family = product.family
+    effective_specs = ProductVMConfigDAO.resolve_effective_config(db, product)
+    if not effective_specs:
+        effective_specs = {
+            **((family.defaults if family else None) or {}),
+            **(product.overrides or {}),
+        }
+
+    os_profiles = []
+    if family is not None:
+        for mapping in family.os_mappings or []:
+            profile = mapping.os_profile
+            if profile is None or not profile.enabled:
+                continue
+            os_profiles.append(
+                {
+                    "id": profile.id,
+                    "code": profile.code,
+                    "name": profile.name,
+                    "os_family": profile.os_family,
+                    "strategy_name": profile.strategy_name,
+                }
+            )
+    os_profiles.sort(key=lambda row: (row.get("name") or row.get("code") or "").lower())
+
+    from app.services.ssh_public_keys import os_type_accepts_ssh_key
+    from app.services.vm_install_type_strategy import resolve_vm_template_strategy
+
+    vm_templates = []
+    for mapping in product.vm_template_mappings or []:
+        tmpl = mapping.vm_template
+        if tmpl is None or not tmpl.enabled:
+            continue
+        strategy_name = None
+        try:
+            strategy_name = resolve_vm_template_strategy(tmpl.os_type).get("strategy_name")
+        except ValueError:
+            strategy_name = None
+        vm_templates.append(
+            {
+                "id": tmpl.id,
+                "code": tmpl.code,
+                "name": tmpl.name,
+                "os_type": tmpl.os_type,
+                "proxmox_template_name": tmpl.proxmox_template_name,
+                "strategy_name": strategy_name,
+                "accepts_ssh_key": os_type_accepts_ssh_key(tmpl.os_type),
+            }
+        )
+    vm_templates.sort(key=lambda row: (row.get("name") or "").lower())
+
+    return {
+        "id": product.id,
+        "code": product.code,
+        "name": product.name,
+        "description": product.description or "",
+        "enabled": bool(product.enabled),
+        "service_type": family.service_type if family else None,
+        "family": (
+            {
+                "id": family.id,
+                "code": family.code,
+                "name": family.name,
+                "service_type": family.service_type,
+                "provisioning_backend": family.provisioning_backend,
+            }
+            if family
+            else None
+        ),
+        "effective_specs": effective_specs or {},
+        "overrides": product.overrides or {},
+        "os_profiles": os_profiles,
+        "vm_templates": vm_templates,
+        "checkout_os_mode": (
+            "vm_template"
+            if vm_templates
+            else ("os_profile" if os_profiles else "none")
+        ),
+    }
+
+
+@router.get("/products", response_model=List[dict])
+async def list_products_billing(
+    service_type: Optional[str] = None,
+    include_disabled: bool = False,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """
+    List RackFlow catalog products for billing systems (WHMCS Module Settings).
+
+    Optional ``service_type`` filters to ``bare_metal``, ``vm``, or ``http_proxy``.
+    Each item includes effective specs, family OS profiles, and linked VM templates
+    so the admin UI can preview what a product will provision.
+    """
+    rows = ProductDAO.get_all(db)
+    wanted = (service_type or "").strip().lower() or None
+    out: List[dict] = []
+    for product in rows:
+        if not include_disabled and not product.enabled:
+            continue
+        family = product.family
+        if wanted and (family is None or family.service_type != wanted):
+            continue
+        out.append(_billing_product_catalog_item(db, product))
+    return out
+
+
+@router.get("/products/{product_code}", response_model=dict)
+async def get_product_billing(
+    product_code: str,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Return one catalog product (by code) with OS/template preview payload."""
+    product = ProductDAO.get_by_code(db, product_code)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown product_code '{product_code}'",
+        )
+    return _billing_product_catalog_item(db, product)
+
+
 @router.get("/isos", response_model=List[dict])
 async def list_isos_billing(
     integration: BillingIntegration = Depends(get_billing_integration),
@@ -2276,6 +3616,38 @@ async def list_temp_os_billing(
         }
         for c in configs
     ]
+
+
+@router.get("/proxmox/clusters", response_model=List[dict])
+async def list_proxmox_clusters_billing(
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """
+    List enabled Proxmox clusters (locations) for WHMCS module/config option loaders.
+
+    Returns id + display name + enabled nodes so billing can offer a location
+    dropdown without an admin session.
+    """
+    from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
+
+    out: List[dict] = []
+    for cluster in ProxmoxInventoryDAO.list_clusters(db):
+        if not cluster.enabled:
+            continue
+        nodes = [
+            {"node_name": n.node_name, "enabled": bool(n.enabled)}
+            for n in (cluster.nodes or [])
+            if n.enabled
+        ]
+        out.append(
+            {
+                "id": cluster.id,
+                "name": cluster.name,
+                "nodes": nodes,
+            }
+        )
+    return out
 
 
 @router.get("/server-groups", response_model=List[dict])

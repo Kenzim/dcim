@@ -85,6 +85,64 @@ class BillingRegisterService(BaseModel):
     name: Optional[str] = Field(None, description="Service name; default service-{external_service_id}")
 
 
+class BillingLinkService(BaseModel):
+    """Bind a RackFlow service to an external (e.g. WHMCS) line item."""
+    external_service_id: str = Field(..., description="External service ID (e.g. WHMCS hosting id)")
+    external_user_id: Optional[str] = Field(
+        None,
+        description="External user/client ID; when set, finds or creates the external user and assigns ownership",
+    )
+    external_username: Optional[str] = Field(None, description="Username in external system")
+    external_email: Optional[str] = Field(None, description="Email in external system")
+
+
+class BillingAdoptVmService(BaseModel):
+    """Adopt an existing Proxmox guest as a billing VM service and bind it externally."""
+    external_service_id: str = Field(..., description="External service ID (e.g. WHMCS hosting id)")
+    external_user_id: str = Field(..., description="External user/client ID")
+    external_username: Optional[str] = Field(None, description="Username in external system")
+    external_email: Optional[str] = Field(None, description="Email in external system")
+    proxmox_cluster_id: int
+    proxmox_node_name: str
+    proxmox_vmid: int
+    name: Optional[str] = Field(None, description="Service name; defaults to Proxmox guest name")
+    product_code: Optional[str] = None
+    os_code: Optional[str] = None
+
+
+class BillingVmPlacementUpdate(BaseModel):
+    """Update Proxmox placement for a VM billing service."""
+    proxmox_cluster_id: int
+    proxmox_node_name: str
+    proxmox_vmid: Optional[int] = Field(
+        None,
+        description="Requested VMID; omitted/null lets the allocator pick the next free id",
+    )
+    adopt_existing: bool = Field(
+        False,
+        description=(
+            "When true, bind to an existing Proxmox guest VMID (skip nextid availability check "
+            "and allow VMIDs outside the cluster auto-allocation range)."
+        ),
+    )
+
+
+class BillingServiceLookupItem(BaseModel):
+    """Lookup row for WHMCS admin link search (RackFlow service or unmanaged Proxmox guest)."""
+    id: Optional[int] = None
+    name: str
+    external_service_id: Optional[str] = None
+    service_type: Optional[str] = None
+    status: Optional[str] = None
+    proxmox_cluster_id: Optional[int] = None
+    proxmox_node_name: Optional[str] = None
+    proxmox_vmid: Optional[int] = None
+    server_ip: Optional[str] = None
+    server_name: Optional[str] = None
+    source: str = Field("rackflow", description="rackflow or proxmox")
+    proxmox_status: Optional[str] = None
+
+
 class BillingServiceResponse(BaseModel):
     """Response schema for service details"""
     id: int
@@ -127,6 +185,10 @@ class BillingServiceResponse(BaseModel):
     credentials: Optional[Dict[str, Any]] = Field(
         default=None,
         description="OS / service credentials (e.g. admin username/password) when known",
+    )
+    proxy_assignments: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="For http_proxy services: assigned IP(s) + credentials + ready-to-use proxy URLs",
     )
     created_at: datetime
     updated_at: datetime

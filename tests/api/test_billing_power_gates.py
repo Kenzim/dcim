@@ -2,7 +2,7 @@
 import pytest
 
 from app.dao.billing_integration_dao import BillingIntegrationDAO
-from app.dao.external_user_dao import ExternalUserDAO
+from app.dao.user_dao import UserDAO
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ProvisioningSource, ServiceStatus
 
@@ -15,9 +15,11 @@ def _integration_key(db_session):
 
 
 def _service_for(db_session, integration, status):
-    ext_user = ExternalUserDAO.create(
+    billing_user = UserDAO.create(
         db_session,
-        integration_id=integration.id,
+        username="poweruser",
+        email="power@example.com",
+        billing_integration_id=integration.id,
         external_user_id="ext-power-1",
         external_username="poweruser",
         external_email="power@example.com",
@@ -25,7 +27,7 @@ def _service_for(db_session, integration, status):
     return ServiceDAO.create_vm(
         db_session,
         name="svc-power",
-        external_user_id=ext_user.id,
+        owner_user_id=billing_user.id,
         provisioning_source=ProvisioningSource.BILLING,
         status=status,
     )

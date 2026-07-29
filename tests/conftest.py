@@ -8,6 +8,14 @@ os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 # Disable initial admin creation so test fixtures can create users without conflicts
 os.environ["INITIAL_ADMIN_USERNAME"] = ""
 os.environ["INITIAL_ADMIN_PASSWORD"] = ""
+# Tests intentionally exercise the plaintext/no-encryption-key path for service
+# instance API keys (see tests/dao/test_service_instance_dao.py), so opt out of
+# the secure-by-default production requirement here.
+os.environ["REQUIRE_SERVICE_INSTANCE_ENCRYPTION"] = "false"
+# Some tests introspect /openapi.json to assert on route schemas; keep the
+# docs endpoints enabled in the test environment even though they're disabled
+# by default in production.
+os.environ["DISABLE_PUBLIC_API_DOCS"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,6 +50,8 @@ def mock_redis():
     mock_redis_client._zsets = {}
     # Store TTLs: {key: seconds}
     mock_redis_client._ttls = {}
+    # Store simple integer counters (e.g. rate limiting): {key: count}
+    mock_redis_client._counters = {}
     
     def mock_hset(key, *args, mapping=None, **kwargs):
         """
@@ -90,18 +100,34 @@ def mock_redis():
             if key in mock_redis_client._zsets:
                 del mock_redis_client._zsets[key]
                 count += 1
+            if key in mock_redis_client._counters:
+                del mock_redis_client._counters[key]
+                count += 1
             if key in mock_redis_client._ttls:
                 del mock_redis_client._ttls[key]
         return count
     
     def mock_expire(key, seconds):
-        if key in mock_redis_client._hashes or key in mock_redis_client._zsets:
+        if (
+            key in mock_redis_client._hashes
+            or key in mock_redis_client._zsets
+            or key in mock_redis_client._counters
+        ):
             mock_redis_client._ttls[key] = seconds
             return True
         return False
     
     def mock_exists(key):
-        return key in mock_redis_client._hashes or key in mock_redis_client._zsets
+        return (
+            key in mock_redis_client._hashes
+            or key in mock_redis_client._zsets
+            or key in mock_redis_client._counters
+        )
+
+    def mock_incr(key, amount=1):
+        """Mock INCR: atomically increment (and implicitly create) an integer counter."""
+        mock_redis_client._counters[key] = mock_redis_client._counters.get(key, 0) + amount
+        return mock_redis_client._counters[key]
     
     def mock_scan_iter(match=None):
         """Mock scan_iter for iterating over keys"""
@@ -163,12 +189,23 @@ def mock_redis():
     def mock_pipeline():
         return MockPipeline(mock_redis_client)
     
+    def mock_ttl(key):
+        if (
+            key not in mock_redis_client._hashes
+            and key not in mock_redis_client._zsets
+            and key not in mock_redis_client._counters
+        ):
+            return -2
+        return mock_redis_client._ttls.get(key, -1)
+
     mock_redis_client.hset = mock_hset
     mock_redis_client.hgetall = mock_hgetall
     mock_redis_client.hsetnx = mock_hsetnx
     mock_redis_client.delete = mock_delete
     mock_redis_client.expire = mock_expire
+    mock_redis_client.ttl = mock_ttl
     mock_redis_client.exists = mock_exists
+    mock_redis_client.incr = mock_incr
     mock_redis_client.scan_iter = mock_scan_iter
     mock_redis_client.zadd = mock_zadd
     mock_redis_client.zrem = mock_zrem
@@ -213,14 +250,22 @@ def client(db_session, mock_redis, monkeypatch):
     import app.core.redis as redis_module
     import app.api.user as user_api
     import app.core.auth as auth_module
+    import app.core.rate_limit as rate_limit_module
     import app.services.download_token_service as token_service_module
     import app.services.ipmi_ticket_service as ipmi_ticket_module
+    import app.services.user_session_service as user_session_service_module
+    import app.services.client_portal_service as client_portal_service_module
+    import app.services.vm_vnc_ticket_service as vm_vnc_ticket_module
 
     monkeypatch.setattr(redis_module, "redis_client", mock_redis)
     monkeypatch.setattr(user_api, "redis_client", mock_redis)
     monkeypatch.setattr(auth_module, "redis_client", mock_redis)
+    monkeypatch.setattr(rate_limit_module, "redis_client", mock_redis)
     monkeypatch.setattr(token_service_module, "redis_client", mock_redis)
     monkeypatch.setattr(ipmi_ticket_module, "redis_client", mock_redis)
+    monkeypatch.setattr(user_session_service_module, "redis_client", mock_redis)
+    monkeypatch.setattr(client_portal_service_module, "redis_client", mock_redis)
+    monkeypatch.setattr(vm_vnc_ticket_module, "redis_client", mock_redis)
 
     app.dependency_overrides[get_db] = override_get_db
 
@@ -232,6 +277,7 @@ def client(db_session, mock_redis, monkeypatch):
     mock_redis._hashes.clear()
     mock_redis._zsets.clear()
     mock_redis._ttls.clear()
+    mock_redis._counters.clear()
 
 
 @pytest.fixture
