@@ -17,6 +17,11 @@ class IPSubnet(Base):
     tags = Column(JSON, nullable=False, default=list)
     allocation_strategy = Column(String(64), nullable=False, default="first_free")
     enabled = Column(Boolean, nullable=False, default=True)
+    # How many concurrent ServiceIPAssignment rows a single IP in this subnet
+    # may carry. 1 (default) reproduces today's exclusive-IP behavior; >1
+    # allows the same IP to be resold to that many distinct owners at once
+    # (see ServiceIPAssignment / same-owner collision guard in IPAMDAO).
+    max_resale_count = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -35,7 +40,11 @@ class IPAddress(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     subnet = relationship("IPSubnet", back_populates="ip_addresses")
-    assignment = relationship("ServiceIPAssignment", back_populates="ip", uselist=False)
+    # An IP may carry more than one live assignment when its subnet's
+    # max_resale_count > 1 (IP reselling); ordering is by assignment id.
+    assignments = relationship(
+        "ServiceIPAssignment", back_populates="ip", order_by="ServiceIPAssignment.id"
+    )
 
 
 class ServiceIPAssignment(Base):
@@ -43,13 +52,15 @@ class ServiceIPAssignment(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     service_id = Column(Integer, ForeignKey("services.id", ondelete="CASCADE"), nullable=False, index=True)
-    ip_id = Column(Integer, ForeignKey("ip_addresses.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    # No longer unique: a single IP can carry multiple concurrent assignments
+    # when its subnet allows reselling (IPSubnet.max_resale_count > 1).
+    ip_id = Column(Integer, ForeignKey("ip_addresses.id", ondelete="CASCADE"), nullable=False, index=True)
     username = Column(String(255), nullable=True)
     password = Column(String(255), nullable=True)
     assigned_by = Column(String(128), nullable=True)
     assigned_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    ip = relationship("IPAddress", back_populates="assignment")
+    ip = relationship("IPAddress", back_populates="assignments")
     service = relationship("Service")
 
 

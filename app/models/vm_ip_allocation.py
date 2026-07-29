@@ -31,6 +31,9 @@ class VMIPAllocation(Base):
     subnet_mask = Column(String(64), nullable=False)
     gateway = Column(String(64), nullable=False)
     bridge_name = Column(String(255), nullable=True)
+    # Free-text label applied to a batch add so related IPs can be found/filtered
+    # together later (e.g. "customer-acme-2026-07"). Optional on single create.
+    batch_tag = Column(String(100), nullable=True, index=True)
     enabled = Column(Boolean, nullable=False, default=True)
     assigned_service_id = Column(
         Integer,

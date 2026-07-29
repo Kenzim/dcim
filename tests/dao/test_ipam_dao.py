@@ -5,7 +5,7 @@ from app.dao.service_dao import ServiceDAO
 from app.models.location import Location
 from app.models.server import Server
 from app.models.service import ProvisioningSource
-from app.models.ipam import IPAddress, ServiceIPAssignmentHistory
+from app.models.ipam import IPAddress
 
 
 def _create_service(db_session) -> int:
@@ -112,4 +112,40 @@ def test_assign_ip_errors_for_disabled_or_missing_capacity(db_session):
 
     with pytest.raises(ValueError, match="No free IP available"):
         IPAMDAO.assign_ip(db_session, service_id=service_id, subnet_id=enabled_subnet.id)
+
+
+def test_update_and_delete_subnet(db_session):
+    subnet = IPAMDAO.create_subnet(db_session, name="upd-subnet", cidr="10.0.4.0/30")
+    updated = IPAMDAO.update_subnet(
+        db_session,
+        subnet.id,
+        name="renamed",
+        enabled=False,
+        allocation_strategy="least_recently_used",
+    )
+    assert updated.name == "renamed"
+    assert updated.enabled is False
+    assert updated.allocation_strategy == "least_recently_used"
+
+    # Empty assigned — delete ok
+    IPAMDAO.delete_subnet(db_session, subnet.id)
+    assert IPAMDAO.get_subnet(db_session, subnet.id) is None
+
+
+def test_delete_subnet_rejects_when_assigned(db_session):
+    service_id = _create_service(db_session)
+    subnet = IPAMDAO.create_subnet(db_session, name="busy-subnet", cidr="10.0.5.0/30")
+    IPAMDAO.assign_ip(db_session, service_id=service_id, subnet_id=subnet.id, username="u")
+    with pytest.raises(ValueError, match="assigned"):
+        IPAMDAO.delete_subnet(db_session, subnet.id)
+
+
+def test_list_assignments(db_session):
+    service_id = _create_service(db_session)
+    subnet = IPAMDAO.create_subnet(db_session, name="list-subnet", cidr="10.0.6.0/30")
+    IPAMDAO.assign_ip(db_session, service_id=service_id, subnet_id=subnet.id, username="u", password="p")
+    rows = IPAMDAO.list_assignments(db_session)
+    assert len(rows) == 1
+    assert rows[0].username == "u"
+    assert rows[0].service_id == service_id
 
