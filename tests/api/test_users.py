@@ -100,6 +100,52 @@ def test_login_invalid_password(client, test_user):
     assert "Invalid" in response.json()["detail"]
 
 
+def test_login_rate_limited_per_username(client, test_user):
+    """Repeated failed logins for the same username are throttled with 429."""
+    from app.core.config import settings
+
+    for _ in range(settings.login_rate_limit_per_username):
+        resp = client.post(
+            "/api/users/login",
+            json={"username": "testuser", "password": "wrongpassword"},
+        )
+        assert resp.status_code == 401
+
+    resp = client.post(
+        "/api/users/login",
+        json={"username": "testuser", "password": "wrongpassword"},
+    )
+    assert resp.status_code == 429
+    assert "Retry-After" in resp.headers
+
+
+def test_login_rate_limit_resets_on_success(client, test_user):
+    """A successful login clears the failed-attempt counter for that user."""
+    from app.core.config import settings
+
+    # Fail a few times, but stay under the limit.
+    for _ in range(settings.login_rate_limit_per_username - 1):
+        resp = client.post(
+            "/api/users/login",
+            json={"username": "testuser", "password": "wrongpassword"},
+        )
+        assert resp.status_code == 401
+
+    ok = client.post(
+        "/api/users/login",
+        json={"username": "testuser", "password": "testpassword123"},
+    )
+    assert ok.status_code == 200
+
+    # Counter should have been reset, so another failed attempt right after
+    # a successful login is not immediately rate-limited.
+    resp = client.post(
+        "/api/users/login",
+        json={"username": "testuser", "password": "wrongpassword"},
+    )
+    assert resp.status_code == 401
+
+
 def test_login_with_email(client, test_user):
     """Test login using email instead of username"""
     response = client.post(
@@ -252,8 +298,8 @@ def test_logout_with_bearer_token(client, test_user, mock_redis):
     assert len(mock_redis.hgetall(token_key)) == 0
 
 
-def test_get_sessions_requires_admin(client, test_user, mock_redis):
-    """Test that getting sessions requires admin"""
+def test_get_sessions_self_service_for_non_admin(client, test_user, mock_redis):
+    """Non-admin users can list their own sessions (self-service, no admin required)."""
     # Login first (non-admin user)
     login_response = client.post(
         "/api/users/login",
@@ -262,13 +308,23 @@ def test_get_sessions_requires_admin(client, test_user, mock_redis):
             "password": "testpassword123"
         }
     )
+    assert login_response.status_code == 200
     token = login_response.json()["token"]
-    
-    # Get sessions - should fail with 403
+
+    # Get sessions - scoped to this user's own session(s), no admin needed
     response = client.get("/api/users/sessions")
-    
-    assert response.status_code == 403
-    assert "Admin access required" in response.json()["detail"]
+
+    assert response.status_code == 200
+    sessions = response.json()
+    assert isinstance(sessions, list)
+    assert len(sessions) == 1
+    assert sessions[0]["is_current"] is True
+
+
+def test_get_sessions_requires_authentication(client, mock_redis):
+    """Getting sessions without any auth token/cookie is rejected."""
+    response = client.get("/api/users/sessions")
+    assert response.status_code == 401
 
 
 def test_get_sessions_with_admin(client, test_admin_user, mock_redis):
@@ -399,8 +455,8 @@ def test_admin_login(client, test_admin_user, mock_redis):
     assert stored_data["is_admin"] == "true"
 
 
-def test_delete_session_requires_admin(client, test_user, mock_redis):
-    """Test that deleting a session requires admin"""
+def test_delete_session_self_service_for_non_admin(client, test_user, mock_redis):
+    """Non-admin users can revoke their own other sessions (self-service)."""
     # Login twice to create two sessions (non-admin user)
     login1 = client.post(
         "/api/users/login",
@@ -411,7 +467,7 @@ def test_delete_session_requires_admin(client, test_user, mock_redis):
     )
     token1 = login1.json()["token"]
     token_id1 = _derive_token_id(token1)
-    
+
     login2 = client.post(
         "/api/users/login",
         json={
@@ -420,15 +476,22 @@ def test_delete_session_requires_admin(client, test_user, mock_redis):
         }
     )
     token2 = login2.json()["token"]
-    
-    # Try to delete session - should fail with 403
+
+    # Deleting the *other* session (not the one used to authenticate) works
+    # without needing admin access.
     response = client.delete(
         f"/api/users/sessions/{token_id1}",
         cookies={"auth_token": token2}
     )
-    
-    assert response.status_code == 403
-    assert "Admin access required" in response.json()["detail"]
+
+    assert response.status_code == 200
+    assert len(mock_redis.hgetall(f"tok:{token_id1}")) == 0
+
+
+def test_delete_session_requires_authentication(client, mock_redis):
+    """Deleting a session without any auth token/cookie is rejected."""
+    response = client.delete("/api/users/sessions/some-token-id")
+    assert response.status_code == 401
 
 
 def test_delete_session_with_admin(client, test_admin_user, mock_redis):
@@ -525,7 +588,7 @@ def test_delete_nonexistent_session_with_admin(client, test_admin_user, mock_red
 
 
 def test_delete_other_user_session(client, test_user, test_admin_user, mock_redis):
-    """Test that non-admin users cannot delete sessions (requires admin)"""
+    """Non-admin users can self-manage sessions, but still can't delete another user's session."""
     # Login as test_user (non-admin)
     login1 = client.post(
         "/api/users/login",
@@ -547,15 +610,15 @@ def test_delete_other_user_session(client, test_user, test_admin_user, mock_redi
     token2 = login2.json()["token"]
     token_id2 = _derive_token_id(token2)
     
-    # Try to delete admin's session while logged in as test_user
-    # Should fail with admin requirement, not "other users" error
+    # Try to delete admin's session while logged in as test_user.
+    # Self-service is now allowed, but ownership is still enforced.
     response = client.delete(
         f"/api/users/sessions/{token_id2}",
         cookies={"auth_token": token1}
     )
     
     assert response.status_code == 403
-    assert "admin access required" in response.json()["detail"].lower()
+    assert "other users" in response.json()["detail"].lower()
 
 
 def test_delete_other_user_session_with_admin(client, test_user, test_admin_user, mock_redis):

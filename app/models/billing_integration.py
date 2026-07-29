@@ -34,7 +34,7 @@ class BillingIntegration(Base):
     last_used_ip = Column(String(45), nullable=True)  # Last IP address that used this API key
     
     # Relationships
-    external_users = relationship("ExternalUser", back_populates="integration")
+    billing_users = relationship("User", back_populates="billing_integration")
 
     def __repr__(self):
         return f"<BillingIntegration(id={self.id}, name='{self.name}', type='{self.integration_type}', enabled={self.enabled})>"

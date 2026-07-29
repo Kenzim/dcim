@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.redis import redis_client
 from app.core.database import get_db
 from app.models.billing_integration import BillingIntegration
+from app.core.config import settings
 
 security = HTTPBearer(auto_error=False)
 
@@ -38,6 +39,7 @@ def _get_user_from_token(token: str, client_ip: Optional[str] = None) -> Optiona
         "username": user_data.get("username", ""),
         "email": user_data.get("email", ""),
         "is_admin": user_data.get("is_admin", "false").lower() == "true",
+        "is_reseller": user_data.get("is_reseller", "false").lower() == "true",
         "created_at": user_data.get("created_at", ""),
         "last_seen_at": user_data.get("last_seen_at", ""),
         "last_seen_ip": user_data.get("last_seen_ip", "")
@@ -94,8 +96,8 @@ def get_current_user(
     
     # Get client IP from request
     client_ip = request.client.host if request.client else None
-    # Check for X-Forwarded-For header (if behind proxy)
-    if "x-forwarded-for" in request.headers:
+    # Only trust proxy-provided client identity when explicitly configured.
+    if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
         client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
     
     # First try Redis token authentication (user session)
@@ -103,6 +105,17 @@ def get_current_user(
     
     if user_info:
         return user_info
+
+    # Reseller keys have a dedicated authentication dependency and must never
+    # be reinterpreted as generic billing integrations or user sessions.
+    from app.core.reseller_auth import is_reseller_api_key
+
+    if is_reseller_api_key(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     # If Redis token auth failed, try API key authentication (keys are hashed)
     from app.core.billing_auth import hash_api_key
@@ -151,6 +164,20 @@ def require_admin(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
+        )
+    return auth
+
+
+def require_reseller(auth: dict = Depends(get_current_user)) -> dict:
+    """Require a reseller *user session*, never an integration API key."""
+    if (
+        auth.get("type") == "api_key"
+        or not auth.get("user_id")
+        or not auth.get("is_reseller", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Reseller session required",
         )
     return auth
 
