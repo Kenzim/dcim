@@ -69,5 +69,17 @@ def test_build_launch_url_ok(monkeypatch):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "ipmi_proxy_public_base", "ipmi.test")
+    monkeypatch.setattr(settings, "ipmi_proxy_scheme", "https")
+    monkeypatch.setattr(settings, "ipmi_proxy_port", None)
     url = build_launch_url("uuid-abc", "tok123")
     assert url == "https://uuid-abc.ipmi.test/__ipmi/auth?t=tok123"
+
+
+def test_build_launch_url_includes_custom_port(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ipmi_proxy_public_base", "ipmi.test")
+    monkeypatch.setattr(settings, "ipmi_proxy_scheme", "http")
+    monkeypatch.setattr(settings, "ipmi_proxy_port", 9082)
+    url = build_launch_url("uuid-abc", "tok123")
+    assert url == "http://uuid-abc.ipmi.test:9082/__ipmi/auth?t=tok123"

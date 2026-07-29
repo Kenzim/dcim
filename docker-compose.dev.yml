@@ -26,6 +26,19 @@ services:
     environment:
       STATIC_FILES_PATH: /app/static
       PYTHONUNBUFFERED: "1"
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      PAYPAL_ENVIRONMENT: ${PAYPAL_ENVIRONMENT:-sandbox}
+      PAYPAL_RETURN_BASE_URL: ${PAYPAL_RETURN_BASE_URL:-}
+      RESELLER_TOPUP_MIN_CENTS: ${RESELLER_TOPUP_MIN_CENTS:-500}
+      RESELLER_TOPUP_MAX_CENTS: ${RESELLER_TOPUP_MAX_CENTS:-1000000}
+      # API stays enqueue-only; the dedicated deployment-worker service advances jobs
+      # (matches production). Avoids a hung in-process worker blocking uvicorn --reload.
+      RUN_DEPLOYMENT_WORKER: "false"
       # DHCP/TFTP run as in-app subprocesses (dhcpd/tftpd are in the app-dev image);
       # do NOT set DHCP_RUNNER_URL / TFTP_RUNNER_URL here.
     volumes:
@@ -42,6 +55,29 @@ services:
     ports:
       # Host ports 8000/8001 are occupied by other processes; expose the API on 8088.
       - "0.0.0.0:8088:8000"
+    restart: unless-stopped
+
+  # Dedicated deployment worker (same role as production `deployment-worker`).
+  # Survives API reload; DB leases make it safe alongside any in-process worker.
+  deployment-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app-dev
+    command: ["python", "-m", "app.workers.deployment"]
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      RUN_DEPLOYMENT_WORKER: "false"
+      DEPLOYMENT_WORKER_INTERVAL_SECONDS: ${DEPLOYMENT_WORKER_INTERVAL_SECONDS:-3}
+      DEPLOYMENT_WORKER_LEASE_TTL_SECONDS: ${DEPLOYMENT_WORKER_LEASE_TTL_SECONDS:-60}
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    depends_on:
+      - app
     restart: unless-stopped
 
   frontend:

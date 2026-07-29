@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import ssl
 import time
 from contextlib import asynccontextmanager
@@ -42,8 +43,23 @@ logger = logging.getLogger(__name__)
 RACKFLOW_BASE_URL = os.getenv("RACKFLOW_BASE_URL", "").rstrip("/")
 RUNNER_API_KEY = os.getenv("RUNNER_API_KEY", "")
 COOKIE_SECRET = os.getenv("IPMI_COOKIE_SECRET", "")
+if not COOKIE_SECRET:
+    # An empty HMAC key is a known, computable value: anyone can forge a
+    # session cookie for any server UUID (no ticket redemption required) and
+    # get IPMI/KVM console access. Fail closed by generating a random
+    # ephemeral secret instead of signing with a known-empty key. This means
+    # sessions won't survive a process restart and (if this runner is ever
+    # horizontally scaled) replicas won't accept each other's cookies --
+    # both are acceptable availability trade-offs versus authentication
+    # bypass. Set IPMI_COOKIE_SECRET explicitly for production deployments.
+    COOKIE_SECRET = secrets.token_urlsafe(32)
+    logging.getLogger(__name__).warning(
+        "IPMI_COOKIE_SECRET is not set; generated a random ephemeral secret "
+        "for this process. Sessions will not survive a restart. Set "
+        "IPMI_COOKIE_SECRET explicitly for production deployments."
+    )
 PUBLIC_BASE = os.getenv("IPMI_PUBLIC_BASE", "").strip().strip(".").lower()
-DEFAULT_SESSION_TTL = int(os.getenv("IPMI_SESSION_TTL_SECONDS", "1800"))
+DEFAULT_SESSION_TTL = int(os.getenv("IPMI_SESSION_TTL_SECONDS", "7200"))
 SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", "30"))
 # BMC web UIs almost always use self-signed certs, so upstream TLS verification
 # is off by default. Set IPMI_UPSTREAM_VERIFY_TLS=1 to enforce it.
@@ -465,8 +481,6 @@ async def health(request: Request) -> Response:
 
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    if not COOKIE_SECRET:
-        logger.warning("IPMI_COOKIE_SECRET is not set; sessions cannot be signed securely")
     task = asyncio.create_task(_sync_loop())
     try:
         yield
