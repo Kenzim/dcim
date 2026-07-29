@@ -2762,8 +2762,9 @@
   .left-pane-top {
     flex-shrink: 0;
     padding: 0 0 16px 0;
-    background: linear-gradient(180deg, var(--accent-color) 0%, var(--accent-dark) 100%);
-    color: white;
+    /* Deep teal (not neon accent) so white labels stay readable in dark theme */
+    background: linear-gradient(180deg, #0e7490 0%, #155e75 100%);
+    color: #fff;
     border-radius: 4px 4px 0 0;
   }
 

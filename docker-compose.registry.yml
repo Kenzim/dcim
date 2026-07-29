@@ -1,5 +1,6 @@
 # Pull pre-built images from the Forgejo registry (git.stackken.com).
-# Workers reuse dcim-app (also tagged as dcim-<worker> aliases by CI).
+# Worker containers use dcim-app:latest (same layers; CI may also push
+# dcim-<worker> aliases, but those tags are optional).
 services:
   app:
     image: git.stackken.com/kenzim/dcim-app:latest
@@ -52,6 +53,11 @@ services:
       TFTP_ROOT_DIRECTORY: /shared/tftp
       SERVICE_INSTANCE_ENCRYPTION_KEY: ${SERVICE_INSTANCE_ENCRYPTION_KEY:?set SERVICE_INSTANCE_ENCRYPTION_KEY in .env}
       REQUIRE_SERVICE_INSTANCE_ENCRYPTION: "true"
+      # End-user IPMI reverse proxy (subdomain + ticket).
+      IPMI_PROXY_PUBLIC_BASE: ${IPMI_PROXY_PUBLIC_BASE:-}
+      IPMI_PROXY_RUNNER_API_KEY: ${IPMI_PROXY_RUNNER_API_KEY:-}
+      IPMI_TICKET_TTL_SECONDS: ${IPMI_TICKET_TTL_SECONDS:-60}
+      IPMI_SESSION_TTL_SECONDS: ${IPMI_SESSION_TTL_SECONDS:-7200}
     volumes:
       - /os_templates:/app/os_templates
       - dhcp_tftp_shared:/shared
@@ -89,8 +95,9 @@ services:
     image: git.stackken.com/kenzim/dcim-proxy-runner:latest
     network_mode: host
     environment:
-      RACKFLOW_BASE_URL: ${RACKFLOW_BASE_URL}
-      RUNNER_API_KEY: ${PROXY_RUNNER_API_KEY}
+      # Host-networked: reach published app port on the host loopback.
+      RACKFLOW_BASE_URL: ${PROXY_RACKFLOW_BASE_URL:-http://127.0.0.1:8000}
+      RUNNER_API_KEY: ${PROXY_RUNNER_API_KEY:-}
       SYNC_INTERVAL_SECONDS: ${PROXY_SYNC_INTERVAL_SECONDS:-10}
       PROXY_LISTEN: ${PROXY_LISTEN:-:8080}
       HEALTH_LISTEN: ${PROXY_HEALTH_LISTEN:-:8081}
@@ -99,7 +106,8 @@ services:
   ipmi-proxy-runner:
     image: git.stackken.com/kenzim/dcim-ipmi-proxy-runner:latest
     environment:
-      RACKFLOW_BASE_URL: ${RACKFLOW_BASE_URL}
+      # Bridge-networked: use the compose service DNS name by default.
+      RACKFLOW_BASE_URL: ${IPMI_RACKFLOW_BASE_URL:-http://app:8000}
       RUNNER_API_KEY: ${IPMI_PROXY_RUNNER_API_KEY}
       IPMI_COOKIE_SECRET: ${IPMI_COOKIE_SECRET}
       IPMI_PUBLIC_BASE: ${IPMI_PROXY_PUBLIC_BASE}
@@ -122,7 +130,8 @@ services:
     restart: unless-stopped
 
   deployment-worker:
-    image: git.stackken.com/kenzim/dcim-deployment-worker:latest
+    # Same image as app (CI may also push a dcim-deployment-worker alias).
+    image: git.stackken.com/kenzim/dcim-app:latest
     command: ["python", "-m", "app.workers.deployment"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -140,7 +149,7 @@ services:
     restart: unless-stopped
 
   usdt-watcher:
-    image: git.stackken.com/kenzim/dcim-usdt-watcher:latest
+    image: git.stackken.com/kenzim/dcim-app:latest
     command: ["python", "-m", "app.workers.usdt_watcher"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -171,7 +180,7 @@ services:
     restart: unless-stopped
 
   recurring-billing-worker:
-    image: git.stackken.com/kenzim/dcim-recurring-billing-worker:latest
+    image: git.stackken.com/kenzim/dcim-app:latest
     command: ["python", "-m", "app.workers.recurring_billing"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -191,7 +200,7 @@ services:
     restart: unless-stopped
 
   notification-worker:
-    image: git.stackken.com/kenzim/dcim-notification-worker:latest
+    image: git.stackken.com/kenzim/dcim-app:latest
     command: ["python", "-m", "app.workers.notification_outbox"]
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-dcim}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@mysql:3306/${MYSQL_DATABASE:-dcim}
@@ -237,3 +246,5 @@ volumes:
     external: true
     name: dcim_mysql_data
   dhcp_tftp_shared:
+    external: true
+    name: root_dhcp_tftp_shared
