@@ -78,7 +78,10 @@ async def test_list_merges_platform_and_client(db_session):
         ]
     )
 
-    with patch("app.services.vm_backup_service.get_vm_backup_plugin", return_value=(plugin, 1, "pve", 5100)):
+    with patch(
+        "app.services.vm_backup_service.get_vm_backup_plugin",
+        new=AsyncMock(return_value=(plugin, 1, "pve", 5100)),
+    ):
         items = await list_service_backups(db_session, service)
 
     assert len(items) == 2
@@ -101,7 +104,10 @@ async def test_create_enforces_quota(db_session):
     plugin.create_backup = AsyncMock(return_value="UPID:1")
     plugin.list_tasks = AsyncMock(return_value=[])
 
-    with patch("app.services.vm_backup_service.get_vm_backup_plugin", return_value=(plugin, 1, "pve", 5100)):
+    with patch(
+        "app.services.vm_backup_service.get_vm_backup_plugin",
+        new=AsyncMock(return_value=(plugin, 1, "pve", 5100)),
+    ):
         with pytest.raises(BackupQuotaError):
             await create_client_backup(db_session, service, wait=False)
     plugin.create_backup.assert_not_called()
@@ -113,7 +119,10 @@ async def test_delete_rejects_platform(db_session):
     plugin = MagicMock()
     plugin.delete_backup = AsyncMock()
 
-    with patch("app.services.vm_backup_service.get_vm_backup_plugin", return_value=(plugin, 1, "pve", 5100)):
+    with patch(
+        "app.services.vm_backup_service.get_vm_backup_plugin",
+        new=AsyncMock(return_value=(plugin, 1, "pve", 5100)),
+    ):
         with pytest.raises(BackupForbiddenError):
             await delete_client_backup(
                 db_session,

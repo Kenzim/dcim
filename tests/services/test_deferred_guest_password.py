@@ -99,9 +99,12 @@ def _patch_change_password_path(monkeypatch, *, agent_ready=False, set_ok=True):
             raise RuntimeError("Failed to set password for 'client'")
         return None
 
+    async def _fake_plugin_for_service(db, service):
+        return plugin
+
     monkeypatch.setattr(
         "app.services.strategy_actions._plugin_for_service",
-        lambda db, service: plugin,
+        _fake_plugin_for_service,
     )
     monkeypatch.setattr(
         "app.services.strategy_actions.set_guest_password",

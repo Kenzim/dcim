@@ -68,6 +68,7 @@ def _fake_plugin(
     ticket="vnc-ticket-abc",
     available_console_types=None,
     open_console_proxy_error=None,
+    node="pve",
 ):
     available = available_console_types or {"vnc": True, "serial": False}
     open_console_proxy = (
@@ -76,10 +77,22 @@ def _fake_plugin(
         else AsyncMock(return_value={"port": port, "ticket": ticket, "console_type": console_type})
     )
     return SimpleNamespace(
+        node=node,
         get_power_state=AsyncMock(return_value=power_state),
         get_available_console_types=AsyncMock(return_value=available),
         open_console_proxy=open_console_proxy,
+        power_on=AsyncMock(return_value=True),
+        power_off=AsyncMock(return_value=True),
+        power_reset=AsyncMock(return_value=True),
     )
+
+
+def _resolver_patch(target, plugin, *, cid=1, node="pve", vmid=101):
+    """Patch the module-local ``resolve_proxmox_plugin_for_service`` import
+    (post-refactor, admin/client/public VNC endpoints resolve the live
+    Proxmox plugin from the service rather than building it from a bare
+    ``get_registry().get_plugin(...)`` call)."""
+    return patch(target, new=AsyncMock(return_value=(plugin, cid, node, vmid)))
 
 
 # --- Console type availability ----------------------------------------------
@@ -90,7 +103,10 @@ def test_admin_console_types_endpoint(client, db_session, test_admin_user):
     service = _vm_service(db_session)
 
     fake_plugin = _fake_plugin(available_console_types={"vnc": True, "serial": True})
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 101)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 101)),
+    ):
         resp = client.get(f"/api/admin/services/{service.id}/vm/console-types", headers=headers)
 
     assert resp.status_code == 200, resp.text
@@ -102,8 +118,7 @@ def test_client_console_types_endpoint(client, db_session, test_user):
     service = _vm_service(db_session, owner_user_id=test_user.id, permission_overrides={PermissionKey.VM_CONSOLE: True})
 
     fake_plugin = _fake_plugin(available_console_types={"vnc": False, "serial": True})
-    with patch("app.api.services_client.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.services_client.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.get(f"/api/client/services/{service.id}/vm/console-types", headers=headers)
 
     assert resp.status_code == 200, resp.text
@@ -128,7 +143,10 @@ def test_admin_vnc_session_success(client, db_session, test_admin_user):
     service = _vm_service(db_session)
 
     fake_plugin = _fake_plugin()
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 101)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 101)),
+    ):
         resp = client.post(f"/api/admin/services/{service.id}/vm/vnc-session", headers=headers)
 
     assert resp.status_code == 200, resp.text
@@ -147,7 +165,10 @@ def test_admin_vnc_session_serial_console(client, db_session, test_admin_user):
     service = _vm_service(db_session)
 
     fake_plugin = _fake_plugin(console_type="serial", ticket="term-ticket-abc")
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 101)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 101)),
+    ):
         resp = client.post(f"/api/admin/services/{service.id}/vm/vnc-session", headers=headers)
 
     assert resp.status_code == 200, resp.text
@@ -161,7 +182,10 @@ def test_admin_vnc_session_blocked_when_vm_not_running(client, db_session, test_
     service = _vm_service(db_session)
 
     fake_plugin = _fake_plugin(power_state=PowerState.OFF)
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 101)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 101)),
+    ):
         resp = client.post(f"/api/admin/services/{service.id}/vm/vnc-session", headers=headers)
 
     assert resp.status_code == 409, resp.text
@@ -185,7 +209,10 @@ def test_admin_vnc_session_honors_explicit_console_type(client, db_session, test
     service = _vm_service(db_session)
 
     fake_plugin = _fake_plugin(console_type="serial", ticket="term-ticket-abc")
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 101)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 101)),
+    ):
         resp = client.post(
             f"/api/admin/services/{service.id}/vm/vnc-session?console_type=serial", headers=headers
         )
@@ -199,7 +226,10 @@ def test_admin_vnc_session_rejects_unavailable_console_type(client, db_session, 
     service = _vm_service(db_session)
 
     fake_plugin = _fake_plugin(open_console_proxy_error=ConsoleTypeUnavailable("serial console is not available"))
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 101)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 101)),
+    ):
         resp = client.post(
             f"/api/admin/services/{service.id}/vm/vnc-session?console_type=serial", headers=headers
         )
@@ -215,8 +245,7 @@ def test_client_vnc_session_success_when_permitted(client, db_session, test_user
     service = _vm_service(db_session, owner_user_id=test_user.id, permission_overrides={PermissionKey.VM_CONSOLE: True})
 
     fake_plugin = _fake_plugin()
-    with patch("app.api.services_client.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.services_client.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.post(f"/api/client/services/{service.id}/vm/vnc-session", headers=headers)
 
     assert resp.status_code == 200, resp.text
@@ -251,8 +280,7 @@ def test_client_vnc_session_honors_explicit_console_type(client, db_session, tes
     service = _vm_service(db_session, owner_user_id=test_user.id, permission_overrides={PermissionKey.VM_CONSOLE: True})
 
     fake_plugin = _fake_plugin(console_type="serial", ticket="term-ticket-abc")
-    with patch("app.api.services_client.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.services_client.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.post(
             f"/api/client/services/{service.id}/vm/vnc-session?console_type=serial", headers=headers
         )
@@ -270,8 +298,7 @@ def test_redeem_launch_ticket_success(client, db_session):
     token = mint_launch_ticket(service.id)
 
     fake_plugin = _fake_plugin()
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.post("/api/vnc/redeem", json={"token": token})
 
     assert resp.status_code == 200, resp.text
@@ -286,8 +313,7 @@ def test_redeem_launch_ticket_serial_console(client, db_session):
     token = mint_launch_ticket(service.id)
 
     fake_plugin = _fake_plugin(console_type="serial", ticket="term-ticket-abc")
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.post("/api/vnc/redeem", json={"token": token})
 
     assert resp.status_code == 200, resp.text
@@ -306,8 +332,7 @@ def test_redeem_launch_ticket_single_use(client, db_session):
     token = mint_launch_ticket(service.id)
 
     fake_plugin = _fake_plugin()
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         first = client.post("/api/vnc/redeem", json={"token": token})
         second = client.post("/api/vnc/redeem", json={"token": token})
 
@@ -328,8 +353,7 @@ def test_redeem_launch_ticket_blocked_when_not_running(client, db_session):
     token = mint_launch_ticket(service.id)
 
     fake_plugin = _fake_plugin(power_state=PowerState.OFF)
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.post("/api/vnc/redeem", json={"token": token})
 
     assert resp.status_code == 409, resp.text
@@ -342,15 +366,13 @@ def test_refresh_ws_session_mints_fresh_proxmox_proxy(client, db_session):
     token = mint_launch_ticket(service.id)
 
     fake_plugin = _fake_plugin(ticket="first-ticket")
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         redeem_resp = client.post("/api/vnc/redeem", json={"token": token})
     assert redeem_resp.status_code == 200, redeem_resp.text
     ws_token = redeem_resp.json()["ws_token"]
 
     refresh_plugin = _fake_plugin(ticket="second-ticket", port=5909)
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = refresh_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", refresh_plugin):
         resp = client.post("/api/vnc/refresh", json={"token": ws_token})
 
     assert resp.status_code == 200, resp.text
@@ -375,8 +397,7 @@ def test_redeem_includes_guest_credentials(client, db_session):
     token = mint_launch_ticket(service.id)
 
     fake_plugin = _fake_plugin()
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.post("/api/vnc/redeem", json={"token": token})
 
     assert resp.status_code == 200, resp.text
@@ -395,8 +416,7 @@ def test_console_power_action_via_ws_token(client, db_session):
     fake_plugin.power_off = AsyncMock(return_value=True)
     fake_plugin.power_reset = AsyncMock(return_value=True)
 
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         redeem = client.post("/api/vnc/redeem", json={"token": token})
         assert redeem.status_code == 200, redeem.text
         ws_token = redeem.json()["ws_token"]
@@ -492,8 +512,7 @@ def test_admin_vnc_popup_carries_requested_console_type_through_to_redeem(client
     token = resp.headers["location"].split("t=", 1)[1]
 
     fake_plugin = _fake_plugin(console_type="serial", ticket="term-ticket-abc")
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         redeem_resp = client.post("/api/vnc/redeem", json={"token": token})
 
     assert redeem_resp.status_code == 200, redeem_resp.text
@@ -512,8 +531,7 @@ def test_client_vnc_popup_carries_requested_console_type_through_to_redeem(clien
     token = resp.headers["location"].split("t=", 1)[1]
 
     fake_plugin = _fake_plugin(console_type="vnc")
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         redeem_resp = client.post("/api/vnc/redeem", json={"token": token})
 
     assert redeem_resp.status_code == 200, redeem_resp.text
@@ -525,8 +543,7 @@ def test_redeem_launch_ticket_rejects_unavailable_requested_console_type(client,
     token = mint_launch_ticket(service.id, console_type="serial")
 
     fake_plugin = _fake_plugin(open_console_proxy_error=ConsoleTypeUnavailable("serial console is not available"))
-    with patch("app.api.vm_vnc.get_registry") as mock_registry:
-        mock_registry.return_value.get_plugin.return_value = fake_plugin
+    with _resolver_patch("app.api.vm_vnc.resolve_proxmox_plugin_for_service", fake_plugin):
         resp = client.post("/api/vnc/redeem", json={"token": token})
 
     assert resp.status_code == 400, resp.text

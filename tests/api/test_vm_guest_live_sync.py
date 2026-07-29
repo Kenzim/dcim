@@ -51,7 +51,10 @@ def test_get_vm_service_syncs_stopped_from_proxmox(client, db_session, test_admi
         vm_exists=AsyncMock(return_value=True),
         get_power_state=AsyncMock(return_value=PowerState.OFF),
     )
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 200901)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 200901)),
+    ):
         r = client.get(f"/api/admin/services/vm/{service.id}")
     assert r.status_code == 200
     body = r.json()
@@ -79,7 +82,10 @@ def test_get_vm_service_syncs_destroyed_when_missing(client, db_session, test_ad
         vm_exists=AsyncMock(return_value=False),
         get_power_state=AsyncMock(return_value=PowerState.UNKNOWN),
     )
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 200902)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 200902)),
+    ):
         r = client.get(f"/api/admin/services/vm/{service.id}")
     assert r.status_code == 200
     assert r.json()["vm_guest_state"] == "destroyed"
@@ -107,7 +113,10 @@ def test_get_vm_service_skips_sync_while_provisioning(client, db_session, test_a
         vm_exists=AsyncMock(return_value=True),
         get_power_state=AsyncMock(return_value=PowerState.OFF),
     )
-    with patch("app.api.services_admin._admin_get_vm_plugin", return_value=(fake_plugin, 200903)):
+    with patch(
+        "app.api.services_admin._admin_get_vm_plugin",
+        new=AsyncMock(return_value=(fake_plugin, 1, "pve", 200903)),
+    ):
         r = client.get(f"/api/admin/services/vm/{service.id}")
     assert r.status_code == 200
     assert r.json()["vm_guest_state"] == "provisioning"

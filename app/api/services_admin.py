@@ -39,8 +39,10 @@ from app.services.vm_strategy_executor import (
     schedule_vm_auto_provision,
 )
 from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
-from app.plugins.registry import get_registry
+from app.services.proxmox_placement import (
+    ProxmoxPlacementError,
+    resolve_proxmox_plugin_for_service,
+)
 from app.plugins.base import PowerState
 from app.plugins.proxmox import ConsoleTypeUnavailable
 from app.models.service_vm import VMGuestState
@@ -404,24 +406,20 @@ def _service_to_admin_response(db: Session, service) -> ServiceResponse:
     )
 
 
-def _admin_get_vm_plugin(db: Session, service: Service):
+async def _admin_get_vm_plugin(db: Session, service: Service):
+    """Resolve a live Proxmox plugin for a VM service.
+
+    ``proxmox_node_name`` is treated as a cache: if it's empty or stale
+    (guest migrated), this searches the cluster for the VMID's current node
+    and updates the cache before erroring. Returns ``(plugin, cluster_id,
+    node_name, vmid)``.
+    """
     if service.service_type != ServiceType.VM:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not (node and str(node).strip()) or vmid is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="VM service is missing Proxmox placement (proxmox_cluster_id, proxmox_node_name, proxmox_vmid)",
-        )
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-    if cluster is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown proxmox_cluster_id {cid}")
     try:
-        plugin_config = cluster_to_proxmox_plugin_config(cluster, str(node).strip(), int(vmid))
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    plugin = get_registry().get_plugin("proxmox", plugin_config)
-    return plugin, int(vmid)
+        return await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 def _set_guest_state(db: Session, service: Service, state: VMGuestState, error: Optional[str] = None) -> None:
@@ -445,11 +443,11 @@ async def _sync_guest_state_from_proxmox(db: Session, service: Service) -> None:
     prov_status = ((service.config or {}).get("vm_provision") or {}).get("status")
     if service.vm.guest_state == VMGuestState.PROVISIONING or prov_status in ("queued", "running"):
         return
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not (node and str(node).strip()) or vmid is None:
+    cid, _node, vmid = vm_placement(service)
+    if cid is None or vmid is None:
         return
     try:
-        plugin, _ = _admin_get_vm_plugin(db, service)
+        plugin, _cid, _node, _vmid = await _admin_get_vm_plugin(db, service)
     except HTTPException:
         return
     try:
@@ -848,7 +846,7 @@ async def admin_vm_power_action(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
-    plugin, _vmid = _admin_get_vm_plugin(db, service)
+    plugin, _cid, _node, _vmid = await _admin_get_vm_plugin(db, service)
     action = (body.action or "").strip().lower()
     log_server_activity_attempt(
         db,
@@ -903,7 +901,7 @@ async def admin_get_vm_console_types(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
-    plugin, _vmid = _admin_get_vm_plugin(db, service)
+    plugin, _cid, _node, _vmid = await _admin_get_vm_plugin(db, service)
     try:
         available = await plugin.get_available_console_types()
     except Exception as exc:
@@ -930,8 +928,7 @@ async def admin_create_vm_vnc_session(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
-    plugin, vmid = _admin_get_vm_plugin(db, service)
-    cid, node, _ = vm_placement(service)
+    plugin, cid, node, vmid = await _admin_get_vm_plugin(db, service)
     try:
         power_state = await plugin.get_power_state()
     except Exception as exc:
@@ -1002,7 +999,7 @@ async def admin_destroy_vm_guest(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
-    plugin, vmid = _admin_get_vm_plugin(db, service)
+    plugin, _cid, _node, vmid = await _admin_get_vm_plugin(db, service)
     log_server_activity_attempt(
         db,
         service_id=service.id,
@@ -1189,7 +1186,7 @@ async def admin_reinstall_vm_guest(
     )
     # Destroy first when a guest exists; ignore missing-guest / already-gone errors.
     try:
-        plugin, _vmid = _admin_get_vm_plugin(db, service)
+        plugin, _cid, _node, _vmid = await _admin_get_vm_plugin(db, service)
         try:
             exists = await plugin.vm_exists()
         except Exception:

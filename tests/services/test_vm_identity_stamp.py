@@ -218,7 +218,10 @@ async def test_list_enrichment_from_notes_token(db_session):
     )
     plugin.extract_backup_config = AsyncMock(side_effect=AssertionError("should not extract"))
 
-    with patch("app.services.vm_backup_service.get_vm_backup_plugin", return_value=(plugin, 1, "pve", 5100)):
+    with patch(
+        "app.services.vm_backup_service.get_vm_backup_plugin",
+        new=AsyncMock(return_value=(plugin, 1, "pve", 5100)),
+    ):
         items = await list_service_backups(db_session, service)
 
     assert len(items) == 1

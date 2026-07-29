@@ -8,11 +8,10 @@ from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.dao.service_dao import ServiceDAO
-from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.models.service import ServiceStatus, ServiceType
 from app.services.service_resource import service_linked_server, vm_placement
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
-from app.services.proxmox_placement import cluster_to_proxmox_plugin_config
+from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 from app.services.vm_guest_credentials import session_guest_fields
 from app.services.vm_vnc_ticket_service import (
     build_relative_error_url,
@@ -134,32 +133,21 @@ def _power_permission_key(service) -> str:
     return PermissionKey.VM_POWER if service.service_type == ServiceType.VM else PermissionKey.BMS_POWER
 
 
-def _client_plugin_instance(db: Session, service):
+async def _client_plugin_instance(db: Session, service):
     """Return ``(plugin, server_or_none)`` for an owned service.
 
     VM services resolve the Proxmox plugin from placement (no linked Server
-    row by design); bare-metal / http_proxy resolve the linked server's
-    plugin. Raises HTTPException with client-safe messages when power/IPMI
-    control isn't applicable to the service.
+    row by design), treating the cached node as a hint and searching the
+    cluster for the VMID's current node if it's missing/stale; bare-metal /
+    http_proxy resolve the linked server's plugin. Raises HTTPException with
+    client-safe messages when power/IPMI control isn't applicable.
     """
     if service.service_type == ServiceType.VM:
-        cid, node, vmid = vm_placement(service)
-        if cid is None or not (node and str(node).strip()) or vmid is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="VM service is missing Proxmox placement (proxmox_cluster_id, proxmox_node_name, proxmox_vmid)",
-            )
-        cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-        if not cluster:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Unknown proxmox_cluster_id {cid}",
-            )
         try:
-            plugin_config = cluster_to_proxmox_plugin_config(cluster, str(node).strip(), int(vmid))
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        return get_registry().get_plugin("proxmox", plugin_config), None
+            plugin, _cid, _node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
+        except ProxmoxPlacementError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        return plugin, None
     server = service_linked_server(db, service)
     if not server:
         if service.service_type == ServiceType.HTTP_PROXY:
@@ -179,7 +167,7 @@ def _client_plugin_instance(db: Session, service):
 async def _best_effort_power_state(db: Session, service) -> PowerState:
     """Live power state; UNKNOWN whenever the plugin can't be built/reached."""
     try:
-        plugin, _ = _client_plugin_instance(db, service)
+        plugin, _ = await _client_plugin_instance(db, service)
         state = await plugin.get_power_state()
     except Exception:
         return PowerState.UNKNOWN
@@ -385,7 +373,7 @@ async def client_power_service(
                 detail=f"Cannot '{action}' an administratively disabled server",
             )
 
-    plugin, _ = _client_plugin_instance(db, service)
+    plugin, _ = await _client_plugin_instance(db, service)
 
     log_kw = {"server_id": server.id} if server else {"service_id": service.id}
     log_server_activity_attempt(
@@ -542,7 +530,7 @@ async def client_rotate_proxy_credentials(
     return {"assignments": rotated}
 
 
-def _client_owned_vm_plugin(db: Session, service_id: int, user_id):
+async def _client_owned_vm_plugin(db: Session, service_id: int, user_id):
     """Shared owner/type/permission/placement checks for the VM console
     endpoints below; returns ``(service, plugin, cid, node, vmid)``."""
     service = ServiceDAO.get_by_id(db, service_id)
@@ -554,18 +542,10 @@ def _client_owned_vm_plugin(db: Session, service_id: int, user_id):
 
     require_client_permission(db, service, PermissionKey.VM_CONSOLE)
 
-    cid, node, vmid = vm_placement(service)
-    if cid is None or not (node and str(node).strip()) or vmid is None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="VM placement is not configured")
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cid)
-    if cluster is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown Proxmox cluster")
-
     try:
-        plugin_config = cluster_to_proxmox_plugin_config(cluster, str(node).strip(), int(vmid))
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    plugin = get_registry().get_plugin("proxmox", plugin_config)
+        plugin, cid, node, vmid = await resolve_proxmox_plugin_for_service(db, service)
+    except ProxmoxPlacementError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return service, plugin, cid, node, vmid
 
 
@@ -582,7 +562,7 @@ async def get_vnc_console_types(
     if not user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
 
-    _service, plugin, _cid, _node, _vmid = _client_owned_vm_plugin(db, service_id, user_id)
+    _service, plugin, _cid, _node, _vmid = await _client_owned_vm_plugin(db, service_id, user_id)
     try:
         available = await plugin.get_available_console_types()
     except Exception as exc:
@@ -608,7 +588,7 @@ async def create_vnc_session(
     if not user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
 
-    service, plugin, cid, node, vmid = _client_owned_vm_plugin(db, service_id, user_id)
+    service, plugin, cid, node, vmid = await _client_owned_vm_plugin(db, service_id, user_id)
 
     try:
         power_state = await plugin.get_power_state()

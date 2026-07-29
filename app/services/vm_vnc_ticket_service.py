@@ -193,14 +193,17 @@ def refresh_ws_session(
     vnc_port: int,
     vnc_ticket: str,
     console_type: Optional[str] = None,
+    node_name: Optional[str] = None,
 ) -> Optional[dict]:
     """Replace the Proxmox port/ticket on an existing WS session in place.
 
     Keeps the same ``ws_token`` (and its remaining TTL) so the browser can
     reconnect without a new launch ticket, while getting a fresh Proxmox
     proxy -- required because Proxmox's vncproxy/termproxy tickets die when
-    the upstream WebSocket closes. Returns the updated session dict, or
-    ``None`` if ``token`` is unknown/expired.
+    the upstream WebSocket closes. ``node_name``, when given, updates the
+    session's cached node too (the VM may have migrated since the session
+    was minted). Returns the updated session dict, or ``None`` if ``token``
+    is unknown/expired.
     """
     if not token:
         return None
@@ -215,11 +218,32 @@ def refresh_ws_session(
     }
     if console_type:
         mapping["console_type"] = console_type
+    if node_name:
+        mapping["node_name"] = node_name
     redis_client.hset(key, mapping=mapping)
     # Preserve remaining TTL (ttl == -1 means no expiry; -2 means gone).
     if isinstance(ttl, int) and ttl > 0:
         redis_client.expire(key, ttl)
     return get_ws_session(token)
+
+
+def update_ws_session_node(token: str, node_name: str) -> None:
+    """Patch just the cached ``node_name`` on an existing WS session.
+
+    Used by power-control endpoints that rebuild the plugin via the
+    placement resolver (which may discover the VM moved) but don't mint a
+    new Proxmox proxy, so there's no fresh port/ticket to pass through
+    :func:`refresh_ws_session`.
+    """
+    if not token or not node_name:
+        return
+    key = f"{SESSION_KEY_PREFIX}{_derive_id(token)}"
+    if not redis_client.exists(key):
+        return
+    ttl = redis_client.ttl(key)
+    redis_client.hset(key, mapping={"node_name": node_name})
+    if isinstance(ttl, int) and ttl > 0:
+        redis_client.expire(key, ttl)
 
 
 def build_public_app_url() -> str:
