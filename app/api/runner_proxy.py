@@ -1,9 +1,12 @@
+import hashlib
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.dao.service_instance_dao import ServiceInstanceDAO
-from app.models.ipam import ServiceIPAssignment
+from app.models.ipam import IPAddress, ServiceIPAssignment
+from app.models.service import ServiceStatus
 
 
 router = APIRouter(prefix="/runner/proxy", tags=["proxy-runner"])
@@ -34,14 +37,27 @@ async def get_proxy_config(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
     location_id = _authenticate_runner(db, token)
-    assignments = db.query(ServiceIPAssignment).all()
+    assignments = (
+        db.query(ServiceIPAssignment)
+        .options(joinedload(ServiceIPAssignment.ip).joinedload(IPAddress.subnet), joinedload(ServiceIPAssignment.service))
+        .all()
+    )
     rows = []
     version_parts = []
     for a in assignments:
         ip_row = a.ip
         if not ip_row or not ip_row.subnet:
             continue
+        if not ip_row.subnet.enabled:
+            continue
         if ip_row.subnet.location_id is not None and ip_row.subnet.location_id != location_id:
+            continue
+        service = a.service
+        # Only publish credentials for services actively allowed to use the
+        # proxy: suspended/terminated/pending services must not be able to
+        # authenticate even though their IP assignment row still exists (it
+        # stays reserved until an admin/billing action releases it).
+        if service is None or service.status != ServiceStatus.ACTIVE:
             continue
         rows.append(
             {
@@ -51,9 +67,17 @@ async def get_proxy_config(
                 "password": a.password,
             }
         )
-        version_parts.append(f"{a.id}:{ip_row.updated_at.isoformat() if ip_row.updated_at else ''}")
+        # Hash the actual published content (not a timestamp): rotating
+        # credentials only touches the assignment row, not the IPAddress
+        # row's updated_at, so keying the version off ip_row.updated_at
+        # silently hid credential rotations from the runner. Including the
+        # username/password directly guarantees any content change (new
+        # creds, new IP, added/removed entry) is reflected in the version.
+        version_parts.append(f"{a.id}:{ip_row.ip_address}:{a.username}:{a.password}")
 
-    version = str(abs(hash("|".join(sorted(version_parts)))))
+    # A stable hash (not Python's per-process salted hash()) so the runner
+    # can tell "unchanged" from "changed" across app restarts.
+    version = hashlib.sha256("|".join(sorted(version_parts)).encode("utf-8")).hexdigest()[:16]
     return {
         "version": version,
         "location_id": location_id,

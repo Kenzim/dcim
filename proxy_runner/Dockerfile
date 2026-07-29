@@ -1,14 +1,13 @@
-FROM python:3.12-slim
+FROM golang:1.22-bookworm AS build
+WORKDIR /src
+COPY go.mod ./
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/proxy-runner ./cmd/proxy-runner
 
-WORKDIR /app
-
-RUN pip install --no-cache-dir fastapi uvicorn httpx
-
-COPY main.py /app/main.py
-
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
-
-EXPOSE 8080
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/proxy-runner /proxy-runner
+ENV PROXY_LISTEN=:8080
+ENV HEALTH_LISTEN=:8081
+EXPOSE 8080 8081
+USER nonroot:nonroot
+ENTRYPOINT ["/proxy-runner"]
