@@ -2,7 +2,7 @@ import os
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services.download_token_service import get_download_token_service
+from app.services.download_token_service import get_download_token_service, template_file_scope
 
 
 client = TestClient(app)
@@ -24,7 +24,10 @@ def test_template_files_serves_firstboot_and_user_login(mock_redis, monkeypatch)
     token_service = get_download_token_service()
     token = token_service.generate_token(
         boot_task_id=123,
-        allowed_files=["firstboot.ps1", "user-login.ps1"],
+        allowed_files=[
+            template_file_scope(template_id, "firstboot.ps1"),
+            template_file_scope(template_id, "user-login.ps1"),
+        ],
     )
 
     # firstboot.ps1 should be served from os_templates/{template_id}/firstboot.ps1
@@ -37,7 +40,7 @@ def test_template_files_serves_firstboot_and_user_login(mock_redis, monkeypatch)
     # user-login.ps1 should be served from os_templates/{template_id}/user-login.ps1
     token2 = token_service.generate_token(
         boot_task_id=124,
-        allowed_files=["user-login.ps1"],
+        allowed_files=[template_file_scope(template_id, "user-login.ps1")],
     )
     resp_user_login = client.get(
         f"/api/servers/interaction/template-files/{template_id}/user-login.ps1?token={token2}"
@@ -58,7 +61,7 @@ def test_template_files_serves_deploy_path_with_slash(mock_redis, monkeypatch):
     token_service = get_download_token_service()
     token = token_service.generate_token(
         boot_task_id=125,
-        allowed_files=["deploy/windows.img"],
+        allowed_files=[template_file_scope(template_id, "deploy/windows.img")],
     )
     # Request path with slash: template_id + deploy/windows.img
     resp = client.get(

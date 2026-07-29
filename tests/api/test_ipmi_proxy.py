@@ -9,7 +9,7 @@ import pytest
 from app.core.billing_auth import hash_api_key
 from app.core.config import settings
 from app.models.billing_integration import BillingIntegration
-from app.models.external_user import ExternalUser
+from app.models.user import User
 from app.models.location import Location
 from app.models.server import Server
 from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
@@ -60,12 +60,15 @@ def _make_server(db_session, location, *, enabled_proxy=True):
 
 
 def _make_service(db_session, integration, server):
-    ext_user = ExternalUser(
-        integration_id=integration.id,
+    ext_user = User(
+        username="client1",
+        email="client1@example.com",
+        billing_integration_id=integration.id,
         external_user_id="client-1",
         external_username="client1",
         external_email="client1@example.com",
     )
+    ext_user.set_password(None)
     db_session.add(ext_user)
     db_session.commit()
     db_session.refresh(ext_user)
@@ -73,7 +76,7 @@ def _make_service(db_session, integration, server):
     service = Service(
         name="bm-service",
         external_service_id="svc-1",
-        external_user_id=ext_user.id,
+        owner_user_id=ext_user.id,
         service_type=ServiceType.BARE_METAL,
         status=ServiceStatus.ACTIVE,
         config={},

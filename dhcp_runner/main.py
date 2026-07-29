@@ -6,7 +6,9 @@ Main DCIM app calls this API. Config via env:
 Auto-starts dhcpd on container startup if config file exists.
 """
 import asyncio
+import hmac
 import os
+import re
 import logging
 from collections import deque
 from pathlib import Path
@@ -44,6 +46,26 @@ DHCP_INTERFACES_ENV = os.environ.get("DHCP_INTERFACES", "eth0")
 DHCPD_BINARY = "/usr/sbin/dhcpd"
 
 
+# Linux network interface names are at most 15 bytes (IFNAMSIZ-1) and never
+# start with '-'; enforcing this also blocks smuggling extra dhcpd argv flags
+# (e.g. an "interface" of "-cf" or "/etc/passwd") through X-Runner-Interfaces,
+# since argv is list-form/no shell but dhcpd itself still parses each element.
+_VALID_INTERFACE_RE = re.compile(r"^[A-Za-z0-9_.]{1,15}$")
+
+
+def _sanitize_interfaces(raw_names) -> list:
+    valid = []
+    for name in raw_names:
+        name = name.strip()
+        if not name:
+            continue
+        if not _VALID_INTERFACE_RE.match(name):
+            logger.warning("Ignoring invalid interface name: %r", name)
+            continue
+        valid.append(name)
+    return valid
+
+
 def _get_interfaces() -> list:
     """Use runner_interfaces file (written by app) if present, else env."""
     interfaces_file = Path(DHCP_CONFIG_PATH).parent / "runner_interfaces"
@@ -51,10 +73,12 @@ def _get_interfaces() -> list:
         try:
             raw = interfaces_file.read_text().strip()
             if raw:
-                return [x.strip() for x in raw.splitlines() if x.strip()]
+                sanitized = _sanitize_interfaces(raw.splitlines())
+                if sanitized:
+                    return sanitized
         except Exception as e:
             logger.warning("Failed to read runner_interfaces: %s", e)
-    return [x.strip() for x in DHCP_INTERFACES_ENV.split(",") if x.strip()] or ["eth0"]
+    return _sanitize_interfaces(DHCP_INTERFACES_ENV.split(",")) or ["eth0"]
 
 _process: Optional[asyncio.subprocess.Process] = None
 _lock = asyncio.Lock()
@@ -101,7 +125,7 @@ def _require_api_key(
     token = x_api_key
     if not token and authorization and authorization.startswith("Bearer "):
         token = authorization[7:]
-    if not token or token != API_KEY:
+    if not token or not hmac.compare_digest(token, API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -130,8 +154,11 @@ async def put_config(request: Request, _: None = Depends(_require_api_key)):
     p.write_bytes(content)
     interfaces_hdr = request.headers.get("X-Runner-Interfaces")
     if interfaces_hdr:
-        interfaces_file = p.parent / "runner_interfaces"
-        interfaces_file.write_text(interfaces_hdr.replace(",", "\n").replace(" ", "\n").replace("\n\n", "\n").strip() + "\n")
+        raw_names = interfaces_hdr.replace(",", "\n").replace(" ", "\n").split("\n")
+        sanitized = _sanitize_interfaces(raw_names)
+        if sanitized:
+            interfaces_file = p.parent / "runner_interfaces"
+            interfaces_file.write_text("\n".join(sanitized) + "\n")
     return {"success": True, "path": str(p)}
 
 

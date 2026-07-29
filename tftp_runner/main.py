@@ -7,6 +7,7 @@ Auto-starts in.tftpd on container startup.
 """
 import asyncio
 import base64
+import hmac
 import os
 import logging
 from collections import deque
@@ -79,7 +80,7 @@ def _require_api_key(
     token = x_api_key
     if not token and authorization and authorization.startswith("Bearer "):
         token = authorization[7:]
-    if not token or token != API_KEY:
+    if not token or not hmac.compare_digest(token, API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 

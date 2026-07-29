@@ -131,3 +131,4 @@ docker-compose.registry.yml
 tftp/pxe/boot.ipxe
 tftp/pxe/initrd/
 tftp/pxe/kernel/
+proxy_runner.env
