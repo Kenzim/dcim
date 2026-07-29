@@ -42,7 +42,6 @@ class Service(Base):
     name = Column(String(255), nullable=False, index=True)
     external_service_id = Column(String(255), nullable=True, index=True)
     owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
-    external_user_id = Column(Integer, ForeignKey("external_users.id"), nullable=True, index=True)
     service_type = Column(
         SQLEnum(ServiceType, native_enum=False, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
@@ -60,6 +59,13 @@ class Service(Base):
     os_code = Column(String(128), nullable=True, index=True)
     product_snapshot = Column(JSON, nullable=True)
 
+    # Client permission preset for this specific service, plus sparse
+    # per-key overrides. Both sit above the product/user presets and below
+    # nothing else — they are the final word in the resolution hierarchy
+    # (see app.services.client_permission_resolver).
+    permission_set_id = Column(Integer, ForeignKey("permission_sets.id", ondelete="SET NULL"), nullable=True, index=True)
+    permission_overrides = Column(JSON, nullable=True)
+
     provisioning_source = Column(
         SQLEnum(ProvisioningSource, native_enum=False, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
@@ -72,8 +78,8 @@ class Service(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     terminated_at = Column(DateTime(timezone=True), nullable=True)
 
-    owner_user = relationship("User", backref="owned_services")
-    external_user = relationship("ExternalUser", backref="services")
+    owner_user = relationship("User", backref="owned_services", foreign_keys=[owner_user_id])
+    permission_set = relationship("PermissionSet", foreign_keys=[permission_set_id])
     bare_metal = relationship(
         "ServiceBareMetal",
         back_populates="service",

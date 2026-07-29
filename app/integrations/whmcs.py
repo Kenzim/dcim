@@ -18,6 +18,7 @@ class WHMCSIntegration(BaseIntegration):
         Validate WHMCS-specific configuration.
         
         Expected config:
+        - public_base_url: str (optional) - WHMCS site root for admin deep links
         - api_url: str (optional) - WHMCS API endpoint URL
         - api_identifier: str (optional) - WHMCS API identifier
         - api_secret: str (optional) - WHMCS API secret
@@ -32,6 +33,10 @@ class WHMCSIntegration(BaseIntegration):
         return {
             "type": "object",
             "properties": {
+                "public_base_url": {
+                    "type": "string",
+                    "description": "WHMCS site root URL (e.g. https://billing.example.com) for admin service/client links in Proxmox VM notes",
+                },
                 "api_url": {
                     "type": "string",
                     "description": "WHMCS API endpoint URL (optional - for future use)"

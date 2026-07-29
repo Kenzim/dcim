@@ -1,4 +1,9 @@
-"""Extension row for bare-metal (and http_proxy) services — links Service to Server."""
+"""Extension row for bare-metal (and http_proxy) services — links Service to Server.
+
+``server_id`` is nullable because http_proxy services provisioned purely
+from the IP pool (IPAM) don't need a rack Server; bare_metal services always
+have one.
+"""
 
 from sqlalchemy import Column, Integer, ForeignKey
 from sqlalchemy.orm import relationship
@@ -10,7 +15,7 @@ class ServiceBareMetal(Base):
     __tablename__ = "service_bare_metal"
 
     service_id = Column(Integer, ForeignKey("services.id", ondelete="CASCADE"), primary_key=True)
-    server_id = Column(Integer, ForeignKey("servers.id"), nullable=False, index=True)
+    server_id = Column(Integer, ForeignKey("servers.id"), nullable=True, index=True)
 
     service = relationship("Service", back_populates="bare_metal")
     server = relationship("Server", backref="bare_metal_service_links")

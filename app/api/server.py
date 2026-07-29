@@ -23,6 +23,11 @@ from app.dao import ServiceInstanceDAO
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
+from app.services.secret_masking import (
+    MASKED_SECRET_PLACEHOLDER,
+    mask_plugin_config,
+    restore_masked_plugin_config,
+)
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -212,6 +217,17 @@ class DiskResponse(BaseModel):
         return str(value).lower()
 
 
+def _mask_server_dict_secrets(server_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Mask BMC/hypervisor secrets in-place before a server dict is returned
+    to the client (plugin_config credentials + the IPMI viewer password)."""
+    server_dict["plugin_config"] = mask_plugin_config(
+        server_dict.get("plugin_name"), server_dict.get("plugin_config")
+    )
+    if server_dict.get("ipmi_viewer_password"):
+        server_dict["ipmi_viewer_password"] = MASKED_SECRET_PLACEHOLDER
+    return server_dict
+
+
 class NetworkPortCreate(BaseModel):
     name: str
     mac_address: str | None = None
@@ -363,6 +379,11 @@ class ServerResponse(BaseModel):
 class ServerTestRequest(BaseModel):
     plugin_name: str
     plugin_config: dict
+    # Optional: when testing an existing server's connection from the edit
+    # form, the submitted plugin_config may still contain the masked secret
+    # placeholder for any password field the admin didn't change. Passing
+    # server_id lets us restore the real stored value before testing.
+    server_id: int | None = None
 
 
 class ServerCapabilitiesUpdateRequest(BaseModel):
@@ -919,10 +940,18 @@ async def test_server_connection(
     db: Session = Depends(get_db)
 ):
     """Test server connection using plugin's test_connection method"""
+    plugin_config = test_data.plugin_config
+    if test_data.server_id is not None:
+        existing_server = ServerDAO.get_by_id(db, test_data.server_id)
+        if existing_server:
+            plugin_config = restore_masked_plugin_config(
+                test_data.plugin_name, plugin_config, existing_server.plugin_config
+            )
+
     # Get plugin instance from registry
     registry = get_registry()
     try:
-        plugin_instance = registry.get_plugin(test_data.plugin_name, test_data.plugin_config)
+        plugin_instance = registry.get_plugin(test_data.plugin_name, plugin_config)
     except KeyError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1054,7 +1083,7 @@ async def list_servers(
                 })
         
         result.append({
-            **server_dict,
+            **_mask_server_dict_secrets(server_dict),
             "disks": convert_disks_to_response(disks),
             "network_ports": network_ports,
             "plugin_categories": plugin_categories,
@@ -1269,7 +1298,7 @@ async def create_server(
                 })
         
         return {
-            **server_dict,
+            **_mask_server_dict_secrets(server_dict),
             "disks": convert_disks_to_response(disks),
             "network_ports": network_ports_with_cables,
             "plugin_categories": plugin_categories,
@@ -1360,7 +1389,7 @@ async def get_server(
             })
 
     return {
-        **server_dict,
+        **_mask_server_dict_secrets(server_dict),
         "location_name": location_name,
         "rack_name": rack_name,
         "disks": convert_disks_to_response(disks),
@@ -1927,7 +1956,13 @@ async def update_server(
         # Plugin validation already done above
         server.plugin_name = server_data.plugin_name
     if server_data.plugin_config is not None:
-        server.plugin_config = server_data.plugin_config
+        # The admin UI receives masked secret placeholders (see
+        # _mask_server_dict_secrets) rather than real credentials; restore
+        # any untouched password fields from the existing config so we don't
+        # overwrite the real secret with the literal placeholder string.
+        server.plugin_config = restore_masked_plugin_config(
+            server.plugin_name, server_data.plugin_config, server.plugin_config
+        )
     if server_data.enabled is not None:
         server.enabled = server_data.enabled
     if server_data.boot_mode is not None:
@@ -1978,7 +2013,10 @@ async def update_server(
     if server_data.ipmi_viewer_username is not None:
         server.ipmi_viewer_username = server_data.ipmi_viewer_username
     if server_data.ipmi_viewer_password is not None:
-        server.ipmi_viewer_password = server_data.ipmi_viewer_password
+        # Same masking convention as plugin_config: ignore the placeholder if
+        # the admin didn't actually change the viewer password.
+        if server_data.ipmi_viewer_password != MASKED_SECRET_PLACEHOLDER:
+            server.ipmi_viewer_password = server_data.ipmi_viewer_password
     
     # Update disks if provided
     if server_data.disks is not None:
@@ -2086,7 +2124,7 @@ async def update_server(
             })
 
     return {
-        **server_dict,
+        **_mask_server_dict_secrets(server_dict),
         "location_name": location_name,
         "rack_name": rack_name,
         "disks": convert_disks_to_response(disks),

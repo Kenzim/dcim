@@ -153,6 +153,50 @@ def test_ingest_hardware_detection_report_submits_payload(client, db_session):
     assert updated.detected_inventory["nics"][0]["pci_address"] == "0000:18:00.0"
 
 
+def test_ingest_hardware_detection_report_rejects_malformed_mac(client, db_session):
+    server, _, _ = _create_server_with_pxe_port(db_session, name="bad-mac-server", ip="10.50.0.35")
+    boot_task = BootTaskDAO.create(
+        db=db_session,
+        server_id=server.id,
+        boot_type=BootType.TEMP_OS,
+        temp_os_id="debian-live",
+        description="Hardware detection",
+    )
+    HardwareDetectionReportDAO.create(
+        db_session,
+        server_id=server.id,
+        boot_task_id=boot_task.id,
+        status=HardwareDetectionReportStatus.PENDING,
+    )
+    token = get_download_token_service().generate_token(
+        boot_task_id=boot_task.id,
+        allowed_patterns=["hardware-detection-report-*"],
+        single_use=False,
+    )
+
+    response = client.post(
+        f"/api/servers/interaction/hardware-detection/report?token={token}",
+        json={
+            "cpu_count": 16,
+            "cpu_model": "AMD EPYC 9354",
+            "ram_gb": 128,
+            "nics": [
+                {
+                    "name": "ens1f0",
+                    # Malformed MAC that would otherwise be embedded verbatim
+                    # into generated dhcpd.conf via dhcp_config_generator.py.
+                    "mac_address": "AA:BB:CC:10:00:01;\nhost evil { hardware ethernet 00:00:00:00:00:00; }",
+                    "speed_mbps": 25000,
+                    "pci_address": "0000:18:00.0",
+                    "is_physical": True,
+                }
+            ],
+            "disks": [],
+        },
+    )
+    assert response.status_code == 422
+
+
 def test_hardware_detection_diff_apply_and_reject_flow(client, db_session, test_admin_user):
     headers = _admin_headers(client, test_admin_user)
     server, _, _ = _create_server_with_pxe_port(db_session, name="diff-apply-server", ip="10.50.0.40")

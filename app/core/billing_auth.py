@@ -9,6 +9,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import Optional
 from datetime import datetime, timezone
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.billing_integration import BillingIntegration
 
@@ -64,9 +65,12 @@ def get_billing_integration(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Update last used timestamp and IP
+    # Update last used timestamp and IP. Only trust X-Forwarded-For when
+    # explicitly configured (i.e. the app sits behind a trusted reverse
+    # proxy that sets/overwrites the header) -- otherwise any caller can
+    # spoof the IP recorded in `last_used_ip` (used for audit/troubleshooting).
     client_ip = request.client.host if request.client else None
-    if "x-forwarded-for" in request.headers:
+    if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
         client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
     
     integration.last_used_at = datetime.now(timezone.utc)

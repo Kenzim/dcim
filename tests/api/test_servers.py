@@ -338,6 +338,137 @@ def test_test_server_connection_with_admin(client, test_admin_user, mock_redis, 
         assert data["success"] is True
 
 
+def test_get_server_masks_plugin_config_password(client, test_admin_user, mock_redis, test_server):
+    """BMC credentials in plugin_config must never be returned in plaintext."""
+    login_response = client.post(
+        "/api/users/login",
+        json={"username": test_admin_user.username, "password": "adminpassword123"}
+    )
+    token = login_response.json()["token"]
+
+    response = client.get(
+        f"/api/servers/{test_server.id}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["plugin_config"]["password"] != "password"
+    assert data["plugin_config"]["password"] == "\u2022" * 8
+    # Non-secret fields are untouched.
+    assert data["plugin_config"]["hostname"] == "192.168.1.100"
+    assert data["plugin_config"]["username"] == "admin"
+
+
+def test_list_servers_masks_plugin_config_password(client, test_admin_user, mock_redis, test_server):
+    login_response = client.post(
+        "/api/users/login",
+        json={"username": test_admin_user.username, "password": "adminpassword123"}
+    )
+    token = login_response.json()["token"]
+
+    response = client.get("/api/servers/", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    servers = {s["id"]: s for s in response.json()}
+    assert servers[test_server.id]["plugin_config"]["password"] == "\u2022" * 8
+
+
+def test_update_server_with_masked_password_placeholder_preserves_secret(
+    client, test_admin_user, mock_redis, db_session, test_server
+):
+    """Submitting the masked placeholder back (unchanged field) must not
+    overwrite the real stored credential with the literal placeholder."""
+    login_response = client.post(
+        "/api/users/login",
+        json={"username": test_admin_user.username, "password": "adminpassword123"}
+    )
+    token = login_response.json()["token"]
+
+    response = client.put(
+        f"/api/servers/{test_server.id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "plugin_config": {
+                "hostname": "192.168.1.100",
+                "username": "admin",
+                "password": "\u2022" * 8,
+            }
+        }
+    )
+    assert response.status_code == 200
+
+    db_session.expire_all()
+    refreshed = ServerDAO.get_by_id(db_session, test_server.id)
+    assert refreshed.plugin_config["password"] == "password"
+
+
+def test_update_server_with_real_password_overwrites_secret(
+    client, test_admin_user, mock_redis, db_session, test_server
+):
+    """A genuinely new password value must still be persisted as-is."""
+    login_response = client.post(
+        "/api/users/login",
+        json={"username": test_admin_user.username, "password": "adminpassword123"}
+    )
+    token = login_response.json()["token"]
+
+    response = client.put(
+        f"/api/servers/{test_server.id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "plugin_config": {
+                "hostname": "192.168.1.100",
+                "username": "admin",
+                "password": "brand-new-secret",
+            }
+        }
+    )
+    assert response.status_code == 200
+
+    db_session.expire_all()
+    refreshed = ServerDAO.get_by_id(db_session, test_server.id)
+    assert refreshed.plugin_config["password"] == "brand-new-secret"
+
+
+def test_test_connection_with_server_id_restores_masked_password(
+    client, test_admin_user, mock_redis, db_session, test_server
+):
+    """Testing an existing server's connection with the masked placeholder
+    still submitted must use the real stored password, not the placeholder."""
+    login_response = client.post(
+        "/api/users/login",
+        json={"username": test_admin_user.username, "password": "adminpassword123"}
+    )
+    token = login_response.json()["token"]
+
+    with patch('app.api.server.get_registry') as mock_registry:
+        captured_config = {}
+
+        def _capture_get_plugin(plugin_name, plugin_config):
+            captured_config.update(plugin_config)
+            instance = Mock()
+            instance.test_connection = AsyncMock(return_value={"success": True, "message": "ok", "details": {}})
+            return instance
+
+        mock_registry.return_value.get_plugin.side_effect = _capture_get_plugin
+
+        response = client.post(
+            "/api/servers/test",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "plugin_name": "ipmi",
+                "plugin_config": {
+                    "hostname": "192.168.1.100",
+                    "username": "admin",
+                    "password": "\u2022" * 8,
+                },
+                "server_id": test_server.id,
+            }
+        )
+
+        assert response.status_code == 200
+        assert captured_config["password"] == "password"
+
+
 def test_test_server_capabilities_requires_admin(client, test_user, mock_redis, db_session, test_server):
     """Test that testing server capabilities requires admin access"""
     login_response = client.post(

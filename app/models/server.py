@@ -48,7 +48,6 @@ class Server(Base):
     test_logs = Column(Text, nullable=True)  # Logs from the last capability test run for this server
     # Credentials storage (OS passwords, etc.)
     credentials = Column(JSON, nullable=True)  # Store OS installation passwords and other credentials (e.g., {"admin_password": "...", "os_type": "windows"})
-    external_user_id = Column(Integer, ForeignKey("external_users.id"), nullable=True, index=True)  # Link to external user (if provisioned via billing system)
     # IPMI Web Proxy configuration
     ipmi_proxy_enabled = Column(Boolean, default=False, nullable=False)  # Enable/disable IPMI web proxy
     ipmi_web_management_url = Column(String(512), nullable=True)  # URL for IPMI web management interface
@@ -61,7 +60,6 @@ class Server(Base):
     # Relationships
     location = relationship("Location", backref="servers")
     rack = relationship("Rack", backref="servers")
-    external_user = relationship("ExternalUser", back_populates="servers")
     server_groups = relationship("ServerGroup", secondary="server_group_association", back_populates="servers")
 
     def __repr__(self):
