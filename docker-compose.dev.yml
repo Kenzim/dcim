@@ -36,9 +36,12 @@ services:
       PAYPAL_RETURN_BASE_URL: ${PAYPAL_RETURN_BASE_URL:-}
       RESELLER_TOPUP_MIN_CENTS: ${RESELLER_TOPUP_MIN_CENTS:-500}
       RESELLER_TOPUP_MAX_CENTS: ${RESELLER_TOPUP_MAX_CENTS:-1000000}
-      # API stays enqueue-only; the dedicated deployment-worker service advances jobs
-      # (matches production). Avoids a hung in-process worker blocking uvicorn --reload.
+      # API stays enqueue-only; dedicated worker services advance jobs
+      # (matches production). Avoids hung in-process workers blocking uvicorn --reload.
       RUN_DEPLOYMENT_WORKER: "false"
+      RUN_RECURRING_BILLING_WORKER: "false"
+      RUN_NOTIFICATION_OUTBOX_WORKER: "false"
+      RUN_USDT_WATCHER: "false"
       # DHCP/TFTP run as in-app subprocesses (dhcpd/tftpd are in the app-dev image);
       # do NOT set DHCP_RUNNER_URL / TFTP_RUNNER_URL here.
     volumes:
@@ -57,8 +60,7 @@ services:
       - "0.0.0.0:8088:8000"
     restart: unless-stopped
 
-  # Dedicated deployment worker (same role as production `deployment-worker`).
-  # Survives API reload; DB leases make it safe alongside any in-process worker.
+  # Dedicated workers (same roles as production). API stays enqueue-only.
   deployment-worker:
     build:
       context: .
@@ -71,6 +73,63 @@ services:
       RUN_DEPLOYMENT_WORKER: "false"
       DEPLOYMENT_WORKER_INTERVAL_SECONDS: ${DEPLOYMENT_WORKER_INTERVAL_SECONDS:-3}
       DEPLOYMENT_WORKER_LEASE_TTL_SECONDS: ${DEPLOYMENT_WORKER_LEASE_TTL_SECONDS:-60}
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  recurring-billing-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app-dev
+    command: ["python", "-m", "app.workers.recurring_billing"]
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      RUN_RECURRING_BILLING_WORKER: "false"
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  notification-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app-dev
+    command: ["python", "-m", "app.workers.notification_outbox"]
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      RUN_NOTIFICATION_OUTBOX_WORKER: "false"
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  usdt-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app-dev
+    command: ["python", "-m", "app.workers.usdt_watcher"]
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      RUN_USDT_WATCHER: "false"
     volumes:
       - ./app:/app/app
       - ./scripts:/app/scripts

@@ -1,3 +1,10 @@
+# Build and push every Rackflow runtime image to the Forgejo package registry.
+#
+# Unique images:
+#   app, bandwidth-poller, dhcp-runner, tftp-runner, proxy-runner, ipmi-proxy-runner
+#
+# Worker aliases (same layers as `app`, different repository name for compose):
+#   deployment-worker, usdt-watcher, recurring-billing-worker, notification-worker
 name: Container Build
 
 on:
@@ -24,26 +31,33 @@ jobs:
             context: .
             dockerfile: Dockerfile
             target: app
+            # Retag/push the app image under these worker names (no rebuild).
+            worker_aliases: "deployment-worker usdt-watcher recurring-billing-worker notification-worker"
           - image_suffix: bandwidth-poller
             context: .
             dockerfile: Dockerfile
             target: bandwidth-poller
+            worker_aliases: ""
           - image_suffix: dhcp-runner
             context: dhcp_runner
             dockerfile: dhcp_runner/Dockerfile
             target: ""
+            worker_aliases: ""
           - image_suffix: tftp-runner
             context: .
             dockerfile: tftp_runner/Dockerfile
             target: ""
+            worker_aliases: ""
           - image_suffix: proxy-runner
             context: proxy_runner
             dockerfile: proxy_runner/Dockerfile
             target: ""
+            worker_aliases: ""
           - image_suffix: ipmi-proxy-runner
             context: ipmi_proxy_runner
             dockerfile: ipmi_proxy_runner/Dockerfile
             target: ""
+            worker_aliases: ""
 
     steps:
       - name: Checkout
@@ -69,6 +83,7 @@ jobs:
           IMAGE_NAME="${REGISTRY_HOST}/${IMAGE_REPO}-${{ matrix.image_suffix }}"
 
           echo "REGISTRY_HOST=${REGISTRY_HOST}" >> "${GITHUB_ENV}"
+          echo "IMAGE_REPO=${IMAGE_REPO}" >> "${GITHUB_ENV}"
           echo "IMAGE_NAME=${IMAGE_NAME}" >> "${GITHUB_ENV}"
           echo "SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)" >> "${GITHUB_ENV}"
           echo "SAFE_REF_NAME=${SAFE_REF_NAME}" >> "${GITHUB_ENV}"
@@ -95,6 +110,21 @@ jobs:
             docker tag "${IMAGE_NAME}:${SHORT_SHA}" "${IMAGE_NAME}:${GITHUB_REF_NAME}"
           fi
 
+          # Worker services share the app image; publish convenience aliases.
+          for alias in ${{ matrix.worker_aliases }}; do
+            ALIAS_NAME="${REGISTRY_HOST}/${IMAGE_REPO}-${alias}"
+            docker tag "${IMAGE_NAME}:${SHORT_SHA}" "${ALIAS_NAME}:${SHORT_SHA}"
+            if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
+              docker tag "${IMAGE_NAME}:${SHORT_SHA}" "${ALIAS_NAME}:branch-${SAFE_REF_NAME}"
+            fi
+            if [ "${GITHUB_REF_NAME}" = "main" ]; then
+              docker tag "${IMAGE_NAME}:${SHORT_SHA}" "${ALIAS_NAME}:latest"
+            fi
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              docker tag "${IMAGE_NAME}:${SHORT_SHA}" "${ALIAS_NAME}:${GITHUB_REF_NAME}"
+            fi
+          done
+
       - name: Login to registry
         if: github.event_name != 'pull_request'
         run: |
@@ -114,16 +144,24 @@ jobs:
       - name: Push image
         if: github.event_name != 'pull_request'
         run: |
-          docker push "${IMAGE_NAME}:${SHORT_SHA}" || {
-            echo "Push failed. Ensure token has package write permission for ${IMAGE_NAME}." >&2
-            exit 1
+          push_tags() {
+            NAME="$1"
+            docker push "${NAME}:${SHORT_SHA}" || {
+              echo "Push failed. Ensure token has package write permission for ${NAME}." >&2
+              exit 1
+            }
+            if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
+              docker push "${NAME}:branch-${SAFE_REF_NAME}"
+            fi
+            if [ "${GITHUB_REF_NAME}" = "main" ]; then
+              docker push "${NAME}:latest"
+            fi
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              docker push "${NAME}:${GITHUB_REF_NAME}"
+            fi
           }
-          if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
-            docker push "${IMAGE_NAME}:branch-${SAFE_REF_NAME}"
-          fi
-          if [ "${GITHUB_REF_NAME}" = "main" ]; then
-            docker push "${IMAGE_NAME}:latest"
-          fi
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            docker push "${IMAGE_NAME}:${GITHUB_REF_NAME}"
-          fi
+
+          push_tags "${IMAGE_NAME}"
+          for alias in ${{ matrix.worker_aliases }}; do
+            push_tags "${REGISTRY_HOST}/${IMAGE_REPO}-${alias}"
+          done

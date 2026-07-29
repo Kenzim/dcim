@@ -125,7 +125,6 @@ run_*.sh
 docker-compose.override.yml
 docker-compose.*.local.yml
 *.local.yml
-docker-compose.registry.yml
 
 # Old PXE boot files
 tftp/pxe/boot.ipxe
