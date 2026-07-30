@@ -1,45 +1,62 @@
 import hashlib
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.dao.service_instance_dao import ServiceInstanceDAO
+from app.dao.proxy_runner_dao import ProxyRunnerDAO
 from app.models.ipam import IPAddress, ServiceIPAssignment
+from app.models.proxy_runner import ProxyRunner
 from app.models.service import ServiceStatus
 
 
 router = APIRouter(prefix="/runner/proxy", tags=["proxy-runner"])
 
 
-def _authenticate_runner(db: Session, api_key: str) -> int:
-    instances = ServiceInstanceDAO.get_all(db)
-    for instance in instances:
-        if instance.service_type != "proxy":
-            continue
-        if ServiceInstanceDAO.verify_api_key(instance, api_key):
-            return instance.location_id
+def _extract_token(authorization: str | None, x_api_key: str | None) -> str:
+    if x_api_key:
+        return x_api_key
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return ""
+
+
+def _authenticate_runner(db: Session, api_key: str) -> ProxyRunner:
+    for instance in ProxyRunnerDAO.get_enabled(db):
+        if ProxyRunnerDAO.verify_api_key(instance, api_key, db=db):
+            return instance
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid runner API key")
+
+
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or None
+    if request.client:
+        return request.client.host
+    return None
 
 
 @router.get("/config")
 async def get_proxy_config(
+    request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    token = ""
-    if x_api_key:
-        token = x_api_key
-    elif authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1].strip()
+    token = _extract_token(authorization, x_api_key)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
-    location_id = _authenticate_runner(db, token)
+    runner = _authenticate_runner(db, token)
+    ProxyRunnerDAO.touch_heartbeat(db, runner, client_ip=_client_ip(request))
+
     assignments = (
         db.query(ServiceIPAssignment)
-        .options(joinedload(ServiceIPAssignment.ip).joinedload(IPAddress.subnet), joinedload(ServiceIPAssignment.service))
+        .options(
+            joinedload(ServiceIPAssignment.ip).joinedload(IPAddress.subnet),
+            joinedload(ServiceIPAssignment.service),
+        )
         .all()
     )
     rows = []
@@ -49,8 +66,6 @@ async def get_proxy_config(
         if not ip_row or not ip_row.subnet:
             continue
         if not ip_row.subnet.enabled:
-            continue
-        if ip_row.subnet.location_id is not None and ip_row.subnet.location_id != location_id:
             continue
         service = a.service
         # Only publish credentials for services actively allowed to use the
@@ -80,6 +95,6 @@ async def get_proxy_config(
     version = hashlib.sha256("|".join(sorted(version_parts)).encode("utf-8")).hexdigest()[:16]
     return {
         "version": version,
-        "location_id": location_id,
+        "runner_id": runner.id,
         "assignments": rows,
     }

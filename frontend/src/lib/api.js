@@ -913,6 +913,67 @@ export async function updateTFTPConfig(config) {
   return await response.json();
 }
 
+// Standalone proxy runners (generated API key; phone-home health)
+export async function listProxyRunners() {
+  const response = await fetch(`${API_BASE}/admin/proxy-runners`, { credentials: 'include' });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to list proxy runners');
+  }
+  return await response.json();
+}
+
+export async function createProxyRunner(data) {
+  const response = await fetch(`${API_BASE}/admin/proxy-runners`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create proxy runner');
+  }
+  return await response.json();
+}
+
+export async function updateProxyRunner(id, data) {
+  const response = await fetch(`${API_BASE}/admin/proxy-runners/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update proxy runner');
+  }
+  return await response.json();
+}
+
+export async function rotateProxyRunnerKey(id) {
+  const response = await fetch(`${API_BASE}/admin/proxy-runners/${id}/rotate-key`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to rotate proxy runner key');
+  }
+  return await response.json();
+}
+
+export async function deleteProxyRunner(id) {
+  const response = await fetch(`${API_BASE}/admin/proxy-runners/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete proxy runner');
+  }
+}
+
 // Service instances (per-location DHCP/TFTP runners)
 export async function listServiceInstances(locationId) {
   const url = locationId

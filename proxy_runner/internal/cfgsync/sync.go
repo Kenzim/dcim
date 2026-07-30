@@ -20,8 +20,8 @@ type Config struct {
 }
 
 type configResponse struct {
-	Version     string `json:"version"`
-	LocationID  int    `json:"location_id"`
+	Version    string `json:"version"`
+	RunnerID   int    `json:"runner_id"`
 	Assignments []struct {
 		ServiceID int    `json:"service_id"`
 		BindIP    string `json:"bind_ip"`
@@ -36,7 +36,7 @@ func Loop(ctx context.Context, store *auth.Store, cfg Config) {
 		cfg.Client = &http.Client{Timeout: 10 * time.Second}
 	}
 	if cfg.Interval <= 0 {
-		cfg.Interval = 10 * time.Second
+		cfg.Interval = 30 * time.Second
 	}
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
@@ -54,10 +54,10 @@ func Loop(ctx context.Context, store *auth.Store, cfg Config) {
 }
 
 // validateBaseURL requires HTTPS for the Rackflow config-sync endpoint,
-// since the response carries every customer's plaintext proxy credentials
-// for this location. Plain HTTP is allowed only for loopback targets so
-// local development/tests keep working; any other host must use HTTPS or a
-// network-level MITM could read/poison proxy credentials in transit.
+// since the response carries every customer's plaintext proxy credentials.
+// Plain HTTP is allowed only for loopback targets so local development/tests
+// keep working; any other host must use HTTPS or a network-level MITM could
+// read/poison proxy credentials in transit.
 func validateBaseURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -118,6 +118,6 @@ func Once(ctx context.Context, store *auth.Store, cfg Config) error {
 		})
 	}
 	store.Replace(version, rows)
-	log.Printf("synced proxy config version=%s entries=%d location_id=%d", version, store.Len(), data.LocationID)
+	log.Printf("synced proxy config version=%s entries=%d runner_id=%d", version, store.Len(), data.RunnerID)
 	return nil
 }

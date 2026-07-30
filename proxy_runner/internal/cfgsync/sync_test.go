@@ -18,8 +18,8 @@ func TestOnceUpdatesStoreOnNewVersion(t *testing.T) {
 			t.Errorf("unexpected Authorization header: %q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"version":     "v1",
-			"location_id": 7,
+			"version":   "v1",
+			"runner_id": 7,
 			"assignments": []map[string]any{
 				{"service_id": 1, "bind_ip": "10.0.0.5", "username": "u1", "password": "p1"},
 			},
@@ -46,8 +46,8 @@ func TestOnceSkipsReplaceWhenVersionUnchanged(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"version":     "same",
-			"location_id": 1,
+			"version":   "same",
+			"runner_id": 1,
 			"assignments": []map[string]any{
 				{"service_id": 2, "bind_ip": "10.0.0.9", "username": "u2", "password": "p2"},
 			},
@@ -81,8 +81,8 @@ func TestOnceRemovesEntriesWhenVersionChangesToEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if version == "v1" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"version":     "v1",
-				"location_id": 1,
+				"version":   "v1",
+				"runner_id": 1,
 				"assignments": []map[string]any{
 					{"service_id": 3, "bind_ip": "10.0.0.11", "username": "u3", "password": "p3"},
 				},
@@ -90,7 +90,7 @@ func TestOnceRemovesEntriesWhenVersionChangesToEmpty(t *testing.T) {
 		} else {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"version":     "v2-empty",
-				"location_id": 1,
+				"runner_id":   1,
 				"assignments": []map[string]any{},
 			})
 		}
@@ -142,7 +142,7 @@ func TestOnceRequiresBaseURLAndAPIKey(t *testing.T) {
 
 func TestLoopStopsOnContextCancel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"version": "v1", "location_id": 1, "assignments": []map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"version": "v1", "runner_id": 1, "assignments": []map[string]any{}})
 	}))
 	defer srv.Close()
 

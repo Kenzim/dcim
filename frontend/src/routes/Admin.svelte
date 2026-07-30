@@ -36,6 +36,7 @@
   import ProxmoxInventory from '../components/ProxmoxInventory.svelte';
   import ProxmoxClusterDetail from '../components/ProxmoxClusterDetail.svelte';
   import ProxyIpam from '../components/ProxyIpam.svelte';
+  import ProxyRunners from '../components/ProxyRunners.svelte';
   import PermissionSets from '../components/PermissionSets.svelte';
   import Resellers from '../components/Resellers.svelte';
   import ResellerDetail from '../components/ResellerDetail.svelte';
@@ -294,6 +295,8 @@
         <ProxmoxClusterDetail clusterId={proxmoxClusterId} />
       {:else if routeName === 'proxy-ipam'}
         <ProxyIpam />
+      {:else if routeName === 'proxy-runners'}
+        <ProxyRunners />
       {:else if routeName === 'server-groups'}
         <ServerGroups />
       {:else if routeName.startsWith('server-groups/') && groupId}

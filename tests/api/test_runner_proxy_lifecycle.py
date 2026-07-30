@@ -1,11 +1,13 @@
-"""Proxy runner config reflects service lifecycle (suspend/unsuspend/terminate)
-and enforces location scoping, per the ipam-hardening + lifecycle-runner work.
+"""Proxy runner config reflects service lifecycle (suspend/unsuspend/terminate).
+
+Proxy runners are standalone (not location-bound); config includes all active
+assignments from enabled IPAM subnets.
 """
 from app.dao.ipam_dao import IPAMDAO
 from app.dao.location_dao import LocationDAO
+from app.dao.proxy_runner_dao import ProxyRunnerDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.service_dao import ServiceDAO
-from app.dao.service_instance_dao import ServiceInstanceDAO
 from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
 
 
@@ -38,15 +40,13 @@ def _proxy_service(db_session, *, location, status=ServiceStatus.ACTIVE, suffix=
     )
 
 
-def _runner_instance(db_session, location, suffix="1"):
-    return ServiceInstanceDAO.create(
+def _runner(db_session, suffix="1"):
+    row, _ = ProxyRunnerDAO.create(
         db_session,
-        location_id=location.id,
-        service_type="proxy",
         name=f"proxy-runner-{suffix}",
-        base_url=f"http://runner-{suffix}.local:8080",
         api_key=f"runner-secret-{suffix}",
     )
+    return row
 
 
 def _fetch_config(client, api_key):
@@ -57,7 +57,7 @@ def _fetch_config(client, api_key):
 
 def test_suspended_service_excluded_from_runner_config(client, db_session):
     location = LocationDAO.create(db_session, name="loc-runner-suspend")
-    _runner_instance(db_session, location)
+    _runner(db_session)
     service = _proxy_service(db_session, location=location, status=ServiceStatus.ACTIVE)
     subnet = IPAMDAO.create_subnet(db_session, name="suspend-subnet", cidr="198.51.100.4/30", location_id=location.id)
     assignment = IPAMDAO.assign_ip(db_session, service_id=service.id, subnet_id=subnet.id, username="u", password="p")
@@ -79,7 +79,7 @@ def test_suspended_service_excluded_from_runner_config(client, db_session):
 
 def test_unsuspended_service_reappears_in_runner_config(client, db_session):
     location = LocationDAO.create(db_session, name="loc-runner-unsuspend")
-    _runner_instance(db_session, location, suffix="2")
+    _runner(db_session, suffix="2")
     service = _proxy_service(db_session, location=location, status=ServiceStatus.SUSPENDED, suffix="2")
     subnet = IPAMDAO.create_subnet(db_session, name="unsuspend-subnet", cidr="198.51.100.8/30", location_id=location.id)
     assignment = IPAMDAO.assign_ip(db_session, service_id=service.id, subnet_id=subnet.id, username="u2", password="p2")
@@ -98,7 +98,7 @@ def test_unsuspended_service_reappears_in_runner_config(client, db_session):
 def test_terminate_releases_ipam_assignment_and_removes_from_config(client, db_session, test_admin_user):
     headers = _admin_headers(client, test_admin_user)
     location = LocationDAO.create(db_session, name="loc-runner-terminate")
-    _runner_instance(db_session, location, suffix="3")
+    _runner(db_session, suffix="3")
     service = _proxy_service(db_session, location=location, status=ServiceStatus.ACTIVE, suffix="3")
     subnet = IPAMDAO.create_subnet(db_session, name="terminate-subnet", cidr="198.51.100.12/30", location_id=location.id)
     assignment = IPAMDAO.assign_ip(db_session, service_id=service.id, subnet_id=subnet.id, username="u3", password="p3")
@@ -131,7 +131,7 @@ def test_rotated_credentials_change_config_version(client, db_session):
     (username/password) changes.
     """
     location = LocationDAO.create(db_session, name="loc-runner-rotate")
-    _runner_instance(db_session, location, suffix="rotate")
+    _runner(db_session, suffix="rotate")
     service = _proxy_service(db_session, location=location, suffix="rotate")
     subnet = IPAMDAO.create_subnet(db_session, name="rotate-subnet", cidr="198.51.100.28/30", location_id=location.id)
     assignment = IPAMDAO.assign_ip(db_session, service_id=service.id, subnet_id=subnet.id, username="u-before", password="p-before")
@@ -149,10 +149,11 @@ def test_rotated_credentials_change_config_version(client, db_session):
     assert after["version"] != before["version"]
 
 
-def test_location_scoping_hides_other_location_assignments(client, db_session):
+def test_config_includes_assignments_from_all_locations(client, db_session):
+    """Standalone runners receive all active assignments (not location-scoped)."""
     loc_a = LocationDAO.create(db_session, name="loc-runner-a")
     loc_b = LocationDAO.create(db_session, name="loc-runner-b")
-    _runner_instance(db_session, loc_a, suffix="a")
+    runner = _runner(db_session, suffix="a")
     service_a = _proxy_service(db_session, location=loc_a, suffix="a")
     service_b = _proxy_service(db_session, location=loc_b, suffix="b")
     subnet_a = IPAMDAO.create_subnet(db_session, name="loc-a-subnet", cidr="198.51.100.16/30", location_id=loc_a.id)
@@ -161,15 +162,15 @@ def test_location_scoping_hides_other_location_assignments(client, db_session):
     assign_b = IPAMDAO.assign_ip(db_session, service_id=service_b.id, subnet_id=subnet_b.id, username="ub")
 
     data = _fetch_config(client, "runner-secret-a")
-    assert data["location_id"] == loc_a.id
+    assert data["runner_id"] == runner.id
     ips = {row["bind_ip"] for row in data["assignments"]}
     assert assign_a.ip.ip_address in ips
-    assert assign_b.ip.ip_address not in ips
+    assert assign_b.ip.ip_address in ips
 
 
 def test_config_version_stable_when_assignments_unchanged(client, db_session):
     location = LocationDAO.create(db_session, name="loc-runner-stable")
-    _runner_instance(db_session, location, suffix="stable")
+    _runner(db_session, suffix="stable")
     service = _proxy_service(db_session, location=location, suffix="stable")
     subnet = IPAMDAO.create_subnet(db_session, name="stable-subnet", cidr="198.51.100.24/30", location_id=location.id)
     IPAMDAO.assign_ip(db_session, service_id=service.id, subnet_id=subnet.id, username="us")
@@ -177,3 +178,15 @@ def test_config_version_stable_when_assignments_unchanged(client, db_session):
     first = _fetch_config(client, "runner-secret-stable")
     second = _fetch_config(client, "runner-secret-stable")
     assert first["version"] == second["version"]
+
+
+def test_config_poll_updates_last_seen(client, db_session):
+    runner = _runner(db_session, suffix="hb")
+    assert runner.last_seen_at is None
+
+    data = _fetch_config(client, "runner-secret-hb")
+    assert data["runner_id"] == runner.id
+
+    db_session.refresh(runner)
+    assert runner.last_seen_at is not None
+    assert ProxyRunnerDAO.is_online(runner)

@@ -72,9 +72,9 @@ def test_update_service_instance_rejects_non_http_base_url(client, test_admin_us
         headers=headers,
         json={
             "location_id": test_location.id,
-            "service_type": "proxy",
-            "name": "proxy-runner",
-            "base_url": "http://10.50.0.6:8080",
+            "service_type": "dhcp",
+            "name": "dhcp-runner-update",
+            "base_url": "http://10.50.0.6:9080",
             "api_key": "secret",
         },
     )
