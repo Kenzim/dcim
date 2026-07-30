@@ -21,7 +21,6 @@
   $: chartHeight = Math.max(1, height - padding.top - padding.bottom);
   $: yTickFractions = [1, 0.75, 0.5, 0.25, 0];
 
-  let hoverX = null;
   let hoverT = null;
 
   function niceCeiling(value) {
@@ -75,6 +74,14 @@
     return samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${x(s.t)} ${y(s.value || 0)}`).join(' ');
   }
 
+  // Must be a reactive declaration so paths recompute when width/height/scale change.
+  // Calling pathFor() only from the template does not track those dependencies.
+  $: seriesPaths = visibleSeries.map((s) => ({
+    id: s.id,
+    color: s.color,
+    d: pathFor(s.samples),
+  }));
+
   function nearestSample(samples, t) {
     if (!samples || !samples.length) return null;
     let best = samples[0];
@@ -92,15 +99,13 @@
   function handleMove(event) {
     if (!allSamples.length) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    if (!rect.width) return;
+    if (!rect.width || !rect.height) return;
     const svgX = ((event.clientX - rect.left) / rect.width) * width;
     const clampedX = Math.max(padding.left, Math.min(width - padding.right, svgX));
-    hoverX = clampedX;
     hoverT = domainStart + ((clampedX - padding.left) / chartWidth) * domainSpan;
   }
 
   function clearHover() {
-    hoverX = null;
     hoverT = null;
   }
 
@@ -110,6 +115,17 @@
           .map((s) => ({ series: s, sample: nearestSample(s.samples, hoverT) }))
           .filter((e) => e.sample)
       : [];
+
+  // Snap the crosshair/dots to the nearest sample time so they sit on the line.
+  $: hoverSnapT =
+    hoverEntries.length > 0
+      ? hoverEntries.reduce((best, entry) => {
+          const t = entry.sample.t;
+          if (best == null || Math.abs(t - hoverT) < Math.abs(best - hoverT)) return t;
+          return best;
+        }, null)
+      : null;
+  $: hoverX = hoverSnapT != null ? x(hoverSnapT) : null;
 </script>
 
 <div class="agg-chart">
@@ -142,11 +158,11 @@
 
         <line x1={padding.left} y1={padding.top + chartHeight} x2={width - padding.right} y2={padding.top + chartHeight} class="axis-line" />
 
-        {#each visibleSeries as s (s.id)}
-          <path d={pathFor(s.samples)} fill="none" stroke={s.color} stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+        {#each seriesPaths as s (s.id)}
+          <path d={s.d} fill="none" stroke={s.color} stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
         {/each}
 
-        {#if hoverT != null}
+        {#if hoverX != null}
           <line x1={hoverX} y1={padding.top} x2={hoverX} y2={padding.top + chartHeight} class="hover-line" />
           {#each hoverEntries as entry (entry.series.id)}
             <circle cx={x(entry.sample.t)} cy={y(entry.sample.value || 0)} r="3.5" fill={entry.series.color} stroke="var(--bg-primary)" stroke-width="1.5" />
@@ -158,7 +174,7 @@
     </svg>
     {#if hoverEntries.length > 0}
       <div class="tooltip" style="left: {Math.min(Math.max((hoverX / width) * 100, 8), 92)}%">
-        <div class="tooltip-time">{formatLongTime(hoverT)}</div>
+        <div class="tooltip-time">{formatLongTime(hoverSnapT ?? hoverT)}</div>
         {#each hoverEntries as entry (entry.series.id)}
           <div class="tooltip-row">
             <span class="legend-dot" style="background: {entry.series.color}" />
