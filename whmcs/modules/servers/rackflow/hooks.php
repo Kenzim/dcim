@@ -7,8 +7,9 @@
  * Settings tab and Save Changes once so WHMCS registers this file.
  *
  * AdminAreaFooterOutput: custom Module Settings UI on configproducts.php
- * that mirrors packageconfigoption[1..8] (native WHMCS fields stay in the
- * form for submit; their table rows are hidden).
+ * for RackFlow products only (servertype check) that mirrors
+ * packageconfigoption[1..8] (native WHMCS fields stay in the form for
+ * submit; their table rows are hidden).
  *
  * AdminAreaFooterOutput: styles the admin service "Server overview" card on
  * clientsservices.php when #rackflow-admin-status is present.
@@ -55,6 +56,37 @@ function rackflow_hook_catalog_bootstrap($productId)
     return $out;
 }
 
+/**
+ * True when this product uses the RackFlow server module.
+ *
+ * Prefers a posted Module Name (servertype) on save / form submit so a
+ * just-changed dropdown wins over the DB value; otherwise reads tblproducts.
+ *
+ * @param int $productId
+ * @return bool
+ */
+function rackflow_hook_productIsRackflow($productId)
+{
+    if (isset($_REQUEST['servertype'])) {
+        $posted = strtolower(trim((string)$_REQUEST['servertype']));
+        if ($posted !== '') {
+            return $posted === 'rackflow';
+        }
+    }
+    $productId = (int)$productId;
+    if ($productId <= 0 || !class_exists('\Illuminate\Database\Capsule\Manager')) {
+        return false;
+    }
+    try {
+        $product = \Illuminate\Database\Capsule\Manager::table('tblproducts')
+            ->where('id', $productId)
+            ->first();
+        return $product && strtolower((string)$product->servertype) === 'rackflow';
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 add_hook('AdminProductConfigFieldsSave', 1, function (array $vars) {
     $productId = 0;
     if (!empty($vars['pid'])) {
@@ -63,6 +95,10 @@ add_hook('AdminProductConfigFieldsSave', 1, function (array $vars) {
         $productId = (int)$_REQUEST['id'];
     }
     if ($productId <= 0) {
+        return;
+    }
+    // Do not sync OS / hygiene for DCIMPC (or any other) module products.
+    if (!rackflow_hook_productIsRackflow($productId)) {
         return;
     }
 
@@ -401,6 +437,12 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     }
 
     $productId = isset($_REQUEST['id']) ? (int)$_REQUEST['id'] : 0;
+    // Only inject the Module Settings mirror UI for RackFlow products.
+    // Without this, any product with packageconfigoption[1] (e.g. DCIMPC)
+    // would get the RackFlow panel overlaid on its native fields.
+    if ($productId <= 0 || !rackflow_hook_productIsRackflow($productId)) {
+        return '';
+    }
     $bootstrap = rackflow_hook_catalog_bootstrap($productId);
     $catalogJson = json_encode(
         $bootstrap,
@@ -671,6 +713,35 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
 
   function optionSelector(index) {
     return '[name="packageconfigoption[' + index + ']"], [name="packageconfigoption' + index + '"]';
+  }
+
+  /** Module Name dropdown on configproducts — must stay rackflow while mounted. */
+  function selectedModuleType() {
+    var \$ = jq();
+    if (!\$) return '';
+    var \$sel = \$('select[name="servertype"], select#servertype, #inputServerType').first();
+    if (!\$sel.length) return '';
+    return String(\$sel.val() || '').toLowerCase();
+  }
+
+  function isRackflowModuleContext() {
+    var mod = selectedModuleType();
+    // PHP only injects for RackFlow products; if the select is missing, allow mount.
+    if (!mod) return true;
+    return mod === 'rackflow';
+  }
+
+  function teardownUi(\$) {
+    var el = document.getElementById(UI_ID);
+    if (el) {
+      var \$row = \$(el).closest('tr.rf-ms-row');
+      if (\$row.length) {
+        \$row.remove();
+      } else {
+        \$(el).remove();
+      }
+    }
+    \$('.rf-ms__hidden-native').removeClass('rf-ms__hidden-native');
   }
 
   function nativeControl(index) {
@@ -1129,6 +1200,10 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
   function mount() {
     var \$ = jq();
     if (!\$) return;
+    if (!isRackflowModuleContext()) {
+      teardownUi(\$);
+      return;
+    }
     if (!nativeControl(IDX.serviceType).length) return;
 
     hideNativePackageRows(\$);
@@ -1156,6 +1231,11 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       \$(document).on(
         'click.rfms',
         'a[href*="Module"], a[data-toggle="tab"], .nav-tabs a, #mode-switch',
+        function () { setTimeout(scheduleMount, 200); }
+      );
+      \$(document).on(
+        'change.rfms',
+        'select[name="servertype"], select#servertype, #inputServerType',
         function () { setTimeout(scheduleMount, 200); }
       );
       \$(window).on('hashchange.rfms', function () { setTimeout(scheduleMount, 200); });
