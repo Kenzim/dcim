@@ -23,8 +23,10 @@
   let series = [];
   let trackedPorts = 0;
 
-  let chartWidth = 960;
-  let chartHeight = 280;
+  // Start at 0 so we never paint paths against the fallback 960×280 viewBox;
+  // bind:clientWidth/Height supply the real flex size before the first draw.
+  let chartWidth = 0;
+  let chartHeight = 0;
 
   onMount(loadSeries);
 
@@ -91,7 +93,9 @@
     </div>
   {:else}
     <div class="chart-wrap" bind:clientWidth={chartWidth} bind:clientHeight={chartHeight}>
-      <AggregateTrafficChart {series} width={chartWidth} height={chartHeight} />
+      {#if chartWidth > 0 && chartHeight > 0}
+        <AggregateTrafficChart {series} width={chartWidth} height={chartHeight} />
+      {/if}
     </div>
     <div class="traffic-legend">
       {#each series as s (s.id)}

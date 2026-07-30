@@ -69,18 +69,32 @@
     return padding.top + chartHeight - (v / maxValue) * chartHeight;
   }
 
-  function pathFor(samples) {
-    if (!samples || samples.length < 2) return '';
-    return samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${x(s.t)} ${y(s.value || 0)}`).join(' ');
-  }
+  // Scale inputs must appear in this $: expression (not only inside helpers) so
+  // path `d` recomputes when the flex-measured viewBox changes.
+  $: seriesPaths = buildSeriesPaths(
+    visibleSeries,
+    chartWidth,
+    chartHeight,
+    domainStart,
+    domainSpan,
+    maxValue,
+    padding
+  );
 
-  // Must be a reactive declaration so paths recompute when width/height/scale change.
-  // Calling pathFor() only from the template does not track those dependencies.
-  $: seriesPaths = visibleSeries.map((s) => ({
-    id: s.id,
-    color: s.color,
-    d: pathFor(s.samples),
-  }));
+  function buildSeriesPaths(seriesList, w, h, x0, xSpan, yMax, pad) {
+    const xAt = (t) => pad.left + ((t - x0) / xSpan) * w;
+    const yAt = (v) => pad.top + h - (v / yMax) * h;
+    return seriesList.map((s) => {
+      const samples = s.samples || [];
+      const d =
+        samples.length < 2
+          ? ''
+          : samples
+              .map((p, i) => `${i === 0 ? 'M' : 'L'} ${xAt(p.t)} ${yAt(p.value || 0)}`)
+              .join(' ');
+      return { id: s.id, color: s.color, d };
+    });
+  }
 
   function nearestSample(samples, t) {
     if (!samples || !samples.length) return null;
@@ -158,9 +172,11 @@
 
         <line x1={padding.left} y1={padding.top + chartHeight} x2={width - padding.right} y2={padding.top + chartHeight} class="axis-line" />
 
-        {#each seriesPaths as s (s.id)}
-          <path d={s.d} fill="none" stroke={s.color} stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-        {/each}
+        {#key `${width}x${height}:${maxValue}`}
+          {#each seriesPaths as s (s.id)}
+            <path d={s.d} fill="none" stroke={s.color} stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+          {/each}
+        {/key}
 
         {#if hoverX != null}
           <line x1={hoverX} y1={padding.top} x2={hoverX} y2={padding.top + chartHeight} class="hover-line" />
