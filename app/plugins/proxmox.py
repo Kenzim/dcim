@@ -1093,6 +1093,11 @@ class ProxmoxPlugin(ServerPlugin):
         if not current:
             raise RuntimeError(f"VM {target} has no {key} to retarget onto bridge {bridge_name}")
 
+        # No-op when the target bridge is already present (option order may vary).
+        for part in current.split(","):
+            if part == f"bridge={bridge_name}":
+                return {"changed": False, "net_key": key, "value": current}
+
         parts = [p for p in current.split(",") if p and not p.startswith("bridge=")]
         parts.append(f"bridge={bridge_name}")
         updated = ",".join(parts)
