@@ -1739,8 +1739,6 @@
             <div class="traffic-graph-wrap">
               <TrafficGraph
                 samples={firstPortWithSamples.samples}
-                width={520}
-                height={230}
                 graphId="main"
               />
             </div>
@@ -3666,12 +3664,13 @@
     min-height: 0;
     display: flex;
     align-items: stretch;
-    justify-content: stretch;
   }
 
   .traffic-graph-wrap :global(.traffic-graph) {
+    flex: 1;
     width: 100%;
     min-width: 0;
+    min-height: 0;
   }
 
   .activity-panel {
