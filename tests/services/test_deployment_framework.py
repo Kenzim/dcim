@@ -64,6 +64,10 @@ class FakePlugin:
         self.calls.append(("configure", vm_config))
         return True
 
+    async def ensure_network_bridge(self, bridge, *, vmid=None, net_key="net0"):
+        self.calls.append(("ensure_network_bridge", bridge, net_key, vmid))
+        return {"changed": True, "net_key": net_key, "value": f"virtio=AA:BB:CC:DD:EE:FF,bridge={bridge}"}
+
     async def regenerate_cloudinit(self, vmid=None):
         self.calls.append(("regenerate_cloudinit", vmid))
 
@@ -389,6 +393,9 @@ def _drive(db_session, max_ticks=30):
             DeploymentJobStatus.SUCCEEDED,
             DeploymentJobStatus.FAILED,
             DeploymentJobStatus.CANCELLED,
+            # Job-level step retries park here with next_run_at set; stop so tests
+            # can assert waiting/retry instead of spinning forever.
+            DeploymentJobStatus.WAITING,
         ):
             return job
     return last
@@ -459,14 +466,38 @@ def test_runner_guest_agent_waits_then_completes(db_session, monkeypatch):
     assert job.status == DeploymentJobStatus.SUCCEEDED
 
 
-def test_runner_fails_on_missing_ip_allocation(db_session, monkeypatch):
+def test_runner_retries_on_missing_ip_allocation(db_session, monkeypatch):
+    """Transient/config step failures park the job in WAITING (24h budget), not FAILED."""
     plugin = FakePlugin(exists=True, power=PowerState.OFF)  # skip clone
     _patch_context(monkeypatch, plugin, alloc=None)  # cloudinit net precheck fails
     service = _placed_vm_service(db_session, "cloudinit_clone")
     _create_job(db_session, service, "cloudinit_clone")
 
     job = _drive(db_session)
+    assert job.status == DeploymentJobStatus.WAITING
+    assert job.next_run_at is not None
+    assert job.error_message
+    db_session.refresh(service)
+    assert service.vm.guest_state == VMGuestState.PROVISIONING
+    assert service.vm.guest_last_error
+
+
+def test_runner_fails_after_retry_budget(db_session, monkeypatch):
+    """Once the 24h job budget elapses, a step failure becomes terminal FAILED."""
+    from datetime import timedelta
+
+    from app.services.deployment import runner as runner_mod
+
+    plugin = FakePlugin(exists=True, power=PowerState.OFF)
+    _patch_context(monkeypatch, plugin, alloc=None)
+    service = _placed_vm_service(db_session, "cloudinit_clone")
+    job = _create_job(db_session, service, "cloudinit_clone")
+    # Pretend the job started just outside the retry budget.
+    job.started_at = runner_mod._utcnow() - runner_mod.JOB_RETRY_BUDGET - timedelta(minutes=1)
+    db_session.commit()
+
+    job = _drive(db_session)
     assert job.status == DeploymentJobStatus.FAILED
+    assert "gave up after" in (job.error_message or "")
     db_session.refresh(service)
     assert service.vm.guest_state == VMGuestState.ERROR
-    assert service.vm.guest_last_error

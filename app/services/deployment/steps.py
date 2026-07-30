@@ -58,6 +58,23 @@ class ConfigureSizingStep(DeploymentStep):
         if not ok:
             raise DeploymentError("Proxmox VM sizing config update failed")
 
+        # Apply IP-pool / product bridge before power-on (clones keep the template vmbr).
+        alloc = ctx.get_ip_allocation()
+        bridge = (specs.get("network_bridge") or "").strip()
+        if not bridge and alloc is not None:
+            bridge = (getattr(alloc, "bridge_name", None) or "").strip()
+        if bridge:
+            if not hasattr(plugin, "ensure_network_bridge"):
+                ctx.logger.warning("Plugin does not support network bridge updates; skipping bridge=%s", bridge)
+            else:
+                result = await plugin.ensure_network_bridge(bridge, vmid=int(target_vmid))
+                ctx.logger.info(
+                    "Network bridge net=%s bridge=%s changed=%s",
+                    result.get("net_key"),
+                    bridge,
+                    result.get("changed"),
+                )
+
         # Grow the primary virtual disk when catalog/product asks for more space.
         # Guest filesystem growth (APFS / Linux) happens later via the guest agent.
         disk_gb = specs.get("disk_gb")
@@ -133,9 +150,21 @@ class PowerOnStep(DeploymentStep):
 
     async def execute(self, ctx) -> None:
         plugin = ctx.get_plugin()
-        powered = await plugin.power_on()
+        try:
+            powered = await plugin.power_on()
+        except Exception as exc:
+            raise DeploymentError(f"Proxmox power_on failed: {exc}") from exc
         if not powered:
             raise DeploymentError("Proxmox power_on returned failure")
+        # Defense in depth: never mark succeeded while the guest is still stopped.
+        try:
+            state = await plugin.get_power_state()
+        except Exception as exc:
+            raise DeploymentError(f"Could not verify power state after power_on: {exc}") from exc
+        if state != PowerState.ON:
+            raise DeploymentError(
+                f"Proxmox reported power_on success but VM is not running (state={state})"
+            )
 
 
 class WaitForGuestAgentStep(DeploymentStep):

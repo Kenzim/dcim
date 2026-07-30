@@ -58,6 +58,9 @@ services:
       IPMI_PROXY_RUNNER_API_KEY: ${IPMI_PROXY_RUNNER_API_KEY:-}
       IPMI_TICKET_TTL_SECONDS: ${IPMI_TICKET_TTL_SECONDS:-60}
       IPMI_SESSION_TTL_SECONDS: ${IPMI_SESSION_TTL_SECONDS:-7200}
+      # Public RackFlow URL for WHMCS VNC popup launch (/vnc?t=…).
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-${PUBLIC_APP_URL:-}}
     volumes:
       - /os_templates:/app/os_templates
       - dhcp_tftp_shared:/shared
@@ -141,6 +144,8 @@ services:
       DEPLOYMENT_WORKER_INTERVAL_SECONDS: ${DEPLOYMENT_WORKER_INTERVAL_SECONDS:-3}
       DEPLOYMENT_WORKER_LEASE_TTL_SECONDS: ${DEPLOYMENT_WORKER_LEASE_TTL_SECONDS:-60}
       RUN_DEPLOYMENT_WORKER: "false"
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-${PUBLIC_APP_URL:-}}
     depends_on:
       mysql:
         condition: service_healthy

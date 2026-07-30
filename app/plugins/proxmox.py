@@ -683,22 +683,48 @@ class ProxmoxPlugin(ServerPlugin):
     async def power_on(self) -> bool:
         """
         Power on the VM via Proxmox API.
+
+        Waits for the async start task (UPID) and confirms the guest is running.
+        Accepting the HTTP ``/status/start`` alone is not enough — QEMU can still
+        fail immediately after (e.g. missing bridge) while the POST returns 200.
         
         Returns:
             True if successful, False otherwise
         """
         try:
+            # Already running: treat as success (idempotent for deployment retries).
+            if await self.get_power_state() == PowerState.ON:
+                logger.info("[ProxmoxPlugin.power_on] VM %s already running", self.vmid)
+                return True
+
             response = await self._post_with_relocate(
                 lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/start",
                 timeout=30.0,
             )
             response.raise_for_status()
+            upid = response.json().get("data")
+            if upid:
+                await self.wait_for_proxmox_task(str(upid), timeout=120.0)
 
-            logger.info(f"[ProxmoxPlugin.power_on] Successfully sent power on command for VM {self.vmid}")
-            return True
-                
+            # Confirm QEMU actually reached running (task OK can still race).
+            deadline = asyncio.get_running_loop().time() + 30.0
+            while asyncio.get_running_loop().time() < deadline:
+                if await self.get_power_state() == PowerState.ON:
+                    logger.info("[ProxmoxPlugin.power_on] VM %s is running", self.vmid)
+                    return True
+                await asyncio.sleep(1.0)
+
+            raise RuntimeError(
+                f"Proxmox start task finished but VM {self.vmid} is not running"
+            )
+
         except Exception as e:
             logger.error(f"[ProxmoxPlugin.power_on] Failed to power on VM: {str(e)}")
+            # Preserve bool API for admin/client power buttons; callers that need the
+            # message (deployment steps) should catch via get_power_state / logs.
+            # Re-raise task/verify failures so deployment does not mark success silently.
+            if isinstance(e, (RuntimeError, TimeoutError, httpx.HTTPError)):
+                raise
             return False
     
     async def power_off(self, force: bool = False) -> bool:
@@ -1037,6 +1063,48 @@ class ProxmoxPlugin(ServerPlugin):
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             return response.json().get("data") or {}
+
+    async def ensure_network_bridge(
+        self,
+        bridge: str,
+        *,
+        vmid: Optional[int] = None,
+        net_key: str = "net0",
+    ) -> Dict[str, Any]:
+        """Set ``bridge=<bridge>`` on a QEMU nic (default ``net0``), preserving model/MAC/opts.
+
+        Linked clones keep the template's bridge; catalog/IP-pool placement must
+        rewrite it before power-on when the target node uses a different vmbr.
+        """
+        target = vmid if vmid is not None else self.vmid
+        if target is None:
+            raise ValueError("vmid is required")
+        bridge_name = (bridge or "").strip()
+        if not bridge_name:
+            raise ValueError("bridge is required")
+        if not re.match(r"^[A-Za-z0-9._-]+$", bridge_name):
+            raise ValueError(f"Invalid bridge name: {bridge_name!r}")
+        key = (net_key or "net0").strip() or "net0"
+        if not re.match(r"^net\d+$", key):
+            raise ValueError(f"Invalid net key: {key!r}")
+
+        cfg = await self.get_qemu_config(vmid=int(target))
+        current = str(cfg.get(key) or "").strip()
+        if not current:
+            raise RuntimeError(f"VM {target} has no {key} to retarget onto bridge {bridge_name}")
+
+        parts = [p for p in current.split(",") if p and not p.startswith("bridge=")]
+        parts.append(f"bridge={bridge_name}")
+        updated = ",".join(parts)
+        if updated == current:
+            return {"changed": False, "net_key": key, "value": current}
+
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{int(target)}/config"
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.put(url, headers=headers, data={key: updated})
+            response.raise_for_status()
+        return {"changed": True, "net_key": key, "value": updated, "previous": current}
 
     async def resize_disk(self, disk: str, size: str, vmid: Optional[int] = None) -> None:
         """

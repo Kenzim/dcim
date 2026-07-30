@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 # the single-threaded worker loop (lease reclaim never runs while blocked).
 DEFAULT_STEP_CALL_TIMEOUT_SECONDS = 1800
 
+# After a step hard-fails (timeout / execute error), keep retrying the same step
+# until this wall-clock budget from job start elapses, then fail the job.
+JOB_RETRY_BUDGET = timedelta(hours=24)
+JOB_STEP_RETRY_BACKOFF_BASE_SECONDS = 30
+JOB_STEP_RETRY_BACKOFF_MAX_SECONDS = 300
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -137,6 +143,98 @@ def _fail_step_and_job(db: Session, job, step_row, message: str, detail=None, *,
     _fail_job(db, job, message, strategy=strategy)
 
 
+def _retry_backoff_seconds(step_row) -> int:
+    """Exponential backoff from step attempts, capped (30s … 5m)."""
+    n = max(0, int(getattr(step_row, "attempt_count", 0) or 0) - 1)
+    return min(
+        JOB_STEP_RETRY_BACKOFF_MAX_SECONDS,
+        JOB_STEP_RETRY_BACKOFF_BASE_SECONDS * (2 ** min(n, 4)),
+    )
+
+
+def _job_retry_deadline(job) -> datetime:
+    anchor = _as_utc(job.started_at) or _as_utc(job.created_at) or _utcnow()
+    return anchor + JOB_RETRY_BUDGET
+
+
+def _retry_step_or_fail(
+    db: Session,
+    job,
+    step_row,
+    message: str,
+    detail=None,
+    *,
+    strategy=None,
+) -> None:
+    """Reschedule the current step until the 24h job budget is exhausted.
+
+    Resets the step's ``started_at`` so per-step timeouts (e.g. guest-agent wait)
+    begin a fresh window on each retry. Guest stays ``provisioning`` with the
+    last error surfaced; the job is not marked FAILED until the budget ends.
+    """
+    now = _utcnow()
+    if strategy is None:
+        strategy = get_deployment_strategy_registry().resolve(job.strategy_name)
+    deadline = _job_retry_deadline(job)
+    if now >= deadline:
+        hours = JOB_RETRY_BUDGET.total_seconds() / 3600.0
+        _fail_step_and_job(
+            db,
+            job,
+            step_row,
+            f"{message} (gave up after {hours:g}h of retries)",
+            detail=detail,
+            strategy=strategy,
+        )
+        return
+
+    backoff = _retry_backoff_seconds(step_row)
+    step_row.status = DeploymentStepStatus.WAITING
+    step_row.message = message
+    step_row.finished_at = None
+    # Fresh timeout window for the next claim of this step.
+    step_row.started_at = None
+    if detail is not None:
+        step_row.detail = detail
+
+    job.status = DeploymentJobStatus.WAITING
+    job.error_message = message
+    job.finished_at = None
+    job.next_run_at = now + timedelta(seconds=backoff)
+    job.locked_by = None
+    job.locked_at = None
+
+    service = job.service
+    if _strategy_mutates_lifecycle(strategy):
+        if service.vm:
+            service.vm.guest_state = VMGuestState.PROVISIONING
+            service.vm.guest_last_error = message
+        _write_provision_summary(
+            service,
+            job,
+            step_name=step_row.name,
+            status="waiting",
+            error=message,
+        )
+    else:
+        _write_guest_password_apply(
+            service,
+            job,
+            status="waiting",
+            step_name=step_row.name,
+            error=message,
+        )
+    db.commit()
+    logger.warning(
+        "Deployment job %s step %s will retry in %ss (deadline %s): %s",
+        job.id,
+        step_row.name,
+        backoff,
+        deadline.isoformat(),
+        message,
+    )
+
+
 async def _complete_job(
     db: Session, job, ctx: DeploymentContext, *, strategy: DeploymentStrategy | None
 ) -> None:
@@ -221,11 +319,11 @@ async def run_job_tick(db: Session, job) -> None:
     ctx = DeploymentContext(db, service, job)
     now = _utcnow()
 
-    # Enforce per-step wait timeout.
+    # Enforce per-step wait timeout (resets when a job-level retry clears started_at).
     if step_def.timeout_seconds and step_row.started_at is not None:
         started = _as_utc(step_row.started_at)
         if (now - started).total_seconds() > step_def.timeout_seconds:
-            _fail_step_and_job(
+            _retry_step_or_fail(
                 db,
                 job,
                 step_row,
@@ -279,7 +377,7 @@ async def run_job_tick(db: Session, job) -> None:
         return
 
     if outcome.result == StepResult.FAILED:
-        _fail_step_and_job(
+        _retry_step_or_fail(
             db,
             job,
             step_row,
@@ -298,7 +396,7 @@ async def run_job_tick(db: Session, job) -> None:
     try:
         await asyncio.wait_for(step_def.execute(ctx), timeout=call_timeout)
     except asyncio.TimeoutError:
-        _fail_step_and_job(
+        _retry_step_or_fail(
             db,
             job,
             step_row,
@@ -307,14 +405,16 @@ async def run_job_tick(db: Session, job) -> None:
         )
         return
     except DeploymentError as exc:
-        _fail_step_and_job(db, job, step_row, str(exc), strategy=strategy)
+        _retry_step_or_fail(db, job, step_row, str(exc), strategy=strategy)
         return
     except Exception as exc:
         logger.exception("Deployment step execute crashed (job=%s step=%s)", job.id, step_def.name)
-        _fail_step_and_job(db, job, step_row, f"execute error: {exc}", strategy=strategy)
+        _retry_step_or_fail(db, job, step_row, f"execute error: {exc}", strategy=strategy)
         return
 
     step_row.status = DeploymentStepStatus.SUCCEEDED
     step_row.finished_at = _utcnow()
     step_row.message = None
+    # Clear last transient error once a step succeeds again.
+    job.error_message = None
     await _advance(db, job, steps, ctx, strategy=strategy)

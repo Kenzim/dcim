@@ -31,11 +31,12 @@ class DeploymentJobStatus(str, enum.Enum):
     RUNNING = "running"  # A worker is actively executing a step
     WAITING = "waiting"  # A step precheck asked to wait; retry after next_run_at
     SUCCEEDED = "succeeded"  # All steps completed (or skipped)
-    FAILED = "failed"  # A step failed or max attempts exhausted
+    FAILED = "failed"  # Gave up after the job retry budget / reclaim limit
     CANCELLED = "cancelled"  # Cancelled by an operator
 
 
 # Terminal states never get picked up by the worker again.
+# Step failures are usually parked in WAITING and retried until the 24h budget.
 TERMINAL_JOB_STATUSES = (
     DeploymentJobStatus.SUCCEEDED,
     DeploymentJobStatus.FAILED,
