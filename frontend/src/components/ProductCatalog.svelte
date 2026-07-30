@@ -126,11 +126,12 @@
         listProxmoxBackupStorages().catch(() => []),
       ]);
       // VM Product Catalog: Proxmox families/products only (proxy lives under Proxy Catalog).
+      // Ungrouped products are listed under Proxy Catalog (legacy "No family" creates).
       families = (familyRows || []).filter((f) => f.service_type === 'vm');
-      const vmFamilyIds = new Set(families.map((f) => f.id));
+      const vmFamilyIds = new Set(families.map((f) => Number(f.id)));
       products = (productRows || []).filter(
-        (p) => p.family_service_type === 'vm' || (!p.family_id && !p.family_service_type),
-      ).filter((p) => !p.family_id || vmFamilyIds.has(p.family_id));
+        (p) => p.family_service_type === 'vm' || (p.family_id != null && vmFamilyIds.has(Number(p.family_id))),
+      );
       vmTemplates = vmTemplateRows;
       permissionSets = permissionSetRows;
       backupStorages = backupStorageRows || [];

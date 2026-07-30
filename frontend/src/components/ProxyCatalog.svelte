@@ -99,10 +99,16 @@
         listProxySubnetGroups().catch(() => []),
       ]);
       families = (familyRows || []).filter((f) => f.service_type === 'http_proxy');
-      const familyIds = new Set(families.map((f) => f.id));
-      products = (productRows || []).filter(
-        (p) => p.family_service_type === 'http_proxy' || (p.family_id && familyIds.has(p.family_id)),
-      );
+      const familyIds = new Set(families.map((f) => Number(f.id)));
+      // http_proxy is typed via family. Also list ungrouped rows here — the create form
+      // used to allow "No family", and VM Product Catalog was claiming those orphans so
+      // they never appeared on this page.
+      products = (productRows || []).filter((p) => {
+        if (p.family_service_type === 'http_proxy') return true;
+        if (p.family_id != null && familyIds.has(Number(p.family_id))) return true;
+        if (p.family_id == null && !p.family_service_type) return true;
+        return false;
+      });
       permissionSets = permissionSetRows || [];
       ipamSubnets = subnetRows || [];
       subnetGroups = groupRows || [];
@@ -114,7 +120,7 @@
   }
 
   function productsForFamily(familyId) {
-    return products.filter((p) => p.family_id === familyId);
+    return products.filter((p) => Number(p.family_id) === Number(familyId));
   }
 
   function getProductById(productId) {
@@ -171,16 +177,21 @@
   }
 
   async function submitProduct() {
+    error = '';
+    if (!productForm.family_id) {
+      error = 'Select a proxy family — products without a family are not typed as http_proxy and will not list here.';
+      return;
+    }
     try {
       await createCatalogProduct({
-        family_id: productForm.family_id ? Number(productForm.family_id) : null,
+        family_id: Number(productForm.family_id),
         name: productForm.name,
         description: productForm.description,
         code: productForm.code,
         overrides: proxyDefaultsFormToPayload(productForm),
       });
       productForm = {
-        family_id: '',
+        family_id: families[0] ? String(families[0].id) : '',
         name: '',
         description: '',
         code: '',
@@ -294,8 +305,11 @@
           defaults: proxyDefaultsFormToPayload(specsForm),
         });
       } else {
+        if (!identityForm.family_id) {
+          throw new Error('Proxy products must belong to a proxy family.');
+        }
         await updateCatalogProduct(editor.id, {
-          family_id: identityForm.family_id ? Number(identityForm.family_id) : null,
+          family_id: Number(identityForm.family_id),
           name: identityForm.name,
           description: identityForm.description || null,
           code: identityForm.code,
@@ -372,9 +386,9 @@
         </div>
         <div class="field-grid">
           {#if editor.kind === 'product'}
-            <FormGroup label="Family">
+            <FormGroup label="Family" required>
               <select bind:value={identityForm.family_id}>
-                <option value="">No family (ungrouped)</option>
+                <option value="" disabled>Select a family…</option>
                 {#each families as fam}
                   <option value={String(fam.id)}>{fam.name} ({fam.code})</option>
                 {/each}
@@ -466,7 +480,13 @@
       <div class="toolbar-actions">
         <Button variant="secondary" on:click={() => openGroupForm()}>New Subnet Group</Button>
         <Button variant="secondary" on:click={() => { showFamilyForm = true; }}>New Family</Button>
-        <Button on:click={() => { showProductForm = true; }}>New Product</Button>
+        <Button on:click={() => {
+          productForm = {
+            ...productForm,
+            family_id: productForm.family_id || (families[0] ? String(families[0].id) : ''),
+          };
+          showProductForm = true;
+        }}>New Product</Button>
       </div>
     </div>
 
@@ -626,11 +646,11 @@
 
 {#if showProductForm}
   <Modal title="Create Proxy Product" onClose={() => (showProductForm = false)}>
-    <FormGroup label="Family">
+    <FormGroup label="Family" required help="Required — catalog type comes from the family.">
       <select bind:value={productForm.family_id}>
-        <option value="">No family (ungrouped)</option>
+        <option value="" disabled>Select a family…</option>
         {#each families as fam}
-          <option value={fam.id}>{fam.name} ({fam.code})</option>
+          <option value={String(fam.id)}>{fam.name} ({fam.code})</option>
         {/each}
       </select>
     </FormGroup>
