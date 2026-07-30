@@ -15,11 +15,12 @@
     createCatalogProduct,
     updateCatalogProduct,
     deleteCatalogProduct,
-    listVmTemplates,
-    updateFamilyVmConfig,
-    updateProductVmConfig,
     listPermissionSets,
-    listProxmoxBackupStorages,
+    listIpamSubnets,
+    listProxySubnetGroups,
+    createProxySubnetGroup,
+    updateProxySubnetGroup,
+    deleteProxySubnetGroup,
   } from '../lib/api.js';
 
   let loading = false;
@@ -27,13 +28,14 @@
   let error = '';
   let families = [];
   let products = [];
-  let vmTemplates = [];
   let permissionSets = [];
-  let backupStorages = [];
+  let ipamSubnets = [];
+  let subnetGroups = [];
   let searchTerm = '';
 
   let showFamilyForm = false;
   let showProductForm = false;
+  let showGroupForm = false;
 
   let familyForm = { name: '', description: '' };
   let productForm = {
@@ -41,99 +43,69 @@
     name: '',
     description: '',
     code: '',
-    vm_template_ids: [],
+    ip_count: '',
+    subnet_group_id: '',
+    allocation_strategy: '',
+  };
+  let groupForm = {
+    id: null,
+    name: '',
+    code: '',
+    description: '',
+    enabled: true,
+    subnet_ids: [],
   };
 
-  // Unified editor: one full-page editor covering Identity + VM specs + Templates,
-  // replacing the old separate "Edit Product" / "Edit VM Config" surfaces.
-  let editor = null; // { kind: 'family' | 'product', id, title, code, hasFamily }
-  let identityForm = {};
-  let specsForm = {};
-  let inheritedConfig = {};
-  let editorSuccess = '';
-
-  const specFields = [
-    { key: 'cpu_cores', label: 'CPU Cores', type: 'number' },
-    { key: 'ram_mb', label: 'RAM (MB)', type: 'number' },
-    { key: 'disk_gb', label: 'Disk (GB)', type: 'number' },
-    { key: 'storage', label: 'Storage Target', type: 'text' },
-    { key: 'network_bridge', label: 'Default Network Bridge', type: 'text' },
+  const allocationStrategyOptions = [
+    { value: '', label: 'Default (first available)' },
+    { value: 'spread_subnets', label: 'Spread across subnets' },
   ];
 
-  function cloneModeFromConfig(config = {}) {
-    if (config.full_clone === true) return 'full';
-    if (config.full_clone === false) return 'linked';
-    return '';
-  }
-
-  function buildSpecsForm(config = {}, extendsFamily = true) {
+  function proxyDefaultsForm(defaults = {}) {
     return {
-      extends_family: extendsFamily,
-      cpu_cores: config.cpu_cores ?? '',
-      ram_mb: config.ram_mb ?? '',
-      disk_gb: config.disk_gb ?? '',
-      storage: config.storage ?? '',
-      network_bridge: config.network_bridge ?? '',
-      clone_mode: cloneModeFromConfig(config),
-      platform_backup_storage: config.platform_backup_storage ?? '',
-      client_backup_storage: config.client_backup_storage ?? '',
-      max_client_backups:
-        config.max_client_backups === undefined || config.max_client_backups === null
-          ? ''
-          : String(config.max_client_backups),
-      template_ids: Array.isArray(config.template_ids)
-        ? config.template_ids.map((v) => String(v))
-        : [],
+      ip_count: defaults.ip_count ?? '',
+      subnet_group_id: defaults.subnet_group_id ? String(defaults.subnet_group_id) : '',
+      allocation_strategy: defaults.allocation_strategy ?? '',
+      // Legacy single-subnet still honored by provisioning; keep visible if set.
+      subnet_id: defaults.subnet_id ? String(defaults.subnet_id) : '',
     };
   }
 
-  function specsFormToConfig(form) {
+  function proxyDefaultsFormToPayload(form) {
     const out = {};
-    for (const field of specFields) {
-      const value = form[field.key];
-      if (value === '' || value === null || value === undefined) continue;
-      out[field.key] = field.type === 'number' ? Number(value) : value;
+    if (form.ip_count !== '' && form.ip_count !== null && form.ip_count !== undefined) {
+      out.ip_count = Number(form.ip_count);
     }
-    if (form.clone_mode === 'full') {
-      out.full_clone = true;
-    } else if (form.clone_mode === 'linked') {
-      out.full_clone = false;
-    }
-    if (form.platform_backup_storage) {
-      out.platform_backup_storage = String(form.platform_backup_storage);
-    }
-    if (form.client_backup_storage) {
-      out.client_backup_storage = String(form.client_backup_storage);
-    }
-    if (form.max_client_backups !== '' && form.max_client_backups !== null && form.max_client_backups !== undefined) {
-      out.max_client_backups = Number(form.max_client_backups);
-    }
-    if (Array.isArray(form.template_ids) && form.template_ids.length > 0) {
-      out.template_ids = form.template_ids.map((v) => Number(v));
-    }
+    if (form.subnet_group_id) out.subnet_group_id = Number(form.subnet_group_id);
+    if (form.allocation_strategy) out.allocation_strategy = form.allocation_strategy;
+    if (form.subnet_id) out.subnet_id = Number(form.subnet_id);
     return out;
   }
+
+  let editor = null;
+  let identityForm = {};
+  let specsForm = {};
+  let editorSuccess = '';
 
   async function loadData() {
     loading = true;
     error = '';
     try {
-      const [familyRows, productRows, vmTemplateRows, permissionSetRows, backupStorageRows] = await Promise.all([
+      const [familyRows, productRows, permissionSetRows, subnetRows, groupRows] = await Promise.all([
         listProductFamilies(),
         listCatalogProducts(),
-        listVmTemplates(),
         listPermissionSets(),
-        listProxmoxBackupStorages().catch(() => []),
+        listIpamSubnets().catch(() => []),
+        listProxySubnetGroups().catch(() => []),
       ]);
-      // VM Product Catalog: Proxmox families/products only (proxy lives under Proxy Catalog).
-      families = (familyRows || []).filter((f) => f.service_type === 'vm');
-      const vmFamilyIds = new Set(families.map((f) => f.id));
+      families = (familyRows || []).filter((f) => f.service_type === 'http_proxy');
+      const familyIds = new Set(families.map((f) => f.id));
       products = (productRows || []).filter(
-        (p) => p.family_service_type === 'vm' || (!p.family_id && !p.family_service_type),
-      ).filter((p) => !p.family_id || vmFamilyIds.has(p.family_id));
-      vmTemplates = vmTemplateRows;
-      permissionSets = permissionSetRows;
-      backupStorages = backupStorageRows || [];
+        (p) => p.family_service_type === 'http_proxy' || (p.family_id && familyIds.has(p.family_id)),
+      );
+      permissionSets = permissionSetRows || [];
+      ipamSubnets = subnetRows || [];
+      subnetGroups = groupRows || [];
     } catch (err) {
       error = err.message;
     } finally {
@@ -153,10 +125,22 @@
     return families.find((f) => f.id === familyId);
   }
 
-  $: vmTemplateOptions = vmTemplates.map((tmpl) => ({
-    value: String(tmpl.id),
-    label: `${tmpl.name} (${tmpl.os_type})`,
+  function getSubnetGroupById(groupId) {
+    return subnetGroups.find((g) => g.id === Number(groupId));
+  }
+
+  $: subnetOptions = ipamSubnets.map((s) => ({
+    value: String(s.id),
+    label: `${s.name} (${s.cidr})${s.enabled === false ? ' — disabled' : ''}`,
   }));
+
+  $: subnetGroupOptions = [
+    { value: '', label: 'Any enabled subnet (no group)' },
+    ...subnetGroups.filter((g) => g.enabled !== false).map((g) => ({
+      value: String(g.id),
+      label: `${g.name} (${g.code}) — ${(g.subnet_ids || []).length} subnet(s)`,
+    })),
+  ];
 
   $: normalizedSearch = searchTerm.trim().toLowerCase();
   function matchesSearch(entity) {
@@ -169,13 +153,14 @@
   }
   $: visibleFamilies = families.filter(matchesSearch);
   $: visibleProducts = products.filter(matchesSearch);
+  $: visibleSubnetGroups = subnetGroups.filter(matchesSearch);
 
   async function submitFamily() {
     try {
       await createProductFamily({
         name: familyForm.name,
         description: familyForm.description,
-        service_type: 'vm',
+        service_type: 'http_proxy',
       });
       familyForm = { name: '', description: '' };
       showFamilyForm = false;
@@ -187,22 +172,73 @@
 
   async function submitProduct() {
     try {
-      const payload = {
+      await createCatalogProduct({
         family_id: productForm.family_id ? Number(productForm.family_id) : null,
         name: productForm.name,
         description: productForm.description,
         code: productForm.code,
-        vm_template_ids: productForm.vm_template_ids.map((v) => Number(v)),
-      };
-      await createCatalogProduct(payload);
+        overrides: proxyDefaultsFormToPayload(productForm),
+      });
       productForm = {
         family_id: '',
         name: '',
         description: '',
         code: '',
-        vm_template_ids: [],
+        ip_count: '',
+        subnet_group_id: '',
+        allocation_strategy: '',
       };
       showProductForm = false;
+      await loadData();
+    } catch (err) {
+      error = err.message;
+    }
+  }
+
+  function openGroupForm(group = null) {
+    if (group) {
+      groupForm = {
+        id: group.id,
+        name: group.name || '',
+        code: group.code || '',
+        description: group.description || '',
+        enabled: group.enabled !== false,
+        subnet_ids: (group.subnet_ids || []).map((v) => String(v)),
+      };
+    } else {
+      groupForm = { id: null, name: '', code: '', description: '', enabled: true, subnet_ids: [] };
+    }
+    showGroupForm = true;
+  }
+
+  async function submitGroup() {
+    try {
+      const payload = {
+        name: groupForm.name,
+        description: groupForm.description || null,
+        enabled: !!groupForm.enabled,
+        subnet_ids: (groupForm.subnet_ids || []).map((v) => Number(v)),
+      };
+      if (groupForm.id) {
+        await updateProxySubnetGroup(groupForm.id, payload);
+      } else {
+        if (groupForm.code.trim()) payload.code = groupForm.code.trim();
+        await createProxySubnetGroup(payload);
+      }
+      showGroupForm = false;
+      await loadData();
+    } catch (err) {
+      error = err.message;
+    }
+  }
+
+  async function removeSubnetGroup(group) {
+    if (!confirm(`Delete subnet group "${group.name}" (${group.code})? Products referencing it will need updating.`)) {
+      return;
+    }
+    error = '';
+    try {
+      await deleteProxySubnetGroup(group.id);
       await loadData();
     } catch (err) {
       error = err.message;
@@ -212,8 +248,7 @@
   function openFamilyEditor(family) {
     editor = { kind: 'family', id: family.id, title: family.name, code: family.code };
     identityForm = { name: family.name || '', description: family.description || '' };
-    specsForm = buildSpecsForm(family.vm_config || {}, true);
-    inheritedConfig = {};
+    specsForm = proxyDefaultsForm(family.defaults || {});
     editorSuccess = '';
     error = '';
   }
@@ -232,12 +267,9 @@
       name: product.name || '',
       description: product.description || '',
       code: product.code || '',
-      vm_template_ids: (product.vm_template_ids || []).map((v) => String(v)),
       permission_set_id: product.permission_set_id ? String(product.permission_set_id) : '',
     };
-    specsForm = buildSpecsForm(product.vm_config || {}, product.extends_group_vm_config ?? true);
-    if (!family) specsForm.extends_family = false;
-    inheritedConfig = family?.vm_config || {};
+    specsForm = proxyDefaultsForm(product.overrides || {});
     editorSuccess = '';
     error = '';
   }
@@ -246,40 +278,7 @@
     editor = null;
     identityForm = {};
     specsForm = {};
-    inheritedConfig = {};
     editorSuccess = '';
-  }
-
-  $: if (editor?.kind === 'product') {
-    const fam = identityForm.family_id ? getFamilyById(Number(identityForm.family_id)) : null;
-    if (!!fam !== !!editor.hasFamily) {
-      editor = { ...editor, hasFamily: !!fam };
-      inheritedConfig = fam?.vm_config || {};
-    }
-  }
-
-  // Templates a product/family can actually select as defaults: filtered live by
-  // the allow-list being edited in the Identity/Templates section (product only).
-  $: editorTemplateOptions = (() => {
-    if (!editor) return [];
-    if (editor.kind === 'family') return vmTemplateOptions;
-    const allowed = new Set((identityForm.vm_template_ids || []).map((v) => Number(v)));
-    if (!allowed.size) return vmTemplateOptions;
-    return vmTemplateOptions.filter((opt) => allowed.has(Number(opt.value)));
-  })();
-
-  function formatInheritedValue(value) {
-    if (value === null || value === undefined || value === '') return 'not set';
-    return String(value);
-  }
-
-  function formatInheritedTemplates(templateIds = []) {
-    if (!Array.isArray(templateIds) || templateIds.length === 0) return 'not set';
-    const byId = new Map(vmTemplates.map((tmpl) => [Number(tmpl.id), tmpl]));
-    const names = templateIds
-      .map((id) => byId.get(Number(id))?.name || `#${id}`)
-      .filter(Boolean);
-    return names.join(', ');
   }
 
   async function saveEditor() {
@@ -292,20 +291,16 @@
         await updateProductFamily(editor.id, {
           name: identityForm.name,
           description: identityForm.description || null,
+          defaults: proxyDefaultsFormToPayload(specsForm),
         });
-        await updateFamilyVmConfig(editor.id, { config: specsFormToConfig(specsForm) });
       } else {
         await updateCatalogProduct(editor.id, {
           family_id: identityForm.family_id ? Number(identityForm.family_id) : null,
           name: identityForm.name,
           description: identityForm.description || null,
           code: identityForm.code,
-          vm_template_ids: identityForm.vm_template_ids.map((v) => Number(v)),
           permission_set_id: identityForm.permission_set_id ? Number(identityForm.permission_set_id) : null,
-        });
-        await updateProductVmConfig(editor.id, {
-          extends_family: !!specsForm.extends_family && !!editor.hasFamily,
-          config: specsFormToConfig(specsForm),
+          overrides: proxyDefaultsFormToPayload(specsForm),
         });
       }
       await loadData();
@@ -336,10 +331,20 @@
     }
   }
 
+  function formatGroupSummary(defaults) {
+    const gid = defaults?.subnet_group_id;
+    if (gid) {
+      const g = getSubnetGroupById(gid);
+      return g ? g.name : `group #${gid}`;
+    }
+    if (defaults?.subnet_id) return `subnet #${defaults.subnet_id}`;
+    return 'any enabled';
+  }
+
   onMount(loadData);
 </script>
 
-<PageHeader title="VM Product Catalog" />
+<PageHeader title="Proxy Catalog" />
 <div class="catalog-page">
   {#if error}
     <Alert type="error">{error}</Alert>
@@ -363,13 +368,13 @@
       <section class="panel">
         <div class="panel-head">
           <h3>Identity</h3>
-          <p>Name, description{editor.kind === 'product' ? ', code and group' : ''}.</p>
+          <p>Name, description{editor.kind === 'product' ? ', code and family' : ''}.</p>
         </div>
         <div class="field-grid">
           {#if editor.kind === 'product'}
-            <FormGroup label="Group">
+            <FormGroup label="Family">
               <select bind:value={identityForm.family_id}>
-                <option value="">No group (ungrouped)</option>
+                <option value="">No family (ungrouped)</option>
                 {#each families as fam}
                   <option value={String(fam.id)}>{fam.name} ({fam.code})</option>
                 {/each}
@@ -384,7 +389,7 @@
               <input class="mono" bind:value={identityForm.code} placeholder="product-code" />
             </FormGroup>
           {:else}
-            <FormGroup label="Code" help="Group codes are generated on create and not editable.">
+            <FormGroup label="Code" help="Family codes are generated on create and not editable.">
               <input class="mono" value={editor.code} disabled />
             </FormGroup>
           {/if}
@@ -392,7 +397,7 @@
             <textarea bind:value={identityForm.description} rows="2" placeholder="Description"></textarea>
           </FormGroup>
           {#if editor.kind === 'product'}
-            <FormGroup label="Client permission preset" help="Applied to services created from this product; a per-client or per-service preset can still override it.">
+            <FormGroup label="Client permission preset">
               <select bind:value={identityForm.permission_set_id}>
                 <option value="">No preset (built-in defaults)</option>
                 {#each permissionSets as ps}
@@ -406,149 +411,43 @@
 
       <section class="panel">
         <div class="panel-head">
-          <h3>VM specs</h3>
-          <p>
-            {#if editor.kind === 'product' && editor.hasFamily}
-              Overrides on top of the group defaults below. Leave a field blank to inherit it.
-            {:else}
-              Default sizing applied when provisioning from this {editor.kind === 'family' ? 'group' : 'product'}.
-            {/if}
-          </p>
-        </div>
-        {#if editor.kind === 'product' && editor.hasFamily}
-          <label class="toggle">
-            <input type="checkbox" bind:checked={specsForm.extends_family} />
-            Extend group config
-          </label>
-        {/if}
-        <div class="field-grid spec-grid">
-          {#each specFields as field}
-            <FormGroup label={field.label}>
-              {#if field.type === 'number'}
-                <input
-                  type="number"
-                  bind:value={specsForm[field.key]}
-                  placeholder={(editor.kind === 'product' && specsForm.extends_family && editor.hasFamily) ? 'override only' : 'set value'}
-                />
-              {:else}
-                <input
-                  type="text"
-                  bind:value={specsForm[field.key]}
-                  placeholder={(editor.kind === 'product' && specsForm.extends_family && editor.hasFamily) ? 'override only' : 'set value'}
-                />
-              {/if}
-              {#if editor.kind === 'product' && specsForm.extends_family && editor.hasFamily}
-                <div class="inherited-note">Group: {formatInheritedValue(inheritedConfig[field.key])}</div>
-              {/if}
-            </FormGroup>
-          {/each}
-          <FormGroup label="Clone mode">
-            <select bind:value={specsForm.clone_mode}>
-              {#if editor.kind === 'product' && specsForm.extends_family && editor.hasFamily}
-                <option value="">Inherit from group (linked default)</option>
-              {:else}
-                <option value="">Linked clone (default)</option>
-              {/if}
-              <option value="linked">Linked clone</option>
-              <option value="full">Full clone</option>
-            </select>
-            <div class="inherited-note">
-              Linked clones are faster and share the template disk. Use full clone when the VM must be independent of the template.
-            </div>
-            {#if editor.kind === 'product' && specsForm.extends_family && editor.hasFamily}
-              <div class="inherited-note">
-                Group: {inheritedConfig.full_clone === true ? 'Full clone' : inheritedConfig.full_clone === false ? 'Linked clone' : 'Linked clone (default)'}
-              </div>
-            {/if}
-          </FormGroup>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <h3>VM backups</h3>
-          <p>
-            Select two Proxmox storage IDs (typically PBS with namespaces baked into each storage).
-            Platform backups are scheduled in Proxmox and shown read-only; client backups are created/deleted via RackFlow.
-          </p>
-        </div>
-        <div class="field-grid spec-grid">
-          <FormGroup label="Platform backup storage">
-            <select bind:value={specsForm.platform_backup_storage}>
-              <option value="">
-                {(editor.kind === 'product' && specsForm.extends_family && editor.hasFamily)
-                  ? 'Inherit from group'
-                  : 'Not set'}
-              </option>
-              {#each backupStorages as st}
-                <option value={st.storage_name}>{st.storage_name}{st.storage_type ? ` (${st.storage_type})` : ''}</option>
-              {/each}
-            </select>
-            {#if editor.kind === 'product' && specsForm.extends_family && editor.hasFamily}
-              <div class="inherited-note">Group: {formatInheritedValue(inheritedConfig.platform_backup_storage)}</div>
-            {/if}
-          </FormGroup>
-          <FormGroup label="Client backup storage">
-            <select bind:value={specsForm.client_backup_storage}>
-              <option value="">
-                {(editor.kind === 'product' && specsForm.extends_family && editor.hasFamily)
-                  ? 'Inherit from group'
-                  : 'Not set'}
-              </option>
-              {#each backupStorages as st}
-                <option value={st.storage_name}>{st.storage_name}{st.storage_type ? ` (${st.storage_type})` : ''}</option>
-              {/each}
-            </select>
-            {#if editor.kind === 'product' && specsForm.extends_family && editor.hasFamily}
-              <div class="inherited-note">Group: {formatInheritedValue(inheritedConfig.client_backup_storage)}</div>
-            {/if}
-          </FormGroup>
-          <FormGroup label="Max client backups">
-            <input
-              type="number"
-              min="0"
-              bind:value={specsForm.max_client_backups}
-              placeholder={(editor.kind === 'product' && specsForm.extends_family && editor.hasFamily) ? 'override only' : 'e.g. 3'}
-            />
-            {#if editor.kind === 'product' && specsForm.extends_family && editor.hasFamily}
-              <div class="inherited-note">Group: {formatInheritedValue(inheritedConfig.max_client_backups)}</div>
-            {/if}
-          </FormGroup>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-head">
-          <h3>VM templates</h3>
+          <h3>Proxy defaults</h3>
           <p>
             {#if editor.kind === 'product'}
-              Choose which catalog templates this product may use, then pick the default(s) offered at provision time.
+              Overrides when this product is used; leave blank to inherit the family default.
             {:else}
-              Default template selection inherited by products in this group.
+              Default IP count, subnet group, and allocation strategy for services in this family.
             {/if}
           </p>
         </div>
-        {#if editor.kind === 'product'}
-          <MultiSelect
-            label="Allowed templates (access list)"
-            options={vmTemplateOptions}
-            bind:value={identityForm.vm_template_ids}
-            size={5}
-            emptyText="No VM templates available"
-          />
-        {/if}
-        <MultiSelect
-          label={editor.kind === 'product' ? 'Default templates' : 'Group default templates'}
-          options={editorTemplateOptions}
-          bind:value={specsForm.template_ids}
-          size={5}
-          emptyText="No VM templates available"
-        />
-        {#if editor.kind === 'product' && specsForm.extends_family && editor.hasFamily}
-          <div class="inherited-note">Group default: {formatInheritedTemplates(inheritedConfig.template_ids || [])}</div>
-        {/if}
-        <div class="selected-note">
-          Selected: {formatInheritedTemplates((specsForm.template_ids || []).map((v) => Number(v)))}
+        <div class="field-grid spec-grid">
+          <FormGroup label="IP count" help="How many IPs to auto-assign on service creation (1–32).">
+            <input type="number" min="1" max="32" bind:value={specsForm.ip_count} placeholder="default: 1" />
+          </FormGroup>
+          <FormGroup label="Subnet group" help="Named pool of IPAM subnets. Empty = any enabled subnet.">
+            <select bind:value={specsForm.subnet_group_id}>
+              {#each subnetGroupOptions as opt}
+                <option value={opt.value}>{opt.label}</option>
+              {/each}
+            </select>
+          </FormGroup>
+          <FormGroup label="Allocation strategy">
+            <select bind:value={specsForm.allocation_strategy}>
+              {#each allocationStrategyOptions as opt}
+                <option value={opt.value}>{opt.label}</option>
+              {/each}
+            </select>
+          </FormGroup>
+          {#if specsForm.subnet_id}
+            <FormGroup label="Legacy single subnet" help="Older catalog default; wins over subnet group if set. Clear to use the group.">
+              <select bind:value={specsForm.subnet_id}>
+                <option value="">(clear — use subnet group)</option>
+                {#each ipamSubnets as s}
+                  <option value={String(s.id)}>{s.name} ({s.cidr})</option>
+                {/each}
+              </select>
+            </FormGroup>
+          {/if}
         </div>
       </section>
 
@@ -563,16 +462,17 @@
     </div>
   {:else}
     <div class="toolbar">
-      <input class="search-input" bind:value={searchTerm} placeholder="Search groups and products…" />
+      <input class="search-input" bind:value={searchTerm} placeholder="Search families, products, subnet groups…" />
       <div class="toolbar-actions">
-        <Button variant="secondary" on:click={() => { showFamilyForm = true; }}>New Family / Group</Button>
+        <Button variant="secondary" on:click={() => openGroupForm()}>New Subnet Group</Button>
+        <Button variant="secondary" on:click={() => { showFamilyForm = true; }}>New Family</Button>
         <Button on:click={() => { showProductForm = true; }}>New Product</Button>
       </div>
     </div>
 
     <div class="fact-grid">
       <section class="fact">
-        <h3>Groups</h3>
+        <h3>Families</h3>
         <p class="fact-value">{families.length}</p>
       </section>
       <section class="fact">
@@ -580,18 +480,60 @@
         <p class="fact-value">{products.length}</p>
       </section>
       <section class="fact">
-        <h3>VM Templates</h3>
-        <p class="fact-value">{vmTemplates.length}</p>
+        <h3>Subnet groups</h3>
+        <p class="fact-value">{subnetGroups.length}</p>
       </section>
     </div>
 
     {#if loading}
-      <div class="loading-row"><Spinner /> <span>Loading catalog…</span></div>
+      <div class="loading-row"><Spinner /> <span>Loading proxy catalog…</span></div>
     {:else}
       <section class="panel">
         <div class="panel-head">
-          <h3>Groups</h3>
-          <p>Families that products belong to and inherit default VM specs/templates from.</p>
+          <h3>Subnet groups</h3>
+          <p>Named pools of IPAM subnets. Proxy products select a group so auto-assignment stays inside that pool.</p>
+        </div>
+        {#if visibleSubnetGroups.length > 0}
+          <table class="catalog-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Code</th>
+                <th>Members</th>
+                <th>Enabled</th>
+                <th class="col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each visibleSubnetGroups as group (group.id)}
+                <tr>
+                  <td class="cell-name">{group.name}</td>
+                  <td class="mono">{group.code}</td>
+                  <td class="cell-desc">
+                    {#if (group.members || []).length}
+                      {(group.members || []).map((m) => m.cidr || `#${m.subnet_id}`).join(', ')}
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                  <td>{group.enabled ? 'Yes' : 'No'}</td>
+                  <td class="col-actions">
+                    <Button size="small" variant="secondary" on:click={() => openGroupForm(group)}>Edit</Button>
+                    <Button size="small" variant="danger" on:click={() => removeSubnetGroup(group)}>Delete</Button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {:else}
+          <p class="muted empty-note">No subnet groups yet. Create one before locking products to a pool.</p>
+        {/if}
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h3>Families</h3>
+          <p>HTTP/SOCKS proxy product families and their default IPAM settings.</p>
         </div>
         {#if visibleFamilies.length > 0}
           <table class="catalog-table">
@@ -599,6 +541,7 @@
               <tr>
                 <th>Name</th>
                 <th>Code</th>
+                <th>Pool</th>
                 <th>Description</th>
                 <th class="col-count">Products</th>
                 <th class="col-actions">Actions</th>
@@ -609,6 +552,7 @@
                 <tr>
                   <td class="cell-name">{family.name}</td>
                   <td class="mono">{family.code}</td>
+                  <td>{formatGroupSummary(family.defaults || {})}</td>
                   <td class="cell-desc">{family.description || '—'}</td>
                   <td class="col-count">{productsForFamily(family.id).length}</td>
                   <td class="col-actions">
@@ -619,14 +563,14 @@
             </tbody>
           </table>
         {:else}
-          <p class="muted empty-note">No groups match "{searchTerm}".</p>
+          <p class="muted empty-note">No proxy families yet.</p>
         {/if}
       </section>
 
       <section class="panel">
         <div class="panel-head">
           <h3>Products</h3>
-          <p>Sellable catalog entries, each optionally belonging to a group.</p>
+          <p>Sellable proxy catalog entries (WHMCS product code / admin create).</p>
         </div>
         {#if visibleProducts.length > 0}
           <table class="catalog-table">
@@ -634,7 +578,8 @@
               <tr>
                 <th>Name</th>
                 <th>Code</th>
-                <th>Group</th>
+                <th>Family</th>
+                <th>Pool</th>
                 <th>Description</th>
                 <th class="col-actions">Actions</th>
               </tr>
@@ -646,6 +591,7 @@
                   <td class="cell-name">{product.name}</td>
                   <td class="mono">{product.code}</td>
                   <td>{family ? family.name : '—'}</td>
+                  <td>{formatGroupSummary({ ...(family?.defaults || {}), ...(product.overrides || {}) })}</td>
                   <td class="cell-desc">{product.description || '—'}</td>
                   <td class="col-actions">
                     <Button size="small" variant="secondary" on:click={() => openProductEditor(product)}>Edit</Button>
@@ -656,7 +602,7 @@
             </tbody>
           </table>
         {:else}
-          <p class="muted empty-note">No products match "{searchTerm}".</p>
+          <p class="muted empty-note">No proxy products yet.</p>
         {/if}
       </section>
     {/if}
@@ -664,7 +610,7 @@
 </div>
 
 {#if showFamilyForm}
-  <Modal title="Create VM Product Family / Group" onClose={() => (showFamilyForm = false)}>
+  <Modal title="Create Proxy Family" onClose={() => (showFamilyForm = false)}>
     <FormGroup label="Family name" required>
       <input bind:value={familyForm.name} placeholder="Family name" />
     </FormGroup>
@@ -679,10 +625,10 @@
 {/if}
 
 {#if showProductForm}
-  <Modal title="Create VM Product" onClose={() => (showProductForm = false)}>
-    <FormGroup label="Group">
+  <Modal title="Create Proxy Product" onClose={() => (showProductForm = false)}>
+    <FormGroup label="Family">
       <select bind:value={productForm.family_id}>
-        <option value="">No group (ungrouped)</option>
+        <option value="">No family (ungrouped)</option>
         {#each families as fam}
           <option value={fam.id}>{fam.name} ({fam.code})</option>
         {/each}
@@ -697,16 +643,61 @@
     <FormGroup label="Code" required>
       <input bind:value={productForm.code} placeholder="product-code" />
     </FormGroup>
-    <MultiSelect
-      label="VM Templates"
-      options={vmTemplateOptions}
-      bind:value={productForm.vm_template_ids}
-      size={5}
-      emptyText="No VM templates available"
-    />
+    <FormGroup label="IP count" help="Leave blank to inherit the family default.">
+      <input type="number" min="1" max="32" bind:value={productForm.ip_count} placeholder="default: 1" />
+    </FormGroup>
+    <FormGroup label="Subnet group" help="Leave blank to inherit the family default / any enabled subnet.">
+      <select bind:value={productForm.subnet_group_id}>
+        {#each subnetGroupOptions as opt}
+          <option value={opt.value}>{opt.label}</option>
+        {/each}
+      </select>
+    </FormGroup>
+    <FormGroup label="Allocation strategy">
+      <select bind:value={productForm.allocation_strategy}>
+        {#each allocationStrategyOptions as opt}
+          <option value={opt.value}>{opt.label}</option>
+        {/each}
+      </select>
+    </FormGroup>
     <svelte:fragment slot="footer">
       <Button variant="secondary" on:click={() => (showProductForm = false)}>Cancel</Button>
       <Button on:click={submitProduct}>Create Product</Button>
+    </svelte:fragment>
+  </Modal>
+{/if}
+
+{#if showGroupForm}
+  <Modal title={groupForm.id ? 'Edit Subnet Group' : 'Create Subnet Group'} onClose={() => (showGroupForm = false)}>
+    <FormGroup label="Name" required>
+      <input bind:value={groupForm.name} placeholder="e.g. Kenzi Home pool" />
+    </FormGroup>
+    {#if !groupForm.id}
+      <FormGroup label="Code" help="Optional — auto-generated from name if blank.">
+        <input class="mono" bind:value={groupForm.code} placeholder="kenzi-home" />
+      </FormGroup>
+    {:else}
+      <FormGroup label="Code">
+        <input class="mono" value={groupForm.code} disabled />
+      </FormGroup>
+    {/if}
+    <FormGroup label="Description" help="Optional">
+      <textarea bind:value={groupForm.description} rows="2" placeholder="Description"></textarea>
+    </FormGroup>
+    <label class="toggle">
+      <input type="checkbox" bind:checked={groupForm.enabled} />
+      Enabled
+    </label>
+    <MultiSelect
+      label="Member subnets"
+      options={subnetOptions}
+      bind:value={groupForm.subnet_ids}
+      size={6}
+      emptyText="No IPAM subnets available"
+    />
+    <svelte:fragment slot="footer">
+      <Button variant="secondary" on:click={() => (showGroupForm = false)}>Cancel</Button>
+      <Button on:click={submitGroup}>{groupForm.id ? 'Save group' : 'Create group'}</Button>
     </svelte:fragment>
   </Modal>
 {/if}
@@ -739,12 +730,10 @@
   input:disabled { opacity: 0.7; cursor: not-allowed; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 
-  /* Toolbar */
   .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .search-input { min-width: 260px; flex: 1 1 260px; max-width: 420px; }
-  .toolbar-actions { display: flex; gap: 10px; }
+  .toolbar-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
-  /* Fact strip */
   .fact-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
   @media (max-width: 640px) { .fact-grid { grid-template-columns: 1fr; } }
   .fact {
@@ -782,11 +771,9 @@
     color: var(--text-secondary);
     border: 1px solid var(--border-color);
   }
-  .meta { margin: 2px 0 0; color: var(--text-secondary); font-size: 12px; }
   .empty-note { color: var(--text-secondary); font-size: 13px; padding: 4px; }
   .muted { color: var(--text-secondary); }
 
-  /* Catalog tables */
   .catalog-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .catalog-table th, .catalog-table td {
     padding: 10px 12px;
@@ -811,7 +798,6 @@
   .catalog-table .col-actions :global(.btn) { margin-left: 6px; }
   .catalog-table .col-actions :global(.btn:first-child) { margin-left: 0; }
 
-  /* Editor page */
   .editor-page { display: flex; flex-direction: column; gap: 16px; }
   .editor-toolbar { display: flex; }
   .back-link {
@@ -841,9 +827,7 @@
 
   .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 16px; }
   .spec-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
-  .inherited-note { font-size: 11px; color: var(--text-secondary); opacity: 0.9; margin-top: 4px; }
-  .selected-note { font-size: 12px; color: var(--text-primary); opacity: 0.95; }
-  .toggle { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px; font-weight: 600; }
+  .toggle { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px; font-weight: 600; margin: 8px 0; }
 
   .editor-actions { display: flex; align-items: center; gap: 10px; }
   .editor-actions-spacer { flex: 1; }

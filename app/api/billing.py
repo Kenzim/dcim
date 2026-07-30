@@ -1028,18 +1028,20 @@ async def _provision_bare_metal_service(
             details={"service_id": service.id, **actor.details},
         )
 
-        ip_count, subnet_id, ip_strategy = resolve_proxy_ip_request(
+        ip_req = resolve_proxy_ip_request(
             product_snapshot.get("effective_specs"),
             override_ip_count=service_config.get("ip_count"),
             override_subnet_id=service_config.get("subnet_id"),
             override_strategy=service_config.get("allocation_strategy"),
+            override_subnet_group_id=service_config.get("subnet_group_id"),
         )
         assignments = auto_assign_proxy_ips(
             db,
             service,
-            ip_count=ip_count,
-            subnet_id=subnet_id,
-            strategy=ip_strategy,
+            ip_count=ip_req.ip_count,
+            subnet_id=ip_req.subnet_id,
+            subnet_group_id=ip_req.subnet_group_id,
+            strategy=ip_req.strategy,
             assigned_by=actor.assigned_by,
         )
         ServiceDAO.update(db, service)
@@ -1050,12 +1052,15 @@ async def _provision_bare_metal_service(
             event_type=ServerActivityEventType.SERVICE,
             action="create",
             source=actor.source,
-            message=f"Created proxy service '{service.name}' ({len(assignments)}/{ip_count} IP(s) assigned)",
+            message=(
+                f"Created proxy service '{service.name}' "
+                f"({len(assignments)}/{ip_req.ip_count} IP(s) assigned)"
+            ),
             details={
                 "service_id": service.id,
                 **actor.details,
                 "assigned_ip_count": len(assignments),
-                "requested_ip_count": ip_count,
+                "requested_ip_count": ip_req.ip_count,
             },
         )
         logger.info(
@@ -1063,7 +1068,7 @@ async def _provision_bare_metal_service(
             service.name,
             service.id,
             len(assignments),
-            ip_count,
+            ip_req.ip_count,
         )
     else:
         # --- Default mode: create a brand new server record ---

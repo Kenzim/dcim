@@ -324,6 +324,9 @@ api_router.include_router(runner_proxy_api.router, tags=["proxy-runner"])
 from app.api import proxy_runners as proxy_runners_api
 api_router.include_router(proxy_runners_api.router, tags=["proxy-runners"])
 
+from app.api import proxy_subnet_groups as proxy_subnet_groups_api
+api_router.include_router(proxy_subnet_groups_api.router, tags=["proxy-subnet-groups"])
+
 # IPMI reverse-proxy runner API (config + ticket redeem)
 from app.api import runner_ipmi as runner_ipmi_api
 api_router.include_router(runner_ipmi_api.router, tags=["ipmi-proxy-runner"])

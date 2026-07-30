@@ -217,9 +217,9 @@ class AdminHttpProxyServiceCreate(BaseModel):
     Create an http_proxy service (``services`` + ``service_bare_metal`` with
     no linked Server) with IP(s) auto-assigned from IPAM.
 
-    ``ip_count``/``subnet_id``/``allocation_strategy`` override the
-    product/family catalog defaults when set; a bare service with no
-    ``product_code`` falls back to a single auto-picked IP.
+    ``ip_count``/``subnet_id``/``subnet_group_id``/``allocation_strategy``
+    override the product/family catalog defaults when set; a bare service
+    with no ``product_code`` falls back to a single auto-picked IP.
     """
 
     name: str = Field(..., description="Unique service name")
@@ -235,7 +235,8 @@ class AdminHttpProxyServiceCreate(BaseModel):
     )
     external_service_id: Optional[str] = Field(None, description="Optional external line-item id (e.g. WHMCS service id)")
     ip_count: Optional[int] = Field(None, description="Override how many IPs to auto-assign (default 1)")
-    subnet_id: Optional[int] = Field(None, description="Override which subnet to assign from")
+    subnet_id: Optional[int] = Field(None, description="Override which subnet to assign from (wins over subnet_group_id)")
+    subnet_group_id: Optional[int] = Field(None, description="Override which proxy subnet group to assign from")
     allocation_strategy: Optional[str] = Field(None, description="Override allocation strategy")
 
 
@@ -1814,19 +1815,21 @@ async def create_http_proxy_service_admin(
         details={"provisioning_source": prov.value},
     )
 
-    ip_count, subnet_id, ip_strategy = resolve_proxy_ip_request(
+    ip_req = resolve_proxy_ip_request(
         product_snapshot.get("effective_specs"),
         override_ip_count=body.ip_count,
         override_subnet_id=body.subnet_id,
         override_strategy=body.allocation_strategy,
+        override_subnet_group_id=body.subnet_group_id,
     )
     try:
         assignments = auto_assign_proxy_ips(
             db,
             service,
-            ip_count=ip_count,
-            subnet_id=subnet_id,
-            strategy=ip_strategy,
+            ip_count=ip_req.ip_count,
+            subnet_id=ip_req.subnet_id,
+            subnet_group_id=ip_req.subnet_group_id,
+            strategy=ip_req.strategy,
             assigned_by="admin",
         )
     except Exception as exc:
@@ -1840,8 +1843,13 @@ async def create_http_proxy_service_admin(
         event_type=ServerActivityEventType.SERVICE,
         action="create_admin_http_proxy",
         source="admin_api",
-        message=f"Created proxy service '{body.name}' ({len(assignments)}/{ip_count} IP(s) assigned)",
-        details={"assigned_ip_count": len(assignments), "requested_ip_count": ip_count},
+        message=f"Created proxy service '{body.name}' ({len(assignments)}/{ip_req.ip_count} IP(s) assigned)",
+        details={"assigned_ip_count": len(assignments), "requested_ip_count": ip_req.ip_count},
     )
-    logger.info("Admin API: created http_proxy service %s (%s/%s IPs)", service.id, len(assignments), ip_count)
+    logger.info(
+        "Admin API: created http_proxy service %s (%s/%s IPs)",
+        service.id,
+        len(assignments),
+        ip_req.ip_count,
+    )
     return _service_to_admin_response(db, service)
