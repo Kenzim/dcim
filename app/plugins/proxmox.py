@@ -21,6 +21,17 @@ from app.plugins.capabilities import Capability, ActionDef, UIPattern
 logger = logging.getLogger(__name__)
 
 _SERIAL_DEVICE_KEY_RE = re.compile(r"^serial\d+$")
+# UPID:<node>:<hexpid>:<hexpstart>:<hexstarttime>:<type>:<id>:<user>:
+_UPID_NODE_RE = re.compile(r"^UPID:([^:]+):")
+
+
+def proxmox_node_from_upid(upid: str) -> Optional[str]:
+    """Extract the originating node name from a Proxmox UPID string."""
+    match = _UPID_NODE_RE.match((upid or "").strip())
+    if not match:
+        return None
+    node = (match.group(1) or "").strip()
+    return node or None
 
 
 class ConsoleTypeUnavailable(Exception):
@@ -1077,11 +1088,17 @@ class ProxmoxPlugin(ServerPlugin):
         }
 
     async def get_proxmox_task_status(self, upid: str) -> Dict[str, Any]:
-        """Return one poll of ``/nodes/{node}/tasks/{upid}/status`` (empty if no upid)."""
+        """Return one poll of ``/nodes/{node}/tasks/{upid}/status`` (empty if no upid).
+
+        Cross-node clones (template on A, target on B) return a UPID whose node
+        is the template/home node. Always poll that node from the UPID, not the
+        plugin's placed ``self.node``.
+        """
         if not upid:
             return {}
+        task_node = proxmox_node_from_upid(upid) or self.node
         encoded = urllib.parse.quote(upid, safe="")
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/tasks/{encoded}/status"
+        url = f"{self.base_url}/api2/json/nodes/{task_node}/tasks/{encoded}/status"
         headers = await self._get_headers()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=60.0) as client:
             response = await client.get(url, headers=headers)
@@ -1090,7 +1107,7 @@ class ProxmoxPlugin(ServerPlugin):
         return data if isinstance(data, dict) else {}
 
     async def wait_for_proxmox_task(self, upid: str, timeout: float = 300.0, interval: float = 1.5) -> None:
-        """Poll ``/nodes/{node}/tasks/{upid}/status`` until finished or timeout."""
+        """Poll task status until finished or timeout (node taken from UPID)."""
         if not upid:
             return
         loop = asyncio.get_running_loop()

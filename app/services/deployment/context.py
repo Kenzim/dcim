@@ -182,8 +182,16 @@ class DeploymentContext:
         return int(vmid)
 
     def get_specs(self) -> Dict[str, Any]:
-        vm_plan = (self.service.config or {}).get("vm_plan") or {}
-        return dict(vm_plan.get("effective_specs") or {})
+        from app.services.vm_provisioning_service import _normalize_vm_specs
+
+        cfg = self.service.config or {}
+        vm_plan = cfg.get("vm_plan") or {}
+        specs = dict(vm_plan.get("effective_specs") or {})
+        if not specs:
+            snap = cfg.get("product_snapshot") or {}
+            if isinstance(snap, dict):
+                specs = dict(snap.get("effective_specs") or {})
+        return _normalize_vm_specs(specs)
 
     def get_ip_allocation(self):
         vm = self.vm
