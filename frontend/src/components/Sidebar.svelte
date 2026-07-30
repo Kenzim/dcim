@@ -44,6 +44,7 @@
   $: isVmIpAllocationsActive = currentPath.startsWith('/admin/vm-ip-allocations');
   $: isProxmoxInventoryActive = currentPath.startsWith('/admin/proxmox-inventory');
   $: isProxyIpamActive = currentPath.startsWith('/admin/proxy-ipam');
+  $: isProxyRunnersActive = currentPath.startsWith('/admin/proxy-runners');
   $: isServerGroupsActive = currentPath.startsWith('/admin/server-groups');
   $: isUserActive = currentPath === '/admin/user' || currentPath === '/admin/user/';
 </script>
@@ -195,6 +196,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
             <span>IPAM & Proxy</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/proxy-runners" class="nav-link" class:active={isProxyRunnersActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+            <span>Proxy Runners</span>
           </a>
         </li>
         <li class="nav-item">

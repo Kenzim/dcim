@@ -113,6 +113,7 @@ All included from `app/main.py` under `/api`.
 | `location_dhcp.py` | `/api/locations/{id}/dhcp/...` | Per-location DHCP status/settings/start/stop |
 | `location_tftp.py` | `/api/locations/{id}/tftp/...` | Per-location TFTP controls |
 | `service_instance.py` | `/api/service-instances` | DHCP/TFTP runner registration per location |
+| `proxy_runners.py` | `/api/admin/proxy-runners` | Standalone proxy runners (generated key, phone-home health) |
 | `rack.py` | `/api/racks` | Racks + servers-in-rack |
 | `server.py` | `/api/servers` | Servers CRUD, power, boot, capabilities, hardware detection, activity, bandwidth |
 | `server_interaction.py` | `/api/servers/interaction` | **PXE scripts, cloud-init, ISOs, temp-OS, kernels, download tokens** (bare-metal install path) |
@@ -259,7 +260,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/racks/:id` | `RackView.svelte` |
 | `/admin/racks/rows/:locationId/:row` | `RowView.svelte` |
 | `/admin/locations` | `Locations.svelte` |
-| `/admin/locations/:id` | `LocationDetail.svelte` (DHCP/TFTP/service instances) |
+| `/admin/locations/:id` | `LocationDetail.svelte` (DHCP/TFTP runners) |
 | `/admin/server-groups` | `ServerGroups.svelte` |
 | `/admin/server-groups/:id` | `ServerGroupDetail.svelte` |
 | `/admin/bare-metal-services` | `BareMetalServices.svelte` → `ServicesList` mode `bare_metal` |
@@ -276,6 +277,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/vm-ip-allocations` | `VMIpAllocations.svelte` |
 | `/admin/proxmox-inventory` | `ProxmoxInventory.svelte` |
 | `/admin/proxy-ipam` | `ProxyIpam.svelte` (IPAM proxy flag) |
+| `/admin/proxy-runners` | `ProxyRunners.svelte` (standalone proxy runners) |
 | `/admin/billing-integrations` | `BillingIntegrations.svelte` |
 | `/admin/user` | `User.svelte` |
 | `/login` | `Login.svelte` |
@@ -302,7 +304,7 @@ Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelt
 |---|---|---|
 | DHCP runner | `dhcp_runner/main.py` | FastAPI control plane for `dhcpd`; shared volume for conf/leases |
 | TFTP runner | `tftp_runner/main.py` | Control plane for `in.tftpd`; shared TFTP root |
-| Proxy runner | `proxy_runner/main.py` | Polls `/api/runner/proxy/config`, syncs local proxy |
+| Proxy runner | `proxy_runner/cmd/proxy-runner/` | Polls `/api/runner/proxy/config` every 30s (phone-home); register via Admin → Proxy Runners |
 | Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit |
 
 App selects remote runners when `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` (or legacy `DHCP_TFTP_SERVICE_URL`) are set — see `app/core/config.py` and `INSTALL.md`.

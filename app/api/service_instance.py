@@ -19,12 +19,13 @@ from app.models.service_instance import ServiceInstance
 
 router = APIRouter(prefix="/service-instances", tags=["service-instances"])
 
-# DHCP/TFTP/proxy runner base_urls legitimately point at RFC1918 addresses
+# DHCP/TFTP runner base_urls legitimately point at RFC1918 addresses
 # inside the DC network by design (that's how these runners are deployed),
 # so this intentionally does not allowlist/denylist IP ranges the way the
 # Go proxy runner's customer-facing destination ACL does. It only rejects
 # non-HTTP(S) schemes, which would let an admin-supplied value be used for
 # SSRF-adjacent tricks (e.g. file://, gopher://) when passed to httpx.
+# Proxy runners are managed separately via /api/admin/proxy-runners.
 _ALLOWED_BASE_URL_SCHEMES = {"http", "https"}
 
 
@@ -39,7 +40,7 @@ def _validate_runner_base_url(value: Optional[str]) -> Optional[str]:
 
 class ServiceInstanceCreate(BaseModel):
     location_id: int
-    service_type: str  # 'dhcp' | 'tftp' | 'proxy'
+    service_type: str  # 'dhcp' | 'tftp'
     name: str
     base_url: str
     api_key: str | None = None
@@ -125,10 +126,10 @@ async def create_service_instance(
     db: Session = Depends(get_db),
 ):
     """Create a new service instance."""
-    if data.service_type not in ("dhcp", "tftp", "proxy"):
+    if data.service_type not in ("dhcp", "tftp"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="service_type must be 'dhcp', 'tftp', or 'proxy'",
+            detail="service_type must be 'dhcp' or 'tftp' (proxy runners use /api/admin/proxy-runners)",
         )
     location = LocationDAO.get_by_id(db, data.location_id)
     if not location:
@@ -137,7 +138,7 @@ async def create_service_instance(
             detail="Location not found",
         )
     existing = ServiceInstanceDAO.get_by_location_and_type(db, data.location_id, data.service_type)
-    if existing and data.service_type in ("dhcp", "tftp"):
+    if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"A {data.service_type} instance already exists for this location",

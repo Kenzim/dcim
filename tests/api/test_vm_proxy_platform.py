@@ -1,4 +1,4 @@
-from app.dao.service_instance_dao import ServiceInstanceDAO
+from app.dao.proxy_runner_dao import ProxyRunnerDAO
 from app.models.billing_integration import BillingIntegration
 from app.models.user import User
 from app.models.location import Location
@@ -193,12 +193,9 @@ def test_ipam_assignment_and_runner_config(client, test_admin_user, db_session):
     db_session.commit()
     db_session.refresh(service)
 
-    ServiceInstanceDAO.create(
+    runner, _ = ProxyRunnerDAO.create(
         db_session,
-        location_id=location.id,
-        service_type="proxy",
         name="proxy-runner-loc",
-        base_url="http://runner.local:8080",
         api_key="runner-secret",
     )
 
@@ -236,7 +233,7 @@ def test_ipam_assignment_and_runner_config(client, test_admin_user, db_session):
     )
     assert config.status_code == 200, config.text
     data = config.json()
-    assert data["location_id"] == location.id
+    assert data["runner_id"] == runner.id
     assert any(row["bind_ip"] == assigned_ip and row["username"] == "u1" for row in data["assignments"])
 
     history = client.get("/api/ipam/history", headers=headers)
