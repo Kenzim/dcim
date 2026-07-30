@@ -256,11 +256,31 @@ async def console_power_action(body: VmVncPowerRequest, db: Session = Depends(ge
 
 
 async def _pipe_browser_to_upstream(websocket: WebSocket, upstream) -> None:
-    """VNC (RFB) direction: raw byte pass-through, no framing on either side."""
+    """VNC (RFB) direction: raw byte pass-through to Proxmox.
+
+    Text frames are a small Rackflow control channel (not forwarded upstream).
+    Used for console RTT probes: ``{"type":"ping","t":...}`` is answered with
+    ``{"type":"pong","t":...}`` so the noVNC viewer can show latency without
+    injecting bytes into the RFB stream.
+    """
     try:
         while True:
-            data = await websocket.receive_bytes()
-            await upstream.send(data)
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data is not None:
+                await upstream.send(data)
+                continue
+            text = message.get("text")
+            if text is None:
+                continue
+            try:
+                control = json.loads(text)
+            except ValueError:
+                continue
+            if control.get("type") == "ping":
+                await websocket.send_text(json.dumps({"type": "pong", "t": control.get("t")}))
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001
