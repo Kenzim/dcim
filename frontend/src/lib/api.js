@@ -974,6 +974,55 @@ export async function deleteProxyRunner(id) {
   }
 }
 
+// Proxy IPAM subnet groups (named pools for catalog auto-assign)
+export async function listProxySubnetGroups() {
+  const response = await fetch(`${API_BASE}/admin/proxy-subnet-groups`, { credentials: 'include' });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to list proxy subnet groups');
+  }
+  return await response.json();
+}
+
+export async function createProxySubnetGroup(data) {
+  const response = await fetch(`${API_BASE}/admin/proxy-subnet-groups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create proxy subnet group');
+  }
+  return await response.json();
+}
+
+export async function updateProxySubnetGroup(id, data) {
+  const response = await fetch(`${API_BASE}/admin/proxy-subnet-groups/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update proxy subnet group');
+  }
+  return await response.json();
+}
+
+export async function deleteProxySubnetGroup(id) {
+  const response = await fetch(`${API_BASE}/admin/proxy-subnet-groups/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete proxy subnet group');
+  }
+}
+
 // Service instances (per-location DHCP/TFTP runners)
 export async function listServiceInstances(locationId) {
   const url = locationId

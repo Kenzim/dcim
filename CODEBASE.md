@@ -114,6 +114,7 @@ All included from `app/main.py` under `/api`.
 | `location_tftp.py` | `/api/locations/{id}/tftp/...` | Per-location TFTP controls |
 | `service_instance.py` | `/api/service-instances` | DHCP/TFTP runner registration per location |
 | `proxy_runners.py` | `/api/admin/proxy-runners` | Standalone proxy runners (generated key, phone-home health) |
+| `proxy_subnet_groups.py` | `/api/admin/proxy-subnet-groups` | Named IPAM subnet pools for proxy catalog auto-assign |
 | `rack.py` | `/api/racks` | Racks + servers-in-rack |
 | `server.py` | `/api/servers` | Servers CRUD, power, boot, capabilities, hardware detection, activity, bandwidth |
 | `server_interaction.py` | `/api/servers/interaction` | **PXE scripts, cloud-init, ISOs, temp-OS, kernels, download tokens** (bare-metal install path) |
@@ -154,7 +155,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 | Boot / install | `boot_task.py`, `installation_task.py`, `server_capability.py`, `hardware_detection_report.py`, `server_activity.py` |
 | DHCP/TFTP | `dhcp_config.py`, `tftp_config.py`, `service_instance.py` |
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
-| Proxmox / IPAM | `proxmox_inventory.py`, `ipam.py`, `vm_ip_allocation.py`, `vmid_reservation.py` |
+| Proxmox / IPAM | `proxmox_inventory.py`, `ipam.py`, `vm_ip_allocation.py`, `vmid_reservation.py`, `proxy_runner.py`, `proxy_subnet_group.py` |
 | Billing / assets | `billing_integration.py`, `asset.py` |
 | Plugins (metadata leftovers) | `plugin.py`, `plugin_category.py`, `switch_plugin.py`, `category.py` |
 
@@ -272,10 +273,11 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/os-templates` | `OSTemplates.svelte` |
 | `/admin/scripts` | `Scripts.svelte` |
 | `/admin/asset-manager` | `AssetManager.svelte` |
-| `/admin/product-catalog` | `ProductCatalog.svelte` (Proxmox flag) |
+| `/admin/product-catalog` | `ProductCatalog.svelte` (VM families/products only) |
 | `/admin/vm-templates` | `VMTemplates.svelte` |
 | `/admin/vm-ip-allocations` | `VMIpAllocations.svelte` |
 | `/admin/proxmox-inventory` | `ProxmoxInventory.svelte` |
+| `/admin/proxy-catalog` | `ProxyCatalog.svelte` (http_proxy families/products + subnet groups) |
 | `/admin/proxy-ipam` | `ProxyIpam.svelte` (IPAM proxy flag) |
 | `/admin/proxy-runners` | `ProxyRunners.svelte` (standalone proxy runners) |
 | `/admin/billing-integrations` | `BillingIntegrations.svelte` |

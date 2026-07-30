@@ -3,16 +3,17 @@
 Both the billing API (WHMCS) and the admin API create ``http_proxy``
 services without a rack Server — IP(s) come straight from IPAM, driven by
 the product/family catalog defaults (or explicit overrides). This module
-resolves how many IPs (and from which subnet/strategy) to auto-assign, and
-performs the assignment against a freshly created service.
+resolves how many IPs (and from which subnet/group/strategy) to auto-assign,
+and performs the assignment against a freshly created service.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from sqlalchemy.orm import Session
 
 from app.dao.ipam_dao import IPAMDAO
+from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
 from app.models.ipam import ServiceIPAssignment
 from app.models.service import Service, ServiceStatus
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
@@ -25,6 +26,13 @@ MAX_AUTO_ASSIGN_IPS = 32
 # Single dual-protocol port the proxy_runner listens on (SOCKS5 vs HTTP is
 # sniffed from the first byte); see proxy_runner/README.md.
 PROXY_PORT = 8080
+
+
+class ProxyIpRequest(NamedTuple):
+    ip_count: int
+    subnet_id: Optional[int]
+    strategy: Optional[str]
+    subnet_group_id: Optional[int]
 
 
 def assignment_payload(assignment: ServiceIPAssignment) -> Dict[str, Any]:
@@ -49,11 +57,13 @@ def resolve_proxy_ip_request(
     override_ip_count: Optional[int] = None,
     override_subnet_id: Optional[int] = None,
     override_strategy: Optional[str] = None,
-) -> Tuple[int, Optional[int], Optional[str]]:
-    """Resolve ``(ip_count, subnet_id, allocation_strategy)``.
+    override_subnet_group_id: Optional[int] = None,
+) -> ProxyIpRequest:
+    """Resolve allocation inputs from catalog specs + explicit overrides.
 
     Explicit overrides (e.g. ad hoc admin/service_config fields) win over the
     product/family catalog defaults, which win over a single-IP fallback.
+    A concrete ``subnet_id`` override wins over ``subnet_group_id``.
     """
     specs = effective_specs or {}
 
@@ -70,8 +80,20 @@ def resolve_proxy_ip_request(
     if subnet_id is not None:
         subnet_id = int(subnet_id)
 
+    subnet_group_id = (
+        override_subnet_group_id
+        if override_subnet_group_id is not None
+        else specs.get("subnet_group_id")
+    )
+    if subnet_group_id is not None:
+        subnet_group_id = int(subnet_group_id)
+
+    # Single-subnet scope supersedes a group.
+    if subnet_id is not None:
+        subnet_group_id = None
+
     strategy = override_strategy or specs.get("allocation_strategy")
-    return ip_count, subnet_id, strategy
+    return ProxyIpRequest(ip_count, subnet_id, strategy, subnet_group_id)
 
 
 def auto_assign_proxy_ips(
@@ -82,6 +104,8 @@ def auto_assign_proxy_ips(
     subnet_id: Optional[int] = None,
     strategy: Optional[str] = None,
     assigned_by: Optional[str] = None,
+    subnet_group_id: Optional[int] = None,
+    subnet_ids: Optional[List[int]] = None,
 ) -> List[ServiceIPAssignment]:
     """Best-effort assign up to ``ip_count`` IPs to a freshly created
     http_proxy service, generating credentials for each.
@@ -91,6 +115,15 @@ def auto_assign_proxy_ips(
     at least one IP was assigned (stays PENDING otherwise, e.g. exhausted
     pool, so an admin can top it up manually via IPAM).
     """
+    resolved_subnet_ids = subnet_ids
+    if subnet_id is None and resolved_subnet_ids is None and subnet_group_id is not None:
+        group = ProxySubnetGroupDAO.get_by_id(db, int(subnet_group_id))
+        if not group or not group.enabled:
+            raise ValueError(f"Proxy subnet group {subnet_group_id} not found or disabled")
+        resolved_subnet_ids = ProxySubnetGroupDAO.member_subnet_ids(db, group.id, enabled_only=True)
+        if not resolved_subnet_ids:
+            raise ValueError(f"Proxy subnet group {group.code} has no enabled member subnets")
+
     assignments: List[ServiceIPAssignment] = []
     for _ in range(max(0, ip_count)):
         try:
@@ -99,6 +132,7 @@ def auto_assign_proxy_ips(
                     db,
                     service_id=service.id,
                     subnet_id=subnet_id,
+                    subnet_ids=resolved_subnet_ids,
                     strategy=strategy,
                     username=generate_proxy_username(),
                     password=generate_proxy_password(),

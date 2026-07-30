@@ -302,8 +302,22 @@ class IPAMDAO:
         username: Optional[str] = None,
         password: Optional[str] = None,
         assigned_by: Optional[str] = None,
+        subnet_ids: Optional[List[int]] = None,
     ) -> ServiceIPAssignment:
-        subnets = [IPAMDAO.get_subnet(db, subnet_id)] if subnet_id else IPAMDAO.list_subnets(db)
+        """Assign one IP to ``service_id``.
+
+        Selection scope (first match wins):
+        - ``subnet_id`` — single subnet
+        - else ``subnet_ids`` — only those subnets (e.g. a proxy subnet group)
+        - else all enabled IPAM subnets
+        """
+        if subnet_id is not None:
+            subnets = [IPAMDAO.get_subnet(db, subnet_id)]
+        elif subnet_ids:
+            wanted = {int(x) for x in subnet_ids}
+            subnets = [s for s in IPAMDAO.list_subnets(db) if s.id in wanted]
+        else:
+            subnets = IPAMDAO.list_subnets(db)
         subnets = [s for s in subnets if s and s.enabled]
         if not subnets:
             raise ValueError("No enabled subnets available")

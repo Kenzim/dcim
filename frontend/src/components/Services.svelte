@@ -11,6 +11,7 @@
     createAdminVmService,
     createAdminHttpProxyService,
     listIpamSubnets,
+    listProxySubnetGroups,
   } from '../lib/api.js';
   import { onMount } from 'svelte';
 
@@ -55,10 +56,12 @@
   let proxyBusy = false;
   let proxyError = null;
   let ipamSubnets = [];
+  let proxySubnetGroups = [];
   let proxyForm = {
     name: '',
     product_code: '',
     ip_count: '',
+    subnet_group_id: '',
     subnet_id: '',
     description: '',
     external_user_id: '',
@@ -153,9 +156,15 @@
     if (showProxyForm) {
       await loadVmCatalog();
       try {
-        ipamSubnets = await listIpamSubnets();
+        const [subnets, groups] = await Promise.all([
+          listIpamSubnets(),
+          listProxySubnetGroups().catch(() => []),
+        ]);
+        ipamSubnets = subnets || [];
+        proxySubnetGroups = groups || [];
       } catch (e) {
         ipamSubnets = [];
+        proxySubnetGroups = [];
       }
     }
   }
@@ -170,6 +179,8 @@
       if (proxyForm.description.trim()) payload.description = proxyForm.description.trim();
       const ipCount = parseInt(String(proxyForm.ip_count), 10);
       if (Number.isFinite(ipCount)) payload.ip_count = ipCount;
+      const subnetGroupId = parseInt(String(proxyForm.subnet_group_id), 10);
+      if (Number.isFinite(subnetGroupId)) payload.subnet_group_id = subnetGroupId;
       const subnetId = parseInt(String(proxyForm.subnet_id), 10);
       if (Number.isFinite(subnetId)) payload.subnet_id = subnetId;
       const extId = parseInt(String(proxyForm.external_user_id), 10);
@@ -180,6 +191,7 @@
         name: '',
         product_code: '',
         ip_count: '',
+        subnet_group_id: '',
         subnet_id: '',
         description: '',
         external_user_id: '',
@@ -387,8 +399,8 @@
       <h4>Create HTTP/SOCKS proxy service</h4>
       <p class="hint">
         Creates an <strong>http_proxy</strong> service with no rack Server; IP(s) are auto-assigned from IPAM
-        immediately. Pick a proxy <strong>product</strong> to use its catalog defaults (IP count / subnet / allocation
-        strategy), or leave it blank and set overrides below.
+        immediately. Pick a proxy <strong>product</strong> to use its catalog defaults (IP count / subnet group),
+        or leave it blank and set overrides below. A single-subnet override wins over a subnet group.
       </p>
       {#if proxyError}<div class="error">{proxyError}</div>{/if}
       <div class="form-grid">
@@ -407,9 +419,18 @@
           <input type="number" min="1" max="32" bind:value={proxyForm.ip_count} placeholder="default: 1" />
         </label>
         <label>
-          Subnet override
+          Subnet group override
+          <select bind:value={proxyForm.subnet_group_id}>
+            <option value="">Inherit from product / any enabled</option>
+            {#each proxySubnetGroups.filter((g) => g.enabled !== false) as g}
+              <option value={String(g.id)}>{g.name} ({g.code})</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          Single subnet override (lab)
           <select bind:value={proxyForm.subnet_id}>
-            <option value="">Any enabled subnet</option>
+            <option value="">None (use group / any)</option>
             {#each ipamSubnets as s}
               <option value={String(s.id)}>{s.name} ({s.cidr})</option>
             {/each}

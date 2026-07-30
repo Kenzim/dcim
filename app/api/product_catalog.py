@@ -175,10 +175,11 @@ async def list_families(
     return result
 
 
-def _validate_proxy_defaults(defaults: dict) -> None:
+def _validate_proxy_defaults(defaults: dict, db: Session | None = None) -> None:
     """Light validation for the http_proxy family/product ``defaults``/
-    ``overrides`` JSON blob: ip_count/subnet_id/location_id, when present,
-    must be sane. Everything else in the dict is passed through untouched."""
+    ``overrides`` JSON blob: ip_count/subnet_id/subnet_group_id/location_id,
+    when present, must be sane. Everything else in the dict is passed through
+    untouched."""
     if "ip_count" in defaults and defaults["ip_count"] is not None:
         try:
             ip_count = int(defaults["ip_count"])
@@ -186,7 +187,7 @@ def _validate_proxy_defaults(defaults: dict) -> None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be an integer")
         if ip_count < 1 or ip_count > 32:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be between 1 and 32")
-    for key in ("subnet_id", "location_id"):
+    for key in ("subnet_id", "location_id", "subnet_group_id"):
         if key in defaults and defaults[key] is not None:
             try:
                 int(defaults[key])
@@ -195,6 +196,15 @@ def _validate_proxy_defaults(defaults: dict) -> None:
     if "allocation_strategy" in defaults and defaults["allocation_strategy"] is not None:
         if not isinstance(defaults["allocation_strategy"], str):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.allocation_strategy must be a string")
+    if db is not None and defaults.get("subnet_group_id") is not None:
+        from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
+
+        group = ProxySubnetGroupDAO.get_by_id(db, int(defaults["subnet_group_id"]))
+        if not group:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="defaults.subnet_group_id does not refer to an existing proxy subnet group",
+            )
 
 
 @router.post("/families", status_code=status.HTTP_201_CREATED)
@@ -221,7 +231,7 @@ async def create_family(
         payload["provisioning_backend"] = "proxmox"
     else:
         # http_proxy: no hardware/hypervisor backend — IPs come from IPAM.
-        _validate_proxy_defaults(data.defaults or {})
+        _validate_proxy_defaults(data.defaults or {}, db=db)
         payload["provisioning_backend"] = data.provisioning_backend or "ipam"
 
     if ProductFamilyDAO.get_by_code(db, payload["code"]):
@@ -258,7 +268,7 @@ async def update_family(
             update_data["provisioning_backend"] = "proxmox"
     else:
         if "defaults" in update_data and update_data["defaults"] is not None:
-            _validate_proxy_defaults(update_data["defaults"])
+            _validate_proxy_defaults(update_data["defaults"], db=db)
     ProductFamilyDAO.update(db, row, **update_data)
     return {"status": "ok"}
 
@@ -290,7 +300,7 @@ async def create_product(
         if not family:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
         if family.service_type == "http_proxy":
-            _validate_proxy_defaults(data.overrides or {})
+            _validate_proxy_defaults(data.overrides or {}, db=db)
     if data.permission_set_id is not None and PermissionSetDAO.get_by_id(db, data.permission_set_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
     if ProductDAO.get_by_code(db, data.code):
@@ -363,7 +373,7 @@ async def update_product(
         if "family_id" in update_data and update_data["family_id"] is not None:
             target_family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
         if target_family and target_family.service_type == "http_proxy":
-            _validate_proxy_defaults(update_data["overrides"])
+            _validate_proxy_defaults(update_data["overrides"], db=db)
     if "permission_set_id" in update_data and update_data["permission_set_id"] is not None:
         if PermissionSetDAO.get_by_id(db, update_data["permission_set_id"]) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
