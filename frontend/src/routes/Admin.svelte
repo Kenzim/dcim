@@ -43,6 +43,16 @@
   import Resellers from '../components/Resellers.svelte';
   import ResellerDetail from '../components/ResellerDetail.svelte';
   import ResellerGroups from '../components/ResellerGroups.svelte';
+  import StoreCategories from '../components/store/StoreCategories.svelte';
+  import StoreProducts from '../components/store/StoreProducts.svelte';
+  import StoreCoupons from '../components/store/StoreCoupons.svelte';
+  import CommerceOrders from '../components/commerce/CommerceOrders.svelte';
+  import CommerceInvoices from '../components/commerce/CommerceInvoices.svelte';
+  import CommerceTransactions from '../components/commerce/CommerceTransactions.svelte';
+  import CommerceGatewayLogs from '../components/commerce/CommerceGatewayLogs.svelte';
+  import CommerceEmailLog from '../components/commerce/CommerceEmailLog.svelte';
+  import CommerceAudit from '../components/commerce/CommerceAudit.svelte';
+  import SupportTickets from '../components/commerce/SupportTickets.svelte';
 
   let authChecked = false;
   
@@ -307,6 +317,26 @@
         <ServerGroups />
       {:else if routeName.startsWith('server-groups/') && groupId}
         <ServerGroupDetail groupId={groupId} />
+      {:else if routeName === 'store/categories'}
+        <StoreCategories />
+      {:else if routeName === 'store/products'}
+        <StoreProducts />
+      {:else if routeName === 'store/coupons'}
+        <StoreCoupons />
+      {:else if routeName === 'commerce/orders'}
+        <CommerceOrders />
+      {:else if routeName === 'commerce/invoices'}
+        <CommerceInvoices />
+      {:else if routeName === 'commerce/transactions'}
+        <CommerceTransactions />
+      {:else if routeName === 'commerce/gateway-logs'}
+        <CommerceGatewayLogs />
+      {:else if routeName === 'commerce/email-log'}
+        <CommerceEmailLog />
+      {:else if routeName === 'commerce/audit'}
+        <CommerceAudit />
+      {:else if routeName === 'support/tickets'}
+        <SupportTickets />
       {:else if routeName === 'user'}
         <User />
       {:else}

@@ -83,21 +83,27 @@ class InvoiceService:
     def create(
         db: Session,
         *,
-        reseller_id: int,
+        reseller_id: Optional[int] = None,
         purpose: InvoicePurpose,
         amount_cents: int,
         description: Optional[str] = None,
         service_id: Optional[int] = None,
         due_at: Optional[datetime] = None,
         currency: str = "USD",
+        billing_account_id: Optional[int] = None,
+        order_id: Optional[int] = None,
     ) -> Invoice:
         InvoiceService._require_positive_cents(amount_cents)
         currency = currency.strip().upper()
         if len(currency) != 3 or not currency.isalpha():
             raise InvoiceError("currency must be a three-letter code")
+        if reseller_id is None and billing_account_id is None:
+            raise InvoiceError("reseller_id or billing_account_id is required")
         invoice = Invoice(
             invoice_number=InvoiceService.allocate_number(db),
             reseller_id=reseller_id,
+            billing_account_id=billing_account_id,
+            order_id=order_id,
             service_id=service_id,
             purpose=purpose,
             status=InvoiceStatus.OPEN,

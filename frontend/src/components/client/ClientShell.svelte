@@ -12,6 +12,10 @@
   $: path = $currentRoute || '/client';
   $: onDashboard = path === '/client' || path === '/client/';
   $: onServices = path.startsWith('/client/services');
+  $: onBilling = path.startsWith('/client/billing') || path.startsWith('/client/orders');
+  $: onCheckout = path.startsWith('/client/checkout');
+  $: onSupport = path.startsWith('/client/support');
+  $: onAccount = path.startsWith('/client/account');
 
   async function handleLogout() {
     loggingOut = true;
@@ -34,6 +38,9 @@
       <nav class="nav" class:nav-open={menuOpen} aria-label="Portal">
         <a href="/client" class:active={onDashboard} on:click={() => (menuOpen = false)}>Dashboard</a>
         <a href="/client/services" class:active={onServices} on:click={() => (menuOpen = false)}>Services</a>
+        <a href="/client/billing" class:active={onBilling} on:click={() => (menuOpen = false)}>Billing</a>
+        <a href="/client/support" class:active={onSupport} on:click={() => (menuOpen = false)}>Support</a>
+        <a href="/client/account" class:active={onAccount} on:click={() => (menuOpen = false)}>Account</a>
       </nav>
 
       <div class="topbar-actions">

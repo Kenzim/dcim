@@ -2401,6 +2401,19 @@ export async function redeemVmVncLaunchTicket(token) {
   return await response.json();
 }
 
+export async function redeemIpmiKvmLaunchTicket(token) {
+  const response = await fetch(`${API_BASE}/kvm/redeem`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Console link is invalid or has expired');
+  }
+  return await response.json();
+}
+
 // Mint a fresh Proxmox console proxy for an existing WS session (same
 // ws_token, new vnc_password/port). Required for Reconnect: Proxmox's
 // vncproxy/termproxy tickets die when the upstream WebSocket closes.
@@ -3856,4 +3869,315 @@ export const rotateOwnResellerApiKey = (currentPassword) =>
     method: 'POST',
     body: JSON.stringify({ current_password: currentPassword }),
   });
+
+// --- Retail commerce (store admin, commerce admin, client portal) ---
+
+function commerceQuery(filters = {}) {
+  const query = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') query.set(key, value);
+  });
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : '';
+}
+
+async function adminStoreRequest(path, options = {}) {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(`${API_BASE}/admin/store${path}`, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail?.message || options.errorMessage || 'Store admin request failed');
+    const requestError = new Error(message);
+    requestError.status = response.status;
+    requestError.detail = detail;
+    throw requestError;
+  }
+  if (response.status === 204) return null;
+  return await response.json();
+}
+
+async function adminCommerceRequest(path, options = {}) {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(`${API_BASE}/admin/commerce${path}`, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail?.message || options.errorMessage || 'Commerce admin request failed');
+    const requestError = new Error(message);
+    requestError.status = response.status;
+    requestError.detail = detail;
+    throw requestError;
+  }
+  if (response.status === 204) return null;
+  return await response.json();
+}
+
+async function adminSupportRequest(path, options = {}) {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(`${API_BASE}/admin/support${path}`, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail?.message || options.errorMessage || 'Support admin request failed');
+    const requestError = new Error(message);
+    requestError.status = response.status;
+    requestError.detail = detail;
+    throw requestError;
+  }
+  if (response.status === 204) return null;
+  return await response.json();
+}
+
+async function clientCommerceRequest(path, options = {}) {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  Object.entries(_impersonationHeaders()).forEach(([key, value]) => {
+    headers.set(key, value);
+  });
+  const response = await fetch(`${API_BASE}/client/commerce${path}`, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail?.message || options.errorMessage || 'Commerce request failed');
+    const requestError = new Error(message);
+    requestError.status = response.status;
+    requestError.detail = detail;
+    throw requestError;
+  }
+  if (response.status === 204) return null;
+  return await response.json();
+}
+
+async function commercePdfRequest(path, { errorMessage = 'PDF download failed' } = {}) {
+  const headers = new Headers(_impersonationHeaders());
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'GET',
+    headers,
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || errorMessage);
+  }
+  return await response.blob();
+}
+
+// Store admin
+export const adminStoreListCategories = (filters = {}) =>
+  adminStoreRequest(`/categories${commerceQuery(filters)}`, { errorMessage: 'Failed to list categories' });
+export const adminStoreGetCategory = (categoryId) =>
+  adminStoreRequest(`/categories/${categoryId}`, { errorMessage: 'Failed to load category' });
+export const adminStoreCreateCategory = (data) =>
+  adminStoreRequest('/categories', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create category' });
+export const adminStoreUpdateCategory = (categoryId, data) =>
+  adminStoreRequest(`/categories/${categoryId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update category' });
+export const adminStoreDeleteCategory = (categoryId) =>
+  adminStoreRequest(`/categories/${categoryId}`, { method: 'DELETE', errorMessage: 'Failed to delete category' });
+
+export const adminStoreListProducts = (filters = {}) =>
+  adminStoreRequest(`/products${commerceQuery(filters)}`, { errorMessage: 'Failed to list store products' });
+export const adminStoreGetProduct = (productId) =>
+  adminStoreRequest(`/products/${productId}`, { errorMessage: 'Failed to load store product' });
+export const adminStoreCreateProduct = (data) =>
+  adminStoreRequest('/products', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create store product' });
+export const adminStoreUpdateProduct = (productId, data) =>
+  adminStoreRequest(`/products/${productId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update store product' });
+export const adminStoreDeleteProduct = (productId) =>
+  adminStoreRequest(`/products/${productId}`, { method: 'DELETE', errorMessage: 'Failed to delete store product' });
+
+export const adminStoreCreatePricePlan = (productId, data) =>
+  adminStoreRequest(`/products/${productId}/plans`, { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create price plan' });
+export const adminStoreUpdatePricePlan = (planId, data) =>
+  adminStoreRequest(`/plans/${planId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update price plan' });
+export const adminStoreDeletePricePlan = (planId) =>
+  adminStoreRequest(`/plans/${planId}`, { method: 'DELETE', errorMessage: 'Failed to delete price plan' });
+export const adminStoreCreatePlanCycle = (planId, data) =>
+  adminStoreRequest(`/plans/${planId}/cycles`, { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create billing cycle' });
+export const adminStoreUpdatePlanCycle = (cycleId, data) =>
+  adminStoreRequest(`/cycles/${cycleId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update billing cycle' });
+export const adminStoreDeletePlanCycle = (cycleId) =>
+  adminStoreRequest(`/cycles/${cycleId}`, { method: 'DELETE', errorMessage: 'Failed to delete billing cycle' });
+
+export const adminStoreListCoupons = (filters = {}) =>
+  adminStoreRequest(`/coupons${commerceQuery(filters)}`, { errorMessage: 'Failed to list coupons' });
+export const adminStoreCreateCoupon = (data) =>
+  adminStoreRequest('/coupons', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create coupon' });
+export const adminStoreUpdateCoupon = (couponId, data) =>
+  adminStoreRequest(`/coupons/${couponId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update coupon' });
+
+export const adminStoreListTaxRates = (filters = {}) =>
+  adminStoreRequest(`/tax-rates${commerceQuery(filters)}`, { errorMessage: 'Failed to list tax rates' });
+export const adminStoreCreateTaxRate = (data) =>
+  adminStoreRequest('/tax-rates', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create tax rate' });
+export const adminStoreUpdateTaxRate = (taxRateId, data) =>
+  adminStoreRequest(`/tax-rates/${taxRateId}`, { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update tax rate' });
+
+// Commerce admin
+export const adminCommerceListOrders = (filters = {}) =>
+  adminCommerceRequest(`/orders${commerceQuery(filters)}`, { errorMessage: 'Failed to list orders' });
+export const adminCommerceGetOrder = (orderId) =>
+  adminCommerceRequest(`/orders/${orderId}`, { errorMessage: 'Failed to load order' });
+export const adminCommerceAcceptOrder = (orderId) =>
+  adminCommerceRequest(`/orders/${orderId}/accept`, { method: 'POST', errorMessage: 'Failed to accept order' });
+export const adminCommerceRetryOrder = (orderId) =>
+  adminCommerceRequest(`/orders/${orderId}/retry-fulfill`, { method: 'POST', errorMessage: 'Failed to retry fulfillment' });
+export const adminCommerceCancelOrder = (orderId) =>
+  adminCommerceRequest(`/orders/${orderId}/cancel`, { method: 'POST', errorMessage: 'Failed to cancel order' });
+
+export const adminCommerceListInvoices = (filters = {}) =>
+  adminCommerceRequest(`/invoices${commerceQuery(filters)}`, { errorMessage: 'Failed to list invoices' });
+export const adminCommerceGetInvoice = (invoiceId) =>
+  adminCommerceRequest(`/invoices/${invoiceId}`, { errorMessage: 'Failed to load invoice' });
+export const adminCommerceDownloadInvoicePdf = (invoiceId) =>
+  commercePdfRequest(`/admin/commerce/invoices/${invoiceId}/pdf`, { errorMessage: 'Failed to download invoice PDF' });
+export const adminCommerceMarkInvoicePaid = (invoiceId, reason) =>
+  adminCommerceRequest(`/invoices/${invoiceId}/mark-paid`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+    errorMessage: 'Failed to mark invoice paid',
+  });
+export const adminCommerceVoidInvoice = (invoiceId) =>
+  adminCommerceRequest(`/invoices/${invoiceId}/void`, { method: 'POST', errorMessage: 'Failed to void invoice' });
+
+export const adminCommerceListTransactions = (filters = {}) =>
+  adminCommerceRequest(`/transactions${commerceQuery(filters)}`, { errorMessage: 'Failed to list transactions' });
+export const adminCommerceListGatewayLogs = (filters = {}) =>
+  adminCommerceRequest(`/gateway-logs${commerceQuery(filters)}`, { errorMessage: 'Failed to list gateway logs' });
+export const adminCommerceListEmailMessages = (filters = {}) =>
+  adminCommerceRequest(`/email-messages${commerceQuery(filters)}`, { errorMessage: 'Failed to list email messages' });
+export const adminCommerceRetryEmailMessage = (messageId) =>
+  adminCommerceRequest(`/email-messages/${messageId}/retry`, { method: 'POST', errorMessage: 'Failed to retry email' });
+export const adminCommerceListAuditEvents = (filters = {}) =>
+  adminCommerceRequest(`/audit-events${commerceQuery(filters)}`, { errorMessage: 'Failed to list audit events' });
+export const adminCommerceListBillingAccounts = (filters = {}) =>
+  adminCommerceRequest(`/billing-accounts${commerceQuery(filters)}`, { errorMessage: 'Failed to list billing accounts' });
+export const adminCommerceGetBillingAccount = (accountId) =>
+  adminCommerceRequest(`/billing-accounts/${accountId}`, { errorMessage: 'Failed to load billing account' });
+
+// Support admin
+export const adminSupportListDepartments = () =>
+  adminSupportRequest('/departments', { errorMessage: 'Failed to list departments' });
+export const adminSupportListTickets = (filters = {}) =>
+  adminSupportRequest(`/tickets${commerceQuery(filters)}`, { errorMessage: 'Failed to list tickets' });
+export const adminSupportGetTicket = (ticketId) =>
+  adminSupportRequest(`/tickets/${ticketId}`, { errorMessage: 'Failed to load ticket' });
+export const adminSupportReplyTicket = (ticketId, data) =>
+  adminSupportRequest(`/tickets/${ticketId}/reply`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+    errorMessage: 'Failed to reply to ticket',
+  });
+export const adminSupportPatchTicket = (ticketId, data) =>
+  adminSupportRequest(`/tickets/${ticketId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+    errorMessage: 'Failed to update ticket',
+  });
+
+// Client commerce
+export const clientCommerceListProducts = (filters = {}) =>
+  clientCommerceRequest(`/products${commerceQuery(filters)}`, { errorMessage: 'Failed to list products' });
+export const clientCommerceGetProduct = (productId) =>
+  clientCommerceRequest(`/products/${productId}`, { errorMessage: 'Failed to load product' });
+export const clientCommerceQuote = (data) =>
+  clientCommerceRequest('/quote', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to get quote' });
+export const clientCommerceCheckout = (data) =>
+  clientCommerceRequest('/checkout', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Checkout failed' });
+
+export const clientCommerceListOrders = (filters = {}) =>
+  clientCommerceRequest(`/orders${commerceQuery(filters)}`, { errorMessage: 'Failed to list orders' });
+export const clientCommerceGetOrder = (orderId) =>
+  clientCommerceRequest(`/orders/${orderId}`, { errorMessage: 'Failed to load order' });
+
+export const clientCommerceListInvoices = (filters = {}) =>
+  clientCommerceRequest(`/invoices${commerceQuery(filters)}`, { errorMessage: 'Failed to list invoices' });
+export const clientCommerceGetInvoice = (invoiceId) =>
+  clientCommerceRequest(`/invoices/${invoiceId}`, { errorMessage: 'Failed to load invoice' });
+export const clientCommerceDownloadInvoicePdf = (invoiceId) =>
+  commercePdfRequest(`/client/commerce/invoices/${invoiceId}/pdf`, { errorMessage: 'Failed to download invoice PDF' });
+
+export const clientCommerceListEmails = (filters = {}) =>
+  clientCommerceRequest(`/emails${commerceQuery(filters)}`, { errorMessage: 'Failed to list emails' });
+export const clientCommerceListActivity = (filters = {}) =>
+  clientCommerceRequest(`/activity${commerceQuery(filters)}`, { errorMessage: 'Failed to load activity' });
+
+export const clientCommerceGetProfile = () =>
+  clientCommerceRequest('/profile', { errorMessage: 'Failed to load profile' });
+export const clientCommerceUpdateProfile = (data) =>
+  clientCommerceRequest('/profile', { method: 'PUT', body: JSON.stringify(data), errorMessage: 'Failed to update profile' });
+
+export const clientCommerceListTickets = (filters = {}) =>
+  clientCommerceRequest(`/tickets${commerceQuery(filters)}`, { errorMessage: 'Failed to list tickets' });
+export const clientCommerceGetTicket = (ticketId) =>
+  clientCommerceRequest(`/tickets/${ticketId}`, { errorMessage: 'Failed to load ticket' });
+export const clientCommerceCreateTicket = (data) =>
+  clientCommerceRequest('/tickets', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create ticket' });
+export const clientCommerceReplyTicket = (ticketId, bodyText) =>
+  clientCommerceRequest(`/tickets/${ticketId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ body_text: bodyText }),
+    errorMessage: 'Failed to send message',
+  });
+
+export const clientCommerceDiscordAuthorizeUrl = () =>
+  clientCommerceRequest('/discord/authorize-url', { errorMessage: 'Failed to get Discord link URL' });
+export const clientCommerceDiscordCallback = (data) =>
+  clientCommerceRequest('/discord/callback', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Discord link failed' });
+export const clientCommerceDiscordUnlink = () =>
+  clientCommerceRequest('/discord', { method: 'DELETE', errorMessage: 'Failed to unlink Discord' });
+
+export const clientCommerce2faSetup = () =>
+  clientCommerceRequest('/2fa/setup', { method: 'POST', errorMessage: 'Failed to start 2FA setup' });
+export const clientCommerce2faConfirm = (code) =>
+  clientCommerceRequest('/2fa/confirm', { method: 'POST', body: JSON.stringify({ code }), errorMessage: 'Failed to confirm 2FA' });
+export const clientCommerce2faDisable = (code) =>
+  clientCommerceRequest('/2fa/disable', { method: 'POST', body: JSON.stringify({ code }), errorMessage: 'Failed to disable 2FA' });
+
+/** Trigger browser download of a PDF blob returned by commerce PDF helpers. */
+export function downloadPdfBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 

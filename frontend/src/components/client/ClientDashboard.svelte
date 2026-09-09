@@ -2,10 +2,11 @@
   import { onMount } from 'svelte';
   import { Alert, StatTile } from '../ui/index.js';
   import { user } from '../../stores/auth.js';
-  import { listMyServices } from '../../lib/api.js';
+  import { listMyServices, clientCommerceListProducts } from '../../lib/api.js';
   import ServiceCard from './ServiceCard.svelte';
 
   let services = [];
+  let storeAvailable = false;
   let loading = true;
   let error = '';
 
@@ -26,7 +27,15 @@
     }
   }
 
-  onMount(load);
+  onMount(async () => {
+    await load();
+    try {
+      const products = await clientCommerceListProducts({ limit: 1 });
+      storeAvailable = products.length > 0;
+    } catch (e) {
+      if (e.status !== 503) storeAvailable = false;
+    }
+  });
 </script>
 
 <section class="hero">
@@ -59,6 +68,9 @@
   <div class="empty">
     <h2>Welcome to your portal</h2>
     <p>You don't have any services yet. Once a service is provisioned for your account, you can manage power, consoles, backups, and credentials from here.</p>
+    {#if storeAvailable}
+      <a href="/client/checkout" class="empty-cta">Browse products & order</a>
+    {/if}
   </div>
 {:else}
   <div class="kpis">
@@ -167,11 +179,24 @@
     font-weight: 700;
   }
   .empty p {
-    margin: 0 auto;
+    margin: 0 auto 16px;
     max-width: 480px;
     font-size: 14px;
     color: var(--text-secondary);
     line-height: 1.55;
+  }
+  .empty-cta {
+    display: inline-flex;
+    padding: 10px 18px;
+    border-radius: var(--radius-md);
+    background: var(--portal-accent);
+    color: var(--portal-accent-contrast);
+    font-size: 14px;
+    font-weight: 650;
+    text-decoration: none;
+  }
+  .empty-cta:hover {
+    filter: brightness(1.05);
   }
   @media (max-width: 900px) {
     .kpis {

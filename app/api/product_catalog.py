@@ -17,10 +17,8 @@ from app.services.vm_install_type_strategy import INSTALL_TYPE_STRATEGIES, list_
 router = APIRouter(prefix="/product-catalog", tags=["product-catalog"])
 # VM template os_type values are the provisioning strategy keys (model + strategy merged).
 ALLOWED_VM_OS_TYPES = sorted(INSTALL_TYPE_STRATEGIES.keys())
-# Service types this catalog can define families/products for. bare_metal
-# isn't included: those products are still ad hoc (server_group driven) and
-# don't have a dedicated catalog UI yet.
-ALLOWED_FAMILY_SERVICE_TYPES = ("vm", "http_proxy")
+# Service types this catalog can define families/products for.
+ALLOWED_FAMILY_SERVICE_TYPES = ("vm", "http_proxy", "bare_metal")
 
 
 def _slugify(text: str) -> str:
@@ -229,10 +227,13 @@ async def create_family(
                 detail="VM product families must use provisioning_backend 'proxmox'",
             )
         payload["provisioning_backend"] = "proxmox"
-    else:
+    elif data.service_type == "http_proxy":
         # http_proxy: no hardware/hypervisor backend — IPs come from IPAM.
         _validate_proxy_defaults(data.defaults or {}, db=db)
         payload["provisioning_backend"] = data.provisioning_backend or "ipam"
+    else:
+        # bare_metal: server_group driven provisioning defaults.
+        payload["provisioning_backend"] = data.provisioning_backend or "server_group"
 
     if ProductFamilyDAO.get_by_code(db, payload["code"]):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Family code already exists")
@@ -254,7 +255,7 @@ async def update_family(
     if row.service_type not in ALLOWED_FAMILY_SERVICE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only VM/http_proxy families are editable from this catalog",
+            detail="Family service type is not editable from this catalog",
         )
     update_data = data.model_dump(exclude_unset=True)
     if row.service_type == "vm":
@@ -266,7 +267,7 @@ async def update_family(
                     detail="VM product families must use provisioning_backend 'proxmox'",
                 )
             update_data["provisioning_backend"] = "proxmox"
-    else:
+    elif row.service_type == "http_proxy":
         if "defaults" in update_data and update_data["defaults"] is not None:
             _validate_proxy_defaults(update_data["defaults"], db=db)
     ProductFamilyDAO.update(db, row, **update_data)

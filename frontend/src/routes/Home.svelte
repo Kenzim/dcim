@@ -39,10 +39,9 @@
       {:else if $isAuthenticated && $user?.is_reseller}
         <a href="/reseller" class="btn-primary">Go to Reseller Panel</a>
       {:else if $isAuthenticated}
-        <a href="/client" class="btn-primary">Go to My Services</a>
+        <a href="/client" class="btn-primary">Go to Client Portal</a>
       {:else}
         <button class="btn-primary" type="button" on:click={handleLogin}>Sign in</button>
-        <a href="/client" class="btn-secondary">Client Portal</a>
       {/if}
     </div>
   </div>
