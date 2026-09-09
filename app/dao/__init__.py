@@ -14,6 +14,7 @@ from app.dao.boot_task_dao import BootTaskDAO
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.billing_integration_dao import BillingIntegrationDAO
+from app.dao.mcp_api_key_dao import McpApiKeyDAO
 from app.dao.script_dao import ScriptDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
@@ -33,6 +34,6 @@ from app.dao.vmid_reservation_dao import VMIDReservationDAO
 from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.dao.reseller_dao import EffectiveProductPrice, ResellerDAO
 
-__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ServiceDAO", "BillingIntegrationDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "ProxyRunnerDAO", "ProxySubnetGroupDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "OSProfileDAO", "ProductFamilyOSProfileDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "VMDeploymentJobDAO"]
+__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ServiceDAO", "BillingIntegrationDAO", "McpApiKeyDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "ProxyRunnerDAO", "ProxySubnetGroupDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "OSProfileDAO", "ProductFamilyOSProfileDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "VMDeploymentJobDAO"]
 __all__ += ["EffectiveProductPrice", "ResellerDAO"]
 

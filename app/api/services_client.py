@@ -11,6 +11,9 @@ from app.dao.service_dao import ServiceDAO
 from app.models.service import ServiceStatus, ServiceType
 from app.services.service_resource import service_linked_server, vm_placement
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
+from app.services.ipmi_kvm import kvm_ready
+from app.api.ipmi_kvm import kvm_popup_redirect
+from app.services.ipmi_kvm_ticket_service import build_relative_error_url as kvm_error_url
 from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 from app.services.vm_guest_credentials import session_guest_fields
 from app.services.vm_vnc_ticket_service import (
@@ -261,6 +264,11 @@ async def client_get_service(
         and getattr(server, "ipmi_web_management_url", None)
         and permissions.get(PermissionKey.BMS_IPMI, False)
     )
+    kvm_console_available = bool(
+        server
+        and kvm_ready(server)
+        and permissions.get(PermissionKey.BMS_IPMI, False)
+    )
     console_available = bool(
         is_vm
         and cid is not None
@@ -315,6 +323,7 @@ async def client_get_service(
             "ipmi_available": ipmi_available,
             "ipmi_viewer_username": getattr(server, "ipmi_viewer_username", None) if ipmi_available else None,
             "ipmi_viewer_password": getattr(server, "ipmi_viewer_password", None) if ipmi_available else None,
+            "kvm_console_available": kvm_console_available,
             "console_available": console_available,
             "backups_available": backups_available,
             "proxy_credentials_available": bool(
@@ -475,6 +484,31 @@ async def create_ipmi_ticket(
         return build_launch_payload(server)
     except IPMIProxyUnavailable as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
+
+
+@router.get("/{service_id}/kvm-popup")
+async def kvm_popup_redirect_handler(
+    service_id: int,
+    auth: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
+    user_id = auth.get("user_id")
+    if not user_id:
+        return RedirectResponse(
+            url=kvm_error_url("User session required"), status_code=status.HTTP_302_FOUND
+        )
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.owner_user_id != int(user_id):
+        return RedirectResponse(url=kvm_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+
+    try:
+        require_client_permission(db, service, PermissionKey.BMS_IPMI)
+    except HTTPException as exc:
+        return RedirectResponse(url=kvm_error_url(str(exc.detail)), status_code=status.HTTP_302_FOUND)
+
+    return kvm_popup_redirect(service_linked_server(db, service))
 
 
 def _client_owned_proxy_service(db: Session, service_id: int, user_id, permission: str):

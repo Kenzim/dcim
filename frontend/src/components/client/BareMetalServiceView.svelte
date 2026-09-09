@@ -23,6 +23,15 @@
       busy = false;
     }
   }
+
+  function openKvm() {
+    if (!service?.id) return;
+    window.open(
+      `/api/client/services/${service.id}/kvm-popup`,
+      `rackflow_kvm_${service.id}`,
+      'width=1024,height=768,resizable=yes,scrollbars=yes'
+    );
+  }
 </script>
 
 {#if activeTab === 'overview'}
@@ -90,18 +99,28 @@
 {:else if activeTab === 'console'}
   <section class="stack">
     <p class="muted">
-      Opens the IPMI/KVM console in a new tab. Console links are single-use and expire shortly.
+      Console links are single-use and expire shortly. Open IPMI uses the BMC web UI proxy; Open KVM is a native HTML5 console popup.
     </p>
     {#if consoleError}
       <Alert type="error">{consoleError}</Alert>
     {/if}
-    <div>
+    <div class="console-actions">
+      {#if service.ipmi_available}
       <Button disabled={busy} on:click={openIpmi}>
         <svg slot="icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="15" height="15">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
         </svg>
         {busy ? 'Opening…' : 'Open IPMI console'}
       </Button>
+      {/if}
+      {#if service.kvm_console_available}
+      <Button on:click={openKvm}>
+        <svg slot="icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="15" height="15">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+        </svg>
+        Open KVM
+      </Button>
+      {/if}
     </div>
     {#if service.ipmi_viewer_username || service.ipmi_viewer_password}
       <dl class="facts creds">
@@ -207,6 +226,11 @@
     flex-direction: column;
     gap: 14px;
     align-items: flex-start;
+  }
+  .console-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .muted {
     margin: 0;

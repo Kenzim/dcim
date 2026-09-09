@@ -520,7 +520,7 @@ button.rf-ca__btn--danger:hover {
       </div>
       {/if}
 
-      {if $rackflow_portal_open_url || $rackflow_ipmi_available || $rackflow_vnc_available}
+      {if $rackflow_portal_open_url || $rackflow_ipmi_available || $rackflow_vnc_available || $rackflow_kvm_available}
       <div class="rf-ca__actions">
         {if $rackflow_portal_open_url}
         <div class="rf-ca__action">
@@ -557,6 +557,16 @@ button.rf-ca__btn--danger:hover {
             <p class="rf-ca__action-help">Opens in a popup. The console link is single-use and expires shortly.</p>
           </div>
           <a href="{$rackflow_vnc_open_url|escape}" rel="noopener" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-vnc-launch">Open VNC</a>
+        </div>
+        {/if}
+
+        {if $rackflow_kvm_available}
+        <div class="rf-ca__action">
+          <div class="rf-ca__action-copy">
+            <p class="rf-ca__action-title">HTML5 KVM</p>
+            <p class="rf-ca__action-help">Opens in a popup. The console link is single-use and expires shortly.</p>
+          </div>
+          <a href="{$rackflow_kvm_open_url|escape}" rel="noopener" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-kvm-launch">Open KVM</a>
         </div>
         {/if}
       </div>
@@ -668,6 +678,13 @@ button.rf-ca__btn--danger:hover {
     vnc.addEventListener('click', function (e) {
       e.preventDefault();
       window.open(vnc.href, 'rackflow_vnc', 'width=1024,height=768,resizable=yes,scrollbars=yes');
+    });
+  }
+  var kvm = document.getElementById('rackflow-kvm-launch');
+  if (kvm) {
+    kvm.addEventListener('click', function (e) {
+      e.preventDefault();
+      window.open(kvm.href, 'rackflow_kvm', 'width=1024,height=768,resizable=yes,scrollbars=yes');
     });
   }
 

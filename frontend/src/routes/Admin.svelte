@@ -20,6 +20,7 @@
   import SwitchDetail from '../components/SwitchDetail.svelte';
   import OSTemplates from '../components/OSTemplates.svelte';
   import BillingIntegrations from '../components/BillingIntegrations.svelte';
+  import McpKeys from '../components/McpKeys.svelte';
   import AdminBilling from '../components/AdminBilling.svelte';
   import Services from '../components/Services.svelte';
   import ServiceDetail from '../components/ServiceDetail.svelte';
@@ -260,6 +261,8 @@
         <OSTemplates />
       {:else if routeName === 'billing-integrations'}
         <BillingIntegrations />
+      {:else if routeName === 'mcp-keys'}
+        <McpKeys />
       {:else if routeName === 'billing'}
         <AdminBilling />
       {:else if routeName === 'resellers'}

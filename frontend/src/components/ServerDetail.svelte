@@ -176,6 +176,15 @@
   let ipmiLaunchInfo = null;
   let ipmiLaunchError = null;
 
+  function handleOpenKvm() {
+    if (!serverId) return;
+    window.open(
+      `/api/servers/${serverId}/kvm-popup`,
+      `rackflow_kvm_${serverId}`,
+      'width=1024,height=768,resizable=yes,scrollbars=yes'
+    );
+  }
+
   async function handleOpenIpmi() {
     openingIpmi = true;
     ipmiLaunchError = null;
@@ -1550,11 +1559,20 @@
             {powerActionInProgress === 'reset' ? '…' : 'Reboot'}
           </button>
         </div>
-        {#if server.ipmi_proxy_enabled}
+        {#if server.ipmi_proxy_enabled || server.ipmi_kvm_profile}
           <div class="left-pane-ipmi">
+            <div class="left-pane-ipmi-btns">
+            {#if server.ipmi_proxy_enabled}
             <button type="button" class="btn-open-ipmi" on:click={handleOpenIpmi} disabled={openingIpmi} title="Open the BMC web UI via the IPMI proxy">
               {openingIpmi ? 'Opening…' : 'Open IPMI'}
             </button>
+            {/if}
+            {#if server.ipmi_kvm_profile}
+            <button type="button" class="btn-open-ipmi" on:click={handleOpenKvm} title="Open native HTML5 KVM in a popup">
+              Open KVM
+            </button>
+            {/if}
+            </div>
             {#if server.ipmi_viewer_username || server.ipmi_viewer_password}
               <div class="ipmi-launch-info">
                 <div class="ipmi-creds">
@@ -2916,6 +2934,15 @@
 
   .left-pane-ipmi {
     padding: 0 16px 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .left-pane-ipmi-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
   .btn-open-ipmi {
     padding: 6px 12px;

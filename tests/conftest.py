@@ -16,6 +16,9 @@ os.environ["REQUIRE_SERVICE_INSTANCE_ENCRYPTION"] = "false"
 # docs endpoints enabled in the test environment even though they're disabled
 # by default in production.
 os.environ["DISABLE_PUBLIC_API_DOCS"] = "false"
+# Keep /mcp unmounted unless a test explicitly remounts it. A developer .env
+# with MCP_ENABLED=true would otherwise import FastMCP during app import.
+os.environ["MCP_ENABLED"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -256,6 +259,7 @@ def client(db_session, mock_redis, monkeypatch):
     import app.services.user_session_service as user_session_service_module
     import app.services.client_portal_service as client_portal_service_module
     import app.services.vm_vnc_ticket_service as vm_vnc_ticket_module
+    import app.services.ipmi_kvm_ticket_service as ipmi_kvm_ticket_module
 
     monkeypatch.setattr(redis_module, "redis_client", mock_redis)
     monkeypatch.setattr(user_api, "redis_client", mock_redis)
@@ -266,6 +270,7 @@ def client(db_session, mock_redis, monkeypatch):
     monkeypatch.setattr(user_session_service_module, "redis_client", mock_redis)
     monkeypatch.setattr(client_portal_service_module, "redis_client", mock_redis)
     monkeypatch.setattr(vm_vnc_ticket_module, "redis_client", mock_redis)
+    monkeypatch.setattr(ipmi_kvm_ticket_module, "redis_client", mock_redis)
 
     app.dependency_overrides[get_db] = override_get_db
 

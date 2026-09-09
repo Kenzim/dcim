@@ -146,6 +146,20 @@ REDIS_HOST=redis
 
 Then in `docker-compose.yml` under `app` and `bandwidth-poller` you can use `env_file: .env` or pass variables in the `environment` section.
 
+### Admin MCP (remote AI)
+
+Streamable HTTP MCP is **off by default**. Mint keys at **Admin → MCP keys** (`/admin/mcp-keys`) even while `/mcp` is disabled, then enable the endpoint:
+
+```bash
+MCP_ENABLED=true
+MCP_RATE_LIMIT_PER_KEY=120
+MCP_RATE_LIMIT_PER_KEY_WINDOW_SECONDS=60
+MCP_RATE_LIMIT_PER_IP=240
+MCP_RATE_LIMIT_PER_IP_WINDOW_SECONDS=60
+```
+
+When `MCP_ENABLED=true`, remote clients POST to `https://<host>/mcp` with `Authorization: Bearer rfmcp_…`. Keys are hashed (SHA-256); plaintext is shown once on create/rotate. Scopes are `read`, `write`, and `destructive` (`read` ⊂ `write` ⊂ `destructive`). Optional CIDR allowlists apply per key. Do not give billing/WHMCS keys access to MCP.
+
 ### Building images only
 
 - Main app: `docker build --target app -t dcim-app .` (required: default is last stage, bandwidth-poller)

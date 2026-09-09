@@ -67,8 +67,15 @@ from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
+from app.services.ipmi_kvm import kvm_ready
+from app.services.ipmi_kvm_ticket_service import (
+    IpmiKvmTicketUnavailable,
+    build_launch_url as build_kvm_launch_url,
+    mint_launch_ticket as mint_kvm_launch_ticket,
+)
 from app.services.vm_vnc_ticket_service import mint_launch_ticket, build_launch_url, VmVncUnavailable
 from app.schemas.vm_vnc import VmVncTicketResponse
+from app.schemas.ipmi_kvm import IpmiKvmTicketResponse
 from app.services.client_portal_service import ensure_user_for_billing_identity, mint_sso_ticket
 from app.services.client_permission_resolver import (
     resolve_client_permissions,
@@ -2367,6 +2374,7 @@ async def get_service_status(
         and getattr(server, "ipmi_web_management_url", None)
         and ipmi_granted
     )
+    kvm_console_available = bool(server and kvm_ready(server) and ipmi_granted)
 
     vnc_console_granted = bool(client_permissions.get(PermissionKey.VM_CONSOLE, False))
     vnc_cid, _vnc_node, vnc_vmid = vm_placement(service)
@@ -2430,6 +2438,7 @@ async def get_service_status(
         "ipmi_viewer_password": (
             getattr(server, "ipmi_viewer_password", None) if ipmi_proxy_available else None
         ),
+        "kvm_console_available": kvm_console_available,
         "vnc_console_available": vnc_console_available,
         "backups_available": backups_available,
         "proxy_credentials_available": proxy_credentials_available,
@@ -2880,6 +2889,55 @@ async def create_vnc_ticket(
         integration.name,
     )
     return VmVncTicketResponse(launch_url=launch_url, expires_in=settings.vm_vnc_launch_ttl_seconds)
+
+
+@router.post("/services/{service_id}/kvm-ticket", status_code=status.HTTP_200_OK, response_model=IpmiKvmTicketResponse)
+async def create_kvm_ticket(
+    service_id: int,
+    integration: BillingIntegration = Depends(get_billing_integration),
+    db: Session = Depends(get_db),
+):
+    """Mint a one-time IPMI HTML5 KVM launch ticket.
+
+    WHMCS (or any billing integration) calls this on behalf of the already
+    authenticated end user; the returned ``launch_url`` opens Rackflow's
+    ``/kvm`` page, which redeems the ticket for a BMC-bridged session.
+    BMC credentials never reach the browser.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+        )
+
+    _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_IPMI)
+
+    server = service_linked_server(db, service)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service has no linked server",
+        )
+    if not kvm_ready(server):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="HTML5 KVM is not configured for this server",
+        )
+
+    try:
+        token = mint_kvm_launch_ticket(server.id)
+        launch_url = build_kvm_launch_url(token)
+    except IpmiKvmTicketUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
+
+    logger.info(
+        "Billing API: Minted IPMI KVM launch ticket for service %s (server %s) via integration '%s'",
+        service_id,
+        server.id,
+        integration.name,
+    )
+    return IpmiKvmTicketResponse(launch_url=launch_url, expires_in=settings.ipmi_kvm_launch_ttl_seconds)
 
 
 @router.post("/services/{service_id}/portal-sso", status_code=status.HTTP_200_OK)

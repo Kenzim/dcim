@@ -5,6 +5,7 @@ import Client from './Client.svelte';
 import Reseller from './Reseller.svelte';
 import Login from '../components/Login.svelte';
 import VncLaunch from './VncLaunch.svelte';
+import KvmLaunch from './KvmLaunch.svelte';
 
 export default {
   '/': Home,
@@ -19,4 +20,5 @@ export default {
   // direct link); redeems a ?t= launch ticket and renders the viewer
   // full-viewport with no admin/client chrome.
   '/vnc': VncLaunch,
+  '/kvm': KvmLaunch,
 };

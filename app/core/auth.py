@@ -116,6 +116,17 @@ def get_current_user(
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # MCP keys are a dedicated trust boundary (FastMCP at /mcp) and must never
+    # fall through to billing-integration SHA-256 lookup.
+    from app.core.mcp_auth import is_mcp_api_key
+
+    if is_mcp_api_key(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     # If Redis token auth failed, try API key authentication (keys are hashed)
     from app.core.billing_auth import hash_api_key

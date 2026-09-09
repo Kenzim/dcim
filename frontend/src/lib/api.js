@@ -648,6 +648,18 @@ export async function openServerIpmiConsole(serverId) {
   return await response.json();
 }
 
+export async function listIpmiKvmProfiles() {
+  const response = await fetch(`${API_BASE}/ipmi-kvm/profiles`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load IPMI KVM profiles');
+  }
+  return await response.json();
+}
+
 export async function getServerCapabilities(serverId) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/capabilities`, {
     method: 'GET',
@@ -1854,6 +1866,58 @@ export async function rotateBillingIntegrationKey(integrationId) {
   }
 
   return await response.json();
+}
+
+async function mcpKeysRequest(path, { method = 'GET', body, errorMessage } = {}) {
+  const options = { method, credentials: 'include' };
+  if (body !== undefined) {
+    options.headers = { 'Content-Type': 'application/json' };
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(`${API_BASE}/admin/mcp-keys${path}`, options);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    let message = errorMessage;
+    if (typeof detail === 'string' && detail) {
+      message = detail;
+    } else if (Array.isArray(detail) && detail.length) {
+      const msgs = detail.map((item) => item?.msg || item?.message).filter(Boolean);
+      if (msgs.length) message = msgs.join('; ');
+    } else if (detail?.message) {
+      message = detail.message;
+    }
+    throw new Error(message);
+  }
+  if (response.status === 204) return null;
+  return await response.json();
+}
+
+export async function getMcpKeys() {
+  const data = await mcpKeysRequest('', { errorMessage: 'Failed to list MCP keys' });
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.items)) return data.items;
+  return [];
+}
+
+export async function getMcpKey(keyId) {
+  return mcpKeysRequest(`/${keyId}`, { errorMessage: 'Failed to get MCP key' });
+}
+
+export async function createMcpKey(data) {
+  return mcpKeysRequest('', { method: 'POST', body: data, errorMessage: 'Failed to create MCP key' });
+}
+
+export async function updateMcpKey(keyId, data) {
+  return mcpKeysRequest(`/${keyId}`, { method: 'PATCH', body: data, errorMessage: 'Failed to update MCP key' });
+}
+
+export async function rotateMcpKey(keyId) {
+  return mcpKeysRequest(`/${keyId}/rotate`, { method: 'POST', errorMessage: 'Failed to rotate MCP key' });
+}
+
+export async function deleteMcpKey(keyId) {
+  return mcpKeysRequest(`/${keyId}`, { method: 'DELETE', errorMessage: 'Failed to delete MCP key' });
 }
 
 // Services and External Users API functions

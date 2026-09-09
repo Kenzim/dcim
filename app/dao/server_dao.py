@@ -42,7 +42,8 @@ class ServerDAO:
         ipmi_proxy_enabled: bool = False,
         ipmi_web_management_url: Optional[str] = None,
         ipmi_viewer_username: Optional[str] = None,
-        ipmi_viewer_password: Optional[str] = None
+        ipmi_viewer_password: Optional[str] = None,
+        ipmi_kvm_profile: Optional[str] = None,
     ) -> Server:
         """Create a new server"""
         # Use provided pxe_boot_mode/os_boot_mode, or fallback to boot_mode for backward compatibility
@@ -74,7 +75,8 @@ class ServerDAO:
             ipmi_proxy_enabled=ipmi_proxy_enabled,
             ipmi_web_management_url=ipmi_web_management_url,
             ipmi_viewer_username=ipmi_viewer_username,
-            ipmi_viewer_password=ipmi_viewer_password
+            ipmi_viewer_password=ipmi_viewer_password,
+            ipmi_kvm_profile=ipmi_kvm_profile,
         )
         db.add(server)
         db.commit()

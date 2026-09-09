@@ -53,6 +53,8 @@ class Server(Base):
     ipmi_web_management_url = Column(String(512), nullable=True)  # URL for IPMI web management interface
     ipmi_viewer_username = Column(String(255), nullable=True)  # Username for IPMI web access (read-only)
     ipmi_viewer_password = Column(String(255), nullable=True)  # Password for IPMI web access (read-only)
+    # Native HTML5 KVM vendor profile (e.g. "asrockrack", "gigabyte"); empty/null disables Open KVM
+    ipmi_kvm_profile = Column(String(64), nullable=True)
     preview_asset_id = Column(Integer, ForeignKey("assets.id"), nullable=True, index=True)  # Optional image from asset manager
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

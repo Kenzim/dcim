@@ -23,6 +23,8 @@ from app.dao import ServiceInstanceDAO
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
+from app.services.ipmi_kvm import IpmiKvmUnavailable, normalize_profile_id
+from app.api.ipmi_kvm import kvm_popup_redirect
 from app.services.secret_masking import (
     MASKED_SECRET_PLACEHOLDER,
     mask_plugin_config,
@@ -37,6 +39,13 @@ import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_kvm_profile(value: str | None) -> str | None:
+    try:
+        return normalize_profile_id(value)
+    except IpmiKvmUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
 
 router = APIRouter()
 
@@ -298,6 +307,7 @@ class ServerCreate(BaseModel):
     ipmi_web_management_url: str | None = None
     ipmi_viewer_username: str | None = None
     ipmi_viewer_password: str | None = None
+    ipmi_kvm_profile: str | None = None
     server_group_ids: List[int] = []  # List of server group IDs to assign server to
 
 
@@ -329,6 +339,7 @@ class ServerUpdate(BaseModel):
     ipmi_web_management_url: str | None = None
     ipmi_viewer_username: str | None = None
     ipmi_viewer_password: str | None = None
+    ipmi_kvm_profile: str | None = None
     server_group_ids: List[int] | None = None  # List of server group IDs to assign server to
     preview_asset_id: int | None = None  # Optional image from asset manager for server preview
 
@@ -370,6 +381,7 @@ class ServerResponse(BaseModel):
     ipmi_web_management_url: str | None
     ipmi_viewer_username: str | None
     ipmi_viewer_password: str | None = None  # Viewer BMC login shown when IPMI proxy is enabled
+    ipmi_kvm_profile: str | None = None
     preview_asset_id: int | None = None
 
     class Config:
@@ -1216,7 +1228,8 @@ async def create_server(
             ipmi_proxy_enabled=server_data.ipmi_proxy_enabled,
             ipmi_web_management_url=server_data.ipmi_web_management_url,
             ipmi_viewer_username=server_data.ipmi_viewer_username,
-            ipmi_viewer_password=server_data.ipmi_viewer_password
+            ipmi_viewer_password=server_data.ipmi_viewer_password,
+            ipmi_kvm_profile=_normalize_kvm_profile(server_data.ipmi_kvm_profile),
         )
         
         # Create disks
@@ -1334,6 +1347,17 @@ async def create_server_ipmi_ticket(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=exc.detail
         ) from exc
+
+
+@router.get("/{server_id}/kvm-popup")
+async def server_kvm_popup(
+    server_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
+    del auth
+    return kvm_popup_redirect(ServerDAO.get_by_id(db, server_id))
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
@@ -2017,6 +2041,8 @@ async def update_server(
         # the admin didn't actually change the viewer password.
         if server_data.ipmi_viewer_password != MASKED_SECRET_PLACEHOLDER:
             server.ipmi_viewer_password = server_data.ipmi_viewer_password
+    if "ipmi_kvm_profile" in server_data.model_fields_set:
+        server.ipmi_kvm_profile = _normalize_kvm_profile(server_data.ipmi_kvm_profile)
     
     # Update disks if provided
     if server_data.disks is not None:
