@@ -94,6 +94,27 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     smtp_timeout_seconds: float = 10.0
 
+    # Retail commerce (orders/checkout/client invoices). Always on by default;
+    # there is no public storefront — clients use /client after login.
+    commerce_retail_enabled: bool = True
+    commerce_public_app_url: Optional[str] = None
+    commerce_default_currency: str = "USD"
+    commerce_invoice_prefix: str = "INV"
+    commerce_terms_version: str = "1"
+    commerce_registration_mode: Literal["disabled", "invite_only", "open"] = "disabled"
+    commerce_checkout_rate_limit_per_account: int = 10
+    commerce_checkout_rate_limit_window_seconds: int = 3600
+
+    # Discord account linking (optional).
+    discord_client_id: Optional[str] = None
+    discord_client_secret: Optional[SecretStr] = None
+    discord_redirect_uri: Optional[str] = None
+
+    # Company branding for invoice PDFs.
+    company_name: str = "Rackflow"
+    company_address: Optional[str] = None
+    company_tax_id: Optional[str] = None
+
     # Non-custodial USDT-on-Ethereum deposits. There are deliberately no RPC,
     # chain, contract, or key defaults: operators must select the network and
     # token explicitly, especially in test environments.

@@ -7,37 +7,58 @@
   import ClientDashboard from '../components/client/ClientDashboard.svelte';
   import ClientServiceList from '../components/client/ClientServiceList.svelte';
   import ClientServiceDetail from '../components/client/ClientServiceDetail.svelte';
+  import ClientBilling from '../components/client/ClientBilling.svelte';
+  import ClientCheckout from '../components/client/ClientCheckout.svelte';
+  import ClientSupport from '../components/client/ClientSupport.svelte';
+  import ClientAccount from '../components/client/ClientAccount.svelte';
 
   let authChecked = false;
   let impersonating = false;
 
-  // Route parsing (same pattern as Admin.svelte): /client -> dashboard,
-  // /client/services -> list, /client/services/:id -> detail.
   let routeName = 'dashboard';
   let serviceId = null;
+  let invoiceId = null;
+  let ticketId = null;
 
   $: {
     const path = $currentRoute || window.location.pathname;
     const routePath = path.startsWith('/') ? path.slice(1) : path;
     const parts = routePath.split('/').filter((p) => p);
 
+    serviceId = null;
+    invoiceId = null;
+    ticketId = null;
+
     if (parts.length === 0 || (parts.length === 1 && parts[0] === 'client')) {
       routeName = 'dashboard';
-      serviceId = null;
-    } else if (parts[0] === 'client' && parts[1] === 'services') {
-      if (parts.length === 2) {
-        routeName = 'services';
-        serviceId = null;
-      } else if (parts.length === 3 && !isNaN(parseInt(parts[2], 10))) {
-        routeName = 'service-detail';
-        serviceId = parseInt(parts[2], 10);
+    } else if (parts[0] === 'client') {
+      if (parts[1] === 'services') {
+        if (parts.length === 2) routeName = 'services';
+        else if (parts.length === 3 && !isNaN(parseInt(parts[2], 10))) {
+          routeName = 'service-detail';
+          serviceId = parseInt(parts[2], 10);
+        } else routeName = 'services';
+      } else if (parts[1] === 'billing') {
+        routeName = 'billing';
+        if (parts.length === 3 && !isNaN(parseInt(parts[2], 10))) {
+          invoiceId = parseInt(parts[2], 10);
+        }
+      } else if (parts[1] === 'orders') {
+        routeName = 'orders';
+      } else if (parts[1] === 'checkout') {
+        routeName = 'checkout';
+      } else if (parts[1] === 'support') {
+        routeName = 'support';
+        if (parts.length === 3 && !isNaN(parseInt(parts[2], 10))) {
+          ticketId = parseInt(parts[2], 10);
+        }
+      } else if (parts[1] === 'account') {
+        routeName = 'account';
       } else {
-        routeName = 'services';
-        serviceId = null;
+        routeName = 'dashboard';
       }
     } else {
       routeName = 'dashboard';
-      serviceId = null;
     }
   }
 
@@ -79,12 +100,20 @@
     <p>Loading…</p>
   </div>
 {:else if $isAuthenticated && !$user?.is_admin && !$user?.is_reseller}
-  {#key serviceId}
+  {#key `${routeName}-${serviceId}-${invoiceId}-${ticketId}`}
     <ClientShell {impersonating}>
       {#if routeName === 'services'}
         <ClientServiceList />
       {:else if routeName === 'service-detail' && serviceId != null}
         <ClientServiceDetail {serviceId} />
+      {:else if routeName === 'billing' || routeName === 'orders'}
+        <ClientBilling {impersonating} {invoiceId} initialTab={routeName === 'orders' ? 'orders' : 'invoices'} />
+      {:else if routeName === 'checkout'}
+        <ClientCheckout {impersonating} />
+      {:else if routeName === 'support'}
+        <ClientSupport {ticketId} />
+      {:else if routeName === 'account'}
+        <ClientAccount {impersonating} />
       {:else}
         <ClientDashboard />
       {/if}

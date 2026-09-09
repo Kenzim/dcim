@@ -2,7 +2,7 @@ from fastapi import FastAPI, APIRouter, Request, status, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
 from pathlib import Path
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from app.core.config import settings
 from app.core.redis_notifications import setup_keyspace_notifications, start_keyspace_notification_listener
 import asyncio
@@ -112,8 +112,13 @@ async def lifespan(app: FastAPI):
         logger.info("Plugins are loaded directly from disk (not stored in database)")
     except Exception as e:
         logger.warning(f"Could not seed categories/sync plugins (may already exist): {e}")
-    
-    yield
+
+    async with AsyncExitStack() as stack:
+        if settings.mcp_enabled:
+            from app.mcp.server import mcp_session_lifespan
+
+            await stack.enter_async_context(mcp_session_lifespan())
+        yield
     
     # Shutdown
     logger.info("Shutting down...")
@@ -358,6 +363,18 @@ api_router.include_router(services_client_api.router, tags=["services-client"])
 # behind Access.
 from app.api import client as client_api
 api_router.include_router(client_api.router, tags=["client"])
+
+# Retail commerce: storefront admin, commerce admin, client shop, support, auth
+from app.api import commerce_store_admin as commerce_store_admin_api
+from app.api import commerce_admin as commerce_admin_api
+from app.api import commerce_client as commerce_client_api
+from app.api import commerce_support_admin as commerce_support_admin_api
+from app.api import commerce_auth_public as commerce_auth_public_api
+api_router.include_router(commerce_store_admin_api.router, tags=["commerce-store-admin"])
+api_router.include_router(commerce_admin_api.router, tags=["commerce-admin"])
+api_router.include_router(commerce_client_api.router, tags=["commerce-client"])
+api_router.include_router(commerce_support_admin_api.router, tags=["commerce-support-admin"])
+api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"])
 
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api

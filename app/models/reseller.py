@@ -80,6 +80,11 @@ class InvoicePurpose(str, enum.Enum):
     DEPLOY_CHARGE = "deploy_charge"
     CYCLE_CHARGE = "cycle_charge"
     ADJUSTMENT = "adjustment"
+    ORDER_CHARGE = "order_charge"
+    ADDON = "addon"
+    UPGRADE = "upgrade"
+    CREDIT_NOTE = "credit_note"
+    RENEWAL = "renewal"
 
 
 class InvoiceStatus(str, enum.Enum):
@@ -495,10 +500,12 @@ class Invoice(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     invoice_number = Column(BigInteger, nullable=False, unique=True)
+    # Nullable for retail client invoices (billing_account_id is the payer).
+    # Reseller invoices keep reseller_id populated for B2B compatibility.
     reseller_id = Column(
         Integer,
         ForeignKey(_FK_RESELLERS, ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     service_id = Column(
@@ -507,6 +514,13 @@ class Invoice(Base):
         nullable=True,
         index=True,
     )
+    billing_account_id = Column(
+        Integer,
+        ForeignKey("billing_accounts.id", ondelete=_ON_DELETE_SET_NULL),
+        nullable=True,
+        index=True,
+    )
+    order_id = Column(Integer, nullable=True, index=True)
     purpose = Column(_string_enum(InvoicePurpose), nullable=False, index=True)
     status = Column(
         _string_enum(InvoiceStatus),
@@ -527,7 +541,14 @@ class Invoice(Base):
 
     reseller = relationship("Reseller", back_populates="invoices")
     service = relationship("Service")
+    billing_account = relationship("BillingAccount", foreign_keys=[billing_account_id])
     payments = relationship("Payment", back_populates="invoice")
+    invoice_lines = relationship(
+        "InvoiceLine",
+        back_populates="invoice",
+        cascade=_CASCADE_DELETE_ORPHAN,
+        order_by="InvoiceLine.sort_order",
+    )
 
 
 class InvoiceSequence(Base):
@@ -789,6 +810,11 @@ class ServiceBilling(Base):
             "reseller_id",
             "status",
         ),
+        Index(
+            "ix_service_billings_billing_account_status",
+            "billing_account_id",
+            "status",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -801,7 +827,13 @@ class ServiceBilling(Base):
     reseller_id = Column(
         Integer,
         ForeignKey(_FK_RESELLERS, ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
+        index=True,
+    )
+    billing_account_id = Column(
+        Integer,
+        ForeignKey("billing_accounts.id", ondelete=_ON_DELETE_SET_NULL),
+        nullable=True,
         index=True,
     )
     product_id = Column(
@@ -835,6 +867,7 @@ class ServiceBilling(Base):
 
     service = relationship("Service")
     reseller = relationship("Reseller", back_populates="service_billings")
+    billing_account = relationship("BillingAccount", foreign_keys=[billing_account_id])
     product = relationship("Product")
     cycles = relationship(
         "BillingCycle",

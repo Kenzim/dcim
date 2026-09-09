@@ -560,18 +560,11 @@ class PaymentOrchestrator:
         gateway = self.registry.maybe_get(method.provider)
         if gateway is None:
             return self._result(db, invoice)
-        attempt = int(
-            db.scalar(
-                select(func.count(Payment.id)).where(
-                    Payment.invoice_id == invoice.id,
-                    Payment.gateway == method.provider,
-                )
-            )
-            or 0
-        ) + 1
+        # Stable key (invoice + method + amount + purpose) so a gateway success
+        # followed by a local failure cannot double-charge on retry.
         idempotency_key = (
             f"invoice-{invoice.id}-{method.provider}-{method.id}-"
-            f"{amount_cents}-{attempt}"
+            f"{amount_cents}-{invoice.purpose.value if hasattr(invoice.purpose, 'value') else invoice.purpose}"
         )
         outcome = gateway.charge_off_session(
             customer_ref=method.provider_customer_ref,
@@ -597,7 +590,7 @@ class PaymentOrchestrator:
             payment_metadata={
                 "saved_method_id": method.id,
                 "provider_method_ref": method.provider_method_ref,
-                "attempt": attempt,
+                "idempotency_key": idempotency_key,
             },
             processed_at=(
                 datetime.now(timezone.utc)

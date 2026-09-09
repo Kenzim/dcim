@@ -214,3 +214,20 @@ sudo systemctl enable --now dcim-snmp-bandwidth-poller.service
 - Service files are automatically updated when configuration changes
 - The installation script uses the current configuration files to generate service files
 - Services run independently of the main application and persist across app restarts
+
+## Retail commerce
+
+Commerce (orders, client invoices, support) is **enabled by default**. There is no public storefront on `/` — visitors only see Sign in; clients use `/client` after login (admin `/admin`, reseller `/reseller`).
+
+```bash
+# .env (optional overrides)
+COMMERCE_DEFAULT_CURRENCY=USD
+COMMERCE_TERMS_VERSION=1
+# COMMERCE_RETAIL_ENABLED=false   # emergency kill switch only
+# COMMERCE_REGISTRATION_MODE=disabled|invite_only|open
+# DISCORD_CLIENT_ID=...
+# DISCORD_CLIENT_SECRET=...
+# DISCORD_REDIRECT_URI=https://your.app/client/account
+```
+
+WHMCS `/api/billing` stays available during dual-run. See `docs/commerce-whmcs-coexistence.md`.

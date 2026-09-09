@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -10,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.commerce_order import OrderItem
 from app.models.reseller import (
     CreditLedgerEntry,
     CreditLedgerEntryType,
@@ -19,7 +22,9 @@ from app.models.reseller import (
     Payment,
     PaymentStatus,
 )
+from app.models.service import Service
 from app.services.credit_ledger_service import CreditLedgerService
+from app.services.email_message_service import EmailEvent, EmailMessageService
 from app.services.invoice_service import InvoiceService
 from app.services.payments.base import (
     GatewayWebhookAction,
@@ -27,6 +32,9 @@ from app.services.payments.base import (
     PaymentGatewayError,
 )
 from app.services.payments.orchestrator import PaymentOrchestrator
+from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
+
+logger = logging.getLogger(__name__)
 
 
 class PaymentWebhookService:
@@ -56,7 +64,11 @@ class PaymentWebhookService:
         event: NormalizedGatewayWebhookEvent,
         raw_payload: bytes,
     ) -> bool:
-        """Process an event and return False when it was already processed."""
+        """Process an event and return False when it was already processed.
+
+        Claims the ``GatewayWebhookEvent`` row *before* side effects so
+        concurrent deliveries cannot double-apply ledger/payment mutations.
+        """
         event_id = event.event_id
         event_type = event.event_type
         if not event_id or not event_type:
@@ -68,6 +80,21 @@ class PaymentWebhookService:
             )
         ).scalar_one_or_none()
         if existing is not None:
+            return False
+
+        # Claim-before-apply: unique (gateway, event_id) makes replay harmless.
+        record = GatewayWebhookEvent(
+            gateway=gateway,
+            event_id=event_id,
+            event_type=event_type,
+            payload_hash=hashlib.sha256(raw_payload).hexdigest(),
+            processed_at=datetime.now(timezone.utc),
+        )
+        try:
+            with db.begin_nested():
+                db.add(record)
+                db.flush()
+        except IntegrityError:
             return False
 
         if event.action == GatewayWebhookAction.PAYMENT_COMPLETED:
@@ -90,19 +117,13 @@ class PaymentWebhookService:
                 event_id=event_id,
                 reason="dispute",
             )
-        record = GatewayWebhookEvent(
-            gateway=gateway,
-            event_id=event_id,
-            event_type=event_type,
-            payload_hash=hashlib.sha256(raw_payload).hexdigest(),
-            processed_at=datetime.now(timezone.utc),
-        )
-        try:
-            with db.begin_nested():
-                db.add(record)
-                db.flush()
-        except IntegrityError:
-            return False
+            payment = PaymentWebhookService._payment_for_update(
+                db, gateway, event.external_ref or ""
+            )
+            if payment is not None and payment.invoice is not None:
+                PaymentWebhookService._suspend_linked_services(
+                    db, payment.invoice, reason="dispute"
+                )
         db.flush()
         return True
 
@@ -159,6 +180,27 @@ class PaymentWebhookService:
             raise PaymentGatewayError("Gateway payment currency does not match")
         payment.external_ref = event.external_ref
         PaymentOrchestrator.finalize_success(db, payment)
+        invoice = payment.invoice
+        if invoice is not None and invoice.billing_account_id is not None:
+            try:
+                from app.services.commerce_webhook_service import CommerceWebhookService
+
+                CommerceWebhookService.enqueue(
+                    db,
+                    "invoice.paid",
+                    {
+                        "invoice_id": invoice.id,
+                        "invoice_number": invoice.invoice_number,
+                        "billing_account_id": invoice.billing_account_id,
+                        "order_id": invoice.order_id,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to enqueue invoice.paid webhook for invoice %s",
+                    invoice.id,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _payment_failed(
@@ -245,3 +287,89 @@ class PaymentWebhookService:
         }
         invoice.status = InvoiceStatus.FAILED
         invoice.paid_at = None
+
+    @staticmethod
+    def _linked_service_ids(db: Session, invoice) -> list[int]:
+        service_ids: list[int] = []
+        if invoice.service_id is not None:
+            service_ids.append(int(invoice.service_id))
+        if invoice.order_id is not None:
+            rows = list(
+                db.execute(
+                    select(OrderItem.service_id).where(
+                        OrderItem.order_id == invoice.order_id,
+                        OrderItem.service_id.isnot(None),
+                    )
+                ).scalars()
+            )
+            service_ids.extend(int(row) for row in rows if row is not None)
+        seen: set[int] = set()
+        unique: list[int] = []
+        for sid in service_ids:
+            if sid not in seen:
+                seen.add(sid)
+                unique.append(sid)
+        return unique
+
+    @staticmethod
+    def _suspend_linked_services(db: Session, invoice, *, reason: str) -> None:
+        service_ids = PaymentWebhookService._linked_service_ids(db, invoice)
+        if not service_ids:
+            return
+        lifecycle = ServiceLifecycle()
+
+        async def _run() -> None:
+            for service_id in service_ids:
+                service = db.get(Service, service_id)
+                if service is None:
+                    continue
+                try:
+                    await lifecycle.suspend(db, service, reason=reason)
+                except ServiceLifecycleError as exc:
+                    logger.warning(
+                        "Dispute suspend failed for service %s: %s",
+                        service_id,
+                        exc,
+                    )
+
+        try:
+            asyncio.run(_run())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_run())
+            finally:
+                loop.close()
+
+        if invoice.billing_account_id is not None:
+            try:
+                from app.models.commerce_account import BillingAccount
+
+                account = db.get(BillingAccount, invoice.billing_account_id)
+                recipient = (
+                    account.user.email
+                    if account and account.user and account.user.email
+                    else None
+                )
+                if recipient:
+                    EmailMessageService.enqueue(
+                        db,
+                        to_address=recipient,
+                        event=EmailEvent.SERVICE_SUSPENDED,
+                        idempotency_key=f"dispute:suspend:invoice:{invoice.id}",
+                        data={
+                            "invoice_id": invoice.id,
+                            "invoice_number": invoice.invoice_number,
+                            "reason": reason,
+                        },
+                        billing_account_id=invoice.billing_account_id,
+                        user_id=account.user_id if account else None,
+                        related_type="invoice",
+                        related_id=str(invoice.id),
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to enqueue dispute suspend email for invoice %s",
+                    invoice.id,
+                    exc_info=True,
+                )

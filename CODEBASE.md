@@ -129,6 +129,11 @@ All included from `app/main.py` under `/api`.
 | `billing.py` | `/api/billing` | External billing API (register/suspend/power/reinstall/…) |
 | `billing_admin.py` | (billing-admin tags) | Admin management of billing integrations |
 | `mcp_keys_admin.py` | `/api/admin/mcp-keys` | Admin CRUD for MCP Streamable HTTP keys (`rfmcp_`) |
+| `commerce_store_admin.py` | `/api/admin/store` | Frontend products, categories, plans, coupons, tax |
+| `commerce_admin.py` | `/api/admin/commerce` | Orders, invoices/PDF, gateway logs, emails, webhooks, GDPR |
+| `commerce_client.py` | `/api/client/commerce` | Client browse/checkout/orders/invoices/support/Discord/2FA |
+| `commerce_support_admin.py` | `/api/admin/support` | Support ticket admin queue |
+| `commerce_auth_public.py` | `/api/commerce/auth` | Register, verify email, password reset |
 | `product_catalog.py` | `/api/product-catalog` | Families, products, VM templates, OS profiles, VM config |
 | `proxmox_inventory.py` | `/api/proxmox` | Clusters, sync, inventory, VM plan |
 | `ipam.py` | `/api/ipam` | Subnets, assignments, history |
@@ -163,6 +168,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
 | Proxmox / IPAM | `proxmox_inventory.py`, `ipam.py`, `vm_ip_allocation.py`, `vmid_reservation.py`, `proxy_runner.py`, `proxy_subnet_group.py` |
 | Billing / assets | `billing_integration.py`, `mcp_api_key.py`, `asset.py` |
+| Retail commerce | `commerce_account.py`, `commerce_order.py`, `storefront.py`, `commerce_invoice_ext.py`, `commerce_coupon_tax.py`, `commerce_email.py`, `commerce_audit.py`, `commerce_gateway_log.py`, `commerce_auth_extra.py`, `commerce_webhook.py`, `support_ticket.py` |
 | Plugins (metadata leftovers) | `plugin.py`, `plugin_category.py`, `switch_plugin.py`, `category.py` |
 
 Schema changes → new Alembic revision under `alembic/versions/`.
@@ -291,8 +297,20 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/proxy-runners` | `ProxyRunners.svelte` (standalone proxy runners) |
 | `/admin/billing-integrations` | `BillingIntegrations.svelte` |
 | `/admin/mcp-keys` | `McpKeys.svelte` |
+| `/admin/store/categories` | `store/StoreCategories.svelte` |
+| `/admin/store/products` | `store/StoreProducts.svelte` |
+| `/admin/store/coupons` | `store/StoreCoupons.svelte` |
+| `/admin/commerce/orders` | `commerce/CommerceOrders.svelte` |
+| `/admin/commerce/invoices` | `commerce/CommerceInvoices.svelte` |
+| `/admin/commerce/transactions` | `commerce/CommerceTransactions.svelte` |
+| `/admin/commerce/gateway-logs` | `commerce/CommerceGatewayLogs.svelte` |
+| `/admin/commerce/email-log` | `commerce/CommerceEmailLog.svelte` |
+| `/admin/commerce/audit` | `commerce/CommerceAudit.svelte` |
+| `/admin/support/tickets` | `commerce/SupportTickets.svelte` |
 | `/admin/user` | `User.svelte` |
 | `/login` | `Login.svelte` |
+
+Client portal (commerce always on; no public storefront): `/client/billing`, `/client/checkout`, `/client/support`, `/client/account` — see `frontend/src/components/client/Client*.svelte`. Coexistence notes: `docs/commerce-whmcs-coexistence.md`.
 
 Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelte`, `CodeEditor.svelte`.
 
