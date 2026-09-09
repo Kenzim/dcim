@@ -53,6 +53,8 @@ from app.services.vm_vnc_ticket_service import (
     mint_launch_ticket,
     mint_ws_session,
 )
+from app.api.ipmi_kvm import kvm_popup_redirect
+from app.services.ipmi_kvm_ticket_service import build_relative_error_url as kvm_error_url
 from app.schemas.vm_vnc import VmConsoleTypesResponse, VmVncSessionResponse
 from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody, map_backup_error
 from app.services.vm_backup_service import (
@@ -989,6 +991,20 @@ async def admin_vm_vnc_popup(
     token = mint_launch_ticket(service.id, console_type=type)
     logger.info("Admin API: minted VM console popup ticket for service %s", service.id)
     return RedirectResponse(url=build_relative_launch_url(token), status_code=status.HTTP_302_FOUND)
+
+
+@router.get("/{service_id}/kvm-popup")
+async def admin_kvm_popup(
+    service_id: int,
+    auth: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
+    del auth
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        return RedirectResponse(url=kvm_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+    return kvm_popup_redirect(service_linked_server(db, service))
 
 
 @router.post("/{service_id}/vm/destroy", response_model=ServiceResponse)

@@ -1,0 +1,495 @@
+<script>
+  import { onDestroy, onMount } from 'svelte';
+
+  /** Session from POST /api/kvm/redeem. BMC cookies/tokens stay on the server. */
+  export let session;
+
+  const IVTP = {
+    HDR: 8,
+    CMD_HID: 0x01,
+    CMD_RESUME: 0x06,
+    CMD_STOP: 0x08,
+    CMD_BLANK: 0x09,
+    CMD_FULL: 0x0b,
+    CMD_VALIDATED: 0x13,
+    CMD_MAX_SESSION: 0x16,
+    CMD_ALLOWED: 0x17,
+    CMD_VIDEO: 0x19,
+    CMD_ACTIVE: 0x27,
+    CMD_KEEPALIVE: 0x39,
+  };
+
+  const IUSB = {
+    HID_HDR: 34,
+    HDR: 32,
+    KEYBD: 48,
+    MOUSE: 49,
+    PROTO_KEYBD: 16,
+    PROTO_MOUSE: 32,
+    FROM_REMOTE: 128,
+    KEYBD_DEV: 2,
+    KEYBD_IF: 0,
+    MOUSE_DEV: 2,
+    MOUSE_IF: 1,
+    MAJOR: 1,
+    MINOR: 0,
+  };
+
+  const HID_KEY = {
+    8: 42, 9: 43, 13: 40, 27: 41, 32: 44,
+    33: 75, 34: 78, 35: 77, 36: 74, 37: 80, 38: 82, 39: 79, 40: 81,
+    45: 73, 46: 76, 48: 39,
+    49: 30, 50: 31, 51: 32, 52: 33, 53: 34, 54: 35, 55: 36, 56: 37, 57: 38,
+    65: 4, 66: 5, 67: 6, 68: 7, 69: 8, 70: 9, 71: 10, 72: 11, 73: 12, 74: 13,
+    75: 14, 76: 15, 77: 16, 78: 17, 79: 18, 80: 19, 81: 20, 82: 21, 83: 22,
+    84: 23, 85: 24, 86: 25, 87: 26, 88: 27, 89: 28, 90: 29,
+    91: 227, 93: 101, 112: 58, 113: 59, 114: 60, 115: 61, 116: 62, 117: 63,
+    118: 64, 119: 65, 120: 66, 121: 67, 122: 68, 123: 69,
+    186: 51, 187: 46, 188: 54, 189: 45, 190: 55, 191: 56, 192: 53,
+    219: 47, 220: 49, 221: 48, 222: 52,
+  };
+
+  let canvas;
+  let ctx;
+  let statusText = 'Connecting…';
+  let resText = '';
+  let ws = null;
+  let worker = null;
+  let keepAlive = null;
+  let imageBuffer = null;
+  let fatal = null;
+  let seqKbd = 0;
+  let seqMouse = 0;
+  let modifiers = 0;
+  let buttons = 0;
+  let lastMouse = 0;
+  let prevComplete = true;
+  let frameChunks = [];
+  let frameGot = 0;
+  let compressSize = 0;
+  let header = null;
+  let videoFrames = 0;
+  let destroyed = false;
+  const buf = { u8: new Uint8Array(0) };
+
+  function setStatus(msg) {
+    statusText = msg;
+  }
+
+  function ivtp(type, pktStatus, payload) {
+    const n = payload ? payload.byteLength : 0;
+    const out = new ArrayBuffer(IVTP.HDR + n);
+    const dv = new DataView(out);
+    const u8 = new Uint8Array(out);
+    dv.setUint16(0, type, true);
+    dv.setUint32(2, n, true);
+    dv.setUint16(6, pktStatus, true);
+    if (payload) u8.set(new Uint8Array(payload), 8);
+    return out;
+  }
+
+  function iusbHid(dev, proto, devNum, ifNum, seq, report) {
+    const pktSize = IUSB.HID_HDR - 1 + report.length;
+    const out = new ArrayBuffer(IVTP.HDR + pktSize);
+    const dv = new DataView(out);
+    const u8 = new Uint8Array(out);
+    dv.setUint16(0, IVTP.CMD_HID, true);
+    dv.setUint32(2, pktSize, true);
+    dv.setUint16(6, 0, true);
+    const o = 8;
+    u8.set(new TextEncoder().encode('IUSB    '), o);
+    u8[o + 8] = IUSB.MAJOR;
+    u8[o + 9] = IUSB.MINOR;
+    u8[o + 10] = IUSB.HDR;
+    u8[o + 11] = 0;
+    dv.setInt32(o + 12, pktSize - IUSB.HDR, true);
+    u8[o + 16] = 0;
+    u8[o + 17] = dev;
+    u8[o + 18] = proto;
+    u8[o + 19] = IUSB.FROM_REMOTE;
+    u8[o + 20] = devNum;
+    u8[o + 21] = ifNum;
+    u8[o + 22] = 0;
+    u8[o + 23] = 0;
+    dv.setInt32(o + 24, seq, true);
+    u8[o + 28] = 0;
+    u8[o + 29] = 0;
+    u8[o + 30] = 0;
+    u8[o + 31] = 0;
+    u8[o + 32] = report.length & 0xff;
+    u8.set(report, o + 33);
+    let sum = 0;
+    for (let i = 8; i < 8 + IUSB.HDR; i++) sum = (sum + u8[i]) & 0xff;
+    u8[19] = (-sum) & 0xff;
+    return out;
+  }
+
+  function appendBuf(chunk) {
+    const n = new Uint8Array(buf.u8.length + chunk.length);
+    n.set(buf.u8);
+    n.set(chunk, buf.u8.length);
+    buf.u8 = n;
+  }
+
+  function takeBuf(n) {
+    const copy = new Uint8Array(buf.u8.subarray(0, n));
+    buf.u8 = buf.u8.subarray(n);
+    return copy;
+  }
+
+  function send(out) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(out);
+  }
+
+  function startStreaming() {
+    if (keepAlive) return;
+    setStatus('KVM authenticated — click the screen, then move the mouse');
+    keepAlive = setInterval(() => send(ivtp(IVTP.CMD_KEEPALIVE, 0, null)), 3000);
+    send(ivtp(IVTP.CMD_FULL, 1, null));
+    nudgeMouse();
+  }
+
+  function resetImage(w, h) {
+    if (!canvas || !ctx) return;
+    canvas.width = w;
+    canvas.height = h;
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, w, h);
+    imageBuffer = ctx.getImageData(0, 0, w, h);
+    if (worker) {
+      worker.postMessage({ cmd: 'imageBuffer', imageBuffer });
+      worker.postMessage({ cmd: 'resolution_changed', imageBuffer, w, h });
+    }
+    resText = `${w}×${h}`;
+  }
+
+  function onVideo(payload) {
+    if (payload.length < 2) return;
+    if (prevComplete) {
+      if (payload.length < 88) return;
+      const hdr = payload.subarray(2, 2 + 86);
+      const x = hdr[4] | (hdr[5] << 8);
+      const y = hdr[6] | (hdr[7] << 8);
+      const csize = hdr[69] | (hdr[70] << 8) | (hdr[71] << 16) | (hdr[72] << 24);
+      header = {
+        SourceModeInfo: { X: x, Y: y },
+        DestinationModeInfo: {
+          X: hdr[13] | (hdr[14] << 8),
+          Y: hdr[15] | (hdr[16] << 8),
+        },
+        FrameHeader: {
+          JPEGTableSelector: hdr[44],
+          JPEGYUVTableMapping: hdr[45],
+          AdvanceTableSelector: hdr[47],
+          RC4Enable: hdr[53],
+        },
+        Mode420: hdr[55],
+        CompressData: { CompressSize: csize },
+      };
+      compressSize = csize;
+      if (x && y && canvas && (x !== canvas.width || y !== canvas.height)) {
+        resetImage(x, y);
+        if (worker) worker.postMessage({ cmd: 'resolution_changed', w: x, h: y });
+      }
+      frameChunks = [payload.subarray(88)];
+      frameGot = payload.length - 88;
+    } else {
+      frameChunks.push(payload.subarray(2));
+      frameGot += payload.length - 2;
+    }
+    if (frameGot < compressSize) {
+      prevComplete = false;
+      return;
+    }
+    prevComplete = true;
+    const raw = new Uint8Array(compressSize);
+    let off = 0;
+    for (const c of frameChunks) {
+      const n = Math.min(c.length, compressSize - off);
+      raw.set(c.subarray(0, n), off);
+      off += n;
+      if (off >= compressSize) break;
+    }
+    const words = (compressSize / 4) | 0;
+    const aligned = new ArrayBuffer(words * 4);
+    new Uint8Array(aligned).set(raw.subarray(0, words * 4));
+    if (worker) worker.postMessage({ header, buffer: new Int32Array(aligned) });
+    videoFrames += 1;
+    setStatus(`streaming ${canvas.width}×${canvas.height}  frames=${videoFrames}`);
+  }
+
+  function onPkt(type, pktStatus, payload) {
+    switch (type) {
+      case IVTP.CMD_ALLOWED:
+        // Handshake already happened server-side; ignore if a leftover 0x17 arrives.
+        break;
+      case IVTP.CMD_MAX_SESSION:
+        setStatus('BMC reports KVM max sessions — wait for timeout or kick the other viewer');
+        break;
+      case IVTP.CMD_VALIDATED: {
+        const ok = payload.length ? payload[0] : 0;
+        if (ok !== 1) {
+          fatal = `KVM token rejected (${ok})`;
+          setStatus(fatal);
+          send(ivtp(IVTP.CMD_STOP, 0, null));
+          if (ws) ws.close();
+          return;
+        }
+        startStreaming();
+        break;
+      }
+      case IVTP.CMD_ACTIVE:
+        send(ivtp(IVTP.CMD_FULL, 1, null));
+        break;
+      case IVTP.CMD_KEEPALIVE:
+        send(ivtp(IVTP.CMD_KEEPALIVE, 0, null));
+        break;
+      case IVTP.CMD_BLANK:
+        if (ctx && canvas) {
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        if (!videoFrames) setStatus('authenticated — host sent a blank frame; move the mouse');
+        nudgeMouse();
+        break;
+      case IVTP.CMD_STOP:
+        setStatus(`BMC stopped KVM session (${pktStatus})`);
+        break;
+      case IVTP.CMD_VIDEO:
+        onVideo(payload);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function drain() {
+    while (buf.u8.length >= IVTP.HDR) {
+      const dv = new DataView(buf.u8.buffer, buf.u8.byteOffset, buf.u8.byteLength);
+      const type = dv.getUint16(0, true);
+      const size = dv.getUint32(2, true);
+      const pktStatus = dv.getUint16(6, true);
+      if (buf.u8.length < IVTP.HDR + size) return;
+      takeBuf(IVTP.HDR);
+      const payload = takeBuf(size);
+      onPkt(type, pktStatus, payload);
+    }
+  }
+
+  function sendKey(keyCode, location, down) {
+    let hid = HID_KEY[keyCode];
+    if (keyCode === 17) hid = location === 2 ? 228 : 224;
+    if (keyCode === 16) hid = location === 2 ? 229 : 225;
+    if (keyCode === 18) hid = location === 2 ? 230 : 226;
+    if (keyCode === 91 || keyCode === 92) hid = location === 2 ? 231 : 227;
+    const bits = { 17: [0x01, 0x10], 16: [0x02, 0x20], 18: [0x04, 0x40], 91: [0x08, 0x80], 92: [0x08, 0x80] };
+    if (bits[keyCode]) {
+      const [l, r] = bits[keyCode];
+      const bit = location === 2 ? r : l;
+      modifiers = down ? (modifiers | bit) : (modifiers & ~bit);
+    }
+    const keys = new Uint8Array(6);
+    let autoBreak = 0;
+    if (down && hid && ![16, 17, 18, 91, 92].includes(keyCode)) {
+      keys[0] = hid;
+      autoBreak = 1;
+    }
+    const report = new Uint8Array(8);
+    report[0] = modifiers;
+    report[1] = autoBreak;
+    report.set(keys, 2);
+    send(iusbHid(IUSB.KEYBD, IUSB.PROTO_KEYBD, IUSB.KEYBD_DEV, IUSB.KEYBD_IF, seqKbd++, report));
+  }
+
+  function nudgeMouse() {
+    const report = new Uint8Array(6);
+    const dv = new DataView(report.buffer);
+    dv.setInt16(1, 16383, true);
+    dv.setInt16(3, 16383, true);
+    send(iusbHid(IUSB.MOUSE, IUSB.PROTO_MOUSE, IUSB.MOUSE_DEV, IUSB.MOUSE_IF, seqMouse++, report));
+  }
+
+  function sendMouse(ev) {
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((ev.clientX - rect.left) / rect.width) * canvas.width;
+    const y = ((ev.clientY - rect.top) / rect.height) * canvas.height;
+    const sx = ((x * 32767) / canvas.width) + 0.5;
+    const sy = ((y * 32767) / canvas.height) + 0.5;
+    const report = new Uint8Array(6);
+    const dv = new DataView(report.buffer);
+    report[0] = buttons;
+    dv.setInt16(1, sx, true);
+    dv.setInt16(3, sy, true);
+    report[5] = 0;
+    send(iusbHid(IUSB.MOUSE, IUSB.PROTO_MOUSE, IUSB.MOUSE_DEV, IUSB.MOUSE_IF, seqMouse++, report));
+  }
+
+  function sendCtrlAltDel() {
+    if (canvas) canvas.focus();
+    modifiers = 0x01 | 0x04;
+    sendKey(17, 1, true);
+    sendKey(18, 1, true);
+    sendKey(46, 0, true);
+    setTimeout(() => {
+      modifiers = 0;
+      sendKey(17, 1, false);
+      sendKey(18, 1, false);
+      sendKey(46, 0, false);
+    }, 80);
+  }
+
+  function teardown() {
+    if (keepAlive) {
+      clearInterval(keepAlive);
+      keepAlive = null;
+    }
+    if (ws) {
+      try {
+        if (ws.readyState === WebSocket.OPEN) ws.send(ivtp(IVTP.CMD_STOP, 0, null));
+        ws.close();
+      } catch (_) {
+        /* ignore */
+      }
+      ws = null;
+    }
+    if (worker) {
+      worker.terminate();
+      worker = null;
+    }
+  }
+
+  onMount(() => {
+    if (!canvas) return;
+    ctx = canvas.getContext('2d');
+    resetImage(640, 480);
+    const workerPath = session.decode_worker_path || '/api/kvm/assets/libs/kvm/ast/decode_worker.js';
+    const workerUrl = `${workerPath}?token=${encodeURIComponent(session.ws_token)}`;
+    worker = new Worker(workerUrl);
+    worker.onerror = (e) => {
+      setStatus(`worker error: ${e.message || 'failed to load decoder'}`);
+    };
+    worker.onmessage = (e) => {
+      if (e.data.cmd === 'draw') {
+        imageBuffer = e.data.ibuf;
+        if (imageBuffer && ctx) ctx.putImageData(imageBuffer, 0, 0);
+      } else if (e.data.cmd === 'exception') {
+        setStatus('decode error');
+        console.error(e.data.ex);
+      }
+    };
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const path = session.ws_path || '/api/kvm/ws';
+    ws = new WebSocket(`${proto}://${location.host}${path}?token=${encodeURIComponent(session.ws_token)}`, ['binary']);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => setStatus('websocket open, waiting for video…');
+    ws.onerror = () => setStatus('websocket error');
+    ws.onclose = (e) => {
+      if (keepAlive) {
+        clearInterval(keepAlive);
+        keepAlive = null;
+      }
+      if (destroyed) return;
+      if (fatal) {
+        setStatus(fatal);
+        return;
+      }
+      setStatus(`disconnected (${e.code} ${e.reason || ''})`.trim());
+    };
+    ws.onmessage = (ev) => {
+      try {
+        appendBuf(new Uint8Array(ev.data));
+        drain();
+      } catch (err) {
+        setStatus(`parse error: ${err.message}`);
+      }
+    };
+  });
+
+  onDestroy(() => {
+    destroyed = true;
+    teardown();
+  });
+</script>
+
+<div class="kvm-viewer">
+  <div class="kvm-toolbar">
+    <span class="status">{statusText}</span>
+    {#if resText}
+      <span class="res">{resText}</span>
+    {/if}
+    <button type="button" class="cad" on:click={sendCtrlAltDel}>Ctrl+Alt+Del</button>
+  </div>
+  <canvas
+    bind:this={canvas}
+    class="kvm-canvas"
+    tabindex="0"
+    on:click={() => canvas && canvas.focus()}
+    on:contextmenu|preventDefault
+    on:mousemove={(e) => {
+      const now = performance.now();
+      if (now - lastMouse < 16) return;
+      lastMouse = now;
+      sendMouse(e);
+    }}
+    on:mousedown|preventDefault={(e) => {
+      if (canvas) canvas.focus();
+      buttons |= [1, 4, 2][e.button] || 0;
+      sendMouse(e);
+    }}
+    on:mouseup|preventDefault={(e) => {
+      buttons &= ~([1, 4, 2][e.button] || 0);
+      sendMouse(e);
+    }}
+    on:keydown|preventDefault={(e) => sendKey(e.keyCode, e.location, true)}
+    on:keyup|preventDefault={(e) => sendKey(e.keyCode, e.location, false)}
+  ></canvas>
+</div>
+
+<style>
+  .kvm-viewer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: #101114;
+    color: #e6e6e6;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  .kvm-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: #1b1d22;
+    border-bottom: 1px solid #2a2d34;
+    flex-shrink: 0;
+  }
+  .status {
+    flex: 1;
+    font-size: 13px;
+    color: #c8c8c8;
+  }
+  .res {
+    font-size: 12px;
+    color: #9a9a9a;
+  }
+  .cad {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid #4c8bf5;
+    background: #4c8bf5;
+    color: #fff;
+    cursor: pointer;
+  }
+  .kvm-canvas {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+    outline: none;
+    cursor: crosshair;
+  }
+</style>

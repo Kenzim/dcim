@@ -305,6 +305,10 @@ api_router.include_router(reseller_admin_api.router, tags=["reseller-admin"])
 from app.api import billing_admin as billing_admin_api
 api_router.include_router(billing_admin_api.router, tags=["billing-admin"])
 
+# Include MCP API key admin routes (works even when /mcp is disabled)
+from app.api import mcp_keys_admin as mcp_keys_admin_api
+api_router.include_router(mcp_keys_admin_api.router, tags=["mcp-admin"])
+
 # Include product catalog admin routes
 from app.api import product_catalog as product_catalog_api
 api_router.include_router(product_catalog_api.router, tags=["product-catalog"])
@@ -371,8 +375,38 @@ api_router.include_router(permission_sets_admin_api.router, tags=["admin-permiss
 from app.api import vm_vnc as vm_vnc_api
 api_router.include_router(vm_vnc_api.router, tags=["vm-vnc"])
 
+# IPMI HTML5 KVM: profile list + public redeem / asset proxy / WS bridge to BMC
+from app.api import ipmi_kvm as ipmi_kvm_api
+api_router.include_router(ipmi_kvm_api.profiles_router, tags=["ipmi-kvm"])
+api_router.include_router(ipmi_kvm_api.router, tags=["ipmi-kvm"])
+
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)
+
+# MCP Streamable HTTP (before SPA catch-all). Feature-flagged: when off, /mcp 404s
+# for every method (the SPA fallback is GET-only, so POST would otherwise 405).
+if settings.mcp_enabled:
+    from app.mcp.server import get_mcp_asgi_app
+
+    app.mount("/mcp", get_mcp_asgi_app())
+else:
+
+    async def _mcp_disabled(full_path: str = ""):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    _mcp_off_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    app.add_api_route(
+        "/mcp",
+        _mcp_disabled,
+        methods=_mcp_off_methods,
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        "/mcp/{full_path:path}",
+        _mcp_disabled,
+        methods=_mcp_off_methods,
+        include_in_schema=False,
+    )
 
 # SPA fallback: serve static files when they exist, else index.html so client-side routing works (e.g. refresh on /admin)
 static_path = Path(settings.static_files_path)
@@ -380,7 +414,12 @@ static_path = Path(settings.static_files_path)
 
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    if full_path.startswith("api/") or full_path == "api":
+    if (
+        full_path.startswith("api/")
+        or full_path == "api"
+        or full_path.startswith("mcp/")
+        or full_path == "mcp"
+    ):
         raise HTTPException(status_code=404, detail="Not found")
     if not static_path.exists():
         raise HTTPException(status_code=404, detail="Not found")

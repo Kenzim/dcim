@@ -205,6 +205,7 @@ function rackflow_ClientArea(array $vars)
     $ipmiViewerUsername = '';
     $ipmiViewerPassword = '';
     $vncAvailable = false;
+    $kvmAvailable = false;
     $changePasswordAllowed = false;
     $backupsAllowed = false;
     $backups = array();
@@ -260,6 +261,7 @@ function rackflow_ClientArea(array $vars)
                 $ipmiViewerPassword = isset($statusData['ipmi_viewer_password']) ? (string)$statusData['ipmi_viewer_password'] : '';
             }
             $vncAvailable = !empty($statusData['vnc_console_available']);
+            $kvmAvailable = !empty($statusData['kvm_console_available']);
             $backupsAllowed = !empty($statusData['backups_available']);
             $clientPermissions = isset($statusData['client_permissions']) && is_array($statusData['client_permissions'])
                 ? $statusData['client_permissions']
@@ -339,6 +341,10 @@ function rackflow_ClientArea(array $vars)
             // One-click: opens redirect endpoint in a popup window (mints ticket server-side).
             'rackflow_vnc_open_url' => !empty($params['serviceid'])
                 ? rackflow_vncOpenEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
+                : '',
+            'rackflow_kvm_available' => $kvmAvailable,
+            'rackflow_kvm_open_url' => !empty($params['serviceid'])
+                ? rackflow_kvmOpenEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
                 : '',
             // One-click sign-in to the RackFlow client portal, scoped to this client's own
             // service. Gated by product Module Setting (configoption8) and the
@@ -3755,6 +3761,59 @@ function rackflow_vncOpenEndpointUrl($whmcsServiceId, $systemUrl = '')
 }
 
 /**
+ * Same-origin URL for the one-click HTML5 KVM console open redirect endpoint.
+ * Mirrors {@see rackflow_vncOpenEndpointUrl()}.
+ *
+ * @param int    $whmcsServiceId tblhosting.id
+ * @param string $systemUrl      Optional WHMCS "systemurl" module param, used
+ *                                only as a fallback if the base path can't be
+ *                                derived from the filesystem.
+ * @return string
+ */
+function rackflow_kvmOpenEndpointUrl($whmcsServiceId, $systemUrl = '')
+{
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $path = (string)parse_url($systemUrl, PHP_URL_PATH);
+            $basePath = rtrim($path, '/');
+        }
+    }
+    return $basePath . '/modules/servers/rackflow/kvm_open.php?serviceid=' . (int)$whmcsServiceId;
+}
+
+/**
+ * Mint a one-time IPMI HTML5 KVM launch ticket for a service via the billing API.
+ *
+ * @param string $apiUrl        Base API URL
+ * @param string $apiKey        Billing API key
+ * @param int    $rackflowSvcId RackFlow service ID
+ * @return array Decoded launch payload, or array with 'error' key on failure
+ */
+function rackflow_mintKvmTicket($apiUrl, $apiKey, $rackflowSvcId)
+{
+    if (empty($apiUrl) || empty($apiKey) || empty($rackflowSvcId)) {
+        return array('error' => 'API URL, API key, or RackFlow service ID is missing.');
+    }
+    $result = rackflow_apiCall($apiUrl, $apiKey, 'POST', '/api/billing/services/' . (int)$rackflowSvcId . '/kvm-ticket', array());
+    if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        if (is_array($detail)) {
+            $detail = json_encode($detail);
+        }
+        rackflow_log('mintKvmTicket failed', array(
+            'rackflow_service_id' => (int)$rackflowSvcId,
+            'error' => (string)$detail,
+            'http_code' => isset($result['http_code']) ? $result['http_code'] : null,
+        ));
+        return array('error' => (string)$detail);
+    }
+    return $result['data'];
+}
+
+/**
  * Mint a one-time VM VNC console launch ticket for a service via the billing API.
  *
  * @param string $apiUrl        Base API URL
@@ -4071,6 +4130,14 @@ function rackflow_renderAdminStatusCard(array $params, $serviceId, $statusData, 
                 . '<div class="rf-as__action-copy"><p class="rf-as__action-title">VNC console</p>'
                 . '<p class="rf-as__action-help">Opens in a new tab. The console link is single-use and expires shortly.</p></div>'
                 . '<a href="' . $vncHref . '" target="_blank" rel="noopener" class="rf-as__btn rf-as__btn--secondary">Open VNC</a>'
+                . '</div>';
+        }
+        if (!empty($statusData['kvm_console_available'])) {
+            $kvmHref = $h(rackflow_kvmOpenEndpointUrl($serviceId, $systemUrl));
+            $actions .= '<div class="rf-as__action">'
+                . '<div class="rf-as__action-copy"><p class="rf-as__action-title">HTML5 KVM</p>'
+                . '<p class="rf-as__action-help">Opens in a new tab. The console link is single-use and expires shortly.</p></div>'
+                . '<a href="' . $kvmHref . '" target="_blank" rel="noopener" class="rf-as__btn rf-as__btn--secondary">Open KVM</a>'
                 . '</div>';
         }
         if ($actions !== '') {

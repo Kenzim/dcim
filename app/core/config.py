@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     login_rate_limit_per_username: int = 8
     login_rate_limit_per_username_window_seconds: int = 300
 
+    # Admin MCP Streamable HTTP (remote AI). Off by default so operators can
+    # mint keys before exposing /mcp.
+    mcp_enabled: bool = False
+    mcp_rate_limit_per_key: int = 120
+    mcp_rate_limit_per_key_window_seconds: int = 60
+    mcp_rate_limit_per_ip: int = 240
+    mcp_rate_limit_per_ip_window_seconds: int = 60
+
     # Trust the X-Forwarded-For header when determining the caller's source IP.
     # This must ONLY be enabled when the app sits behind a trusted reverse proxy
     # that sets/overwrites the header; otherwise clients can spoof their identity
@@ -362,6 +370,11 @@ class Settings(BaseSettings):
     # WS headers), so it can land in proxy/access logs; kept to 1 hour rather
     # than longer to bound how long a log-leaked token stays replayable.
     vm_vnc_session_ttl_seconds: int = 3600
+
+    # IPMI HTML5 KVM (BMC IVTP bridge, in-app — not the IPMI web-UI proxy).
+    # Launch tickets hand the browser to /kvm; WS sessions authorize /api/kvm/ws.
+    ipmi_kvm_launch_ttl_seconds: int = 60
+    ipmi_kvm_session_ttl_seconds: int = 3600
 
     class Config:
         env_file = ".env"

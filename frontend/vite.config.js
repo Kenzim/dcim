@@ -9,9 +9,8 @@ export default defineConfig({
       '/api': {
         target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
         changeOrigin: true,
-        // Required for /api/vnc/ws: without this, Vite's dev proxy never
-        // upgrades the WebSocket handshake and the noVNC client hangs on
-        // "Connecting..." forever.
+        // Required for /api/vnc/ws and /api/kvm/ws: without this, Vite's
+        // dev proxy never upgrades the WebSocket handshake.
         ws: true
       }
     },

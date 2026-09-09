@@ -30,6 +30,7 @@
   $: isPluginsActive = currentPath.startsWith('/admin/plugins');
   $: isOSTemplatesActive = currentPath.startsWith('/admin/os-templates');
   $: isBillingIntegrationsActive = currentPath.startsWith('/admin/billing-integrations');
+  $: isMcpKeysActive = currentPath.startsWith('/admin/mcp-keys');
   $: isBillingActive = currentPath === '/admin/billing' || currentPath.startsWith('/admin/billing/');
   $: isResellersActive = currentPath.startsWith('/admin/resellers');
   $: isResellerGroupsActive = currentPath.startsWith('/admin/reseller-groups');
@@ -267,6 +268,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-12V7a4 4 0 10-8 0v2" />
             </svg>
             <span>Admins</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/mcp-keys" class="nav-link" class:active={isMcpKeysActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+            <span>MCP Keys</span>
           </a>
         </li>
       </ul>

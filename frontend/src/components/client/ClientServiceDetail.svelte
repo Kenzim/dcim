@@ -55,7 +55,7 @@
     }
     if (d.service_type === 'bare_metal') {
       const t = [{ id: 'overview', label: 'Overview' }];
-      if (d.ipmi_available) t.push({ id: 'console', label: 'Console' });
+      if (d.ipmi_available || d.kvm_console_available) t.push({ id: 'console', label: 'Console' });
       return t;
     }
     return [];

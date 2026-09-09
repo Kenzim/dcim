@@ -16,9 +16,11 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Change DB schema / model | `app/models/<entity>.py` + new file under `alembic/versions/` + matching `app/dao/<entity>_dao.py` |
 | Business logic (provisioning, DHCP gen, VM place) | `app/services/` |
 | Server power / BMC / Proxmox actions | `app/plugins/` (`ipmi.py`, `proxmox.py`, …) |
+| Native HTML5 KVM (AMI MegaRAC) | `app/services/ipmi_kvm/` (`asrockrack.py`, `gigabyte.py`) + `app/api/ipmi_kvm.py` |
 | Switch SNMP / bandwidth | `app/plugins/snmpv3.py`, poller `scripts/snmp_bandwidth_poller.py` |
-| Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py` |
+| Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
+| Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
 | OS install templates | `os_templates/<name>/` (`template.json` + `install.sh`) |
 | PXE / cloud-init / boot scripts served to bare metal | `app/api/server_interaction.py` |
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
@@ -88,8 +90,9 @@ Runners (dhcp_runner/, tftp_runner/, proxy_runner/)  ← optional sidecars
 | `app/main.py` | FastAPI app, lifespan (migrations, Redis keyspace, reconciliation, seed admin/plugins), mounts all routers, SPA fallback |
 | `app/core/config.py` | `Settings` from env / `.env` (`DATABASE_URL`, Redis, runner URLs, initial admin, static path, encryption key) |
 | `app/core/database.py` | SQLAlchemy engine / `SessionLocal` |
-| `app/core/auth.py` | Session tokens in Redis, admin/user deps |
+| `app/core/auth.py` | Session tokens in Redis, admin/user deps (`rfmcp_` / `rsk_` rejected here) |
 | `app/core/billing_auth.py` | API-key auth for billing integrations |
+| `app/core/mcp_auth.py` | Dedicated `rfmcp_` Bearer keys for `/mcp` (scopes, CIDR, rate limit) |
 | `app/core/redis.py` | Redis client |
 | `app/core/redis_notifications.py` | Keyspace notifications / listeners |
 | `app/core/plugin_capabilities.py` | Capability helpers for plugins |
@@ -125,6 +128,7 @@ All included from `app/main.py` under `/api`.
 | `os_templates.py` | `/api/os-templates` | Scan/list OS templates from disk |
 | `billing.py` | `/api/billing` | External billing API (register/suspend/power/reinstall/…) |
 | `billing_admin.py` | (billing-admin tags) | Admin management of billing integrations |
+| `mcp_keys_admin.py` | `/api/admin/mcp-keys` | Admin CRUD for MCP Streamable HTTP keys (`rfmcp_`) |
 | `product_catalog.py` | `/api/product-catalog` | Families, products, VM templates, OS profiles, VM config |
 | `proxmox_inventory.py` | `/api/proxmox` | Clusters, sync, inventory, VM plan |
 | `ipam.py` | `/api/ipam` | Subnets, assignments, history |
@@ -135,6 +139,8 @@ All included from `app/main.py` under `/api`.
 | `scripts_admin.py` | (scripts-admin) | Admin scripts CRUD |
 | `asset.py` | `/api/assets` | Asset manager / files / labels |
 | `utils.py` | `/api/utils` | e.g. password generation |
+| `vm_vnc.py` | `/api/vnc` | Public VM console redeem + WS bridge to Proxmox |
+| `ipmi_kvm.py` | `/api/kvm`, `/api/ipmi-kvm` | HTML5 KVM redeem/asset/WS bridge + admin profile list |
 | `dhcp.py` / `tftp.py` | **Not mounted** in `main.py` — prefer location-scoped DHCP/TFTP APIs | |
 
 **Largest / hottest files:** `server.py`, `server_interaction.py`, `billing.py`, `network_switch.py`, `services_admin.py`.
@@ -156,7 +162,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 | DHCP/TFTP | `dhcp_config.py`, `tftp_config.py`, `service_instance.py` |
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
 | Proxmox / IPAM | `proxmox_inventory.py`, `ipam.py`, `vm_ip_allocation.py`, `vmid_reservation.py`, `proxy_runner.py`, `proxy_subnet_group.py` |
-| Billing / assets | `billing_integration.py`, `asset.py` |
+| Billing / assets | `billing_integration.py`, `mcp_api_key.py`, `asset.py` |
 | Plugins (metadata leftovers) | `plugin.py`, `plugin_category.py`, `switch_plugin.py`, `category.py` |
 
 Schema changes → new Alembic revision under `alembic/versions/`.
@@ -185,6 +191,9 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
+| `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
+| `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
+| `ipmi_kvm/` | Vendor KVM profiles (ASRockRack AMI MegaRAC IVTP) |
 
 ---
 
@@ -234,7 +243,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 |---|---|
 | `src/main.js` | Mounts `App.svelte` |
 | `src/App.svelte` | Root shell |
-| `src/routes/index.js` | Top routes: `/`, `/admin`, `/admin/*`, `/client`, `/login` |
+| `src/routes/index.js` | Top routes: `/`, `/admin`, `/admin/*`, `/client`, `/login`, `/vnc`, `/kvm` |
 | `src/routes/Home.svelte` | Landing |
 | `src/routes/Admin.svelte` | **Admin shell + all sub-route → component mapping** |
 | `src/routes/Client.svelte` | Client area shell |
@@ -281,6 +290,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/proxy-ipam` | `ProxyIpam.svelte` (IPAM proxy flag) |
 | `/admin/proxy-runners` | `ProxyRunners.svelte` (standalone proxy runners) |
 | `/admin/billing-integrations` | `BillingIntegrations.svelte` |
+| `/admin/mcp-keys` | `McpKeys.svelte` |
 | `/admin/user` | `User.svelte` |
 | `/login` | `Login.svelte` |
 
@@ -333,6 +343,9 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 | Path | Role |
 |---|---|
 | `whmcs/modules/servers/rackflow/rackflow.php` | Provisioning module (Create/Suspend/Power/Register, etc.) |
+| `whmcs/modules/servers/rackflow/vnc_open.php` | One-click VM VNC popup launcher |
+| `whmcs/modules/servers/rackflow/kvm_open.php` | One-click IPMI HTML5 KVM popup launcher |
+| `whmcs/modules/servers/rackflow/ipmi_open.php` | One-click BMC web-UI proxy launcher |
 | `whmcs/modules/servers/rackflow/whmcs.json` | Module metadata |
 | `whmcs/includes/hooks/` | WHMCS hooks |
 | Backend counterpart | `app/api/billing.py` + `app/integrations/whmcs.py` |
@@ -348,6 +361,7 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 | `tests/services/` | Service logic |
 | `tests/plugins/` | IPMI, SNMPv3, … |
 | `tests/core/` | Auth, billing auth, Redis notifications |
+| `tests/mcp/` | MCP scopes, key auth, confirm/audit, tool happy paths |
 | `tests/models/`, `tests/utils/`, `tests/unit/` | Models, utils, placement, etc. |
 | `tests/SECURITY_TESTS.md` | Security test notes |
 | `tests/fixtures/` | Shared fixtures |
@@ -415,6 +429,7 @@ Non-VM security controls that are now enforced (see `tests/SECURITY_TESTS.md`):
 | DHCP/TFTP runners | **Fail-closed**: `503` on protected routes unless `API_KEY` set (`DHCP_RUNNER_API_KEY` / `TFTP_RUNNER_API_KEY`) | `dhcp_runner/main.py`, `tftp_runner/main.py`, compose |
 | Service-instance keys | Fernet-encrypted at rest when `SERVICE_INSTANCE_ENCRYPTION_KEY` set; legacy plaintext re-encrypted on verify | `app/dao/service_instance_dao.py`, `app/core/service_instance_crypto.py` |
 | Billing integration keys | Stored as SHA-256 hash; plaintext revealed once on create/rotate, masked elsewhere | `app/core/billing_auth.py`, `app/api/billing_admin.py` |
+| MCP admin keys | Prefix `rfmcp_`; SHA-256 at rest; plaintext once on create/rotate. Rejected by `get_current_user`. `/mcp` off unless `MCP_ENABLED=true`. Scope ladder `read` ⊂ `write` ⊂ `destructive`; destructive tools need `confirm=true`. | `app/core/mcp_auth.py`, `app/api/mcp_keys_admin.py`, `app/mcp/` |
 | Billing power control | `on`/`reboot`/`reset` blocked for `SUSPENDED`/`TERMINATED` | `app/api/billing.py` |
 | WHMCS module | TLS verification on (`CURLOPT_SSL_VERIFYPEER`/`VERIFYHOST`) | `whmcs/modules/servers/rackflow/rackflow.php` |
 | Validation errors | 422 responses/logs redact request bodies and sensitive fields | `app/main.py` |
@@ -422,7 +437,9 @@ Non-VM security controls that are now enforced (see `tests/SECURITY_TESTS.md`):
 | IPMI | Password via `IPMI_PASSWORD` env (`-E`), never argv | `app/plugins/ipmi.py` |
 | Frontend auth | Role-based routing (admin→`/admin`, else `/client`); global fetch 401 → clear auth + `/login`; secret template params masked | `frontend/src/lib/api.js`, `frontend/src/routes/`, `frontend/src/components/ServerDetail.svelte` |
 
-Relevant settings live in `app/core/config.py`: `TRUST_X_FORWARDED_FOR`, `SERVICE_INSTANCE_ENCRYPTION_KEY`, `REQUIRE_SERVICE_INSTANCE_ENCRYPTION`. Runner keys and encryption keys are wired through `docker-compose.yml`; see `INSTALL.md`.
+Relevant settings live in `app/core/config.py`: `TRUST_X_FORWARDED_FOR`, `SERVICE_INSTANCE_ENCRYPTION_KEY`, `REQUIRE_SERVICE_INSTANCE_ENCRYPTION`, `MCP_ENABLED`, `MCP_RATE_LIMIT_PER_KEY`, `MCP_RATE_LIMIT_PER_IP`. Runner keys and encryption keys are wired through `docker-compose.yml`; see `INSTALL.md`.
+
+MCP tools live in `app/mcp/tools/` and call DAOs/services/plugins directly (not a REST proxy). Resources: `rackflow://server/{id}`, `rackflow://service/{id}`, `rackflow://location/{id}`.
 
 ---
 

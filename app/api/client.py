@@ -40,6 +40,7 @@ from app.api.services_client import (
     create_vnc_session as _create_vnc_session,
     get_vnc_console_types as _get_vnc_console_types,
     vnc_popup_redirect as _vnc_popup_redirect,
+    kvm_popup_redirect_handler as _kvm_popup_redirect,
     client_list_strategy_actions as _client_list_strategy_actions,
     client_run_strategy_action as _client_run_strategy_action,
     client_list_vm_backups as _client_list_vm_backups,
@@ -147,6 +148,17 @@ async def client_create_ipmi_ticket(
     """Mint a one-time IPMI proxy launch ticket for a service the caller owns."""
     _require_non_admin_client(auth)
     return await _create_ipmi_ticket(service_id, auth, db)
+
+
+@router.get("/services/{service_id}/kvm-popup")
+async def client_kvm_popup(
+    service_id: int,
+    auth: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mint a launch ticket and redirect to ``/kvm?t=...`` for a real popup window."""
+    _require_non_admin_client(auth)
+    return await _kvm_popup_redirect(service_id=service_id, auth=auth, db=db)
 
 
 @router.get("/services/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse)

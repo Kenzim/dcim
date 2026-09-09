@@ -1,6 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, getRacks, testServerConnection, getServerGroups, getServerCapabilities, updateServerCapabilities } from '../lib/api.js';
+  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, getRacks, testServerConnection, getServerGroups, getServerCapabilities, updateServerCapabilities, listIpmiKvmProfiles } from '../lib/api.js';
   import { onMount, tick } from 'svelte';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
@@ -16,6 +16,7 @@
   let racks = [];
   let availableRacks = [];
   let serverGroups = [];
+  let kvmProfiles = [];
   let loading = true;
   let error = null;
   let showModal = false;
@@ -67,7 +68,8 @@
     ipmi_proxy_enabled: false,
     ipmi_web_management_url: '',
     ipmi_viewer_username: '',
-    ipmi_viewer_password: ''
+    ipmi_viewer_password: '',
+    ipmi_kvm_profile: ''
   };
   let formError = null;
   let pluginConfigError = null;
@@ -83,10 +85,10 @@
 
   onMount(async () => {
     if (embeddedEditServer) {
-      await Promise.all([loadPlugins(), loadLocations(), loadRacks(), loadServerGroups()]);
+      await Promise.all([loadPlugins(), loadLocations(), loadRacks(), loadServerGroups(), loadKvmProfiles()]);
       await openEditModal(embeddedEditServer);
     } else {
-      await Promise.all([loadServers(), loadPlugins(), loadLocations(), loadRacks(), loadServerGroups()]);
+      await Promise.all([loadServers(), loadPlugins(), loadLocations(), loadRacks(), loadServerGroups(), loadKvmProfiles()]);
       const params = new URLSearchParams(window.location.search);
       const editId = params.get('edit');
       if (editId && servers.length > 0) {
@@ -106,6 +108,14 @@
       serverGroups = await getServerGroups();
     } catch (err) {
       console.error('Failed to load server groups:', err);
+    }
+  }
+
+  async function loadKvmProfiles() {
+    try {
+      kvmProfiles = await listIpmiKvmProfiles();
+    } catch (err) {
+      console.error('Failed to load IPMI KVM profiles:', err);
     }
   }
 
@@ -239,7 +249,8 @@
       ipmi_proxy_enabled: false,
       ipmi_web_management_url: '',
       ipmi_viewer_username: '',
-      ipmi_viewer_password: ''
+      ipmi_viewer_password: '',
+      ipmi_kvm_profile: ''
     };
     formError = null;
     pluginConfigError = null;
@@ -279,6 +290,7 @@
       ipmi_web_management_url: server.ipmi_web_management_url || '',
       ipmi_viewer_username: server.ipmi_viewer_username || '',
       ipmi_viewer_password: server.ipmi_viewer_password || '',
+      ipmi_kvm_profile: server.ipmi_kvm_profile || '',
       disks: (server.disks || []).map(d => ({
         type: d.type,
         capacity_gb: d.capacity_gb,
@@ -529,6 +541,7 @@
       formError = null;
       const submitData = {
         ...formData,
+        ipmi_kvm_profile: formData.ipmi_kvm_profile || null,
         pxe_kernel_args_general: formData.pxe_kernel_args_general && formData.pxe_kernel_args_general.trim()
           ? formData.pxe_kernel_args_general.trim()
           : null,
@@ -1017,6 +1030,16 @@
               />
               <small class="field-help">Password for web access</small>
             </div>
+          </div>
+          <div class="form-group">
+            <label for="ipmi-kvm-profile">HTML5 KVM profile</label>
+            <select id="ipmi-kvm-profile" bind:value={formData.ipmi_kvm_profile}>
+              <option value="">Disabled</option>
+              {#each kvmProfiles as profile}
+                <option value={profile.id}>{profile.display_name}</option>
+              {/each}
+            </select>
+            <small class="field-help">Native BMC HTML5 KVM in a popup (separate from Open IPMI). The Rackflow host must reach BMC HTTPS.</small>
           </div>
         </div>
 
