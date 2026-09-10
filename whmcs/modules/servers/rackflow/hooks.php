@@ -27,6 +27,7 @@ if (!defined('WHMCS')) {
 }
 
 require_once __DIR__ . '/rackflow.php';
+require_once __DIR__ . '/git_update.php';
 
 /**
  * Build catalog JSON + API readiness for the Module Settings UI.
@@ -425,6 +426,59 @@ add_hook('ClientAreaFooterOutput', 2, function (array $vars) {
 HTML;
 });
 
+if (!class_exists('RackflowGitUpdateWidget', false) && class_exists('\WHMCS\Module\AbstractWidget')) {
+    class RackflowGitUpdateWidget extends \WHMCS\Module\AbstractWidget
+    {
+        protected $title = 'RackFlow';
+        protected $description = 'Git updates for the RackFlow provisioning module.';
+        protected $weight = 150;
+        protected $columns = 1;
+        protected $cache = false;
+        protected $requiredPermission = '';
+
+        public function getData()
+        {
+            return array(
+                'url' => rackflow_gitupdateAdminEntryUrl(),
+                'status' => rackflow_gitupdate_statusPayload(),
+            );
+        }
+
+        public function generateOutput($data)
+        {
+            $url = htmlspecialchars(
+                isset($data['url']) ? (string)$data['url'] : rackflow_gitupdateAdminEntryUrl(),
+                ENT_QUOTES,
+                'UTF-8'
+            );
+            $status = isset($data['status']) && is_array($data['status']) ? $data['status'] : array();
+            $sha = isset($status['last_sha']) ? (string)$status['last_sha'] : '';
+            $when = isset($status['last_at']) ? (string)$status['last_at'] : '';
+            if ($sha !== '') {
+                $applied = htmlspecialchars(substr($sha, 0, 12), ENT_QUOTES, 'UTF-8');
+                if ($when !== '') {
+                    $applied .= ' · ' . htmlspecialchars($when, ENT_QUOTES, 'UTF-8');
+                }
+            } else {
+                $applied = 'Never applied via git updates';
+            }
+            return '<div class="widget-content-padded">'
+                . '<div class="text-muted" style="margin:0 0 12px;">Provisioning module files from git.</div>'
+                . '<div style="margin:0 0 12px;font-size:12px;">Last applied: ' . $applied . '</div>'
+                . '<a href="' . $url . '" class="btn btn-default btn-sm">'
+                . '<i class="fas fa-arrow-right"></i> Git updates</a>'
+                . '</div>';
+        }
+    }
+}
+
+add_hook('AdminHomeWidgets', 1, function () {
+    if (!class_exists('RackflowGitUpdateWidget')) {
+        return;
+    }
+    return new RackflowGitUpdateWidget();
+});
+
 add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     $filename = isset($vars['filename']) ? (string) $vars['filename'] : '';
     $uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
@@ -450,6 +504,13 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     );
     if ($catalogJson === false) {
         $catalogJson = '{"products":[],"error":"Failed to encode catalog","serverid":null}';
+    }
+    $gitUpdateUrlJson = json_encode(
+        rackflow_gitupdateAdminEntryUrl(),
+        JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT
+    );
+    if ($gitUpdateUrlJson === false) {
+        $gitUpdateUrlJson = '""';
     }
 
     $hygieneHtml = '';
@@ -524,6 +585,21 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     color: var(--rf-muted);
     line-height: 1.45;
   }
+  .rf-ms__git {
+    display: inline-flex;
+    align-items: center;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid var(--rf-line);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--rf-ink);
+    font-size: 12px;
+    font-weight: 650;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .rf-ms__git:hover { border-color: var(--rf-accent); color: var(--rf-accent); }
   .rf-ms__seg {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -704,6 +780,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
 
   var UI_ID = 'rackflow-module-ui';
   var CATALOG = {$catalogJson};
+  var GIT_UPDATE_URL = {$gitUpdateUrlJson};
   var applyTimer = null;
   var observing = false;
 
@@ -1073,6 +1150,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '        <h3 class="rf-ms__title">RackFlow settings</h3>'
       + '        <p class="rf-ms__lead">Pick a RackFlow catalog product. Specs and linked VM templates are loaded from RackFlow.</p>'
       + '      </div>'
+      + '      <a class="rf-ms__git" href="' + GIT_UPDATE_URL + '">Git updates</a>'
       + '    </div>'
       + banner
       + '    <div class="rf-ms__seg" role="radiogroup" aria-label="Service type">'
@@ -1900,7 +1978,14 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
     border-radius: 10px;
     background: var(--rf-bg);
   }
-  .rf-as__panel-head { margin-bottom: 12px; }
+  .rf-as__panel-head {
+    margin-bottom: 12px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
   .rf-as__panel-title {
     margin: 0 0 4px;
     font-size: 13px;
@@ -1924,6 +2009,18 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
     word-break: break-all;
   }
   .rf-as__proxy-url code { color: var(--rf-ink); }
+  .rf-as__sr-only {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+  }
+  #rf-as-proxy-rotate, #rf-as-proxy-copy-all { margin-top: 0; }
   #rf-as-proxy-rotate { margin-top: 8px; }
   .rf-as__backup-create {
     display: flex;
@@ -2469,7 +2566,33 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
       });
     }
 
-    // Proxy credential rotation via AJAX.
+    // Proxy credential copy-all + rotation via AJAX.
+    var proxyCopyBtn = document.getElementById('rf-as-proxy-copy-all');
+    if (proxyCopyBtn) {
+      proxyCopyBtn.addEventListener('click', function () {
+        var linesEl = document.getElementById('rf-as-proxy-endpoint-lines');
+        var text = linesEl ? linesEl.value : '';
+        if (!text) { return; }
+        var original = proxyCopyBtn.textContent;
+        function markDone() {
+          proxyCopyBtn.textContent = 'Copied';
+          window.setTimeout(function () { proxyCopyBtn.textContent = original; }, 2000);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(markDone).catch(function () {
+            linesEl.focus();
+            linesEl.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            markDone();
+          });
+        } else {
+          linesEl.focus();
+          linesEl.select();
+          try { document.execCommand('copy'); } catch (e) {}
+          markDone();
+        }
+      });
+    }
     var proxyRotateBtn = document.getElementById('rf-as-proxy-rotate');
     var proxyMsgEl = document.getElementById('rf-as-proxy-msg');
     if (proxyRotateBtn) {

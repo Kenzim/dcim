@@ -1,0 +1,22 @@
+{
+    "schema": "1.0",
+    "type": "whmcs-addons",
+    "name": "rackflow_updater",
+    "license": "MIT",
+    "category": "utilities",
+    "description": {
+        "name": "RackFlow Git Updates",
+        "tagline": "Pull the latest RackFlow WHMCS module files from git",
+        "long": "Downloads the RackFlow provisioning module from GitHub or Forgejo/Gitea and replaces the files on this WHMCS server.",
+        "features": [
+            "Check the latest git branch commit",
+            "Download and apply module files in place",
+            "Optional reseller module sync"
+        ]
+    },
+    "authors": [
+        {
+            "name": "RackFlow Team"
+        }
+    ]
+}
