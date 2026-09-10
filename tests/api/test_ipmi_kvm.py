@@ -87,6 +87,7 @@ def test_admin_lists_kvm_profiles(client, test_admin_user):
     ids = {row["id"] for row in resp.json()}
     assert "asrockrack" in ids
     assert "gigabyte" in ids
+    assert "supermicro" in ids
 
 
 def test_create_server_rejects_unknown_kvm_profile(client, test_admin_user, db_session):
@@ -220,7 +221,7 @@ def test_client_kvm_popup_denied_without_permission(client, db_session, test_use
         db_session,
         server,
         owner_user_id=test_user.id,
-        permission_overrides={PermissionKey.BMS_IPMI: False},
+        permission_overrides={PermissionKey.BMS_KVM: False},
     )
     resp = client.get(
         f"/api/client/services/{service.id}/kvm-popup", headers=headers, follow_redirects=False
@@ -233,6 +234,22 @@ def test_client_kvm_popup_when_permitted(client, db_session, test_user):
     headers = _login_user(client, test_user)
     server = _server(db_session, name="kvm-client-ok")
     service = _bm_service(db_session, server, owner_user_id=test_user.id)
+    resp = client.get(
+        f"/api/client/services/{service.id}/kvm-popup", headers=headers, follow_redirects=False
+    )
+    assert resp.status_code == 302, resp.text
+    assert resp.headers["location"].startswith("/kvm?t=")
+
+
+def test_client_kvm_popup_when_ipmi_proxy_denied(client, db_session, test_user):
+    headers = _login_user(client, test_user)
+    server = _server(db_session, name="kvm-client-split")
+    service = _bm_service(
+        db_session,
+        server,
+        owner_user_id=test_user.id,
+        permission_overrides={PermissionKey.BMS_IPMI: False},
+    )
     resp = client.get(
         f"/api/client/services/{service.id}/kvm-popup", headers=headers, follow_redirects=False
     )
@@ -288,7 +305,7 @@ def test_billing_kvm_ticket_and_status_flag(client, db_session, monkeypatch):
     assert ticket.json()["launch_url"].startswith("https://rackflow.test/kvm?t=")
 
 
-def test_billing_kvm_ticket_denied_when_bms_ipmi_false(client, db_session, monkeypatch):
+def test_billing_kvm_ticket_denied_when_bms_kvm_false(client, db_session, monkeypatch):
     monkeypatch.setattr(settings, "public_app_url", "https://rackflow.test")
     integration = BillingIntegrationDAO.create(db_session, name="whmcs-kvm3", integration_type="whmcs")
     key = integration.plaintext_api_key
@@ -307,7 +324,7 @@ def test_billing_kvm_ticket_denied_when_bms_ipmi_false(client, db_session, monke
         server,
         owner_user_id=owner.id,
         billing=True,
-        permission_overrides={PermissionKey.BMS_IPMI: False},
+        permission_overrides={PermissionKey.BMS_KVM: False},
     )
     resp = client.post(
         f"/api/billing/services/{service.id}/kvm-ticket",
@@ -321,3 +338,34 @@ def test_billing_kvm_ticket_denied_when_bms_ipmi_false(client, db_session, monke
     )
     assert status_resp.status_code == 200, status_resp.text
     assert status_resp.json()["kvm_console_available"] is False
+
+
+def test_billing_kvm_ticket_allowed_when_ipmi_proxy_denied(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "public_app_url", "https://rackflow.test")
+    integration = BillingIntegrationDAO.create(db_session, name="whmcs-kvm4", integration_type="whmcs")
+    key = integration.plaintext_api_key
+    owner = UserDAO.create(
+        db_session,
+        username="kvm-bill4",
+        email="kvm-bill4@example.com",
+        billing_integration_id=integration.id,
+        external_user_id="ext-kvm-4",
+        external_username="kvm-bill4",
+        external_email="kvm-bill4@example.com",
+    )
+    server = _server(db_session, name="kvm-bill-split")
+    service = _bm_service(
+        db_session,
+        server,
+        owner_user_id=owner.id,
+        billing=True,
+        permission_overrides={PermissionKey.BMS_IPMI: False},
+    )
+    headers = {"Authorization": f"Bearer {key}"}
+    status_resp = client.get(f"/api/billing/services/{service.id}/status", headers=headers)
+    assert status_resp.status_code == 200, status_resp.text
+    assert status_resp.json()["kvm_console_available"] is True
+    ticket = client.post(f"/api/billing/services/{service.id}/kvm-ticket", headers=headers)
+    assert ticket.status_code == 200, ticket.text
+    deny_proxy = client.post(f"/api/billing/services/{service.id}/ipmi-ticket", headers=headers)
+    assert deny_proxy.status_code == 403, deny_proxy.text

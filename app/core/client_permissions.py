@@ -25,6 +25,7 @@ class PermissionKey:
 
     BMS_POWER = "bms.power"
     BMS_IPMI = "bms.ipmi"
+    BMS_KVM = "bms.kvm"
     BMS_REINSTALL = "bms.reinstall"
     BMS_RUN_SCRIPT = "bms.run_script"
 
@@ -61,7 +62,12 @@ PERMISSION_CATALOG: List[Dict] = [
     },
     {
         "key": PermissionKey.BMS_IPMI,
-        "label": "Open IPMI / BMC console",
+        "label": "Open BMC web UI (IPMI proxy)",
+        "service_types": ["bare_metal", "http_proxy"],
+    },
+    {
+        "key": PermissionKey.BMS_KVM,
+        "label": "Open HTML5 KVM console",
         "service_types": ["bare_metal", "http_proxy"],
     },
     {
@@ -126,19 +132,21 @@ ALL_PERMISSION_KEYS = {entry["key"] for entry in PERMISSION_CATALOG}
 # Built-in defaults per service type — the base layer of the resolution
 # hierarchy, chosen to match current (pre-permission-system) behavior so
 # existing clients see no regression when no presets are assigned:
-# power + IPMI + portal + view were always available, reinstall/scripts
-# were billing-API-ready but never surfaced client-side. vm.console is on
-# by default (VNC console access, alongside vm.power) since clients already
-# expect interactive access to their own VM. http_proxy defaults to power/
-# IPMI OFF (unlike bare_metal): a proxy created from the IP pool has no
-# linked server, so those controls are meaningless there by default; grant
-# them via a preset for the (legacy) hardware-bound proxy case.
+# power + IPMI proxy + HTML5 KVM + portal + view were always available,
+# reinstall/scripts were billing-API-ready but never surfaced client-side.
+# vm.console is on by default (VNC console access, alongside vm.power) since
+# clients already expect interactive access to their own VM. http_proxy
+# defaults to power/IPMI/KVM OFF (unlike bare_metal): a proxy created from
+# the IP pool has no linked server, so those controls are meaningless there
+# by default; grant them via a preset for the (legacy) hardware-bound
+# proxy case.
 DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
     ServiceType.BARE_METAL: {
         PermissionKey.SERVICE_VIEW: True,
         PermissionKey.SERVICE_PORTAL: True,
         PermissionKey.BMS_POWER: True,
         PermissionKey.BMS_IPMI: True,
+        PermissionKey.BMS_KVM: True,
         PermissionKey.BMS_REINSTALL: False,
         PermissionKey.BMS_RUN_SCRIPT: False,
     },
@@ -156,12 +164,13 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
     ServiceType.HTTP_PROXY: {
         PermissionKey.SERVICE_VIEW: True,
         PermissionKey.SERVICE_PORTAL: True,
-        # Power/IPMI default OFF: most http_proxy services are provisioned
+        # Power/IPMI/KVM default OFF: most http_proxy services are provisioned
         # straight from the IP pool (no linked rack server) so these controls
         # don't apply. Legacy/hardware-bound proxies (created via a server
         # group) can still be granted them explicitly via a preset.
         PermissionKey.BMS_POWER: False,
         PermissionKey.BMS_IPMI: False,
+        PermissionKey.BMS_KVM: False,
         PermissionKey.PROXY_VIEW_CREDENTIALS: True,
         PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
     },
@@ -174,12 +183,13 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
 SYSTEM_PRESETS: List[Dict] = [
     {
         "name": "Full access",
-        "description": "Everything a client can be granted: power, IPMI, reinstall, scripts, proxy credentials.",
+        "description": "Everything a client can be granted: power, IPMI proxy, HTML5 KVM, reinstall, scripts, proxy credentials.",
         "permissions": {
             PermissionKey.SERVICE_VIEW: True,
             PermissionKey.SERVICE_PORTAL: True,
             PermissionKey.BMS_POWER: True,
             PermissionKey.BMS_IPMI: True,
+            PermissionKey.BMS_KVM: True,
             PermissionKey.BMS_REINSTALL: True,
             PermissionKey.BMS_RUN_SCRIPT: True,
             PermissionKey.VM_POWER: True,
@@ -195,12 +205,13 @@ SYSTEM_PRESETS: List[Dict] = [
     },
     {
         "name": "Power + IPMI",
-        "description": "Default-equivalent preset: power control, IPMI/BMC console, VM console, backups, and guest password change; no reinstall or scripts.",
+        "description": "Default-equivalent preset: power control, BMC web UI (IPMI proxy), HTML5 KVM, VM console, backups, and guest password change; no reinstall or scripts.",
         "permissions": {
             PermissionKey.SERVICE_VIEW: True,
             PermissionKey.SERVICE_PORTAL: True,
             PermissionKey.BMS_POWER: True,
             PermissionKey.BMS_IPMI: True,
+            PermissionKey.BMS_KVM: True,
             PermissionKey.BMS_REINSTALL: False,
             PermissionKey.BMS_RUN_SCRIPT: False,
             PermissionKey.VM_POWER: True,
@@ -214,12 +225,13 @@ SYSTEM_PRESETS: List[Dict] = [
     },
     {
         "name": "Read-only",
-        "description": "View status only. No power, IPMI, reinstall, script, or credential access.",
+        "description": "View status only. No power, IPMI proxy, HTML5 KVM, reinstall, script, or credential access.",
         "permissions": {
             PermissionKey.SERVICE_VIEW: True,
             PermissionKey.SERVICE_PORTAL: True,
             PermissionKey.BMS_POWER: False,
             PermissionKey.BMS_IPMI: False,
+            PermissionKey.BMS_KVM: False,
             PermissionKey.BMS_REINSTALL: False,
             PermissionKey.BMS_RUN_SCRIPT: False,
             PermissionKey.VM_POWER: False,
@@ -235,12 +247,13 @@ SYSTEM_PRESETS: List[Dict] = [
     },
     {
         "name": "Proxy credentials only",
-        "description": "For HTTP proxy services: view credentials, no power/IPMI/reinstall.",
+        "description": "For HTTP proxy services: view credentials, no power/IPMI/KVM/reinstall.",
         "permissions": {
             PermissionKey.SERVICE_VIEW: True,
             PermissionKey.SERVICE_PORTAL: True,
             PermissionKey.BMS_POWER: False,
             PermissionKey.BMS_IPMI: False,
+            PermissionKey.BMS_KVM: False,
             PermissionKey.PROXY_VIEW_CREDENTIALS: True,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
         },
