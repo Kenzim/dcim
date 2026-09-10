@@ -40,7 +40,7 @@ class ProductFamilyCreate(BaseModel):
     name: str
     code: Optional[str] = None
     service_type: str = "vm"
-    provisioning_backend: str = "proxmox"
+    provisioning_backend: Optional[str] = None
     defaults: dict[str, Any] = Field(default_factory=dict)
     constraints: dict[str, Any] = Field(default_factory=dict)
     description: Optional[str] = None
@@ -221,7 +221,7 @@ async def create_family(
     payload["code"] = data.code or _generate_family_code(db, data.name)
 
     if data.service_type == "vm":
-        if data.provisioning_backend not in ("proxmox", ""):
+        if data.provisioning_backend not in ("proxmox", "", None):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="VM product families must use provisioning_backend 'proxmox'",

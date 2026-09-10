@@ -16,7 +16,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Change DB schema / model | `app/models/<entity>.py` + new file under `alembic/versions/` + matching `app/dao/<entity>_dao.py` |
 | Business logic (provisioning, DHCP gen, VM place) | `app/services/` |
 | Server power / BMC / Proxmox actions | `app/plugins/` (`ipmi.py`, `proxmox.py`, …) |
-| Native HTML5 KVM (AMI MegaRAC) | `app/services/ipmi_kvm/` (`asrockrack.py`, `gigabyte.py`) + `app/api/ipmi_kvm.py` |
+| Native HTML5 KVM (AMI MegaRAC / SuperMicro ATEN) | `app/services/ipmi_kvm/` (`asrockrack.py`, `gigabyte.py`, `supermicro.py`) + `app/api/ipmi_kvm.py` |
 | Switch SNMP / bandwidth | `app/plugins/snmpv3.py`, poller `scripts/snmp_bandwidth_poller.py` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
@@ -199,7 +199,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
-| `ipmi_kvm/` | Vendor KVM profiles (ASRockRack AMI MegaRAC IVTP) |
+| `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC) |
 
 ---
 
@@ -289,6 +289,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/scripts` | `Scripts.svelte` |
 | `/admin/asset-manager` | `AssetManager.svelte` |
 | `/admin/product-catalog` | `ProductCatalog.svelte` (VM families/products only) |
+| `/admin/bare-metal-catalog` | `BareMetalCatalog.svelte` (bare_metal families/products + OS profiles) |
 | `/admin/vm-templates` | `VMTemplates.svelte` |
 | `/admin/vm-ip-allocations` | `VMIpAllocations.svelte` |
 | `/admin/proxmox-inventory` | `ProxmoxInventory.svelte` |
