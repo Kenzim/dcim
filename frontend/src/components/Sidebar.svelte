@@ -47,6 +47,7 @@
   $: isProxyIpamActive = currentPath.startsWith('/admin/proxy-ipam');
   $: isProxyRunnersActive = currentPath.startsWith('/admin/proxy-runners');
   $: isProxyCatalogActive = currentPath.startsWith('/admin/proxy-catalog');
+  $: isBareMetalCatalogActive = currentPath.startsWith('/admin/bare-metal-catalog');
   $: isServerGroupsActive = currentPath.startsWith('/admin/server-groups');
   $: isUserActive = currentPath === '/admin/user' || currentPath === '/admin/user/';
   $: isStoreCategoriesActive = currentPath.startsWith('/admin/store/categories');
@@ -202,6 +203,14 @@
     <div class="nav-group">
       <div class="nav-group-label">SERVICES</div>
       <ul class="nav-list">
+        <li class="nav-item">
+          <a href="/admin/bare-metal-catalog" class="nav-link" class:active={isBareMetalCatalogActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            <span>Bare Metal Catalog</span>
+          </a>
+        </li>
         <li class="nav-item">
           <a href="/admin/proxy-catalog" class="nav-link" class:active={isProxyCatalogActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">

@@ -39,6 +39,7 @@
   import ProxyIpam from '../components/ProxyIpam.svelte';
   import ProxyRunners from '../components/ProxyRunners.svelte';
   import ProxyCatalog from '../components/ProxyCatalog.svelte';
+  import BareMetalCatalog from '../components/BareMetalCatalog.svelte';
   import PermissionSets from '../components/PermissionSets.svelte';
   import Resellers from '../components/Resellers.svelte';
   import ResellerDetail from '../components/ResellerDetail.svelte';
@@ -313,6 +314,8 @@
         <ProxyRunners />
       {:else if routeName === 'proxy-catalog'}
         <ProxyCatalog />
+      {:else if routeName === 'bare-metal-catalog'}
+        <BareMetalCatalog />
       {:else if routeName === 'server-groups'}
         <ServerGroups />
       {:else if routeName.startsWith('server-groups/') && groupId}

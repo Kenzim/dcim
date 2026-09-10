@@ -3201,6 +3201,19 @@ export async function attachCatalogOSProfile(familyId, osProfileId) {
   return await response.json();
 }
 
+export async function detachCatalogOSProfile(familyId, osProfileId) {
+  const response = await fetch(`${API_BASE}/product-catalog/families/${familyId}/os-profiles/${osProfileId}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to detach OS profile');
+  }
+  if (response.status === 204) return null;
+  return await response.json().catch(() => null);
+}
+
 // Proxmox inventory API
 export async function listProxmoxClusters() {
   const response = await fetch(`${API_BASE}/proxmox/clusters`, { method: 'GET', credentials: 'include' });
