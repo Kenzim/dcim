@@ -113,6 +113,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not seed categories/sync plugins (may already exist): {e}")
 
+    from app.services.ipmi_kvm.hub import ensure_splice_server, shutdown_kvm_hubs
+
+    try:
+        await ensure_splice_server()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KVM hub splice server failed to bind: %s", exc)
+
     async with AsyncExitStack() as stack:
         if settings.mcp_enabled:
             from app.mcp.server import mcp_session_lifespan
@@ -122,6 +129,10 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("Shutting down...")
+    try:
+        await shutdown_kvm_hubs()
+    except Exception:  # noqa: BLE001
+        logger.debug("KVM hub shutdown failed", exc_info=True)
     
     reconciliation_task.cancel()
     tasks = [reconciliation_task]

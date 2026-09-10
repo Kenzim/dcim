@@ -10,7 +10,8 @@ from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
 from app.models.service import ProvisioningSource, ServiceStatus
 from app.services.ipmi_kvm.base import BmcKvmAuth
-from app.services.ipmi_kvm_ticket_service import mint_launch_ticket, mint_ws_session
+from app.services.ipmi_kvm.hub_lock import cache_kvm_asset
+from app.services.ipmi_kvm_ticket_service import mint_launch_ticket, mint_viewer_session, mint_ws_session
 
 
 def _login_admin(client, test_admin_user):
@@ -85,6 +86,7 @@ def test_admin_lists_kvm_profiles(client, test_admin_user):
     assert resp.status_code == 200, resp.text
     ids = {row["id"] for row in resp.json()}
     assert "asrockrack" in ids
+    assert "gigabyte" in ids
 
 
 def test_create_server_rejects_unknown_kvm_profile(client, test_admin_user, db_session):
@@ -119,9 +121,10 @@ def test_redeem_without_profile_is_409(client, db_session):
 
 def test_redeem_mints_ws_session_without_bmc_secrets(client, db_session, monkeypatch):
     server = _server(db_session)
+    login = AsyncMock(return_value=_fake_auth())
     monkeypatch.setattr(
         "app.services.ipmi_kvm.asrockrack.AsrockRackKvmProfile.login",
-        AsyncMock(return_value=_fake_auth()),
+        login,
     )
     token = mint_launch_ticket(server.id)
     resp = client.post("/api/kvm/redeem", json={"token": token})
@@ -133,6 +136,7 @@ def test_redeem_mints_ws_session_without_bmc_secrets(client, db_session, monkeyp
     assert "kvm_token" not in body
     assert "cookie" not in body
     assert client.post("/api/kvm/redeem", json={"token": token}).status_code == 400
+    login.assert_not_called()
 
 
 def test_asset_rejects_path_traversal(client, db_session):
@@ -175,6 +179,22 @@ def test_asset_proxies_allowlisted_path(client, db_session, monkeypatch):
     )
     assert resp.status_code == 200, resp.text
     assert resp.content == b"/* worker */"
+
+
+def test_asset_serves_cached_decode_worker_for_viewer_ticket(client, db_session):
+    server = _server(db_session)
+    minted = mint_viewer_session(server.id, "asrockrack")
+    cache_kvm_asset(
+        server.id,
+        "libs/kvm/ast/decode_worker.js",
+        b"/* cached worker */",
+        "application/javascript",
+    )
+    resp = client.get(
+        f"/api/kvm/assets/libs/kvm/ast/decode_worker.js?token={minted['ws_token']}"
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.content == b"/* cached worker */"
 
 
 def test_admin_server_kvm_popup_without_profile_errors(client, test_admin_user, db_session):

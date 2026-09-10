@@ -396,6 +396,13 @@ class Settings(BaseSettings):
     # Launch tickets hand the browser to /kvm; WS sessions authorize /api/kvm/ws.
     ipmi_kvm_launch_ttl_seconds: int = 60
     ipmi_kvm_session_ttl_seconds: int = 3600
+    # Shared KVM hub: last viewer gone → STOP the BMC after this idle window.
+    ipmi_kvm_hub_idle_seconds: int = 20
+    # Redis lock TTL for which process owns the BMC socket; refreshed ~ttl/3.
+    kvm_hub_lock_ttl_seconds: int = 30
+    # Host other workers use to splice to this process's unpublished hub port.
+    # Unset: auto-detect via the Redis UDP connect trick.
+    kvm_hub_advertise_host: Optional[str] = None
 
     class Config:
         env_file = ".env"

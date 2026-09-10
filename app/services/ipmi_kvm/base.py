@@ -81,8 +81,8 @@ class IpmiKvmProfile(ABC):
         """Create a BMC web session and mint a KVM token."""
 
     @abstractmethod
-    async def open_upstream(self, auth: BmcKvmAuth):
-        """Open the BMC KVM WebSocket (async context manager)."""
+    def open_upstream(self, auth: BmcKvmAuth):
+        """Return an async context manager for the BMC KVM WebSocket."""
 
     @abstractmethod
     async def handshake(self, upstream, auth: BmcKvmAuth) -> bytes:

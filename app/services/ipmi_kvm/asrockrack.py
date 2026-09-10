@@ -187,7 +187,7 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
             )
         return initial_client_frame(auth.kvm_token, auth.client_ip, auth.username)
 
-    async def open_upstream(self, auth: BmcKvmAuth):
+    def open_upstream(self, auth: BmcKvmAuth):
         parsed = urlparse(auth.origin)
         ws_scheme = "wss" if parsed.scheme == "https" else "ws"
         url = f"{ws_scheme}://{parsed.netloc}/kvm"
@@ -218,22 +218,25 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
                     data = data.encode("latin1")
                 buf.feed(data)
 
-        first = await next_pkt()
-        typ = struct.unpack_from("<H", first)[0]
-        if typ == _IVTP_MAX_SESSION:
-            raise IpmiKvmUnavailable("BMC reports KVM max sessions")
-        if typ != _IVTP_ALLOWED:
-            raise IpmiKvmUnavailable(f"Unexpected KVM hello (0x{typ:x})")
-        await upstream.send(self.hello_frame(auth))
-        while True:
-            pkt = await next_pkt()
-            typ = struct.unpack_from("<H", pkt)[0]
-            if typ != _IVTP_VALIDATED:
-                continue
-            if len(pkt) < 9 or pkt[8] != 1:
-                code = pkt[8] if len(pkt) > 8 else -1
-                raise IpmiKvmUnavailable(f"KVM token rejected ({code})")
-            return pkt + buf.buf
+        try:
+            first = await next_pkt()
+            typ = struct.unpack_from("<H", first)[0]
+            if typ == _IVTP_MAX_SESSION:
+                raise IpmiKvmUnavailable("BMC reports KVM max sessions")
+            if typ != _IVTP_ALLOWED:
+                raise IpmiKvmUnavailable(f"Unexpected KVM hello (0x{typ:x})")
+            await upstream.send(self.hello_frame(auth))
+            while True:
+                pkt = await next_pkt()
+                typ = struct.unpack_from("<H", pkt)[0]
+                if typ != _IVTP_VALIDATED:
+                    continue
+                if len(pkt) < 9 or pkt[8] != 1:
+                    code = pkt[8] if len(pkt) > 8 else -1
+                    raise IpmiKvmUnavailable(f"KVM token rejected ({code})")
+                return pkt + buf.buf
+        except TimeoutError as exc:
+            raise IpmiKvmUnavailable("BMC KVM handshake timed out") from exc
 
     def stop_frame(self) -> bytes:
         return ivtp(_IVTP_STOP, 0)
