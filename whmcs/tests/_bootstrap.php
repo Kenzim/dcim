@@ -19,4 +19,5 @@ if (!defined('WHMCS')) {
 }
 
 require_once __DIR__ . '/../modules/servers/rackflow/rackflow.php';
+require_once __DIR__ . '/../modules/servers/rackflow/git_update.php';
 require_once __DIR__ . '/../modules/servers/rackflow_reseller/rackflow_reseller.php';

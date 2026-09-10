@@ -361,6 +361,10 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 | Path | Role |
 |---|---|
 | `whmcs/modules/servers/rackflow/rackflow.php` | Provisioning module (Create/Suspend/Power/Register, etc.) |
+| `whmcs/modules/servers/rackflow/git_update.php` | Admin git-archive download + in-place module file sync |
+| `whmcs/modules/servers/rackflow/module_update.php` | Admin UI to check/apply git module updates |
+| `whmcs/modules/servers/rackflow/module_update_action.php` | Admin JSON API for git module updates |
+| `whmcs/modules/addons/rackflow_updater/` | Addon menu entry (Addons → RackFlow Git Updates) |
 | `whmcs/modules/servers/rackflow/vnc_open.php` | One-click VM VNC popup launcher |
 | `whmcs/modules/servers/rackflow/kvm_open.php` | One-click IPMI HTML5 KVM popup launcher |
 | `whmcs/modules/servers/rackflow/ipmi_open.php` | One-click BMC web-UI proxy launcher |
