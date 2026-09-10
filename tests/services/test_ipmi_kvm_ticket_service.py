@@ -12,6 +12,7 @@ from app.services.ipmi_kvm_ticket_service import (
     build_relative_launch_url,
     get_ws_session,
     mint_launch_ticket,
+    mint_viewer_session,
     mint_ws_session,
     redeem_launch_ticket,
 )
@@ -61,6 +62,16 @@ def test_mint_and_get_ws_session_round_trip():
     assert data["kvm_token"] == "kvm-tok"
     assert data["username"] == "admin"
     assert get_ws_session("missing") is None
+
+
+def test_mint_viewer_session_has_no_bmc_cookies():
+    minted = mint_viewer_session(4, "gigabyte")
+    data = get_ws_session(minted["ws_token"])
+    assert data["server_id"] == 4
+    assert data["profile_id"] == "gigabyte"
+    assert data["cookie"] == ""
+    assert data["kvm_token"] == ""
+    assert data["csrf"] == ""
 
 
 def test_build_launch_url_requires_public_app_url(monkeypatch):

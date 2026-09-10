@@ -4,7 +4,7 @@ from __future__ import annotations
 from app.models.server import Server
 from app.services.ipmi_kvm.base import BmcKvmAuth
 from app.services.ipmi_kvm.registry import profile_for_server
-from app.services.ipmi_kvm_ticket_service import mint_ws_session
+from app.services.ipmi_kvm_ticket_service import mint_viewer_session
 
 
 def auth_from_ws_session(data: dict) -> BmcKvmAuth:
@@ -22,21 +22,9 @@ def auth_from_ws_session(data: dict) -> BmcKvmAuth:
 
 
 async def mint_bridged_session(server: Server) -> dict:
-    """Login to the BMC, mint a WS session, return browser-safe payload."""
+    """Mint a viewer-only WS ticket. BMC login happens when the hub starts."""
     profile = profile_for_server(server)
-    auth = await profile.login(server)
-    minted = mint_ws_session(
-        server.id,
-        profile.id,
-        https_base=auth.origin,
-        cookie=auth.cookie,
-        csrf=auth.csrf,
-        kvm_token=auth.kvm_token,
-        client_ip=auth.client_ip,
-        username=auth.username,
-        hostname=auth.hostname,
-        server_ip=auth.server_ip,
-    )
+    minted = mint_viewer_session(server.id, profile.id)
     return {
         "ws_token": minted["ws_token"],
         "ws_path": "/api/kvm/ws",

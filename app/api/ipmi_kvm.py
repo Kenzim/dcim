@@ -4,17 +4,16 @@ Mounted at ``/api/kvm`` (redeem / assets / ws) and ``/api/ipmi-kvm`` (admin prof
 
 ``POST /api/kvm/redeem`` is unauthenticated — the launch ticket itself is the
 credential, matching ``POST /api/vnc/redeem``. BMC cookies and KVM tokens never
-reach the browser; the WS bridge talks AMI IVTP to the BMC after a server-side
-handshake.
+reach the browser; the shared hub talks AMI IVTP to the BMC after one
+server-side login.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import List, Optional
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, status
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
@@ -29,13 +28,12 @@ from app.schemas.ipmi_kvm import (
 )
 from app.services.ipmi_kvm import (
     IpmiKvmUnavailable,
-    auth_from_ws_session,
     get_profile,
     kvm_ready,
     list_profiles,
     mint_bridged_session,
-    profile_for_server,
 )
+from app.services.ipmi_kvm.hub import attach_kvm_websocket, wait_or_fetch_kvm_asset
 from app.services.ipmi_kvm_ticket_service import (
     build_relative_error_url,
     build_relative_launch_url,
@@ -98,7 +96,7 @@ async def admin_list_kvm_profiles(auth: dict = Depends(require_admin)):
 
 @router.post("/redeem", response_model=IpmiKvmSessionResponse)
 async def redeem_kvm_launch_ticket(body: IpmiKvmRedeemRequest, db: Session = Depends(get_db)):
-    """Consume a launch ticket, log into the BMC, and mint a WS session."""
+    """Consume a launch ticket and mint a viewer-only WS session."""
     server_id = redeem_launch_ticket(body.token)
     if server_id is None:
         raise HTTPException(
@@ -148,7 +146,9 @@ async def proxy_kvm_asset(
     if not profile.asset_allowed(cleaned):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="KVM asset not found")
     try:
-        body, content_type = await profile.fetch_asset(auth_from_ws_session(session), cleaned)
+        body, content_type = await wait_or_fetch_kvm_asset(
+            session["server_id"], cleaned, session, profile
+        )
     except IpmiKvmUnavailable as exc:
         raise kvm_http_error(exc) from exc
     media = content_type.split(";")[0].strip() if content_type else "application/javascript"
@@ -159,34 +159,9 @@ async def proxy_kvm_asset(
     return response
 
 
-async def _pipe_browser_to_upstream(websocket: WebSocket, upstream) -> None:
-    try:
-        while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                break
-            data = message.get("bytes")
-            if data is not None:
-                await upstream.send(data)
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("IPMI KVM: browser->upstream pipe ended: %s", exc)
-
-
-async def _pipe_upstream_to_browser(websocket: WebSocket, upstream) -> None:
-    try:
-        async for data in upstream:
-            if isinstance(data, str):
-                data = data.encode("latin1")
-            await websocket.send_bytes(data)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("IPMI KVM: upstream->browser pipe ended: %s", exc)
-
-
 @router.websocket("/ws")
 async def kvm_websocket(websocket: WebSocket, token: str):
-    """Bridge the browser's IVTP WebSocket to the BMC after a server-side handshake."""
+    """Attach the browser to the shared KVM hub (or splice to the owner process)."""
     session = get_ws_session(token)
     if session is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
@@ -195,36 +170,21 @@ async def kvm_websocket(websocket: WebSocket, token: str):
     if profile is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    auth = auth_from_ws_session(session)
+    close_code = status.WS_1000_NORMAL_CLOSURE
+    close_reason = ""
     await websocket.accept(subprotocol="binary")
     try:
-        async with profile.open_upstream(auth) as upstream:
-            leftover = await profile.handshake(upstream, auth)
-            if leftover:
-                await websocket.send_bytes(leftover)
-            tasks = [
-                asyncio.create_task(_pipe_browser_to_upstream(websocket, upstream)),
-                asyncio.create_task(_pipe_upstream_to_browser(websocket, upstream)),
-            ]
-            try:
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                for task in tasks:
-                    task.cancel()
-                try:
-                    await upstream.send(profile.stop_frame())
-                except Exception:  # noqa: BLE001
-                    pass
+        await attach_kvm_websocket(websocket, session)
     except IpmiKvmUnavailable as exc:
-        logger.warning("IPMI KVM handshake failed for server %s: %s", session.get("server_id"), exc.detail)
+        logger.warning("IPMI KVM hub attach failed for server %s: %s", session.get("server_id"), exc.detail)
+        close_code = status.WS_1011_INTERNAL_ERROR
+        close_reason = (exc.detail or "KVM handshake failed")[:120]
     except Exception as exc:  # noqa: BLE001
-        logger.warning("IPMI KVM: upstream bridge failed for server %s: %s", session.get("server_id"), exc)
+        logger.warning("IPMI KVM: hub attach failed for server %s: %s", session.get("server_id"), exc)
+        close_code = status.WS_1011_INTERNAL_ERROR
+        close_reason = "KVM upstream failed"
     finally:
         try:
-            await profile.logout(auth)
-        except Exception:  # noqa: BLE001
-            logger.debug("IPMI KVM: BMC logout failed", exc_info=True)
-        try:
-            await websocket.close()
+            await websocket.close(code=close_code, reason=close_reason)
         except Exception:  # noqa: BLE001
             pass

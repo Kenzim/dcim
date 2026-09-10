@@ -59,17 +59,41 @@ def redeem_launch_ticket(token: str) -> Optional[int]:
     return int(server_id) if server_id is not None else None
 
 
+def mint_viewer_session(
+    server_id: int,
+    profile_id: str,
+    expires_in: Optional[int] = None,
+) -> dict:
+    """Mint a viewer-only WS ticket (no BMC cookies). Hub login happens on attach."""
+    ttl = max(1, int(expires_in if expires_in is not None else settings.ipmi_kvm_session_ttl_seconds))
+    token = secrets.token_urlsafe(32)
+    key = f"{SESSION_KEY_PREFIX}{_derive_id(token)}"
+    now = datetime.now(timezone.utc)
+    redis_client.hset(
+        key,
+        mapping={
+            "server_id": str(server_id),
+            "profile_id": profile_id,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
+        },
+    )
+    redis_client.expire(key, ttl)
+    logger.info("Minted IPMI KVM viewer session for server %s (ttl=%ss)", server_id, ttl)
+    return {"ws_token": token, "expires_in": ttl}
+
+
 def mint_ws_session(
     server_id: int,
     profile_id: str,
     *,
-    https_base: str,
-    cookie: str,
-    csrf: str,
-    kvm_token: str,
-    client_ip: str,
-    username: str,
-    hostname: str,
+    https_base: str = "",
+    cookie: str = "",
+    csrf: str = "",
+    kvm_token: str = "",
+    client_ip: str = "",
+    username: str = "",
+    hostname: str = "",
     server_ip: str = "",
     expires_in: Optional[int] = None,
 ) -> dict:
@@ -110,10 +134,10 @@ def get_ws_session(token: str) -> Optional[dict]:
         return {
             "server_id": int(data["server_id"]),
             "profile_id": data["profile_id"],
-            "https_base": data["https_base"],
-            "cookie": data["cookie"],
-            "csrf": data["csrf"],
-            "kvm_token": data["kvm_token"],
+            "https_base": data.get("https_base") or "",
+            "cookie": data.get("cookie") or "",
+            "csrf": data.get("csrf") or "",
+            "kvm_token": data.get("kvm_token") or "",
             "client_ip": data.get("client_ip") or "",
             "username": data.get("username") or "admin",
             "hostname": data.get("hostname") or "",

@@ -55,6 +55,8 @@ def mock_redis():
     mock_redis_client._ttls = {}
     # Store simple integer counters (e.g. rate limiting): {key: count}
     mock_redis_client._counters = {}
+    # Store string keys (SET/GET), e.g. KVM hub locks
+    mock_redis_client._strings = {}
     
     def mock_hset(key, *args, mapping=None, **kwargs):
         """
@@ -106,6 +108,9 @@ def mock_redis():
             if key in mock_redis_client._counters:
                 del mock_redis_client._counters[key]
                 count += 1
+            if key in mock_redis_client._strings:
+                del mock_redis_client._strings[key]
+                count += 1
             if key in mock_redis_client._ttls:
                 del mock_redis_client._ttls[key]
         return count
@@ -115,6 +120,7 @@ def mock_redis():
             key in mock_redis_client._hashes
             or key in mock_redis_client._zsets
             or key in mock_redis_client._counters
+            or key in mock_redis_client._strings
         ):
             mock_redis_client._ttls[key] = seconds
             return True
@@ -125,6 +131,7 @@ def mock_redis():
             key in mock_redis_client._hashes
             or key in mock_redis_client._zsets
             or key in mock_redis_client._counters
+            or key in mock_redis_client._strings
         )
 
     def mock_incr(key, amount=1):
@@ -197,9 +204,24 @@ def mock_redis():
             key not in mock_redis_client._hashes
             and key not in mock_redis_client._zsets
             and key not in mock_redis_client._counters
+            and key not in mock_redis_client._strings
         ):
             return -2
         return mock_redis_client._ttls.get(key, -1)
+
+    def mock_set(key, value, nx=False, xx=False, ex=None, px=None, **kwargs):
+        exists = key in mock_redis_client._strings
+        if nx and exists:
+            return False
+        if xx and not exists:
+            return False
+        mock_redis_client._strings[key] = value
+        if ex is not None:
+            mock_redis_client._ttls[key] = int(ex)
+        return True
+
+    def mock_get(key):
+        return mock_redis_client._strings.get(key)
 
     mock_redis_client.hset = mock_hset
     mock_redis_client.hgetall = mock_hgetall
@@ -214,6 +236,8 @@ def mock_redis():
     mock_redis_client.zrem = mock_zrem
     mock_redis_client.zrevrange = mock_zrevrange
     mock_redis_client.pipeline = mock_pipeline
+    mock_redis_client.set = mock_set
+    mock_redis_client.get = mock_get
     
     return mock_redis_client
 
@@ -283,6 +307,7 @@ def client(db_session, mock_redis, monkeypatch):
     mock_redis._zsets.clear()
     mock_redis._ttls.clear()
     mock_redis._counters.clear()
+    mock_redis._strings.clear()
 
 
 @pytest.fixture

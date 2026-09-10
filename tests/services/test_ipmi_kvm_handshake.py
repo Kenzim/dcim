@@ -58,6 +58,29 @@ async def test_handshake_sends_empty_3a_validate_resume_and_returns_leftover():
 
 
 @pytest.mark.asyncio
+async def test_handshake_timeout_becomes_unavailable():
+    class _Hang:
+        async def recv(self):
+            raise TimeoutError("bmc silent")
+
+        async def send(self, data):
+            raise AssertionError("should not send before hello")
+
+    profile = AsrockRackKvmProfile()
+    with pytest.raises(IpmiKvmUnavailable, match="timed out"):
+        await profile.handshake(_Hang(), _auth())
+
+
+def test_open_upstream_returns_async_context_manager():
+    import asyncio
+
+    cm = AsrockRackKvmProfile().open_upstream(_auth())
+    assert not asyncio.iscoroutine(cm)
+    assert hasattr(cm, "__aenter__")
+    assert hasattr(cm, "__aexit__")
+
+
+@pytest.mark.asyncio
 async def test_handshake_rejects_invalid_session():
     upstream = _FakeUpstream(
         [

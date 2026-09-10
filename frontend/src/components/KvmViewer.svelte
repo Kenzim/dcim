@@ -149,17 +149,24 @@
     nudgeMouse();
   }
 
+  function postDecodeBuffer(w, h) {
+    if (!worker || !w || !h) return;
+    // Always send dimensions. The same-origin decode bridge allocates
+    // ImageData inside the worker when a cloned buffer arrives with null .data.
+    const msg = { cmd: 'imageBuffer', imageBuffer, w, h };
+    worker.postMessage(msg);
+    worker.postMessage({ cmd: 'resolution_changed', imageBuffer, w, h });
+  }
+
   function resetImage(w, h) {
     if (!canvas || !ctx) return;
     canvas.width = w;
     canvas.height = h;
     ctx.fillStyle = '#111';
     ctx.fillRect(0, 0, w, h);
-    imageBuffer = ctx.getImageData(0, 0, w, h);
-    if (worker) {
-      worker.postMessage({ cmd: 'imageBuffer', imageBuffer });
-      worker.postMessage({ cmd: 'resolution_changed', imageBuffer, w, h });
-    }
+    imageBuffer = new ImageData(w, h);
+    ctx.putImageData(imageBuffer, 0, 0);
+    postDecodeBuffer(w, h);
     resText = `${w}×${h}`;
   }
 
@@ -189,7 +196,6 @@
       compressSize = csize;
       if (x && y && canvas && (x !== canvas.width || y !== canvas.height)) {
         resetImage(x, y);
-        if (worker) worker.postMessage({ cmd: 'resolution_changed', w: x, h: y });
       }
       frameChunks = [payload.subarray(88)];
       frameGot = payload.length - 88;
@@ -362,10 +368,13 @@
   onMount(() => {
     if (!canvas) return;
     ctx = canvas.getContext('2d');
-    resetImage(640, 480);
     const workerPath = session.decode_worker_path || '/api/kvm/assets/libs/kvm/ast/decode_worker.js';
-    const workerUrl = `${workerPath}?token=${encodeURIComponent(session.ws_token)}`;
-    worker = new Worker(workerUrl);
+    const workerQs = new URLSearchParams({
+      token: session.ws_token,
+      src: workerPath,
+    });
+    // Worker must exist before resetImage so the AMI decoder receives a buffer.
+    worker = new Worker(`/kvm-decode-bridge.js?${workerQs}`);
     worker.onerror = (e) => {
       setStatus(`worker error: ${e.message || 'failed to load decoder'}`);
     };
@@ -378,6 +387,7 @@
         console.error(e.data.ex);
       }
     };
+    resetImage(640, 480);
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const path = session.ws_path || '/api/kvm/ws';
     ws = new WebSocket(`${proto}://${location.host}${path}?token=${encodeURIComponent(session.ws_token)}`, ['binary']);
