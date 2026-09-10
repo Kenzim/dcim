@@ -2367,6 +2367,7 @@ async def get_service_status(
     client_permissions = resolve_client_permissions(db, service)
     power_key = _power_permission_key(service)
     ipmi_granted = bool(client_permissions.get(PermissionKey.BMS_IPMI, False))
+    kvm_granted = bool(client_permissions.get(PermissionKey.BMS_KVM, False))
 
     ipmi_proxy_available = bool(
         server
@@ -2374,7 +2375,7 @@ async def get_service_status(
         and getattr(server, "ipmi_web_management_url", None)
         and ipmi_granted
     )
-    kvm_console_available = bool(server and kvm_ready(server) and ipmi_granted)
+    kvm_console_available = bool(server and kvm_ready(server) and kvm_granted)
 
     vnc_console_granted = bool(client_permissions.get(PermissionKey.VM_CONSOLE, False))
     vnc_cid, _vnc_node, vnc_vmid = vm_placement(service)
@@ -2899,10 +2900,11 @@ async def create_kvm_ticket(
 ):
     """Mint a one-time IPMI HTML5 KVM launch ticket.
 
-    WHMCS (or any billing integration) calls this on behalf of the already
-    authenticated end user; the returned ``launch_url`` opens Rackflow's
-    ``/kvm`` page, which redeems the ticket for a BMC-bridged session.
-    BMC credentials never reach the browser.
+    Gated by ``bms.kvm`` (separate from ``bms.ipmi``, which opens the BMC
+    web UI via the IPMI reverse proxy). WHMCS (or any billing integration)
+    calls this on behalf of the already authenticated end user; the
+    returned ``launch_url`` opens Rackflow's ``/kvm`` page. BMC credentials
+    never reach the browser.
     """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -2911,7 +2913,7 @@ async def create_kvm_ticket(
         )
 
     _assert_billing_owned_service(service, integration)
-    require_client_permission(db, service, PermissionKey.BMS_IPMI)
+    require_client_permission(db, service, PermissionKey.BMS_KVM)
 
     server = service_linked_server(db, service)
     if not server:

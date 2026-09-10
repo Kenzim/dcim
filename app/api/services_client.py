@@ -267,7 +267,7 @@ async def client_get_service(
     kvm_console_available = bool(
         server
         and kvm_ready(server)
-        and permissions.get(PermissionKey.BMS_IPMI, False)
+        and permissions.get(PermissionKey.BMS_KVM, False)
     )
     console_available = bool(
         is_vm
@@ -504,7 +504,7 @@ async def kvm_popup_redirect_handler(
         return RedirectResponse(url=kvm_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
 
     try:
-        require_client_permission(db, service, PermissionKey.BMS_IPMI)
+        require_client_permission(db, service, PermissionKey.BMS_KVM)
     except HTTPException as exc:
         return RedirectResponse(url=kvm_error_url(str(exc.detail)), status_code=status.HTTP_302_FOUND)
 

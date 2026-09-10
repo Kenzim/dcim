@@ -169,6 +169,7 @@ def test_status_reports_client_permissions_and_hides_ipmi_when_denied(client, db
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["client_permissions"][PermissionKey.BMS_IPMI] is False
+    assert body["client_permissions"][PermissionKey.BMS_KVM] is True
     assert body["ipmi_proxy_available"] is False
     assert body["ipmi_viewer_username"] is None
     assert body["ipmi_viewer_password"] is None
@@ -185,6 +186,7 @@ def test_status_exposes_ipmi_viewer_fields_when_granted(client, db_session):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["client_permissions"][PermissionKey.BMS_IPMI] is True
+    assert body["client_permissions"][PermissionKey.BMS_KVM] is True
     assert body["ipmi_proxy_available"] is True
     assert body["ipmi_viewer_username"] == "viewer"
     assert body["power_available"] is True
