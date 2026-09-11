@@ -24,12 +24,21 @@ jobs:
     container:
       image: ghcr.io/catthehacker/ubuntu:act-latest
     steps:
+      # Full history from LAN Forgejo. Avoid actions/checkout: data.forgejo.org
+      # TLS flakes (gnutls SNI) on this runner, and HTTPS git.stackken.com hairpins WAN.
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          github-server-url: http://192.168.11.92:3000
+        env:
+          GIT_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          git init
+          git remote add origin "http://192.168.11.92:3000/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: bearer ${GIT_TOKEN}" \
+            fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*"
+          git checkout --force "${GITHUB_SHA}"
+          git reset --hard "${GITHUB_SHA}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
