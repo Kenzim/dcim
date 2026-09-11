@@ -206,3 +206,21 @@ def test_scan_missing_files(temp_os_dir):
     configs = service.scan_os_configs()
     config_ids = [c.id for c in configs]
     assert "invalid" in config_ids  # Invalid config is included if structure is valid
+
+
+def test_prefers_tftp_root_directory_when_present(tmp_path, monkeypatch):
+    """Production serves temp-OS files from the shared TFTP volume, not the image tree."""
+    tftp_root = tmp_path / "shared" / "tftp"
+    os_dir = tftp_root / "pxe" / "temp_os" / "debian-live"
+    os_dir.mkdir(parents=True)
+    (os_dir / "config.json").write_text(
+        '{"id":"debian-live","name":"Debian Live OS","kernel_file":"vmlinuz","initrd_file":"initrd.img"}'
+    )
+    (os_dir / "vmlinuz").write_bytes(b"kernel")
+    monkeypatch.setenv("TFTP_ROOT_DIRECTORY", str(tftp_root))
+
+    service = TempOSService()
+    found = service.get_os_dir("debian-live")
+    assert found is not None
+    assert found.resolve() == os_dir.resolve()
+    assert (found / "vmlinuz").read_bytes() == b"kernel"

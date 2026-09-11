@@ -107,6 +107,11 @@ tftp/pxe/temp_os/**/kernel/*
 tftp/pxe/temp_os/**/initrd/*
 tftp/pxe/temp_os/**/modloop/*
 !tftp/pxe/temp_os/**/config.json
+# Track Rackflow netboot overlay (name matches initrd* otherwise)
+!tftp/pxe/temp_os/**/initrd-overlay/
+!tftp/pxe/temp_os/**/initrd-overlay/**
+!tftp/pxe/temp_os/**/initrd-overlay/lib/
+!tftp/pxe/temp_os/**/initrd-overlay/lib/**
 
 # Squashfs root (extracted filesystem)
 tftp/squashfs-root/

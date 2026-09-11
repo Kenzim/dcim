@@ -64,6 +64,13 @@ services:
     volumes:
       - /os_templates:/app/os_templates
       - dhcp_tftp_shared:/shared
+      # Image only bakes temp-OS config.json; kernel/initrd/squashfs live on the TFTP volume.
+      - type: volume
+        source: dhcp_tftp_shared
+        target: /app/tftp
+        read_only: true
+        volume:
+          subpath: tftp
     depends_on:
       mysql:
         condition: service_healthy
