@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
+from typing import Annotated, List, Optional, Dict, Any
 from pydantic import BaseModel, Field, field_serializer
 from app.core.database import get_db
 from app.core.auth import require_admin
@@ -948,8 +948,8 @@ def _server_has_capability(db: Session, server: Server, capability_id: str) -> b
 @router.post("/test", response_model=dict)
 async def test_server_connection(
     test_data: ServerTestRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Test server connection using plugin's test_connection method"""
     plugin_config = test_data.plugin_config
@@ -990,8 +990,8 @@ async def test_server_connection(
 @router.post("/{server_id}/test-capabilities", response_model=dict)
 async def test_server_capabilities(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
     Return effective capabilities for a server (declaration-only, no probing).
@@ -1017,8 +1017,8 @@ async def test_server_capabilities(
 @router.get("/{server_id}/capabilities", response_model=dict)
 async def get_server_capabilities(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
@@ -1030,8 +1030,8 @@ async def get_server_capabilities(
 async def update_server_capabilities(
     server_id: int,
     payload: ServerCapabilitiesUpdateRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
@@ -1063,8 +1063,9 @@ async def list_servers(
     skip: int = 0,
     limit: int = 100,
     enabled_only: bool = False,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """List all servers"""
     servers = ServerDAO.get_all(db, skip=skip, limit=limit, enabled_only=enabled_only)
@@ -1108,8 +1109,8 @@ async def list_servers(
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
 async def create_server(
     server_data: ServerCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Create a new server"""
     try:
@@ -1332,8 +1333,8 @@ async def create_server(
 @router.post("/{server_id}/ipmi-ticket")
 async def create_server_ipmi_ticket(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a one-time IPMI proxy launch ticket for a server (admin)."""
     server = ServerDAO.get_by_id(db, server_id)
@@ -1352,8 +1353,8 @@ async def create_server_ipmi_ticket(
 @router.get("/{server_id}/kvm-popup")
 async def server_kvm_popup(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
     del auth
@@ -1363,8 +1364,8 @@ async def server_kvm_popup(
 @router.get("/{server_id}", response_model=ServerResponse)
 async def get_server(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Get a server by ID"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -1427,8 +1428,8 @@ async def get_server(
 @router.post("/{server_id}/hardware-detection/run", response_model=HardwareDetectionRunResponse)
 async def run_hardware_detection(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Queue built-in hardware detection boot workflow for a server."""
     server = ServerDAO.get_by_id(db, server_id)
@@ -1521,8 +1522,8 @@ async def run_hardware_detection(
 @router.post("/{server_id}/boot/fix-boot-order", response_model=dict)
 async def queue_boot_order_fix(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """
     Queue a one-time boot-order correction task.
@@ -1618,8 +1619,9 @@ async def queue_boot_order_fix(
 async def list_hardware_detection_reports(
     server_id: int,
     status_filter: Optional[str] = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
@@ -1639,8 +1641,8 @@ async def list_hardware_detection_reports(
 async def get_hardware_detection_report(
     server_id: int,
     report_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     report = HardwareDetectionReportDAO.get_by_id(db, report_id)
     if not report or report.server_id != server_id:
@@ -1652,8 +1654,8 @@ async def get_hardware_detection_report(
 async def get_hardware_detection_diff(
     server_id: int,
     report_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     report = HardwareDetectionReportDAO.get_by_id(db, report_id)
     if not report or report.server_id != server_id:
@@ -1676,8 +1678,8 @@ async def reject_hardware_detection_report(
     server_id: int,
     report_id: int,
     payload: HardwareDetectionApplyRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     report = HardwareDetectionReportDAO.get_by_id(db, report_id)
     if not report or report.server_id != server_id:
@@ -1696,8 +1698,8 @@ async def apply_hardware_detection_report(
     server_id: int,
     report_id: int,
     payload: HardwareDetectionApplyRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     report = HardwareDetectionReportDAO.get_by_id(db, report_id)
     if not report or report.server_id != server_id:
@@ -1731,8 +1733,8 @@ async def apply_hardware_detection_report(
 async def delete_hardware_detection_report(
     server_id: int,
     report_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Delete a hardware detection report (admin only)."""
     report = HardwareDetectionReportDAO.get_by_id(db, report_id)
@@ -1794,8 +1796,9 @@ async def get_server_bandwidth(
     server_id: int,
     hours: int = 24,
     resolution_minutes: int = 0,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Get stored bandwidth data for switch ports linked to this server. Bytes are cumulative; Rate is the difference over the chosen interval."""
     server = ServerDAO.get_by_id(db, server_id)
@@ -1872,8 +1875,8 @@ async def get_server_bandwidth(
 async def update_server(
     server_id: int,
     server_data: ServerUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Update a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -2164,8 +2167,8 @@ async def update_server(
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_server(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Delete a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -2199,8 +2202,9 @@ async def delete_server(
 async def get_server_activity(
     server_id: int,
     limit: int = 100,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Get unified server activity log entries for a server."""
     server = ServerDAO.get_by_id(db, server_id)
@@ -2218,8 +2222,8 @@ async def get_server_activity(
 @router.get("/{server_id}/power-state", response_model=dict)
 async def get_server_power_state(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Get current power state of a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -2255,8 +2259,8 @@ async def get_server_power_state(
 @router.post("/{server_id}/power-on", response_model=dict)
 async def power_on_server(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Power on a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -2333,8 +2337,9 @@ async def power_on_server(
 async def power_off_server(
     server_id: int,
     force: bool = False,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Power off a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -2411,8 +2416,8 @@ async def power_off_server(
 @router.post("/{server_id}/power-reset", response_model=dict)
 async def power_reset_server(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Reset/reboot a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -2488,8 +2493,8 @@ async def power_reset_server(
 @router.get("/{server_id}/boot/options", response_model=dict)
 async def get_server_boot_options(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
@@ -2539,8 +2544,8 @@ async def get_server_boot_options(
 async def set_server_boot_option(
     server_id: int,
     payload: ServerBootSetRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
@@ -2640,8 +2645,8 @@ async def set_server_boot_option(
 async def preview_server_kernel_args(
     server_id: int,
     payload: ServerKernelArgsPreviewRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     server = ServerDAO.get_by_id(db, server_id)
     if not server:

@@ -12,7 +12,7 @@ Handlers here delegate to the existing admin/staff auth logic in
 cookie semantics, ownership checks, etc.) stays identical to today.
 """
 
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -82,7 +82,7 @@ async def client_login(
     login_data: UserLogin,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Client portal login. Same session/cookie mechanism as staff login."""
     return await _login(login_data, request, response, db)
@@ -92,15 +92,15 @@ async def client_login(
 async def client_logout(
     request: Request,
     response: Response,
-    auth: dict = Depends(get_current_user),
+    auth: Annotated[dict, Depends(get_current_user)],
 ):
     return await _logout(request, response, auth)
 
 
 @router.get("/me", response_model=UserResponse)
 async def client_me(
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     return await _get_current_user_details(auth, db)
 
@@ -108,8 +108,9 @@ async def client_me(
 @router.get("/services/me", response_model=List[ClientServiceResponse])
 async def client_list_my_services(
     service_type: Optional[str] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _list_my_services(service_type, auth, db)
@@ -118,8 +119,8 @@ async def client_list_my_services(
 @router.get("/services/{service_id}")
 async def client_service_detail(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Owner-scoped service detail: power state, primary IP, availability
     flags, and the effective client permission map for portal UI gating."""
@@ -131,8 +132,8 @@ async def client_service_detail(
 async def client_service_power(
     service_id: int,
     body: PowerAction,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Power on/off/reboot/reset for a service the caller owns."""
     _require_non_admin_client(auth)
@@ -142,8 +143,8 @@ async def client_service_power(
 @router.post("/services/{service_id}/ipmi-ticket")
 async def client_create_ipmi_ticket(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a one-time IPMI proxy launch ticket for a service the caller owns."""
     _require_non_admin_client(auth)
@@ -153,8 +154,8 @@ async def client_create_ipmi_ticket(
 @router.get("/services/{service_id}/kvm-popup")
 async def client_kvm_popup(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a launch ticket and redirect to ``/kvm?t=...`` for a real popup window."""
     _require_non_admin_client(auth)
@@ -164,8 +165,8 @@ async def client_kvm_popup(
 @router.get("/services/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse)
 async def client_get_vnc_console_types(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Report which console types (noVNC/serial) this VM actually supports,
     for a VM service the caller owns."""
@@ -177,8 +178,9 @@ async def client_get_vnc_console_types(
 async def client_create_vnc_session(
     service_id: int,
     console_type: Optional[str] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a VNC console session for a VM service the caller owns."""
     _require_non_admin_client(auth)
@@ -189,8 +191,9 @@ async def client_create_vnc_session(
 async def client_vnc_popup(
     service_id: int,
     type: Optional[str] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a launch ticket and redirect to ``/vnc?t=...`` for a real popup
     window (see ``window.open`` in the client portal), rather than the
@@ -202,8 +205,8 @@ async def client_vnc_popup(
 @router.get("/services/{service_id}/actions")
 async def client_portal_list_actions(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_list_strategy_actions(service_id, auth, db)
@@ -214,8 +217,8 @@ async def client_portal_run_action(
     service_id: int,
     action_name: str,
     body: ClientStrategyActionBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_run_strategy_action(service_id, action_name, body, auth, db)
@@ -224,8 +227,8 @@ async def client_portal_run_action(
 @router.get("/services/{service_id}/vm/backups")
 async def client_portal_list_backups(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_list_vm_backups(service_id, auth, db)
@@ -235,8 +238,8 @@ async def client_portal_list_backups(
 async def client_portal_create_backup(
     service_id: int,
     body: BackupCreateBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_create_vm_backup(service_id, body, auth, db)
@@ -246,8 +249,8 @@ async def client_portal_create_backup(
 async def client_portal_delete_backup(
     service_id: int,
     body: BackupMutateBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_delete_vm_backup(service_id, body, auth, db)
@@ -257,8 +260,8 @@ async def client_portal_delete_backup(
 async def client_portal_restore_backup(
     service_id: int,
     body: BackupMutateBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_restore_vm_backup(service_id, body, auth, db)
@@ -267,8 +270,8 @@ async def client_portal_restore_backup(
 @router.get("/services/{service_id}/vm/ssh-keys")
 async def client_portal_get_vm_ssh_keys(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_get_vm_ssh_keys(service_id, auth, db)
@@ -278,8 +281,8 @@ async def client_portal_get_vm_ssh_keys(
 async def client_portal_put_vm_ssh_keys(
     service_id: int,
     body: VmSshKeysBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_put_vm_ssh_keys(service_id, body, auth, db)
@@ -289,8 +292,9 @@ async def client_portal_put_vm_ssh_keys(
 async def client_portal_reinstall_vm(
     service_id: int,
     body: Optional[VmReinstallBody] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
     return await _client_reinstall_vm(service_id, body, auth, db)
@@ -299,8 +303,8 @@ async def client_portal_reinstall_vm(
 @router.get("/services/{service_id}/proxy/credentials")
 async def client_portal_get_proxy_credentials(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """List assigned proxy IP(s) + credentials + ready-to-use URLs for an
     http_proxy service the caller owns."""
@@ -311,8 +315,8 @@ async def client_portal_get_proxy_credentials(
 @router.post("/services/{service_id}/proxy/rotate")
 async def client_portal_rotate_proxy_credentials(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Rotate credentials (new username+password, same IP(s)) for an
     http_proxy service the caller owns."""
@@ -324,7 +328,7 @@ async def client_portal_rotate_proxy_credentials(
 async def client_sso_redeem(
     token: str,
     request: Request,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Redeem a one-time billing SSO ticket, mint a session, and redirect.
 

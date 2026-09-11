@@ -13,7 +13,6 @@ import asyncio
 import base64
 import logging
 import re
-import ssl
 import struct
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -23,6 +22,7 @@ import websockets
 
 from app.models.server import Server
 from app.services.ipmi_kvm.base import BmcKvmAuth, IpmiKvmProfile, IpmiKvmUnavailable
+from app.services.ipmi_kvm.bmc_tls import bmc_httpx_verify, bmc_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +100,6 @@ def _sid_from_response(response: httpx.Response, client: httpx.AsyncClient | Non
     return ""
 
 
-def _ssl_ctx() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 class SuperMicroKvmProfile(IpmiKvmProfile):
     id = "supermicro"
     display_name = "SuperMicro (ATEN HTML5 KVM)"
@@ -150,7 +143,7 @@ class SuperMicroKvmProfile(IpmiKvmProfile):
             "Referer": origin + "/",
             "User-Agent": "Mozilla/5.0",
         }
-        async with httpx.AsyncClient(verify=False, timeout=20.0, headers=headers) as client:
+        async with httpx.AsyncClient(verify=bmc_httpx_verify(), timeout=20.0, headers=headers) as client:
             try:
                 login = await client.post(
                     f"{origin}/cgi/login.cgi",
@@ -198,7 +191,7 @@ class SuperMicroKvmProfile(IpmiKvmProfile):
             extra["CSRF-TOKEN"] = auth.csrf
         return websockets.connect(
             url,
-            ssl=_ssl_ctx() if ws_scheme == "wss" else None,
+            ssl=bmc_ssl_context() if ws_scheme == "wss" else None,
             server_hostname=auth.hostname,
             origin=auth.origin,
             additional_headers=extra,
@@ -295,7 +288,7 @@ class SuperMicroKvmProfile(IpmiKvmProfile):
         if auth.csrf:
             headers["CSRF-TOKEN"] = auth.csrf
         try:
-            async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+            async with httpx.AsyncClient(verify=bmc_httpx_verify(), timeout=20.0) as client:
                 resp = await client.get(f"{auth.origin}/{cleaned}", headers=headers)
         except httpx.RequestError as exc:
             raise IpmiKvmUnavailable(f"Could not fetch KVM asset: {exc}") from exc
@@ -312,7 +305,7 @@ class SuperMicroKvmProfile(IpmiKvmProfile):
         if auth.csrf:
             headers["CSRF-TOKEN"] = auth.csrf
         try:
-            async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
+            async with httpx.AsyncClient(verify=bmc_httpx_verify(), timeout=8.0) as client:
                 await client.get(f"{auth.origin}/cgi/logout.cgi", headers=headers)
         except Exception:  # noqa: BLE001
             logger.debug("SuperMicro KVM: BMC logout failed", exc_info=True)

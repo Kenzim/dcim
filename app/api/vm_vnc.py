@@ -16,7 +16,6 @@ which would expose far more than a single VM's console.
 import asyncio
 import json
 import logging
-import ssl
 
 import websockets
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
@@ -41,6 +40,7 @@ from app.services.proxmox_placement import (
     cluster_to_proxmox_plugin_config,
     resolve_proxmox_plugin_for_service,
 )
+from app.services.ipmi_kvm.bmc_tls import ssl_context_for_verify
 from app.services.vm_guest_credentials import session_guest_fields
 from app.services.vm_vnc_ticket_service import (
     get_ws_session,
@@ -383,10 +383,7 @@ async def vnc_websocket(websocket: WebSocket, token: str, db: Session = Depends(
     upstream_url = plugin.vnc_websocket_url(session["vnc_port"], session["vnc_ticket"])
     is_serial = session.get("console_type") == "serial"
 
-    ssl_context = ssl.create_default_context()
-    if not plugin.verify_ssl:
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+    ssl_context = ssl_context_for_verify(plugin.verify_ssl)
 
     await websocket.accept(subprotocol="binary")
     try:

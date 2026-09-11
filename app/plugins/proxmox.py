@@ -999,8 +999,6 @@ class ProxmoxPlugin(ServerPlugin):
         vmid = vm_ref.get("vmid") or self.vmid
         if vmid is None:
             raise ValueError("vmid is required")
-        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{vmid}/config"
-        headers = await self._get_headers()
         payload = {}
         if "memory_mb" in vm_config:
             payload["memory"] = vm_config["memory_mb"]
@@ -1022,10 +1020,11 @@ class ProxmoxPlugin(ServerPlugin):
             payload["sshkeys"] = str(vm_config["sshkeys"])
         if not payload:
             return True
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{vmid}/config"
+        headers = await self._get_headers()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
             response = await client.put(url, headers=headers, data=payload)
-            response.raise_for_status()
-            return True
+            return response.is_success
 
     async def regenerate_cloudinit(self, vmid: Optional[int] = None) -> None:
         """Mark the cloud-init drive for rebuild from current QEMU config.

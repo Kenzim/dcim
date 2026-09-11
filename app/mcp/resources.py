@@ -19,7 +19,7 @@ from app.api.server import _get_effective_capabilities_for_server
 async def server_resource(id: str) -> str:
     """Full compact server record including effective capabilities."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         try:
             sid = int(id)
         except (TypeError, ValueError) as exc:
@@ -38,7 +38,7 @@ async def server_resource(id: str) -> str:
 async def service_resource(id: str) -> str:
     """Full compact service record (no passwords or guest credentials)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         try:
             sid = int(id)
         except (TypeError, ValueError) as exc:
@@ -56,7 +56,7 @@ async def service_resource(id: str) -> str:
 async def location_resource(id: str) -> str:
     """Location record."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         try:
             lid = int(id)
         except (TypeError, ValueError) as exc:

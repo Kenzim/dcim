@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.commerce_auth import require_commerce_enabled
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.rate_limit import enforce_rate_limit
 from app.dao import UserDAO
 from app.models.commerce_auth_extra import EmailVerificationToken, PasswordResetToken
@@ -26,7 +27,10 @@ router = APIRouter(
     prefix="/commerce/auth",
     tags=["commerce-auth"],
     dependencies=[Depends(require_commerce_enabled)],
+    responses=COMMON_ERROR_RESPONSES,
 )
+
+_INVALID_TOKEN_MSG = "Invalid or expired token"
 
 
 class RequestModel(BaseModel):
@@ -74,7 +78,7 @@ def _enqueue_verify_email(db: Session, *, user: User, raw_token: str) -> None:
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register(body: RegisterBody, db: Session = Depends(get_db)):
+def register(body: RegisterBody, db: Annotated[Session, Depends(get_db)]):
     mode = settings.commerce_registration_mode
     if mode == "disabled":
         raise HTTPException(status_code=403, detail="Registration is disabled")
@@ -121,7 +125,7 @@ def register(body: RegisterBody, db: Session = Depends(get_db)):
 
 
 @router.post("/verify-email")
-def verify_email(body: VerifyEmailBody, db: Session = Depends(get_db)):
+def verify_email(body: VerifyEmailBody, db: Annotated[Session, Depends(get_db)]):
     token_hash = _hash_token(body.token.strip())
     row = db.execute(
         select(EmailVerificationToken).where(
@@ -130,9 +134,9 @@ def verify_email(body: VerifyEmailBody, db: Session = Depends(get_db)):
         )
     ).scalar_one_or_none()
     if row is None:
-        raise HTTPException(status_code=400, detail="Invalid or expired token")
+        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     if row.expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Invalid or expired token")
+        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     row.consumed_at = datetime.now(timezone.utc)
     db.commit()
     return {"verified": True, "user_id": row.user_id}
@@ -142,7 +146,7 @@ def verify_email(body: VerifyEmailBody, db: Session = Depends(get_db)):
 def password_reset_request(
     body: PasswordResetRequestBody,
     request: Request,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
 ):
     client_ip = request.client.host if request.client else "unknown"
     if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
@@ -190,7 +194,7 @@ def password_reset_request(
 
 
 @router.post("/password-reset/confirm")
-def password_reset_confirm(body: PasswordResetConfirmBody, db: Session = Depends(get_db)):
+def password_reset_confirm(body: PasswordResetConfirmBody, db: Annotated[Session, Depends(get_db)]):
     token_hash = _hash_token(body.token.strip())
     row = db.execute(
         select(PasswordResetToken).where(
@@ -199,12 +203,12 @@ def password_reset_confirm(body: PasswordResetConfirmBody, db: Session = Depends
         )
     ).scalar_one_or_none()
     if row is None:
-        raise HTTPException(status_code=400, detail="Invalid or expired token")
+        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     if row.expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Invalid or expired token")
+        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     user = db.get(User, row.user_id)
     if user is None:
-        raise HTTPException(status_code=400, detail="Invalid or expired token")
+        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     user.set_password(body.password)
     row.consumed_at = datetime.now(timezone.utc)
     db.commit()

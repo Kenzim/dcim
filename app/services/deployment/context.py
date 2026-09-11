@@ -34,41 +34,52 @@ async def _find_template_vmid_live(cluster, node_name: str, template_name: str) 
     return found[1] if found else None
 
 
+def _qemu_template_vmid(row: dict, template_name: str) -> Optional[int]:
+    if int(row.get("template") or 0) != 1:
+        return None
+    if str(row.get("name") or "") != template_name:
+        return None
+    vmid = row.get("vmid")
+    return int(vmid) if vmid is not None else None
+
+
+async def _proxmox_api_headers(cluster, client: httpx.AsyncClient) -> dict[str, str]:
+    auth_url = f"{cluster.api_url.rstrip('/')}/api2/json/access/ticket"
+    auth_resp = await client.post(
+        auth_url,
+        data={"username": cluster.username, "password": cluster.password},
+    )
+    auth_resp.raise_for_status()
+    payload = auth_resp.json().get("data") or {}
+    ticket = payload.get("ticket")
+    csrf = payload.get("CSRFPreventionToken")
+    if not ticket:
+        raise DeploymentError("Failed to authenticate with Proxmox while resolving template")
+    headers = {"Cookie": f"PVEAuthCookie={ticket}"}
+    if csrf:
+        headers["CSRFPreventionToken"] = csrf
+    return headers
+
+
 async def _find_template_on_nodes_live(
     cluster,
     node_names: List[str],
     template_name: str,
 ) -> Optional[Tuple[str, int]]:
     """Scan the given nodes via the Proxmox API for a QEMU template by name."""
-    auth_url = f"{cluster.api_url.rstrip('/')}/api2/json/access/ticket"
     base = f"{cluster.api_url.rstrip('/')}/api2/json"
     async with httpx.AsyncClient(verify=cluster.verify_ssl, timeout=20.0) as client:
-        auth_resp = await client.post(
-            auth_url,
-            data={"username": cluster.username, "password": cluster.password},
-        )
-        auth_resp.raise_for_status()
-        payload = auth_resp.json().get("data") or {}
-        ticket = payload.get("ticket")
-        csrf = payload.get("CSRFPreventionToken")
-        if not ticket:
-            raise DeploymentError("Failed to authenticate with Proxmox while resolving template")
-        headers = {"Cookie": f"PVEAuthCookie={ticket}"}
-        if csrf:
-            headers["CSRFPreventionToken"] = csrf
+        headers = await _proxmox_api_headers(cluster, client)
         for node_name in node_names:
-            if not (node_name or "").strip():
+            node = (node_name or "").strip()
+            if not node:
                 continue
-            qemu_resp = await client.get(f"{base}/nodes/{node_name}/qemu", headers=headers)
+            qemu_resp = await client.get(f"{base}/nodes/{node}/qemu", headers=headers)
             qemu_resp.raise_for_status()
             for row in qemu_resp.json().get("data") or []:
-                if int(row.get("template") or 0) != 1:
-                    continue
-                if str(row.get("name") or "") != template_name:
-                    continue
-                vmid = row.get("vmid")
+                vmid = _qemu_template_vmid(row, template_name)
                 if vmid is not None:
-                    return str(node_name).strip(), int(vmid)
+                    return node, vmid
     return None
 
 

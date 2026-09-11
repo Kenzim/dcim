@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import Annotated, Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
@@ -199,8 +199,9 @@ def _client_primary_ip(db: Session, service) -> Optional[str]:
 @router.get("/me", response_model=List[ClientServiceResponse])
 async def list_my_services(
     service_type: Optional[str] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -234,8 +235,8 @@ async def list_my_services(
 @router.get("/{service_id}")
 async def client_get_service(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Owner-scoped service detail for the portal.
 
@@ -342,8 +343,8 @@ async def client_get_service(
 async def client_power_service(
     service_id: int,
     body: PowerAction,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Power on/off/reboot/reset for a service the caller owns.
 
@@ -462,8 +463,8 @@ async def client_power_service(
 @router.post("/{service_id}/ipmi-ticket")
 async def create_ipmi_ticket(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a one-time IPMI proxy launch ticket for a service the caller owns."""
     user_id = auth.get("user_id")
@@ -489,8 +490,8 @@ async def create_ipmi_ticket(
 @router.get("/{service_id}/kvm-popup")
 async def kvm_popup_redirect_handler(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
     user_id = auth.get("user_id")
@@ -524,8 +525,8 @@ def _client_owned_proxy_service(db: Session, service_id: int, user_id, permissio
 @router.get("/{service_id}/proxy/credentials")
 async def client_get_proxy_credentials(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """List assigned proxy IP(s) + credentials + ready-to-use URLs for a service the caller owns."""
     user_id = auth.get("user_id")
@@ -539,8 +540,8 @@ async def client_get_proxy_credentials(
 @router.post("/{service_id}/proxy/rotate")
 async def client_rotate_proxy_credentials(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Rotate credentials (new username+password, same IP(s)) for a service the caller owns."""
     user_id = auth.get("user_id")
@@ -586,8 +587,8 @@ async def _client_owned_vm_plugin(db: Session, service_id: int, user_id):
 @router.get("/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse)
 async def get_vnc_console_types(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Report which console types (noVNC/serial) this VM actually supports,
     for a VM service the caller owns. Fetched by the client portal UI before
@@ -610,8 +611,9 @@ async def get_vnc_console_types(
 async def create_vnc_session(
     service_id: int,
     console_type: Optional[str] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a VNC/serial console session for a VM service the caller owns.
 
@@ -662,8 +664,8 @@ class ClientStrategyActionBody(BaseModel):
 @router.get("/{service_id}/actions")
 async def client_list_strategy_actions(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     from app.services.strategy_actions import list_actions
 
@@ -681,8 +683,8 @@ async def client_run_strategy_action(
     service_id: int,
     action_name: str,
     body: ClientStrategyActionBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     from app.services.strategy_actions import StrategyActionError, run_action
 
@@ -716,8 +718,8 @@ def _client_owned_vm_service(db: Session, service_id: int, user_id, permission: 
 @router.get("/{service_id}/vm/backups")
 async def client_list_vm_backups(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -734,8 +736,8 @@ async def client_list_vm_backups(
 async def client_create_vm_backup(
     service_id: int,
     body: BackupCreateBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -753,8 +755,8 @@ async def client_create_vm_backup(
 async def client_delete_vm_backup(
     service_id: int,
     body: BackupMutateBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -771,8 +773,8 @@ async def client_delete_vm_backup(
 async def client_restore_vm_backup(
     service_id: int,
     body: BackupMutateBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -800,8 +802,8 @@ async def client_restore_vm_backup(
 @router.get("/{service_id}/vm/ssh-keys")
 async def client_get_vm_ssh_keys(
     service_id: int,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Return stored keys + reinstall template choices for the service owner."""
     from app.services.ssh_public_keys import ssh_key_fields_for_service
@@ -827,8 +829,8 @@ async def client_get_vm_ssh_keys(
 async def client_put_vm_ssh_keys(
     service_id: int,
     body: VmSshKeysBody,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     from app.services.vm_ssh_keys_service import VmSshKeysError, save_and_apply_ssh_public_keys
 
@@ -846,8 +848,9 @@ async def client_put_vm_ssh_keys(
 async def client_reinstall_vm(
     service_id: int,
     body: Optional[VmReinstallBody] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Destroy guest (if any) and reprovision at the same reserved VMID."""
     from app.services.vm_reinstall_service import VmReinstallError, reinstall_vm_guest
@@ -873,8 +876,9 @@ async def client_reinstall_vm(
 async def vnc_popup_redirect(
     service_id: int,
     type: Optional[str] = None,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     """Mint a one-time console launch ticket and redirect to ``/vnc?t=...``.
 

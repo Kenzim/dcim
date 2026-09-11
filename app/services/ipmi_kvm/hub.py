@@ -79,6 +79,25 @@ _hubs: dict[int, "KvmHub"] = {}
 _start_locks: dict[int, asyncio.Lock] = {}
 _splice_server = None
 _splice_lock: Optional[asyncio.Lock] = None
+_server_asset_events: dict[int, asyncio.Event] = {}
+
+
+def _server_asset_event(server_id: int) -> asyncio.Event:
+    key = int(server_id)
+    event = _server_asset_events.get(key)
+    if event is None:
+        event = asyncio.Event()
+        _server_asset_events[key] = event
+    return event
+
+
+def _signal_server_asset_activity(server_id: int) -> None:
+    _server_asset_event(server_id).set()
+
+
+def _store_kvm_asset(server_id: int, path: str, body: bytes, content_type: str) -> None:
+    cache_kvm_asset(server_id, path, body, content_type)
+    _signal_server_asset_activity(server_id)
 
 
 class ViewerSocket(Protocol):
@@ -289,6 +308,7 @@ class KvmHub:
                     asyncio.create_task(self._full_loop(), name=f"kvm-full-{self.server_id}"),
                 ]
             )
+        _signal_server_asset_activity(self.server_id)
         await asyncio.sleep(0)
 
     def request_full(self) -> None:
@@ -311,12 +331,31 @@ class KvmHub:
             self._idle_task = asyncio.create_task(self._idle_then_stop())
 
     async def _idle_then_stop(self) -> None:
-        try:
-            await asyncio.sleep(self._idle_wait())
-        except asyncio.CancelledError:
-            return
+        await asyncio.sleep(self._idle_wait())
         if self._alive and not self._viewers:
             await self.destroy(reason="idle")
+
+    async def _setup_raw_viewer(self, viewer: ViewerSocket, join_packets: list[bytes]) -> None:
+        for pkt in join_packets:
+            if pkt:
+                await viewer.send_bytes(pkt)
+        if self._had_viewer:
+            join = self.profile.join_frame(self.auth) if self.auth is not None else b""
+            if join:
+                try:
+                    await self.upstream.send(join)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("KVM hub raw join frame failed: %s", exc)
+        self._had_viewer = True
+
+    async def _setup_ivtp_viewer(self, viewer: ViewerSocket, join_packets: list[bytes]) -> None:
+        await viewer.send_bytes(validated_ok_frame())
+        self.request_full()
+        for pkt in join_packets:
+            typ = packet_type(pkt)
+            if typ in _INTERNAL_TYPES or typ not in _FANOUT_TYPES:
+                continue
+            await viewer.send_bytes(pkt)
 
     async def add_viewer(self, viewer: ViewerSocket) -> None:
         self._cancel_idle()
@@ -328,26 +367,9 @@ class KvmHub:
             self._join_packets = []
         try:
             if self._raw:
-                for pkt in join_packets:
-                    if pkt:
-                        await viewer.send_bytes(pkt)
-                if self._had_viewer:
-                    join = self.profile.join_frame(self.auth) if self.auth is not None else b""
-                    if join:
-                        try:
-                            await self.upstream.send(join)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug("KVM hub raw join frame failed: %s", exc)
-                self._had_viewer = True
+                await self._setup_raw_viewer(viewer, join_packets)
             else:
-                await viewer.send_bytes(validated_ok_frame())
-                self.request_full()
-                for pkt in join_packets:
-                    typ = packet_type(pkt)
-                    if typ in _INTERNAL_TYPES:
-                        continue
-                    if typ in _FANOUT_TYPES:
-                        await viewer.send_bytes(pkt)
+                await self._setup_ivtp_viewer(viewer, join_packets)
             await self._viewer_recv_loop(viewer)
         except (WebSocketDisconnect, ConnectionClosed):
             pass
@@ -360,6 +382,28 @@ class KvmHub:
             if empty and self._alive:
                 self._schedule_idle()
 
+    async def _forward_viewer_bytes(self, data: bytes) -> bool:
+        """Forward viewer bytes to BMC. Returns False when the viewer loop should stop."""
+        if self._raw:
+            try:
+                await self.upstream.send(data)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("KVM hub raw viewer forward failed: %s", exc)
+                return False
+            return True
+        packets, _tail = iter_packets(data)
+        if not packets and len(data) >= 2 and packet_type(data) == IVTP_HID:
+            packets = [data]
+        for pkt in packets:
+            if packet_type(pkt) != IVTP_HID:
+                continue
+            try:
+                await self.upstream.send(pkt)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("KVM hub HID forward failed: %s", exc)
+                return False
+        return True
+
     async def _viewer_recv_loop(self, viewer: ViewerSocket) -> None:
         while self._alive:
             message = await viewer.receive()
@@ -371,25 +415,42 @@ class KvmHub:
                 continue
             if await answer_kvm_ping(viewer, data):
                 continue
-            if self._raw:
-                try:
-                    await self.upstream.send(data)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("KVM hub raw viewer forward failed: %s", exc)
-                    return
-                continue
-            packets, _tail = iter_packets(data)
-            if not packets and len(data) >= 2 and packet_type(data) == IVTP_HID:
-                packets = [data]
-            for pkt in packets:
-                typ = packet_type(pkt)
-                if typ == IVTP_HID:
-                    try:
-                        await self.upstream.send(pkt)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("KVM hub HID forward failed: %s", exc)
-                        return
-                # keepalive / FULL / STOP / anything else: drop
+            if not await self._forward_viewer_bytes(data):
+                return
+
+    async def _handle_raw_bmc_chunk(self, data: bytes) -> None:
+        async with self._viewer_lock:
+            if not self._viewers:
+                if not self._had_viewer:
+                    self._join_packets.append(data)
+                return
+        await self._broadcast(data)
+
+    async def _dispatch_bmc_packet(self, pkt: bytes) -> bool:
+        """Handle one BMC packet. Returns False when the dispatch loop should stop."""
+        typ = packet_type(pkt)
+        if typ in _INTERNAL_TYPES:
+            return True
+        if typ == IVTP_KEEPALIVE:
+            try:
+                await self.upstream.send(keepalive_frame())
+            except Exception:  # noqa: BLE001
+                return False
+            return True
+        if typ == IVTP_MAX_SESSION:
+            await self.destroy(from_bmc=True, reason="max sessions")
+            return False
+        if typ == IVTP_STOP:
+            await self._broadcast(pkt)
+            await self.destroy(from_bmc=True, reason="bmc stop")
+            return False
+        if typ == IVTP_ACTIVE:
+            await self._broadcast(pkt)
+            self.request_full()
+            return True
+        if typ in _FANOUT_TYPES:
+            await self._broadcast(pkt)
+        return True
 
     async def _bmc_loop(self) -> None:
         try:
@@ -400,16 +461,9 @@ class KvmHub:
                 if isinstance(data, str):
                     data = data.encode("latin1")
                 if self._raw:
-                    async with self._viewer_lock:
-                        if not self._viewers:
-                            if not self._had_viewer:
-                                self._join_packets.append(data)
-                            continue
-                    await self._broadcast(data)
+                    await self._handle_raw_bmc_chunk(data)
                 else:
                     await self._dispatch_bmc_bytes(data)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001
             logger.info("KVM hub BMC stream ended for server %s: %s", self.server_id, exc)
         finally:
@@ -422,28 +476,8 @@ class KvmHub:
             pkt = self._bmc_buf.take()
             if pkt is None:
                 return
-            typ = packet_type(pkt)
-            if typ in _INTERNAL_TYPES:
-                continue
-            if typ == IVTP_KEEPALIVE:
-                try:
-                    await self.upstream.send(keepalive_frame())
-                except Exception:  # noqa: BLE001
-                    return
-                continue
-            if typ == IVTP_MAX_SESSION:
-                await self.destroy(from_bmc=True, reason="max sessions")
+            if not await self._dispatch_bmc_packet(pkt):
                 return
-            if typ == IVTP_STOP:
-                await self._broadcast(pkt)
-                await self.destroy(from_bmc=True, reason="bmc stop")
-                return
-            if typ == IVTP_ACTIVE:
-                await self._broadcast(pkt)
-                self.request_full()
-                continue
-            if typ in _FANOUT_TYPES:
-                await self._broadcast(pkt)
 
     async def _broadcast(self, pkt: bytes) -> None:
         stale: list[ViewerSocket] = []
@@ -467,50 +501,80 @@ class KvmHub:
             self._schedule_idle()
 
     async def _keepalive_loop(self) -> None:
-        try:
-            while self._alive:
-                await asyncio.sleep(self._keepalive_seconds)
-                if not self._alive:
-                    return
-                try:
-                    await self.upstream.send(keepalive_frame())
-                except Exception:  # noqa: BLE001
-                    return
-        except asyncio.CancelledError:
-            return
+        while self._alive:
+            await asyncio.sleep(self._keepalive_seconds)
+            if not self._alive:
+                return
+            try:
+                await self.upstream.send(keepalive_frame())
+            except Exception:  # noqa: BLE001
+                return
 
     async def _full_loop(self) -> None:
-        try:
-            while True:
-                await self._full_event.wait()
-                if not self._alive:
-                    return
-                self._full_event.clear()
-                await asyncio.sleep(self._full_coalesce_seconds)
-                if not self._alive:
-                    return
-                try:
-                    await self.upstream.send(full_frame())
-                except Exception:  # noqa: BLE001
-                    return
-        except asyncio.CancelledError:
-            return
+        while True:
+            await self._full_event.wait()
+            if not self._alive:
+                return
+            self._full_event.clear()
+            await asyncio.sleep(self._full_coalesce_seconds)
+            if not self._alive:
+                return
+            try:
+                await self.upstream.send(full_frame())
+            except Exception:  # noqa: BLE001
+                return
 
     async def _heartbeat_loop(self) -> None:
         if not self._owns_lock:
             return
         interval = heartbeat_seconds()
-        try:
-            while self._alive:
-                await asyncio.sleep(interval)
-                if not self._alive:
-                    return
-                if not refresh_lock(self.server_id):
-                    logger.warning("KVM hub lost Redis lock for server %s", self.server_id)
-                    await self.destroy(reason="lost lock")
-                    return
-        except asyncio.CancelledError:
+        while self._alive:
+            await asyncio.sleep(interval)
+            if not self._alive:
+                return
+            if not refresh_lock(self.server_id):
+                logger.warning("KVM hub lost Redis lock for server %s", self.server_id)
+                await self.destroy(reason="lost lock")
+                return
+
+    async def _cancel_hub_tasks(self) -> None:
+        current = asyncio.current_task()
+        pending = [task for task in self._tasks if task is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._tasks = []
+
+    async def _close_upstream(self) -> None:
+        if self._upstream_cm is None:
             return
+        try:
+            await self._upstream_cm.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        self._upstream_cm = None
+
+    async def _logout_and_release_lock(self) -> None:
+        if self.auth is not None:
+            try:
+                await self.profile.logout(self.auth)
+            except Exception:  # noqa: BLE001
+                logger.debug("KVM hub BMC logout failed", exc_info=True)
+        if not self._owns_lock:
+            return
+        try:
+            drop_lock(self.server_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("KVM hub lock drop failed", exc_info=True)
+
+    async def _kick_viewers(self, viewers: list[ViewerSocket], reason: str) -> None:
+        close_reason = (reason or "KVM hub closed")[:120]
+        for viewer in viewers:
+            try:
+                await viewer.close(code=1011, reason=close_reason)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def destroy(self, *, from_bmc: bool = False, reason: str = "") -> None:
         async with self._destroy_lock:
@@ -527,37 +591,13 @@ class KvmHub:
                         await self.upstream.send(stop)
                     except Exception:  # noqa: BLE001
                         pass
-            current = asyncio.current_task()
-            pending = [task for task in self._tasks if task is not current]
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            self._tasks = []
-            if self._upstream_cm is not None:
-                try:
-                    await self._upstream_cm.__aexit__(None, None, None)
-                except Exception:  # noqa: BLE001
-                    pass
-                self._upstream_cm = None
-            if self.auth is not None:
-                try:
-                    await self.profile.logout(self.auth)
-                except Exception:  # noqa: BLE001
-                    logger.debug("KVM hub BMC logout failed", exc_info=True)
-            if self._owns_lock:
-                try:
-                    drop_lock(self.server_id)
-                except Exception:  # noqa: BLE001
-                    logger.debug("KVM hub lock drop failed", exc_info=True)
+            await self._cancel_hub_tasks()
+            await self._close_upstream()
+            await self._logout_and_release_lock()
             _hubs.pop(self.server_id, None)
             viewers = list(self._viewers)
             self._viewers.clear()
-        for viewer in viewers:
-            try:
-                await viewer.close(code=1011, reason=(reason or "KVM hub closed")[:120])
-            except Exception:  # noqa: BLE001
-                pass
+        await self._kick_viewers(viewers, reason)
 
 
 async def wait_local_hub(server_id: int, timeout: float = 30.0) -> Optional[KvmHub]:
@@ -581,7 +621,7 @@ async def prefetch_decode_worker(server_id: int, profile: IpmiKvmProfile, auth: 
         except Exception as exc:  # noqa: BLE001
             logger.debug("KVM hub: asset prefetch failed (%s): %s", cleaned, exc)
             continue
-        cache_kvm_asset(server_id, cleaned, body, content_type)
+        _store_kvm_asset(server_id, cleaned, body, content_type)
 
 
 def _load_server(server_id: int):
@@ -601,25 +641,102 @@ def _is_max_sessions(exc: BaseException) -> bool:
     return "max session" in detail.lower()
 
 
+def _is_handshake_timeout(exc: BaseException) -> bool:
+    detail = getattr(exc, "detail", None) or str(exc)
+    return "timed out" in detail.lower()
+
+
+def _hello_attempts(profile: IpmiKvmProfile, auth: BmcKvmAuth) -> list[Optional[bytes]]:
+    fn = getattr(profile, "hello_frame_attempts", None)
+    if callable(fn):
+        frames = list(fn(auth) or [])
+        if frames:
+            return frames
+    return [None]
+
+
+async def _logout_quietly(profile: IpmiKvmProfile, auth: BmcKvmAuth) -> None:
+    try:
+        await profile.logout(auth)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _connect_handshake(
+    server_id: int,
+    profile: IpmiKvmProfile,
+    auth: BmcKvmAuth,
+    hellos: list[Optional[bytes]],
+) -> tuple[Any, Any, bytes]:
+    last_exc: Optional[BaseException] = None
+    for hello_i, hello in enumerate(hellos):
+        cm = profile.open_upstream(auth)
+        upstream = None
+        try:
+            upstream = await cm.__aenter__()
+            if hello is None:
+                leftover = await profile.handshake(upstream, auth)
+            else:
+                leftover = await profile.handshake(upstream, auth, hello=hello)
+            return cm, upstream, leftover
+        except Exception as exc:  # noqa: BLE001
+            await _close_kvm_attempt(profile, cm, upstream)
+            last_exc = exc
+            more_hellos = hello_i < len(hellos) - 1
+            if (
+                isinstance(exc, IpmiKvmUnavailable)
+                and _is_handshake_timeout(exc)
+                and more_hellos
+            ):
+                logger.info(
+                    "KVM hub hello timeout on server %s, trying next validate body",
+                    server_id,
+                )
+                continue
+            raise
+    raise last_exc or IpmiKvmUnavailable("BMC KVM handshake failed")
+
+
+async def _close_kvm_attempt(profile: IpmiKvmProfile, cm, upstream) -> None:
+    if upstream is not None:
+        try:
+            stop = profile.stop_frame()
+            if stop:
+                await asyncio.wait_for(upstream.send(stop), 3)
+        except Exception:  # noqa: BLE001
+            pass
+    if cm is not None:
+        try:
+            await cm.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def start_hub(server_id: int, profile: IpmiKvmProfile, attach_secret: str) -> KvmHub:
     server = _load_server(server_id)
     last_exc: Optional[BaseException] = None
     for attempt in range(_MAX_SESSION_RETRIES):
         auth = await profile.login(server)
         await prefetch_decode_worker(server_id, profile, auth)
-        upstream_cm = profile.open_upstream(auth)
+        hellos = _hello_attempts(profile, auth)
         try:
-            upstream = await upstream_cm.__aenter__()
-            leftover = await profile.handshake(upstream, auth)
+            upstream_cm, upstream, leftover = await _connect_handshake(
+                server_id, profile, auth, hellos
+            )
+            hub = KvmHub(
+                server_id,
+                profile,
+                auth,
+                upstream,
+                leftover=leftover,
+                attach_secret=attach_secret,
+                owns_lock=True,
+                upstream_cm=upstream_cm,
+            )
+            await hub.start()
+            return hub
         except IpmiKvmUnavailable as exc:
-            try:
-                await upstream_cm.__aexit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await profile.logout(auth)
-            except Exception:  # noqa: BLE001
-                pass
+            await _logout_quietly(profile, auth)
             last_exc = exc
             if _is_max_sessions(exc) and attempt < _MAX_SESSION_RETRIES - 1:
                 logger.info(
@@ -632,27 +749,8 @@ async def start_hub(server_id: int, profile: IpmiKvmProfile, attach_secret: str)
                 continue
             raise
         except Exception:
-            try:
-                await upstream_cm.__aexit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await profile.logout(auth)
-            except Exception:  # noqa: BLE001
-                pass
+            await _logout_quietly(profile, auth)
             raise
-        hub = KvmHub(
-            server_id,
-            profile,
-            auth,
-            upstream,
-            leftover=leftover,
-            attach_secret=attach_secret,
-            owns_lock=True,
-            upstream_cm=upstream_cm,
-        )
-        await hub.start()
-        return hub
     raise last_exc or IpmiKvmUnavailable("BMC reports KVM max sessions")
 
 
@@ -833,6 +931,40 @@ async def _add_local_viewer(websocket: WebSocket, hub: KvmHub) -> None:
     await hub.add_viewer(FastApiViewer(websocket))
 
 
+async def _try_local_splice_viewer(
+    websocket: WebSocket, server_id: int, lock: dict
+) -> bool:
+    if lock["instance_id"] != INSTANCE_ID:
+        return False
+    hub = await wait_local_hub(server_id, timeout=15.0)
+    if hub is None:
+        return False
+    await _add_local_viewer(websocket, hub)
+    return True
+
+
+async def _attempt_remote_splice(
+    websocket: WebSocket, server_id: int, lock: dict
+) -> None:
+    await splice_to_owner(websocket, server_id, lock)
+
+
+async def _steal_and_attach_local(
+    websocket: WebSocket,
+    server_id: int,
+    profile: IpmiKvmProfile,
+    lock: dict,
+) -> bool:
+    if lock["instance_id"] == INSTANCE_ID:
+        return False
+    steal_lock(server_id, lock["instance_id"])
+    hub = await _own_or_wait_hub(server_id, profile)
+    if hub is None:
+        return False
+    await _add_local_viewer(websocket, hub)
+    return True
+
+
 async def _splice_with_failover(
     websocket: WebSocket, server_id: int, profile: IpmiKvmProfile
 ) -> None:
@@ -841,13 +973,10 @@ async def _splice_with_failover(
     for _attempt in range(_SPLICE_RETRIES):
         if lock is None:
             break
-        if lock["instance_id"] == INSTANCE_ID:
-            hub = await wait_local_hub(server_id, timeout=15.0)
-            if hub is not None:
-                await _add_local_viewer(websocket, hub)
-                return
+        if await _try_local_splice_viewer(websocket, server_id, lock):
+            return
         try:
-            await splice_to_owner(websocket, server_id, lock)
+            await _attempt_remote_splice(websocket, server_id, lock)
             return
         except (OSError, WebSocketException) as exc:
             last_exc = exc
@@ -855,11 +984,8 @@ async def _splice_with_failover(
             await asyncio.sleep(0.4)
             lock = get_hub_lock(server_id)
 
-    if isinstance(last_exc, ConnectionRefusedError) and lock and lock["instance_id"] != INSTANCE_ID:
-        steal_lock(server_id, lock["instance_id"])
-        hub = await _own_or_wait_hub(server_id, profile)
-        if hub is not None:
-            await _add_local_viewer(websocket, hub)
+    if isinstance(last_exc, ConnectionRefusedError) and lock:
+        if await _steal_and_attach_local(websocket, server_id, profile, lock):
             return
 
     if last_exc is not None:
@@ -870,7 +996,7 @@ async def _splice_with_failover(
         return
     lock = get_hub_lock(server_id)
     if lock is not None:
-        await splice_to_owner(websocket, server_id, lock)
+        await _attempt_remote_splice(websocket, server_id, lock)
         return
     raise IpmiKvmUnavailable("KVM hub is not available")
 
@@ -896,16 +1022,16 @@ async def _fetch_and_cache_asset(
     auth: BmcKvmAuth,
 ) -> tuple[bytes, str]:
     body, content_type = await profile.fetch_asset(auth, path)
-    cache_kvm_asset(server_id, path, body, content_type)
+    _store_kvm_asset(server_id, path, body, content_type)
     return body, content_type
 
 
-async def wait_or_fetch_kvm_asset(
+async def _resolve_kvm_asset(
     server_id: int,
     path: str,
     session: dict,
     profile: IpmiKvmProfile,
-) -> tuple[bytes, str]:
+) -> Optional[tuple[bytes, str]]:
     cached = get_cached_kvm_asset(server_id, path)
     if cached:
         return cached
@@ -916,21 +1042,48 @@ async def wait_or_fetch_kvm_asset(
         return await _fetch_and_cache_asset(
             server_id, path, profile, auth_from_ws_session(session)
         )
+    return None
+
+
+def _asset_wait_should_stop(start: float, server_id: int, saw_lock: bool) -> bool:
+    if get_hub_lock(server_id) is not None:
+        return False
+    return not saw_lock and (time.monotonic() - start) > _ASSET_NO_LOCK_GRACE_SECONDS
+
+
+async def _wait_for_server_asset_activity(server_id: int, timeout: float) -> None:
+    event = _server_asset_event(server_id)
+    event.clear()
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+
+
+async def wait_or_fetch_kvm_asset(
+    server_id: int,
+    path: str,
+    session: dict,
+    profile: IpmiKvmProfile,
+) -> tuple[bytes, str]:
+    resolved = await _resolve_kvm_asset(server_id, path, session, profile)
+    if resolved is not None:
+        return resolved
 
     start = time.monotonic()
     saw_lock = False
     while time.monotonic() - start < _ASSET_WAIT_SECONDS:
-        cached = get_cached_kvm_asset(server_id, path)
-        if cached:
-            return cached
-        hub = get_local_hub(server_id)
-        if hub is not None and hub.auth is not None:
-            return await _fetch_and_cache_asset(server_id, path, profile, hub.auth)
+        resolved = await _resolve_kvm_asset(server_id, path, session, profile)
+        if resolved is not None:
+            return resolved
         if get_hub_lock(server_id) is not None:
             saw_lock = True
-        elif not saw_lock and (time.monotonic() - start) > _ASSET_NO_LOCK_GRACE_SECONDS:
+        elif _asset_wait_should_stop(start, server_id, saw_lock):
             break
-        await asyncio.sleep(0.1)
+        remaining = _ASSET_WAIT_SECONDS - (time.monotonic() - start)
+        if remaining <= 0:
+            break
+        await _wait_for_server_asset_activity(server_id, remaining)
 
     cached = get_cached_kvm_asset(server_id, path)
     if cached:

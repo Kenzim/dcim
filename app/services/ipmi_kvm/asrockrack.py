@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import ssl
 import struct
 from typing import Any
 from urllib.parse import urlparse
@@ -13,6 +12,7 @@ import websockets
 
 from app.models.server import Server
 from app.services.ipmi_kvm.base import BmcKvmAuth, IpmiKvmProfile, IpmiKvmUnavailable
+from app.services.ipmi_kvm.bmc_tls import bmc_httpx_verify, bmc_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +80,6 @@ def initial_client_frame_with_server_ip(
     )
 
 
-def _ssl_ctx() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 class _PacketBuf:
     def __init__(self) -> None:
         self.buf = b""
@@ -118,7 +111,7 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
     async def login(self, server: Server) -> BmcKvmAuth:
         username, password = self.credentials(server)
         origin, hostname = self.origin_and_host(server)
-        async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+        async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=20.0) as client:
             try:
                 login = await client.post(
                     f"{origin}/api/session",
@@ -178,14 +171,20 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
         )
 
     def hello_frame(self, auth: BmcKvmAuth) -> bytes:
+        return self.hello_frame_attempts(auth)[0]
+
+    def hello_frame_attempts(self, auth: BmcKvmAuth) -> list[bytes]:
+        """IVTP hello variants: 373-byte first on ASRock 1.83+, 438-byte first on Gigabyte."""
+        short = initial_client_frame(auth.kvm_token, auth.client_ip, auth.username)
+        long = initial_client_frame_with_server_ip(
+            auth.kvm_token,
+            auth.client_ip,
+            auth.username,
+            auth.server_ip or auth.hostname,
+        )
         if self.include_server_ip_in_validate:
-            return initial_client_frame_with_server_ip(
-                auth.kvm_token,
-                auth.client_ip,
-                auth.username,
-                auth.server_ip or auth.hostname,
-            )
-        return initial_client_frame(auth.kvm_token, auth.client_ip, auth.username)
+            return [long, short]
+        return [short, long]
 
     def open_upstream(self, auth: BmcKvmAuth):
         parsed = urlparse(auth.origin)
@@ -193,7 +192,7 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
         url = f"{ws_scheme}://{parsed.netloc}/kvm"
         return websockets.connect(
             url,
-            ssl=_ssl_ctx() if ws_scheme == "wss" else None,
+            ssl=bmc_ssl_context(megarac=True) if ws_scheme == "wss" else None,
             server_hostname=auth.hostname,
             subprotocols=["binary", "base64"],
             origin=auth.origin,
@@ -205,7 +204,9 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
             open_timeout=20,
         )
 
-    async def handshake(self, upstream: Any, auth: BmcKvmAuth) -> bytes:
+    async def handshake(
+        self, upstream: Any, auth: BmcKvmAuth, hello: bytes | None = None
+    ) -> bytes:
         buf = _PacketBuf()
 
         async def next_pkt() -> bytes:
@@ -225,7 +226,7 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
                 raise IpmiKvmUnavailable("BMC reports KVM max sessions")
             if typ != _IVTP_ALLOWED:
                 raise IpmiKvmUnavailable(f"Unexpected KVM hello (0x{typ:x})")
-            await upstream.send(self.hello_frame(auth))
+            await upstream.send(hello if hello is not None else self.hello_frame(auth))
             while True:
                 pkt = await next_pkt()
                 typ = struct.unpack_from("<H", pkt)[0]
@@ -246,7 +247,7 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
         if not self.asset_allowed(cleaned):
             raise IpmiKvmUnavailable("KVM asset path is not allowed")
         try:
-            async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+            async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=20.0) as client:
                 resp = await client.get(
                     f"{auth.origin}/{cleaned}",
                     headers={
@@ -264,7 +265,7 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
 
     async def logout(self, auth: BmcKvmAuth) -> None:
         try:
-            async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
+            async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=8.0) as client:
                 await client.delete(
                     f"{auth.origin}/api/session",
                     headers={

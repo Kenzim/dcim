@@ -152,7 +152,11 @@ async def set_guest_password(
     )
 
 
-DEFAULT_CLOUDINIT_NAMESERVERS = "1.1.1.1 8.8.8.8"
+DEFAULT_DNS_PRIMARY = "1.1.1.1"
+DEFAULT_DNS_SECONDARY = "8.8.8.8"
+DEFAULT_IPV4_NETMASK = "255.255.255.0"
+DEFAULT_DNS_SERVER_LIST = (DEFAULT_DNS_PRIMARY, DEFAULT_DNS_SECONDARY)
+DEFAULT_CLOUDINIT_NAMESERVERS = f"{DEFAULT_DNS_PRIMARY} {DEFAULT_DNS_SECONDARY}"
 
 
 def cloudinit_credentials_from_ctx(ctx) -> tuple[Optional[str], Optional[str]]:
@@ -289,7 +293,9 @@ async def configure_linux_network(plugin, *, mode: str, alloc=None, dns: Optiona
     ip = (alloc.ip_address or "").strip()
     prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
     gw = (alloc.gateway or "").strip()
-    dns_servers = (dns or getattr(alloc, "dns_servers", None) or "1.1.1.1 8.8.8.8").replace(",", " ")
+    dns_servers = (
+        dns or getattr(alloc, "dns_servers", None) or DEFAULT_CLOUDINIT_NAMESERVERS
+    ).replace(",", " ")
     script = f"""
 set -e
 IFACE=$(ip -o link show | awk -F': ' '!/lo/{{print $2; exit}}')
@@ -342,7 +348,7 @@ async def configure_macos_network(plugin, *, mode: str, alloc=None, dns: Optiona
     if not alloc or not (alloc.ip_address or "").strip():
         raise DeploymentError("Static network requires a VM IP allocation")
     ip = (alloc.ip_address or "").strip()
-    mask = (alloc.subnet_mask or "").strip() or "255.255.255.0"
+    mask = (alloc.subnet_mask or "").strip() or DEFAULT_IPV4_NETMASK
     gw = (alloc.gateway or "").strip()
     script = (
         f"/usr/sbin/networksetup -setmanual {svc_q} "
@@ -351,7 +357,7 @@ async def configure_macos_network(plugin, *, mode: str, alloc=None, dns: Optiona
     result = await plugin.guest_exec(["/bin/sh", "-c", script])
     if result.get("exitcode") not in (0, None):
         raise DeploymentError(f"macOS setmanual failed: {result.get('err-data')!r}")
-    dns_servers = (dns or "1.1.1.1 8.8.8.8").replace(",", " ").split()
+    dns_servers = (dns or DEFAULT_CLOUDINIT_NAMESERVERS).replace(",", " ").split()
     dns_cmd = "/usr/sbin/networksetup -setdnsservers " + svc_q + " " + " ".join(
         shlex.quote(d) for d in dns_servers
     )
@@ -385,10 +391,12 @@ async def configure_windows_network(plugin, *, mode: str, alloc=None, dns: Optio
     ip = (alloc.ip_address or "").strip()
     prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
     gw = (alloc.gateway or "").strip()
-    dns_raw = (dns or getattr(alloc, "dns_servers", None) or "1.1.1.1 8.8.8.8").replace(",", " ")
+    dns_raw = (
+        dns or getattr(alloc, "dns_servers", None) or DEFAULT_CLOUDINIT_NAMESERVERS
+    ).replace(",", " ")
     dns_list = [d for d in dns_raw.split() if d]
     if not dns_list:
-        dns_list = ["1.1.1.1", "8.8.8.8"]
+        dns_list = list(DEFAULT_DNS_SERVER_LIST)
     dns_ps = ",".join("'" + _ps_quote(d) + "'" for d in dns_list)
     gw_line = ""
     if gw:

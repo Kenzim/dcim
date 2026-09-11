@@ -153,14 +153,14 @@ class IPMIPlugin(ServerPlugin):
         except asyncio.TimeoutError:
             logger.warning(f"ipmitool timed out after {self.timeout}s: {subcommand}")
             raise
-        except Exception as e:
-            logger.error(f"ipmitool execution failed: {e}")
+        except Exception:
+            logger.exception("ipmitool execution failed")
             raise
 
     async def test_connection(self) -> Dict[str, Any]:
         """Test IPMI connection with mc info and power status."""
         try:
-            stdout, stderr, rc = await self._run_ipmitool("mc info")
+            _stdout, stderr, rc = await self._run_ipmitool("mc info")
             if rc != 0:
                 err = (stderr or b"").decode("utf-8", errors="replace").strip()
                 return {
@@ -169,7 +169,7 @@ class IPMIPlugin(ServerPlugin):
                     "details": {"hostname": self.hostname, "port": self.port},
                 }
             # Optionally verify power command works
-            pout, perr, prc = await self._run_ipmitool("power status")
+            _pout, perr, prc = await self._run_ipmitool("power status")
             if prc != 0:
                 err = (perr or b"").decode("utf-8", errors="replace").strip()
                 return {
@@ -211,7 +211,7 @@ class IPMIPlugin(ServerPlugin):
 
     async def power_on(self) -> bool:
         """Power on the chassis."""
-        stdout, stderr, rc = await self._run_ipmitool("power on")
+        _stdout, stderr, rc = await self._run_ipmitool("power on")
         if rc != 0:
             logger.warning(f"ipmitool power on failed: {stderr.decode(errors='replace')}")
             return False
@@ -220,11 +220,11 @@ class IPMIPlugin(ServerPlugin):
     async def power_off(self, force: bool = False) -> bool:
         """Power off the chassis. force=True uses hard off if supported."""
         cmd = "power off" if force else "power soft"
-        stdout, stderr, rc = await self._run_ipmitool(cmd)
+        _stdout, stderr, rc = await self._run_ipmitool(cmd)
         if rc != 0:
             # Some BMCs only support "power off" (hard)
             if not force:
-                stdout, stderr, rc = await self._run_ipmitool("power off")
+                _stdout, stderr, rc = await self._run_ipmitool("power off")
             if rc != 0:
                 logger.warning(f"ipmitool power off failed: {stderr.decode(errors='replace')}")
                 return False
@@ -232,7 +232,7 @@ class IPMIPlugin(ServerPlugin):
 
     async def power_reset(self) -> bool:
         """Reset (cycle) the chassis power."""
-        stdout, stderr, rc = await self._run_ipmitool("power reset")
+        _stdout, stderr, rc = await self._run_ipmitool("power reset")
         if rc != 0:
             logger.warning(f"ipmitool power reset failed: {stderr.decode(errors='replace')}")
             return False
@@ -344,7 +344,7 @@ class IPMIPlugin(ServerPlugin):
         command = f"chassis bootdev {normalized_device}"
         if options:
             command = f"{command} options={','.join(options)}"
-        stdout, stderr, rc = await self._run_ipmitool(command)
+        _stdout, stderr, rc = await self._run_ipmitool(command)
         if rc != 0:
             msg = (stderr or b"").decode("utf-8", errors="replace").strip()
             logger.warning(f"ipmitool set boot device failed: {msg}")

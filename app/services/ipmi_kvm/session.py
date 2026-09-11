@@ -1,6 +1,8 @@
 """Open a BMC HTML5 KVM session and persist it for the Rackflow WS bridge."""
 from __future__ import annotations
 
+import asyncio
+
 from app.models.server import Server
 from app.services.ipmi_kvm.base import BmcKvmAuth
 from app.services.ipmi_kvm.registry import profile_for_server
@@ -21,8 +23,7 @@ def auth_from_ws_session(data: dict) -> BmcKvmAuth:
     )
 
 
-async def mint_bridged_session(server: Server) -> dict:
-    """Mint a viewer-only WS ticket. BMC login happens when the hub starts."""
+def _mint_bridged_session_sync(server: Server) -> dict:
     profile = profile_for_server(server)
     minted = mint_viewer_session(server.id, profile.id)
     return {
@@ -32,3 +33,8 @@ async def mint_bridged_session(server: Server) -> dict:
         "profile": profile.id,
         "expires_in": minted["expires_in"],
     }
+
+
+async def mint_bridged_session(server: Server) -> dict:
+    """Mint a viewer-only WS ticket. BMC login happens when the hub starts."""
+    return await asyncio.to_thread(_mint_bridged_session_sync, server)
