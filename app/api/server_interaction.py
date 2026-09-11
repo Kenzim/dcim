@@ -52,6 +52,53 @@ router = APIRouter()
 DEFAULT_PXE_NETWORK_KERNEL_ARGS = "ip=dhcp rd.neednet=1"
 
 
+def _pxe_mac_hex(mac: Optional[str]) -> str:
+    """Return 12 lowercase hex digits, or empty if mac is not a MAC address."""
+    raw = (
+        (mac or "")
+        .replace(":", "")
+        .replace("-", "")
+        .replace(".", "")
+        .strip()
+        .lower()
+    )
+    if len(raw) != 12 or any(c not in "0123456789abcdef" for c in raw):
+        return ""
+    return raw
+
+
+def _pxe_colon_mac(mac: Optional[str]) -> str:
+    """Colon MAC (aa:bb:cc:dd:ee:ff) for rf_pxe_mac= on the kernel command line."""
+    raw = _pxe_mac_hex(mac)
+    if not raw:
+        return ""
+    return ":".join(raw[i : i + 2] for i in range(0, 12, 2))
+
+
+def _pxe_bootif_from_mac(mac: Optional[str]) -> str:
+    """PXELINUX BOOTIF value (01-aa-bb-cc-dd-ee-ff) for live-boot / initramfs."""
+    raw = _pxe_mac_hex(mac)
+    if not raw:
+        return ""
+    dashed = "-".join(raw[i : i + 2] for i in range(0, 12, 2))
+    return f"01-{dashed}"
+
+
+def _append_pxe_mac_kernel_args(kernel_params: str, boot_port: Optional[NetworkPort]) -> str:
+    """Ensure BOOTIF= and rf_pxe_mac= are present when the PXE port MAC is known."""
+    mac = (getattr(boot_port, "mac_address", None) or "").strip() if boot_port is not None else ""
+    bootif = _pxe_bootif_from_mac(mac)
+    colon_mac = _pxe_colon_mac(mac)
+    if not bootif or not colon_mac:
+        return kernel_params
+    params = (kernel_params or "").strip()
+    if "BOOTIF=" not in params:
+        params = f"{params} BOOTIF={bootif}".strip()
+    if "rf_pxe_mac=" not in params:
+        params = f"{params} rf_pxe_mac={colon_mac}".strip()
+    return params
+
+
 def _script_token_filename(boot_task_id: int) -> str:
     """Canonical filename a download token must allow to fetch a boot task script."""
     return f"script-{boot_task_id}.sh"
@@ -120,11 +167,16 @@ def _build_kernel_arg_template_context(db: Session, server, boot_port: Optional[
     except Exception as exc:
         logger.debug("Failed to build extended kernel arg context for server %s: %s", server_id, exc)
 
+    mac_dash = mac.replace(":", "-").replace(".", "-").lower() if mac else ""
+    bootif = _pxe_bootif_from_mac(mac)
+
     return {
         "ip": server_ip,
         "server_ip": server_ip,
         "mac": mac,
         "server_mac": mac,
+        "mac_dash": mac_dash,
+        "bootif": bootif,
         "pxe_ip": pxe_ip,
         "hostname": hostname,
         "name": server_name,
@@ -197,7 +249,7 @@ def _merge_server_kernel_args(
     elif network_args:
         kernel_params = f"{kernel_params} {network_args}".strip()
 
-    return kernel_params
+    return _append_pxe_mac_kernel_args(kernel_params, boot_port)
 
 
 def build_temp_os_kernel_args_preview(

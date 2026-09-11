@@ -1,0 +1,4 @@
+#!/bin/sh
+# Busybox udhcpc hook used when ipconfig is unavailable.
+. /lib/rf-netboot.sh
+rf_udhcpc_handler "$@"

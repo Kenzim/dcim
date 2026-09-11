@@ -3,20 +3,37 @@ Service for managing temporary OS configurations.
 
 Temporary OSes are stored in tftp/pxe/temp_os/{os_id}/ with:
 - config.json: Configuration file
+- kernel / initrd / squashfs files next to the config
 
-For debian-live, boot files (kernel, initrd, squashfs) are served from /root/dcim/tftp/
-via the API endpoint /api/servers/interaction/tftp/
+In production the app container only bakes config.json (binaries are excluded
+from the image). The live files live on the DHCP/TFTP shared volume at
+``$TFTP_ROOT_DIRECTORY/pxe/temp_os`` (typically ``/shared/tftp/pxe/temp_os``).
 """
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
-# Base directory for temporary OSes
-BASE_DIR = Path(__file__).parent.parent.parent / "tftp" / "pxe" / "temp_os"
+# Repo-relative fallback (dev / tests without a TFTP volume)
+_REPO_TEMP_OS_DIR = Path(__file__).resolve().parent.parent.parent / "tftp" / "pxe" / "temp_os"
+
+
+def _default_temp_os_dir() -> Path:
+    """Prefer the shared TFTP volume when the runner layout is in use."""
+    tftp_root = os.environ.get("TFTP_ROOT_DIRECTORY", "").strip()
+    if tftp_root:
+        shared = Path(tftp_root) / "pxe" / "temp_os"
+        if shared.is_dir():
+            return shared
+    return _REPO_TEMP_OS_DIR
+
+
+# Backwards-compatible alias used by older tests/imports
+BASE_DIR = _REPO_TEMP_OS_DIR
 
 
 class TempOSConfig(BaseModel):
@@ -45,8 +62,8 @@ class TempOSConfig(BaseModel):
 class TempOSService:
     """Service for managing temporary OS configurations"""
     
-    def __init__(self, base_dir: Path = BASE_DIR):
-        self.base_dir = Path(base_dir)
+    def __init__(self, base_dir: Optional[Path] = None):
+        self.base_dir = Path(base_dir) if base_dir is not None else _default_temp_os_dir()
         self.base_dir.mkdir(parents=True, exist_ok=True)
     
     def scan_os_configs(self) -> List[TempOSConfig]:
@@ -79,8 +96,7 @@ class TempOSService:
                     logger.warning(f"Missing kernel_file or initrd_file in {config_file}")
                     continue
                 
-                # For debian-live, files are served from /root/dcim/tftp/ via API
-                # No need to check for local kernel/initrd files in temp_os directory
+                # Boot binaries may live only on the TFTP volume, not in the image.
                 
                 config = TempOSConfig(**config_data)
                 configs.append(config)

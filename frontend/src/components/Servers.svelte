@@ -766,7 +766,7 @@
               rows="2"
               placeholder="e.g. console=ttyS0,115200n8"
             ></textarea>
-            <small class="field-help">Appended to PXE boot kernel command line. Template format: <code>${"{var}"}</code> (e.g. <code>${"{ip}"}</code>, <code>${"{mac}"}</code>, <code>${"{gateway}"}</code>, <code>${"{cidr}"}</code>).</small>
+            <small class="field-help">Appended to PXE boot kernel command line. Template format: <code>${"{var}"}</code> (e.g. <code>${"{ip}"}</code>, <code>${"{mac}"}</code>, <code>${"{bootif}"}</code>, <code>${"{gateway}"}</code>, <code>${"{cidr}"}</code>).</small>
           </div>
           <div class="form-group">
             <label for="pxe-kernel-args-network">PXE kernel args (network)</label>

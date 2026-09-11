@@ -2171,7 +2171,7 @@
                       bind:value={pxeKernelArgsGeneralDraft}
                       placeholder="e.g. console=ttyS0,115200n8"
                     ></textarea>
-                    <small class="field-help">Template format: <code>${"{var}"}</code>. Common vars: <code>${"{ip}"}</code>, <code>${"{mac}"}</code>, <code>${"{pxe_ip}"}</code>, <code>${"{gateway}"}</code>, <code>${"{cidr}"}</code>, <code>${"{netmask}"}</code>.</small>
+                    <small class="field-help">Template format: <code>${"{var}"}</code>. Common vars: <code>${"{ip}"}</code>, <code>${"{mac}"}</code>, <code>${"{bootif}"}</code>, <code>${"{pxe_ip}"}</code>, <code>${"{gateway}"}</code>, <code>${"{cidr}"}</code>, <code>${"{netmask}"}</code>.</small>
                   </div>
                   <div class="form-group">
                     <label for="pxe-kernel-args-network-detail">Network args</label>

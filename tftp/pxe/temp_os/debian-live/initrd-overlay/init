@@ -1,0 +1,181 @@
+#!/bin/sh
+# Rackflow netboot PID 1. Replaces live-boot: wait for PXE MAC, DHCP that
+# iface only, fetch squashfs, overlay, then chain into the live OS.
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+[ -d /dev ] || mkdir -m 0755 /dev
+[ -d /root ] || mkdir -m 0700 /root
+[ -d /sys ] || mkdir /sys
+[ -d /proc ] || mkdir /proc
+[ -d /tmp ] || mkdir /tmp
+mkdir -p /var/lock
+mount -t sysfs -o nodev,noexec,nosuid sysfs /sys
+mount -t proc -o nodev,noexec,nosuid proc /proc
+
+# shellcheck disable=SC2013
+for x in $(cat /proc/cmdline); do
+	case $x in
+	quiet)
+		quiet=y
+		;;
+	esac
+done
+
+if [ "$quiet" != "y" ]; then
+	quiet=n
+	echo "Loading, please wait..."
+fi
+export quiet
+
+mount -t devtmpfs -o nosuid,mode=0755 udev /dev
+[ ! -h /dev/fd ] && ln -s /proc/self/fd /dev/fd
+[ ! -h /dev/stdin ] && ln -s /proc/self/fd/0 /dev/stdin
+[ ! -h /dev/stdout ] && ln -s /proc/self/fd/1 /dev/stdout
+[ ! -h /dev/stderr ] && ln -s /proc/self/fd/2 /dev/stderr
+
+mkdir /dev/pts
+mount -t devpts -o noexec,nosuid,gid=5,mode=0600 devpts /dev/pts || true
+
+export DPKG_ARCH=
+# shellcheck disable=SC1091
+[ -f /conf/arch.conf ] && . /conf/arch.conf
+
+export MODPROBE_OPTIONS="-qb"
+export ROOT=
+export ROOTDELAY=
+export ROOTFLAGS=
+export ROOTFSTYPE=
+export IP=
+export DEVICE=
+export BOOT=
+export BOOTIF=
+export UBIMTD=
+export break=
+export init=/sbin/init
+export readonly=y
+export rootmnt=/root
+export debug=
+export panic=
+export blacklist=
+export resume=
+export resume_offset=
+export noresume=
+export drop_caps=
+export fastboot=n
+export forcefsck=n
+export fsckfix=
+
+# shellcheck disable=SC1091
+[ -f /conf/initramfs.conf ] && . /conf/initramfs.conf
+for conf in conf/conf.d/*; do
+	[ -f "${conf}" ] && . "${conf}"
+done
+# shellcheck disable=SC1091
+[ -f /scripts/functions ] && . /scripts/functions
+
+# shellcheck disable=SC2013
+for x in $(cat /proc/cmdline); do
+	case $x in
+	init=*)
+		init=${x#init=}
+		;;
+	panic=*)
+		panic="${x#panic=}"
+		;;
+	debug)
+		debug=y
+		quiet=n
+		set -x
+		;;
+	break)
+		break=premount
+		;;
+	break=*)
+		break=${x#break=}
+		;;
+	BOOTIF=*)
+		BOOTIF=${x#BOOTIF=}
+		;;
+	initramfs.runsize=*)
+		RUNSIZE="${x#initramfs.runsize=}"
+		;;
+	esac
+done
+
+mount -t tmpfs -o "nodev,noexec,nosuid,size=${RUNSIZE:-10%},mode=0755" tmpfs /run
+mkdir -m 0700 /run/initramfs
+
+# Enlarge /run before modules/udev; squashfs fetch uses ramfs regardless.
+mount -o remount,size=90% /run 2>/dev/null || true
+
+if command -v maybe_break >/dev/null 2>&1; then
+	maybe_break top
+fi
+
+if command -v run_scripts >/dev/null 2>&1; then
+	run_scripts /scripts/init-top
+fi
+
+if command -v load_modules >/dev/null 2>&1; then
+	[ "$quiet" != "y" ] && log_begin_msg "Loading essential drivers"
+	load_modules
+	[ "$quiet" != "y" ] && log_end_msg
+fi
+
+# shellcheck disable=SC1091
+. /lib/rf-netboot.sh
+
+echo "rf-netboot: PID 1 (live-boot skipped)"
+if ! rf_netboot_prepare; then
+	echo "rf-netboot: failed; dropping to shell"
+	exec /bin/sh
+fi
+
+if command -v maybe_break >/dev/null 2>&1; then
+	maybe_break bottom
+fi
+
+if command -v run_scripts >/dev/null 2>&1; then
+	# udev init-bottom moves /dev onto ${rootmnt}/dev
+	run_scripts /scripts/init-bottom
+fi
+
+if [ -d "${rootmnt}/run" ]; then
+	mount -n -o move /run "${rootmnt}/run"
+fi
+
+unset debug
+unset MODPROBE_OPTIONS
+unset DPKG_ARCH
+unset ROOTFLAGS
+unset ROOTFSTYPE
+unset ROOTDELAY
+unset ROOT
+unset IP
+unset BOOT
+unset BOOTIF
+unset DEVICE
+unset UBIMTD
+unset blacklist
+unset break
+unset noresume
+unset panic
+unset quiet
+unset readonly
+unset resume
+unset resume_offset
+unset fastboot
+unset forcefsck
+unset fsckfix
+
+mount -n -o move /sys "${rootmnt}/sys" 2>/dev/null || true
+mount -n -o move /proc "${rootmnt}/proc" 2>/dev/null || true
+
+if command -v run-init >/dev/null 2>&1; then
+	# shellcheck disable=SC2086,SC2094
+	exec run-init ${drop_caps} "${rootmnt}" "${init}" "$@" <"${rootmnt}/dev/console" >"${rootmnt}/dev/console" 2>&1
+fi
+
+exec switch_root "${rootmnt}" "${init}"
+echo "rf-netboot: switch_root failed"
+exec /bin/sh
