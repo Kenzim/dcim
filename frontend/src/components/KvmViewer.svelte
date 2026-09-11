@@ -1,5 +1,9 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
+  import { readClipboardOrPrompt, typeIntoHid } from '../lib/clipboardType.js';
+  import { createWsLatencyProbe } from '../lib/consoleLatency.js';
+  import { eventToFramebuffer, letterboxCanvas, watchCanvasFit } from '../lib/kvmPointer.js';
+  import RemoteConsoleChrome from './RemoteConsoleChrome.svelte';
 
   /** Session from POST /api/kvm/redeem. BMC cookies/tokens stay on the server. */
   export let session;
@@ -49,9 +53,15 @@
     219: 47, 220: 49, 221: 48, 222: 52,
   };
 
+  const MAX_AUTO_RETRIES = 5;
+
   let canvas;
+  let stage;
+  let chrome;
+  let stopFitWatch = null;
   let ctx;
-  let statusText = 'Connecting…';
+  let status = 'connecting';
+  let errorMessage = '';
   let resText = '';
   let ws = null;
   let worker = null;
@@ -70,10 +80,24 @@
   let header = null;
   let videoFrames = 0;
   let destroyed = false;
+  let reconnecting = false;
+  let pasting = false;
+  let autoRetries = 0;
+  let autoReconnectTimer = null;
   const buf = { u8: new Uint8Array(0) };
 
-  function setStatus(msg) {
-    statusText = msg;
+  let latencyMs = null;
+  let latencySamples = [];
+  const latencyProbe = createWsLatencyProbe({
+    encoding: 'binary',
+    onSample({ ms, samples }) {
+      latencyMs = ms;
+      latencySamples = samples;
+    },
+  });
+
+  function isLive() {
+    return !destroyed && ws && ws.readyState === WebSocket.OPEN && status === 'connected';
   }
 
   function ivtp(type, pktStatus, payload) {
@@ -143,10 +167,13 @@
 
   function startStreaming() {
     if (keepAlive) return;
-    setStatus('KVM authenticated — click the screen, then move the mouse');
+    status = 'connected';
+    errorMessage = '';
+    autoRetries = 0;
     keepAlive = setInterval(() => send(ivtp(IVTP.CMD_KEEPALIVE, 0, null)), 3000);
     send(ivtp(IVTP.CMD_FULL, 1, null));
     nudgeMouse();
+    latencyProbe.attach(ws);
   }
 
   function postDecodeBuffer(w, h) {
@@ -168,6 +195,7 @@
     ctx.putImageData(imageBuffer, 0, 0);
     postDecodeBuffer(w, h);
     resText = `${w}×${h}`;
+    letterboxCanvas(canvas, stage);
   }
 
   function onVideo(payload) {
@@ -221,7 +249,6 @@
     new Uint8Array(aligned).set(raw.subarray(0, words * 4));
     if (worker) worker.postMessage({ header, buffer: new Int32Array(aligned) });
     videoFrames += 1;
-    setStatus(`streaming ${canvas.width}×${canvas.height}  frames=${videoFrames}`);
   }
 
   function onPkt(type, pktStatus, payload) {
@@ -230,13 +257,14 @@
         // Handshake already happened server-side; ignore if a leftover 0x17 arrives.
         break;
       case IVTP.CMD_MAX_SESSION:
-        setStatus('BMC reports KVM max sessions — wait for timeout or kick the other viewer');
+        errorMessage = 'BMC reports KVM max sessions — wait for timeout or kick the other viewer';
         break;
       case IVTP.CMD_VALIDATED: {
         const ok = payload.length ? payload[0] : 0;
         if (ok !== 1) {
           fatal = `KVM token rejected (${ok})`;
-          setStatus(fatal);
+          status = 'error';
+          errorMessage = fatal;
           send(ivtp(IVTP.CMD_STOP, 0, null));
           if (ws) ws.close();
           return;
@@ -255,11 +283,10 @@
           ctx.fillStyle = '#000';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
         }
-        if (!videoFrames) setStatus('authenticated — host sent a blank frame; move the mouse');
         nudgeMouse();
         break;
       case IVTP.CMD_STOP:
-        setStatus(`BMC stopped KVM session (${pktStatus})`);
+        errorMessage = `BMC stopped KVM session (${pktStatus})`;
         break;
       case IVTP.CMD_VIDEO:
         onVideo(payload);
@@ -317,11 +344,10 @@
 
   function sendMouse(ev) {
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = ((ev.clientX - rect.left) / rect.width) * canvas.width;
-    const y = ((ev.clientY - rect.top) / rect.height) * canvas.height;
-    const sx = ((x * 32767) / canvas.width) + 0.5;
-    const sy = ((y * 32767) / canvas.height) + 0.5;
+    const pt = eventToFramebuffer(ev, canvas);
+    if (!pt) return;
+    const sx = ((pt.x * 32767) / canvas.width) + 0.5;
+    const sy = ((pt.y * 32767) / canvas.height) + 0.5;
     const report = new Uint8Array(6);
     const dv = new DataView(report.buffer);
     report[0] = buttons;
@@ -332,6 +358,7 @@
   }
 
   function sendCtrlAltDel() {
+    if (!isLive()) return;
     if (canvas) canvas.focus();
     modifiers = 0x01 | 0x04;
     sendKey(17, 1, true);
@@ -345,19 +372,163 @@
     }, 80);
   }
 
+  async function pasteClipboard() {
+    if (pasting || !isLive()) return;
+    errorMessage = '';
+    pasting = true;
+    try {
+      const text = await readClipboardOrPrompt();
+      if (!text) return;
+      await typeText(text);
+    } catch (e) {
+      errorMessage = `Paste failed: ${e.message || e}`;
+    } finally {
+      pasting = false;
+    }
+  }
+
+  export async function typeText(text, opts = {}) {
+    if (!isLive() || !text) return;
+    if (canvas) canvas.focus();
+    await typeIntoHid(sendKey, text, { ...opts, stillConnected: isLive });
+    modifiers = 0;
+  }
+
+  function resetDecodeState() {
+    buf.u8 = new Uint8Array(0);
+    prevComplete = true;
+    frameChunks = [];
+    frameGot = 0;
+    compressSize = 0;
+    header = null;
+    videoFrames = 0;
+    seqKbd = 0;
+    seqMouse = 0;
+    modifiers = 0;
+    buttons = 0;
+    imageBuffer = null;
+  }
+
+  function startWorker() {
+    const workerPath = session.decode_worker_path || '/api/kvm/assets/libs/kvm/ast/decode_worker.js';
+    const workerQs = new URLSearchParams({
+      token: session.ws_token,
+      src: workerPath,
+    });
+    worker = new Worker(`/kvm-decode-bridge.js?${workerQs}`);
+    worker.onerror = (e) => {
+      status = 'error';
+      errorMessage = `worker error: ${e.message || 'failed to load decoder'}`;
+    };
+    worker.onmessage = (e) => {
+      if (e.data.cmd === 'draw') {
+        imageBuffer = e.data.ibuf;
+        if (imageBuffer && ctx) ctx.putImageData(imageBuffer, 0, 0);
+      } else if (e.data.cmd === 'exception') {
+        errorMessage = 'decode error';
+        console.error(e.data.ex);
+      }
+    };
+  }
+
+  function openSocket() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const path = session.ws_path || '/api/kvm/ws';
+    const socket = new WebSocket(`${proto}://${location.host}${path}?token=${encodeURIComponent(session.ws_token)}`, ['binary']);
+    ws = socket;
+    socket.binaryType = 'arraybuffer';
+    socket.onopen = () => {
+      if (destroyed || ws !== socket) return;
+      status = 'connecting';
+    };
+    socket.onerror = () => {
+      if (destroyed || reconnecting || ws !== socket) return;
+      status = 'error';
+      errorMessage = 'websocket error';
+    };
+    socket.onclose = (e) => {
+      if (ws !== socket) return;
+      if (keepAlive) {
+        clearInterval(keepAlive);
+        keepAlive = null;
+      }
+      latencyProbe.detach();
+      chrome?.closeLatencyGraph?.();
+      if (destroyed || reconnecting) return;
+      if (fatal) {
+        status = 'error';
+        errorMessage = fatal;
+        return;
+      }
+      status = 'disconnected';
+      if (e.code !== 1000) {
+        errorMessage = `disconnected (${e.code} ${e.reason || ''})`.trim();
+        scheduleAutoReconnect();
+      }
+    };
+    socket.onmessage = (ev) => {
+      if (ws !== socket) return;
+      try {
+        appendBuf(new Uint8Array(ev.data));
+        drain();
+      } catch (err) {
+        errorMessage = `parse error: ${err.message}`;
+      }
+    };
+  }
+
+  function connect() {
+    if (destroyed) return;
+    status = 'connecting';
+    errorMessage = '';
+    fatal = null;
+    resetDecodeState();
+    startWorker();
+    resetImage(640, 480);
+    openSocket();
+  }
+
+  function clearAutoReconnect() {
+    if (autoReconnectTimer != null) {
+      clearTimeout(autoReconnectTimer);
+      autoReconnectTimer = null;
+    }
+  }
+
+  function scheduleAutoReconnect() {
+    if (destroyed || reconnecting || fatal) return;
+    if (autoRetries >= MAX_AUTO_RETRIES) {
+      errorMessage = 'Console disconnected. Click Reconnect to try again.';
+      return;
+    }
+    clearAutoReconnect();
+    const delayMs = Math.min(1000 * 2 ** autoRetries, 15000);
+    autoRetries += 1;
+    status = 'connecting';
+    errorMessage = `Reconnecting… (attempt ${autoRetries}/${MAX_AUTO_RETRIES})`;
+    autoReconnectTimer = setTimeout(() => {
+      autoReconnectTimer = null;
+      reconnect({ auto: true });
+    }, delayMs);
+  }
+
   function teardown() {
+    clearAutoReconnect();
+    latencyProbe.detach();
+    chrome?.closeLatencyGraph?.();
     if (keepAlive) {
       clearInterval(keepAlive);
       keepAlive = null;
     }
     if (ws) {
+      const old = ws;
+      ws = null;
       try {
-        if (ws.readyState === WebSocket.OPEN) ws.send(ivtp(IVTP.CMD_STOP, 0, null));
-        ws.close();
+        if (old.readyState === WebSocket.OPEN) old.send(ivtp(IVTP.CMD_STOP, 0, null));
+        old.close();
       } catch (_) {
         /* ignore */
       }
-      ws = null;
     }
     if (worker) {
       worker.terminate();
@@ -365,139 +536,94 @@
     }
   }
 
+  async function reconnect({ auto = false } = {}) {
+    if (reconnecting || destroyed) return;
+    reconnecting = true;
+    clearAutoReconnect();
+    if (!auto) {
+      autoRetries = 0;
+      fatal = null;
+      errorMessage = '';
+    }
+    try {
+      teardown();
+      connect();
+    } catch (e) {
+      status = 'error';
+      errorMessage = e.message || String(e);
+      if (auto) scheduleAutoReconnect();
+    } finally {
+      reconnecting = false;
+    }
+  }
+
   onMount(() => {
     if (!canvas) return;
     ctx = canvas.getContext('2d');
-    const workerPath = session.decode_worker_path || '/api/kvm/assets/libs/kvm/ast/decode_worker.js';
-    const workerQs = new URLSearchParams({
-      token: session.ws_token,
-      src: workerPath,
-    });
-    // Worker must exist before resetImage so the AMI decoder receives a buffer.
-    worker = new Worker(`/kvm-decode-bridge.js?${workerQs}`);
-    worker.onerror = (e) => {
-      setStatus(`worker error: ${e.message || 'failed to load decoder'}`);
-    };
-    worker.onmessage = (e) => {
-      if (e.data.cmd === 'draw') {
-        imageBuffer = e.data.ibuf;
-        if (imageBuffer && ctx) ctx.putImageData(imageBuffer, 0, 0);
-      } else if (e.data.cmd === 'exception') {
-        setStatus('decode error');
-        console.error(e.data.ex);
-      }
-    };
-    resetImage(640, 480);
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const path = session.ws_path || '/api/kvm/ws';
-    ws = new WebSocket(`${proto}://${location.host}${path}?token=${encodeURIComponent(session.ws_token)}`, ['binary']);
-    ws.binaryType = 'arraybuffer';
-    ws.onopen = () => setStatus('websocket open, waiting for video…');
-    ws.onerror = () => setStatus('websocket error');
-    ws.onclose = (e) => {
-      if (keepAlive) {
-        clearInterval(keepAlive);
-        keepAlive = null;
-      }
-      if (destroyed) return;
-      if (fatal) {
-        setStatus(fatal);
-        return;
-      }
-      setStatus(`disconnected (${e.code} ${e.reason || ''})`.trim());
-    };
-    ws.onmessage = (ev) => {
-      try {
-        appendBuf(new Uint8Array(ev.data));
-        drain();
-      } catch (err) {
-        setStatus(`parse error: ${err.message}`);
-      }
-    };
+    stopFitWatch = watchCanvasFit(stage, () => letterboxCanvas(canvas, stage));
+    connect();
   });
 
   onDestroy(() => {
     destroyed = true;
+    stopFitWatch?.();
     teardown();
   });
 </script>
 
-<div class="kvm-viewer">
-  <div class="kvm-toolbar">
-    <span class="status">{statusText}</span>
-    {#if resText}
-      <span class="res">{resText}</span>
-    {/if}
-    <button type="button" class="cad" on:click={sendCtrlAltDel}>Ctrl+Alt+Del</button>
+<RemoteConsoleChrome
+  bind:this={chrome}
+  {status}
+  {errorMessage}
+  {pasting}
+  {reconnecting}
+  extraLabel={resText}
+  {latencyMs}
+  {latencySamples}
+  onCad={sendCtrlAltDel}
+  onPaste={pasteClipboard}
+  onReconnect={() => reconnect()}
+>
+  <div class="kvm-stage" bind:this={stage}>
+    <canvas
+      bind:this={canvas}
+      class="kvm-canvas"
+      tabindex="0"
+      on:click={() => canvas && canvas.focus()}
+      on:contextmenu|preventDefault
+      on:mousemove={(e) => {
+        const now = performance.now();
+        if (now - lastMouse < 16) return;
+        lastMouse = now;
+        sendMouse(e);
+      }}
+      on:mousedown|preventDefault={(e) => {
+        if (canvas) canvas.focus();
+        buttons |= [1, 4, 2][e.button] || 0;
+        sendMouse(e);
+      }}
+      on:mouseup|preventDefault={(e) => {
+        buttons &= ~([1, 4, 2][e.button] || 0);
+        sendMouse(e);
+      }}
+      on:keydown|preventDefault={(e) => sendKey(e.keyCode, e.location, true)}
+      on:keyup|preventDefault={(e) => sendKey(e.keyCode, e.location, false)}
+    ></canvas>
   </div>
-  <canvas
-    bind:this={canvas}
-    class="kvm-canvas"
-    tabindex="0"
-    on:click={() => canvas && canvas.focus()}
-    on:contextmenu|preventDefault
-    on:mousemove={(e) => {
-      const now = performance.now();
-      if (now - lastMouse < 16) return;
-      lastMouse = now;
-      sendMouse(e);
-    }}
-    on:mousedown|preventDefault={(e) => {
-      if (canvas) canvas.focus();
-      buttons |= [1, 4, 2][e.button] || 0;
-      sendMouse(e);
-    }}
-    on:mouseup|preventDefault={(e) => {
-      buttons &= ~([1, 4, 2][e.button] || 0);
-      sendMouse(e);
-    }}
-    on:keydown|preventDefault={(e) => sendKey(e.keyCode, e.location, true)}
-    on:keyup|preventDefault={(e) => sendKey(e.keyCode, e.location, false)}
-  ></canvas>
-</div>
+</RemoteConsoleChrome>
 
 <style>
-  .kvm-viewer {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    background: #101114;
-    color: #e6e6e6;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  }
-  .kvm-toolbar {
+  .kvm-stage {
+    flex: 1;
+    min-height: 0;
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
-    background: #1b1d22;
-    border-bottom: 1px solid #2a2d34;
-    flex-shrink: 0;
-  }
-  .status {
-    flex: 1;
-    font-size: 13px;
-    color: #c8c8c8;
-  }
-  .res {
-    font-size: 12px;
-    color: #9a9a9a;
-  }
-  .cad {
-    font-size: 12px;
-    font-weight: 600;
-    padding: 4px 10px;
-    border-radius: 4px;
-    border: 1px solid #4c8bf5;
-    background: #4c8bf5;
-    color: #fff;
-    cursor: pointer;
+    justify-content: center;
+    overflow: hidden;
+    background: #000;
   }
   .kvm-canvas {
-    flex: 1;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
+    flex: none;
     background: #000;
     outline: none;
     cursor: crosshair;

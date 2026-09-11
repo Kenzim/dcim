@@ -1,9 +1,9 @@
 """IPMI HTML5 KVM profile contract.
 
-Each BMC vendor (ASRockRack MegaRAC, Gigabyte MegaRAC, future SuperMicro, iDRAC, …) implements
-this interface. The server row stores ``ipmi_kvm_profile`` (the profile id);
-launch endpoints resolve it through the registry and never talk AMI/IVTP
-directly.
+Each BMC vendor (ASRockRack MegaRAC, Gigabyte MegaRAC, SuperMicro ATEN, …)
+implements this interface. The server row stores ``ipmi_kvm_profile`` (the
+profile id); launch endpoints resolve it through the registry and never talk
+AMI/IVTP or InsydeVNC directly.
 """
 from __future__ import annotations
 
@@ -36,6 +36,8 @@ class BmcKvmAuth:
     client_ip: str
     username: str
     server_ip: str = ""
+    fb_width: int = 0
+    fb_height: int = 0
 
 
 class IpmiKvmProfile(ABC):
@@ -44,6 +46,8 @@ class IpmiKvmProfile(ABC):
     id: str = ""
     display_name: str = ""
     decode_worker_path: str = ""
+    # "ivtp" = AMI MegaRAC packets; "raw" = opaque WebSocket frames (ATEN InsydeVNC).
+    packet_mode: str = "ivtp"
 
     def describe(self) -> dict[str, str]:
         return {"id": self.id, "display_name": self.display_name}
@@ -92,9 +96,19 @@ class IpmiKvmProfile(ABC):
     def stop_frame(self) -> bytes:
         """IVTP (or vendor) frame that releases the KVM slot on disconnect."""
 
+    def join_frame(self, auth: BmcKvmAuth) -> bytes:
+        """Optional extra BMC bytes when a new viewer attaches (raw profiles)."""
+        del auth
+        return b""
+
     async def logout(self, auth: BmcKvmAuth) -> None:
         """Best-effort BMC web session teardown. Default is a no-op."""
         return None
+
+    def prefetch_asset_paths(self) -> list[str]:
+        """BMC asset paths to cache when the hub logs in (decode worker, ATEN JS)."""
+        path = (self.decode_worker_path or "").lstrip("/")
+        return [path] if path else []
 
     def asset_allowed(self, path: str) -> bool:
         cleaned = (path or "").lstrip("/")
