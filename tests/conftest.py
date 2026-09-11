@@ -84,6 +84,9 @@ def mock_redis():
         
         return len(mock_redis_client._hashes[key])
     
+    def mock_hget(key, field):
+        return mock_redis_client._hashes.get(key, {}).get(field)
+
     def mock_hgetall(key):
         return mock_redis_client._hashes.get(key, {})
 
@@ -224,6 +227,7 @@ def mock_redis():
         return mock_redis_client._strings.get(key)
 
     mock_redis_client.hset = mock_hset
+    mock_redis_client.hget = mock_hget
     mock_redis_client.hgetall = mock_hgetall
     mock_redis_client.hsetnx = mock_hsetnx
     mock_redis_client.delete = mock_delete
@@ -284,6 +288,7 @@ def client(db_session, mock_redis, monkeypatch):
     import app.services.client_portal_service as client_portal_service_module
     import app.services.vm_vnc_ticket_service as vm_vnc_ticket_module
     import app.services.ipmi_kvm_ticket_service as ipmi_kvm_ticket_module
+    import app.core.commerce_auth as commerce_auth_module
 
     monkeypatch.setattr(redis_module, "redis_client", mock_redis)
     monkeypatch.setattr(user_api, "redis_client", mock_redis)
@@ -295,6 +300,7 @@ def client(db_session, mock_redis, monkeypatch):
     monkeypatch.setattr(client_portal_service_module, "redis_client", mock_redis)
     monkeypatch.setattr(vm_vnc_ticket_module, "redis_client", mock_redis)
     monkeypatch.setattr(ipmi_kvm_ticket_module, "redis_client", mock_redis)
+    monkeypatch.setattr(commerce_auth_module, "redis_client", mock_redis)
 
     app.dependency_overrides[get_db] = override_get_db
 

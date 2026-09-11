@@ -82,7 +82,8 @@ class PaymentWebhookService:
         if existing is not None:
             return False
 
-        # Claim-before-apply: unique (gateway, event_id) makes replay harmless.
+        # Claim-before-apply inside one savepoint so validation failures do not
+        # leave a dedupe row that would block legitimate retries.
         record = GatewayWebhookEvent(
             gateway=gateway,
             event_id=event_id,
@@ -94,37 +95,37 @@ class PaymentWebhookService:
             with db.begin_nested():
                 db.add(record)
                 db.flush()
+
+                if event.action == GatewayWebhookAction.PAYMENT_COMPLETED:
+                    PaymentWebhookService._payment_succeeded(db, gateway, event)
+                elif event.action == GatewayWebhookAction.PAYMENT_FAILED:
+                    PaymentWebhookService._payment_failed(db, gateway, event)
+                elif event.action == GatewayWebhookAction.PAYMENT_REVERSED:
+                    PaymentWebhookService._reverse_payment(
+                        db,
+                        gateway,
+                        event.external_ref or "",
+                        event_id=event_id,
+                        reason="refund",
+                    )
+                elif event.action == GatewayWebhookAction.PAYMENT_DISPUTED:
+                    PaymentWebhookService._reverse_payment(
+                        db,
+                        gateway,
+                        event.external_ref or "",
+                        event_id=event_id,
+                        reason="dispute",
+                    )
+                    payment = PaymentWebhookService._payment_for_update(
+                        db, gateway, event.external_ref or ""
+                    )
+                    if payment is not None and payment.invoice is not None:
+                        PaymentWebhookService._suspend_linked_services(
+                            db, payment.invoice, reason="dispute"
+                        )
+                db.flush()
         except IntegrityError:
             return False
-
-        if event.action == GatewayWebhookAction.PAYMENT_COMPLETED:
-            PaymentWebhookService._payment_succeeded(db, gateway, event)
-        elif event.action == GatewayWebhookAction.PAYMENT_FAILED:
-            PaymentWebhookService._payment_failed(db, gateway, event)
-        elif event.action == GatewayWebhookAction.PAYMENT_REVERSED:
-            PaymentWebhookService._reverse_payment(
-                db,
-                gateway,
-                event.external_ref or "",
-                event_id=event_id,
-                reason="refund",
-            )
-        elif event.action == GatewayWebhookAction.PAYMENT_DISPUTED:
-            PaymentWebhookService._reverse_payment(
-                db,
-                gateway,
-                event.external_ref or "",
-                event_id=event_id,
-                reason="dispute",
-            )
-            payment = PaymentWebhookService._payment_for_update(
-                db, gateway, event.external_ref or ""
-            )
-            if payment is not None and payment.invoice is not None:
-                PaymentWebhookService._suspend_linked_services(
-                    db, payment.invoice, reason="dispute"
-                )
-        db.flush()
         return True
 
     @staticmethod
@@ -312,25 +313,37 @@ class PaymentWebhookService:
         return unique
 
     @staticmethod
-    def _suspend_linked_services(db: Session, invoice, *, reason: str) -> None:
-        service_ids = PaymentWebhookService._linked_service_ids(db, invoice)
-        if not service_ids:
-            return
+    async def _suspend_services_for_dispute(
+        db: Session,
+        service_ids: list[int],
+        *,
+        reason: str,
+    ) -> None:
         lifecycle = ServiceLifecycle()
+        for service_id in service_ids:
+            service = db.get(Service, service_id)
+            if service is None:
+                continue
+            try:
+                await lifecycle.suspend(db, service, reason=reason)
+            except ServiceLifecycleError as exc:
+                logger.warning(
+                    "Dispute suspend failed for service %s: %s",
+                    service_id,
+                    exc,
+                )
 
+    @staticmethod
+    def _run_suspend_services_for_dispute(
+        db: Session,
+        service_ids: list[int],
+        *,
+        reason: str,
+    ) -> None:
         async def _run() -> None:
-            for service_id in service_ids:
-                service = db.get(Service, service_id)
-                if service is None:
-                    continue
-                try:
-                    await lifecycle.suspend(db, service, reason=reason)
-                except ServiceLifecycleError as exc:
-                    logger.warning(
-                        "Dispute suspend failed for service %s: %s",
-                        service_id,
-                        exc,
-                    )
+            await PaymentWebhookService._suspend_services_for_dispute(
+                db, service_ids, reason=reason
+            )
 
         try:
             asyncio.run(_run())
@@ -341,35 +354,49 @@ class PaymentWebhookService:
             finally:
                 loop.close()
 
-        if invoice.billing_account_id is not None:
-            try:
-                from app.models.commerce_account import BillingAccount
+    @staticmethod
+    def _enqueue_dispute_suspend_email(db: Session, invoice, *, reason: str) -> None:
+        if invoice.billing_account_id is None:
+            return
+        try:
+            from app.models.commerce_account import BillingAccount
 
-                account = db.get(BillingAccount, invoice.billing_account_id)
-                recipient = (
-                    account.user.email
-                    if account and account.user and account.user.email
-                    else None
-                )
-                if recipient:
-                    EmailMessageService.enqueue(
-                        db,
-                        to_address=recipient,
-                        event=EmailEvent.SERVICE_SUSPENDED,
-                        idempotency_key=f"dispute:suspend:invoice:{invoice.id}",
-                        data={
-                            "invoice_id": invoice.id,
-                            "invoice_number": invoice.invoice_number,
-                            "reason": reason,
-                        },
-                        billing_account_id=invoice.billing_account_id,
-                        user_id=account.user_id if account else None,
-                        related_type="invoice",
-                        related_id=str(invoice.id),
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to enqueue dispute suspend email for invoice %s",
-                    invoice.id,
-                    exc_info=True,
-                )
+            account = db.get(BillingAccount, invoice.billing_account_id)
+            recipient = (
+                account.user.email
+                if account and account.user and account.user.email
+                else None
+            )
+            if not recipient:
+                return
+            EmailMessageService.enqueue(
+                db,
+                to_address=recipient,
+                event=EmailEvent.SERVICE_SUSPENDED,
+                idempotency_key=f"dispute:suspend:invoice:{invoice.id}",
+                data={
+                    "invoice_id": invoice.id,
+                    "invoice_number": invoice.invoice_number,
+                    "reason": reason,
+                },
+                billing_account_id=invoice.billing_account_id,
+                user_id=account.user_id if account else None,
+                related_type="invoice",
+                related_id=str(invoice.id),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to enqueue dispute suspend email for invoice %s",
+                invoice.id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _suspend_linked_services(db: Session, invoice, *, reason: str) -> None:
+        service_ids = PaymentWebhookService._linked_service_ids(db, invoice)
+        if not service_ids:
+            return
+        PaymentWebhookService._run_suspend_services_for_dispute(
+            db, service_ids, reason=reason
+        )
+        PaymentWebhookService._enqueue_dispute_suspend_email(db, invoice, reason=reason)

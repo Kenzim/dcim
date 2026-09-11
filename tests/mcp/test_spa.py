@@ -2,6 +2,7 @@
 
 import asyncio
 
+import pytest
 from fastapi import HTTPException
 
 import app.main as main_module
