@@ -3,6 +3,10 @@
 # Required repository secrets (Forgejo -> Settings -> Actions -> Secrets):
 #   SONAR_HOST_URL  - base URL of your SonarQube server (e.g. https://sonar.example.com)
 #   SONAR_TOKEN     - project or global analysis token from SonarQube
+#
+# Checkout uses the LAN Forgejo URL. Default https://git.stackken.com hairpins
+# through the public IP and a rootless slirp4netns path, so fetch-depth: 0
+# (full history, ~430MB of old PXE blobs) stalls for 15–50 minutes.
 
 name: SonarQube
 
@@ -16,13 +20,16 @@ on:
 jobs:
   sonarqube:
     runs-on: docker
+    timeout-minutes: 45
     container:
       image: ghcr.io/catthehacker/ubuntu:act-latest
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          github-server-url: http://192.168.11.92:3000
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,18 +51,29 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run tests with coverage
+        id: tests
+        timeout-minutes: 20
+        continue-on-error: true
         run: |
-          pytest --cov=app --cov-report=xml:coverage.xml -q
+          pytest --cov=app --cov-report=xml:coverage.xml -q -n auto
 
       - name: SonarQube Scan
+        if: steps.checkout.outcome == 'success'
         uses: https://github.com/SonarSource/sonarqube-scan-action@v7
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
       - name: SonarQube Quality Gate
+        if: success()
         uses: https://github.com/SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Fail if tests failed
+        if: steps.tests.outcome == 'failure'
+        run: |
+          echo "Tests failed or timed out; Sonar scan was still attempted." >&2
+          exit 1
