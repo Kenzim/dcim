@@ -24,7 +24,18 @@ if (!defined("WHMCS")) {
  */
 function rackflow_log($message, array $context = array())
 {
-    $redactKeys = array('serverpassword', 'serveraccesshash', 'password', 'accesshash', 'api_key', 'apiKey');
+    $redactKeys = array(
+        'serverpassword',
+        'serveraccesshash',
+        'password',
+        'accesshash',
+        'api_key',
+        'apiKey',
+        'token',
+        'access_token',
+        'accesstoken',
+        'git_token',
+    );
     $safe = array();
     foreach ($context as $k => $v) {
         $keyLower = is_string($k) ? strtolower($k) : $k;
@@ -36,6 +47,37 @@ function rackflow_log($message, array $context = array())
     }
     $line .= "\n";
     @file_put_contents('/rackflow.log', $line, FILE_APPEND | LOCK_EX);
+}
+
+/**
+ * Build newline-joined ip:port:user:pass lines from proxy assignment payloads.
+ *
+ * @param array $assignments
+ * @return string
+ */
+function rackflow_proxyEndpointLines(array $assignments)
+{
+    $lines = array();
+    foreach ($assignments as $assignment) {
+        if (!is_array($assignment)) {
+            continue;
+        }
+        if (!empty($assignment['endpoint'])) {
+            $lines[] = (string)$assignment['endpoint'];
+            continue;
+        }
+        $ip = isset($assignment['ip_address']) ? (string)$assignment['ip_address'] : '';
+        $user = isset($assignment['username']) ? (string)$assignment['username'] : '';
+        $pass = isset($assignment['password']) ? (string)$assignment['password'] : '';
+        $port = isset($assignment['port']) && $assignment['port'] !== '' && $assignment['port'] !== null
+            ? (string)$assignment['port']
+            : '8080';
+        if ($ip === '' || $user === '' || $pass === '') {
+            continue;
+        }
+        $lines[] = $ip . ':' . $port . ':' . $user . ':' . $pass;
+    }
+    return implode("\n", $lines);
 }
 
 /**
@@ -376,6 +418,7 @@ function rackflow_ClientArea(array $vars)
             'rackflow_proxy_credentials_available' => $proxyCredentialsAvailable && !empty($rackflowServiceId),
             'rackflow_proxy_rotate_available' => $proxyRotateAvailable && !empty($rackflowServiceId),
             'rackflow_proxy_assignments' => $proxyAssignments,
+            'rackflow_proxy_endpoint_lines' => rackflow_proxyEndpointLines($proxyAssignments),
             // AJAX endpoint (avoids modop=custom success redirects that drop Login-as-Owner sessions).
             'rackflow_proxy_action_url' => !empty($params['serviceid'])
                 ? rackflow_proxyActionEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
@@ -412,12 +455,12 @@ function rackflow_ConfigOptions()
             'SimpleMode' => true,
             'Description' => 'RackFlow catalog product (products.code). Bare metal/VM: plans, OS profiles, and VM templates come from this product. HTTP proxy: IP count/subnet/allocation strategy defaults come from this product\'s http_proxy family — required to auto-assign IP(s) from IPAM on create.',
         ),
-        // configoption3 — default OS when customer choice is off / no selection
+        // configoption3 — default OS template (bare metal) / unused for VM
         'OS Code' => array(
             'Type' => 'text',
             'Size' => '40',
             'SimpleMode' => true,
-            'Description' => 'Bare metal/VM only: optional default OS profile code when the customer does not choose one. Leave blank for catalog/template default. Not used for HTTP proxy.',
+            'Description' => 'Bare metal only: optional default OS template id (from the server group) when the customer does not choose one. Leave blank for no default. Not used for VM or HTTP proxy.',
         ),
         // configoption4 — bare_metal (required) / http_proxy (legacy, optional)
         'RackFlow Server Group' => array(
@@ -445,7 +488,7 @@ function rackflow_ConfigOptions()
         'Customer OS Selection' => array(
             'Type' => 'yesno',
             'SimpleMode' => true,
-            'Description' => 'When enabled, syncs an order-form "Operating System" configurable option from this RackFlow product (VM templates or OS profiles).',
+            'Description' => 'When enabled, syncs an order-form "Operating System" configurable option from this RackFlow product (VM templates) or its server group (bare-metal OS templates).',
         ),
         // configoption8 — show "Open RackFlow portal" on the client product page
         'Allow Client Portal Sign-In' => array(
@@ -870,12 +913,6 @@ function rackflow_CreateAccount(array $params)
         if ($serverGroupId) {
             $serviceConfig['server_group_id'] = $serverGroupId;
         }
-        if (!empty($templateId)) {
-            $serviceConfig['template_id'] = $templateId;
-        }
-        if (!empty($templateParameters)) {
-            $serviceConfig['template_parameters'] = $templateParameters;
-        }
 
         // Checkout OS / VM template (order form) overrides module default OS Code.
         $vmTemplateId = null;
@@ -889,15 +926,37 @@ function rackflow_CreateAccount(array $params)
             'os',
             'vm_template_id',
         ));
+        $checkoutTemplateId = null;
         if ($checkoutOs !== null && $checkoutOs !== '') {
             $resolved = rackflow_resolveCheckoutOsSelection($params, $productCode, $checkoutOs);
             if (!empty($resolved['vm_template_id'])) {
                 $vmTemplateId = (int)$resolved['vm_template_id'];
                 // Template strategy owns the effective OS; don't also send os_code.
                 $osCode = null;
+            } elseif (!empty($resolved['template_id'])) {
+                $checkoutTemplateId = (string)$resolved['template_id'];
+                $osCode = null;
             } elseif (!empty($resolved['os_code'])) {
                 $osCode = (string)$resolved['os_code'];
             }
+        }
+
+        // os_template configurable option is an explicit override; otherwise
+        // checkout rfot: then Module Settings default OS template (configoption3).
+        if (empty($templateId) && $checkoutTemplateId !== null && $checkoutTemplateId !== '') {
+            $templateId = $checkoutTemplateId;
+        }
+        if (strtolower($serviceType) === 'bare_metal') {
+            if (empty($templateId) && $osCode !== null && $osCode !== '') {
+                $templateId = rackflow_bareMetalTemplateIdFromOsSetting($osCode);
+            }
+            $osCode = null;
+        }
+        if (!empty($templateId)) {
+            $serviceConfig['template_id'] = $templateId;
+        }
+        if (!empty($templateParameters)) {
+            $serviceConfig['template_parameters'] = $templateParameters;
         }
 
         $createPath = '/api/billing/bare-metal/services';
@@ -1498,6 +1557,43 @@ function rackflow_getServerGroups($params = null)
 }
 
 /**
+ * Resolved OS templates for a RackFlow server group id.
+ *
+ * @param array $params
+ * @param int|string|null $serverGroupId
+ * @return array
+ */
+function rackflow_osTemplatesForServerGroupId(array $params, $serverGroupId = null)
+{
+    if ($serverGroupId === null || $serverGroupId === '') {
+        if (isset($params['configoption4']) && $params['configoption4'] !== '') {
+            $serverGroupId = $params['configoption4'];
+        }
+    }
+    $serverGroupId = trim((string)$serverGroupId);
+    if ($serverGroupId === '') {
+        return array();
+    }
+    $groups = rackflow_getServerGroups($params);
+    if (!is_array($groups)) {
+        return array();
+    }
+    foreach ($groups as $group) {
+        if (!isset($group['id'])) {
+            continue;
+        }
+        if ((string)$group['id'] !== $serverGroupId) {
+            continue;
+        }
+        if (!empty($group['os_templates']) && is_array($group['os_templates'])) {
+            return $group['os_templates'];
+        }
+        return array();
+    }
+    return array();
+}
+
+/**
  * Read the first non-empty configurable-option value for any of the given keys.
  *
  * @param array $params
@@ -1662,16 +1758,17 @@ function rackflow_ensureConfigOptionSubPricing($subOptionId)
  * Sync / hide the order-form "OS" configurable option for a product.
  *
  * Sub-option names are customer-facing labels. CreateAccount resolves them back
- * to a VM template id or OS profile code via the RackFlow catalog (see
- * rackflow_resolveCheckoutOsSelection). Machine tokens rfvt:{id} / rfos:{code}
- * are also accepted if present.
+ * to a VM template id, OS template id, or OS profile code via the RackFlow
+ * catalog (see rackflow_resolveCheckoutOsSelection). Machine tokens rfvt:{id} /
+ * rfot:{template_id} / rfos:{code} are also accepted if present.
  *
  * @param int $productId WHMCS tblproducts.id
  * @param array $catalogProduct one item from /api/billing/products
  * @param bool $enabled
+ * @param array $groupOsTemplates resolved os_templates from the product's server group
  * @return bool
  */
-function rackflow_syncCheckoutOsOption($productId, array $catalogProduct, $enabled)
+function rackflow_syncCheckoutOsOption($productId, array $catalogProduct, $enabled, $groupOsTemplates = array())
 {
     $productId = (int)$productId;
     if ($productId <= 0 || !class_exists('\Illuminate\Database\Capsule\Manager')) {
@@ -1767,6 +1864,14 @@ function rackflow_syncCheckoutOsOption($productId, array $catalogProduct, $enabl
                 // Token first so CreateAccount can parse even if the label is edited later.
                 $label = !empty($tmpl['name']) ? (string)$tmpl['name'] : ('Template #' . $tmpl['id']);
                 $choices[] = 'rfvt:' . (int)$tmpl['id'] . '|' . $label;
+            }
+        } elseif ($mode === 'server_group' && !empty($groupOsTemplates) && is_array($groupOsTemplates)) {
+            foreach ($groupOsTemplates as $tmpl) {
+                if (empty($tmpl['id'])) {
+                    continue;
+                }
+                $label = !empty($tmpl['name']) ? (string)$tmpl['name'] : (string)$tmpl['id'];
+                $choices[] = 'rfot:' . (string)$tmpl['id'] . '|' . $label;
             }
         } elseif (!empty($catalogProduct['os_profiles']) && is_array($catalogProduct['os_profiles'])) {
             foreach ($catalogProduct['os_profiles'] as $profile) {
@@ -1904,19 +2009,40 @@ function rackflow_unlinkStrayOsConfigGroups($productId, $canonicalGroupId)
 }
 
 /**
- * Resolve a checkout OS selection into vm_template_id and/or os_code.
+ * Strip an rfot: prefix from a Module Settings default OS value.
  *
- * Accepts machine tokens (rfvt:/rfos:), bare ids/codes, "token|Label" WHMCS
+ * @param string $raw
+ * @return string
+ */
+function rackflow_bareMetalTemplateIdFromOsSetting($raw)
+{
+    $value = trim((string)$raw);
+    if ($value === '') {
+        return '';
+    }
+    if (strpos($value, '|') !== false) {
+        $value = trim(explode('|', $value, 2)[0]);
+    }
+    if (preg_match('/^rfot:(.+)$/', $value, $m)) {
+        return trim($m[1]);
+    }
+    return $value;
+}
+
+/**
+ * Resolve a checkout OS selection into vm_template_id, template_id, and/or os_code.
+ *
+ * Accepts machine tokens (rfvt:/rfot:/rfos:), bare ids/codes, "token|Label" WHMCS
  * pipe forms, or friendly labels matched against the catalog product.
  *
- * @param array $params module params (for API)
+ * @param array $params
  * @param string $productCode
  * @param string $selected
- * @return array{vm_template_id:?int,os_code:?string}
+ * @return array{vm_template_id:?int,os_code:?string,template_id:?string}
  */
 function rackflow_resolveCheckoutOsSelection(array $params, $productCode, $selected)
 {
-    $out = array('vm_template_id' => null, 'os_code' => null);
+    $out = array('vm_template_id' => null, 'os_code' => null, 'template_id' => null);
     $raw = trim((string)$selected);
     if ($raw === '') {
         return $out;
@@ -1931,6 +2057,10 @@ function rackflow_resolveCheckoutOsSelection(array $params, $productCode, $selec
         $out['vm_template_id'] = (int)$m[1];
         return $out;
     }
+    if (preg_match('/^rfot:(.+)$/', $raw, $m)) {
+        $out['template_id'] = $m[1];
+        return $out;
+    }
     if (preg_match('/^rfos:(.+)$/', $raw, $m)) {
         $out['os_code'] = $m[1];
         return $out;
@@ -1940,7 +2070,7 @@ function rackflow_resolveCheckoutOsSelection(array $params, $productCode, $selec
         return $out;
     }
 
-    // Treat as OS code or friendly name — confirm against catalog when possible.
+    // Treat as OS code, disk template id, or friendly name — confirm against catalog when possible.
     $out['os_code'] = $raw;
     if ($productCode === null || $productCode === '') {
         return $out;
@@ -1972,6 +2102,18 @@ function rackflow_resolveCheckoutOsSelection(array $params, $productCode, $selec
             }
             if ((string)$tmpl['id'] === $raw || $name === $needle || $label === $needle) {
                 $out['vm_template_id'] = (int)$tmpl['id'];
+                $out['os_code'] = null;
+                return $out;
+            }
+        }
+    }
+    $groupTemplates = rackflow_osTemplatesForServerGroupId($params, null);
+    if (!empty($groupTemplates) && is_array($groupTemplates)) {
+        foreach ($groupTemplates as $tmpl) {
+            $tid = isset($tmpl['id']) ? (string)$tmpl['id'] : '';
+            $name = isset($tmpl['name']) ? strtolower((string)$tmpl['name']) : '';
+            if ($tid !== '' && ($tid === $raw || strtolower($tid) === $needle || $name === $needle)) {
+                $out['template_id'] = $tid;
                 $out['os_code'] = null;
                 return $out;
             }
@@ -2308,7 +2450,7 @@ function rackflow_ensureSshKeysCustomField($productId)
  * @param array $catalogProduct
  * @return array<string,bool>
  */
-function rackflow_sshAcceptMapFromCatalog(array $catalogProduct)
+function rackflow_sshAcceptMapFromCatalog(array $catalogProduct, $groupOsTemplates = array())
 {
     $map = array();
     if (!empty($catalogProduct['vm_templates']) && is_array($catalogProduct['vm_templates'])) {
@@ -2320,12 +2462,20 @@ function rackflow_sshAcceptMapFromCatalog(array $catalogProduct)
             $map[$token] = !empty($tmpl['accepts_ssh_key']);
         }
     }
+    if (!empty($groupOsTemplates) && is_array($groupOsTemplates)) {
+        foreach ($groupOsTemplates as $tmpl) {
+            if (empty($tmpl['id'])) {
+                continue;
+            }
+            $token = 'rfot:' . (string)$tmpl['id'];
+            $map[$token] = !empty($tmpl['accepts_ssh_key']);
+        }
+    }
     if (!empty($catalogProduct['os_profiles']) && is_array($catalogProduct['os_profiles'])) {
         foreach ($catalogProduct['os_profiles'] as $profile) {
             if (empty($profile['code'])) {
                 continue;
             }
-            // Bare-metal OS profiles: no SSH key injection in this pass.
             $map['rfos:' . (string)$profile['code']] = false;
         }
     }
@@ -2349,7 +2499,7 @@ function rackflow_checkoutOsTokenFromOptionname($optionname)
         $raw = substr($raw, 0, $pipe);
     }
     $raw = trim($raw);
-    if (preg_match('/^(rfvt:\d+|rfos:[A-Za-z0-9._-]+)$/', $raw)) {
+    if (preg_match('/^(rfvt:\d+|rfos:[A-Za-z0-9._-]+|rfot:[A-Za-z0-9._-]+)$/', $raw)) {
         return $raw;
     }
     return '';
@@ -4149,10 +4299,16 @@ function rackflow_renderAdminStatusCard(array $params, $serviceId, $statusData, 
         // proxy.view_credentials / proxy.rotate_credentials client permissions).
         if ($serviceType === 'http_proxy' && !empty($statusData['proxy_assignments']) && is_array($statusData['proxy_assignments'])) {
             $rotateAvailable = !empty($statusData['proxy_rotate_available']);
+            $endpointLines = rackflow_proxyEndpointLines($statusData['proxy_assignments']);
             $html .= '<div class="rf-as__panel" id="rf-as-proxy-panel"'
                 . ' data-rf-service-id="' . (int)$serviceId . '"'
                 . ' data-rf-rackflow-id="' . ($linked ? (int)$rackflowSvcId : '') . '">'
-                . '<p class="rf-as__panel-title">Proxy access</p>';
+                . '<div class="rf-as__panel-head">'
+                . '<p class="rf-as__panel-title">Proxy access</p>'
+                . '<button type="button" class="rf-as__btn rf-as__btn--secondary" id="rf-as-proxy-copy-all">Copy all (ip:port:user:pass)</button>'
+                . '</div>'
+                . '<textarea id="rf-as-proxy-endpoint-lines" class="rf-as__sr-only" readonly aria-hidden="true">'
+                . $h($endpointLines) . '</textarea>';
             foreach ($statusData['proxy_assignments'] as $assignment) {
                 $ip = isset($assignment['ip_address']) ? (string)$assignment['ip_address'] : '';
                 $user = isset($assignment['username']) ? (string)$assignment['username'] : '';
@@ -4173,9 +4329,9 @@ function rackflow_renderAdminStatusCard(array $params, $serviceId, $statusData, 
                 $html .= '</div>';
             }
             if ($rotateAvailable) {
-                $html .= '<button type="button" class="rf-as__btn rf-as__btn--secondary" id="rf-as-proxy-rotate">Rotate credentials</button>'
-                    . '<p class="rf-as__note" id="rf-as-proxy-msg" hidden></p>';
+                $html .= '<button type="button" class="rf-as__btn rf-as__btn--secondary" id="rf-as-proxy-rotate">Rotate credentials</button>';
             }
+            $html .= '<p class="rf-as__note" id="rf-as-proxy-msg" hidden></p>';
             $html .= '</div>';
         }
     }

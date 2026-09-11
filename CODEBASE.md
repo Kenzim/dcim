@@ -21,7 +21,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
-| OS install templates | `os_templates/<name>/` (`template.json` + `install.sh`) |
+| OS install templates | `os_templates/<name>/` (`template.json` + `install.sh`); bare-metal WHMCS OS list is the server group’s permitted templates |
 | PXE / cloud-init / boot scripts served to bare metal | `app/api/server_interaction.py` |
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
 | DHCP/TFTP runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, services in `app/services/dhcp_*.py` / `tftp_*.py` |
@@ -289,7 +289,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/scripts` | `Scripts.svelte` |
 | `/admin/asset-manager` | `AssetManager.svelte` |
 | `/admin/product-catalog` | `ProductCatalog.svelte` (VM families/products only) |
-| `/admin/bare-metal-catalog` | `BareMetalCatalog.svelte` (bare_metal families/products + OS profiles) |
+| `/admin/bare-metal-catalog` | `BareMetalCatalog.svelte` (bare_metal families/products; installable OS is on the server group) |
 | `/admin/vm-templates` | `VMTemplates.svelte` |
 | `/admin/vm-ip-allocations` | `VMIpAllocations.svelte` |
 | `/admin/proxmox-inventory` | `ProxmoxInventory.svelte` |
@@ -355,13 +355,15 @@ App selects remote runners when `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` (or legacy
 
 Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_template_service.py` / `temp_os_service.py`.
 
+**WHMCS OS source:** bare-metal Default OS and checkout OS come from the product's **server group** (`permitted_os_templates`, exposed as `os_templates` on `GET /api/billing/server-groups`). Catalog `os_profiles` are not used for bare metal; they remain for the legacy VM `os_code` path. Provisioning installs `service_config.template_id` (WHMCS token `rfot:{id}`).
+
 ---
 
 ## WHMCS
 
 | Path | Role |
 |---|---|
-| `whmcs/modules/servers/rackflow/rackflow.php` | Provisioning module (Create/Suspend/Power/Register, etc.) |
+| `whmcs/modules/servers/rackflow/rackflow.php` | Provisioning module (Create/Suspend/Power/Register, etc.). Bare-metal checkout OS tokens are `rfot:{template_id}` from the server group. |
 | `whmcs/modules/servers/rackflow/git_update.php` | Admin git-archive download + in-place module file sync |
 | `whmcs/modules/servers/rackflow/module_update.php` | Admin UI to check/apply git module updates |
 | `whmcs/modules/servers/rackflow/module_update_action.php` | Admin JSON API for git module updates |

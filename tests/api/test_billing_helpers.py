@@ -46,6 +46,8 @@ def test_group_selection_and_template_rules(monkeypatch):
     monkeypatch.setattr(
         billing.ServerGroupDAO, "get_by_id",
         lambda _db, ident: None if ident == 0 else SimpleNamespace(
+            name="pool",
+            enable_os_templates=True,
             servers=[] if ident == 1 else [disabled, occupied, free],
             permitted_os_templates=["debian"],
         ),
@@ -65,6 +67,29 @@ def test_group_selection_and_template_rules(monkeypatch):
     ):
         with pytest.raises(HTTPException):
             fn()
+
+
+def test_determine_template_requires_enable_and_lists_choices(monkeypatch):
+    monkeypatch.setattr(
+        billing.ServerGroupDAO,
+        "get_by_id",
+        lambda _db, ident: SimpleNamespace(
+            name="multi",
+            enable_os_templates=ident == 2,
+            permitted_os_templates=["ubuntu-cloud-image", "windows-server-2022"],
+        ),
+    )
+    with pytest.raises(HTTPException) as disabled:
+        billing._determine_template_for_group(None, 1, "ubuntu-cloud-image")
+    assert disabled.value.status_code == 400
+    assert "not enabled" in str(disabled.value.detail)
+
+    with pytest.raises(HTTPException) as missing:
+        billing._determine_template_for_group(None, 2, None)
+    assert missing.value.status_code == 400
+    assert "ubuntu-cloud-image" in str(missing.value.detail)
+    assert "windows-server-2022" in str(missing.value.detail)
+    assert billing._determine_template_for_group(None, 2, "ubuntu-cloud-image") == "ubuntu-cloud-image"
 
 
 def test_validate_cluster_and_activity_keyword(monkeypatch):

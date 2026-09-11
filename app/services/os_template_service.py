@@ -3,6 +3,8 @@ OS Template Service - Scans and manages OS installation templates from disk.
 """
 import json
 import logging
+import secrets
+import string
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Literal
 from pydantic import BaseModel, Field
@@ -25,6 +27,25 @@ class PasswordGenerateConfig(BaseModel):
         default=True,
         description="Exclude ambiguous characters (0, O, 1, I, l, 5, S, 2, Z)"
     )
+
+
+def generate_parameter_password(cfg: Optional[PasswordGenerateConfig] = None) -> str:
+    """Generate a password matching a template.json ``generate`` spec."""
+    cfg = cfg or PasswordGenerateConfig()
+    charset_map = {
+        "alphanumeric": string.ascii_letters + string.digits,
+        "alphanumeric_symbols": string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;:,.<>?",
+        "numeric": string.digits,
+        "alphabetic": string.ascii_letters,
+    }
+    chars = charset_map.get(cfg.charset, charset_map["alphanumeric"])
+    if cfg.exclude_ambiguous:
+        ambiguous = "0O1Il5S2Z"
+        chars = "".join(c for c in chars if c not in ambiguous)
+    if not chars:
+        chars = string.ascii_letters + string.digits
+    length = max(4, int(cfg.length or 16))
+    return "".join(secrets.choice(chars) for _ in range(length))
 
 
 class TemplateParameter(BaseModel):

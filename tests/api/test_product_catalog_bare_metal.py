@@ -80,7 +80,8 @@ def test_create_bare_metal_family_product_and_os_profile_on_billing_list(
     assert match is not None
     assert match["name"] == "EPYC 32C"
     assert match["service_type"] == "bare_metal"
-    assert any(p["code"] == "debian-13" for p in match["os_profiles"])
+    assert match["checkout_os_mode"] == "server_group"
+    assert match["os_profiles"] == []
 
     detail = client.get(
         "/api/billing/products/bm-epyc-32c",
@@ -88,7 +89,8 @@ def test_create_bare_metal_family_product_and_os_profile_on_billing_list(
     )
     assert detail.status_code == 200, detail.text
     assert detail.json()["family"]["code"] == "bm-dedicated"
-    assert any(p["code"] == "debian-13" for p in detail.json()["os_profiles"])
+    assert detail.json()["os_profiles"] == []
+    assert detail.json()["checkout_os_mode"] == "server_group"
 
     detach = client.delete(
         f"/api/product-catalog/families/{family_id}/os-profiles/{os_id}",

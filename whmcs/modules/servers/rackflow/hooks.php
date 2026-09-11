@@ -39,6 +39,7 @@ function rackflow_hook_catalog_bootstrap($productId)
 {
     $out = array(
         'products' => array(),
+        'server_groups' => array(),
         'error' => null,
         'serverid' => null,
     );
@@ -54,6 +55,8 @@ function rackflow_hook_catalog_bootstrap($productId)
         return $out;
     }
     $out['products'] = $products;
+    $groups = rackflow_getServerGroups(array('serverid' => $serverId));
+    $out['server_groups'] = is_array($groups) ? $groups : array();
     return $out;
 }
 
@@ -141,7 +144,21 @@ add_hook('AdminProductConfigFieldsSave', 1, function (array $vars) {
         }
     }
 
-    rackflow_syncCheckoutOsOption($productId, $catalogProduct, $enabled && !empty($catalogProduct));
+    $groupOsTemplates = array();
+    $serverGroupId = isset($opts[4]) ? trim((string)$opts[4]) : '';
+    if ($serverGroupId !== '') {
+        $groupOsTemplates = rackflow_osTemplatesForServerGroupId(
+            array('serverid' => $serverId, 'configoption4' => $serverGroupId),
+            $serverGroupId
+        );
+    }
+
+    rackflow_syncCheckoutOsOption(
+        $productId,
+        $catalogProduct,
+        $enabled && !empty($catalogProduct),
+        $groupOsTemplates
+    );
     // Ensure checkout can collect multi-line SSH public keys for Linux templates.
     rackflow_ensureSshKeysCustomField($productId);
     rackflow_warnProductHygiene($productId);
@@ -209,7 +226,14 @@ add_hook('ClientAreaFooterOutput', 2, function (array $vars) {
                 null
             );
             if (!empty($result['success']) && !empty($result['data']) && is_array($result['data'])) {
-                $tokenAcceptMap = rackflow_sshAcceptMapFromCatalog($result['data']);
+                $groupOsTemplates = array();
+                if (!empty($product->configoption4)) {
+                    $groupOsTemplates = rackflow_osTemplatesForServerGroupId(
+                        array('serverid' => $serverId, 'configoption4' => $product->configoption4),
+                        $product->configoption4
+                    );
+                }
+                $tokenAcceptMap = rackflow_sshAcceptMapFromCatalog($result['data'], $groupOsTemplates);
             }
         }
     }
@@ -905,25 +929,34 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     }
   }
 
+  function findServerGroup(id) {
+    var all = (CATALOG && CATALOG.server_groups) ? CATALOG.server_groups : [];
+    var want = String(id || '');
+    for (var i = 0; i < all.length; i++) {
+      if (String(all[i].id) === want) return all[i];
+    }
+    return null;
+  }
+
   function fillOsSelect(\$ui, product, selected) {
     var \$sel = \$ui.find('[data-rf-field="osCode"]');
     \$sel.empty();
     \$sel.append(\$('<option/>').attr('value', '').text('— None / product default —'));
-    if (!product) {
-      if (selected) {
-        \$sel.append(\$('<option/>').attr('value', selected).text(selected + ' (saved)'));
-        \$sel.val(selected);
-      }
-      return;
+    var st = \$ui.find('input[name="rf_service_type"]:checked').val() || 'bare_metal';
+    if (st === 'bare_metal') {
+      var group = findServerGroup(\$ui.find('[data-rf-field="serverGroup"]').val() || '');
+      var templates = (group && group.os_templates) ? group.os_templates : [];
+      templates.forEach(function (t) {
+        if (!t.id) return;
+        \$sel.append(\$('<option/>').attr('value', t.id).text(t.name || t.id));
+      });
+    } else if (product) {
+      var profiles = product.os_profiles || [];
+      profiles.forEach(function (os) {
+        if (!os.code) return;
+        \$sel.append(\$('<option/>').attr('value', os.code).text(os.name || os.code));
+      });
     }
-    // Bare-metal / legacy only: optional default from family OS list.
-    // VM products use linked templates — no separate OS dropdown.
-    var profiles = product.os_profiles || [];
-    profiles.forEach(function (os) {
-      if (!os.code) return;
-      var label = (os.name || os.code);
-      \$sel.append(\$('<option/>').attr('value', os.code).text(label));
-    });
     if (selected) {
       if (!\$sel.find('option[value="' + selected.replace(/"/g, '\\\\"') + '"]').length) {
         \$sel.append(\$('<option/>').attr('value', selected).text(selected + ' (saved)'));
@@ -995,6 +1028,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     var mode = product.checkout_os_mode || 'none';
     var modeLabel = 'Checkout OS: none available for this product.';
     if (mode === 'vm_template') modeLabel = 'Checkout OS will list the linked VM templates.';
+    else if (mode === 'server_group') modeLabel = 'Checkout OS will list OS templates from the selected server group.';
     else if (mode === 'os_profile') modeLabel = 'Checkout OS will list the linked OS choices.';
     \$ui.find('[data-rf-preview-mode]').text(modeLabel);
   }
@@ -1072,12 +1106,11 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     var productCode = nativeControl(IDX.productCode).val() || '';
     var osCode = nativeControl(IDX.osCode).val() || '';
     fillProductSelect(\$ui, st, productCode);
-    fillOsSelect(\$ui, findProduct(productCode), osCode);
-    renderPreview(\$ui, findProduct(productCode));
-
     \$ui.find('[data-rf-field="proxmoxNode"]').val(nativeControl(IDX.proxmoxNode).val() || '');
     copySelectOptions(nativeControl(IDX.serverGroup), \$ui.find('[data-rf-field="serverGroup"]'));
     copySelectOptions(nativeControl(IDX.proxmoxLocation), \$ui.find('[data-rf-field="proxmoxLocation"]'));
+    fillOsSelect(\$ui, findProduct(productCode), osCode);
+    renderPreview(\$ui, findProduct(productCode));
     \$ui.find('[data-rf-field="customerOs"]').prop('checked', nativeCustomerOsChecked());
     \$ui.find('[data-rf-field="portalSignIn"]').prop('checked', nativePortalSignInEnabled());
   }
@@ -1168,9 +1201,9 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '        <p class="rf-help">Catalog product this WHMCS package provisions (plan + templates).</p>'
       + '      </div>'
       + '      <div class="rf-ms__field" data-rf-field-wrap="osCode">'
-      + '        <label for="rf_os_code">Default OS <span style="font-weight:500;color:var(--rf-muted)">(optional)</span></label>'
+      + '        <label for="rf_os_code">Default OS template <span style="font-weight:500;color:var(--rf-muted)">(optional)</span></label>'
       + '        <select id="rf_os_code" data-rf-field="osCode"></select>'
-      + '        <p class="rf-help">Bare metal only: default OS when the customer does not choose one at checkout.</p>'
+      + '        <p class="rf-help">Bare metal only: default installer from the selected server group when the customer does not choose one at checkout.</p>'
       + '      </div>'
       + '    </div>'
       + '    <div class="rf-ms__preview" data-rf-preview hidden>'
@@ -1187,8 +1220,8 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '      <div class="rf-ms__check">'
       + '        <input type="checkbox" id="rf_customer_os" data-rf-field="customerOs"/>'
       + '        <div>'
-      + '          <label for="rf_customer_os">Let customers choose OS at checkout</label>'
-      + '          <p>On Save, syncs a WHMCS <strong>OS</strong> option from this product’s linked VM templates. Turn off to hide it.</p>'
+          + '          <label for="rf_customer_os">Let customers choose OS at checkout</label>'
+          + '          <p>On Save, syncs a WHMCS <strong>OS</strong> option from this product’s VM templates or the selected server group’s OS templates. Turn off to hide it.</p>'
       + '        </div>'
       + '      </div>'
       + '      <div class="rf-ms__check" style="margin-top:10px">'
@@ -1269,6 +1302,13 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     });
     \$ui.on('change.rfms', '[data-rf-field="productCode"]', function () {
       onProductChanged(\$ui);
+    });
+    \$ui.on('change.rfms', '[data-rf-field="serverGroup"]', function () {
+      var code = \$ui.find('[data-rf-field="productCode"]').val() || '';
+      var prevOs = \$ui.find('[data-rf-field="osCode"]').val() || '';
+      fillOsSelect(\$ui, findProduct(code), prevOs);
+      renderPreview(\$ui, findProduct(code));
+      syncToNative(\$ui);
     });
     \$ui.on('input.rfms change.rfms', '[data-rf-field]', function () {
       syncToNative(\$ui);

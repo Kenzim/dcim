@@ -1,7 +1,6 @@
 <script>
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
-  import MultiSelect from './ui/MultiSelect.svelte';
   import Modal from './ui/Modal.svelte';
   import Button from './ui/Button.svelte';
   import FormGroup from './ui/FormGroup.svelte';
@@ -16,10 +15,6 @@
     updateCatalogProduct,
     deleteCatalogProduct,
     listPermissionSets,
-    listCatalogOSProfiles,
-    createCatalogOSProfile,
-    attachCatalogOSProfile,
-    detachCatalogOSProfile,
   } from '../lib/api.js';
 
   let loading = false;
@@ -28,12 +23,10 @@
   let families = [];
   let products = [];
   let permissionSets = [];
-  let osProfiles = [];
   let searchTerm = '';
 
   let showFamilyForm = false;
   let showProductForm = false;
-  let showOsForm = false;
 
   let familyForm = { name: '', description: '' };
   let productForm = {
@@ -43,14 +36,6 @@
     code: '',
     permission_set_id: '',
   };
-  let osForm = { code: '', name: '', os_family: 'linux' };
-
-  const osFamilyOptions = [
-    { value: 'linux', label: 'Linux' },
-    { value: 'windows', label: 'Windows' },
-    { value: 'freebsd', label: 'FreeBSD' },
-    { value: 'other', label: 'Other' },
-  ];
 
   let editor = null;
   let identityForm = {};
@@ -60,11 +45,10 @@
     loading = true;
     error = '';
     try {
-      const [familyRows, productRows, permissionSetRows, osProfileRows] = await Promise.all([
+      const [familyRows, productRows, permissionSetRows] = await Promise.all([
         listProductFamilies(),
         listCatalogProducts(),
         listPermissionSets(),
-        listCatalogOSProfiles().catch(() => []),
       ]);
       families = (familyRows || []).filter((f) => f.service_type === 'bare_metal');
       const familyIds = new Set(families.map((f) => Number(f.id)));
@@ -74,7 +58,6 @@
           (p.family_id != null && familyIds.has(Number(p.family_id))),
       );
       permissionSets = permissionSetRows || [];
-      osProfiles = osProfileRows || [];
     } catch (err) {
       error = err.message;
     } finally {
@@ -94,30 +77,17 @@
     return families.find((f) => f.id === familyId);
   }
 
-  $: osProfileOptions = osProfiles.map((p) => ({
-    value: String(p.id),
-    label: `${p.name} (${p.code})`,
-  }));
-
   $: normalizedSearch = searchTerm.trim().toLowerCase();
   function matchesSearch(entity) {
     if (!normalizedSearch) return true;
     return (
       (entity.name || '').toLowerCase().includes(normalizedSearch) ||
       (entity.code || '').toLowerCase().includes(normalizedSearch) ||
-      (entity.description || '').toLowerCase().includes(normalizedSearch) ||
-      (entity.os_family || '').toLowerCase().includes(normalizedSearch)
+      (entity.description || '').toLowerCase().includes(normalizedSearch)
     );
   }
   $: visibleFamilies = families.filter(matchesSearch);
   $: visibleProducts = products.filter(matchesSearch);
-  $: visibleOsProfiles = osProfiles.filter(matchesSearch);
-
-  function familyOsLabel(family) {
-    const rows = family?.os_profiles || [];
-    if (!rows.length) return '—';
-    return rows.map((p) => p.name || p.code).join(', ');
-  }
 
   async function submitFamily() {
     error = '';
@@ -164,28 +134,11 @@
     }
   }
 
-  async function submitOsProfile() {
-    error = '';
-    try {
-      await createCatalogOSProfile({
-        code: osForm.code.trim(),
-        name: osForm.name.trim(),
-        os_family: osForm.os_family,
-      });
-      osForm = { code: '', name: '', os_family: 'linux' };
-      showOsForm = false;
-      await loadData();
-    } catch (err) {
-      error = err.message;
-    }
-  }
-
   function openFamilyEditor(family) {
     editor = { kind: 'family', id: family.id, title: family.name, code: family.code };
     identityForm = {
       name: family.name || '',
       description: family.description || '',
-      os_profile_ids: (family.os_profiles || []).map((p) => String(p.id)),
     };
     editorSuccess = '';
     error = '';
@@ -217,18 +170,6 @@
     editorSuccess = '';
   }
 
-  async function syncFamilyOsProfiles(familyId, selectedIds) {
-    const family = getFamilyById(familyId);
-    const current = new Set((family?.os_profiles || []).map((p) => Number(p.id)));
-    const next = new Set((selectedIds || []).map((v) => Number(v)).filter((n) => !Number.isNaN(n)));
-    for (const id of next) {
-      if (!current.has(id)) await attachCatalogOSProfile(familyId, id);
-    }
-    for (const id of current) {
-      if (!next.has(id)) await detachCatalogOSProfile(familyId, id);
-    }
-  }
-
   async function saveEditor() {
     if (!editor) return;
     saving = true;
@@ -240,7 +181,6 @@
           name: identityForm.name,
           description: identityForm.description || null,
         });
-        await syncFamilyOsProfiles(editor.id, identityForm.os_profile_ids);
       } else {
         if (!identityForm.family_id) {
           throw new Error('Bare-metal products must belong to a bare-metal family.');
@@ -352,19 +292,13 @@
       {#if editor.kind === 'family'}
         <section class="panel">
           <div class="panel-head">
-            <h3>OS profiles</h3>
+            <h3>Installable OS</h3>
             <p>
-              Attached profiles appear in WHMCS as Default OS / checkout OS for products in this family.
-              First-install templates still come from the server group.
+              Checkout and first-install OS choices come from the product's
+              <a href="/admin/server-groups">server group</a> permitted OS templates,
+              not from this catalog page.
             </p>
           </div>
-          <MultiSelect
-            label="Attached OS profiles"
-            options={osProfileOptions}
-            bind:value={identityForm.os_profile_ids}
-            size={6}
-            emptyText="No OS profiles yet — create one from the catalog list."
-          />
         </section>
       {:else}
         <section class="panel">
@@ -389,14 +323,14 @@
     </div>
   {:else}
     <p class="lead">
-      Catalog SKUs for WHMCS bare-metal products. Hardware is assigned from a
-      <a href="/admin/server-groups">server group</a>; this page only defines the product code, permission preset, and OS labels.
+      Catalog SKUs for WHMCS bare-metal products. Put free servers in a
+      <a href="/admin/server-groups">server group</a> and enable its installable OS templates;
+      this page only defines the product code and permission preset.
     </p>
 
     <div class="toolbar">
-      <input class="search-input" bind:value={searchTerm} placeholder="Search families, products, OS profiles…" />
+      <input class="search-input" bind:value={searchTerm} placeholder="Search families, products…" />
       <div class="toolbar-actions">
-        <Button variant="secondary" on:click={() => { showOsForm = true; }}>New OS Profile</Button>
         <Button variant="secondary" on:click={() => { showFamilyForm = true; }}>New Family</Button>
         <Button on:click={() => {
           productForm = {
@@ -417,10 +351,6 @@
         <h3>Products</h3>
         <p class="fact-value">{products.length}</p>
       </section>
-      <section class="fact">
-        <h3>OS profiles</h3>
-        <p class="fact-value">{osProfiles.length}</p>
-      </section>
     </div>
 
     {#if loading}
@@ -428,39 +358,18 @@
     {:else}
       <section class="panel">
         <div class="panel-head">
-          <h3>OS profiles</h3>
-          <p>Reusable OS labels. Attach them to a family so WHMCS can offer Default OS / checkout OS.</p>
+          <h3>Installable OS</h3>
+          <p>
+            Enable OS templates on a <a href="/admin/server-groups">server group</a>, then pick that group
+            on the WHMCS product. WHMCS Default OS and checkout OS come from that list.
+          </p>
         </div>
-        {#if visibleOsProfiles.length > 0}
-          <table class="catalog-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Code</th>
-                <th>Family</th>
-                <th>Enabled</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each visibleOsProfiles as profile (profile.id)}
-                <tr>
-                  <td class="cell-name">{profile.name}</td>
-                  <td class="mono">{profile.code}</td>
-                  <td>{profile.os_family || '—'}</td>
-                  <td>{profile.enabled === false ? 'No' : 'Yes'}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {:else}
-          <p class="muted empty-note">No OS profiles yet. Create one if WHMCS should offer an OS choice.</p>
-        {/if}
       </section>
 
       <section class="panel">
         <div class="panel-head">
           <h3>Families</h3>
-          <p>Bare-metal product families. OS profiles attach here and apply to every product in the family.</p>
+          <p>Bare-metal product families. Installable OS is configured on the server group, not here.</p>
         </div>
         {#if visibleFamilies.length > 0}
           <table class="catalog-table">
@@ -468,7 +377,6 @@
               <tr>
                 <th>Name</th>
                 <th>Code</th>
-                <th>OS profiles</th>
                 <th>Description</th>
                 <th class="col-count">Products</th>
                 <th class="col-actions">Actions</th>
@@ -479,7 +387,6 @@
                 <tr>
                   <td class="cell-name">{family.name}</td>
                   <td class="mono">{family.code}</td>
-                  <td class="cell-desc">{familyOsLabel(family)}</td>
                   <td class="cell-desc">{family.description || '—'}</td>
                   <td class="col-count">{productsForFamily(family.id).length}</td>
                   <td class="col-actions">
@@ -585,28 +492,6 @@
   </Modal>
 {/if}
 
-{#if showOsForm}
-  <Modal title="Create OS Profile" onClose={() => (showOsForm = false)}>
-    <FormGroup label="Name" required>
-      <input bind:value={osForm.name} placeholder="Debian 13" />
-    </FormGroup>
-    <FormGroup label="Code" required help="Stored as os_code; WHMCS uses rfos:code at checkout.">
-      <input class="mono" bind:value={osForm.code} placeholder="debian-13" />
-    </FormGroup>
-    <FormGroup label="OS family" required>
-      <select bind:value={osForm.os_family}>
-        {#each osFamilyOptions as opt}
-          <option value={opt.value}>{opt.label}</option>
-        {/each}
-      </select>
-    </FormGroup>
-    <svelte:fragment slot="footer">
-      <Button variant="secondary" on:click={() => (showOsForm = false)}>Cancel</Button>
-      <Button on:click={submitOsProfile}>Create OS Profile</Button>
-    </svelte:fragment>
-  </Modal>
-{/if}
-
 <style>
   .catalog-page { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
   @media (max-width: 768px) { .catalog-page { padding: 16px; } }
@@ -642,7 +527,7 @@
   .search-input { min-width: 260px; flex: 1 1 260px; max-width: 420px; }
   .toolbar-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
-  .fact-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .fact-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   @media (max-width: 640px) { .fact-grid { grid-template-columns: 1fr; } }
   .fact {
     border: 1px solid var(--border-color);

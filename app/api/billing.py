@@ -14,7 +14,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session, aliased
-from typing import List, Optional
+from sqlalchemy.orm.attributes import flag_modified
+from typing import Any, List, Optional
 from datetime import datetime, timezone
 from app.core.database import get_db
 from app.core.billing_auth import get_billing_integration
@@ -63,7 +64,11 @@ from app.models.disk import DiskType
 from app.models.boot_task import BootTask, BootType, BootTaskStatus
 from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
-from app.services.os_template_service import get_template_service
+from app.services.os_template_service import (
+    PasswordGenerateConfig,
+    get_template_service,
+    generate_parameter_password,
+)
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
@@ -494,6 +499,7 @@ def _determine_template_for_group(
     Determine which OS template to use for a server group.
 
     Rules:
+    - OS templates must be enabled on the group.
     - If explicit_template_id is provided, verify it's permitted (when list is non-empty).
     - Otherwise, if exactly one permitted_os_templates entry exists, use that.
     - Else, require explicit template_id.
@@ -505,24 +511,197 @@ def _determine_template_for_group(
             detail="Server group not found",
         )
 
-    permitted = list(group.permitted_os_templates or [])
+    group_name = getattr(group, "name", None) or str(group_id)
+    if not (getattr(group, "enable_os_templates", False) or False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"OS templates are not enabled for server group '{group_name}'",
+        )
+
+    permitted = [str(tid) for tid in (group.permitted_os_templates or [])]
 
     if explicit_template_id:
         if permitted and explicit_template_id not in permitted:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Template '{explicit_template_id}' is not permitted for this server group",
+                detail=(
+                    f"Template '{explicit_template_id}' is not permitted for "
+                    f"server group '{group_name}'"
+                ),
             )
         return explicit_template_id
 
-    # No explicit template; auto-select when there is exactly one permitted option
     if permitted and len(permitted) == 1:
         return permitted[0]
 
+    permitted_list = ", ".join(permitted) if permitted else "(none)"
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail="OS template must be specified for this server group",
+        detail=(
+            f"OS template must be specified for server group '{group_name}'. "
+            f"Permitted templates: {permitted_list}"
+        ),
     )
+
+
+def _os_template_param_field(param: Any, field: str, default=None):
+    if isinstance(param, dict):
+        return param.get(field, default)
+    return getattr(param, field, default)
+
+
+def _serialize_os_template_parameters(template) -> dict:
+    payload = {}
+    for name, param in (getattr(template, "parameters", None) or {}).items():
+        payload[name] = {
+            "type": _os_template_param_field(param, "type"),
+            "label": _os_template_param_field(param, "label"),
+            "required": bool(_os_template_param_field(param, "required", False)),
+            "default": _os_template_param_field(param, "default"),
+            "options": _os_template_param_field(param, "options"),
+            "help": _os_template_param_field(param, "help"),
+        }
+    return payload
+
+
+def _template_accepts_ssh_key(template) -> bool:
+    os_type = (getattr(template, "os_type", None) or "").lower()
+    params = getattr(template, "parameters", None) or {}
+    return os_type == "linux" and "ssh_public_key" in params
+
+
+def serialize_os_template(template) -> dict:
+    return {
+        "id": template.id,
+        "name": template.name,
+        "description": getattr(template, "description", None) or "",
+        "os_type": getattr(template, "os_type", None) or "other",
+        "user_reinstallable": bool(getattr(template, "user_reinstallable", False)),
+        "accepts_ssh_key": _template_accepts_ssh_key(template),
+        "parameters": _serialize_os_template_parameters(template),
+    }
+
+
+def resolved_os_templates_for_ids(template_ids: list | None) -> list[dict]:
+    """Resolve disk templates for a list of ids; skip ids that are missing on disk."""
+    template_service = get_template_service()
+    out: list[dict] = []
+    for raw_id in template_ids or []:
+        tid = str(raw_id).strip()
+        if not tid:
+            continue
+        template = template_service.get_template(tid)
+        if template is None:
+            continue
+        out.append(serialize_os_template(template))
+    return out
+
+
+def _service_server_group(db: Session, service: Service):
+    cfg = service.config if isinstance(getattr(service, "config", None), dict) else {}
+    raw_id = cfg.get("server_group_id") if cfg else None
+    if raw_id is None or raw_id == "":
+        return None
+    try:
+        return ServerGroupDAO.get_by_id(db, int(raw_id))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_template_param_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "\n".join(str(item) for item in value if item is not None and str(item) != "")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _as_password_generate_config(gen) -> Optional[PasswordGenerateConfig]:
+    if gen is None:
+        return None
+    if isinstance(gen, PasswordGenerateConfig):
+        return gen if gen.enabled else None
+    if isinstance(gen, dict):
+        if not gen.get("enabled", True):
+            return None
+        allowed = {"enabled", "length", "charset", "exclude_ambiguous"}
+        return PasswordGenerateConfig(**{k: v for k, v in gen.items() if k in allowed})
+    if not bool(getattr(gen, "enabled", True)):
+        return None
+    kwargs = {}
+    for key in ("length", "charset", "exclude_ambiguous"):
+        if hasattr(gen, key):
+            kwargs[key] = getattr(gen, key)
+    return PasswordGenerateConfig(**kwargs)
+
+
+def resolve_template_parameters(template, supplied: dict | None) -> dict:
+    """
+    Fill missing template.json parameters from aliases, defaults, or generate specs.
+
+    WHMCS typically supplies ``admin_password`` (service password) and
+    ``ssh_public_keys``; disk templates may declare ``password`` / ``ssh_public_key``.
+    """
+    supplied = dict(supplied or {})
+    params_def = getattr(template, "parameters", None) or {}
+    if not params_def:
+        return supplied
+
+    if "ssh_public_key" not in supplied and supplied.get("ssh_public_keys") is not None:
+        supplied["ssh_public_key"] = _coerce_template_param_value(supplied.get("ssh_public_keys"))
+
+    password_alias = ""
+    for key in ("password", "admin_password"):
+        candidate = _coerce_template_param_value(supplied.get(key))
+        if candidate:
+            password_alias = candidate
+            break
+
+    resolved: dict = {}
+    missing: list[str] = []
+    for name, param in params_def.items():
+        param_type = (_os_template_param_field(param, "type") or "text") or "text"
+        required = bool(_os_template_param_field(param, "required", False))
+        default = _os_template_param_field(param, "default")
+        raw = supplied.get(name)
+        value = _coerce_template_param_value(raw) if raw is not None else ""
+        if value == "" and param_type == "password" and password_alias:
+            value = password_alias
+        if value == "" and default not in (None,):
+            value = _coerce_template_param_value(default)
+        if value == "" and param_type == "password":
+            gen_cfg = _as_password_generate_config(_os_template_param_field(param, "generate"))
+            if gen_cfg is not None:
+                value = generate_parameter_password(gen_cfg)
+        if value == "" and required:
+            missing.append(name)
+        resolved[name] = value
+
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Missing required template parameters for '{getattr(template, 'id', 'template')}': "
+                + ", ".join(missing)
+            ),
+        )
+
+    for key, extra in supplied.items():
+        if key not in resolved:
+            resolved[key] = (
+                extra if not isinstance(extra, (list, tuple)) else _coerce_template_param_value(extra)
+            )
+    return resolved
+
+
+def _persist_resolved_template_params(service: Service, template_id: str, template_parameters: dict) -> None:
+    cfg = dict(service.config or {}) if isinstance(getattr(service, "config", None), dict) else {}
+    cfg["template_id"] = template_id
+    cfg["template_parameters"] = template_parameters
+    service.config = cfg
+    flag_modified(service, "config")
 
 
 def _queue_template_install_for_service(
@@ -563,6 +742,9 @@ def _queue_template_install_for_service(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"OS template '{template_id}' not found",
         )
+
+    template_parameters = resolve_template_parameters(template, template_parameters)
+    _persist_resolved_template_params(service, template_id, template_parameters)
 
     # Load template script
     script_path = template_service.get_template_script_path(template_id)
@@ -3237,8 +3419,10 @@ async def reinstall_os_on_service(
 ):
     """
     Reinstall OS on a service's server.
-    
-    Only OS templates marked as user_reinstallable can be used via this endpoint.
+
+    When the service was provisioned from a server group, the template must be
+    in that group's permitted OS list. Otherwise only ``user_reinstallable``
+    templates are allowed.
     """
     logger.info(f"Billing API: Reinstalling OS '{action.template_id}' on service {service_id} via integration '{integration.name}'")
     
@@ -3282,12 +3466,17 @@ async def reinstall_os_on_service(
                 detail=f"OS template '{action.template_id}' not found"
             )
 
-        # Verify template is user-reinstallable
-        if not template.user_reinstallable:
+        group = _service_server_group(db, service)
+        if group is not None:
+            _determine_template_for_group(db, group.id, action.template_id)
+        elif not template.user_reinstallable:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"OS template '{action.template_id}' is not available for user reinstallation"
             )
+
+        template_parameters = resolve_template_parameters(template, action.template_parameters)
+        _persist_resolved_template_params(service, action.template_id, template_parameters)
 
         # Get template script
         script_path = template_service.get_template_script_path(action.template_id)
@@ -3343,8 +3532,8 @@ async def reinstall_os_on_service(
         # context (see _queue_template_install_for_service) since these are
         # customer-supplied values embedded via literal text substitution
         # into a root-executed install script.
-        if action.template_parameters:
-            for param_name, param_value in action.template_parameters.items():
+        if template_parameters:
+            for param_name, param_value in template_parameters.items():
                 replacements[f"PARAM_{param_name.upper()}"] = shell_escape_double_quoted(param_value)
 
         # Template installations use debian-live
@@ -3509,7 +3698,8 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
         }
 
     os_profiles = []
-    if family is not None:
+    family_type = family.service_type if family is not None else None
+    if family is not None and family_type != "bare_metal":
         for mapping in family.os_mappings or []:
             profile = mapping.os_profile
             if profile is None or not profile.enabled:
@@ -3576,7 +3766,11 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
         "checkout_os_mode": (
             "vm_template"
             if vm_templates
-            else ("os_profile" if os_profiles else "none")
+            else (
+                "server_group"
+                if family_type == "bare_metal"
+                else ("os_profile" if os_profiles else "none")
+            )
         ),
     }
 
@@ -3592,8 +3786,10 @@ async def list_products_billing(
     List RackFlow catalog products for billing systems (WHMCS Module Settings).
 
     Optional ``service_type`` filters to ``bare_metal``, ``vm``, or ``http_proxy``.
-    Each item includes effective specs, family OS profiles, and linked VM templates
-    so the admin UI can preview what a product will provision.
+    Each item includes effective specs, family OS profiles (VM/legacy), and
+    linked VM templates so the admin UI can preview what a product will
+    provision. Bare-metal products use ``checkout_os_mode=server_group``;
+    installable OS comes from the selected server group, not family OS profiles.
     """
     rows = ProductDAO.get_all(db)
     wanted = (service_type or "").strip().lower() or None
@@ -3731,6 +3927,7 @@ async def list_server_groups_billing(
             "permitted_scripts": list(group.permitted_scripts or []),
             "enable_os_templates": getattr(group, "enable_os_templates", False) or False,
             "permitted_os_templates": list(group.permitted_os_templates or []),
+            "os_templates": resolved_os_templates_for_ids(group.permitted_os_templates),
         }
         for group in server_groups
     ]
@@ -3760,35 +3957,34 @@ async def list_available_scripts(
 
 @router.get("/os-templates", response_model=List[dict])
 async def list_available_os_templates(
+    service_id: Optional[int] = None,
     integration: BillingIntegration = Depends(get_billing_integration),
     db: Session = Depends(get_db)
 ):
     """
     List OS templates available for reinstallation via billing API.
-    
-    Only returns templates marked as user_reinstallable.
+
+    Without ``service_id``, only templates marked ``user_reinstallable``.
+    With ``service_id``, return the service's server-group permitted templates
+    (the same list used at checkout) when OS templates are enabled on the group.
     """
+    if service_id is not None:
+        service = ServiceDAO.get_by_id(db, service_id)
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service not found",
+            )
+        _assert_billing_owned_service(service, integration)
+        group = _service_server_group(db, service)
+        if group is None or not (getattr(group, "enable_os_templates", False) or False):
+            return []
+        return resolved_os_templates_for_ids(group.permitted_os_templates)
+
     template_service = get_template_service()
     templates = template_service.get_all_templates()
-    
     return [
-        {
-            "id": template.id,
-            "name": template.name,
-            "description": template.description,
-            "os_type": template.os_type,
-            "parameters": {
-                name: {
-                    "type": param.type,
-                    "label": param.label,
-                    "required": param.required,
-                    "default": param.default,
-                    "options": param.options,
-                    "help": param.help
-                }
-                for name, param in template.parameters.items()
-            }
-        }
+        serialize_os_template(template)
         for template in templates
         if template.user_reinstallable
     ]
