@@ -18,7 +18,7 @@ from app.services.vm_vnc_ticket_service import VmVncUnavailable, build_launch_ur
 async def mint_ipmi_ticket(server_id: Optional[int] = None, service_id: Optional[int] = None, confirm: bool = False) -> dict:
     """Mint a short-lived IPMI proxy launch URL (no viewer passwords)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         server = None
         if server_id is not None:
             server = ServerDAO.get_by_id(db, server_id)
@@ -53,7 +53,7 @@ async def mint_ipmi_ticket(server_id: Optional[int] = None, service_id: Optional
 async def mint_vnc_ticket(service_id: int, console_type: Optional[str] = None, confirm: bool = False) -> dict:
     """Mint a short-lived VM console launch URL (no Proxmox tickets)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         service = ServiceDAO.get_by_id(db, service_id)
         if not service:
             raise ValueError("Service not found")

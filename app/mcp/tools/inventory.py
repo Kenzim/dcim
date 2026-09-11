@@ -20,7 +20,7 @@ from app.plugins.registry import get_registry
 async def list_locations() -> dict:
     """List datacenter locations."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return {"locations": [location_row(r) for r in LocationDAO.get_all(db)]}
 
     return await run_tool("list_locations", "read", work)
@@ -30,7 +30,7 @@ async def list_locations() -> dict:
 async def get_location(location_id: int) -> dict:
     """Get a location by id."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row = LocationDAO.get_by_id(db, location_id)
         if not row:
             raise ValueError("Location not found")
@@ -43,7 +43,7 @@ async def get_location(location_id: int) -> dict:
 async def create_location(name: str, description: Optional[str] = None) -> dict:
     """Create a location."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if LocationDAO.get_by_name(db, name):
             raise ValueError("Location with this name already exists")
         return location_row(LocationDAO.create(db, name=name, description=description))
@@ -59,7 +59,7 @@ async def update_location(
 ) -> dict:
     """Update a location's name or description."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row = LocationDAO.get_by_id(db, location_id)
         if not row:
             raise ValueError("Location not found")
@@ -81,7 +81,7 @@ async def update_location(
 async def list_racks(location_id: Optional[int] = None) -> dict:
     """List racks, optionally filtered by location."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         rows = RackDAO.get_by_location(db, location_id) if location_id else RackDAO.get_all(db)
         return {"racks": [rack_row(r) for r in rows]}
 
@@ -99,7 +99,7 @@ async def create_rack(
 ) -> dict:
     """Create a rack in a location."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if not LocationDAO.get_by_id(db, location_id):
             raise ValueError("Location not found")
         if RackDAO.get_by_name_and_location(db, name, location_id):
@@ -142,7 +142,7 @@ async def update_rack(
 ) -> dict:
     """Update a rack."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row_obj = RackDAO.get_by_id(db, rack_id)
         if not row_obj:
             raise ValueError("Rack not found")
@@ -179,7 +179,7 @@ async def list_servers(
 ) -> dict:
     """List servers (no BMC credentials)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         cap = max(1, min(int(limit or 100), 200))
         if location_id:
             rows = ServerDAO.get_by_location(db, location_id)
@@ -201,7 +201,7 @@ async def list_servers(
 async def get_server(server_id: int) -> dict:
     """Get a server including effective capabilities (no secrets)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row = ServerDAO.get_by_id(db, server_id)
         if not row:
             raise ValueError("Server not found")
@@ -225,7 +225,7 @@ async def create_server(
 ) -> dict:
     """Create a server. plugin_config is write-only and never returned."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if not LocationDAO.get_by_id(db, location_id):
             raise ValueError("Location not found")
         if ServerDAO.get_by_name(db, name):
@@ -276,7 +276,7 @@ async def update_server(
 ) -> dict:
     """Update non-secret server fields."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row = ServerDAO.get_by_id(db, server_id)
         if not row:
             raise ValueError("Server not found")
@@ -317,7 +317,7 @@ async def update_server(
 async def delete_server(server_id: int, confirm: bool = False) -> dict:
     """Delete a server that is not assigned to a service."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if not ServerDAO.get_by_id(db, server_id):
             raise ValueError("Server not found")
         ServerDAO.delete(db, server_id)
@@ -337,7 +337,7 @@ async def delete_server(server_id: int, confirm: bool = False) -> dict:
 async def list_server_groups() -> dict:
     """List server groups."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         rows = ServerGroupDAO.get_all(db, skip=0, limit=200)
         return {
             "groups": [
@@ -352,7 +352,7 @@ async def list_server_groups() -> dict:
 async def get_server_activity(server_id: int, limit: int = 50) -> dict:
     """Recent activity log for a server."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if not ServerDAO.get_by_id(db, server_id):
             raise ValueError("Server not found")
         cap = max(1, min(int(limit or 50), 200))
@@ -381,7 +381,7 @@ async def get_server_activity(server_id: int, limit: int = 50) -> dict:
 async def get_server_bandwidth(server_id: int) -> dict:
     """Latest bandwidth sample per cabled switch port for a server."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         from app.dao.cable_run_dao import CableRunDAO
         from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
         from app.dao.switch_port_dao import SwitchPortDAO

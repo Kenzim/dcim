@@ -109,20 +109,9 @@ class PaymentWebhookService:
                         reason="refund",
                     )
                 elif event.action == GatewayWebhookAction.PAYMENT_DISPUTED:
-                    PaymentWebhookService._reverse_payment(
-                        db,
-                        gateway,
-                        event.external_ref or "",
-                        event_id=event_id,
-                        reason="dispute",
+                    PaymentWebhookService._handle_payment_disputed(
+                        db, gateway, event, event_id=event_id
                     )
-                    payment = PaymentWebhookService._payment_for_update(
-                        db, gateway, event.external_ref or ""
-                    )
-                    if payment is not None and payment.invoice is not None:
-                        PaymentWebhookService._suspend_linked_services(
-                            db, payment.invoice, reason="dispute"
-                        )
                 db.flush()
         except IntegrityError:
             return False
@@ -202,6 +191,29 @@ class PaymentWebhookService:
                     invoice.id,
                     exc_info=True,
                 )
+
+    @staticmethod
+    def _handle_payment_disputed(
+        db: Session,
+        gateway: str,
+        event: NormalizedGatewayWebhookEvent,
+        *,
+        event_id: str,
+    ) -> None:
+        PaymentWebhookService._reverse_payment(
+            db,
+            gateway,
+            event.external_ref or "",
+            event_id=event_id,
+            reason="dispute",
+        )
+        payment = PaymentWebhookService._payment_for_update(
+            db, gateway, event.external_ref or ""
+        )
+        if payment is not None and payment.invoice is not None:
+            PaymentWebhookService._suspend_linked_services(
+                db, payment.invoice, reason="dispute"
+            )
 
     @staticmethod
     def _payment_failed(

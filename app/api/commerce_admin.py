@@ -34,11 +34,13 @@ from app.services.email_message_service import EmailMessageService
 from app.services.gdpr_service import GdprService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceService
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 
 router = APIRouter(
     prefix="/admin/commerce",
     tags=["commerce-admin"],
     dependencies=[Depends(require_admin)],
+    responses=COMMON_ERROR_RESPONSES,
 )
 
 
@@ -240,7 +242,7 @@ def list_orders(
     return [_serialize_order(row, include_items=False) for row in rows]
 
 
-@router.get("/orders/{order_id}")
+@router.get("/orders/{order_id}", responses={**COMMON_ERROR_RESPONSES})
 def get_order(order_id: int, db: Session = Depends(get_db)):
     order = db.execute(
         select(Order).options(joinedload(Order.items)).where(Order.id == order_id)
@@ -250,7 +252,7 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
     return _serialize_order(order)
 
 
-@router.post("/orders/{order_id}/accept")
+@router.post("/orders/{order_id}/accept", responses={**COMMON_ERROR_RESPONSES})
 def accept_order(
     order_id: int,
     request: Request,
@@ -299,7 +301,7 @@ def accept_order(
     return _serialize_order(order)
 
 
-@router.post("/orders/{order_id}/retry-fulfill")
+@router.post("/orders/{order_id}/retry-fulfill", responses={**COMMON_ERROR_RESPONSES})
 def retry_fulfill_order(
     order_id: int,
     request: Request,
@@ -334,7 +336,7 @@ def retry_fulfill_order(
     return _serialize_order(order)
 
 
-@router.post("/orders/{order_id}/cancel")
+@router.post("/orders/{order_id}/cancel", responses={**COMMON_ERROR_RESPONSES})
 def cancel_order(
     order_id: int,
     request: Request,
@@ -395,13 +397,13 @@ def list_invoices(
     return [_serialize_invoice(db, row) for row in rows]
 
 
-@router.get("/invoices/{invoice_id}")
+@router.get("/invoices/{invoice_id}", responses={**COMMON_ERROR_RESPONSES})
 def get_invoice(invoice_id: int, db: Session = Depends(get_db)):
     invoice = _get_invoice_or_404(db, invoice_id)
     return _serialize_invoice(db, invoice, payments=True)
 
 
-@router.get("/invoices/{invoice_id}/pdf")
+@router.get("/invoices/{invoice_id}/pdf", responses={**COMMON_ERROR_RESPONSES})
 def get_invoice_pdf(invoice_id: int, db: Session = Depends(get_db)):
     invoice = _get_invoice_or_404(db, invoice_id)
     try:
@@ -417,7 +419,7 @@ def get_invoice_pdf(invoice_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/invoices/{invoice_id}/mark-paid")
+@router.post("/invoices/{invoice_id}/mark-paid", responses={**COMMON_ERROR_RESPONSES})
 def mark_invoice_paid(
     invoice_id: int,
     body: MarkPaidBody,
@@ -458,7 +460,7 @@ def mark_invoice_paid(
     return _serialize_invoice(db, invoice)
 
 
-@router.post("/invoices/{invoice_id}/void")
+@router.post("/invoices/{invoice_id}/void", responses={**COMMON_ERROR_RESPONSES})
 def void_invoice(
     invoice_id: int,
     request: Request,
@@ -559,7 +561,7 @@ def list_email_messages(
     return [_serialize_email(row) for row in rows]
 
 
-@router.post("/email-messages/{message_id}/retry")
+@router.post("/email-messages/{message_id}/retry", responses={**COMMON_ERROR_RESPONSES})
 def retry_email_message(message_id: int, db: Session = Depends(get_db)):
     row = EmailMessageService.retry(db, message_id)
     if row is None:
@@ -610,7 +612,7 @@ def list_billing_accounts(
     return [_serialize_billing_account(row) for row in rows]
 
 
-@router.get("/billing-accounts/{account_id}")
+@router.get("/billing-accounts/{account_id}", responses={**COMMON_ERROR_RESPONSES})
 def get_billing_account(account_id: int, db: Session = Depends(get_db)):
     row = BillingAccountDAO.get(db, account_id)
     if row is None:
@@ -636,7 +638,7 @@ def get_billing_account(account_id: int, db: Session = Depends(get_db)):
 # --- System settings ---
 
 
-@router.get("/settings/{key}")
+@router.get("/settings/{key}", responses={**COMMON_ERROR_RESPONSES})
 def get_setting(key: str, db: Session = Depends(get_db)):
     value = SystemSettingDAO.get(db, key.strip())
     if value is None:
@@ -673,7 +675,7 @@ def create_webhook(body: WebhookCreateBody, db: Session = Depends(get_db)):
     return CommerceWebhookService.serialize_endpoint(row)
 
 
-@router.put("/webhooks/{endpoint_id}")
+@router.put("/webhooks/{endpoint_id}", responses={**COMMON_ERROR_RESPONSES})
 def update_webhook(
     endpoint_id: int,
     body: WebhookUpdateBody,
@@ -696,7 +698,11 @@ def update_webhook(
     return CommerceWebhookService.serialize_endpoint(row)
 
 
-@router.delete("/webhooks/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/webhooks/{endpoint_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={**COMMON_ERROR_RESPONSES},
+)
 def delete_webhook(endpoint_id: int, db: Session = Depends(get_db)):
     row = db.get(WebhookEndpoint, endpoint_id)
     if row is None:
@@ -708,7 +714,7 @@ def delete_webhook(endpoint_id: int, db: Session = Depends(get_db)):
 # --- GDPR ---
 
 
-@router.post("/users/{user_id}/export")
+@router.post("/users/{user_id}/export", responses={**COMMON_ERROR_RESPONSES})
 def export_user(user_id: int, db: Session = Depends(get_db)):
     if db.get(User, user_id) is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -719,7 +725,7 @@ def export_user(user_id: int, db: Session = Depends(get_db)):
     return payload
 
 
-@router.post("/users/{user_id}/anonymize")
+@router.post("/users/{user_id}/anonymize", responses={**COMMON_ERROR_RESPONSES})
 def anonymize_user(user_id: int, db: Session = Depends(get_db)):
     try:
         result = GdprService.anonymize_user(db, user_id)
@@ -732,7 +738,7 @@ def anonymize_user(user_id: int, db: Session = Depends(get_db)):
 # --- Service lifecycle (admin force) ---
 
 
-@router.post("/services/{service_id}/cancel")
+@router.post("/services/{service_id}/cancel", responses={**COMMON_ERROR_RESPONSES})
 def force_cancel_service(
     service_id: int,
     body: ForceCancelBody,

@@ -18,7 +18,7 @@ from app.models.user import User
 async def list_clients(query: Optional[str] = None, limit: int = 50) -> dict:
     """List non-admin client accounts."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         cap = max(1, min(int(limit or 50), 200))
         q = db.query(User).filter(User.is_admin.is_(False)).order_by(User.username)
         needle = (query or "").strip()
@@ -35,7 +35,7 @@ async def list_clients(query: Optional[str] = None, limit: int = 50) -> dict:
 async def get_client(user_id: int) -> dict:
     """Get a client profile (no password hash)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row = UserDAO.get_by_id(db, user_id)
         if not row or row.is_admin:
             raise ValueError("Client not found")
@@ -50,7 +50,7 @@ async def create_client(
 ) -> dict:
     """Create a client account without a password (portal via SSO/impersonation only)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if UserDAO.get_by_username(db, username):
             raise ValueError("Username already in use")
         if UserDAO.get_by_email(db, email):
@@ -75,7 +75,7 @@ async def create_client(
 async def set_client_permission_set(user_id: int, permission_set_id: Optional[int] = None) -> dict:
     """Assign or clear a client's default permission preset."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row = UserDAO.get_by_id(db, user_id)
         if not row or row.is_admin:
             raise ValueError("Client not found")

@@ -7,6 +7,7 @@ AMI/IVTP or InsydeVNC directly.
 """
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -103,7 +104,8 @@ class IpmiKvmProfile(ABC):
 
     async def logout(self, auth: BmcKvmAuth) -> None:
         """Best-effort BMC web session teardown. Default is a no-op."""
-        return None
+        del auth
+        await asyncio.sleep(0)
 
     def prefetch_asset_paths(self) -> list[str]:
         """BMC asset paths to cache when the hub logs in (decode worker, ATEN JS)."""

@@ -35,6 +35,7 @@ def _auth():
         kvm_token="tok",
         client_ip="10.1.2.3",
         username="admin",
+        server_ip="bmc.example",
     )
 
 
@@ -55,6 +56,22 @@ async def test_handshake_sends_empty_3a_validate_resume_and_returns_leftover():
     assert len(upstream.sent) == 1
     sent = upstream.sent[0]
     assert sent[0:2] == ivtp(_IVTP_CONN_COMPLETE, 1)[0:2]
+
+
+@pytest.mark.asyncio
+async def test_handshake_optional_hello_uses_438_byte_frame():
+    auth = _auth()
+    hello = AsrockRackKvmProfile().hello_frame_attempts(auth)[1]
+    assert len(hello) == 462
+    upstream = _FakeUpstream(
+        [
+            ivtp(_IVTP_ALLOWED, 0),
+            ivtp(_IVTP_VALIDATED, 0, bytes([1])),
+        ]
+    )
+    leftover = await AsrockRackKvmProfile().handshake(upstream, auth, hello=hello)
+    assert leftover[8] == 1
+    assert upstream.sent[0] == hello
 
 
 @pytest.mark.asyncio

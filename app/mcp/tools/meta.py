@@ -22,7 +22,7 @@ from app.models.user import User
 async def rackflow_status() -> dict:
     """Health/status of this Rackflow MCP server and the calling key's scopes."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         from app.mcp.instance import mcp as mcp_instance
 
         manager = getattr(mcp_instance, "_tool_manager", None)
@@ -44,7 +44,7 @@ async def rackflow_status() -> dict:
 async def search(query: str, limit: int = 20) -> dict:
     """Search servers, services, IPs, and clients by name, hostname, or IP."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         needle = (query or "").strip()
         if not needle:
             return {"servers": [], "services": [], "ips": [], "clients": []}

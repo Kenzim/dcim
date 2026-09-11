@@ -22,75 +22,53 @@ def _run_migrations() -> None:
     command.upgrade(alembic_cfg, "head")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup/shutdown tasks"""
-    # Startup
-    logger.info("Starting up...")
-    _run_migrations()
-    setup_keyspace_notifications()
-    
-    # Start keyspace notification listener (it manages its own background thread)
-    start_keyspace_notification_listener()
+def _start_background_workers() -> list[asyncio.Task]:
     from app.services.reconciliation_jobs import run_reconciliation_jobs
-    reconciliation_task = asyncio.create_task(run_reconciliation_jobs())
 
-    # Optional in-process deployment worker (single-node/dev). Production runs a
-    # dedicated `deployment-worker` container instead; see docker-compose.
-    deployment_worker_task = None
+    tasks: list[asyncio.Task] = [asyncio.create_task(run_reconciliation_jobs())]
     if settings.run_deployment_worker:
         from app.services.deployment.worker import run_deployment_job_worker
-        deployment_worker_task = asyncio.create_task(
-            run_deployment_job_worker(
-                interval_seconds=settings.deployment_worker_interval_seconds,
-                lease_ttl_seconds=settings.deployment_worker_lease_ttl_seconds,
+
+        tasks.append(
+            asyncio.create_task(
+                run_deployment_job_worker(
+                    interval_seconds=settings.deployment_worker_interval_seconds,
+                    lease_ttl_seconds=settings.deployment_worker_lease_ttl_seconds,
+                )
             )
         )
         logger.info("In-process deployment worker enabled")
-
-    # Optional in-process USDT watcher for single-node/dev. Production should
-    # run the dedicated profile-gated compose service so API replicas never
-    # duplicate chain polling.
-    usdt_watcher_task = None
     if settings.run_usdt_watcher:
         from app.workers.usdt_watcher import run_usdt_watcher
-        usdt_watcher_task = asyncio.create_task(run_usdt_watcher())
-        logger.info("In-process USDT watcher enabled")
 
-    recurring_billing_task = None
+        tasks.append(asyncio.create_task(run_usdt_watcher()))
+        logger.info("In-process USDT watcher enabled")
     if settings.run_recurring_billing_worker:
         from app.workers.recurring_billing import run_recurring_billing_worker
 
-        recurring_billing_task = asyncio.create_task(
-            run_recurring_billing_worker()
-        )
+        tasks.append(asyncio.create_task(run_recurring_billing_worker()))
         logger.info("In-process recurring billing worker enabled")
-
-    notification_outbox_task = None
     if settings.run_notification_outbox_worker:
-        from app.workers.notification_outbox import (
-            run_notification_outbox_worker,
-        )
+        from app.workers.notification_outbox import run_notification_outbox_worker
 
-        notification_outbox_task = asyncio.create_task(
-            run_notification_outbox_worker()
-        )
+        tasks.append(asyncio.create_task(run_notification_outbox_worker()))
         logger.info("In-process notification outbox worker enabled")
-    
-    # Seed default categories and optional initial admin
+    return tasks
+
+
+def _seed_startup_data() -> None:
     from app.core.database import SessionLocal
     from app.core.seed_categories import seed_categories
-    from app.services.plugin_sync import sync_plugins_to_db, sync_switch_plugins_to_db
+    from app.core.seed_permission_sets import seed_permission_sets
     from app.dao import UserDAO
+    from app.services.plugin_sync import sync_plugins_to_db, sync_switch_plugins_to_db
+
     try:
         db = SessionLocal()
         seed_categories(db)
-        from app.core.seed_permission_sets import seed_permission_sets
         seed_permission_sets(db)
-        # Plugin sync is now a no-op (plugins loaded directly from disk)
-        sync_results = sync_plugins_to_db(db)
-        switch_sync_results = sync_switch_plugins_to_db(db)
-        # Create initial admin if no users exist and env is set
+        sync_plugins_to_db(db)
+        sync_switch_plugins_to_db(db)
         if (
             settings.initial_admin_username
             and settings.initial_admin_password
@@ -113,6 +91,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not seed categories/sync plugins (may already exist): {e}")
 
+
+async def _shutdown_background_workers(tasks: list[asyncio.Task]) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown tasks"""
+    logger.info("Starting up...")
+    _run_migrations()
+    setup_keyspace_notifications()
+    start_keyspace_notification_listener()
+    background_tasks = _start_background_workers()
+    _seed_startup_data()
+
     from app.services.ipmi_kvm.hub import ensure_splice_server, shutdown_kvm_hubs
 
     try:
@@ -126,29 +121,14 @@ async def lifespan(app: FastAPI):
 
             await stack.enter_async_context(mcp_session_lifespan())
         yield
-    
-    # Shutdown
+
     logger.info("Shutting down...")
     try:
         await shutdown_kvm_hubs()
     except Exception:  # noqa: BLE001
         logger.debug("KVM hub shutdown failed", exc_info=True)
-    
-    reconciliation_task.cancel()
-    tasks = [reconciliation_task]
-    if deployment_worker_task is not None:
-        deployment_worker_task.cancel()
-        tasks.append(deployment_worker_task)
-    if usdt_watcher_task is not None:
-        usdt_watcher_task.cancel()
-        tasks.append(usdt_watcher_task)
-    if recurring_billing_task is not None:
-        recurring_billing_task.cancel()
-        tasks.append(recurring_billing_task)
-    if notification_outbox_task is not None:
-        notification_outbox_task.cancel()
-        tasks.append(notification_outbox_task)
-    await asyncio.gather(*tasks, return_exceptions=True)
+
+    await _shutdown_background_workers(background_tasks)
 
 
 app = FastAPI(

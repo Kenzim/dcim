@@ -13,7 +13,7 @@ from app.services.aggregate_bandwidth_service import get_aggregate_monitored_ban
 async def list_switches(location_id: int | None = None, limit: int = 100) -> dict:
     """List network switches (no SNMP credentials)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         cap = max(1, min(int(limit or 100), 200))
         if location_id:
             rows = NetworkSwitchDAO.get_by_location(db, location_id)
@@ -42,7 +42,7 @@ async def list_switches(location_id: int | None = None, limit: int = 100) -> dic
 async def list_switch_ports(switch_id: int) -> dict:
     """List ports on a switch."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if not NetworkSwitchDAO.get_by_id(db, switch_id):
             raise ValueError("Switch not found")
         ports = SwitchPortDAO.get_by_switch(db, switch_id)
@@ -66,7 +66,7 @@ async def list_switch_ports(switch_id: int) -> dict:
 async def get_aggregate_bandwidth(hours: int = 24) -> dict:
     """Aggregate in/out rates across monitored server ports."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return get_aggregate_monitored_bandwidth(db, hours=hours)
 
     return await run_tool("get_aggregate_bandwidth", "read", work, args={"hours": hours})

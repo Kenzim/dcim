@@ -12,6 +12,7 @@ from app.services.ipmi_kvm.asrockrack import (
     validate_payload,
     validate_payload_with_server_ip,
 )
+from app.services.ipmi_kvm.bmc_tls import bmc_ssl_context
 from app.services.ipmi_kvm.base import BmcKvmAuth, IpmiKvmUnavailable
 from app.services.ipmi_kvm.gigabyte import GigabyteKvmProfile
 from app.services.ipmi_kvm.registry import get_profile, list_profiles, normalize_profile_id
@@ -65,6 +66,16 @@ def test_hello_frame_differs_by_profile():
     assert asrock != giga
 
 
+def test_hello_frame_attempts_order():
+    auth = _auth()
+    asrock = AsrockRackKvmProfile().hello_frame_attempts(auth)
+    giga = GigabyteKvmProfile().hello_frame_attempts(auth)
+    assert [len(f) for f in asrock] == [397, 462]
+    assert [len(f) for f in giga] == [462, 397]
+    assert asrock[0] == AsrockRackKvmProfile().hello_frame(auth)
+    assert giga[0] == GigabyteKvmProfile().hello_frame(auth)
+
+
 def test_registry_lists_gigabyte():
     ids = {p["id"] for p in list_profiles()}
     assert ids == {"asrockrack", "gigabyte", "supermicro"}
@@ -73,3 +84,11 @@ def test_registry_lists_gigabyte():
     assert normalize_profile_id("") is None
     with pytest.raises(IpmiKvmUnavailable):
         normalize_profile_id("idrac")
+
+
+def test_ssl_ctx_includes_rsa_aes_gcm():
+    ctx = bmc_ssl_context(megarac=True)
+    names = {cipher["name"] for cipher in ctx.get_ciphers()}
+    assert "AES256-GCM-SHA384" in names
+    client = __import__("httpx").AsyncClient(verify=ctx, timeout=1.0)
+    assert client is not None

@@ -20,7 +20,7 @@ from app.services.server_activity_logger import (
 )
 
 
-async def _plugin_for_server(db, server):
+def _plugin_for_server(_db, server):
     registry = get_registry()
     return registry.get_plugin(server.plugin_name, server.plugin_config)
 
@@ -35,7 +35,7 @@ async def get_server_power_state(server_id: int) -> dict:
             raise ValueError("Server not found")
         if not _server_has_capability(db, server, "power_control"):
             raise ValueError("Server does not have power control capability enabled")
-        plugin = await _plugin_for_server(db, server)
+        plugin = _plugin_for_server(db, server)
         state = await plugin.get_power_state()
         return {
             "server_id": server.id,
@@ -56,7 +56,7 @@ async def get_server_boot_options(server_id: int) -> dict:
             raise ValueError("Server not found")
         if not _server_has_capability(db, server, "boot_order"):
             raise ValueError("Boot order capability is disabled for this server")
-        plugin = await _plugin_for_server(db, server)
+        plugin = _plugin_for_server(db, server)
         options = await plugin.get_boot_options()
         try:
             current = await plugin.get_boot_order()
@@ -71,7 +71,7 @@ async def get_server_boot_options(server_id: int) -> dict:
 async def list_install_tasks(server_id: int) -> dict:
     """OS installation task history for a server."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if not ServerDAO.get_by_id(db, server_id):
             raise ValueError("Server not found")
         tasks = InstallationTaskDAO.get_by_server(db, server_id)
@@ -117,7 +117,7 @@ async def server_power(server_id: int, action: str, force: bool = False, confirm
             message=f"MCP power {mapped} requested",
             details={"mcp_key_id": ctx.key_id, "force": force},
         )
-        plugin = await _plugin_for_server(db, server)
+        plugin = _plugin_for_server(db, server)
         try:
             if mapped == "on":
                 success = await plugin.power_on()
@@ -174,7 +174,7 @@ async def server_set_boot(
             raise ValueError("Server not found")
         if not _server_has_capability(db, server, "boot_order"):
             raise ValueError("Boot order capability is disabled for this server")
-        plugin = await _plugin_for_server(db, server)
+        plugin = _plugin_for_server(db, server)
         kwargs = {"device": device, "persistent": persistent}
         if uefi is not None:
             kwargs["uefi"] = uefi
@@ -201,7 +201,7 @@ async def server_reinstall_os(
 ) -> dict:
     """Queue a PXE OS reinstall for the bare-metal service linked to this server."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         from app.api.billing import _queue_template_install_for_service
 
         server = ServerDAO.get_by_id(db, server_id)

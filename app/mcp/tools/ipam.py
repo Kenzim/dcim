@@ -18,7 +18,7 @@ from app.services.proxy_credentials import generate_proxy_password, generate_pro
 async def list_subnets() -> dict:
     """List IPAM subnets."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return {"subnets": [_subnet_payload(s, db) for s in IPAMDAO.list_subnets(db)]}
 
     return await run_tool("list_subnets", "read", work)
@@ -28,7 +28,7 @@ async def list_subnets() -> dict:
 async def list_ip_assignments(service_id: Optional[int] = None) -> dict:
     """List IP assignments (credentials redacted)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if service_id:
             rows = IPAMDAO.get_assignment_by_service(db, service_id)
         else:
@@ -56,7 +56,7 @@ async def list_vm_ips(
 ) -> dict:
     """List VM IP pool rows."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         rows = VMIPAllocationDAO.list_all(
             db, q=q, assigned=assigned, cluster_id=cluster_id
         )
@@ -90,7 +90,7 @@ async def assign_ip(
 ) -> dict:
     """Assign an IPAM address to an HTTP-proxy service (credentials returned once)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         service = ServiceDAO.get_by_id(db, service_id)
         if not service:
             raise ValueError("Service not found")
@@ -122,7 +122,7 @@ async def assign_ip(
 async def release_ip(assignment_id: int) -> dict:
     """Release an IPAM assignment."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         ok = IPAMDAO.release_ip(db, assignment_id=assignment_id, released_by=f"mcp:{ctx.name}")
         if not ok:
             raise ValueError("Assignment not found")
@@ -135,7 +135,7 @@ async def release_ip(assignment_id: int) -> dict:
 async def rotate_ip_credentials(assignment_id: int, confirm: bool = False) -> dict:
     """Rotate proxy username/password for an assignment (new secrets returned once)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         assignment = IPAMDAO.rotate_credentials(
             db,
             assignment_id=assignment_id,
@@ -166,7 +166,7 @@ async def rotate_ip_credentials(assignment_id: int, confirm: bool = False) -> di
 async def delete_subnet(subnet_id: int, confirm: bool = False) -> dict:
     """Delete an IPAM subnet that has no assigned IPs."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         IPAMDAO.delete_subnet(db, subnet_id)
         return {"deleted": True, "subnet_id": subnet_id}
 

@@ -11,6 +11,8 @@ from app.core.config import settings
 
 security = HTTPBearer(auto_error=False)
 
+_INVALID_TOKEN_MSG = "Invalid or expired token"
+
 
 def _derive_token_id(token: str) -> str:
     """Derive token_id from token using SHA256"""
@@ -113,7 +115,7 @@ def get_current_user(
     if is_reseller_api_key(token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail=_INVALID_TOKEN_MSG,
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -124,7 +126,7 @@ def get_current_user(
     if is_mcp_api_key(token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail=_INVALID_TOKEN_MSG,
             headers={"WWW-Authenticate": "Bearer"},
         )
     
@@ -154,7 +156,7 @@ def get_current_user(
     # Neither authentication method worked
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired token",
+        detail=_INVALID_TOKEN_MSG,
         headers={"WWW-Authenticate": "Bearer"},
     )
 

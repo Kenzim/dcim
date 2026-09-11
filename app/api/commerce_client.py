@@ -20,6 +20,7 @@ from app.core.commerce_auth import (
 )
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.rate_limit import enforce_rate_limit
 from app.dao.order_dao import OrderDAO
 from app.dao.storefront_dao import FrontendProductDAO
@@ -45,6 +46,7 @@ router = APIRouter(
     prefix="/client/commerce",
     tags=["commerce-client"],
     dependencies=[Depends(require_commerce_enabled), Depends(require_client_session)],
+    responses=COMMON_ERROR_RESPONSES,
 )
 
 
@@ -264,7 +266,8 @@ def browse_products(
     q: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: Annotated[Session, Depends(get_db)],
 ):
     rows = FrontendProductDAO.list_enabled_products(
         db,
@@ -281,7 +284,7 @@ def browse_products(
 
 
 @router.get("/products/{product_id}")
-def get_product(product_id: int, db: Session = Depends(get_db)):
+def get_product(product_id: int, db: Annotated[Session, Depends(get_db)]):
     row = FrontendProductDAO.get_product_with_plans(db, product_id)
     if row is None or not row.enabled:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -293,8 +296,9 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
 @router.post("/quote")
 def quote_checkout(
     body: QuoteRequest,
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    *,
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     try:
         quote = CheckoutService.quote(
@@ -318,9 +322,9 @@ def quote_checkout(
 def checkout(
     body: CheckoutRequest,
     request: Request,
-    auth: dict = Depends(require_client_session),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _block_impersonation_money_actions(auth)
     enforce_rate_limit(
@@ -357,8 +361,9 @@ def list_orders(
     status_filter: Optional[OrderStatus] = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    *,
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     rows = OrderDAO.list_for_account(
         db, account.id, status=status_filter, limit=limit, offset=offset
@@ -369,8 +374,8 @@ def list_orders(
 @router.get("/orders/{order_id}")
 def get_order(
     order_id: int,
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     order = db.execute(
         select(Order).options(joinedload(Order.items)).where(Order.id == order_id)
@@ -389,8 +394,9 @@ def list_invoices(
     status_filter: Optional[InvoiceStatus] = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    *,
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     stmt = (
         select(Invoice)
@@ -406,8 +412,8 @@ def list_invoices(
 @router.get("/invoices/{invoice_id}")
 def get_invoice(
     invoice_id: int,
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.billing_account_id != account.id:
@@ -418,8 +424,8 @@ def get_invoice(
 @router.get("/invoices/{invoice_id}/pdf")
 def get_invoice_pdf(
     invoice_id: int,
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.billing_account_id != account.id:
@@ -440,9 +446,9 @@ def get_invoice_pdf(
 @router.post("/invoices/{invoice_id}/pay")
 def pay_invoice(
     invoice_id: int,
-    auth: dict = Depends(require_client_session),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _block_impersonation_money_actions(auth)
     invoice = db.get(Invoice, invoice_id)
@@ -507,7 +513,7 @@ def list_payment_methods():
 
 
 @router.get("/ticket-departments")
-def list_ticket_departments(db: Session = Depends(get_db)):
+def list_ticket_departments(db: Annotated[Session, Depends(get_db)]):
     from app.dao.ticket_dao import TicketDepartmentDAO
 
     rows = TicketDepartmentDAO.list_enabled(db)
@@ -530,8 +536,8 @@ def list_ticket_departments(db: Session = Depends(get_db)):
 def cancel_service(
     service_id: int,
     body: ServiceCancelBody,
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     try:
         result = CommerceLifecycleService.request_cancellation_sync(
@@ -551,9 +557,9 @@ def cancel_service(
 def upgrade_service(
     service_id: int,
     body: ServiceUpgradeBody,
-    auth: dict = Depends(require_client_session),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _block_impersonation_money_actions(auth)
     try:
@@ -578,8 +584,9 @@ def upgrade_service(
 def list_emails(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    auth: dict = Depends(require_client_session),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(require_client_session)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     rows = EmailMessageService.list_for_user(
         db, int(auth["user_id"]), limit=limit, offset=offset
@@ -604,8 +611,9 @@ def list_emails(
 def list_activity(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    auth: dict = Depends(require_client_session),
-    db: Session = Depends(get_db),
+    *,
+    auth: Annotated[dict, Depends(require_client_session)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     user_id = int(auth["user_id"])
     rows = list(
@@ -635,8 +643,8 @@ def list_activity(
 
 @router.get("/profile")
 def get_profile(
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     profile = BillingAccountService.get_profile(db, account.id)
     if profile is None:
@@ -660,8 +668,8 @@ def get_profile(
 @router.put("/profile")
 def update_profile(
     body: ProfileUpdate,
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     data = body.model_dump(exclude_unset=True)
     if "country" in data and data["country"]:
@@ -689,7 +697,7 @@ def update_profile(
 
 @router.get("/discord/authorize-url")
 def discord_authorize_url(
-    auth: dict = Depends(require_client_session),
+    auth: Annotated[dict, Depends(require_client_session)],
 ):
     from app.core.redis import redis_client
 
@@ -705,8 +713,8 @@ def discord_authorize_url(
 @router.post("/discord/callback")
 def discord_callback(
     body: DiscordCallbackBody,
-    auth: dict = Depends(require_client_session),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _block_impersonation_money_actions(auth)
     from app.core.redis import redis_client
@@ -732,8 +740,8 @@ def discord_callback(
 
 @router.delete("/discord", status_code=status.HTTP_204_NO_CONTENT)
 def discord_unlink(
-    auth: dict = Depends(require_client_session),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     _block_impersonation_money_actions(auth)
     DiscordLinkService.unlink_user(db, user_id=int(auth["user_id"]))
@@ -748,8 +756,9 @@ def list_tickets(
     status_filter: Optional[TicketStatus] = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    *,
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     rows = TicketService.list_for_account(
         db, account.id, status=status_filter, limit=limit, offset=offset
@@ -760,9 +769,9 @@ def list_tickets(
 @router.post("/tickets", status_code=status.HTTP_201_CREATED)
 def create_ticket(
     body: TicketCreate,
-    auth: dict = Depends(require_client_session),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     try:
         ticket = TicketService.create_ticket(
@@ -784,8 +793,8 @@ def create_ticket(
 @router.get("/tickets/{ticket_id}")
 def get_ticket(
     ticket_id: int,
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     from app.dao.ticket_dao import TicketDAO, TicketMessageDAO
 
@@ -805,9 +814,9 @@ def get_ticket(
 def add_ticket_message(
     ticket_id: int,
     body: TicketMessageCreate,
-    auth: dict = Depends(require_client_session),
-    account: BillingAccount = Depends(get_client_billing_account),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    account: Annotated[BillingAccount, Depends(get_client_billing_account)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     from app.dao.ticket_dao import TicketDAO
 
@@ -837,8 +846,8 @@ def add_ticket_message(
 
 @router.post("/2fa/setup")
 def totp_setup(
-    auth: dict = Depends(require_client_session),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     import pyotp
 
@@ -875,8 +884,8 @@ def totp_setup(
 @router.post("/2fa/confirm")
 def totp_confirm(
     body: TotpConfirmBody,
-    auth: dict = Depends(require_client_session),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     import pyotp
 
@@ -900,8 +909,8 @@ def totp_confirm(
 @router.post("/2fa/disable")
 def totp_disable(
     body: TotpDisableBody,
-    auth: dict = Depends(require_client_session),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(require_client_session)],
+    db: Annotated[Session, Depends(get_db)],
 ):
     import pyotp
 

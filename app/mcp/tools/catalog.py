@@ -11,7 +11,7 @@ from app.mcp.runtime import run_tool
 async def list_families() -> dict:
     """List product families."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return {
             "families": [
                 {
@@ -32,7 +32,7 @@ async def list_families() -> dict:
 async def list_products() -> dict:
     """List catalog products."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return {
             "products": [
                 {
@@ -53,7 +53,7 @@ async def list_products() -> dict:
 async def list_os_profiles() -> dict:
     """List OS profiles."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return {
             "os_profiles": [
                 {"id": r.id, "name": r.name, "code": r.code, "enabled": r.enabled}
@@ -68,7 +68,7 @@ async def list_os_profiles() -> dict:
 async def list_vm_templates() -> dict:
     """List catalog VM templates."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return {
             "vm_templates": [
                 {

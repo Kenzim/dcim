@@ -39,7 +39,7 @@ async def list_services(
 ) -> dict:
     """List VM, bare-metal, and HTTP-proxy services."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         cap = max(1, min(int(limit or 100), 200))
         status_enum = ServiceStatus(status) if status else None
         rows = ServiceDAO.get_all(db, skip=0, limit=500, status=status_enum)
@@ -60,7 +60,7 @@ async def list_services(
 async def get_service(service_id: int) -> dict:
     """Get a service (no guest passwords or proxy credentials)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         row = ServiceDAO.get_by_id(db, service_id)
         if not row:
             raise ValueError("Service not found")
@@ -87,7 +87,7 @@ async def list_service_backups(service_id: int) -> dict:
 async def list_deployment_jobs(service_id: int, limit: int = 20) -> dict:
     """List VM deployment jobs for a service."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if not ServiceDAO.get_by_id(db, service_id):
             raise ValueError("Service not found")
         cap = max(1, min(int(limit or 20), 50))
@@ -125,7 +125,7 @@ async def provision_vm(
 ) -> dict:
     """Create a VM service and optionally enqueue provisioning."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         body = AdminVmServiceCreate(
             name=name,
             product_code=product_code,
@@ -202,7 +202,7 @@ async def provision_bare_metal(
 ) -> dict:
     """Create a bare-metal service linked to an existing rack server."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         if ServiceDAO.get_by_name(db, name):
             raise ValueError("A service with this name already exists")
         server = ServerDAO.get_by_id(db, server_id)

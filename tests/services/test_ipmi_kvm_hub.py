@@ -521,3 +521,82 @@ async def test_hub_does_not_forward_viewer_text_to_bmc():
         assert upstream.sent == before
         await viewer.client_disconnect()
         await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_start_hub_retries_hello_on_timeout(monkeypatch):
+    from app.services.ipmi_kvm.base import BmcKvmAuth, IpmiKvmUnavailable
+    from app.services.ipmi_kvm import hub as hub_mod
+
+    class _CM:
+        def __init__(self, upstream):
+            self.upstream = upstream
+
+        async def __aenter__(self):
+            return self.upstream
+
+        async def __aexit__(self, *exc):
+            self.upstream.closed = True
+
+    class RetryProfile:
+        id = "asrockrack"
+        decode_worker_path = ""
+
+        def __init__(self):
+            self.handshake_calls = 0
+            self.logouts = 0
+            self.stops = 0
+            self.hellos = []
+
+        def hello_frame_attempts(self, auth):
+            return [b"short-hello", b"long-hello"]
+
+        async def login(self, server):
+            return BmcKvmAuth(
+                https_base="https://bmc.example",
+                origin="https://bmc.example",
+                hostname="bmc.example",
+                cookie="qsess",
+                csrf="csrf",
+                kvm_token="tok",
+                client_ip="10.1.2.3",
+                username="admin",
+            )
+
+        def open_upstream(self, auth):
+            return _CM(FakeUpstream())
+
+        async def handshake(self, upstream, auth, hello=None):
+            self.handshake_calls += 1
+            self.hellos.append(hello)
+            if self.handshake_calls == 1:
+                raise IpmiKvmUnavailable("BMC KVM handshake timed out")
+            return b"leftover"
+
+        def stop_frame(self):
+            self.stops += 1
+            return ivtp(IVTP_STOP, 0)
+
+        async def logout(self, auth):
+            self.logouts += 1
+
+    async def _prefetch(*_a, **_k):
+        return None
+
+    async def _start(self):
+        self._alive = True
+        hub_mod._hubs[self.server_id] = self
+
+    profile = RetryProfile()
+    monkeypatch.setattr(hub_mod, "_load_server", lambda _sid: object())
+    monkeypatch.setattr(hub_mod, "prefetch_decode_worker", _prefetch)
+    monkeypatch.setattr(hub_mod.KvmHub, "start", _start)
+    hub = await hub_mod.start_hub(99, profile, "secret")
+    try:
+        assert profile.handshake_calls == 2
+        assert profile.hellos == [b"short-hello", b"long-hello"]
+        assert profile.stops == 1
+        assert profile.logouts == 0
+        assert hub.upstream is not None
+    finally:
+        hub_mod._hubs.pop(99, None)

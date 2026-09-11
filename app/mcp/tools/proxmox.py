@@ -15,7 +15,7 @@ from app.services.vm_provisioning_service import VMProvisioningService
 async def list_proxmox_clusters() -> dict:
     """List Proxmox clusters with capacity summary (no API passwords)."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return {"clusters": ProxmoxInventoryDAO.get_cluster_capacity_summary(db)}
 
     return await run_tool("list_proxmox_clusters", "read", work)
@@ -42,7 +42,7 @@ async def plan_vm(
 ) -> dict:
     """Preview VM placement/provisioning without creating a guest."""
 
-    async def work(db, ctx):
+    def work(db, ctx):
         return VMProvisioningService.plan_provisioning(
             db=db,
             service_id=service_id,

@@ -34,6 +34,7 @@ from app.services.ipmi_kvm import (
     mint_bridged_session,
 )
 from app.services.ipmi_kvm.hub import attach_kvm_websocket, wait_or_fetch_kvm_asset
+from app.core.config import settings
 from app.services.ipmi_kvm_ticket_service import (
     build_relative_error_url,
     build_relative_launch_url,
@@ -76,13 +77,28 @@ def kvm_popup_redirect(server: Optional[Server]) -> RedirectResponse:
     return RedirectResponse(url=build_relative_launch_url(token), status_code=status.HTTP_302_FOUND)
 
 
-def _set_asset_cookie(response: Response, ws_token: str, expires_in: int) -> None:
+def _cookie_secure(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    if request.url.scheme == "https" or forwarded_proto.split(",")[0].strip().lower() == "https":
+        return True
+    public_url = (settings.public_app_url or settings.public_base_url or "").strip()
+    return public_url.lower().startswith("https://") or settings.ipmi_proxy_scheme.lower() == "https"
+
+
+def _set_asset_cookie(
+    response: Response,
+    ws_token: str,
+    expires_in: int,
+    *,
+    request: Request,
+) -> None:
     response.set_cookie(
         key=_ASSET_COOKIE,
         value=ws_token,
         max_age=int(expires_in),
         httponly=True,
         samesite="lax",
+        secure=_cookie_secure(request),
         path="/api/kvm/assets",
     )
 
@@ -95,7 +111,11 @@ async def admin_list_kvm_profiles(auth: dict = Depends(require_admin)):
 
 
 @router.post("/redeem", response_model=IpmiKvmSessionResponse)
-async def redeem_kvm_launch_ticket(body: IpmiKvmRedeemRequest, db: Session = Depends(get_db)):
+async def redeem_kvm_launch_ticket(
+    body: IpmiKvmRedeemRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """Consume a launch ticket and mint a viewer-only WS session."""
     server_id = redeem_launch_ticket(body.token)
     if server_id is None:
@@ -116,7 +136,7 @@ async def redeem_kvm_launch_ticket(body: IpmiKvmRedeemRequest, db: Session = Dep
     except IpmiKvmUnavailable as exc:
         raise kvm_http_error(exc) from exc
     response = JSONResponse(IpmiKvmSessionResponse(**payload).model_dump())
-    _set_asset_cookie(response, payload["ws_token"], payload["expires_in"])
+    _set_asset_cookie(response, payload["ws_token"], payload["expires_in"], request=request)
     logger.info("Redeemed IPMI KVM launch ticket for server %s", server.id)
     return response
 
@@ -155,7 +175,7 @@ async def proxy_kvm_asset(
     if cleaned.endswith(".js") and "javascript" not in media and "ecmascript" not in media:
         media = "application/javascript"
     response = Response(content=body, media_type=media, headers={"Cache-Control": "no-store"})
-    _set_asset_cookie(response, ws_token, 3600)
+    _set_asset_cookie(response, ws_token, 3600, request=request)
     return response
 
 
