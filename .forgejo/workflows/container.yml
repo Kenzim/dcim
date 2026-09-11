@@ -60,8 +60,21 @@ jobs:
             worker_aliases: ""
 
     steps:
+      # Do not use actions/checkout: the runner fetches it from
+      # https://data.forgejo.org and slirp4netns jobs flake with
+      # gnutls_handshake(): The server name was not recognized.
       - name: Checkout
-        uses: actions/checkout@v4
+        env:
+          GIT_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          git init
+          git remote add origin "http://192.168.11.92:3000/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: bearer ${GIT_TOKEN}" \
+            fetch --depth 1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
+          git reset --hard "${GITHUB_SHA}"
 
       - name: Check docker daemon
         run: |
