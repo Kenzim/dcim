@@ -212,3 +212,137 @@ export async function typeIntoSerialWs(ws, text, { chunkSize = 64, delayMs = 10 
     if (i + chunkSize < normalized.length && delayMs > 0) await sleep(delayMs);
   }
 }
+
+/**
+ * HTML KeyboardEvent.code → legacy keyCode, matching AMI MegaRAC HID maps
+ * (see KvmViewer HID_KEY).
+ */
+const EVENT_CODE_TO_KEYCODE = {
+  Space: 32,
+  Enter: 13,
+  Tab: 9,
+  Backspace: 8,
+  Escape: 27,
+  Backquote: 192,
+  Digit0: 48,
+  Digit1: 49,
+  Digit2: 50,
+  Digit3: 51,
+  Digit4: 52,
+  Digit5: 53,
+  Digit6: 54,
+  Digit7: 55,
+  Digit8: 56,
+  Digit9: 57,
+  Minus: 189,
+  Equal: 187,
+  BracketLeft: 219,
+  BracketRight: 221,
+  Backslash: 220,
+  Semicolon: 186,
+  Quote: 222,
+  Comma: 188,
+  Period: 190,
+  Slash: 191,
+  ShiftLeft: 16,
+};
+
+export function eventCodeToKeyCode(code) {
+  if (!code) return null;
+  if (EVENT_CODE_TO_KEYCODE[code] != null) return EVENT_CODE_TO_KEYCODE[code];
+  if (/^Key[A-Z]$/.test(code)) return code.codePointAt(3);
+  return null;
+}
+
+/** Map a character to AMI HID ``sendKey(keyCode, location, down)`` args. */
+export function charToHidStroke(ch) {
+  const stroke = charToKeyStroke(ch);
+  if (!stroke?.code) return null;
+  const keyCode = eventCodeToKeyCode(stroke.code);
+  if (keyCode == null) return null;
+  return { keyCode, shift: !!stroke.shift };
+}
+
+async function typeNormalized(text, sendStroke, { delayMs = 20, submit = false, stillConnected = () => true, submitStroke } = {}) {
+  if (!text || !stillConnected()) return;
+  const normalized = normalizeVncText(text);
+  for (const ch of normalized) {
+    if (!stillConnected()) return;
+    try {
+      if (sendStroke(ch) === false) return;
+    } catch (_) {
+      // BMC/guest rejected a key; abort the rest of the paste.
+      return;
+    }
+    if (delayMs > 0) await sleep(delayMs);
+  }
+  if (submit && stillConnected() && submitStroke) {
+    await sleep(Math.max(delayMs, 30));
+    try {
+      submitStroke();
+    } catch (_) {
+      // Enter after paste is best-effort; the text already went out.
+    }
+  }
+}
+
+function sendHidChar(sendKey, ch) {
+  const stroke = charToHidStroke(ch);
+  if (!stroke) return;
+  if (stroke.shift) sendKey(16, 1, true);
+  sendKey(stroke.keyCode, 0, true);
+  sendKey(stroke.keyCode, 0, false);
+  if (stroke.shift) sendKey(16, 1, false);
+}
+
+/**
+ * Type ``text`` as USB HID reports through an AMI MegaRAC ``sendKey``
+ * callback ``(keyCode, location, down)``.
+ */
+export async function typeIntoHid(sendKey, text, opts = {}) {
+  if (!sendKey) return;
+  await typeNormalized(text, (ch) => sendHidChar(sendKey, ch), {
+    ...opts,
+    submitStroke: () => {
+      sendKey(13, 0, true);
+      sendKey(13, 0, false);
+    },
+  });
+}
+
+function sendAtenKey(rfb, keysym, down) {
+  if (!rfb || typeof rfb.sendKey !== 'function') return false;
+  try {
+    // SuperMicro ATEN is old noVNC: sendKey(keysym, down). Passing a
+    // boolean as the second arg is the down flag, not a scancode.
+    rfb.sendKey(keysym, down);
+    return true;
+  } catch {
+    // ATEN sendKey throws if the socket is already gone.
+    return false;
+  }
+}
+
+function sendAtenChar(rfb, ch) {
+  const stroke = charToKeyStroke(ch);
+  if (!stroke) return true;
+  if (stroke.shift && !sendAtenKey(rfb, XK_Shift_L, true)) return false;
+  if (!sendAtenKey(rfb, stroke.keysym, true)) return false;
+  if (!sendAtenKey(rfb, stroke.keysym, false)) return false;
+  if (stroke.shift && !sendAtenKey(rfb, XK_Shift_L, false)) return false;
+  return true;
+}
+
+/**
+ * Type ``text`` into SuperMicro ATEN InsydeVNC (legacy noVNC sendKey).
+ */
+export async function typeIntoAtenRfb(rfb, text, opts = {}) {
+  if (!rfb) return;
+  await typeNormalized(text, (ch) => sendAtenChar(rfb, ch), {
+    ...opts,
+    submitStroke: () => {
+      sendAtenKey(rfb, XK_Return, true);
+      sendAtenKey(rfb, XK_Return, false);
+    },
+  });
+}

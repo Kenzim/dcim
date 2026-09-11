@@ -7,10 +7,12 @@ from app.models.server import Server
 from app.services.ipmi_kvm.asrockrack import AsrockRackKvmProfile
 from app.services.ipmi_kvm.base import IpmiKvmProfile, IpmiKvmUnavailable
 from app.services.ipmi_kvm.gigabyte import GigabyteKvmProfile
+from app.services.ipmi_kvm.supermicro import SuperMicroKvmProfile
 
 _PROFILES: dict[str, IpmiKvmProfile] = {
     AsrockRackKvmProfile.id: AsrockRackKvmProfile(),
     GigabyteKvmProfile.id: GigabyteKvmProfile(),
+    SuperMicroKvmProfile.id: SuperMicroKvmProfile(),
 }
 
 

@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import AtenKvmViewer from '../components/AtenKvmViewer.svelte';
   import KvmViewer from '../components/KvmViewer.svelte';
   import { redeemIpmiKvmLaunchTicket } from '../lib/api.js';
 
@@ -44,7 +45,11 @@
       <p class="hint">This link may have expired or already been used. Close this window and reopen the console.</p>
     </div>
   {:else if session}
-    <KvmViewer {session} />
+    {#if session.profile === 'supermicro'}
+      <AtenKvmViewer {session} />
+    {:else}
+      <KvmViewer {session} />
+    {/if}
   {/if}
 </div>
 
@@ -55,6 +60,12 @@
     background: #101114;
     display: flex;
     flex-direction: column;
+  }
+
+  .kvm-launch-page :global(.vnc-viewer) {
+    flex: 1;
+    min-height: 0;
+    border-radius: 0;
   }
 
   .status-msg {

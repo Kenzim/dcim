@@ -9,11 +9,13 @@ Packet policy
 * New viewer: synthetic ``0x13`` (validated) + coalesced ``0x0b`` FULL to the BMC.
 * Last viewer gone: idle, then STOP + BMC logout + drop lock.
 * BMC STOP / disconnect: kick every viewer and destroy the hub.
+* Viewer text/JSON-binary frames are a Rackflow control channel (latency ping/pong), never BMC.
 """
 from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import secrets
 import struct
@@ -129,6 +131,44 @@ def packet_type(pkt: bytes) -> int:
     return struct.unpack_from("<H", pkt)[0]
 
 
+def parse_kvm_control(payload) -> Optional[dict]:
+    """Parse a Rackflow control frame (text or UTF-8 JSON bytes)."""
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        raw = payload
+        if not raw.startswith("{"):
+            return None
+    else:
+        data = bytes(payload)
+        if not data or data[0] != 0x7B:
+            return None
+        try:
+            raw = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    try:
+        msg = json.loads(raw)
+    except ValueError:
+        return None
+    return msg if isinstance(msg, dict) else None
+
+
+async def answer_kvm_ping(websocket: Any, payload) -> bool:
+    """Answer ``{"type":"ping"}`` on the viewer socket. Returns True if consumed."""
+    msg = parse_kvm_control(payload)
+    if not msg or msg.get("type") != "ping":
+        return False
+    pong = json.dumps({"type": "pong", "t": msg.get("t")})
+    send_bytes = getattr(websocket, "send_bytes", None)
+    if callable(send_bytes):
+        await send_bytes(pong.encode("utf-8"))
+    send_text = getattr(websocket, "send_text", None)
+    if callable(send_text):
+        await send_text(pong)
+    return True
+
+
 class FastApiViewer:
     def __init__(self, websocket: WebSocket):
         self._ws = websocket
@@ -137,7 +177,19 @@ class FastApiViewer:
         await self._ws.send_bytes(data)
 
     async def receive(self) -> dict:
-        return await self._ws.receive()
+        while True:
+            message = await self._ws.receive()
+            if message.get("type") == _WS_DISCONNECT:
+                return message
+            if message.get("bytes") is not None:
+                if await answer_kvm_ping(self._ws, message["bytes"]):
+                    continue
+                return message
+            text = message.get("text")
+            if text is not None:
+                await answer_kvm_ping(self._ws, text)
+                continue
+            return message
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         await self._ws.close(code=code, reason=reason)
@@ -199,6 +251,8 @@ class KvmHub:
         self._bmc_buf = _PacketBuf()
         self._join_packets: list[bytes] = []
         self._leftover = leftover or b""
+        self._raw = getattr(profile, "packet_mode", "ivtp") == "raw"
+        self._had_viewer = False
         self._tasks: list[asyncio.Task] = []
         self._idle_task: Optional[asyncio.Task] = None
         self._full_event = asyncio.Event()
@@ -217,16 +271,24 @@ class KvmHub:
         self._alive = True
         _hubs[self.server_id] = self
         if self._leftover:
-            packets, tail = iter_packets(self._leftover)
-            self._join_packets = packets
-            self._bmc_buf.feed(tail)
+            if self._raw:
+                self._join_packets = [self._leftover]
+            else:
+                packets, tail = iter_packets(self._leftover)
+                self._join_packets = packets
+                self._bmc_buf.feed(tail)
             self._leftover = b""
         self._tasks = [
             asyncio.create_task(self._bmc_loop(), name=f"kvm-bmc-{self.server_id}"),
-            asyncio.create_task(self._keepalive_loop(), name=f"kvm-ka-{self.server_id}"),
-            asyncio.create_task(self._full_loop(), name=f"kvm-full-{self.server_id}"),
             asyncio.create_task(self._heartbeat_loop(), name=f"kvm-hb-{self.server_id}"),
         ]
+        if not self._raw:
+            self._tasks.extend(
+                [
+                    asyncio.create_task(self._keepalive_loop(), name=f"kvm-ka-{self.server_id}"),
+                    asyncio.create_task(self._full_loop(), name=f"kvm-full-{self.server_id}"),
+                ]
+            )
         await asyncio.sleep(0)
 
     def request_full(self) -> None:
@@ -265,14 +327,27 @@ class KvmHub:
             join_packets = self._join_packets
             self._join_packets = []
         try:
-            await viewer.send_bytes(validated_ok_frame())
-            self.request_full()
-            for pkt in join_packets:
-                typ = packet_type(pkt)
-                if typ in _INTERNAL_TYPES:
-                    continue
-                if typ in _FANOUT_TYPES:
-                    await viewer.send_bytes(pkt)
+            if self._raw:
+                for pkt in join_packets:
+                    if pkt:
+                        await viewer.send_bytes(pkt)
+                if self._had_viewer:
+                    join = self.profile.join_frame(self.auth) if self.auth is not None else b""
+                    if join:
+                        try:
+                            await self.upstream.send(join)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("KVM hub raw join frame failed: %s", exc)
+                self._had_viewer = True
+            else:
+                await viewer.send_bytes(validated_ok_frame())
+                self.request_full()
+                for pkt in join_packets:
+                    typ = packet_type(pkt)
+                    if typ in _INTERNAL_TYPES:
+                        continue
+                    if typ in _FANOUT_TYPES:
+                        await viewer.send_bytes(pkt)
             await self._viewer_recv_loop(viewer)
         except (WebSocketDisconnect, ConnectionClosed):
             pass
@@ -292,10 +367,17 @@ class KvmHub:
                 break
             data = message.get("bytes")
             if data is None:
-                text = message.get("text")
-                if text is None:
-                    continue
-                data = text.encode("latin1")
+                # Text is the Rackflow latency control channel, never BMC HID.
+                continue
+            if await answer_kvm_ping(viewer, data):
+                continue
+            if self._raw:
+                try:
+                    await self.upstream.send(data)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("KVM hub raw viewer forward failed: %s", exc)
+                    return
+                continue
             packets, _tail = iter_packets(data)
             if not packets and len(data) >= 2 and packet_type(data) == IVTP_HID:
                 packets = [data]
@@ -317,7 +399,15 @@ class KvmHub:
                     break
                 if isinstance(data, str):
                     data = data.encode("latin1")
-                await self._dispatch_bmc_bytes(data)
+                if self._raw:
+                    async with self._viewer_lock:
+                        if not self._viewers:
+                            if not self._had_viewer:
+                                self._join_packets.append(data)
+                            continue
+                    await self._broadcast(data)
+                else:
+                    await self._dispatch_bmc_bytes(data)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -431,10 +521,12 @@ class KvmHub:
             self._cancel_idle()
             self._full_event.set()
             if not from_bmc:
-                try:
-                    await self.upstream.send(self.profile.stop_frame())
-                except Exception:  # noqa: BLE001
-                    pass
+                stop = self.profile.stop_frame()
+                if stop:
+                    try:
+                        await self.upstream.send(stop)
+                    except Exception:  # noqa: BLE001
+                        pass
             current = asyncio.current_task()
             pending = [task for task in self._tasks if task is not current]
             for task in pending:
@@ -479,15 +571,17 @@ async def wait_local_hub(server_id: int, timeout: float = 30.0) -> Optional[KvmH
 
 
 async def prefetch_decode_worker(server_id: int, profile: IpmiKvmProfile, auth: BmcKvmAuth) -> None:
-    path = (profile.decode_worker_path or "").lstrip("/")
-    if not path:
-        return
-    try:
-        body, content_type = await profile.fetch_asset(auth, path)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("KVM hub: decode_worker prefetch failed: %s", exc)
-        return
-    cache_kvm_asset(server_id, path, body, content_type)
+    paths = list(profile.prefetch_asset_paths() or [])
+    for path in paths:
+        cleaned = (path or "").lstrip("/")
+        if not cleaned:
+            continue
+        try:
+            body, content_type = await profile.fetch_asset(auth, cleaned)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("KVM hub: asset prefetch failed (%s): %s", cleaned, exc)
+            continue
+        cache_kvm_asset(server_id, cleaned, body, content_type)
 
 
 def _load_server(server_id: int):
@@ -570,7 +664,13 @@ async def _pipe_browser_to_splice(websocket: WebSocket, upstream) -> None:
                 break
             data = message.get("bytes")
             if data is not None:
+                if await answer_kvm_ping(websocket, data):
+                    continue
                 await upstream.send(data)
+                continue
+            text = message.get("text")
+            if text is not None:
+                await answer_kvm_ping(websocket, text)
     except (WebSocketDisconnect, ConnectionClosed):
         pass
     except Exception as exc:  # noqa: BLE001

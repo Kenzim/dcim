@@ -81,6 +81,7 @@ def test_list_profiles_includes_asrockrack():
     ids = {p["id"] for p in list_profiles()}
     assert "asrockrack" in ids
     assert "gigabyte" in ids
+    assert "supermicro" in ids
 
 
 def test_kvm_ready_requires_known_profile():

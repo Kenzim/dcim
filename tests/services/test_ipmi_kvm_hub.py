@@ -17,7 +17,9 @@ from app.services.ipmi_kvm.hub import (
     IVTP_STOP,
     IVTP_VALIDATED,
     IVTP_VIDEO,
+    FastApiViewer,
     KvmHub,
+    answer_kvm_ping,
     ensure_splice_server,
     get_local_hub,
     packet_type,
@@ -90,6 +92,8 @@ class FakeViewer:
         data = await self._client.get()
         if data is None:
             return {"type": "websocket.disconnect"}
+        if isinstance(data, str):
+            return {"type": "websocket.receive", "text": data}
         return {"type": "websocket.receive", "bytes": data}
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -98,6 +102,9 @@ class FakeViewer:
 
     async def client_send(self, data: bytes) -> None:
         await self._client.put(data)
+
+    async def client_send_text(self, text: str) -> None:
+        await self._client.put(text)
 
     async def client_disconnect(self) -> None:
         await self._client.put(None)
@@ -316,3 +323,201 @@ async def test_hub_lock_set_nx_and_asset_cache(monkeypatch):
     body, content_type = get_cached_kvm_asset(99, "libs/kvm/ast/decode_worker.js")
     assert body == b"/* js */"
     assert "javascript" in content_type
+
+
+class RawFakeProfile:
+    id = "supermicro"
+    packet_mode = "raw"
+    decode_worker_path = "novnc/include/ast2100.js"
+
+    def __init__(self):
+        self.logged_out = 0
+        self.join_count = 0
+
+    def stop_frame(self) -> bytes:
+        return b""
+
+    def join_frame(self, auth) -> bytes:
+        del auth
+        self.join_count += 1
+        return b"JOIN"
+
+    async def logout(self, auth) -> None:
+        del auth
+        self.logged_out += 1
+
+
+@pytest.mark.asyncio
+async def test_raw_hub_forwards_opaque_frames_and_skips_ivtp_hello():
+    upstream = FakeUpstream()
+    profile = RawFakeProfile()
+    hub = KvmHub(
+        21,
+        profile,
+        object(),
+        upstream,
+        leftover=b"hello-aten",
+        attach_secret="secret",
+        owns_lock=False,
+        idle_seconds=20.0,
+        keepalive_seconds=30.0,
+        full_coalesce_seconds=0.02,
+    )
+    await hub.start()
+    try:
+        viewer = FakeViewer()
+        task = asyncio.create_task(hub.add_viewer(viewer))
+        first = await viewer.recv_frame()
+        assert first == b"hello-aten"
+        upstream.push(b"\x00video-bytes")
+        assert await viewer.recv_frame() == b"\x00video-bytes"
+        await viewer.client_send(b"\x04key-event")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if b"\x04key-event" in upstream.sent:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError(f"raw HID not forwarded: {upstream.sent!r}")
+        assert profile.join_count == 0
+        second = FakeViewer()
+        task2 = asyncio.create_task(hub.add_viewer(second))
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if profile.join_count >= 1:
+                break
+            await asyncio.sleep(0.02)
+        assert profile.join_count == 1
+        assert b"JOIN" in upstream.sent
+        await viewer.client_disconnect()
+        await second.client_disconnect()
+        await asyncio.wait_for(asyncio.gather(task, task2), timeout=2)
+    finally:
+        await shutdown_kvm_hubs()
+
+
+@pytest.mark.asyncio
+async def test_raw_hub_queues_bmc_bytes_until_first_viewer():
+    upstream = FakeUpstream()
+    profile = RawFakeProfile()
+    hub = KvmHub(
+        21,
+        profile,
+        object(),
+        upstream,
+        leftover=b"",
+        attach_secret="secret",
+        owns_lock=False,
+        idle_seconds=20.0,
+        keepalive_seconds=30.0,
+        full_coalesce_seconds=0.02,
+    )
+    await hub.start()
+    try:
+        upstream.push(b"\x39user-list")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if hub._join_packets:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("raw hub did not queue BMC bytes before first viewer")
+        viewer = FakeViewer()
+        task = asyncio.create_task(hub.add_viewer(viewer))
+        assert await viewer.recv_frame() == b"\x39user-list"
+        await viewer.client_disconnect()
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        await shutdown_kvm_hubs()
+
+
+@pytest.mark.asyncio
+async def test_answer_kvm_ping_roundtrip():
+    class Ws:
+        def __init__(self):
+            self.out = []
+
+        async def send_text(self, payload: str) -> None:
+            self.out.append(payload)
+
+    ws = Ws()
+    assert await answer_kvm_ping(ws, json.dumps({"type": "ping", "t": "n1"})) is True
+    assert json.loads(ws.out[0]) == {"type": "pong", "t": "n1"}
+    assert await answer_kvm_ping(ws, "not-json") is False
+    assert await answer_kvm_ping(ws, json.dumps({"type": "resize"})) is False
+
+
+@pytest.mark.asyncio
+async def test_fastapi_viewer_answers_ping_and_returns_binary():
+    class FakeWs:
+        def __init__(self):
+            self.q = asyncio.Queue()
+            self.text = []
+            self.binary = []
+
+        async def receive(self):
+            return await self.q.get()
+
+        async def send_text(self, payload: str) -> None:
+            self.text.append(payload)
+
+        async def send_bytes(self, data: bytes) -> None:
+            self.binary.append(bytes(data))
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            del code, reason
+
+    ws = FakeWs()
+    viewer = FastApiViewer(ws)
+    hid = hid_frame(b"k")
+    await ws.q.put({"type": "websocket.receive", "text": json.dumps({"type": "ping", "t": "abc"})})
+    await ws.q.put({"type": "websocket.receive", "bytes": hid})
+    msg = await asyncio.wait_for(viewer.receive(), timeout=2)
+    assert msg.get("bytes") == hid
+    pong = json.loads(ws.text[0] if ws.text else ws.binary[0].decode())
+    assert pong == {"type": "pong", "t": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_fastapi_viewer_answers_binary_ping():
+    class FakeWs:
+        def __init__(self):
+            self.q = asyncio.Queue()
+            self.binary = []
+            self.text = []
+
+        async def receive(self):
+            return await self.q.get()
+
+        async def send_text(self, payload: str) -> None:
+            self.text.append(payload)
+
+        async def send_bytes(self, data: bytes) -> None:
+            self.binary.append(bytes(data))
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            del code, reason
+
+    ws = FakeWs()
+    viewer = FastApiViewer(ws)
+    ping = json.dumps({"type": "ping", "t": "bin1"}).encode("utf-8")
+    hid = hid_frame(b"k")
+    await ws.q.put({"type": "websocket.receive", "bytes": ping})
+    await ws.q.put({"type": "websocket.receive", "bytes": hid})
+    msg = await asyncio.wait_for(viewer.receive(), timeout=2)
+    assert msg.get("bytes") == hid
+    assert json.loads(ws.binary[0]) == {"type": "pong", "t": "bin1"}
+
+
+@pytest.mark.asyncio
+async def test_hub_does_not_forward_viewer_text_to_bmc():
+    async with make_hub(server_id=31) as (hub, upstream, _profile):
+        viewer = FakeViewer()
+        task = await attach(hub, viewer)
+        await wait_typed(upstream.sent, IVTP_FULL, 1)
+        before = list(upstream.sent)
+        await viewer.client_send_text(json.dumps({"type": "ping", "t": "z"}))
+        await asyncio.sleep(0.15)
+        assert upstream.sent == before
+        await viewer.client_disconnect()
+        await asyncio.wait_for(task, timeout=2)
