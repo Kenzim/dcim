@@ -8,13 +8,15 @@
   /** Whether the rotate action is granted (detail.proxy_rotate_available). */
   export let canRotate = false;
 
+  const PROXY_PORT = 8080;
+
   let loading = true;
   let assignments = [];
   let unavailable = false;
-  let revealed = new Set();
   let busy = false;
   let message = '';
   let error = '';
+  let copyAllMsg = '';
 
   onMount(async () => {
     try {
@@ -30,11 +32,40 @@
     }
   });
 
-  function toggleReveal(id) {
-    const next = new Set(revealed);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    revealed = next;
+  function endpointLine(a) {
+    if (a?.endpoint) return a.endpoint;
+    if (!a?.ip_address || !a.username || !a.password) return '';
+    const port = a.port || PROXY_PORT;
+    return `${a.ip_address}:${port}:${a.username}:${a.password}`;
+  }
+
+  function allEndpointLines() {
+    return assignments.map(endpointLine).filter(Boolean).join('\n');
+  }
+
+  async function copyAllEndpoints() {
+    const text = allEndpointLines();
+    if (!text) return;
+    copyAllMsg = '';
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      copyAllMsg = 'Copied';
+      setTimeout(() => { copyAllMsg = ''; }, 2000);
+    } catch (e) {
+      error = e.message || 'Failed to copy';
+    }
   }
 
   async function rotate() {
@@ -46,7 +77,6 @@
     try {
       const res = await rotateClientProxyCredentials(serviceId);
       assignments = res.assignments || [];
-      revealed = new Set(assignments.map((a) => a.id));
       message = 'Credentials rotated';
     } catch (e) {
       error = e.message || String(e);
@@ -58,8 +88,15 @@
 
 <section class="panel">
   <header class="panel-head">
-    <h3>Proxy access</h3>
-    <p class="muted">HTTP and SOCKS5 use the same IP/port with these credentials.</p>
+    <div>
+      <h3>Proxy access</h3>
+      <p class="muted">HTTP and SOCKS5 use the same IP/port with these credentials.</p>
+    </div>
+    {#if !loading && assignments.length > 0}
+      <Button variant="secondary" disabled={busy} on:click={copyAllEndpoints}>
+        {copyAllMsg || 'Copy all (ip:port:user:pass)'}
+      </Button>
+    {/if}
   </header>
 
   {#if loading}
@@ -70,7 +107,6 @@
     {#if error}<Alert type="error">{error}</Alert>{/if}
     <ul class="assignments">
       {#each assignments as a}
-        {@const isRevealed = revealed.has(a.id)}
         <li class="assignment">
           <div class="row">
             <span class="label">IP</span>
@@ -82,15 +118,10 @@
           </div>
           <div class="row">
             <span class="label">Password</span>
-            <code>{isRevealed ? (a.password || '—') : '••••••••'}</code>
-            <button type="button" class="reveal" on:click={() => toggleReveal(a.id)}>
-              {isRevealed ? 'hide' : 'show'}
-            </button>
+            <code>{a.password || '—'}</code>
           </div>
-          {#if isRevealed}
-            {#if a.http_url}<div class="row"><span class="label">HTTP</span><code class="small">{a.http_url}</code></div>{/if}
-            {#if a.socks5_url}<div class="row"><span class="label">SOCKS5</span><code class="small">{a.socks5_url}</code></div>{/if}
-          {/if}
+          {#if a.http_url}<div class="row"><span class="label">HTTP</span><code class="small">{a.http_url}</code></div>{/if}
+          {#if a.socks5_url}<div class="row"><span class="label">SOCKS5</span><code class="small">{a.socks5_url}</code></div>{/if}
         </li>
       {/each}
     </ul>
@@ -104,13 +135,21 @@
 </section>
 
 <style>
+  .panel-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
   .panel-head h3 {
     margin: 0 0 4px;
     font-size: 16px;
     font-weight: 700;
   }
   .panel-head p {
-    margin: 0 0 14px;
+    margin: 0;
   }
   .muted {
     color: var(--text-tertiary);
@@ -162,17 +201,6 @@
   code.small {
     font-size: 12px;
     color: var(--text-secondary);
-  }
-  .reveal {
-    appearance: none;
-    background: none;
-    border: none;
-    padding: 0;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--portal-accent, var(--accent-color));
-    cursor: pointer;
-    text-decoration: underline;
   }
   .actions {
     display: flex;

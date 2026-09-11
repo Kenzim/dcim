@@ -344,6 +344,25 @@ button.rf-ca__btn--danger:hover {
   border-top: 1px solid var(--rf-line);
 }
 .rf-ca__panel-head { margin-bottom: 10px; }
+.rf-ca__panel-head--row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.rf-ca__sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+.rf-ca__proxy-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 8px; }
 .rf-ca__backup-create {
   display: flex;
   flex-wrap: wrap;
@@ -493,10 +512,14 @@ button.rf-ca__btn--danger:hover {
 
       {if $rackflow_proxy_credentials_available && $rackflow_proxy_assignments|@count}
       <div class="rf-ca__backups">
-        <div class="rf-ca__panel-head">
-          <p class="rf-ca__action-title">Proxy access</p>
-          <p class="rf-ca__action-help">HTTP and SOCKS5 use the same IP/port with these credentials.</p>
+        <div class="rf-ca__panel-head rf-ca__panel-head--row">
+          <div>
+            <p class="rf-ca__action-title">Proxy access</p>
+            <p class="rf-ca__action-help">HTTP and SOCKS5 use the same IP/port with these credentials.</p>
+          </div>
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-proxy-copy-all">Copy all (ip:port:user:pass)</button>
         </div>
+        <textarea id="rackflow-proxy-endpoint-lines" class="rf-ca__sr-only" readonly aria-hidden="true">{$rackflow_proxy_endpoint_lines|escape}</textarea>
         {foreach from=$rackflow_proxy_assignments item=a}
         <div class="rf-ca__action">
           <div class="rf-ca__action-copy">
@@ -513,10 +536,12 @@ button.rf-ca__btn--danger:hover {
           </div>
         </div>
         {/foreach}
-        {if $rackflow_proxy_rotate_available}
-        <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-proxy-rotate" data-rf-proxy-action="{$rackflow_proxy_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}">Rotate credentials</button>
-        <p class="rf-ca__note" id="rackflow-proxy-msg" hidden></p>
-        {/if}
+        <div class="rf-ca__proxy-actions">
+          {if $rackflow_proxy_rotate_available}
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-proxy-rotate" data-rf-proxy-action="{$rackflow_proxy_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}">Rotate credentials</button>
+          {/if}
+          <p class="rf-ca__note" id="rackflow-proxy-msg" hidden></p>
+        </div>
       </div>
       {/if}
 
@@ -781,6 +806,50 @@ button.rf-ca__btn--danger:hover {
         volid: this.getAttribute('data-rf-volid') || '',
         storage: this.getAttribute('data-rf-storage') || ''
       });
+    });
+  }
+
+  function rfCopyText(text, btn, doneLabel) {
+    if (!text) { return; }
+    var label = doneLabel || 'Copied';
+    var original = btn ? btn.textContent : '';
+    function markDone() {
+      if (!btn) { return; }
+      btn.textContent = label;
+      window.setTimeout(function () { btn.textContent = original; }, 2000);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(markDone).catch(function () {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+        markDone();
+      });
+      return;
+    }
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    markDone();
+  }
+
+  var proxyCopyBtn = document.getElementById('rackflow-proxy-copy-all');
+  if (proxyCopyBtn) {
+    proxyCopyBtn.addEventListener('click', function () {
+      var linesEl = document.getElementById('rackflow-proxy-endpoint-lines');
+      rfCopyText(linesEl ? linesEl.value : '', proxyCopyBtn, 'Copied');
     });
   }
 
