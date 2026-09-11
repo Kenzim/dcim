@@ -61,6 +61,8 @@ def test_client_can_view_proxy_credentials_by_default(client, db_session):
     assert len(assignments) == 1
     assert assignments[0]["username"] == "cu"
     assert assignments[0]["http_url"].startswith("http://cu:cp@")
+    assert assignments[0]["port"] == 8080
+    assert assignments[0]["endpoint"] == f"{assignments[0]['ip_address']}:8080:cu:cp"
 
 
 def test_client_rotate_denied_by_default(client, db_session):

@@ -23,7 +23,7 @@
   let error = null;
   let busy = false;
   let statusDraft = 'pending';
-  let revealed = new Set();
+  let copyAllMsg = '';
 
   async function load() {
     loading = true;
@@ -55,10 +55,39 @@
     return `${scheme}://${creds}${a.ip_address}:${PROXY_PORT}`;
   }
 
-  function toggleReveal(id) {
-    if (revealed.has(id)) revealed.delete(id);
-    else revealed.add(id);
-    revealed = revealed;
+  function endpointLine(a) {
+    if (!a?.ip_address || !a.username || !a.password) return '';
+    const port = a.port || PROXY_PORT;
+    return `${a.ip_address}:${port}:${a.username}:${a.password}`;
+  }
+
+  function allEndpointLines() {
+    return assignments.map(endpointLine).filter(Boolean).join('\n');
+  }
+
+  async function copyAllEndpoints() {
+    const text = allEndpointLines();
+    if (!text) return;
+    copyAllMsg = '';
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      copyAllMsg = 'Copied';
+      setTimeout(() => { copyAllMsg = ''; }, 2000);
+    } catch (e) {
+      error = e.message || 'Failed to copy';
+    }
   }
 
   async function saveStatus() {
@@ -133,8 +162,6 @@
     try {
       await rotateIpamAssignment(assignment.id);
       await load();
-      revealed.add(assignment.id);
-      revealed = revealed;
     } catch (e) {
       error = e.message || String(e);
     } finally {
@@ -202,7 +229,14 @@
     <section class="panel">
       <div class="panel-head">
         <h3>Assigned proxy IPs</h3>
-        <button class="btn-secondary" disabled={busy} on:click={assignAnotherIp}>+ Assign another IP</button>
+        <div class="panel-actions">
+          {#if assignments.length > 0}
+            <button class="btn-secondary" disabled={busy} on:click={copyAllEndpoints}>
+              {copyAllMsg || 'Copy all (ip:port:user:pass)'}
+            </button>
+          {/if}
+          <button class="btn-secondary" disabled={busy} on:click={assignAnotherIp}>+ Assign another IP</button>
+        </div>
       </div>
       {#if assignments.length === 0}
         <p class="muted">No IPs assigned yet — service stays pending until at least one is assigned.</p>
@@ -224,16 +258,7 @@
               <tr>
                 <td class="mono">{a.ip_address}</td>
                 <td class="mono">{a.username || '—'}</td>
-                <td class="mono">
-                  {#if revealed.has(a.id)}
-                    {a.password || '—'}
-                  {:else}
-                    ••••••••
-                  {/if}
-                  <button class="btn-link" on:click={() => toggleReveal(a.id)}>
-                    {revealed.has(a.id) ? 'hide' : 'show'}
-                  </button>
-                </td>
+                <td class="mono">{a.password || '—'}</td>
                 <td class="mono small">{proxyUrl('http', a)}</td>
                 <td class="mono small">{proxyUrl('socks5', a)}</td>
                 <td>{formatDate(a.assigned_at)}</td>
@@ -262,7 +287,8 @@
   .container { padding: 32px; display: grid; gap: 16px; }
   @media (max-width: 768px) { .container { padding: 16px; } }
   .panel { border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; background: var(--bg-secondary); }
-  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+  .panel-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .kv-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
   .kv-table th { text-align: left; padding: 6px 10px; color: var(--text-secondary); font-weight: 600; }
   .kv-table td { padding: 6px 10px; color: var(--text-primary); }
@@ -286,14 +312,6 @@
     background-size: 12px;
   }
   .row-actions { display: flex; gap: 6px; white-space: nowrap; }
-  .btn-link {
-    border: none;
-    background: none;
-    color: var(--accent-color);
-    cursor: pointer;
-    font-size: 11px;
-    padding: 0 0 0 6px;
-  }
   .btn-secondary {
     padding: 10px 16px;
     background: var(--bg-tertiary);

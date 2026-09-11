@@ -44,10 +44,13 @@ def assignment_payload(assignment: ServiceIPAssignment) -> Dict[str, Any]:
     return {
         "id": assignment.id,
         "ip_address": ip,
+        "port": PROXY_PORT,
         "username": username,
         "password": password,
         "http_url": f"http://{creds}{ip}:{PROXY_PORT}" if ip else None,
         "socks5_url": f"socks5://{creds}{ip}:{PROXY_PORT}" if ip else None,
+        # Compact list format for bulk copy (ip:port:user:pass).
+        "endpoint": f"{ip}:{PROXY_PORT}:{username}:{password}" if ip and username and password else None,
         "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
     }
 
