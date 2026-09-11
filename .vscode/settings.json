@@ -1,0 +1,6 @@
+{
+  "sonarlint.connectedMode.project": {
+    "projectKey": "kenzim_dcim",
+    "connectionId": "https-sonarqube-stackken-com"
+  }
+}
