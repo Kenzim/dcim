@@ -8,8 +8,9 @@ Auto-starts in.tftpd on container startup.
 import asyncio
 import base64
 import hmac
-import os
 import logging
+import os
+import shutil
 from collections import deque
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -94,8 +95,26 @@ _process: Optional[asyncio.subprocess.Process] = None
 _lock = asyncio.Lock()
 
 
+def ensure_bios_ipxe_at_root(root: Optional[str] = None) -> None:
+    """Copy pxe/undionly.kpxe to the TFTP chroot root.
+
+    Intel Boot Agent (BIOS PXE on add-in NICs) hangs or ignores subdirectory
+    filenames such as pxe/undionly.kpxe. DHCP advertises undionly.kpxe.
+    """
+    base = Path(root or TFTP_ROOT)
+    src = base / "pxe" / "undionly.kpxe"
+    dest = base / "undionly.kpxe"
+    if not src.is_file():
+        return
+    try:
+        shutil.copy2(src, dest)
+    except OSError as e:
+        logger.warning("Failed to copy BIOS iPXE loader to TFTP root: %s", e)
+
+
 def _ensure_dirs():
     Path(TFTP_ROOT).mkdir(parents=True, exist_ok=True)
+    ensure_bios_ipxe_at_root()
 
 
 def _list_dir_recursive(root: Path, base: Path, max_depth: int = 3, depth: int = 0) -> List[Dict[str, Any]]:

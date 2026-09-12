@@ -55,3 +55,23 @@ def test_put_config_rejects_sibling_prefix(tftp_client):
     resp = client.put("/config", json=_body(str(sibling), "x"))
     assert resp.status_code == 400
     assert not sibling.exists()
+
+
+def test_ensure_bios_ipxe_copied_to_root(tftp_client):
+    client, root = tftp_client
+    src = root / "pxe" / "undionly.kpxe"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"ipxe-undi")
+    import tftp_runner.main as tftp_main
+
+    tftp_main.ensure_bios_ipxe_at_root()
+    dest = root / "undionly.kpxe"
+    assert dest.read_bytes() == b"ipxe-undi"
+
+
+def test_ensure_bios_ipxe_skips_when_source_missing(tftp_client):
+    client, root = tftp_client
+    import tftp_runner.main as tftp_main
+
+    tftp_main.ensure_bios_ipxe_at_root()
+    assert not (root / "undionly.kpxe").exists()

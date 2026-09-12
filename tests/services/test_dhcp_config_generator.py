@@ -197,6 +197,35 @@ def test_generate_includes_pxe_host_reservation(tmp_path):
     assert "AA:BB:CC:DD:EE:FF" in content
     assert "192.168.1.50" in content
     assert "host " in content
+    assert 'filename "pxe/snponly.efi"' in content
+
+
+def test_generate_bios_pxe_uses_root_undionly(tmp_path):
+    from enum import Enum
+
+    class BootMode(str, Enum):
+        bios = "bios"
+        uefi = "uefi"
+
+    server = SimpleNamespace(
+        id=1,
+        name="addin-nic",
+        pxe_boot_mode=BootMode.bios,
+        boot_mode=BootMode.uefi,
+    )
+    port = SimpleNamespace(mac_address="98-b7-85-23-36-d4", pxe_ip="192.168.1.50")
+    cfg = _config(
+        [{"interface": "eth0", "ip": "192.168.1.10", "cidr": 24, "gateway": "192.168.1.1"}],
+        config_file_path=str(tmp_path / "dhcpd.conf"),
+    )
+    with patch("app.services.dhcp_config_generator.ServerDAO.get_all", return_value=[server]):
+        with patch(
+            "app.services.dhcp_config_generator.NetworkPortDAO.get_pxe_boot_port",
+            return_value=port,
+        ):
+            content, _ = generate_dhcpd_conf(cfg, MagicMock(), return_content=True)
+    assert 'filename "undionly.kpxe"' in content
+    assert "pxe/undionly.kpxe" not in content
 
 
 @pytest.mark.parametrize(
