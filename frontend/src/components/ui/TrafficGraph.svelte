@@ -85,25 +85,28 @@
     return padding.top + innerH - (n / maxRate) * innerH;
   }
 
-  // Explicit deps so paths always recompute with the measured size / scale.
-  $: pathIn =
-    chartSamples.length >= 2
-      ? chartSamples
-          .map((s, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i)} ${yAt(s.rate_in_mbps)}`)
-          .join(' ')
-      : '';
-  $: pathOut =
-    chartSamples.length >= 2
-      ? chartSamples
-          .map((s, i) => `${i === 0 ? 'M' : 'L'} ${xAt(i)} ${yAt(s.rate_out_mbps)}`)
-          .join(' ')
-      : '';
-  $: areaIn =
-    pathIn &&
-    `${pathIn} L ${xAt(chartSamples.length - 1)} ${padding.top + innerH} L ${padding.left} ${padding.top + innerH} Z`;
-  $: areaOut =
-    pathOut &&
-    `${pathOut} L ${xAt(chartSamples.length - 1)} ${padding.top + innerH} L ${padding.left} ${padding.top + innerH} Z`;
+  function buildLine(samples, key, w, h, yMax, pad) {
+    if (!samples || samples.length < 2) return '';
+    const plotW = Math.max(1, w - pad.left - pad.right);
+    const plotH = Math.max(1, h - pad.top - pad.bottom);
+    const x = (i) => pad.left + (i / Math.max(1, samples.length - 1)) * plotW;
+    const y = (v) => pad.top + plotH - ((Number(v) || 0) / yMax) * plotH;
+    return samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(s[key])}`).join(' ');
+  }
+
+  function buildArea(line, w, h, pad) {
+    if (!line) return '';
+    const plotW = Math.max(1, w - pad.left - pad.right);
+    const plotH = Math.max(1, h - pad.top - pad.bottom);
+    const lastX = pad.left + plotW;
+    return `${line} L ${lastX} ${pad.top + plotH} L ${pad.left} ${pad.top + plotH} Z`;
+  }
+
+  // Size args must be in this expression so paths recompute after bind:clientWidth/Height.
+  $: pathIn = buildLine(chartSamples, 'rate_in_mbps', chartW, chartH, maxRate, padding);
+  $: pathOut = buildLine(chartSamples, 'rate_out_mbps', chartW, chartH, maxRate, padding);
+  $: areaIn = buildArea(pathIn, chartW, chartH, padding);
+  $: areaOut = buildArea(pathOut, chartW, chartH, padding);
 
   function handleMove(event) {
     if (chartSamples.length < 1) return;
@@ -176,36 +179,38 @@
         class="axis-line"
       />
 
-      {#if areaIn}
-        <path d={areaIn} fill="url(#grad-in-{graphId})" />
-      {/if}
-      {#if areaOut}
-        <path d={areaOut} fill="url(#grad-out-{graphId})" />
-      {/if}
-      {#if pathIn}
-        <path
-          d={pathIn}
-          class="line-in"
-          fill="none"
-          stroke="var(--accent-color)"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          vector-effect="non-scaling-stroke"
-        />
-      {/if}
-      {#if pathOut}
-        <path
-          d={pathOut}
-          class="line-out"
-          fill="none"
-          stroke="var(--success-color)"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          vector-effect="non-scaling-stroke"
-        />
-      {/if}
+      {#key `${chartW}x${chartH}:${maxRate}`}
+        {#if areaIn}
+          <path d={areaIn} fill="url(#grad-in-{graphId})" />
+        {/if}
+        {#if areaOut}
+          <path d={areaOut} fill="url(#grad-out-{graphId})" />
+        {/if}
+        {#if pathIn}
+          <path
+            d={pathIn}
+            class="line-in"
+            fill="none"
+            stroke="var(--accent-color)"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            vector-effect="non-scaling-stroke"
+          />
+        {/if}
+        {#if pathOut}
+          <path
+            d={pathOut}
+            class="line-out"
+            fill="none"
+            stroke="var(--success-color)"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            vector-effect="non-scaling-stroke"
+          />
+        {/if}
+      {/key}
 
       {#if hoverSample}
         <line
