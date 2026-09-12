@@ -11,6 +11,18 @@ from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.services.vm_os_strategy import VMProvisionRequest, get_vm_os_strategy_registry
 
 
+def _normalize_vm_disk_and_clone(normalized: Dict[str, Any]) -> None:
+    if normalized.get("disk_gb") in (None, ""):
+        for alias in ("storage_gb", "disk_size_gb"):
+            if normalized.get(alias) not in (None, ""):
+                normalized["disk_gb"] = normalized[alias]
+                break
+    if "full_clone" not in normalized or normalized.get("full_clone") in (None, ""):
+        normalized["full_clone"] = False
+    else:
+        normalized["full_clone"] = bool(normalized["full_clone"])
+
+
 def _normalize_vm_specs(specs: Dict[str, Any]) -> Dict[str, Any]:
     """
     Catalog VM config and legacy family/product defaults use several historical
@@ -33,16 +45,7 @@ def _normalize_vm_specs(specs: Dict[str, Any]) -> Dict[str, Any]:
     if normalized.get("memory_mb") in (None, ""):
         if normalized.get("ram_mb") not in (None, ""):
             normalized["memory_mb"] = normalized["ram_mb"]
-    if normalized.get("disk_gb") in (None, ""):
-        for alias in ("storage_gb", "disk_size_gb"):
-            if normalized.get(alias) not in (None, ""):
-                normalized["disk_gb"] = normalized[alias]
-                break
-    # Linked clones are the default; catalog may set full_clone=true for full copies.
-    if "full_clone" not in normalized or normalized.get("full_clone") in (None, ""):
-        normalized["full_clone"] = False
-    else:
-        normalized["full_clone"] = bool(normalized["full_clone"])
+    _normalize_vm_disk_and_clone(normalized)
     return normalized
 
 

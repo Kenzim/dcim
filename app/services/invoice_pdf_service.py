@@ -39,18 +39,23 @@ def _invoice_profile_lines(db: Session, invoice: Invoice) -> list[str]:
     return lines
 
 
+def _load_invoice_lines(db: Session, invoice: Invoice) -> list:
+    lines = list(invoice.invoice_lines or [])
+    if lines:
+        return lines
+    return list(
+        db.execute(
+            select(InvoiceLine)
+            .where(InvoiceLine.invoice_id == invoice.id)
+            .order_by(InvoiceLine.sort_order, InvoiceLine.id)
+        ).scalars()
+    )
+
+
 class InvoicePdfService:
     @staticmethod
     def render_pdf_bytes(db: Session, invoice: Invoice) -> bytes:
-        lines = list(invoice.invoice_lines or [])
-        if not lines:
-            lines = list(
-                db.execute(
-                    select(InvoiceLine)
-                    .where(InvoiceLine.invoice_id == invoice.id)
-                    .order_by(InvoiceLine.sort_order, InvoiceLine.id)
-                ).scalars()
-            )
+        lines = _load_invoice_lines(db, invoice)
         allocated = InvoiceService.allocated_cents(db, invoice.id)
         remaining = max(0, int(invoice.amount_cents) - allocated)
         profile_lines = _invoice_profile_lines(db, invoice)

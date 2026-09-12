@@ -541,7 +541,7 @@ def _cleanup_failed_service(db, reseller, owner, body, service):
     ServiceDAO.delete(db, service.id)
 
 
-async def _provision_charged_service(
+def _provision_charged_service(
     *, db, reseller, owner, body, kind, background_tasks, charge
 ):
     service = None
@@ -636,7 +636,7 @@ async def _create_service(
     charge = _prepare_charge(
         db, reseller, product, price, key, request_hash
     )
-    service = await _provision_charged_service(
+    service = _provision_charged_service(
         db=db,
         reseller=reseller,
         owner=owner,
