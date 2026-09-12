@@ -325,6 +325,79 @@ async def test_discover_opencore_disk_and_apply_smbios(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_configure_windows_network_dhcp_and_static_failure():
+    from app.services.deployment.guest_config import (
+        _windows_dhcp_network_script,
+        _windows_static_network_script,
+        configure_windows_network,
+    )
+
+    dhcp_plugin = SimpleNamespace(
+        guest_exec=AsyncMock(return_value={"exitcode": 0, "out-data": "NET_OK"})
+    )
+    await configure_windows_network(dhcp_plugin, mode="dhcp")
+    assert "Set-NetIPInterface" in _windows_dhcp_network_script()
+
+    alloc = SimpleNamespace(
+        ip_address="10.2.0.5",
+        gateway="10.2.0.1",
+        subnet_mask="255.255.255.0",
+        dns_servers="1.1.1.1",
+    )
+    static_script = _windows_static_network_script("10.2.0.5", 24, "10.2.0.1", ["1.1.1.1"])
+    assert "New-NetIPAddress" in static_script
+
+    bad = SimpleNamespace(
+        guest_exec=AsyncMock(return_value={"exitcode": 1, "out-data": "", "err-data": "fail"})
+    )
+    with pytest.raises(DeploymentError, match="Windows static"):
+        await configure_windows_network(bad, mode="static", alloc=alloc)
+
+
+@pytest.mark.asyncio
+async def test_discover_opencore_disk_fallback_and_grow_failure():
+    from app.services.deployment.guest_config import discover_opencore_disk, grow_macos_root_apfs
+
+    fallback = SimpleNamespace(
+        guest_exec=AsyncMock(
+            side_effect=[
+                {"exitcode": 0, "out-data": "no opencore here"},
+                {"exitcode": 0, "out-data": "disk9s1\n"},
+            ]
+        )
+    )
+    assert await discover_opencore_disk(fallback) == "disk9s1"
+
+    fail_plugin = SimpleNamespace(
+        guest_exec=AsyncMock(
+            side_effect=[
+                {"exitcode": 0, "out-data": "APFS Container: disk4\n"},
+                {"exitcode": 1, "err-data": "resize failed", "out-data": ""},
+            ]
+        )
+    )
+    with pytest.raises(DeploymentError, match="resizeContainer"):
+        await grow_macos_root_apfs(fail_plugin)
+
+
+@pytest.mark.asyncio
+async def test_apply_cloudinit_network_reset_configure_failure():
+    from app.services.deployment.guest_config import apply_cloudinit_network_reset
+
+    plugin = SimpleNamespace(
+        vmid=1,
+        configure_vm=AsyncMock(return_value=False),
+    )
+    alloc = SimpleNamespace(
+        ip_address="10.0.0.3",
+        gateway="10.0.0.1",
+        subnet_mask="255.255.255.0",
+    )
+    with pytest.raises(DeploymentError, match="cloud-init network"):
+        await apply_cloudinit_network_reset(plugin, alloc)
+
+
+@pytest.mark.asyncio
 async def test_reboot_guest_and_wait_agent(monkeypatch):
     from app.plugins.base import PowerState
     from app.services.deployment.guest_config import reboot_guest_and_wait_agent
