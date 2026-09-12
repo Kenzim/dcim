@@ -137,3 +137,72 @@ async def test_plugin_resolution_and_lifecycle_error_translation(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await billing._ensure_service_powered_off(None, _service())
     assert exc.value.status_code == 502
+
+
+def test_billing_vm_ip_fields_and_external_user_id():
+    vm_alloc = SimpleNamespace(
+        vm=SimpleNamespace(
+            vm_ip_allocation_id=9,
+            vm_ip_allocation=SimpleNamespace(ip_address="198.51.100.5"),
+            vm_template_id=3,
+            guest_state=None,
+        ),
+        config={"vm_ip_address": "ignored"},
+        owner_user_id=42,
+        owner_user=SimpleNamespace(billing_integration_id=2),
+    )
+    assert billing._billing_vm_ip_fields(vm_alloc) == (9, "198.51.100.5")
+    assert billing._billing_external_user_id(vm_alloc) == 42
+
+    cfg_only = SimpleNamespace(
+        vm=SimpleNamespace(vm_ip_allocation_id=None, vm_ip_allocation=None, vm_template_id=None, guest_state=None),
+        config={"vm_ip_allocation_id": 4, "vm_ip_address": "203.0.113.7"},
+        owner_user=None,
+    )
+    assert billing._billing_vm_ip_fields(cfg_only) == (4, "203.0.113.7")
+    assert billing._billing_external_user_id(cfg_only) is None
+
+
+def test_billing_product_helpers():
+    family = SimpleNamespace(
+        service_type="vm",
+        defaults={"memory_mb": 2048},
+        os_mappings=[
+            SimpleNamespace(os_profile=SimpleNamespace(id=1, code="deb", name="Debian", enabled=True, os_family="linux", strategy_name="cloudinit")),
+            SimpleNamespace(os_profile=SimpleNamespace(id=2, code="off", name="Off", enabled=False, os_family="linux", strategy_name="cloudinit")),
+        ],
+    )
+    product = SimpleNamespace(
+        overrides={"cores": 2},
+        vm_template_mappings=[
+            SimpleNamespace(vm_template=SimpleNamespace(id=10, code="tpl", name="Ubuntu", enabled=True, os_type="linux-cloudinit", proxmox_template_name="ubuntu")),
+        ],
+    )
+    profiles = billing._billing_product_os_profiles(family)
+    assert len(profiles) == 1
+    assert profiles[0]["code"] == "deb"
+    templates = billing._billing_product_vm_templates(product)
+    assert templates[0]["code"] == "tpl"
+    assert billing._billing_product_checkout_os_mode("vm", templates, profiles) == "vm_template"
+    assert billing._billing_product_checkout_os_mode("bare_metal", [], profiles) == "server_group"
+    assert billing._billing_product_checkout_os_mode("vm", [], []) == "none"
+
+
+def test_apply_lookup_filters(monkeypatch):
+    query = MagicMock()
+    filtered = MagicMock()
+    query.filter.return_value = filtered
+
+    monkeypatch.setattr(billing.ServerDAO, "get_by_ip", lambda db, ip: None)
+    q, empty = billing._apply_lookup_server_ip_filter(query, None, "1.2.3.4", text=None, proxmox_vmid=None)
+    assert empty is True
+    assert q is query
+
+    server = SimpleNamespace(id=55)
+    monkeypatch.setattr(billing.ServerDAO, "get_by_ip", lambda db, ip: server)
+    q2, empty2 = billing._apply_lookup_server_ip_filter(query, None, "1.2.3.4", text=None, proxmox_vmid=None)
+    assert empty2 is False
+    query.filter.assert_called()
+
+    text_q = billing._apply_lookup_text_filter(query, "5100")
+    assert text_q is query.filter.return_value
