@@ -66,20 +66,100 @@ jobs:
         run: |
           pytest --cov=app --cov-report=xml:coverage.xml -q -n auto
 
+      # Run sonar-scanner in the job container. SonarSource `uses:` actions are
+      # node24/composite steps; act_runner polls pathcmd.txt via podman archive
+      # and hits "context deadline exceeded" on long scans.
       - name: SonarQube Scan
         if: steps.checkout.outcome == 'success'
-        uses: https://github.com/SonarSource/sonarqube-scan-action@v7
+        timeout-minutes: 25
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          set -eu
+          SCANNER_VERSION=8.0.1.6346
+          SCANNER_FLAVOR=linux-x64
+          SCANNER_ZIP="sonar-scanner-cli-${SCANNER_VERSION}-${SCANNER_FLAVOR}.zip"
+          SCANNER_ROOT="${RUNNER_TEMP}/sonar-scanner-${SCANNER_VERSION}-${SCANNER_FLAVOR}"
+          SCANNER_BIN="${SCANNER_ROOT}/bin/sonar-scanner"
+
+          if [ ! -x "${SCANNER_BIN}" ]; then
+            apt-get update -qq
+            apt-get install -y -qq curl unzip jq ca-certificates openjdk-17-jre-headless
+            curl -fsSL \
+              "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/${SCANNER_ZIP}" \
+              -o "${RUNNER_TEMP}/${SCANNER_ZIP}"
+            rm -rf "${SCANNER_ROOT}"
+            unzip -q "${RUNNER_TEMP}/${SCANNER_ZIP}" -d "${RUNNER_TEMP}"
+          fi
+
+          "${SCANNER_BIN}" \
+            -Dsonar.host.url="${SONAR_HOST_URL}" \
+            -Dsonar.token="${SONAR_TOKEN}"
 
       - name: SonarQube Quality Gate
         if: success()
-        uses: https://github.com/SonarSource/sonarqube-quality-gate-action@v1
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          set -eu
+          metadataFile=".scannerwork/report-task.txt"
+          pollingTimeoutSec=300
+
+          if [ ! -f "${metadataFile}" ]; then
+            echo "${metadataFile} does not exist." >&2
+            exit 1
+          fi
+
+          serverUrl="${SONAR_HOST_URL%/}"
+          ceTaskUrl="${serverUrl}/api$(sed -n 's/^ceTaskUrl=.*api//p' "${metadataFile}")"
+
+          task="$(curl --location --location-trusted --max-redirs 10 --silent --fail --show-error \
+            --user "${SONAR_TOKEN}:" "${ceTaskUrl}")"
+          status="$(jq -r '.task.status' <<< "${task}")"
+          endTime=$((SECONDS + pollingTimeoutSec))
+
+          until [[ "${status}" != "PENDING" && "${status}" != "IN_PROGRESS" || ${SECONDS} -ge ${endTime} ]]; do
+            printf '.'
+            sleep 5
+            task="$(curl --location --location-trusted --max-redirs 10 --silent --fail --show-error \
+              --user "${SONAR_TOKEN}:" "${ceTaskUrl}")"
+            status="$(jq -r '.task.status' <<< "${task}")"
+          done
+          printf '\n'
+
+          if [[ "${status}" == "PENDING" || "${status}" == "IN_PROGRESS" ]]; then
+            echo "Quality Gate polling timed out after ${pollingTimeoutSec}s." >&2
+            exit 1
+          fi
+          if [[ "${status}" == "CANCELED" || "${status}" == "FAILED" ]]; then
+            jq -r '.task.errorMessage // "Sonar background task failed."' <<< "${task}" >&2
+            exit 1
+          fi
+
+          analysisId="$(jq -r '.task.analysisId' <<< "${task}")"
+          qualityGateStatus="$(curl --location --location-trusted --max-redirs 10 --silent --fail --show-error \
+            --user "${SONAR_TOKEN}:" \
+            "${serverUrl}/api/qualitygates/project_status?analysisId=${analysisId}" \
+            | jq -r '.projectStatus.status')"
+
+          dashboardUrl="$(sed -n 's/dashboardUrl=\(.*\)/\1/p' "${metadataFile}")"
+          echo "Dashboard: ${dashboardUrl}"
+
+          case "${qualityGateStatus}" in
+            OK) echo "Quality Gate PASSED." ;;
+            WARN) echo "Quality Gate WARN." ;;
+            ERROR)
+              echo "Quality Gate FAILED." >&2
+              exit 1
+              ;;
+            *)
+              echo "Quality Gate not configured (status=${qualityGateStatus})." >&2
+              exit 1
+              ;;
+          esac
 
       - name: Fail if tests failed
         if: steps.tests.outcome == 'failure'
