@@ -100,6 +100,32 @@ def _sid_from_response(response: httpx.Response, client: httpx.AsyncClient | Non
     return ""
 
 
+async def aten_web_session(origin: str, username: str, password: str) -> str:
+    """Log into SuperMicro ATEN. Return the SID cookie. No KVM token."""
+    headers = {
+        "Origin": origin,
+        "Referer": origin + "/",
+        "User-Agent": "Mozilla/5.0",
+    }
+    async with httpx.AsyncClient(verify=bmc_httpx_verify(), timeout=20.0, headers=headers) as client:
+        try:
+            login = await client.post(
+                f"{origin}/cgi/login.cgi",
+                data={
+                    "name": b64_basic(username),
+                    "pwd": b64_basic(password),
+                    "check": "00",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        except httpx.RequestError as exc:
+            raise IpmiKvmUnavailable(f"Could not reach BMC web UI: {exc}") from exc
+        sid = _sid_from_response(login, client)
+        if not sid:
+            raise IpmiKvmUnavailable("BMC login failed")
+        return sid
+
+
 class SuperMicroKvmProfile(IpmiKvmProfile):
     id = "supermicro"
     display_name = "SuperMicro (ATEN HTML5 KVM)"
@@ -143,22 +169,9 @@ class SuperMicroKvmProfile(IpmiKvmProfile):
             "Referer": origin + "/",
             "User-Agent": "Mozilla/5.0",
         }
+        sid = await aten_web_session(origin, username, password)
         async with httpx.AsyncClient(verify=bmc_httpx_verify(), timeout=20.0, headers=headers) as client:
-            try:
-                login = await client.post(
-                    f"{origin}/cgi/login.cgi",
-                    data={
-                        "name": b64_basic(username),
-                        "pwd": b64_basic(password),
-                        "check": "00",
-                    },
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                )
-            except httpx.RequestError as exc:
-                raise IpmiKvmUnavailable(f"Could not reach BMC web UI: {exc}") from exc
-            sid = _sid_from_response(login, client)
-            if not sid:
-                raise IpmiKvmUnavailable("BMC login failed")
+            client.cookies.set("SID", sid)
             try:
                 page = await client.get(
                     f"{origin}{_HTML5_PAGE}",

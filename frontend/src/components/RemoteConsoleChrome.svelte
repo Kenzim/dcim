@@ -1,4 +1,6 @@
 <script>
+  import { onDestroy, onMount } from 'svelte';
+  import { getKvmPower, setKvmPower } from '../lib/api.js';
   import {
     assessLatencyHealth,
     computeJitter,
@@ -13,13 +15,108 @@
   export let reconnecting = false;
   export let showCad = true;
   export let extraLabel = '';
+  /** Host VGA is blank (BMC still connected). Toolbar + overlay say No signal. */
+  export let noSignal = false;
   export let latencyMs = null;
   export let latencySamples = [];
   export let onCad = () => {};
   export let onPaste = () => {};
   export let onReconnect = () => {};
+  /** KVM ws_token — chassis power menu. Empty on VM VNC. */
+  export let powerToken = '';
 
   let showLatencyGraph = false;
+  let powerRoot;
+  let powerOpen = false;
+  let powerBusy = false;
+  let powerState = '';
+  let powerActions = [];
+  let powerError = '';
+  let powerPoll = null;
+  let watchedToken = '';
+
+  function stopPowerPoll() {
+    if (powerPoll) {
+      clearInterval(powerPoll);
+      powerPoll = null;
+    }
+  }
+
+  async function refreshPower() {
+    if (!powerToken) return;
+    try {
+      const data = await getKvmPower(powerToken);
+      powerState = data.power_state || '';
+      powerActions = data.actions || [];
+      powerError = data.success === false ? data.message || 'Power status unavailable' : '';
+    } catch (e) {
+      powerError = e.message || String(e);
+    }
+  }
+
+  function startPowerWatch(token) {
+    if (token === watchedToken) return;
+    watchedToken = token;
+    stopPowerPoll();
+    powerState = '';
+    powerActions = [];
+    powerError = '';
+    powerOpen = false;
+    if (!token) return;
+    refreshPower();
+    powerPoll = setInterval(refreshPower, 8000);
+  }
+
+  $: startPowerWatch(powerToken);
+
+  function togglePowerMenu() {
+    if (powerBusy) return;
+    powerOpen = !powerOpen;
+  }
+
+  function onDocPointer(event) {
+    if (!powerOpen) return;
+    if (powerRoot && !powerRoot.contains(event.target)) powerOpen = false;
+  }
+
+  function onDocKey(event) {
+    if (event.key === 'Escape') powerOpen = false;
+  }
+
+  async function runPower(action) {
+    if (!powerToken || powerBusy || !action?.id || action.enabled === false) return;
+    if (action.confirm && !window.confirm(action.confirm)) return;
+    powerBusy = true;
+    powerOpen = false;
+    powerError = '';
+    try {
+      const data = await setKvmPower(powerToken, action.id);
+      powerState = data.power_state || powerState;
+      powerActions = data.actions || powerActions;
+      if (data.success === false && data.message) powerError = data.message;
+    } catch (e) {
+      powerError = e.message || String(e);
+      refreshPower();
+    } finally {
+      powerBusy = false;
+    }
+  }
+
+  $: powerStateLabel =
+    powerState === 'on' ? 'On' : powerState === 'off' ? 'Off' : powerState ? 'Unknown' : '';
+
+  onMount(() => {
+    document.addEventListener('pointerdown', onDocPointer);
+    document.addEventListener('keydown', onDocKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDocPointer);
+      document.removeEventListener('keydown', onDocKey);
+    };
+  });
+
+  onDestroy(() => {
+    stopPowerPoll();
+  });
 
   $: latencyHealth = assessLatencyHealth(latencySamples);
   $: latencyAvg = latencySamples.length
@@ -28,6 +125,7 @@
   $: latencyJitter = computeJitter(latencySamples);
   $: latencyPath = latencySparkline(latencySamples);
   $: connected = status === 'connected';
+  $: showNoSignal = connected && noSignal;
 
   function toggleLatencyGraph() {
     if (latencyMs == null && latencySamples.length === 0) return;
@@ -42,9 +140,16 @@
 <div class="vnc-viewer">
   <div class="vnc-toolbar">
     <div class="vnc-toolbar-left">
-      <span class="vnc-status" class:ok={connected} class:bad={status === 'error' || status === 'disconnected'}>
+      <span
+        class="vnc-status"
+        class:ok={connected && !noSignal}
+        class:warn={showNoSignal}
+        class:bad={status === 'error' || status === 'disconnected'}
+      >
         {#if status === 'connecting'}
           Connecting…
+        {:else if showNoSignal}
+          No signal
         {:else if status === 'connected'}
           Connected
         {:else if status === 'disconnected'}
@@ -53,7 +158,7 @@
           Error
         {/if}
       </span>
-      {#if extraLabel}
+      {#if extraLabel && !showNoSignal}
         <span class="vnc-extra">{extraLabel}</span>
       {/if}
       {#if connected && latencyMs != null}
@@ -73,6 +178,43 @@
       {/if}
     </div>
     <div class="vnc-toolbar-actions">
+      {#if powerToken}
+        <div class="vnc-power" bind:this={powerRoot}>
+          <button
+            type="button"
+            class="vnc-btn vnc-power-btn"
+            class:open={powerOpen}
+            disabled={powerBusy}
+            aria-haspopup="menu"
+            aria-expanded={powerOpen}
+            title={powerError || 'Chassis power'}
+            on:click={togglePowerMenu}
+          >
+            {powerBusy ? 'Power…' : powerStateLabel ? `Power · ${powerStateLabel}` : 'Power'}
+          </button>
+          {#if powerOpen}
+            <div class="vnc-power-menu" role="menu">
+              {#if powerError}
+                <div class="vnc-power-error">{powerError}</div>
+              {/if}
+              {#each powerActions as action (action.id)}
+                <button
+                  type="button"
+                  class="vnc-power-item"
+                  class:danger={action.id === 'off' || action.id === 'cycle'}
+                  role="menuitem"
+                  disabled={powerBusy || action.enabled === false}
+                  on:click={() => runPower(action)}
+                >
+                  {action.label}
+                </button>
+              {:else}
+                <div class="vnc-power-empty">Loading power options…</div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
       {#if showCad}
         <button type="button" class="vnc-btn" disabled={!connected} on:click={onCad}>
           Ctrl+Alt+Del
@@ -91,6 +233,9 @@
   {/if}
   <div class="vnc-screen-wrap">
     <slot />
+    {#if showNoSignal}
+      <div class="no-signal-overlay" aria-live="polite">No Signal</div>
+    {/if}
     {#if showLatencyGraph}
       <div class="latency-overlay" role="dialog" aria-label="Latency graph">
         <div class="latency-overlay-head">
@@ -144,6 +289,8 @@
     background: #1c1d22;
     color: #e6e6e6;
     font-size: 13px;
+    position: relative;
+    z-index: 10;
   }
 
   .vnc-toolbar-left {
@@ -164,8 +311,27 @@
     color: #3ecf6a;
   }
 
+  .vnc-status.warn {
+    color: #e6c35c;
+  }
+
   .vnc-status.bad {
     color: #ff6b61;
+  }
+
+  .no-signal-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: #000;
+    color: #f0f0f0;
+    font-size: 28px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
   }
 
   .vnc-extra {
@@ -221,6 +387,68 @@
   .vnc-toolbar-actions {
     display: flex;
     gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-items: center;
+  }
+
+  .vnc-power {
+    position: relative;
+  }
+
+  .vnc-power-btn.open {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .vnc-power-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 8;
+    min-width: 240px;
+    padding: 6px;
+    border-radius: 8px;
+    background: #1c1d22;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  }
+
+  .vnc-power-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: #e6e6e6;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .vnc-power-item:not(:disabled):hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .vnc-power-item.danger:not(:disabled):hover {
+    background: rgba(255, 80, 70, 0.16);
+  }
+
+  .vnc-power-item:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .vnc-power-error,
+  .vnc-power-empty {
+    padding: 6px 10px 8px;
+    font-size: 11px;
+    color: #ff8f87;
+    line-height: 1.35;
+  }
+
+  .vnc-power-empty {
+    color: #9a9a9a;
   }
 
   .vnc-btn {

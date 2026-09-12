@@ -21,7 +21,17 @@ from app.core.auth import require_admin
 from app.core.database import get_db
 from app.dao.server_dao import ServerDAO
 from app.models.server import Server
+from app.models.server_activity import ServerActivityEventType
+from app.plugins.base import PowerState
+from app.plugins.ipmi import (
+    CHASSIS_POWER_COMMANDS,
+    describe_chassis_power_actions,
+    normalize_chassis_power_action,
+)
+from app.plugins.registry import get_registry
 from app.schemas.ipmi_kvm import (
+    IpmiKvmPowerRequest,
+    IpmiKvmPowerStateResponse,
     IpmiKvmProfileInfo,
     IpmiKvmRedeemRequest,
     IpmiKvmSessionResponse,
@@ -42,6 +52,11 @@ from app.services.ipmi_kvm_ticket_service import (
     mint_launch_ticket,
     redeem_launch_ticket,
 )
+from app.services.server_activity_logger import (
+    log_server_activity_attempt,
+    log_server_activity_failure,
+    log_server_activity_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +65,8 @@ router = APIRouter(prefix="/kvm", tags=["ipmi-kvm"])
 
 _ASSET_COOKIE = "kvm_asset"
 _NOT_CONFIGURED = "HTML5 KVM is not configured for this server"
+_SERVER_NOT_FOUND = "Server not found"
+_SESSION_EXPIRED = "Console session is invalid or has expired"
 
 
 def kvm_http_error(exc: IpmiKvmUnavailable) -> HTTPException:
@@ -67,7 +84,7 @@ def kvm_http_error(exc: IpmiKvmUnavailable) -> HTTPException:
 def kvm_popup_redirect(server: Optional[Server]) -> RedirectResponse:
     """Mint a one-time launch ticket and redirect to ``/kvm?t=...``."""
     if server is None:
-        return RedirectResponse(url=build_relative_error_url("Server not found"), status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(url=build_relative_error_url(_SERVER_NOT_FOUND), status_code=status.HTTP_302_FOUND)
     if not kvm_ready(server):
         return RedirectResponse(
             url=build_relative_error_url(_NOT_CONFIGURED),
@@ -125,7 +142,7 @@ async def redeem_kvm_launch_ticket(
         )
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVER_NOT_FOUND)
     if not kvm_ready(server):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -158,7 +175,7 @@ async def proxy_kvm_asset(
     ws_token = (token or "").strip() or (request.cookies.get(_ASSET_COOKIE) or "").strip()
     session = get_ws_session(ws_token)
     if session is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Console session is invalid or has expired")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SESSION_EXPIRED)
     profile = get_profile(session["profile_id"])
     if profile is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_NOT_CONFIGURED)
@@ -177,6 +194,179 @@ async def proxy_kvm_asset(
     response = Response(content=body, media_type=media, headers={"Cache-Control": "no-store"})
     _set_asset_cookie(response, ws_token, 3600, request=request)
     return response
+
+
+def _kvm_session_or_400(token: Optional[str]) -> dict:
+    session = get_ws_session((token or "").strip())
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_SESSION_EXPIRED,
+        )
+    return session
+
+
+def _kvm_power_server(db: Session, session: dict) -> Server:
+    server = ServerDAO.get_by_id(db, session["server_id"])
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVER_NOT_FOUND)
+    return server
+
+
+def _kvm_has_power_control(db: Session, server: Server) -> bool:
+    from app.api.server import _server_has_capability
+
+    return _server_has_capability(db, server, "power_control")
+
+
+def _kvm_power_plugin(server: Server):
+    try:
+        return get_registry().get_plugin(server.plugin_name, server.plugin_config)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to load power plugin: {exc}",
+        ) from exc
+
+
+def _chassis_action_catalog(plugin, power_state: str) -> list[dict]:
+    if hasattr(plugin, "list_chassis_power_actions"):
+        return plugin.list_chassis_power_actions(power_state)
+    return describe_chassis_power_actions(power_state)
+
+
+async def _read_chassis_power_state(plugin) -> tuple[str, str]:
+    try:
+        state = await plugin.get_power_state()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("KVM power status failed: %s", exc)
+        return PowerState.UNKNOWN.value, str(exc)
+    if isinstance(state, PowerState):
+        return state.value, ""
+    return str(state or PowerState.UNKNOWN.value), ""
+
+
+async def _run_chassis_power(plugin, action: str) -> bool:
+    if hasattr(plugin, "chassis_power"):
+        return await plugin.chassis_power(action)
+    if action == "on":
+        return await plugin.power_on()
+    if action == "soft":
+        return await plugin.power_off(force=False)
+    if action == "off":
+        return await plugin.power_off(force=True)
+    if action == "reset":
+        return await plugin.power_reset()
+    raise ValueError(f"Unsupported chassis power action: {action}")
+
+
+@router.get("/power", response_model=IpmiKvmPowerStateResponse)
+async def kvm_power_state(
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Chassis power status + IPMI action catalog for the KVM popup (ws_token auth)."""
+    session = _kvm_session_or_400(token)
+    server = _kvm_power_server(db, session)
+    if not _kvm_has_power_control(db, server):
+        return IpmiKvmPowerStateResponse(
+            power_state=PowerState.UNKNOWN.value,
+            actions=[
+                {**row, "enabled": False}
+                for row in describe_chassis_power_actions(PowerState.UNKNOWN)
+            ],
+            success=False,
+            message="Power control is not enabled for this server",
+        )
+    plugin = _kvm_power_plugin(server)
+    state, err = await _read_chassis_power_state(plugin)
+    return IpmiKvmPowerStateResponse(
+        power_state=state,
+        actions=_chassis_action_catalog(plugin, state),
+        success=not err,
+        message=err,
+    )
+
+
+@router.post("/power", response_model=IpmiKvmPowerStateResponse)
+async def kvm_power_action(
+    body: IpmiKvmPowerRequest,
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Run an IPMI chassis power verb on the server bound to this KVM session."""
+    session = _kvm_session_or_400(token or body.token)
+    server = _kvm_power_server(db, session)
+    if not _kvm_has_power_control(db, server):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Server does not have power control capability enabled",
+        )
+    action = normalize_chassis_power_action(body.action)
+    if action not in CHASSIS_POWER_COMMANDS:
+        allowed = "|".join(CHASSIS_POWER_COMMANDS)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid action; use {allowed}",
+        )
+
+    log_server_activity_attempt(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.POWER,
+        action=action,
+        source="kvm",
+        message=f"KVM chassis power '{action}' requested",
+    )
+    plugin = _kvm_power_plugin(server)
+    try:
+        ok = await _run_chassis_power(plugin, action)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log_server_activity_failure(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action=action,
+            source="kvm",
+            message="KVM chassis power request failed",
+            error=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Power action '{action}' failed: {exc}",
+        ) from exc
+
+    if not ok:
+        log_server_activity_failure(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.POWER,
+            action=action,
+            source="kvm",
+            message="KVM chassis power command failed",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Power action '{action}' failed",
+        )
+
+    log_server_activity_success(
+        db,
+        server_id=server.id,
+        event_type=ServerActivityEventType.POWER,
+        action=action,
+        source="kvm",
+        message=f"KVM chassis power '{action}' sent successfully",
+    )
+    state, err = await _read_chassis_power_state(plugin)
+    return IpmiKvmPowerStateResponse(
+        power_state=state,
+        actions=_chassis_action_catalog(plugin, state),
+        success=not err,
+        message="" if not err else err,
+    )
 
 
 @router.websocket("/ws")

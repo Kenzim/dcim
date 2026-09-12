@@ -32,6 +32,7 @@
   let status = 'connecting';
   let errorMessage = '';
   let extraLabel = '';
+  let noSignal = false;
   let destroyed = false;
   let ws = null;
   let rfb = null;
@@ -130,7 +131,30 @@
     return { x: x, y: y };
   }
 
+  function markHasVideo() {
+    if (destroyed) return;
+    noSignal = false;
+    const w = rfb?._fb_width || canvas?.width;
+    const h = rfb?._fb_height || canvas?.height;
+    if (w && h && !extraLabel) extraLabel = `${w}×${h}`;
+  }
+
+  function watchAtenVideo(display) {
+    if (!display || display._rackflowVideoHook) return;
+    display._rackflowVideoHook = true;
+    for (const name of ['blitImage', 'blitRgbImage', 'blitRgbxImage', 'imageRect']) {
+      if (typeof display[name] !== 'function') continue;
+      const orig = display[name].bind(display);
+      display[name] = function atenVideoBlit(...args) {
+        markHasVideo();
+        return orig(...args);
+      };
+    }
+  }
+
   function attachRfb(RFB) {
+    noSignal = true;
+    extraLabel = '';
     rfb = new RFB({
       target: canvas,
       focusContainer: canvas,
@@ -154,14 +178,20 @@
           status = 'connected';
           errorMessage = '';
           autoRetries = 0;
+          if (!extraLabel) noSignal = true;
         }
       },
       onUpdateFps: (fps, res) => {
-        if (!destroyed && res) extraLabel = `${res}  ${fps} fps`;
+        if (destroyed) return;
+        if (Number(fps) > 0) {
+          markHasVideo();
+          if (res) extraLabel = `${res}  ${fps} fps`;
+        }
       },
       onFBResize: (_rfb, w, h) => {
         if (destroyed) return;
-        extraLabel = `${w}×${h}`;
+        if (!noSignal && w && h) extraLabel = `${w}×${h}`;
+        watchAtenVideo(rfb?._display);
         requestAnimationFrame(fitCanvas);
       },
     });
@@ -187,6 +217,8 @@
       return true;
     };
 
+    patchAtenPointer(rfb, canvas);
+    watchAtenVideo(rfb._display);
     const queued = pendingFrames;
     pendingFrames = [];
     for (const frame of queued) {
@@ -205,7 +237,6 @@
     } catch (_) {
       /* ignore */
     }
-    patchAtenPointer(rfb, canvas);
     requestAnimationFrame(fitCanvas);
     if (!destroyed) {
       status = 'connected';
@@ -337,6 +368,8 @@
     try {
       teardownSocket();
       status = 'connecting';
+      noSignal = false;
+      extraLabel = '';
       openHubSocket();
       if (scriptsReady && window.RFB) attachRfb(window.RFB);
     } catch (e) {
@@ -381,8 +414,10 @@
   {pasting}
   {reconnecting}
   {extraLabel}
+  {noSignal}
   {latencyMs}
   {latencySamples}
+  powerToken={session.ws_token}
   onCad={sendCtrlAltDel}
   onPaste={pasteClipboard}
   onReconnect={() => reconnect()}

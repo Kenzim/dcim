@@ -660,6 +660,77 @@ export async function listIpmiKvmProfiles() {
   return await response.json();
 }
 
+export async function listSolProfiles() {
+  const response = await fetch(`${API_BASE}/sol/profiles`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load SOL profiles');
+  }
+  return await response.json();
+}
+
+export async function listVirtualMediaProfiles() {
+  const response = await fetch(`${API_BASE}/virtual-media/profiles`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load virtual media profiles');
+  }
+  return await response.json();
+}
+
+async function virtualMediaRequest(path, { method = 'GET', body } = {}) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    credentials: 'include',
+    headers: {
+      ..._impersonationHeaders(),
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Virtual media request failed');
+  }
+  return await response.json();
+}
+
+export async function getServerVirtualMedia(serverId) {
+  return virtualMediaRequest(`/servers/${serverId}/virtual-media`);
+}
+
+export async function insertServerVirtualMedia(serverId, filename, bootOnce = false) {
+  return virtualMediaRequest(`/servers/${serverId}/virtual-media/insert`, {
+    method: 'POST',
+    body: { filename, boot_once: !!bootOnce },
+  });
+}
+
+export async function ejectServerVirtualMedia(serverId) {
+  return virtualMediaRequest(`/servers/${serverId}/virtual-media/eject`, { method: 'POST' });
+}
+
+export async function getClientVirtualMedia(serviceId) {
+  return virtualMediaRequest(`/client/services/${serviceId}/virtual-media`);
+}
+
+export async function insertClientVirtualMedia(serviceId, filename, bootOnce = false) {
+  return virtualMediaRequest(`/client/services/${serviceId}/virtual-media/insert`, {
+    method: 'POST',
+    body: { filename, boot_once: !!bootOnce },
+  });
+}
+
+export async function ejectClientVirtualMedia(serviceId) {
+  return virtualMediaRequest(`/client/services/${serviceId}/virtual-media/eject`, { method: 'POST' });
+}
+
 export async function getServerCapabilities(serverId) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/capabilities`, {
     method: 'GET',
@@ -2403,6 +2474,43 @@ export async function redeemVmVncLaunchTicket(token) {
 
 export async function redeemIpmiKvmLaunchTicket(token) {
   const response = await fetch(`${API_BASE}/kvm/redeem`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Console link is invalid or has expired');
+  }
+  return await response.json();
+}
+
+export async function getKvmPower(wsToken) {
+  const response = await fetch(
+    `${API_BASE}/kvm/power?token=${encodeURIComponent(wsToken)}`,
+  );
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to read chassis power');
+  }
+  return await response.json();
+}
+
+export async function setKvmPower(wsToken, action) {
+  const response = await fetch(`${API_BASE}/kvm/power`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: wsToken, action }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Power action '${action}' failed`);
+  }
+  return await response.json();
+}
+
+export async function redeemSolLaunchTicket(token) {
+  const response = await fetch(`${API_BASE}/sol/redeem`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token }),
