@@ -32,7 +32,7 @@ class VmSshKeysError(Exception):
 async def save_and_apply_ssh_public_keys(
     db: Session,
     service: Service,
-    keys_input: Union[str, List[str], None],
+    keys_input: str | List[str] | None,
     *,
     apply_live: bool = True,
 ) -> Dict[str, Any]:
@@ -87,82 +87,100 @@ async def _try_apply_authorized_keys(db: Session, service: Service, keys: List[s
     return True
 
 
+def _validate_template_for_product(
+    db: Session, service: Service, vm_template_id: int, tmpl
+) -> None:
+    if not service.product_code:
+        return
+    product = ProductDAO.get_by_code(db, service.product_code)
+    if not product:
+        return
+    allowed = {
+        m.vm_template_id
+        for m in (product.vm_template_mappings or [])
+        if m.vm_template_id is not None
+    }
+    if allowed and int(vm_template_id) not in allowed:
+        raise VmSshKeysError("VM template is not linked to this product", 400)
+
+
+def _apply_vm_template_snapshot(
+    db: Session, service: Service, tmpl, vm_template_id: int
+) -> None:
+    try:
+        snapshot, os_code = build_product_snapshot(
+            db,
+            service.product_code,
+            None,
+            ServiceType.VM,
+            vm_template_id=int(vm_template_id),
+        )
+    except ValueError as exc:
+        raise VmSshKeysError(str(exc), 400) from exc
+    service.product_snapshot = snapshot
+    service.os_code = os_code
+    cfg = dict(service.config or {})
+    cfg["product_snapshot"] = snapshot
+    vm_plan = dict(cfg.get("vm_plan") or {})
+    if isinstance(snapshot, dict):
+        vm_plan["vm_template"] = {
+            "id": tmpl.id,
+            "name": tmpl.name,
+            "os_type": tmpl.os_type,
+            "proxmox_template_name": tmpl.proxmox_template_name,
+            "strategy_options": tmpl.strategy_options or {},
+        }
+        from app.services.vm_install_type_strategy import resolve_vm_template_strategy
+
+        try:
+            strat = resolve_vm_template_strategy(tmpl.os_type)
+            vm_plan["strategy_name"] = strat["strategy_name"]
+            vm_plan["strategy_plan"] = {
+                "mode": strat["strategy_name"],
+                "strategy_config": strat["strategy_config"],
+            }
+        except ValueError:
+            pass
+    cfg["vm_plan"] = vm_plan
+    service.config = cfg
+
+
+def _apply_reinstall_ssh_keys(
+    db: Session,
+    service: Service,
+    ssh_public_keys: str | List[str] | None,
+    vm_template_id: Optional[int],
+) -> None:
+    if ssh_public_keys is None:
+        return
+    if not service_accepts_ssh_key(db, service, target_template_id=vm_template_id):
+        return
+    try:
+        keys = parse_ssh_public_keys(ssh_public_keys)
+    except SshPublicKeyError as exc:
+        raise VmSshKeysError(str(exc), 400) from exc
+    set_ssh_public_keys_on_service(service, keys)
+
+
 def apply_template_change_for_reinstall(
     db: Session,
     service: Service,
     *,
     vm_template_id: Optional[int] = None,
-    ssh_public_keys: Union[str, List[str], None] = None,
+    ssh_public_keys: str | List[str] | None = None,
 ) -> Service:
     """Update template / SSH keys on the service before destroy+reprovision."""
     if vm_template_id is not None:
         tmpl = VMTemplateDAO.get_by_id(db, int(vm_template_id))
         if not tmpl or not tmpl.enabled:
             raise VmSshKeysError("VM template not found", 404)
-        # Must be linked to the service product when product_code is set.
+        _validate_template_for_product(db, service, int(vm_template_id), tmpl)
         if service.product_code:
-            product = ProductDAO.get_by_code(db, service.product_code)
-            if product:
-                allowed = {
-                    m.vm_template_id
-                    for m in (product.vm_template_mappings or [])
-                    if m.vm_template_id is not None
-                }
-                if allowed and int(vm_template_id) not in allowed:
-                    raise VmSshKeysError(
-                        "VM template is not linked to this product",
-                        400,
-                    )
-                try:
-                    snapshot, os_code = build_product_snapshot(
-                        db,
-                        service.product_code,
-                        None,
-                        ServiceType.VM,
-                        vm_template_id=int(vm_template_id),
-                    )
-                except ValueError as exc:
-                    raise VmSshKeysError(str(exc), 400) from exc
-                service.product_snapshot = snapshot
-                service.os_code = os_code
-                cfg = dict(service.config or {})
-                cfg["product_snapshot"] = snapshot
-                # Refresh vm_plan strategy bits from snapshot when present
-                vm_plan = dict(cfg.get("vm_plan") or {})
-                if isinstance(snapshot, dict):
-                    vm_plan["vm_template"] = {
-                        "id": tmpl.id,
-                        "name": tmpl.name,
-                        "os_type": tmpl.os_type,
-                        "proxmox_template_name": tmpl.proxmox_template_name,
-                        "strategy_options": tmpl.strategy_options or {},
-                    }
-                    from app.services.vm_install_type_strategy import resolve_vm_template_strategy
-
-                    try:
-                        strat = resolve_vm_template_strategy(tmpl.os_type)
-                        vm_plan["strategy_name"] = strat["strategy_name"]
-                        vm_plan["strategy_plan"] = {
-                            "mode": strat["strategy_name"],
-                            "strategy_config": strat["strategy_config"],
-                        }
-                    except ValueError:
-                        pass
-                cfg["vm_plan"] = vm_plan
-                service.config = cfg
+            _apply_vm_template_snapshot(db, service, tmpl, int(vm_template_id))
         if service.vm:
             service.vm.vm_template_id = int(vm_template_id)
 
-    if ssh_public_keys is not None:
-        if not service_accepts_ssh_key(db, service, target_template_id=vm_template_id):
-            # Ignore keys when target does not accept them
-            pass
-        else:
-            try:
-                keys = parse_ssh_public_keys(ssh_public_keys)
-            except SshPublicKeyError as exc:
-                raise VmSshKeysError(str(exc), 400) from exc
-            set_ssh_public_keys_on_service(service, keys)
+    _apply_reinstall_ssh_keys(db, service, ssh_public_keys, vm_template_id)
 
     ServiceDAO.update(db, service)
     db.refresh(service)

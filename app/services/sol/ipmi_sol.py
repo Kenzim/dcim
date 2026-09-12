@@ -98,12 +98,14 @@ class IpmiSolByteSession(SolByteSession):
         if self._proc.returncode is None:
             self._proc.terminate()
             try:
-                await asyncio.wait_for(self._proc.wait(), 5)
-            except (asyncio.TimeoutError, ProcessLookupError):
+                async with asyncio.timeout(5):
+                    await self._proc.wait()
+            except (TimeoutError, ProcessLookupError):
                 self._proc.kill()
                 try:
-                    await asyncio.wait_for(self._proc.wait(), 3)
-                except (asyncio.TimeoutError, ProcessLookupError):
+                    async with asyncio.timeout(3):
+                        await self._proc.wait()
+                except (TimeoutError, ProcessLookupError):
                     pass
         try:
             await self._deactivate()
@@ -130,7 +132,7 @@ class IpmiSolProfile(SolProfile):
         password: str,
         port: int,
         *subcommand: str,
-        timeout: float = 12,
+        max_wait: float = 12,
     ) -> tuple[bytes, bytes, int]:
         args = build_ipmitool_args(hostname, username, port, *subcommand)
         env = {**os.environ, "IPMI_PASSWORD": password}
@@ -141,8 +143,9 @@ class IpmiSolProfile(SolProfile):
             env=env,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-        except asyncio.TimeoutError as exc:
+            async with asyncio.timeout(max_wait):
+                stdout, stderr = await proc.communicate()
+        except TimeoutError as exc:
             proc.kill()
             await proc.wait()
             raise SolUnavailable(f"ipmitool {' '.join(subcommand)} timed out") from exc
@@ -198,7 +201,7 @@ class IpmiSolProfile(SolProfile):
         async def deactivate() -> None:
             try:
                 await self._run_ipmitool(
-                    hostname, username, password, port, "sol", "deactivate", timeout=8
+                    hostname, username, password, port, "sol", "deactivate", max_wait=8
                 )
             except SolUnavailable:
                 pass

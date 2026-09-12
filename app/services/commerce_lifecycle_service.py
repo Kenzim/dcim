@@ -80,11 +80,14 @@ class CommerceLifecycleService:
                 billing.last_failure_code = "immediate_cancel"
                 billing.last_failure_message = note
 
-        if when == "immediate" and service is not None:
-            if service.status not in {
+        if (
+            when == "immediate"
+            and service is not None
+            and service.status not in {
                 ServiceStatus.TERMINATED,
                 ServiceStatus.SUSPENDED,
-            }:
+            }
+        ):
                 lifecycle = ServiceLifecycle()
                 try:
                     await lifecycle.suspend(db, service, reason="cancellation")

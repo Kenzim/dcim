@@ -25,6 +25,8 @@ from app.services.proxmox_placement import auto_place_vm
 from app.services.vm_install_type_strategy import resolve_vm_template_strategy
 from app.services.vmid_allocator import reserve_vmid_for_service
 
+_MSG_NOT_A_VM_SERVICE = "Not a VM service"
+
 logger = logging.getLogger(__name__)
 
 APPLY_GUEST_PASSWORD_STRATEGY = "apply_guest_password"
@@ -119,7 +121,7 @@ def enqueue_vm_deployment_job(db: Session, service: Service) -> VMDeploymentJob:
     provisioning strategy.
     """
     if service.service_type != ServiceType.VM:
-        raise ValueError("Not a VM service")
+        raise ValueError(_MSG_NOT_A_VM_SERVICE)
     if service.status == ServiceStatus.TERMINATED:
         raise ValueError("Cannot provision a terminated service")
     if not service.vm or not service.vm.vm_template_id:
@@ -169,7 +171,7 @@ def provision_vm_service_async(
     if not service:
         raise ValueError("Service not found")
     if service.service_type != ServiceType.VM:
-        raise ValueError("Not a VM service")
+        raise ValueError(_MSG_NOT_A_VM_SERVICE)
     if service.status == ServiceStatus.TERMINATED:
         raise ValueError("Cannot provision a terminated service")
 
@@ -180,7 +182,7 @@ def provision_vm_service_async(
 
 
 def schedule_vm_auto_provision(
-    db: Session, service: Service, background_tasks: Optional[Any] = None
+    db: Session, service: Service, _background_tasks: Optional[Any] = None
 ) -> VMDeploymentJob:
     """
     Shared create-path helper for admin and billing VM create endpoints: resolve
@@ -205,7 +207,7 @@ def enqueue_apply_guest_password_job(
     ``template_parameters`` and be applied by that job's configure step.
     """
     if service.service_type != ServiceType.VM:
-        raise ValueError("Not a VM service")
+        raise ValueError(_MSG_NOT_A_VM_SERVICE)
 
     existing = VMDeploymentJobDAO.get_active_for_service(db, service.id)
     if existing is not None:

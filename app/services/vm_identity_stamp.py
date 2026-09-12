@@ -93,14 +93,7 @@ def _whmcs_admin_base(db: Session, service: Service) -> str:
     return f"{base}/admin"
 
 
-def build_vm_description_markdown(db: Session, service: Service) -> str:
-    """Markdown for Proxmox qemu ``description`` (Notes).
-
-    Human-readable links only. OS identity lives in ``smbios1`` sku (``rf1:…``),
-    not in Notes — Proxmox markdown also collapses single newlines, so each field
-    is a separate paragraph (blank line between).
-    """
-    lines: list[str] = []
+def _vm_description_core_lines(db: Session, service: Service) -> list[str]:
     product = (service.product_code or "").strip() or "—"
     svc_type = (
         service.service_type.value
@@ -112,16 +105,19 @@ def build_vm_description_markdown(db: Session, service: Service) -> str:
         tmpl = VMTemplateDAO.get_by_id(db, service.vm.vm_template_id)
     tmpl_code = (tmpl.code if tmpl else "") or "—"
     tmpl_name = (tmpl.name if tmpl else "") or "—"
+    return [
+        f"**Service:** {service.name} (#{service.id})",
+        f"**Product:** {product}",
+        f"**Type:** {svc_type}",
+        f"**Template:** {tmpl_name} (`{tmpl_code}`)",
+    ]
 
-    lines.append(f"**Service:** {service.name} (#{service.id})")
-    lines.append(f"**Product:** {product}")
-    lines.append(f"**Type:** {svc_type}")
-    lines.append(f"**Template:** {tmpl_name} (`{tmpl_code}`)")
 
+def _vm_description_link_lines(db: Session, service: Service) -> list[str]:
+    lines: list[str] = []
     rf_base = _rackflow_public_base()
     if rf_base:
         lines.append(f"[Open in RackFlow]({rf_base}/admin/services/{service.id})")
-
     whmcs_admin = _whmcs_admin_base(db, service)
     ext_svc = (service.external_service_id or "").strip()
     owner = getattr(service, "owner_user", None)
@@ -133,7 +129,18 @@ def build_vm_description_markdown(db: Session, service: Service) -> str:
         lines.append(
             f"[WHMCS client]({whmcs_admin}/clientssummary.php?userid={quote(str(owner.external_user_id), safe='')})"
         )
+    return lines
 
+
+def build_vm_description_markdown(db: Session, service: Service) -> str:
+    """Markdown for Proxmox qemu ``description`` (Notes).
+
+    Human-readable links only. OS identity lives in ``smbios1`` sku (``rf1:…``),
+    not in Notes — Proxmox markdown also collapses single newlines, so each field
+    is a separate paragraph (blank line between).
+    """
+    lines = _vm_description_core_lines(db, service)
+    lines.extend(_vm_description_link_lines(db, service))
     return "\n\n".join(lines)
 
 

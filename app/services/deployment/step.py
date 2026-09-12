@@ -1,6 +1,7 @@
 """Deployment step abstraction: precheck outcome + step base class."""
 from __future__ import annotations
 
+import asyncio
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -85,4 +86,4 @@ class DeploymentStep(ABC):
 
     async def execute(self, ctx: "DeploymentContext") -> None:
         """Perform the side effect. Default no-op (for wait-only steps)."""
-        return None
+        await asyncio.sleep(0)

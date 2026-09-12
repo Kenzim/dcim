@@ -15,6 +15,50 @@ from app.mcp.runtime import run_tool
 from app.mcp.serialize import location_row, rack_row, server_row
 from app.plugins.registry import get_registry
 
+_MSG_LOCATION_NOT_FOUND = "Location not found"
+_MSG_SERVER_NOT_FOUND = "Server not found"
+
+
+def _apply_server_field_updates(db, row, *, name, server_ip, description, enabled, rack_id, rack_unit, location_id):
+    if name is not None:
+        row.name = name
+    if server_ip is not None:
+        row.server_ip = server_ip
+    if description is not None:
+        row.description = description
+    if enabled is not None:
+        row.enabled = enabled
+    if rack_id is not None:
+        row.rack_id = rack_id
+    if rack_unit is not None:
+        row.rack_unit = rack_unit
+    if location_id is not None:
+        if not LocationDAO.get_by_id(db, location_id):
+            raise ValueError(_MSG_LOCATION_NOT_FOUND)
+        row.location_id = location_id
+
+
+def _bandwidth_sample_for_cable_run(db, cr):
+    from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
+    from app.dao.switch_port_dao import SwitchPortDAO
+
+    switch_port_id = cr.end_a_switch_port_id or cr.end_b_switch_port_id
+    if not switch_port_id:
+        return None
+    switch_port = SwitchPortDAO.get_by_id(db, switch_port_id)
+    if not switch_port:
+        return None
+    sample = SwitchBandwidthSampleDAO.get_latest_by_switch_port(
+        db, switch_port.switch_id, switch_port.name
+    )
+    return {
+        "switch_id": switch_port.switch_id,
+        "port": switch_port.name,
+        "sampled_at": sample.sampled_at.isoformat() if sample and sample.sampled_at else None,
+        "bytes_in": sample.bytes_in if sample else None,
+        "bytes_out": sample.bytes_out if sample else None,
+    }
+
 
 @mcp.tool()
 async def list_locations() -> dict:
@@ -33,7 +77,7 @@ async def get_location(location_id: int) -> dict:
     def work(db, ctx):
         row = LocationDAO.get_by_id(db, location_id)
         if not row:
-            raise ValueError("Location not found")
+            raise ValueError(_MSG_LOCATION_NOT_FOUND)
         return location_row(row)
 
     return await run_tool("get_location", "read", work, args={"location_id": location_id})
@@ -62,7 +106,7 @@ async def update_location(
     def work(db, ctx):
         row = LocationDAO.get_by_id(db, location_id)
         if not row:
-            raise ValueError("Location not found")
+            raise ValueError(_MSG_LOCATION_NOT_FOUND)
         if name is not None:
             row.name = name
         if description is not None:
@@ -101,7 +145,7 @@ async def create_rack(
 
     def work(db, ctx):
         if not LocationDAO.get_by_id(db, location_id):
-            raise ValueError("Location not found")
+            raise ValueError(_MSG_LOCATION_NOT_FOUND)
         if RackDAO.get_by_name_and_location(db, name, location_id):
             raise ValueError("Rack with this name already exists in the location")
         return rack_row(
@@ -204,7 +248,7 @@ async def get_server(server_id: int) -> dict:
     def work(db, ctx):
         row = ServerDAO.get_by_id(db, server_id)
         if not row:
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         return server_row(row, caps=_get_effective_capabilities_for_server(db, row))
 
     return await run_tool("get_server", "read", work, args={"server_id": server_id})
@@ -227,7 +271,7 @@ async def create_server(
 
     def work(db, ctx):
         if not LocationDAO.get_by_id(db, location_id):
-            raise ValueError("Location not found")
+            raise ValueError(_MSG_LOCATION_NOT_FOUND)
         if ServerDAO.get_by_name(db, name):
             raise ValueError("Server with this name already exists")
         registry = get_registry()
@@ -279,23 +323,18 @@ async def update_server(
     def work(db, ctx):
         row = ServerDAO.get_by_id(db, server_id)
         if not row:
-            raise ValueError("Server not found")
-        if name is not None:
-            row.name = name
-        if server_ip is not None:
-            row.server_ip = server_ip
-        if description is not None:
-            row.description = description
-        if enabled is not None:
-            row.enabled = enabled
-        if rack_id is not None:
-            row.rack_id = rack_id
-        if rack_unit is not None:
-            row.rack_unit = rack_unit
-        if location_id is not None:
-            if not LocationDAO.get_by_id(db, location_id):
-                raise ValueError("Location not found")
-            row.location_id = location_id
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
+        _apply_server_field_updates(
+            db,
+            row,
+            name=name,
+            server_ip=server_ip,
+            description=description,
+            enabled=enabled,
+            rack_id=rack_id,
+            rack_unit=rack_unit,
+            location_id=location_id,
+        )
         return server_row(ServerDAO.update(db, row))
 
     return await run_tool(
@@ -319,7 +358,7 @@ async def delete_server(server_id: int, confirm: bool = False) -> dict:
 
     def work(db, ctx):
         if not ServerDAO.get_by_id(db, server_id):
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         ServerDAO.delete(db, server_id)
         return {"deleted": True, "server_id": server_id}
 
@@ -354,7 +393,7 @@ async def get_server_activity(server_id: int, limit: int = 50) -> dict:
 
     def work(db, ctx):
         if not ServerDAO.get_by_id(db, server_id):
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         cap = max(1, min(int(limit or 50), 200))
         entries = ServerActivityDAO.get_by_server(db, server_id, limit=cap)
         return {
@@ -383,31 +422,14 @@ async def get_server_bandwidth(server_id: int) -> dict:
 
     def work(db, ctx):
         from app.dao.cable_run_dao import CableRunDAO
-        from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
-        from app.dao.switch_port_dao import SwitchPortDAO
 
         if not ServerDAO.get_by_id(db, server_id):
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         ports = []
         for cr in CableRunDAO.get_by_server(db, server_id):
-            switch_port_id = cr.end_a_switch_port_id or cr.end_b_switch_port_id
-            if not switch_port_id:
-                continue
-            switch_port = SwitchPortDAO.get_by_id(db, switch_port_id)
-            if not switch_port:
-                continue
-            sample = SwitchBandwidthSampleDAO.get_latest_by_switch_port(
-                db, switch_port.switch_id, switch_port.name
-            )
-            ports.append(
-                {
-                    "switch_id": switch_port.switch_id,
-                    "port": switch_port.name,
-                    "sampled_at": sample.sampled_at.isoformat() if sample and sample.sampled_at else None,
-                    "bytes_in": sample.bytes_in if sample else None,
-                    "bytes_out": sample.bytes_out if sample else None,
-                }
-            )
+            entry = _bandwidth_sample_for_cable_run(db, cr)
+            if entry is not None:
+                ports.append(entry)
         return {"server_id": server_id, "ports": ports}
 
     return await run_tool("get_server_bandwidth", "read", work, args={"server_id": server_id})

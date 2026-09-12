@@ -395,6 +395,35 @@ class PayPalGateway:
                 "PayPal rejected the payment token deletion"
             )
 
+    def _refund_result_from_response(self, response, data: dict[str, Any]) -> GatewayRefundResult:
+        if response.status_code in {200, 201}:
+            status = str(data.get("status") or "").upper()
+            refund_id = str(data.get("id") or "") or None
+            if status in {"COMPLETED", "PENDING"}:
+                return GatewayRefundResult(
+                    status=GatewayResultStatus.SUCCEEDED,
+                    external_ref=refund_id,
+                    metadata={"paypal_refund_status": status.lower()},
+                )
+            return GatewayRefundResult(
+                status=GatewayResultStatus.DECLINED,
+                external_ref=refund_id,
+                failure_code=status.lower() or "refund_failed",
+                failure_message=_PAYPAL_DECLINED,
+            )
+        issue = self._issue(data, "refund_failed")
+        if response.status_code in _TRANSIENT_STATUS_CODES or response.status_code >= 500:
+            return GatewayRefundResult(
+                status=GatewayResultStatus.TRANSIENT_ERROR,
+                failure_code=issue.lower(),
+                failure_message=_GATEWAY_UNAVAILABLE,
+            )
+        return GatewayRefundResult(
+            status=GatewayResultStatus.DECLINED,
+            failure_code=issue.lower(),
+            failure_message=_PAYPAL_DECLINED,
+        )
+
     def refund_payment(
         self,
         *,
@@ -434,33 +463,7 @@ class PayPalGateway:
                 failure_code="paypal_unavailable",
                 failure_message=_GATEWAY_UNAVAILABLE,
             )
-        if response.status_code in {200, 201}:
-            status = str(data.get("status") or "").upper()
-            refund_id = str(data.get("id") or "") or None
-            if status in {"COMPLETED", "PENDING"}:
-                return GatewayRefundResult(
-                    status=GatewayResultStatus.SUCCEEDED,
-                    external_ref=refund_id,
-                    metadata={"paypal_refund_status": status.lower()},
-                )
-            return GatewayRefundResult(
-                status=GatewayResultStatus.DECLINED,
-                external_ref=refund_id,
-                failure_code=status.lower() or "refund_failed",
-                failure_message=_PAYPAL_DECLINED,
-            )
-        issue = self._issue(data, "refund_failed")
-        if response.status_code in _TRANSIENT_STATUS_CODES or response.status_code >= 500:
-            return GatewayRefundResult(
-                status=GatewayResultStatus.TRANSIENT_ERROR,
-                failure_code=issue.lower(),
-                failure_message=_GATEWAY_UNAVAILABLE,
-            )
-        return GatewayRefundResult(
-            status=GatewayResultStatus.DECLINED,
-            failure_code=issue.lower(),
-            failure_message=_PAYPAL_DECLINED,
-        )
+        return self._refund_result_from_response(response, data)
 
     def charge_off_session(
         self,

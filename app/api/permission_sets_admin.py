@@ -19,6 +19,8 @@ from app.core.client_permissions import ALL_PERMISSION_KEYS, PERMISSION_CATALOG
 from app.dao.permission_set_dao import PermissionSetDAO
 
 from typing import Annotated
+
+_MSG_PERMISSION_SET_NOT_FOUND = "Permission set not found"
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 
@@ -108,7 +110,7 @@ async def get_permission_set(
 ):
     row = PermissionSetDAO.get_by_id(db, permission_set_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PERMISSION_SET_NOT_FOUND)
     return _to_response(row)
 
 
@@ -121,7 +123,7 @@ async def update_permission_set(
 ):
     row = PermissionSetDAO.get_by_id(db, permission_set_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PERMISSION_SET_NOT_FOUND)
     update_data = data.model_dump(exclude_unset=True)
     if "permissions" in update_data and update_data["permissions"] is not None:
         _validate_permission_keys(update_data["permissions"])
@@ -141,7 +143,7 @@ async def delete_permission_set(
 ):
     row = PermissionSetDAO.get_by_id(db, permission_set_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PERMISSION_SET_NOT_FOUND)
     if row.is_system:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="System permission sets cannot be deleted")
     PermissionSetDAO.delete(db, permission_set_id)

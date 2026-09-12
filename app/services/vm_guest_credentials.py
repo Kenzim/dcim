@@ -22,6 +22,45 @@ def _dig(cfg: Any, *path: str) -> Any:
     return node
 
 
+def _credentials_from_template_parameters(tpl: dict) -> Tuple[Optional[str], Optional[str]]:
+    password = tpl.get("admin_password") or tpl.get("guest_password") or tpl.get("password")
+    username = tpl.get("admin_username") or tpl.get("guest_username") or tpl.get("ciuser")
+    return username, password
+
+
+def _merge_strategy_credentials(
+    username: Optional[str], password: Optional[str], node: dict
+) -> Tuple[Optional[str], Optional[str]]:
+    username = username or node.get("guest_username") or node.get("cloudinit_ciuser")
+    password = (
+        password
+        or node.get("guest_password")
+        or node.get("admin_password")
+        or node.get("cloudinit_cipassword")
+    )
+    return username, password
+
+
+def _credentials_from_config_buckets(
+    username: Optional[str], password: Optional[str], cfg: dict
+) -> Tuple[Optional[str], Optional[str]]:
+    for path in (
+        ("vm_plan", "strategy_plan", "strategy_config"),
+        ("vm_plan", "os_profile", "strategy_config"),
+        ("vm_plan", "vm_template", "strategy_options"),
+        ("product_snapshot", "os_profile", "strategy_config"),
+    ):
+        node = _dig(cfg, *path)
+        if isinstance(node, dict):
+            username, password = _merge_strategy_credentials(username, password, node)
+
+    for key in ("effective_specs", "vm_provision", "vm_provision_result"):
+        bucket = cfg.get(key)
+        if isinstance(bucket, dict):
+            username, password = _merge_strategy_credentials(username, password, bucket)
+    return username, password
+
+
 def get_service_guest_credentials(service: Service) -> Tuple[Optional[str], Optional[str]]:
     """Return ``(username, password)`` for the guest OS, or ``(None, None)``.
 
@@ -34,45 +73,9 @@ def get_service_guest_credentials(service: Service) -> Tuple[Optional[str], Opti
 
     tpl = cfg.get("template_parameters") or {}
     if isinstance(tpl, dict):
-        password = (
-            tpl.get("admin_password")
-            or tpl.get("guest_password")
-            or tpl.get("password")
-            or password
-        )
-        username = (
-            tpl.get("admin_username")
-            or tpl.get("guest_username")
-            or tpl.get("ciuser")
-            or username
-        )
+        username, password = _credentials_from_template_parameters(tpl)
 
-    for path in (
-        ("vm_plan", "strategy_plan", "strategy_config"),
-        ("vm_plan", "os_profile", "strategy_config"),
-        ("vm_plan", "vm_template", "strategy_options"),
-        ("product_snapshot", "os_profile", "strategy_config"),
-    ):
-        node = _dig(cfg, *path)
-        if isinstance(node, dict):
-            username = username or node.get("guest_username") or node.get("cloudinit_ciuser")
-            password = (
-                password
-                or node.get("guest_password")
-                or node.get("admin_password")
-                or node.get("cloudinit_cipassword")
-            )
-
-    for key in ("effective_specs", "vm_provision", "vm_provision_result"):
-        bucket = cfg.get(key)
-        if isinstance(bucket, dict):
-            username = username or bucket.get("guest_username") or bucket.get("cloudinit_ciuser")
-            password = (
-                password
-                or bucket.get("guest_password")
-                or bucket.get("admin_password")
-                or bucket.get("cloudinit_cipassword")
-            )
+    username, password = _credentials_from_config_buckets(username, password, cfg)
 
     user_out = str(username).strip() if username else None
     pass_out = str(password) if password else None

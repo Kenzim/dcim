@@ -21,6 +21,8 @@ from sqlalchemy.sql import func
 
 from app.core.database import Base
 
+_FK_SET_NULL = "SET NULL"
+
 _FK_BILLING_ACCOUNTS = "billing_accounts.id"
 _FK_FRONTEND_CATEGORIES = "frontend_product_categories.id"
 _FK_FRONTEND_PRODUCTS = "frontend_products.id"
@@ -69,13 +71,13 @@ class Coupon(Base):
     )
     frontend_product_id = Column(
         Integer,
-        ForeignKey(_FK_FRONTEND_PRODUCTS, ondelete="SET NULL"),
+        ForeignKey(_FK_FRONTEND_PRODUCTS, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
     category_id = Column(
         Integer,
-        ForeignKey(_FK_FRONTEND_CATEGORIES, ondelete="SET NULL"),
+        ForeignKey(_FK_FRONTEND_CATEGORIES, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
@@ -120,13 +122,13 @@ class CouponRedemption(Base):
     )
     order_id = Column(
         Integer,
-        ForeignKey(_FK_ORDERS, ondelete="SET NULL"),
+        ForeignKey(_FK_ORDERS, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
     invoice_id = Column(
         Integer,
-        ForeignKey(_FK_INVOICES, ondelete="SET NULL"),
+        ForeignKey(_FK_INVOICES, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )

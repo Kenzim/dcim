@@ -30,6 +30,10 @@ from app.services.vm_vnc_ticket_service import (
     mint_launch_ticket,
     mint_ws_session,
 )
+
+_MSG_USER_SESSION_REQUIRED = "User session required"
+_MSG_SERVICE_NOT_FOUND = "Service not found"
+_MSG_NOT_A_VM_SERVICE = "Not a VM service"
 from app.services.client_permission_resolver import (
     require_client_permission,
     resolve_client_permissions,
@@ -206,6 +210,113 @@ def _client_primary_ip(db: Session, service) -> Optional[str]:
     return None
 
 
+def _client_server_installation(db: Session, server) -> Optional[dict]:
+    if not server:
+        return None
+    active = InstallationTaskDAO.get_active_by_server(db, server.id)
+    hist = InstallationTaskDAO.get_by_server(db, server.id)
+    task = active or (hist[0] if hist else None)
+    if not task:
+        return None
+    return {
+        "task_id": task.id,
+        "status": task.status.value,
+        "progress_percent": task.progress_percent,
+        "os_name": task.os_name,
+        "error_message": task.error_message,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "started_at": task.started_at.isoformat() if task.started_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+    }
+
+
+def _client_bms_feature_available(server, permissions, permission_key, ready_fn) -> bool:
+    return bool(server and ready_fn(server) and permissions.get(permission_key, False))
+
+
+def _client_service_availability(
+    service,
+    server,
+    permissions: dict,
+    *,
+    cid,
+    node,
+    vmid,
+) -> dict[str, bool]:
+    is_vm = service.service_type == ServiceType.VM
+    is_proxy = service.service_type == ServiceType.HTTP_PROXY
+    ipmi_available = bool(
+        server
+        and getattr(server, "ipmi_proxy_enabled", False)
+        and getattr(server, "ipmi_web_management_url", None)
+        and permissions.get(PermissionKey.BMS_IPMI, False)
+    )
+    return {
+        "ipmi_available": ipmi_available,
+        "kvm_console_available": _client_bms_feature_available(
+            server, permissions, PermissionKey.BMS_KVM, kvm_ready
+        ),
+        "sol_console_available": _client_bms_feature_available(
+            server, permissions, PermissionKey.BMS_SOL, sol_ready
+        ),
+        "virtual_media_available": _client_bms_feature_available(
+            server, permissions, PermissionKey.BMS_VIRTUAL_MEDIA, virtual_media_ready
+        ),
+        "console_available": bool(
+            is_vm
+            and cid is not None
+            and node
+            and str(node).strip()
+            and vmid is not None
+            and permissions.get(PermissionKey.VM_CONSOLE, False)
+        ),
+        "backups_available": bool(
+            is_vm
+            and cid is not None
+            and vmid is not None
+            and permissions.get(PermissionKey.VM_BACKUPS, False)
+        ),
+        "power_available": bool(
+            permissions.get(_power_permission_key(service), False)
+            and (is_vm or server is not None)
+        ),
+        "proxy_credentials_available": bool(
+            is_proxy and permissions.get(PermissionKey.PROXY_VIEW_CREDENTIALS, False)
+        ),
+        "proxy_rotate_available": bool(
+            is_proxy and permissions.get(PermissionKey.PROXY_ROTATE_CREDENTIALS, False)
+        ),
+    }
+
+
+def _client_service_detail_fields(
+    db: Session,
+    service,
+    server,
+    permissions: dict,
+    power_state: PowerState,
+    availability: dict[str, bool],
+) -> dict:
+    is_vm = service.service_type == ServiceType.VM
+    ipmi_available = availability["ipmi_available"]
+    return {
+        "primary_ip": _client_primary_ip(db, service),
+        "power_state": power_state.value,
+        "server_name": server.name if server else None,
+        "server_enabled": server.enabled if server else None,
+        "guest_state": (
+            service.vm.guest_state.value
+            if is_vm and service.vm and service.vm.guest_state
+            else None
+        ),
+        "permissions": permissions,
+        "ipmi_viewer_username": getattr(server, "ipmi_viewer_username", None) if ipmi_available else None,
+        "ipmi_viewer_password": getattr(server, "ipmi_viewer_password", None) if ipmi_available else None,
+        "installation": _client_server_installation(db, server),
+        **availability,
+    }
+
+
 @router.get("/me", response_model=List[ClientServiceResponse], responses=COMMON_ERROR_RESPONSES)
 async def list_my_services(
     service_type: Optional[str] = None,
@@ -215,7 +326,7 @@ async def list_my_services(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     services = ServiceDAO.get_by_owner_user(db, int(user_id))
     if service_type:
         try:
@@ -256,109 +367,78 @@ async def client_get_service(
     """
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     # Only expose services owned by the logged-in user; hide others as 404.
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
 
     permissions = resolve_client_permissions(db, service)
     server = service_linked_server(db, service)
     cid, node, vmid = vm_placement(service)
     power_state = await _best_effort_power_state(db, service)
-    is_vm = service.service_type == ServiceType.VM
-    is_proxy = service.service_type == ServiceType.HTTP_PROXY
-
-    ipmi_available = bool(
-        server
-        and getattr(server, "ipmi_proxy_enabled", False)
-        and getattr(server, "ipmi_web_management_url", None)
-        and permissions.get(PermissionKey.BMS_IPMI, False)
+    availability = _client_service_availability(
+        service, server, permissions, cid=cid, node=node, vmid=vmid
     )
-    kvm_console_available = bool(
-        server
-        and kvm_ready(server)
-        and permissions.get(PermissionKey.BMS_KVM, False)
-    )
-    sol_console_available = bool(
-        server
-        and sol_ready(server)
-        and permissions.get(PermissionKey.BMS_SOL, False)
-    )
-    virtual_media_available = bool(
-        server
-        and virtual_media_ready(server)
-        and permissions.get(PermissionKey.BMS_VIRTUAL_MEDIA, False)
-    )
-    console_available = bool(
-        is_vm
-        and cid is not None
-        and node
-        and str(node).strip()
-        and vmid is not None
-        and permissions.get(PermissionKey.VM_CONSOLE, False)
-    )
-    backups_available = bool(
-        is_vm
-        and cid is not None
-        and vmid is not None
-        and permissions.get(PermissionKey.VM_BACKUPS, False)
-    )
-
-    installation = None
-    if server:
-        active = InstallationTaskDAO.get_active_by_server(db, server.id)
-        hist = InstallationTaskDAO.get_by_server(db, server.id)
-        task = active or (hist[0] if hist else None)
-        if task:
-            installation = {
-                "task_id": task.id,
-                "status": task.status.value,
-                "progress_percent": task.progress_percent,
-                "os_name": task.os_name,
-                "error_message": task.error_message,
-                "created_at": task.created_at.isoformat() if task.created_at else None,
-                "started_at": task.started_at.isoformat() if task.started_at else None,
-                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-            }
 
     detail = _service_to_client_response(service, db).model_dump()
     detail.update(
-        {
-            "primary_ip": _client_primary_ip(db, service),
-            "power_state": power_state.value,
-            "server_name": server.name if server else None,
-            "server_enabled": server.enabled if server else None,
-            "guest_state": (
-                service.vm.guest_state.value
-                if is_vm and service.vm and service.vm.guest_state
-                else None
-            ),
-            "permissions": permissions,
-            # VM power goes through Proxmox placement (no linked Server row);
-            # bare_metal/http_proxy power requires an actual linked server.
-            "power_available": bool(
-                permissions.get(_power_permission_key(service), False)
-                and (is_vm or server is not None)
-            ),
-            "ipmi_available": ipmi_available,
-            "ipmi_viewer_username": getattr(server, "ipmi_viewer_username", None) if ipmi_available else None,
-            "ipmi_viewer_password": getattr(server, "ipmi_viewer_password", None) if ipmi_available else None,
-            "kvm_console_available": kvm_console_available,
-            "sol_console_available": sol_console_available,
-            "virtual_media_available": virtual_media_available,
-            "console_available": console_available,
-            "backups_available": backups_available,
-            "proxy_credentials_available": bool(
-                is_proxy and permissions.get(PermissionKey.PROXY_VIEW_CREDENTIALS, False)
-            ),
-            "proxy_rotate_available": bool(
-                is_proxy and permissions.get(PermissionKey.PROXY_ROTATE_CREDENTIALS, False)
-            ),
-            "installation": installation,
-        }
+        _client_service_detail_fields(db, service, server, permissions, power_state, availability)
     )
     return detail
+
+
+def _validate_client_power_action(service, action: str, server) -> None:
+    if action not in ("on", "off", "reboot", "reset"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid power action: {action}. Must be 'on', 'off', 'reboot', or 'reset'",
+        )
+    if action not in ("on", "reboot", "reset"):
+        return
+    if service.status in (ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot '{action}' server for a {service.status.value} service",
+        )
+    if server is not None and not server.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot '{action}' an administratively disabled server",
+        )
+
+
+async def _run_client_power_action(plugin, action: str) -> bool:
+    if action == "on":
+        return await plugin.power_on()
+    if action == "off":
+        return await plugin.power_off(force=False)
+    return await plugin.power_reset()
+
+
+def _log_client_power_event(db, *, log_kw, user_id, service_id, action, success: bool, error=None) -> None:
+    details = {"service_id": service_id, "user_id": int(user_id)}
+    if success:
+        log_server_activity_success(
+            db,
+            **log_kw,
+            event_type=ServerActivityEventType.POWER,
+            action=action,
+            source="client_portal",
+            message=f"Power action '{action}' completed",
+            details=details,
+        )
+        return
+    log_server_activity_failure(
+        db,
+        **log_kw,
+        event_type=ServerActivityEventType.POWER,
+        action=action,
+        source="client_portal",
+        message=f"Power action '{action}' failed",
+        details=details,
+        error=error,
+    )
 
 
 @router.post("/{service_id}/power", responses=COMMON_ERROR_RESPONSES)
@@ -376,34 +456,15 @@ async def client_power_service(
     """
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, _power_permission_key(service))
 
     action = (body.action or "").lower()
-    if action not in ("on", "off", "reboot", "reset"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid power action: {action}. Must be 'on', 'off', 'reboot', or 'reset'",
-        )
-
     server = service_linked_server(db, service)
-    # Any action that can leave the machine running (on/reboot/reset) is
-    # forbidden for suspended/terminated services and disabled servers; only
-    # "off" stays allowed so the box can always be powered down.
-    if action in ("on", "reboot", "reset"):
-        if service.status in (ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Cannot '{action}' server for a {service.status.value} service",
-            )
-        if server is not None and not server.enabled:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Cannot '{action}' an administratively disabled server",
-            )
+    _validate_client_power_action(service, action, server)
 
     plugin, _ = await _client_plugin_instance(db, service)
 
@@ -418,66 +479,35 @@ async def client_power_service(
         details={"service_id": service.id, "user_id": int(user_id)},
     )
     try:
-        if action == "on":
-            success = await plugin.power_on()
-        elif action == "off":
-            success = await plugin.power_off(force=False)
-        else:  # reboot / reset
-            success = await plugin.power_reset()
+        success = await _run_client_power_action(plugin, action)
     except NotImplementedError as exc:
-        log_server_activity_failure(
-            db,
-            **log_kw,
-            event_type=ServerActivityEventType.POWER,
-            action=action,
-            source="client_portal",
-            message=f"Power action '{action}' failed",
-            details={"service_id": service.id, "user_id": int(user_id)},
-            error=exc,
+        _log_client_power_event(
+            db, log_kw=log_kw, user_id=user_id, service_id=service.id, action=action, success=False, error=exc
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Server plugin does not support power control",
         ) from exc
     except Exception as exc:
-        logger.error(f"Client portal: Power action failed: {exc}", exc_info=True)
-        log_server_activity_failure(
-            db,
-            **log_kw,
-            event_type=ServerActivityEventType.POWER,
-            action=action,
-            source="client_portal",
-            message=f"Power action '{action}' failed",
-            details={"service_id": service.id, "user_id": int(user_id)},
-            error=exc,
+        logger.exception("Client portal: Power action failed: %s", exc)
+        _log_client_power_event(
+            db, log_kw=log_kw, user_id=user_id, service_id=service.id, action=action, success=False, error=exc
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Power action failed: {str(exc)}",
         ) from exc
     if not success:
-        log_server_activity_failure(
-            db,
-            **log_kw,
-            event_type=ServerActivityEventType.POWER,
-            action=action,
-            source="client_portal",
-            message=f"Power action '{action}' failed",
-            details={"service_id": service.id, "user_id": int(user_id)},
+        _log_client_power_event(
+            db, log_kw=log_kw, user_id=user_id, service_id=service.id, action=action, success=False
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Power action command failed",
         )
 
-    log_server_activity_success(
-        db,
-        **log_kw,
-        event_type=ServerActivityEventType.POWER,
-        action=action,
-        source="client_portal",
-        message=f"Power action '{action}' completed",
-        details={"service_id": service.id, "user_id": int(user_id)},
+    _log_client_power_event(
+        db, log_kw=log_kw, user_id=user_id, service_id=service.id, action=action, success=True
     )
     return {"status": "success", "action": action, "message": f"Server power {action} command executed"}
 
@@ -491,12 +521,12 @@ async def create_ipmi_ticket(
     """Mint a one-time IPMI proxy launch ticket for a service the caller owns."""
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
 
     service = ServiceDAO.get_by_id(db, service_id)
     # Only expose services owned by the logged-in user; hide others as 404.
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, PermissionKey.BMS_IPMI)
 
     server = service_linked_server(db, service)
@@ -519,12 +549,12 @@ async def kvm_popup_redirect_handler(
     user_id = auth.get("user_id")
     if not user_id:
         return RedirectResponse(
-            url=kvm_error_url("User session required"), status_code=status.HTTP_302_FOUND
+            url=kvm_error_url(_MSG_USER_SESSION_REQUIRED), status_code=status.HTTP_302_FOUND
         )
 
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        return RedirectResponse(url=kvm_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(url=kvm_error_url(_MSG_SERVICE_NOT_FOUND), status_code=status.HTTP_302_FOUND)
 
     try:
         require_client_permission(db, service, PermissionKey.BMS_KVM)
@@ -544,12 +574,12 @@ async def sol_popup_redirect_handler(
     user_id = auth.get("user_id")
     if not user_id:
         return RedirectResponse(
-            url=sol_error_url("User session required"), status_code=status.HTTP_302_FOUND
+            url=sol_error_url(_MSG_USER_SESSION_REQUIRED), status_code=status.HTTP_302_FOUND
         )
 
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        return RedirectResponse(url=sol_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(url=sol_error_url(_MSG_SERVICE_NOT_FOUND), status_code=status.HTTP_302_FOUND)
 
     try:
         require_client_permission(db, service, PermissionKey.BMS_SOL)
@@ -567,10 +597,10 @@ async def client_get_virtual_media(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_status(service_linked_server(db, service))
 
@@ -584,10 +614,10 @@ async def client_insert_virtual_media(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_insert(
         db,
@@ -607,10 +637,10 @@ async def client_eject_virtual_media(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_eject(
         db,
@@ -630,10 +660,10 @@ async def client_sol_send(
     """Write bytes into the linked server's SOL hub for a service the caller owns."""
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, PermissionKey.BMS_SOL)
     return await perform_sol_send(
         db,
@@ -647,7 +677,7 @@ async def client_sol_send(
 def _client_owned_proxy_service(db: Session, service_id: int, user_id, permission: str):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     if service.service_type != ServiceType.HTTP_PROXY:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a proxy service")
     require_client_permission(db, service, permission)
@@ -663,7 +693,7 @@ async def client_get_proxy_credentials(
     """List assigned proxy IP(s) + credentials + ready-to-use URLs for a service the caller owns."""
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_proxy_service(db, service_id, user_id, PermissionKey.PROXY_VIEW_CREDENTIALS)
     assignments = IPAMDAO.get_assignment_by_service(db, service.id)
     return {"assignments": [assignment_payload(a) for a in assignments]}
@@ -678,7 +708,7 @@ async def client_rotate_proxy_credentials(
     """Rotate credentials (new username+password, same IP(s)) for a service the caller owns."""
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_proxy_service(db, service_id, user_id, PermissionKey.PROXY_ROTATE_CREDENTIALS)
     assignments = IPAMDAO.get_assignment_by_service(db, service.id)
     if not assignments:
@@ -703,9 +733,9 @@ async def _client_owned_vm_plugin(db: Session, service_id: int, user_id):
     service = ServiceDAO.get_by_id(db, service_id)
     # Only expose services owned by the logged-in user; hide others as 404.
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
 
     require_client_permission(db, service, PermissionKey.VM_CONSOLE)
 
@@ -727,7 +757,7 @@ async def get_vnc_console_types(
     showing the "Open Console" control(s)."""
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
 
     _service, plugin, _cid, _node, _vmid = await _client_owned_vm_plugin(db, service_id, user_id)
     try:
@@ -754,7 +784,7 @@ async def create_vnc_session(
     """
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
 
     service, plugin, cid, node, vmid = await _client_owned_vm_plugin(db, service_id, user_id)
 
@@ -803,10 +833,10 @@ async def client_list_strategy_actions(
 
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     return {"actions": list_actions(db, service, "client")}
 
 
@@ -822,10 +852,10 @@ async def client_run_strategy_action(
 
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     try:
         return await run_action(db, service, action_name, body.params, "client")
     except StrategyActionError as exc:
@@ -840,9 +870,9 @@ async def client_run_strategy_action(
 def _client_owned_vm_service(db: Session, service_id: int, user_id, permission: str):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
     require_client_permission(db, service, permission)
     return service
 
@@ -855,7 +885,7 @@ async def client_list_vm_backups(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_vm_service(db, service_id, user_id, PermissionKey.VM_BACKUPS)
     try:
         items, jobs = await list_service_backups_and_jobs(db, service)
@@ -873,7 +903,7 @@ async def client_create_vm_backup(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_vm_service(db, service_id, user_id, PermissionKey.VM_BACKUPS)
     try:
         return await create_client_backup(
@@ -892,7 +922,7 @@ async def client_delete_vm_backup(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_vm_service(db, service_id, user_id, PermissionKey.VM_BACKUPS)
     try:
         await delete_client_backup(db, service, volid=body.volid, storage=body.storage)
@@ -910,7 +940,7 @@ async def client_restore_vm_backup(
 ):
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_vm_service(db, service_id, user_id, PermissionKey.VM_BACKUPS)
     try:
         result = await restore_service_backup(
@@ -943,12 +973,12 @@ async def client_get_vm_ssh_keys(
 
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
     fields = ssh_key_fields_for_service(db, service)
     return {
         **fields,
@@ -968,7 +998,7 @@ async def client_put_vm_ssh_keys(
 
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_vm_service(db, service_id, user_id, PermissionKey.VM_MANAGE_SSH_KEYS)
     try:
         return await save_and_apply_ssh_public_keys(db, service, body.ssh_public_keys)
@@ -989,7 +1019,7 @@ async def client_reinstall_vm(
 
     user_id = auth.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
     service = _client_owned_vm_service(db, service_id, user_id, PermissionKey.VM_REINSTALL)
 
     payload = body or VmReinstallBody()
@@ -1026,14 +1056,14 @@ async def vnc_popup_redirect(
     user_id = auth.get("user_id")
     if not user_id:
         return RedirectResponse(
-            url=build_relative_error_url("User session required"), status_code=status.HTTP_302_FOUND
+            url=build_relative_error_url(_MSG_USER_SESSION_REQUIRED), status_code=status.HTTP_302_FOUND
         )
 
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.owner_user_id != int(user_id):
-        return RedirectResponse(url=build_relative_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(url=build_relative_error_url(_MSG_SERVICE_NOT_FOUND), status_code=status.HTTP_302_FOUND)
     if service.service_type != ServiceType.VM:
-        return RedirectResponse(url=build_relative_error_url("Not a VM service"), status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(url=build_relative_error_url(_MSG_NOT_A_VM_SERVICE), status_code=status.HTTP_302_FOUND)
 
     try:
         require_client_permission(db, service, PermissionKey.VM_CONSOLE)

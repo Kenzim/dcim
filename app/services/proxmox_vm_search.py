@@ -92,6 +92,27 @@ def _matches_query(q: str, vmid: Optional[int], name: str) -> bool:
     return False
 
 
+def _search_clusters(db: Session, cluster_id: Optional[int]) -> list:
+    if cluster_id is not None:
+        cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
+        return [cluster] if cluster and cluster.enabled else []
+    return [c for c in ProxmoxInventoryDAO.list_clusters(db) if c.enabled]
+
+
+def _search_result_row(cluster, row: Dict[str, Any]) -> Dict[str, Any]:
+    vmid = row["vmid"]
+    name = str(row.get("name") or f"vm-{vmid}")
+    return {
+        "cluster_id": cluster.id,
+        "cluster_name": cluster.name,
+        "node_name": row["node"],
+        "vmid": vmid,
+        "name": name,
+        "status": str(row.get("status") or ""),
+        "template": False,
+    }
+
+
 async def search_proxmox_vms(
     db: Session,
     q: str,
@@ -108,32 +129,14 @@ async def search_proxmox_vms(
     if not needle:
         return []
 
-    clusters = []
-    if cluster_id is not None:
-        cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
-        if cluster and cluster.enabled:
-            clusters = [cluster]
-    else:
-        clusters = [c for c in ProxmoxInventoryDAO.list_clusters(db) if c.enabled]
-
     out: List[Dict[str, Any]] = []
-    for cluster in clusters:
+    for cluster in _search_clusters(db, cluster_id):
         for row in await _fetch_cluster_qemu_resources(cluster):
             vmid = row["vmid"]
             name = str(row.get("name") or f"vm-{vmid}")
             if not _matches_query(needle, vmid, name):
                 continue
-            out.append(
-                {
-                    "cluster_id": cluster.id,
-                    "cluster_name": cluster.name,
-                    "node_name": row["node"],
-                    "vmid": vmid,
-                    "name": name,
-                    "status": str(row.get("status") or ""),
-                    "template": False,
-                }
-            )
+            out.append(_search_result_row(cluster, row))
             if len(out) >= limit:
                 return out
     return out

@@ -30,6 +30,9 @@ from app.core.config import settings
 from app.models.user import User
 from app.services.user_session_service import mint_user_session
 
+_MSG_CLIENT_NOT_FOUND = "Client not found"
+_MSG_EMAIL_ALREADY_IN_USE = "Email already in use"
+
 logger = logging.getLogger(__name__)
 
 clients_router = APIRouter(prefix="/admin/clients", tags=["admin-clients"])
@@ -229,11 +232,12 @@ async def get_client_profile(
 ):
     user = UserDAO.get_by_id(db, user_id)
     if not user or user.is_admin:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_CLIENT_NOT_FOUND)
     # A user has at most one billing identity now (collapsed onto the User
     # row itself), so linked_externals holds 0 or 1 entries.
-    linked_externals = (
-        [
+    linked_externals: list[ClientExternalLink] = []
+    if user.billing_integration_id:
+        linked_externals = [
             ClientExternalLink(
                 external_user_id=user.id,
                 external_username=user.external_username,
@@ -242,9 +246,6 @@ async def get_client_profile(
                 integration_name=user.billing_integration.name if user.billing_integration else "",
             )
         ]
-        if user.billing_integration_id
-        else []
-    )
     return ClientProfile(
         user_id=user.id,
         username=user.username,
@@ -277,7 +278,7 @@ async def create_client(
     if UserDAO.get_by_username(db, body.username):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already in use")
     if UserDAO.get_by_email(db, body.email):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already in use")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_MSG_EMAIL_ALREADY_IN_USE)
     try:
         user = UserDAO.create(db, username=body.username, email=body.email, password=body.password, is_admin=False)
     except ValueError as exc:
@@ -294,7 +295,7 @@ async def set_client_password(
 ):
     user = UserDAO.get_by_id(db, user_id)
     if not user or user.is_admin:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_CLIENT_NOT_FOUND)
     try:
         user.set_password(body.password)
     except ValueError as exc:
@@ -316,7 +317,7 @@ async def set_client_permission_set(
     ``app.services.client_permission_resolver``)."""
     user = UserDAO.get_by_id(db, user_id)
     if not user or user.is_admin:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_CLIENT_NOT_FOUND)
     if body.permission_set_id is not None and PermissionSetDAO.get_by_id(db, body.permission_set_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
     user.permission_set_id = body.permission_set_id
@@ -337,7 +338,7 @@ async def impersonate_client(
     """
     user = UserDAO.get_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_CLIENT_NOT_FOUND)
     if user.is_admin:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot impersonate an admin account")
     if user.is_reseller:
@@ -396,7 +397,7 @@ async def create_admin(
     if UserDAO.get_by_username(db, body.username):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already in use")
     if UserDAO.get_by_email(db, body.email):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already in use")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_MSG_EMAIL_ALREADY_IN_USE)
     try:
         admin = UserDAO.create(db, username=body.username, email=body.email, password=body.password, is_admin=True)
     except ValueError as exc:
@@ -416,7 +417,7 @@ async def update_admin(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Admin not found")
     if body.email and body.email != admin.email:
         if UserDAO.get_by_email(db, body.email):
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already in use")
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_MSG_EMAIL_ALREADY_IN_USE)
         admin.email = body.email
     if body.password:
         try:

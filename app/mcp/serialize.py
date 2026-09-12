@@ -56,7 +56,7 @@ def server_row(row: Server, *, caps: Optional[list] = None) -> dict[str, Any]:
     return payload
 
 
-def service_row(db: Session, row: Service) -> dict[str, Any]:
+def service_row(_db: Session, row: Service) -> dict[str, Any]:
     cid, node, vmid = vm_placement(row)
     owner = row.owner_user
     return {

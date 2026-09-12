@@ -83,28 +83,34 @@ async def _collection_members(client: httpx.AsyncClient, origin: str, collection
     return out
 
 
-async def discover_cd_url(client: httpx.AsyncClient, origin: str) -> str:
+async def _manager_virtual_media_candidates(
+    client: httpx.AsyncClient, origin: str, managers: dict
+) -> list[str]:
     candidates: list[str] = []
-    managers = await _get_json(client, _join(origin, "/redfish/v1/Managers"))
-    if managers:
-        for member in managers.get("Members") or []:
-            oid = _odata_id(member)
-            if not oid:
-                continue
-            candidates.extend(
-                await _collection_members(client, origin, _join(origin, f"{oid.rstrip('/')}/VirtualMedia"))
+    for member in managers.get("Members") or []:
+        oid = _odata_id(member)
+        if not oid:
+            continue
+        candidates.extend(
+            await _collection_members(
+                client, origin, _join(origin, f"{oid.rstrip('/')}/VirtualMedia")
             )
-    for known in _KNOWN_COLLECTIONS:
-        candidates.extend(await _collection_members(client, origin, _join(origin, known)))
+        )
+    return candidates
 
+
+def _dedupe_urls(urls: list[str]) -> list[str]:
     seen: set[str] = set()
-    unique = []
-    for url in candidates:
+    unique: list[str] = []
+    for url in urls:
         if url in seen:
             continue
         seen.add(url)
         unique.append(url)
+    return unique
 
+
+async def _pick_virtual_media_url(client: httpx.AsyncClient, unique: list[str]) -> str:
     cd_url = ""
     fallback = ""
     for url in unique:
@@ -120,6 +126,16 @@ async def discover_cd_url(client: httpx.AsyncClient, origin: str) -> str:
     if not chosen:
         raise VirtualMediaUnavailable("BMC has no Redfish VirtualMedia CD device")
     return chosen
+
+
+async def discover_cd_url(client: httpx.AsyncClient, origin: str) -> str:
+    candidates: list[str] = []
+    managers = await _get_json(client, _join(origin, "/redfish/v1/Managers"))
+    if managers:
+        candidates.extend(await _manager_virtual_media_candidates(client, origin, managers))
+    for known in _KNOWN_COLLECTIONS:
+        candidates.extend(await _collection_members(client, origin, _join(origin, known)))
+    return await _pick_virtual_media_url(client, _dedupe_urls(candidates))
 
 
 def _status_from_resource(resource: dict, device_url: str) -> VirtualMediaStatus:

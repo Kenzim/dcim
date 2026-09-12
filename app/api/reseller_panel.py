@@ -1127,9 +1127,7 @@ def pay_invoice(
 @router.post("/webhooks/stripe", responses=COMMON_ERROR_RESPONSES)
 async def stripe_webhook(
     request: Request,
-    stripe_signature: Optional[str] = Header(
-        default=None, alias="Stripe-Signature"
-    ),
+    stripe_signature: Annotated[Optional[str], Header(alias="Stripe-Signature")] = None,
     *,
     db: DbDep,
 ):

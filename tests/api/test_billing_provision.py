@@ -28,7 +28,7 @@ async def test_provision_bare_metal_creates_server_and_service(db_session, monke
         disks=[{"type": "ssd", "capacity_gb": 100, "is_os_disk": True}],
         network_ports=[{"name": "eth0", "mac_address": "00:11:22:33:44:55", "pxe_boot": True}],
     )
-    service = await billing._provision_bare_metal_service(data, owner.id, _actor(), db_session)
+    service = billing._provision_bare_metal_service(data, owner.id, _actor(), db_session)
     assert service.service_type == ServiceType.BARE_METAL
     assert service.bare_metal.server.server_ip == "203.0.113.20"
     assert service.bare_metal.server.os_boot_mode.value == "bios"
@@ -40,11 +40,11 @@ async def test_provision_bare_metal_rejects_invalid_inputs(db_session, monkeypat
     base = {"name": "bad-provision", "external_user_id": "external"}
     invalid_type = BillingBareMetalServiceCreate(**base, service_type="invalid")
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(invalid_type, owner.id, _actor(), db_session)
+        billing._provision_bare_metal_service(invalid_type, owner.id, _actor(), db_session)
     assert exc.value.status_code == 400
     vm_type = BillingBareMetalServiceCreate(name="bad-vm", external_user_id="external", service_type="vm")
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(vm_type, owner.id, _actor(), db_session)
+        billing._provision_bare_metal_service(vm_type, owner.id, _actor(), db_session)
     assert exc.value.status_code == 400
 
     registry = SimpleNamespace(get_plugin_class=lambda name: None)
@@ -53,7 +53,7 @@ async def test_provision_bare_metal_rejects_invalid_inputs(db_session, monkeypat
         name="no-plugin", external_user_id="external", plugin_name="missing", location_id=1,
     )
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(no_plugin, owner.id, _actor(), db_session)
+        billing._provision_bare_metal_service(no_plugin, owner.id, _actor(), db_session)
     assert exc.value.status_code == 404
 
 
@@ -65,5 +65,5 @@ async def test_provision_vm_validation_errors(db_session):
         BillingVmServiceCreate(name="vm-template", external_user_id="e", vm_template_id=1),
     ):
         with pytest.raises(HTTPException) as exc:
-            await billing._provision_vm_service(body, owner.id, _actor(), SimpleNamespace(), db_session)
+            billing._provision_vm_service(body, owner.id, _actor(), SimpleNamespace(), db_session)
         assert exc.value.status_code == 400

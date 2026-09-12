@@ -39,24 +39,22 @@ def os_type_accepts_ssh_key(os_type: Optional[str]) -> bool:
     return strategy_accepts_ssh_key(spec.get("strategy_name"))
 
 
-def parse_ssh_public_keys(value: Union[str, Sequence[str], None]) -> List[str]:
-    """Normalize multiline text or a list into validated OpenSSH public key lines.
-
-    Blank lines are skipped. Raises ``SshPublicKeyError`` on garbage lines.
-    """
+def _ssh_key_input_lines(value: str | Sequence[str] | None) -> List[str]:
     if value is None:
         return []
     if isinstance(value, str):
-        lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    elif isinstance(value, (list, tuple)):
-        lines = []
+        return value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if isinstance(value, (list, tuple)):
+        lines: List[str] = []
         for item in value:
             if item is None:
                 continue
             lines.extend(str(item).replace("\r\n", "\n").replace("\r", "\n").split("\n"))
-    else:
-        raise SshPublicKeyError("ssh_public_keys must be a string or list of strings")
+        return lines
+    raise SshPublicKeyError("ssh_public_keys must be a string or list of strings")
 
+
+def _dedupe_valid_ssh_key_lines(lines: Iterable[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     for raw in lines:
@@ -71,6 +69,14 @@ def parse_ssh_public_keys(value: Union[str, Sequence[str], None]) -> List[str]:
             seen.add(line)
             out.append(line)
     return out
+
+
+def parse_ssh_public_keys(value: str | Sequence[str] | None) -> List[str]:
+    """Normalize multiline text or a list into validated OpenSSH public key lines.
+
+    Blank lines are skipped. Raises ``SshPublicKeyError`` on garbage lines.
+    """
+    return _dedupe_valid_ssh_key_lines(_ssh_key_input_lines(value))
 
 
 def format_authorized_keys(keys: Iterable[str]) -> str:
@@ -91,24 +97,20 @@ def proxmox_sshkeys_param(keys: Sequence[str]) -> Optional[str]:
     return quote(blob, safe="")
 
 
-def ssh_public_keys_from_service_config(config: Optional[dict]) -> List[str]:
-    """Read stored keys from ``service.config.template_parameters``."""
-    cfg = config if isinstance(config, dict) else {}
-    tpl = cfg.get("template_parameters") or {}
-    if not isinstance(tpl, dict):
-        return []
+def _legacy_ssh_keys_from_raw(raw) -> List[str]:
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    if isinstance(raw, str) and raw.strip():
+        return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return []
+
+
+def _ssh_keys_from_template_parameters(tpl: dict) -> List[str]:
     if "ssh_public_keys" in tpl:
         try:
             return parse_ssh_public_keys(tpl.get("ssh_public_keys"))
         except SshPublicKeyError:
-            # Tolerate legacy/corrupt stored values when reading for display.
-            raw = tpl.get("ssh_public_keys")
-            if isinstance(raw, list):
-                return [str(x).strip() for x in raw if str(x).strip()]
-            if isinstance(raw, str) and raw.strip():
-                return [ln.strip() for ln in raw.splitlines() if ln.strip()]
-            return []
-    # Legacy single-key field
+            return _legacy_ssh_keys_from_raw(tpl.get("ssh_public_keys"))
     single = tpl.get("ssh_public_key")
     if single:
         try:
@@ -116,6 +118,15 @@ def ssh_public_keys_from_service_config(config: Optional[dict]) -> List[str]:
         except SshPublicKeyError:
             return []
     return []
+
+
+def ssh_public_keys_from_service_config(config: Optional[dict]) -> List[str]:
+    """Read stored keys from ``service.config.template_parameters``."""
+    cfg = config if isinstance(config, dict) else {}
+    tpl = cfg.get("template_parameters") or {}
+    if not isinstance(tpl, dict):
+        return []
+    return _ssh_keys_from_template_parameters(tpl)
 
 
 def set_ssh_public_keys_on_service(service: Service, keys: Sequence[str]) -> None:

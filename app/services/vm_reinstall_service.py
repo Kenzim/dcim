@@ -24,6 +24,42 @@ class VmReinstallError(Exception):
         self.status_code = status_code
 
 
+async def _power_off_guest_for_reinstall(plugin) -> None:
+    try:
+        state = await plugin.get_power_state()
+    except Exception:
+        state = PowerState.UNKNOWN
+    if state != PowerState.ON:
+        return
+    await plugin.power_off(force=False)
+    for _ in range(15):
+        await asyncio.sleep(1.0)
+        try:
+            if await plugin.get_power_state() == PowerState.OFF:
+                return
+        except Exception:
+            continue
+    try:
+        if await plugin.get_power_state() != PowerState.OFF:
+            await plugin.power_off(force=True)
+    except Exception:
+        await plugin.power_off(force=True)
+
+
+async def _destroy_existing_guest(plugin, vmid: int, service_id: int) -> None:
+    try:
+        exists = await plugin.vm_exists()
+    except Exception:
+        exists = False
+    if not exists:
+        return
+    await _power_off_guest_for_reinstall(plugin)
+    try:
+        await plugin.delete_vm({"vmid": int(vmid)})
+    except Exception as exc:
+        logger.warning("reinstall: delete_vm failed for service %s: %s", service_id, exc)
+
+
 async def reinstall_vm_guest(
     db: Session,
     service: Service,
@@ -53,33 +89,7 @@ async def reinstall_vm_guest(
     except ProxmoxPlacementError as exc:
         raise VmReinstallError(str(exc), status_code=exc.status_code) from exc
 
-    try:
-        exists = await plugin.vm_exists()
-    except Exception:
-        exists = False
-    if exists:
-        try:
-            state = await plugin.get_power_state()
-        except Exception:
-            state = PowerState.UNKNOWN
-        if state == PowerState.ON:
-            await plugin.power_off(force=False)
-            for _ in range(15):
-                await asyncio.sleep(1.0)
-                try:
-                    if await plugin.get_power_state() == PowerState.OFF:
-                        break
-                except Exception:
-                    continue
-            try:
-                if await plugin.get_power_state() != PowerState.OFF:
-                    await plugin.power_off(force=True)
-            except Exception:
-                await plugin.power_off(force=True)
-        try:
-            await plugin.delete_vm({"vmid": int(vmid)})
-        except Exception as exc:
-            logger.warning("reinstall: delete_vm failed for service %s: %s", service.id, exc)
+    await _destroy_existing_guest(plugin, vmid, service.id)
 
     if service.vm:
         service.vm.guest_state = VMGuestState.PROVISIONING

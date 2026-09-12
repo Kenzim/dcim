@@ -595,7 +595,7 @@ def list_audit_events(
         UserAuditEvent.created_at.desc(), UserAuditEvent.id.desc()
     )
     if action:
-        stmt = stmt.where(UserAuditEvent.action == action.strip()[:64])
+        stmt = stmt.where(UserAuditEvent.action.startswith(action.strip()))
     if billing_account_id is not None:
         stmt = stmt.where(UserAuditEvent.billing_account_id == billing_account_id)
     if subject_user_id is not None:

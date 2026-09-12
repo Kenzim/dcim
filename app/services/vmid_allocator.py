@@ -18,6 +18,77 @@ def _resolve_cluster_range(cluster) -> tuple[int, int]:
     return vmid_min, vmid_max
 
 
+def _existing_sticky_reservation(
+    existing,
+    *,
+    cluster_id: int,
+    service_id: int,
+    requested_vmid: Optional[int],
+) -> Optional[int]:
+    if not existing:
+        return None
+    if (
+        requested_vmid is not None
+        and int(requested_vmid) == int(existing.vmid)
+        and existing.cluster_id == cluster_id
+    ):
+        return int(existing.vmid)
+    if requested_vmid is None and existing.cluster_id == cluster_id:
+        return int(existing.vmid)
+    if requested_vmid is None and existing.cluster_id != cluster_id:
+        raise ValueError(
+            f"Service already has reserved VMID {existing.vmid} in cluster {existing.cluster_id}; "
+            "cross-cluster reassignment requires an admin override workflow."
+        )
+    return None
+
+
+def _reserve_explicit_vmid(
+    db: Session,
+    *,
+    cluster_id: int,
+    service_id: int,
+    requested_vmid: int,
+    vmid_min: int,
+    vmid_max: int,
+    allow_outside_range: bool,
+) -> int:
+    requested = int(requested_vmid)
+    if not allow_outside_range and (requested < vmid_min or requested > vmid_max):
+        raise ValueError(f"Requested VMID {requested} is outside cluster range {vmid_min}-{vmid_max}")
+    if requested <= 0:
+        raise ValueError("Requested VMID must be positive")
+    taken = VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, requested)
+    if taken:
+        raise ValueError(f"VMID {requested} is already reserved in cluster {cluster_id}")
+    VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=requested)
+    return requested
+
+
+def _reserve_next_free_vmid(
+    db: Session,
+    *,
+    cluster_id: int,
+    service_id: int,
+    vmid_min: int,
+    vmid_max: int,
+    suggested_vmid: Optional[int],
+) -> int:
+    if suggested_vmid is not None:
+        suggested = int(suggested_vmid)
+        if (
+            vmid_min <= suggested <= vmid_max
+            and VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, suggested) is None
+        ):
+            VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=suggested)
+            return suggested
+    for vmid in range(vmid_min, vmid_max + 1):
+        if VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, vmid) is None:
+            VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=vmid)
+            return vmid
+    raise ValueError(f"No free VMID left in cluster {cluster_id} range {vmid_min}-{vmid_max}")
+
+
 def reserve_vmid_for_service(
     db: Session,
     *,
@@ -40,16 +111,11 @@ def reserve_vmid_for_service(
     outside the cluster's auto-allocation window.
     """
     existing = VMIDReservationDAO.get_by_service_id(db, service_id)
-    if existing:
-        if requested_vmid is not None and int(requested_vmid) == int(existing.vmid) and existing.cluster_id == cluster_id:
-            return int(existing.vmid)
-        if requested_vmid is None and existing.cluster_id == cluster_id:
-            return int(existing.vmid)
-        if requested_vmid is None and existing.cluster_id != cluster_id:
-            raise ValueError(
-                f"Service already has reserved VMID {existing.vmid} in cluster {existing.cluster_id}; "
-                "cross-cluster reassignment requires an admin override workflow."
-            )
+    sticky = _existing_sticky_reservation(
+        existing, cluster_id=cluster_id, service_id=service_id, requested_vmid=requested_vmid
+    )
+    if sticky is not None:
+        return sticky
 
     cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if cluster is None:
@@ -57,32 +123,43 @@ def reserve_vmid_for_service(
     vmid_min, vmid_max = _resolve_cluster_range(cluster)
 
     if requested_vmid is not None:
-        requested = int(requested_vmid)
-        if not allow_outside_range and (requested < vmid_min or requested > vmid_max):
-            raise ValueError(f"Requested VMID {requested} is outside cluster range {vmid_min}-{vmid_max}")
-        if requested <= 0:
-            raise ValueError("Requested VMID must be positive")
-        taken = VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, requested)
-        if taken:
-            raise ValueError(f"VMID {requested} is already reserved in cluster {cluster_id}")
-        VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=requested)
-        return requested
+        return _reserve_explicit_vmid(
+            db,
+            cluster_id=cluster_id,
+            service_id=service_id,
+            requested_vmid=int(requested_vmid),
+            vmid_min=vmid_min,
+            vmid_max=vmid_max,
+            allow_outside_range=allow_outside_range,
+        )
 
-    if suggested_vmid is not None:
-        suggested = int(suggested_vmid)
-        if (
-            vmid_min <= suggested <= vmid_max
-            and VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, suggested) is None
-        ):
-            VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=suggested)
-            return suggested
+    return _reserve_next_free_vmid(
+        db,
+        cluster_id=cluster_id,
+        service_id=service_id,
+        vmid_min=vmid_min,
+        vmid_max=vmid_max,
+        suggested_vmid=suggested_vmid,
+    )
 
-    for vmid in range(vmid_min, vmid_max + 1):
-        if VMIDReservationDAO.get_by_cluster_vmid(db, cluster_id, vmid) is None:
-            VMIDReservationDAO.create(db, cluster_id=cluster_id, service_id=service_id, vmid=vmid)
-            return vmid
 
-    raise ValueError(f"No free VMID left in cluster {cluster_id} range {vmid_min}-{vmid_max}")
+async def _validate_requested_vmid_on_proxmox(
+    plugin,
+    *,
+    requested_vmid: int,
+    node_name: str,
+    adopt_existing: bool,
+) -> None:
+    if not adopt_existing:
+        ok = await plugin.check_vmid_available_for_new(int(requested_vmid))
+        if not ok:
+            raise ValueError(
+                f"VMID {requested_vmid} is not available for new allocation on Proxmox "
+                "(may already be marked non-reusable)"
+            )
+        return
+    if not await plugin.vm_exists():
+        raise ValueError(f"No Proxmox guest with VMID {requested_vmid} on node {node_name}")
 
 
 async def reserve_vmid_aligned_with_proxmox(
@@ -119,18 +196,12 @@ async def reserve_vmid_aligned_with_proxmox(
     plugin = get_registry().get_plugin("proxmox", plugin_config)
 
     if requested_vmid is not None:
-        if not adopt_existing:
-            ok = await plugin.check_vmid_available_for_new(int(requested_vmid))
-            if not ok:
-                raise ValueError(
-                    f"VMID {requested_vmid} is not available for new allocation on Proxmox "
-                    "(may already be marked non-reusable)"
-                )
-        else:
-            if not await plugin.vm_exists():
-                raise ValueError(
-                    f"No Proxmox guest with VMID {requested_vmid} on node {node_name}"
-                )
+        await _validate_requested_vmid_on_proxmox(
+            plugin,
+            requested_vmid=int(requested_vmid),
+            node_name=node_name,
+            adopt_existing=adopt_existing,
+        )
         return reserve_vmid_for_service(
             db,
             cluster_id=cluster_id,

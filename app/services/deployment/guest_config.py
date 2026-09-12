@@ -10,6 +10,10 @@ from app.services.deployment.step import DeploymentError
 from app.services.macos_smbios import generate_smbios, smbios1_config_value
 from app.utils.ipv4_netmask import ipv4_netmask_to_prefixlen
 
+_SHELL_BIN_SH = "/bin/sh"
+_MSG_STATIC_NETWORK_REQUIRES_VM_IP = "Static network requires a VM IP allocation"
+_DISKUTIL_BIN = "/usr/sbin/diskutil"
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,56 +44,70 @@ _WINDOWS_ADAPTER_PS = (
 )
 
 
+_SPEC_OVERRIDE_KEYS = (
+    "guest_username",
+    "network_mode",
+    "randomize_smbios",
+    "smbios_model",
+    "opencore_disk",
+    "opencore_config",
+    "client_actions",
+    "admin_password",
+    "guest_password",
+    "cloudinit_cipassword",
+    "cloudinit_ciuser",
+    "template_password",
+    "initial_password",
+)
+
+
+def _strategy_config_from_vm_plan(vm_plan: dict) -> Dict[str, Any]:
+    cfg: Dict[str, Any] = {}
+    plan = vm_plan.get("strategy_plan") or {}
+    if isinstance(plan.get("strategy_config"), dict):
+        cfg.update(plan["strategy_config"])
+    os_profile = vm_plan.get("os_profile") or {}
+    if isinstance(os_profile.get("strategy_config"), dict):
+        cfg.update(os_profile["strategy_config"])
+    return cfg
+
+
+def _merge_snapshot_strategy_config(cfg: Dict[str, Any], snap: dict) -> None:
+    op = snap.get("os_profile") or {}
+    if isinstance(op.get("strategy_config"), dict):
+        for k, v in op["strategy_config"].items():
+            cfg.setdefault(k, v)
+
+
+def _apply_spec_overrides(cfg: Dict[str, Any], specs: dict) -> None:
+    for key in _SPEC_OVERRIDE_KEYS:
+        if key in specs and specs[key] is not None:
+            cfg[key] = specs[key]
+
+
+def _apply_template_password_overrides(cfg: Dict[str, Any], tpl: dict) -> None:
+    if tpl.get("admin_password"):
+        cfg["admin_password"] = tpl["admin_password"]
+        cfg["guest_password"] = tpl["admin_password"]
+    elif tpl.get("guest_password"):
+        cfg["guest_password"] = tpl["guest_password"]
+    if not cfg.get("guest_password") and not cfg.get("admin_password"):
+        if cfg.get("cloudinit_cipassword"):
+            cfg["guest_password"] = cfg["cloudinit_cipassword"]
+
+
 def strategy_options_from_ctx(ctx) -> Dict[str, Any]:
     """Merged strategy options from vm_plan + template defaults."""
     service_cfg = ctx.service.config or {}
     vm_plan = service_cfg.get("vm_plan") or {}
-    cfg: Dict[str, Any] = {}
-    # Prefer strategy_plan.strategy_config (from VMProvisioningService)
-    plan = vm_plan.get("strategy_plan") or {}
-    if isinstance(plan.get("strategy_config"), dict):
-        cfg.update(plan["strategy_config"])
-    # Legacy / snapshot shape
-    os_profile = vm_plan.get("os_profile") or {}
-    if isinstance(os_profile.get("strategy_config"), dict):
-        cfg.update(os_profile["strategy_config"])
+    cfg = _strategy_config_from_vm_plan(vm_plan)
     snap = service_cfg.get("product_snapshot") or getattr(ctx.service, "product_snapshot", None) or {}
     if isinstance(snap, dict):
-        op = snap.get("os_profile") or {}
-        if isinstance(op.get("strategy_config"), dict):
-            for k, v in op["strategy_config"].items():
-                cfg.setdefault(k, v)
-    # effective_specs may carry provision-time password / overrides
-    specs = ctx.get_specs()
-    for key in (
-        "guest_username",
-        "network_mode",
-        "randomize_smbios",
-        "smbios_model",
-        "opencore_disk",
-        "opencore_config",
-        "client_actions",
-        "admin_password",
-        "guest_password",
-        "cloudinit_cipassword",
-        "cloudinit_ciuser",
-        "template_password",
-        "initial_password",
-    ):
-        if key in specs and specs[key] is not None:
-            cfg[key] = specs[key]
-    # Desired guest password: prefer template_parameters (Change Password /
-    # WHMCS) over stale effective_specs from the original provision enqueue.
+        _merge_snapshot_strategy_config(cfg, snap)
+    _apply_spec_overrides(cfg, ctx.get_specs())
     tpl = service_cfg.get("template_parameters") or {}
     if isinstance(tpl, dict):
-        if tpl.get("admin_password"):
-            cfg["admin_password"] = tpl["admin_password"]
-            cfg["guest_password"] = tpl["admin_password"]
-        elif tpl.get("guest_password"):
-            cfg["guest_password"] = tpl["guest_password"]
-    if not cfg.get("guest_password") and not cfg.get("admin_password"):
-        if cfg.get("cloudinit_cipassword"):
-            cfg["guest_password"] = cfg["cloudinit_cipassword"]
+        _apply_template_password_overrides(cfg, tpl)
     return cfg
 
 
@@ -122,17 +140,18 @@ def old_guest_passwords_from_ctx(ctx, *, include_stored: bool = True) -> list:
     return unique
 
 
-async def wait_for_agent(plugin, timeout: float = 600.0, interval: float = 5.0) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        try:
-            if await plugin.guest_agent_ready():
-                return
-        except Exception:
-            pass
-        await asyncio.sleep(interval)
-    raise DeploymentError("Guest agent did not become ready in time")
+async def wait_for_agent(plugin, max_wait: float = 600.0, interval: float = 5.0) -> None:
+    try:
+        async with asyncio.timeout(max_wait):
+            while True:
+                try:
+                    if await plugin.guest_agent_ready():
+                        return
+                except Exception:
+                    pass
+                await asyncio.sleep(interval)
+    except TimeoutError:
+        raise DeploymentError("Guest agent did not become ready in time")
 
 
 async def set_guest_password(
@@ -239,7 +258,7 @@ async def apply_root_authorized_keys(plugin, keys: list) -> None:
         # Empty blob still creates an empty file (clears keys).
         "true"
     )
-    result = await plugin.guest_exec(["/bin/sh", "-c", script])
+    result = await plugin.guest_exec([_SHELL_BIN_SH, "-c", script])
     if result.get("exitcode") not in (0, None):
         raise DeploymentError(
             f"Failed to write root authorized_keys: exit={result.get('exitcode')} "
@@ -268,11 +287,11 @@ async def apply_cloudinit_network_reset(
         await plugin.regenerate_cloudinit(vmid=vmid)
     try:
         await plugin.guest_exec(
-            ["/bin/sh", "-c", "cloud-init clean --logs 2>/dev/null || cloud-init clean || true"]
+            [_SHELL_BIN_SH, "-c", "cloud-init clean --logs 2>/dev/null || cloud-init clean || true"]
         )
     except Exception as exc:
         logger.warning("cloud-init clean via guest agent failed (continuing to reboot): %s", exc)
-    await reboot_guest_and_wait_agent(plugin, timeout=600.0)
+    await reboot_guest_and_wait_agent(plugin, max_wait=600.0)
 
 
 async def configure_linux_network(plugin, *, mode: str, alloc=None, dns: Optional[str] = None) -> None:
@@ -283,13 +302,13 @@ async def configure_linux_network(plugin, *, mode: str, alloc=None, dns: Optiona
             "command -v nmcli >/dev/null && nmcli dev connect \"$IFACE\" || "
             "dhclient -v \"$IFACE\" || true"
         )
-        result = await plugin.guest_exec(["/bin/sh", "-c", script])
+        result = await plugin.guest_exec([_SHELL_BIN_SH, "-c", script])
         if result.get("exitcode") not in (0, None):
             logger.warning("Linux DHCP configure exit=%s err=%s", result.get("exitcode"), result.get("err-data"))
         return
 
     if not alloc or not (alloc.ip_address or "").strip():
-        raise DeploymentError("Static network requires a VM IP allocation")
+        raise DeploymentError(_MSG_STATIC_NETWORK_REQUIRES_VM_IP)
     ip = (alloc.ip_address or "").strip()
     prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
     gw = (alloc.gateway or "").strip()
@@ -311,7 +330,7 @@ else
   ip route replace default via {shlex.quote(gw)} || true
 fi
 """
-    result = await plugin.guest_exec(["/bin/sh", "-c", script])
+    result = await plugin.guest_exec([_SHELL_BIN_SH, "-c", script])
     if result.get("exitcode") not in (0, None):
         raise DeploymentError(
             f"Linux static network configure failed: exit={result.get('exitcode')} "
@@ -339,14 +358,14 @@ async def configure_macos_network(plugin, *, mode: str, alloc=None, dns: Optiona
     mode = (mode or "static").lower()
     if mode == "dhcp":
         result = await plugin.guest_exec(
-            ["/bin/sh", "-c", f"/usr/sbin/networksetup -setdhcp {svc_q}"]
+            [_SHELL_BIN_SH, "-c", f"/usr/sbin/networksetup -setdhcp {svc_q}"]
         )
         if result.get("exitcode") not in (0, None):
             raise DeploymentError(f"macOS setdhcp failed: {result.get('err-data')!r}")
         return
 
     if not alloc or not (alloc.ip_address or "").strip():
-        raise DeploymentError("Static network requires a VM IP allocation")
+        raise DeploymentError(_MSG_STATIC_NETWORK_REQUIRES_VM_IP)
     ip = (alloc.ip_address or "").strip()
     mask = (alloc.subnet_mask or "").strip() or DEFAULT_IPV4_NETMASK
     gw = (alloc.gateway or "").strip()
@@ -354,54 +373,33 @@ async def configure_macos_network(plugin, *, mode: str, alloc=None, dns: Optiona
         f"/usr/sbin/networksetup -setmanual {svc_q} "
         f"{shlex.quote(ip)} {shlex.quote(mask)} {shlex.quote(gw)}"
     )
-    result = await plugin.guest_exec(["/bin/sh", "-c", script])
+    result = await plugin.guest_exec([_SHELL_BIN_SH, "-c", script])
     if result.get("exitcode") not in (0, None):
         raise DeploymentError(f"macOS setmanual failed: {result.get('err-data')!r}")
     dns_servers = (dns or DEFAULT_CLOUDINIT_NAMESERVERS).replace(",", " ").split()
     dns_cmd = "/usr/sbin/networksetup -setdnsservers " + svc_q + " " + " ".join(
         shlex.quote(d) for d in dns_servers
     )
-    await plugin.guest_exec(["/bin/sh", "-c", dns_cmd])
+    await plugin.guest_exec([_SHELL_BIN_SH, "-c", dns_cmd])
 
 
-async def configure_windows_network(plugin, *, mode: str, alloc=None, dns: Optional[str] = None) -> None:
-    """Configure the first Up non-loopback adapter via PowerShell guest-exec."""
-    mode = (mode or "static").lower()
-    if mode == "dhcp":
-        script = (
-            "$ErrorActionPreference = 'Stop'; "
-            + _WINDOWS_ADAPTER_PS
-            + "Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Enabled; "
-            "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses; "
-            "try { ipconfig /renew | Out-Null } catch {}; "
-            "Write-Output 'NET_OK'"
-        )
-        result = await plugin.guest_exec(_windows_powershell_argv(script), timeout=120.0)
-        out = f"{result.get('out-data') or ''}{result.get('err-data') or ''}"
-        if result.get("exitcode") not in (0, None) or "NET_OK" not in out:
-            logger.warning(
-                "Windows DHCP configure exit=%s err=%s",
-                result.get("exitcode"),
-                result.get("err-data"),
-            )
-        return
+def _windows_dhcp_network_script() -> str:
+    return (
+        "$ErrorActionPreference = 'Stop'; "
+        + _WINDOWS_ADAPTER_PS
+        + "Set-NetIPInterface -InterfaceIndex $ifIndex -Dhcp Enabled; "
+        "Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses; "
+        "try { ipconfig /renew | Out-Null } catch {}; "
+        "Write-Output 'NET_OK'"
+    )
 
-    if not alloc or not (alloc.ip_address or "").strip():
-        raise DeploymentError("Static network requires a VM IP allocation")
-    ip = (alloc.ip_address or "").strip()
-    prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
-    gw = (alloc.gateway or "").strip()
-    dns_raw = (
-        dns or getattr(alloc, "dns_servers", None) or DEFAULT_CLOUDINIT_NAMESERVERS
-    ).replace(",", " ")
-    dns_list = [d for d in dns_raw.split() if d]
-    if not dns_list:
-        dns_list = list(DEFAULT_DNS_SERVER_LIST)
+
+def _windows_static_network_script(
+    ip: str, prefix: int, gw: str, dns_list: list[str]
+) -> str:
     dns_ps = ",".join("'" + _ps_quote(d) + "'" for d in dns_list)
-    gw_line = ""
-    if gw:
-        gw_line = f"-DefaultGateway '{_ps_quote(gw)}' "
-    script = (
+    gw_line = f"-DefaultGateway '{_ps_quote(gw)}' " if gw else ""
+    return (
         "$ErrorActionPreference = 'Stop'; "
         + _WINDOWS_ADAPTER_PS
         + "Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue "
@@ -414,18 +412,47 @@ async def configure_windows_network(plugin, *, mode: str, alloc=None, dns: Optio
         f"Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses @({dns_ps}); "
         "Write-Output 'NET_OK'"
     )
-    result = await plugin.guest_exec(_windows_powershell_argv(script), timeout=120.0)
+
+
+async def _run_windows_network_script(plugin, script: str, *, strict: bool) -> None:
+    result = await plugin.guest_exec(_windows_powershell_argv(script), max_wait=120.0)
     out = f"{result.get('out-data') or ''}{result.get('err-data') or ''}"
     if result.get("exitcode") not in (0, None) or "NET_OK" not in out:
-        raise DeploymentError(
-            f"Windows static network configure failed: exit={result.get('exitcode')} "
-            f"err={result.get('err-data')!r} out={result.get('out-data')!r}"
+        if strict:
+            raise DeploymentError(
+                f"Windows static network configure failed: exit={result.get('exitcode')} "
+                f"err={result.get('err-data')!r} out={result.get('out-data')!r}"
+            )
+        logger.warning(
+            "Windows DHCP configure exit=%s err=%s",
+            result.get("exitcode"),
+            result.get("err-data"),
         )
+
+
+async def configure_windows_network(plugin, *, mode: str, alloc=None, dns: Optional[str] = None) -> None:
+    """Configure the first Up non-loopback adapter via PowerShell guest-exec."""
+    mode = (mode or "static").lower()
+    if mode == "dhcp":
+        await _run_windows_network_script(plugin, _windows_dhcp_network_script(), strict=False)
+        return
+
+    if not alloc or not (alloc.ip_address or "").strip():
+        raise DeploymentError(_MSG_STATIC_NETWORK_REQUIRES_VM_IP)
+    ip = (alloc.ip_address or "").strip()
+    prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
+    gw = (alloc.gateway or "").strip()
+    dns_raw = (
+        dns or getattr(alloc, "dns_servers", None) or DEFAULT_CLOUDINIT_NAMESERVERS
+    ).replace(",", " ")
+    dns_list = [d for d in dns_raw.split() if d] or list(DEFAULT_DNS_SERVER_LIST)
+    script = _windows_static_network_script(ip, int(prefix), gw, dns_list)
+    await _run_windows_network_script(plugin, script, strict=True)
 
 
 async def discover_opencore_disk(plugin) -> str:
     """Return the diskutil identifier for the OPENCORE EFI volume (e.g. disk1s1)."""
-    result = await plugin.guest_exec(["/usr/sbin/diskutil", "list"])
+    result = await plugin.guest_exec([_DISKUTIL_BIN, "list"])
     out = result.get("out-data") or ""
     # Match lines like: 1: EFI OPENCORE 1.1 GB diskXsY
     import re
@@ -437,7 +464,7 @@ async def discover_opencore_disk(plugin) -> str:
                 return m.group(1)
     # Fallback: mount by volume name
     result = await plugin.guest_exec(
-        ["/bin/sh", "-c", "diskutil list | awk '/OPENCORE/{print $NF; exit}'"]
+        [_SHELL_BIN_SH, "-c", "diskutil list | awk '/OPENCORE/{print $NF; exit}'"]
     )
     ident = (result.get("out-data") or "").strip().splitlines()
     if ident and ident[0].startswith("disk"):
@@ -445,41 +472,29 @@ async def discover_opencore_disk(plugin) -> str:
     raise DeploymentError("Could not find OPENCORE EFI partition via diskutil list")
 
 
-async def apply_opencore_smbios(
-    plugin,
-    *,
-    model: str = "iMacPro1,1",
-    oc_disk: Optional[str] = None,
-    cfg_path: str = "/Volumes/OPENCORE/EFI/OC/config.plist",
-    sku: Optional[str] = None,
-) -> Dict[str, str]:
-    """Patch OpenCore PlatformInfo via guest-exec and align Proxmox smbios1.
-
-    Preserves an existing smbios1 ``sku`` (RackFlow rf1 token) unless ``sku``
-    is passed explicitly.
-    """
+async def _resolve_preserved_smbios_sku(plugin, sku: Optional[str]) -> Optional[str]:
+    if sku is not None:
+        return sku
     from app.services.vm_identity_stamp import get_smbios1_sku
 
-    sm = generate_smbios(model)
-    preserved_sku = sku
-    if preserved_sku is None:
-        try:
-            cfg = await plugin.get_qemu_config()
-            preserved_sku = get_smbios1_sku(cfg.get("smbios1") if isinstance(cfg, dict) else None)
-        except Exception:
-            preserved_sku = None
-    # Prefer live discovery — clone/boot order can swap disk numbers vs the template.
     try:
-        disk_id = await discover_opencore_disk(plugin)
+        cfg = await plugin.get_qemu_config()
+        return get_smbios1_sku(cfg.get("smbios1") if isinstance(cfg, dict) else None)
+    except Exception:
+        return None
+
+
+async def _resolve_opencore_disk_id(plugin, oc_disk: Optional[str]) -> str:
+    try:
+        return await discover_opencore_disk(plugin)
     except DeploymentError:
-        disk_id = (oc_disk or "").strip() or "disk1s1"
-    mount = await plugin.guest_exec(["/usr/sbin/diskutil", "mount", disk_id])
-    if mount.get("exitcode") not in (0, None):
-        logger.info("diskutil mount %s: %s %s", disk_id, mount.get("out-data"), mount.get("err-data"))
-    # Resolve config path if volume name differs
+        return (oc_disk or "").strip() or "disk1s1"
+
+
+async def _resolve_opencore_config_path(plugin, cfg_path: str) -> str:
     find_cfg = await plugin.guest_exec(
         [
-            "/bin/sh",
+            _SHELL_BIN_SH,
             "-c",
             "ls /Volumes/OPENCORE/EFI/OC/config.plist 2>/dev/null "
             "|| ls /Volumes/*/EFI/OC/config.plist 2>/dev/null | head -1",
@@ -489,8 +504,12 @@ async def apply_opencore_smbios(
     cfg = resolved[0].strip() if resolved else cfg_path
     if not cfg:
         raise DeploymentError("OpenCore config.plist not found under /Volumes after mount")
+    return cfg
+
+
+def _opencore_smbios_patch_script(cfg: str, sm: Dict[str, str]) -> str:
     rom = sm["ROM_HEX"]
-    script = f"""
+    return f"""
 set -e
 CFG={shlex.quote(cfg)}
 test -f "$CFG"
@@ -506,14 +525,38 @@ rm -f /tmp/rom.bin
 sync
 echo PATCHED_OK
 """
-    result = await plugin.guest_exec(["/bin/sh", "-c", script], timeout=120.0)
+
+
+async def apply_opencore_smbios(
+    plugin,
+    *,
+    model: str = "iMacPro1,1",
+    oc_disk: Optional[str] = None,
+    cfg_path: str = "/Volumes/OPENCORE/EFI/OC/config.plist",
+    sku: Optional[str] = None,
+) -> Dict[str, str]:
+    """Patch OpenCore PlatformInfo via guest-exec and align Proxmox smbios1.
+
+    Preserves an existing smbios1 ``sku`` (RackFlow rf1 token) unless ``sku``
+    is passed explicitly.
+    """
+    sm = generate_smbios(model)
+    preserved_sku = await _resolve_preserved_smbios_sku(plugin, sku)
+    disk_id = await _resolve_opencore_disk_id(plugin, oc_disk)
+    mount = await plugin.guest_exec([_DISKUTIL_BIN, "mount", disk_id])
+    if mount.get("exitcode") not in (0, None):
+        logger.info("diskutil mount %s: %s %s", disk_id, mount.get("out-data"), mount.get("err-data"))
+    cfg = await _resolve_opencore_config_path(plugin, cfg_path)
+    result = await plugin.guest_exec(
+        [_SHELL_BIN_SH, "-c", _opencore_smbios_patch_script(cfg, sm)], max_wait=120.0
+    )
     if result.get("exitcode") not in (0, None) or "PATCHED_OK" not in (result.get("out-data") or ""):
         raise DeploymentError(
             f"OpenCore SMBIOS patch failed: exit={result.get('exitcode')} "
             f"err={result.get('err-data')!r} out={result.get('out-data')!r}"
         )
     try:
-        await plugin.guest_exec(["/usr/sbin/diskutil", "unmount", disk_id])
+        await plugin.guest_exec([_DISKUTIL_BIN, "unmount", disk_id])
     except Exception as exc:
         logger.warning("OpenCore unmount failed: %s", exc)
     await plugin.update_smbios1(smbios1_config_value(sm, sku=preserved_sku))
@@ -529,7 +572,7 @@ async def _macos_root_disk_refs(plugin) -> Dict[str, str]:
     """
     import re
 
-    info = await plugin.guest_exec(["/usr/sbin/diskutil", "info", "/"], timeout=60.0)
+    info = await plugin.guest_exec([_DISKUTIL_BIN, "info", "/"], max_wait=60.0)
     out = info.get("out-data") or ""
     container = None
     physical = None
@@ -587,9 +630,9 @@ async def grow_macos_root_apfs(plugin) -> None:
 
     if whole:
         repair = await plugin.guest_exec(
-            ["/usr/sbin/diskutil", "repairDisk", whole],
+            [_DISKUTIL_BIN, "repairDisk", whole],
             input_data="y\n",
-            timeout=180.0,
+            max_wait=180.0,
         )
         logger.info(
             "macOS repairDisk %s exit=%s: %s",
@@ -599,8 +642,8 @@ async def grow_macos_root_apfs(plugin) -> None:
         )
 
     result = await plugin.guest_exec(
-        ["/usr/sbin/diskutil", "apfs", "resizeContainer", container, "0"],
-        timeout=600.0,
+        [_DISKUTIL_BIN, "apfs", "resizeContainer", container, "0"],
+        max_wait=600.0,
     )
     exitcode = result.get("exitcode")
     err = (result.get("err-data") or "") + " " + (result.get("out-data") or "")
@@ -618,7 +661,7 @@ async def grow_macos_root_apfs(plugin) -> None:
     )
 
 
-async def reboot_guest_and_wait_agent(plugin, timeout: float = 600.0) -> None:
+async def reboot_guest_and_wait_agent(plugin, max_wait: float = 600.0) -> None:
     """Reboot via guest agent shutdown + host start, then wait for agent."""
     from app.plugins.base import PowerState
 
@@ -632,4 +675,4 @@ async def reboot_guest_and_wait_agent(plugin, timeout: float = 600.0) -> None:
             break
         await asyncio.sleep(2)
     await plugin.power_on()
-    await wait_for_agent(plugin, timeout=timeout)
+    await wait_for_agent(plugin, max_wait=max_wait)

@@ -9,6 +9,9 @@ from __future__ import annotations
 from app.plugins.base import PowerState
 from app.services.deployment.step import DeploymentError, DeploymentStep, StepOutcome
 
+_MSG_GUEST_AGENT_NOT_READY = "Guest agent not reachable yet"
+_MSG_STATIC_NETWORK_REQUIRES_LINKED_VM_IP = "Static network requires a linked VM IP allocation"
+
 
 class CloneFromTemplateStep(DeploymentStep):
     name = "clone_from_template"
@@ -182,7 +185,7 @@ class WaitForGuestAgentStep(DeploymentStep):
             ready = await plugin.guest_agent_ready()
         except Exception as exc:  # treat unreachable as "not yet"
             return StepOutcome.wait(
-                message="Guest agent not reachable yet",
+                message=_MSG_GUEST_AGENT_NOT_READY,
                 retry_after_seconds=self.default_retry_after_seconds,
                 detail={"last_error": str(exc)},
             )
@@ -207,7 +210,7 @@ class ConfigureViaGuestAgentStep(DeploymentStep):
             ready = await plugin.guest_agent_ready()
         except Exception as exc:
             return StepOutcome.wait(
-                message="Guest agent not reachable yet",
+                message=_MSG_GUEST_AGENT_NOT_READY,
                 retry_after_seconds=self.default_retry_after_seconds,
                 detail={"last_error": str(exc)},
             )
@@ -230,7 +233,7 @@ class ConfigureViaGuestAgentStep(DeploymentStep):
         password = opts.get("guest_password") or opts.get("admin_password") or opts.get("cloudinit_cipassword")
         mode = str(opts.get("network_mode") or "static").lower()
         if mode == "static" and not ctx.get_ip_allocation():
-            raise DeploymentError("Static network requires a linked VM IP allocation")
+            raise DeploymentError(_MSG_STATIC_NETWORK_REQUIRES_LINKED_VM_IP)
         await configure_linux_network(plugin, mode=mode, alloc=ctx.get_ip_allocation())
         if password:
             from app.services.deployment.guest_config import old_guest_passwords_from_ctx
@@ -268,7 +271,7 @@ class ConfigureMacosGuestStep(DeploymentStep):
             ready = await plugin.guest_agent_ready()
         except Exception as exc:
             return StepOutcome.wait(
-                message="Guest agent not reachable yet",
+                message=_MSG_GUEST_AGENT_NOT_READY,
                 retry_after_seconds=self.default_retry_after_seconds,
                 detail={"last_error": str(exc)},
             )
@@ -276,13 +279,62 @@ class ConfigureMacosGuestStep(DeploymentStep):
             return StepOutcome.wait(message="Waiting for guest agent before macOS configure")
         return StepOutcome.ready()
 
-    async def execute(self, ctx) -> None:
+    @staticmethod
+    def _parse_randomize_flag(value) -> bool:
+        if isinstance(value, str):
+            return value.lower() in ("1", "true", "yes")
+        return bool(value)
+
+    async def _maybe_grow_root_disk(self, ctx, plugin) -> None:
+        specs = ctx.get_specs()
+        if specs.get("disk_gb") in (None, ""):
+            return
+        from app.services.deployment.guest_config import grow_macos_root_apfs
+
+        await grow_macos_root_apfs(plugin)
+
+    async def _maybe_randomize_smbios(self, ctx, plugin, opts: dict) -> None:
+        if not self._parse_randomize_flag(opts.get("randomize_smbios", True)):
+            return
         from app.services.deployment.guest_config import (
             apply_opencore_smbios,
-            configure_macos_network,
-            grow_macos_root_apfs,
             reboot_guest_and_wait_agent,
+        )
+
+        sm = await apply_opencore_smbios(
+            plugin,
+            model=str(opts.get("smbios_model") or "iMacPro1,1"),
+            oc_disk=str(opts.get("opencore_disk") or "disk1s1"),
+            cfg_path=str(
+                opts.get("opencore_config") or "/Volumes/OPENCORE/EFI/OC/config.plist"
+            ),
+        )
+        ctx.logger.info(
+            "OpenCore SMBIOS applied serial=%s mlb=%s uuid=%s",
+            sm.get("SystemSerialNumber"),
+            sm.get("MLB"),
+            sm.get("SystemUUID"),
+        )
+        await reboot_guest_and_wait_agent(plugin, max_wait=600.0)
+
+    async def _apply_guest_password(self, ctx, plugin, username: str, password) -> None:
+        if not password:
+            return
+        from app.services.deployment.guest_config import (
+            old_guest_passwords_from_ctx,
             set_guest_password,
+        )
+
+        await set_guest_password(
+            plugin,
+            username,
+            str(password),
+            old_passwords=old_guest_passwords_from_ctx(ctx, include_stored=False),
+        )
+
+    async def execute(self, ctx) -> None:
+        from app.services.deployment.guest_config import (
+            configure_macos_network,
             strategy_options_from_ctx,
         )
 
@@ -291,51 +343,20 @@ class ConfigureMacosGuestStep(DeploymentStep):
         username = str(opts.get("guest_username") or "client")
         password = opts.get("guest_password") or opts.get("admin_password") or opts.get("cloudinit_cipassword")
         mode = str(opts.get("network_mode") or "static").lower()
-        randomize = opts.get("randomize_smbios", True)
-        if isinstance(randomize, str):
-            randomize = randomize.lower() in ("1", "true", "yes")
+        randomize = self._parse_randomize_flag(opts.get("randomize_smbios", True))
 
-        # Claim any hypervisor-level growth from configure_sizing before other work.
-        specs = ctx.get_specs()
-        if specs.get("disk_gb") not in (None, ""):
-            await grow_macos_root_apfs(plugin)
-
-        if randomize:
-            sm = await apply_opencore_smbios(
-                plugin,
-                model=str(opts.get("smbios_model") or "iMacPro1,1"),
-                oc_disk=str(opts.get("opencore_disk") or "disk1s1"),
-                cfg_path=str(
-                    opts.get("opencore_config") or "/Volumes/OPENCORE/EFI/OC/config.plist"
-                ),
-            )
-            ctx.logger.info(
-                "OpenCore SMBIOS applied serial=%s mlb=%s uuid=%s",
-                sm.get("SystemSerialNumber"),
-                sm.get("MLB"),
-                sm.get("SystemUUID"),
-            )
-            await reboot_guest_and_wait_agent(plugin, timeout=600.0)
+        await self._maybe_grow_root_disk(ctx, plugin)
+        await self._maybe_randomize_smbios(ctx, plugin, opts)
 
         if mode == "static" and not ctx.get_ip_allocation():
-            raise DeploymentError("Static network requires a linked VM IP allocation")
+            raise DeploymentError(_MSG_STATIC_NETWORK_REQUIRES_LINKED_VM_IP)
         await configure_macos_network(plugin, mode=mode, alloc=ctx.get_ip_allocation())
-        if password:
-            from app.services.deployment.guest_config import old_guest_passwords_from_ctx
-
-            # First provision: guest still has the template image password.
-            # Do not treat the desired WHMCS password as the current one.
-            await set_guest_password(
-                plugin,
-                username,
-                str(password),
-                old_passwords=old_guest_passwords_from_ctx(ctx, include_stored=False),
-            )
+        await self._apply_guest_password(ctx, plugin, username, password)
         ctx.logger.info(
             "macOS guest configure done (network_mode=%s user=%s smbios=%s password_set=%s)",
             mode,
             username,
-            bool(randomize),
+            randomize,
             bool(password),
         )
 
@@ -357,7 +378,7 @@ class ConfigureWindowsGuestStep(DeploymentStep):
             ready = await plugin.guest_agent_ready()
         except Exception as exc:
             return StepOutcome.wait(
-                message="Guest agent not reachable yet",
+                message=_MSG_GUEST_AGENT_NOT_READY,
                 retry_after_seconds=self.default_retry_after_seconds,
                 detail={"last_error": str(exc)},
             )
@@ -380,7 +401,7 @@ class ConfigureWindowsGuestStep(DeploymentStep):
         mode = str(opts.get("network_mode") or "static").lower()
 
         if mode == "static" and not ctx.get_ip_allocation():
-            raise DeploymentError("Static network requires a linked VM IP allocation")
+            raise DeploymentError(_MSG_STATIC_NETWORK_REQUIRES_LINKED_VM_IP)
         await configure_windows_network(plugin, mode=mode, alloc=ctx.get_ip_allocation())
         if password:
             await set_guest_password(
@@ -414,7 +435,7 @@ class ApplyGuestPasswordStep(DeploymentStep):
             ready = await plugin.guest_agent_ready()
         except Exception as exc:
             return StepOutcome.wait(
-                message="Guest agent not reachable yet",
+                message=_MSG_GUEST_AGENT_NOT_READY,
                 retry_after_seconds=self.default_retry_after_seconds,
                 detail={"last_error": str(exc)},
             )

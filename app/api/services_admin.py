@@ -32,6 +32,11 @@ from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
 )
+
+_MSG_UNIQUE_SERVICE_NAME = "Unique service name"
+_MSG_NOT_A_VM_SERVICE = "Not a VM service"
+_MSG_VM_SERVICE_NOT_FOUND = "VM service not found"
+_MSG_OWNER_USER_NOT_FOUND = "Owner user not found"
 from app.services.service_resource import service_linked_server, service_server_id_for_response, vm_placement
 from app.models.server_activity import ServerActivityEventType
 from app.services.vm_strategy_executor import (
@@ -180,7 +185,7 @@ class ServicePermissionsAssignBody(BaseModel):
 class InternalTestVMServiceCreate(BaseModel):
     """Create a VM service without billing / external user (lab or QA)."""
 
-    name: str = Field(..., description="Unique service name")
+    name: str = Field(..., description=_MSG_UNIQUE_SERVICE_NAME)
     product_code: str
     vm_template_id: int = Field(..., description="Catalog VM template id (must be linked to product; sets OS strategy)")
     proxmox_cluster_id: int
@@ -197,7 +202,7 @@ class AdminVmServiceCreate(BaseModel):
     Proxmox placement is optional — omit cluster/node/vmid until the guest exists or is placed.
     """
 
-    name: str = Field(..., description="Unique service name")
+    name: str = Field(..., description=_MSG_UNIQUE_SERVICE_NAME)
     product_code: str
     vm_template_id: int = Field(..., description="Catalog VM template id linked to product")
     description: Optional[str] = None
@@ -233,7 +238,7 @@ class AdminHttpProxyServiceCreate(BaseModel):
     with no ``product_code`` falls back to a single auto-picked IP.
     """
 
-    name: str = Field(..., description="Unique service name")
+    name: str = Field(..., description=_MSG_UNIQUE_SERVICE_NAME)
     product_code: Optional[str] = Field(None, description="Catalog product code (http_proxy family)")
     description: Optional[str] = None
     service_config: Optional[Dict[str, Any]] = None
@@ -427,7 +432,7 @@ async def _admin_get_vm_plugin(db: Session, service: Service):
     node_name, vmid)``.
     """
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
     try:
         return await resolve_proxmox_plugin_for_service(db, service)
     except ProxmoxPlacementError as exc:
@@ -720,7 +725,7 @@ async def get_vm_service_admin(
     """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_VM_SERVICE_NOT_FOUND)
     await _sync_guest_state_from_proxmox(db, service)
     db.refresh(service)
     return _service_to_admin_response(db, service)
@@ -783,7 +788,7 @@ def admin_provision_vm_service(
     """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_VM_SERVICE_NOT_FOUND)
     try:
         service, _job = provision_vm_service_async(db, service_id)
     except ValueError as exc:
@@ -804,7 +809,7 @@ async def admin_update_vm_placement(
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.service_type != ServiceType.VM or not service.vm:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_VM_SERVICE_NOT_FOUND)
     if ProxmoxInventoryDAO.get_cluster(db, body.proxmox_cluster_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxmox cluster not found")
     log_server_activity_attempt(
@@ -1004,7 +1009,7 @@ async def admin_vm_vnc_popup(
     if not service:
         return RedirectResponse(url=build_relative_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
     if service.service_type != ServiceType.VM:
-        return RedirectResponse(url=build_relative_error_url("Not a VM service"), status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(url=build_relative_error_url(_MSG_NOT_A_VM_SERVICE), status_code=status.HTTP_302_FOUND)
     token = mint_launch_ticket(service.id, console_type=type)
     logger.info("Admin API: minted VM console popup ticket for service %s", service.id)
     return RedirectResponse(url=build_relative_launch_url(token), status_code=status.HTTP_302_FOUND)
@@ -1185,7 +1190,7 @@ def admin_recreate_vm_guest(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
     if service.vm:
         service.vm.guest_state = VMGuestState.PROVISIONING
         service.vm.guest_last_error = None
@@ -1234,7 +1239,7 @@ async def admin_put_vm_ssh_keys(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
     try:
         return await save_and_apply_ssh_public_keys(db, service, body.ssh_public_keys)
     except VmSshKeysError as exc:
@@ -1254,7 +1259,7 @@ async def admin_get_vm_ssh_keys(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
     fields = ssh_key_fields_for_service(db, service)
     return {
         **fields,
@@ -1278,7 +1283,7 @@ async def admin_reinstall_vm_guest(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_NOT_A_VM_SERVICE)
 
     payload = body or VmReinstallBody()
     if payload.vm_template_id is not None or payload.ssh_public_keys is not None:
@@ -1471,7 +1476,7 @@ async def assign_service_owner(
     if body.owner_user_id is not None:
         owner = UserDAO.get_by_id(db, body.owner_user_id)
         if owner is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner user not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_OWNER_USER_NOT_FOUND)
     service.owner_user_id = body.owner_user_id
     ServiceDAO.update(db, service)
     return _service_to_admin_response(db, service)
@@ -1689,7 +1694,7 @@ def _create_admin_vm_core(
     if owner_uid is not None and owner_user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Owner user not found",
+            detail=_MSG_OWNER_USER_NOT_FOUND,
         )
     prov = (
         ProvisioningSource.BILLING
@@ -1893,7 +1898,7 @@ async def create_http_proxy_service_admin(
     owner_uid = body.owner_user_id
     owner_user = UserDAO.get_by_id(db, owner_uid) if owner_uid is not None else None
     if owner_uid is not None and owner_user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner user not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_OWNER_USER_NOT_FOUND)
     prov = (
         ProvisioningSource.BILLING
         if owner_user is not None and owner_user.billing_integration_id

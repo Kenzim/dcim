@@ -13,6 +13,8 @@ from app.models.proxy_runner import ProxyRunner
 
 
 from typing import Annotated
+
+_MSG_PROXY_RUNNER_NOT_FOUND = "Proxy runner not found"
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 
@@ -96,7 +98,7 @@ async def get_proxy_runner(
 ):
     row = ProxyRunnerDAO.get_by_id(db, runner_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy runner not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PROXY_RUNNER_NOT_FOUND)
     return _to_response(row)
 
 
@@ -109,7 +111,7 @@ async def update_proxy_runner(
 ):
     row = ProxyRunnerDAO.get_by_id(db, runner_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy runner not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PROXY_RUNNER_NOT_FOUND)
     if data.name is not None and not data.name.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="name cannot be empty")
     row = ProxyRunnerDAO.update(db, row, name=data.name, enabled=data.enabled)
@@ -124,7 +126,7 @@ async def rotate_proxy_runner_key(
 ):
     row = ProxyRunnerDAO.get_by_id(db, runner_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy runner not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PROXY_RUNNER_NOT_FOUND)
     try:
         plaintext = ProxyRunnerDAO.rotate_key(db, row)
     except ValueError as exc:
@@ -139,4 +141,4 @@ async def delete_proxy_runner(
     db: DbDep,
 ):
     if not ProxyRunnerDAO.delete(db, runner_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy runner not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PROXY_RUNNER_NOT_FOUND)

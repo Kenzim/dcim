@@ -19,10 +19,33 @@ from app.services.server_activity_logger import (
     log_server_activity_success,
 )
 
+_MSG_SERVER_NOT_FOUND = "Server not found"
+
 
 def _plugin_for_server(_db, server):
     registry = get_registry()
     return registry.get_plugin(server.plugin_name, server.plugin_config)
+
+
+async def _run_mapped_server_power(plugin, mapped: str, *, force: bool) -> bool:
+    if mapped == "on":
+        return await plugin.power_on()
+    if mapped == "off":
+        return await plugin.power_off(force=force)
+    return await plugin.power_reset()
+
+
+def _log_mcp_power_result(db, server_id: int, mapped: str, *, key_id, success: bool) -> None:
+    logger = log_server_activity_success if success else log_server_activity_failure
+    logger(
+        db,
+        server_id=server_id,
+        event_type=ServerActivityEventType.POWER,
+        action=mapped,
+        source="mcp",
+        message=f"MCP power {mapped} {'ok' if success else 'failed'}",
+        details={"mcp_key_id": key_id},
+    )
 
 
 @mcp.tool()
@@ -32,7 +55,7 @@ async def get_server_power_state(server_id: int) -> dict:
     async def work(db, ctx):
         server = ServerDAO.get_by_id(db, server_id)
         if not server:
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         if not _server_has_capability(db, server, "power_control"):
             raise ValueError("Server does not have power control capability enabled")
         plugin = _plugin_for_server(db, server)
@@ -53,7 +76,7 @@ async def get_server_boot_options(server_id: int) -> dict:
     async def work(db, ctx):
         server = ServerDAO.get_by_id(db, server_id)
         if not server:
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         if not _server_has_capability(db, server, "boot_order"):
             raise ValueError("Boot order capability is disabled for this server")
         plugin = _plugin_for_server(db, server)
@@ -73,7 +96,7 @@ async def list_install_tasks(server_id: int) -> dict:
 
     def work(db, ctx):
         if not ServerDAO.get_by_id(db, server_id):
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         tasks = InstallationTaskDAO.get_by_server(db, server_id)
         return {
             "tasks": [
@@ -104,7 +127,7 @@ async def server_power(server_id: int, action: str, force: bool = False, confirm
             raise ValueError("action must be on, off, reset, or reboot")
         server = ServerDAO.get_by_id(db, server_id)
         if not server:
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         if not _server_has_capability(db, server, "power_control"):
             raise ValueError("Server does not have power control capability enabled")
         mapped = "reset" if action_norm == "reboot" else action_norm
@@ -119,12 +142,7 @@ async def server_power(server_id: int, action: str, force: bool = False, confirm
         )
         plugin = _plugin_for_server(db, server)
         try:
-            if mapped == "on":
-                success = await plugin.power_on()
-            elif mapped == "off":
-                success = await plugin.power_off(force=force)
-            else:
-                success = await plugin.power_reset()
+            success = await _run_mapped_server_power(plugin, mapped, force=force)
         except Exception as exc:
             log_server_activity_failure(
                 db,
@@ -137,16 +155,7 @@ async def server_power(server_id: int, action: str, force: bool = False, confirm
                 error=exc,
             )
             raise
-        logger = log_server_activity_success if success else log_server_activity_failure
-        logger(
-            db,
-            server_id=server.id,
-            event_type=ServerActivityEventType.POWER,
-            action=mapped,
-            source="mcp",
-            message=f"MCP power {mapped} {'ok' if success else 'failed'}",
-            details={"mcp_key_id": ctx.key_id},
-        )
+        _log_mcp_power_result(db, server.id, mapped, key_id=ctx.key_id, success=bool(success))
         return {"success": bool(success), "server_id": server.id, "action": mapped}
 
     return await run_tool(
@@ -171,7 +180,7 @@ async def server_set_boot(
     async def work(db, ctx):
         server = ServerDAO.get_by_id(db, server_id)
         if not server:
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         if not _server_has_capability(db, server, "boot_order"):
             raise ValueError("Boot order capability is disabled for this server")
         plugin = _plugin_for_server(db, server)
@@ -206,7 +215,7 @@ async def server_reinstall_os(
 
         server = ServerDAO.get_by_id(db, server_id)
         if not server:
-            raise ValueError("Server not found")
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
         services = [
             s for s in ServiceDAO.get_by_server(db, server_id) if s.service_type != ServiceType.VM
         ]

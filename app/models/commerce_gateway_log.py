@@ -19,6 +19,8 @@ from sqlalchemy.sql import func
 
 from app.core.database import Base
 
+_FK_SET_NULL = "SET NULL"
+
 _FK_BILLING_ACCOUNTS = "billing_accounts.id"
 _FK_INVOICES = "invoices.id"
 
@@ -53,19 +55,19 @@ class PaymentGatewayLog(Base):
     operation = Column(String(128), nullable=False)
     payment_id = Column(
         Integer,
-        ForeignKey("payments.id", ondelete="SET NULL"),
+        ForeignKey("payments.id", ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
     invoice_id = Column(
         Integer,
-        ForeignKey(_FK_INVOICES, ondelete="SET NULL"),
+        ForeignKey(_FK_INVOICES, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
     billing_account_id = Column(
         Integer,
-        ForeignKey(_FK_BILLING_ACCOUNTS, ondelete="SET NULL"),
+        ForeignKey(_FK_BILLING_ACCOUNTS, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )

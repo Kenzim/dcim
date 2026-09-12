@@ -65,6 +65,22 @@ def _template_options(db: Session, service: Service) -> Dict[str, Any]:
     return strategy_options_from_ctx(_ActionCtx(db, service))
 
 
+def _action_visible_for_audience(
+    action,
+    audience: Audience,
+    *,
+    client_allow: set,
+    perms: dict,
+) -> bool:
+    if audience == "admin":
+        return bool(action.admin)
+    if not action.client_eligible or action.name not in client_allow:
+        return False
+    if action.permission_key and not perms.get(action.permission_key, False):
+        return False
+    return True
+
+
 def list_actions(db: Session, service: Service, audience: Audience) -> List[Dict[str, Any]]:
     if service.service_type != ServiceType.VM:
         return []
@@ -77,20 +93,12 @@ def list_actions(db: Session, service: Service, audience: Audience) -> List[Dict
     perms = resolve_client_permissions(db, service) if audience == "client" else {}
     out: List[Dict[str, Any]] = []
     for action in strategy.actions():
-        if audience == "admin":
-            if not action.admin:
-                continue
-            enabled = True
-        else:
-            if not action.client_eligible:
-                continue
-            if action.name not in client_allow:
-                continue
-            if action.permission_key and not perms.get(action.permission_key, False):
-                continue
-            enabled = True
+        if not _action_visible_for_audience(
+            action, audience, client_allow=client_allow, perms=perms
+        ):
+            continue
         item = action.to_dict()
-        item["enabled"] = enabled
+        item["enabled"] = True
         item["audience"] = audience
         out.append(item)
     return out
@@ -196,6 +204,122 @@ async def _try_sync_guest_password(
         await asyncio.sleep(_SYNC_PASSWORD_POLL_INTERVAL)
 
 
+async def _run_change_password(
+    db: Session,
+    service: Service,
+    ctx: _ActionCtx,
+    plugin,
+    params: Dict[str, Any],
+    opts: Dict[str, Any],
+) -> Dict[str, Any]:
+    username = str(params.get("username") or opts.get("guest_username") or "client")
+    password = params.get("password")
+    if not password:
+        raise StrategyActionError("password is required", 400)
+
+    previous = _persist_desired_guest_password(service, str(password))
+    _set_guest_password_apply(
+        service, status="pending", username=username, error=None, job_id=None
+    )
+    ServiceDAO.update(db, service)
+
+    old_passwords = list(previous)
+    for candidate in old_guest_passwords_from_ctx(ctx, include_stored=False):
+        if candidate not in old_passwords and candidate != str(password):
+            old_passwords.append(candidate)
+
+    try:
+        applied = await _try_sync_guest_password(plugin, username, str(password), old_passwords)
+    except RuntimeError as exc:
+        _set_guest_password_apply(service, status="failed", error=str(exc))
+        ServiceDAO.update(db, service)
+        raise StrategyActionError(str(exc), 502) from exc
+
+    if applied:
+        _set_guest_password_apply(
+            service, status="applied", username=username, error=None, job_id=None
+        )
+        ServiceDAO.update(db, service)
+        return {
+            "status": "ok",
+            "action": "change_password",
+            "username": username,
+            "applied": True,
+            "pending": False,
+        }
+
+    try:
+        job = enqueue_apply_guest_password_job(db, service)
+    except ValueError as exc:
+        raise StrategyActionError(str(exc), 409) from exc
+
+    _set_guest_password_apply(
+        service,
+        status="pending",
+        username=username,
+        error=None,
+        job_id=job.id if job else None,
+        deferred=True,
+    )
+    ServiceDAO.update(db, service)
+    return {
+        "status": "ok",
+        "action": "change_password",
+        "username": username,
+        "applied": False,
+        "pending": True,
+        "job_id": job.id if job else None,
+    }
+
+
+async def _run_reset_network(
+    strategy,
+    plugin,
+    ctx: _ActionCtx,
+    opts: Dict[str, Any],
+) -> Dict[str, Any]:
+    mode = str(opts.get("network_mode") or "static").lower()
+    alloc = ctx.get_ip_allocation()
+    if strategy.name == "cloudinit_clone":
+        if mode == "static" and not alloc:
+            raise StrategyActionError("Static network requires a linked VM IP allocation", 409)
+        await apply_cloudinit_network_reset(plugin, alloc, mode=mode)
+        return {
+            "status": "ok",
+            "action": "reset_network",
+            "network_mode": mode,
+            "via": "cloudinit",
+        }
+    if strategy.name == "macos_guest_agent":
+        await configure_macos_network(plugin, mode=mode, alloc=alloc)
+    elif strategy.name == "windows_guest_agent":
+        await configure_windows_network(plugin, mode=mode, alloc=alloc)
+    else:
+        await configure_linux_network(plugin, mode=mode, alloc=alloc)
+    return {"status": "ok", "action": "reset_network", "network_mode": mode}
+
+
+async def _run_randomize_smbios(
+    strategy,
+    plugin,
+    ctx: _ActionCtx,
+    opts: Dict[str, Any],
+) -> Dict[str, Any]:
+    if strategy.name != "macos_guest_agent":
+        raise StrategyActionError("randomize_smbios is only supported for macOS guests", 400)
+    from app.services.vm_identity_stamp import stamp_vm_identity
+
+    sm = await apply_opencore_smbios(
+        plugin,
+        model=str(opts.get("smbios_model") or "iMacPro1,1"),
+        oc_disk=str(opts.get("opencore_disk") or "disk1s1"),
+        cfg_path=str(opts.get("opencore_config") or "/Volumes/OPENCORE/EFI/OC/config.plist"),
+    )
+    await stamp_vm_identity(ctx.db, ctx.service, plugin)
+    await reboot_guest_and_wait_agent(plugin, max_wait=600.0)
+    return {"status": "ok", "action": "randomize_smbios", "smbios": sm}
+
+
 async def run_action(
     db: Session,
     service: Service,
@@ -220,114 +344,11 @@ async def run_action(
     plugin = await _async_plugin(ctx)
 
     if action_name == "change_password":
-        username = str(params.get("username") or opts.get("guest_username") or "client")
-        password = params.get("password")
-        if not password:
-            raise StrategyActionError("password is required", 400)
-
-        # Desired state first so WHMCS success + console creds stay aligned even
-        # when the guest agent is not reachable yet.
-        previous = _persist_desired_guest_password(service, str(password))
-        _set_guest_password_apply(
-            service,
-            status="pending",
-            username=username,
-            error=None,
-            job_id=None,
-        )
-        ServiceDAO.update(db, service)
-
-        old_passwords = list(previous)
-        for candidate in old_guest_passwords_from_ctx(ctx, include_stored=False):
-            if candidate not in old_passwords and candidate != str(password):
-                old_passwords.append(candidate)
-
-        try:
-            applied = await _try_sync_guest_password(
-                plugin, username, str(password), old_passwords
-            )
-        except RuntimeError as exc:
-            _set_guest_password_apply(service, status="failed", error=str(exc))
-            ServiceDAO.update(db, service)
-            raise StrategyActionError(str(exc), 502) from exc
-
-        if applied:
-            _set_guest_password_apply(
-                service,
-                status="applied",
-                username=username,
-                error=None,
-                job_id=None,
-            )
-            ServiceDAO.update(db, service)
-            return {
-                "status": "ok",
-                "action": action_name,
-                "username": username,
-                "applied": True,
-                "pending": False,
-            }
-
-        try:
-            job = enqueue_apply_guest_password_job(db, service)
-        except ValueError as exc:
-            raise StrategyActionError(str(exc), 409) from exc
-
-        _set_guest_password_apply(
-            service,
-            status="pending",
-            username=username,
-            error=None,
-            job_id=job.id if job else None,
-            deferred=True,
-        )
-        ServiceDAO.update(db, service)
-        return {
-            "status": "ok",
-            "action": action_name,
-            "username": username,
-            "applied": False,
-            "pending": True,
-            "job_id": job.id if job else None,
-        }
-
+        return await _run_change_password(db, service, ctx, plugin, params, opts)
     if action_name == "reset_network":
-        mode = str(opts.get("network_mode") or "static").lower()
-        alloc = ctx.get_ip_allocation()
-        if strategy.name == "cloudinit_clone":
-            if mode == "static" and not alloc:
-                raise StrategyActionError("Static network requires a linked VM IP allocation", 409)
-            await apply_cloudinit_network_reset(plugin, alloc, mode=mode)
-            return {
-                "status": "ok",
-                "action": action_name,
-                "network_mode": mode,
-                "via": "cloudinit",
-            }
-        if strategy.name == "macos_guest_agent":
-            await configure_macos_network(plugin, mode=mode, alloc=alloc)
-        elif strategy.name == "windows_guest_agent":
-            await configure_windows_network(plugin, mode=mode, alloc=alloc)
-        else:
-            await configure_linux_network(plugin, mode=mode, alloc=alloc)
-        return {"status": "ok", "action": action_name, "network_mode": mode}
-
+        return await _run_reset_network(strategy, plugin, ctx, opts)
     if action_name == "randomize_smbios":
-        if strategy.name != "macos_guest_agent":
-            raise StrategyActionError("randomize_smbios is only supported for macOS guests", 400)
-        from app.services.vm_identity_stamp import stamp_vm_identity
-
-        sm = await apply_opencore_smbios(
-            plugin,
-            model=str(opts.get("smbios_model") or "iMacPro1,1"),
-            oc_disk=str(opts.get("opencore_disk") or "disk1s1"),
-            cfg_path=str(opts.get("opencore_config") or "/Volumes/OPENCORE/EFI/OC/config.plist"),
-        )
-        # Rebuild/preserve rf1 sku + description after Apple fields change.
-        await stamp_vm_identity(ctx.db, ctx.service, plugin)
-        await reboot_guest_and_wait_agent(plugin, timeout=600.0)
-        return {"status": "ok", "action": action_name, "smbios": sm}
-
+        return await _run_randomize_smbios(strategy, plugin, ctx, opts)
     raise StrategyActionError(f"Action '{action_name}' has no handler", 501)
 
 

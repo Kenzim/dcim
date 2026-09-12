@@ -30,6 +30,11 @@ from app.models.storefront import (
 )
 from app.services.markdown_sanitize import sanitize_markdown_to_html
 
+_MSG_CATEGORY_NOT_FOUND = "Category not found"
+_MSG_PRODUCT_NOT_FOUND = "Product not found"
+_MSG_PRICE_PLAN_NOT_FOUND = "Price plan not found"
+_MSG_PRODUCT_OPTION_NOT_FOUND = "Product option not found"
+
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 
@@ -381,7 +386,7 @@ def create_category(body: CategoryCreate, db: DbDep):
 def get_category(category_id: int, db: DbDep):
     row = FrontendProductCategoryDAO.get(db, category_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Category not found")
+        raise HTTPException(status_code=404, detail=_MSG_CATEGORY_NOT_FOUND)
     return _serialize_category(row)
 
 
@@ -391,7 +396,7 @@ def update_category(
 ):
     row = FrontendProductCategoryDAO.get(db, category_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Category not found")
+        raise HTTPException(status_code=404, detail=_MSG_CATEGORY_NOT_FOUND)
     data = body.model_dump(exclude_unset=True)
     if "slug" in data and data["slug"] != row.slug:
         existing = FrontendProductCategoryDAO.get_by_slug(db, data["slug"])
@@ -406,7 +411,7 @@ def update_category(
 def delete_category(category_id: int, db: DbDep):
     row = FrontendProductCategoryDAO.get(db, category_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Category not found")
+        raise HTTPException(status_code=404, detail=_MSG_CATEGORY_NOT_FOUND)
     db.delete(row)
     db.commit()
 
@@ -446,7 +451,7 @@ def create_product(body: ProductCreate, db: DbDep):
 def get_product(product_id: int, db: DbDep):
     row = FrontendProductDAO.get_product_with_plans(db, product_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Product not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_NOT_FOUND)
     payload = _serialize_product(row)
     payload["price_plans"] = [
         {**_serialize_plan(plan), "cycles": [_serialize_cycle(c) for c in plan.cycles]}
@@ -465,7 +470,7 @@ def update_product(
 ):
     row = FrontendProductDAO.get(db, product_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Product not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_NOT_FOUND)
     data = _product_fields(body, creating=False)
     if "slug" in data and data["slug"] != row.slug:
         existing = FrontendProductDAO.get_by_slug(db, data["slug"])
@@ -480,7 +485,7 @@ def update_product(
 def delete_product(product_id: int, db: DbDep):
     row = FrontendProductDAO.get(db, product_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Product not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_NOT_FOUND)
     db.delete(row)
     db.commit()
 
@@ -494,7 +499,7 @@ def create_price_plan(
 ):
     product = FrontendProductDAO.get(db, product_id)
     if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_NOT_FOUND)
     row = PricePlanDAO.create(
         db, frontend_product_id=product_id, **body.model_dump()
     )
@@ -506,7 +511,7 @@ def create_price_plan(
 def update_price_plan(plan_id: int, body: PricePlanUpdate, db: DbDep):
     row = PricePlanDAO.get(db, plan_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Price plan not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRICE_PLAN_NOT_FOUND)
     row = PricePlanDAO.update(db, row, **body.model_dump(exclude_unset=True))
     db.commit()
     return _serialize_plan(row)
@@ -516,7 +521,7 @@ def update_price_plan(plan_id: int, body: PricePlanUpdate, db: DbDep):
 def delete_price_plan(plan_id: int, db: DbDep):
     row = PricePlanDAO.get(db, plan_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Price plan not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRICE_PLAN_NOT_FOUND)
     db.delete(row)
     db.commit()
 
@@ -527,7 +532,7 @@ def create_plan_cycle(
 ):
     plan = PricePlanDAO.get(db, plan_id)
     if plan is None:
-        raise HTTPException(status_code=404, detail="Price plan not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRICE_PLAN_NOT_FOUND)
     row = PricePlanCycleDAO.create(db, price_plan_id=plan_id, **body.model_dump())
     db.commit()
     return _serialize_cycle(row)
@@ -561,7 +566,7 @@ def delete_plan_cycle(cycle_id: int, db: DbDep):
 def list_product_options(product_id: int, db: DbDep):
     product = FrontendProductDAO.get(db, product_id)
     if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_NOT_FOUND)
     rows = ProductOptionDAO.list_for_product(db, product_id)
     return [
         {**_serialize_option(opt), "values": [_serialize_option_value(v) for v in opt.values]}
@@ -575,7 +580,7 @@ def create_product_option(
 ):
     product = FrontendProductDAO.get(db, product_id)
     if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_NOT_FOUND)
     row = ProductOptionDAO.create(
         db, frontend_product_id=product_id, **body.model_dump()
     )
@@ -589,7 +594,7 @@ def update_product_option(
 ):
     row = ProductOptionDAO.get(db, option_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Product option not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_OPTION_NOT_FOUND)
     row = ProductOptionDAO.update(db, row, **body.model_dump(exclude_unset=True))
     db.commit()
     return _serialize_option(row)
@@ -599,7 +604,7 @@ def update_product_option(
 def delete_product_option(option_id: int, db: DbDep):
     row = ProductOptionDAO.get(db, option_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Product option not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_OPTION_NOT_FOUND)
     db.delete(row)
     db.commit()
 
@@ -610,7 +615,7 @@ def create_option_value(
 ):
     option = ProductOptionDAO.get(db, option_id)
     if option is None:
-        raise HTTPException(status_code=404, detail="Product option not found")
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_OPTION_NOT_FOUND)
     row = ProductOptionValueDAO.create(db, option_id=option_id, **body.model_dump())
     db.commit()
     return _serialize_option_value(row)

@@ -284,6 +284,106 @@ async def _advance(
     db.commit()
 
 
+async def _await_step_precheck(step_def, ctx, call_timeout: int) -> StepOutcome:
+    try:
+        return await asyncio.wait_for(step_def.precheck(ctx), timeout=call_timeout)
+    except asyncio.TimeoutError:
+        return StepOutcome.failed(
+            f"Step '{step_def.name}' precheck timed out after {call_timeout}s"
+        )
+    except DeploymentError as exc:
+        return StepOutcome.failed(str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Deployment step precheck crashed (job=%s step=%s)", ctx.job.id, step_def.name)
+        return StepOutcome.failed(f"precheck error: {exc}")
+
+
+async def _handle_precheck_outcome(
+    db: Session,
+    job,
+    step_row,
+    step_def,
+    steps,
+    ctx,
+    outcome: StepOutcome,
+    now: datetime,
+    strategy,
+) -> bool:
+    """Apply a precheck outcome. Return True when the tick is finished."""
+    if outcome.result == StepResult.WAIT:
+        step_row.status = DeploymentStepStatus.WAITING
+        step_row.message = outcome.message
+        if outcome.detail is not None:
+            step_row.detail = outcome.detail
+        retry = outcome.retry_after_seconds or step_def.default_retry_after_seconds
+        job.status = DeploymentJobStatus.WAITING
+        job.next_run_at = now + timedelta(seconds=max(1, int(retry)))
+        job.locked_by = None
+        job.locked_at = None
+        _mirror_in_flight(job, step_def.name, "waiting", strategy=strategy)
+        db.commit()
+        return True
+
+    if outcome.result == StepResult.SKIP:
+        step_row.status = DeploymentStepStatus.SKIPPED
+        step_row.finished_at = now
+        step_row.message = outcome.message
+        if outcome.detail is not None:
+            step_row.detail = outcome.detail
+        await _advance(db, job, steps, ctx, strategy=strategy)
+        return True
+
+    if outcome.result == StepResult.FAILED:
+        _retry_step_or_fail(
+            db,
+            job,
+            step_row,
+            outcome.message or f"Step '{step_def.name}' failed",
+            detail=outcome.detail,
+            strategy=strategy,
+        )
+        return True
+    return False
+
+
+async def _execute_step_and_advance(
+    db: Session,
+    job,
+    step_row,
+    step_def,
+    steps,
+    ctx,
+    call_timeout: int,
+    strategy,
+) -> None:
+    step_row.status = DeploymentStepStatus.RUNNING
+    db.commit()
+    try:
+        await asyncio.wait_for(step_def.execute(ctx), timeout=call_timeout)
+    except asyncio.TimeoutError:
+        _retry_step_or_fail(
+            db,
+            job,
+            step_row,
+            f"Step '{step_def.name}' execute timed out after {call_timeout}s",
+            strategy=strategy,
+        )
+        return
+    except DeploymentError as exc:
+        _retry_step_or_fail(db, job, step_row, str(exc), strategy=strategy)
+        return
+    except Exception as exc:
+        logger.exception("Deployment step execute crashed (job=%s step=%s)", job.id, step_def.name)
+        _retry_step_or_fail(db, job, step_row, f"execute error: {exc}", strategy=strategy)
+        return
+
+    step_row.status = DeploymentStepStatus.SUCCEEDED
+    step_row.finished_at = _utcnow()
+    step_row.message = None
+    job.error_message = None
+    await _advance(db, job, steps, ctx, strategy=strategy)
+
+
 async def run_job_tick(db: Session, job) -> None:
     """Run a single transition for an already-claimed (RUNNING, leased) job."""
     registry = get_deployment_strategy_registry()
@@ -319,7 +419,6 @@ async def run_job_tick(db: Session, job) -> None:
     ctx = DeploymentContext(db, service, job)
     now = _utcnow()
 
-    # Enforce per-step wait timeout (resets when a job-level retry clears started_at).
     if step_def.timeout_seconds and step_row.started_at is not None:
         started = _as_utc(step_row.started_at)
         if (now - started).total_seconds() > step_def.timeout_seconds:
@@ -340,81 +439,14 @@ async def run_job_tick(db: Session, job) -> None:
     if call_timeout < 1:
         call_timeout = DEFAULT_STEP_CALL_TIMEOUT_SECONDS
 
-    # --- precheck ---
-    try:
-        outcome = await asyncio.wait_for(step_def.precheck(ctx), timeout=call_timeout)
-    except asyncio.TimeoutError:
-        outcome = StepOutcome.failed(
-            f"Step '{step_def.name}' precheck timed out after {call_timeout}s"
-        )
-    except DeploymentError as exc:
-        outcome = StepOutcome.failed(str(exc))
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("Deployment step precheck crashed (job=%s step=%s)", job.id, step_def.name)
-        outcome = StepOutcome.failed(f"precheck error: {exc}")
-
-    if outcome.result == StepResult.WAIT:
-        step_row.status = DeploymentStepStatus.WAITING
-        step_row.message = outcome.message
-        if outcome.detail is not None:
-            step_row.detail = outcome.detail
-        retry = outcome.retry_after_seconds or step_def.default_retry_after_seconds
-        job.status = DeploymentJobStatus.WAITING
-        job.next_run_at = now + timedelta(seconds=max(1, int(retry)))
-        job.locked_by = None
-        job.locked_at = None
-        _mirror_in_flight(job, step_def.name, "waiting", strategy=strategy)
-        db.commit()
+    outcome = await _await_step_precheck(step_def, ctx, call_timeout)
+    if await _handle_precheck_outcome(
+        db, job, step_row, step_def, steps, ctx, outcome, now, strategy
+    ):
         return
 
-    if outcome.result == StepResult.SKIP:
-        step_row.status = DeploymentStepStatus.SKIPPED
-        step_row.finished_at = now
-        step_row.message = outcome.message
-        if outcome.detail is not None:
-            step_row.detail = outcome.detail
-        await _advance(db, job, steps, ctx, strategy=strategy)
-        return
-
-    if outcome.result == StepResult.FAILED:
-        _retry_step_or_fail(
-            db,
-            job,
-            step_row,
-            outcome.message or f"Step '{step_def.name}' failed",
-            detail=outcome.detail,
-            strategy=strategy,
-        )
-        return
-
-    # --- ready: execute ---
-    step_row.status = DeploymentStepStatus.RUNNING
     if outcome.message:
         step_row.message = outcome.message
-    db.commit()
-
-    try:
-        await asyncio.wait_for(step_def.execute(ctx), timeout=call_timeout)
-    except asyncio.TimeoutError:
-        _retry_step_or_fail(
-            db,
-            job,
-            step_row,
-            f"Step '{step_def.name}' execute timed out after {call_timeout}s",
-            strategy=strategy,
-        )
-        return
-    except DeploymentError as exc:
-        _retry_step_or_fail(db, job, step_row, str(exc), strategy=strategy)
-        return
-    except Exception as exc:
-        logger.exception("Deployment step execute crashed (job=%s step=%s)", job.id, step_def.name)
-        _retry_step_or_fail(db, job, step_row, f"execute error: {exc}", strategy=strategy)
-        return
-
-    step_row.status = DeploymentStepStatus.SUCCEEDED
-    step_row.finished_at = _utcnow()
-    step_row.message = None
-    # Clear last transient error once a step succeeds again.
-    job.error_message = None
-    await _advance(db, job, steps, ctx, strategy=strategy)
+    await _execute_step_and_advance(
+        db, job, step_row, step_def, steps, ctx, call_timeout, strategy
+    )
