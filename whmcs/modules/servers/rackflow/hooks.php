@@ -2851,6 +2851,80 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
       });
     }
 
+    var vmPanel = document.getElementById('rf-as-virtual-media-panel');
+    if (vmPanel) {
+      var vmMountBtn = document.getElementById('rf-as-virtual-media-mount');
+      var vmEjectBtn = document.getElementById('rf-as-virtual-media-eject');
+      var vmIso = document.getElementById('rf-as-virtual-media-iso');
+      var vmBoot = document.getElementById('rf-as-virtual-media-boot-once');
+      var vmMsg = document.getElementById('rf-as-virtual-media-msg');
+      var vmStatus = document.getElementById('rf-as-virtual-media-status');
+      function setVmMsg(text, isError) {
+        if (!vmMsg) { return; }
+        if (!text) {
+          vmMsg.hidden = true;
+          vmMsg.textContent = '';
+          return;
+        }
+        vmMsg.hidden = false;
+        vmMsg.textContent = text;
+        vmMsg.style.color = isError ? '#b42318' : '#0a7a32';
+      }
+      function runAdminVirtualMedia(op, btn) {
+        var url = vmPanel.getAttribute('data-rf-virtual-media-action') || '';
+        var sid = vmPanel.getAttribute('data-rf-service-id') || '';
+        if (!url || !sid) {
+          setVmMsg('Virtual media URL missing. Reload the page.', true);
+          return;
+        }
+        if (op === 'insert' && (!vmIso || !vmIso.value)) {
+          setVmMsg('Select an ISO.', true);
+          return;
+        }
+        var body = new URLSearchParams();
+        body.set('serviceid', sid);
+        body.set('op', op);
+        if (vmIso && vmIso.value) { body.set('filename', vmIso.value); }
+        if (vmBoot && vmBoot.checked) { body.set('boot_once', '1'); }
+        if (btn) { btn.disabled = true; }
+        setVmMsg('Working…', false);
+        fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: body.toString(),
+          credentials: 'same-origin'
+        }).then(function (res) {
+          return res.json().catch(function () {
+            return { ok: false, error: 'Unexpected response (' + res.status + ')' };
+          });
+        }).then(function (data) {
+          if (btn) { btn.disabled = false; }
+          if (!data || !data.ok) {
+            setVmMsg((data && data.error) ? data.error : 'Request failed.', true);
+            return;
+          }
+          setVmMsg(data.message || 'Done.', false);
+          if (vmStatus && data.data) {
+            vmStatus.textContent = data.data.inserted
+              ? ('Mounted: ' + (data.data.image_name || 'ISO'))
+              : 'No virtual CD inserted';
+          }
+        }).catch(function (err) {
+          if (btn) { btn.disabled = false; }
+          setVmMsg(err && err.message ? err.message : 'Request failed.', true);
+        });
+      }
+      if (vmMountBtn) {
+        vmMountBtn.addEventListener('click', function () { runAdminVirtualMedia('insert', vmMountBtn); });
+      }
+      if (vmEjectBtn) {
+        vmEjectBtn.addEventListener('click', function () { runAdminVirtualMedia('eject', vmEjectBtn); });
+      }
+    }
+
     // VM backups: create/delete/restore via AJAX (supports naming; no Module Commands).
     var backupsPanel = document.getElementById('rf-as-backups-panel');
     var backupCreateBtn = document.getElementById('rf-as-backup-create');

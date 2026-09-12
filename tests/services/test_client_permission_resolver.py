@@ -47,6 +47,7 @@ def test_defaults_match_pre_permission_system_behavior(db_session):
     assert perms[PermissionKey.BMS_POWER] is True
     assert perms[PermissionKey.BMS_IPMI] is True
     assert perms[PermissionKey.BMS_KVM] is True
+    assert perms[PermissionKey.BMS_SOL] is True
     assert perms[PermissionKey.SERVICE_PORTAL] is True
     assert perms[PermissionKey.BMS_REINSTALL] is False
     assert perms[PermissionKey.BMS_RUN_SCRIPT] is False

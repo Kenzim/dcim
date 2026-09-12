@@ -199,6 +199,25 @@ async def test_list_clients_and_create(
 
 
 @pytest.mark.asyncio
+async def test_list_virtual_media_profiles(mcp_auth_ctx_read, mcp_sessionlocal):
+    from app.mcp.tools.console import list_virtual_media_profiles
+
+    result = await list_virtual_media_profiles()
+    ids = {row["id"] for row in result["profiles"]}
+    assert {"asrockrack", "gigabyte", "supermicro"} <= ids
+
+
+@pytest.mark.asyncio
+async def test_insert_virtual_media_requires_confirm(mcp_auth_ctx_destructive, mcp_sessionlocal):
+    from app.mcp.tools.console import insert_virtual_media, eject_virtual_media
+
+    with pytest.raises(ToolError, match="confirm=true"):
+        await insert_virtual_media(filename="ubuntu.iso", server_id=1, confirm=False)
+    with pytest.raises(ToolError, match="confirm=true"):
+        await eject_virtual_media(server_id=1, confirm=False)
+
+
+@pytest.mark.asyncio
 async def test_list_subnets_empty(db_session, mcp_auth_ctx_read, mcp_sessionlocal):
     from app.mcp.tools.ipam import list_subnets
 

@@ -25,6 +25,13 @@ from app.services.download_token_service import get_download_token_service
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
 from app.services.ipmi_kvm import IpmiKvmUnavailable, normalize_profile_id
 from app.api.ipmi_kvm import kvm_popup_redirect
+from app.api.sol import perform_sol_send, sol_popup_redirect
+from app.services.sol import SolUnavailable, normalize_profile_id as normalize_sol_profile_id
+from app.services.virtual_media import (
+    VirtualMediaUnavailable,
+    normalize_profile_id as normalize_virtual_media_profile_id,
+)
+from app.schemas.sol import SolSendRequest, SolSendResponse
 from app.services.secret_masking import (
     MASKED_SECRET_PLACEHOLDER,
     mask_plugin_config,
@@ -45,6 +52,20 @@ def _normalize_kvm_profile(value: str | None) -> str | None:
     try:
         return normalize_profile_id(value)
     except IpmiKvmUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
+
+
+def _normalize_sol_profile(value: str | None) -> str | None:
+    try:
+        return normalize_sol_profile_id(value)
+    except SolUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
+
+
+def _normalize_virtual_media_profile(value: str | None) -> str | None:
+    try:
+        return normalize_virtual_media_profile_id(value)
+    except VirtualMediaUnavailable as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
 
 router = APIRouter()
@@ -308,6 +329,8 @@ class ServerCreate(BaseModel):
     ipmi_viewer_username: str | None = None
     ipmi_viewer_password: str | None = None
     ipmi_kvm_profile: str | None = None
+    sol_profile: str | None = None
+    virtual_media_profile: str | None = None
     server_group_ids: List[int] = []  # List of server group IDs to assign server to
 
 
@@ -340,6 +363,8 @@ class ServerUpdate(BaseModel):
     ipmi_viewer_username: str | None = None
     ipmi_viewer_password: str | None = None
     ipmi_kvm_profile: str | None = None
+    sol_profile: str | None = None
+    virtual_media_profile: str | None = None
     server_group_ids: List[int] | None = None  # List of server group IDs to assign server to
     preview_asset_id: int | None = None  # Optional image from asset manager for server preview
 
@@ -382,6 +407,8 @@ class ServerResponse(BaseModel):
     ipmi_viewer_username: str | None
     ipmi_viewer_password: str | None = None  # Viewer BMC login shown when IPMI proxy is enabled
     ipmi_kvm_profile: str | None = None
+    sol_profile: str | None = None
+    virtual_media_profile: str | None = None
     preview_asset_id: int | None = None
 
     class Config:
@@ -1231,6 +1258,8 @@ async def create_server(
             ipmi_viewer_username=server_data.ipmi_viewer_username,
             ipmi_viewer_password=server_data.ipmi_viewer_password,
             ipmi_kvm_profile=_normalize_kvm_profile(server_data.ipmi_kvm_profile),
+            sol_profile=_normalize_sol_profile(server_data.sol_profile),
+            virtual_media_profile=_normalize_virtual_media_profile(server_data.virtual_media_profile),
         )
         
         # Create disks
@@ -1359,6 +1388,31 @@ async def server_kvm_popup(
     """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
     del auth
     return kvm_popup_redirect(ServerDAO.get_by_id(db, server_id))
+
+
+@router.get("/{server_id}/sol-popup")
+async def server_sol_popup(
+    server_id: int,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Mint a one-time SOL launch ticket and redirect to ``/sol?t=...``."""
+    del auth
+    return sol_popup_redirect(ServerDAO.get_by_id(db, server_id))
+
+
+@router.post("/{server_id}/sol/send", response_model=SolSendResponse)
+async def server_sol_send(
+    server_id: int,
+    body: SolSendRequest,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Write bytes into this server's SOL hub (starts it if idle)."""
+    del auth
+    return await perform_sol_send(
+        db, ServerDAO.get_by_id(db, server_id), body, source="admin.server"
+    )
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
@@ -2046,6 +2100,12 @@ async def update_server(
             server.ipmi_viewer_password = server_data.ipmi_viewer_password
     if "ipmi_kvm_profile" in server_data.model_fields_set:
         server.ipmi_kvm_profile = _normalize_kvm_profile(server_data.ipmi_kvm_profile)
+    if "sol_profile" in server_data.model_fields_set:
+        server.sol_profile = _normalize_sol_profile(server_data.sol_profile)
+    if "virtual_media_profile" in server_data.model_fields_set:
+        server.virtual_media_profile = _normalize_virtual_media_profile(
+            server_data.virtual_media_profile
+        )
     
     # Update disks if provided
     if server_data.disks is not None:

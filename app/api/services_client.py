@@ -14,6 +14,13 @@ from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnav
 from app.services.ipmi_kvm import kvm_ready
 from app.api.ipmi_kvm import kvm_popup_redirect
 from app.services.ipmi_kvm_ticket_service import build_relative_error_url as kvm_error_url
+from app.api.sol import perform_sol_send, sol_popup_redirect
+from app.services.sol import sol_ready
+from app.services.virtual_media import virtual_media_ready
+from app.services.sol.ticket_service import build_relative_error_url as sol_error_url
+from app.schemas.sol import SolSendRequest, SolSendResponse
+from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
+from app.api.virtual_media import perform_eject, perform_insert, perform_status
 from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 from app.services.vm_guest_credentials import session_guest_fields
 from app.services.vm_vnc_ticket_service import (
@@ -270,6 +277,16 @@ async def client_get_service(
         and kvm_ready(server)
         and permissions.get(PermissionKey.BMS_KVM, False)
     )
+    sol_console_available = bool(
+        server
+        and sol_ready(server)
+        and permissions.get(PermissionKey.BMS_SOL, False)
+    )
+    virtual_media_available = bool(
+        server
+        and virtual_media_ready(server)
+        and permissions.get(PermissionKey.BMS_VIRTUAL_MEDIA, False)
+    )
     console_available = bool(
         is_vm
         and cid is not None
@@ -325,6 +342,8 @@ async def client_get_service(
             "ipmi_viewer_username": getattr(server, "ipmi_viewer_username", None) if ipmi_available else None,
             "ipmi_viewer_password": getattr(server, "ipmi_viewer_password", None) if ipmi_available else None,
             "kvm_console_available": kvm_console_available,
+            "sol_console_available": sol_console_available,
+            "virtual_media_available": virtual_media_available,
             "console_available": console_available,
             "backups_available": backups_available,
             "proxy_credentials_available": bool(
@@ -510,6 +529,116 @@ async def kvm_popup_redirect_handler(
         return RedirectResponse(url=kvm_error_url(str(exc.detail)), status_code=status.HTTP_302_FOUND)
 
     return kvm_popup_redirect(service_linked_server(db, service))
+
+
+@router.get("/{service_id}/sol-popup")
+async def sol_popup_redirect_handler(
+    service_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Mint a one-time SOL launch ticket and redirect to ``/sol?t=...``."""
+    user_id = auth.get("user_id")
+    if not user_id:
+        return RedirectResponse(
+            url=sol_error_url("User session required"), status_code=status.HTTP_302_FOUND
+        )
+
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.owner_user_id != int(user_id):
+        return RedirectResponse(url=sol_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+
+    try:
+        require_client_permission(db, service, PermissionKey.BMS_SOL)
+    except HTTPException as exc:
+        return RedirectResponse(url=sol_error_url(str(exc.detail)), status_code=status.HTTP_302_FOUND)
+
+    return sol_popup_redirect(service_linked_server(db, service))
+
+
+@router.get("/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse)
+async def client_get_virtual_media(
+    service_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    user_id = auth.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.owner_user_id != int(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
+    return await perform_status(service_linked_server(db, service))
+
+
+@router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse)
+async def client_insert_virtual_media(
+    service_id: int,
+    body: VirtualMediaInsertRequest,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    user_id = auth.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.owner_user_id != int(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
+    return await perform_insert(
+        db,
+        service_linked_server(db, service),
+        body.filename,
+        boot_once=body.boot_once,
+        source="client_api",
+        service_id=service.id,
+    )
+
+
+@router.post("/{service_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse)
+async def client_eject_virtual_media(
+    service_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    user_id = auth.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.owner_user_id != int(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
+    return await perform_eject(
+        db,
+        service_linked_server(db, service),
+        source="client_api",
+        service_id=service.id,
+    )
+
+
+@router.post("/{service_id}/sol/send", response_model=SolSendResponse)
+async def client_sol_send(
+    service_id: int,
+    body: SolSendRequest,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Write bytes into the linked server's SOL hub for a service the caller owns."""
+    user_id = auth.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User session required")
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.owner_user_id != int(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    require_client_permission(db, service, PermissionKey.BMS_SOL)
+    return await perform_sol_send(
+        db,
+        service_linked_server(db, service),
+        body,
+        source="client.service",
+        service_id=service.id,
+    )
 
 
 def _client_owned_proxy_service(db: Session, service_id: int, user_id, permission: str):

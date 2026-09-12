@@ -41,6 +41,11 @@ from app.api.services_client import (
     get_vnc_console_types as _get_vnc_console_types,
     vnc_popup_redirect as _vnc_popup_redirect,
     kvm_popup_redirect_handler as _kvm_popup_redirect,
+    sol_popup_redirect_handler as _sol_popup_redirect,
+    client_sol_send as _client_sol_send,
+    client_get_virtual_media as _client_get_virtual_media,
+    client_insert_virtual_media as _client_insert_virtual_media,
+    client_eject_virtual_media as _client_eject_virtual_media,
     client_list_strategy_actions as _client_list_strategy_actions,
     client_run_strategy_action as _client_run_strategy_action,
     client_list_vm_backups as _client_list_vm_backups,
@@ -56,6 +61,8 @@ from app.api.services_client import (
 from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody
 from app.schemas.billing import PowerAction
 from app.schemas.vm_vnc import VmConsoleTypesResponse, VmVncSessionResponse
+from app.schemas.sol import SolSendRequest, SolSendResponse
+from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
 from app.services.client_portal_service import redeem_sso_ticket
 from app.services.user_session_service import mint_user_session
 
@@ -160,6 +167,59 @@ async def client_kvm_popup(
     """Mint a launch ticket and redirect to ``/kvm?t=...`` for a real popup window."""
     _require_non_admin_client(auth)
     return await _kvm_popup_redirect(service_id=service_id, auth=auth, db=db)
+
+
+@router.get("/services/{service_id}/sol-popup")
+async def client_sol_popup(
+    service_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Mint a launch ticket and redirect to ``/sol?t=...`` for a real popup window."""
+    _require_non_admin_client(auth)
+    return await _sol_popup_redirect(service_id=service_id, auth=auth, db=db)
+
+
+@router.post("/services/{service_id}/sol/send", response_model=SolSendResponse)
+async def client_sol_send(
+    service_id: int,
+    body: SolSendRequest,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    _require_non_admin_client(auth)
+    return await _client_sol_send(service_id=service_id, body=body, auth=auth, db=db)
+
+
+@router.get("/services/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse)
+async def client_get_virtual_media(
+    service_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    _require_non_admin_client(auth)
+    return await _client_get_virtual_media(service_id=service_id, auth=auth, db=db)
+
+
+@router.post("/services/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse)
+async def client_insert_virtual_media(
+    service_id: int,
+    body: VirtualMediaInsertRequest,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    _require_non_admin_client(auth)
+    return await _client_insert_virtual_media(service_id=service_id, body=body, auth=auth, db=db)
+
+
+@router.post("/services/{service_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse)
+async def client_eject_virtual_media(
+    service_id: int,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    _require_non_admin_client(auth)
+    return await _client_eject_virtual_media(service_id=service_id, auth=auth, db=db)
 
 
 @router.get("/services/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse)

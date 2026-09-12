@@ -404,6 +404,20 @@ class Settings(BaseSettings):
     # Unset: auto-detect via the Redis UDP connect trick.
     kvm_hub_advertise_host: Optional[str] = None
 
+    # Bare-metal Serial-over-LAN (ipmitool SOL hub + xterm popup).
+    sol_launch_ttl_seconds: int = 60
+    sol_session_ttl_seconds: int = 3600
+    sol_hub_idle_seconds: int = 20
+    sol_hub_lock_ttl_seconds: int = 30
+
+    # BMC virtual CD: URL the BMC uses to fetch ISOs (must be reachable from
+    # the management network). Falls back to public_base_url then public_app_url.
+    # Prefer HTTP; many BMCs reject HTTPS with a private CA.
+    virtual_media_base_url: Optional[str] = None
+    # Reusable ISO image-token lifetime (seconds). VirtualMedia downloads can
+    # take a long time for multi-GB images (HEAD + Range + GET).
+    virtual_media_token_ttl_seconds: int = 14400
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

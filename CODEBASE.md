@@ -17,6 +17,8 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Business logic (provisioning, DHCP gen, VM place) | `app/services/` |
 | Server power / BMC / Proxmox actions | `app/plugins/` (`ipmi.py`, `proxmox.py`, …) |
 | Native HTML5 KVM (AMI MegaRAC / SuperMicro ATEN) | `app/services/ipmi_kvm/` (`asrockrack.py`, `gigabyte.py`, `supermicro.py`) + `app/api/ipmi_kvm.py` |
+| Bare-metal Serial-over-LAN | `app/services/sol/` (`ipmi_sol.py` + hub/tickets) + `app/api/sol.py` |
+| BMC virtual CD (ISO mount) | `app/services/virtual_media/` + `app/api/virtual_media.py` |
 | Switch SNMP / bandwidth | `app/plugins/snmpv3.py`, poller `scripts/snmp_bandwidth_poller.py` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
@@ -146,6 +148,8 @@ All included from `app/main.py` under `/api`.
 | `utils.py` | `/api/utils` | e.g. password generation |
 | `vm_vnc.py` | `/api/vnc` | Public VM console redeem + WS bridge to Proxmox |
 | `ipmi_kvm.py` | `/api/kvm`, `/api/ipmi-kvm` | HTML5 KVM redeem/asset/WS bridge + admin profile list |
+| `sol.py` | `/api/sol` | SOL profile list, redeem, WS bridge; send lives on server/service/billing routes |
+| `virtual_media.py` | `/api/virtual-media` | Profile list, BMC ISO fetch (path token + Range), admin server mount/eject |
 | `dhcp.py` / `tftp.py` | **Not mounted** in `main.py` — prefer location-scoped DHCP/TFTP APIs | |
 
 **Largest / hottest files:** `server.py`, `server_interaction.py`, `billing.py`, `network_switch.py`, `services_admin.py`.
@@ -200,6 +204,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
 | `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC) |
+| `sol/` | Bare-metal SOL profiles (`ipmi_sol` via ipmitool), shared hub, REST send |
+| `virtual_media/` | BMC virtual CD (ASRockRack/Gigabyte MegaRAC Redfish, SuperMicro Redfish), shared `isos/` catalog, path-token fetch URL, insert/eject orchestrator |
 
 ---
 
@@ -249,7 +255,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 |---|---|
 | `src/main.js` | Mounts `App.svelte` |
 | `src/App.svelte` | Root shell |
-| `src/routes/index.js` | Top routes: `/`, `/admin`, `/admin/*`, `/client`, `/login`, `/vnc`, `/kvm` |
+| `src/routes/index.js` | Top routes: `/`, `/admin`, `/admin/*`, `/client`, `/login`, `/vnc`, `/kvm`, `/sol` |
 | `src/routes/Home.svelte` | Landing |
 | `src/routes/Admin.svelte` | **Admin shell + all sub-route → component mapping** |
 | `src/routes/Client.svelte` | Client area shell |
@@ -370,6 +376,8 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 | `whmcs/modules/addons/rackflow_updater/` | Addon menu entry (Addons → RackFlow Git Updates) |
 | `whmcs/modules/servers/rackflow/vnc_open.php` | One-click VM VNC popup launcher |
 | `whmcs/modules/servers/rackflow/kvm_open.php` | One-click IPMI HTML5 KVM popup launcher |
+| `whmcs/modules/servers/rackflow/sol_open.php` | One-click Serial-over-LAN popup launcher |
+| `whmcs/modules/servers/rackflow/virtual_media_action.php` | AJAX BMC virtual CD mount/eject (not a popup) |
 | `whmcs/modules/servers/rackflow/ipmi_open.php` | One-click BMC web-UI proxy launcher |
 | `whmcs/modules/servers/rackflow/whmcs.json` | Module metadata |
 | `whmcs/includes/hooks/` | WHMCS hooks |

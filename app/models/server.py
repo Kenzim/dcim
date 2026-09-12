@@ -55,6 +55,10 @@ class Server(Base):
     ipmi_viewer_password = Column(String(255), nullable=True)  # Password for IPMI web access (read-only)
     # Native HTML5 KVM vendor profile (e.g. "asrockrack", "gigabyte"); empty/null disables Open KVM
     ipmi_kvm_profile = Column(String(64), nullable=True)
+    # Serial-over-LAN method profile (e.g. "ipmi_sol"); empty/null disables Open Serial
+    sol_profile = Column(String(64), nullable=True)
+    # BMC virtual CD profile (e.g. "asrockrack", "gigabyte", "supermicro"); empty/null disables mount
+    virtual_media_profile = Column(String(64), nullable=True)
     preview_asset_id = Column(Integer, ForeignKey("assets.id"), nullable=True, index=True)  # Optional image from asset manager
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

@@ -55,7 +55,8 @@
     }
     if (d.service_type === 'bare_metal') {
       const t = [{ id: 'overview', label: 'Overview' }];
-      if (d.ipmi_available || d.kvm_console_available) t.push({ id: 'console', label: 'Console' });
+      if (d.ipmi_available || d.kvm_console_available || d.sol_console_available) t.push({ id: 'console', label: 'Console' });
+      if (d.virtual_media_available) t.push({ id: 'media', label: 'Media' });
       return t;
     }
     return [];

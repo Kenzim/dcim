@@ -1,6 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, getRacks, testServerConnection, getServerGroups, getServerCapabilities, updateServerCapabilities, listIpmiKvmProfiles } from '../lib/api.js';
+  import { getServers, createServer, updateServer, deleteServer, getPlugins, getLocations, getRacks, testServerConnection, getServerGroups, getServerCapabilities, updateServerCapabilities, listIpmiKvmProfiles, listSolProfiles, listVirtualMediaProfiles } from '../lib/api.js';
   import { onMount, tick } from 'svelte';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
@@ -17,6 +17,8 @@
   let availableRacks = [];
   let serverGroups = [];
   let kvmProfiles = [];
+  let solProfiles = [];
+  let virtualMediaProfiles = [];
   let loading = true;
   let error = null;
   let showModal = false;
@@ -69,7 +71,9 @@
     ipmi_web_management_url: '',
     ipmi_viewer_username: '',
     ipmi_viewer_password: '',
-    ipmi_kvm_profile: ''
+    ipmi_kvm_profile: '',
+    sol_profile: '',
+    virtual_media_profile: ''
   };
   let formError = null;
   let pluginConfigError = null;
@@ -85,10 +89,10 @@
 
   onMount(async () => {
     if (embeddedEditServer) {
-      await Promise.all([loadPlugins(), loadLocations(), loadRacks(), loadServerGroups(), loadKvmProfiles()]);
+      await Promise.all([loadPlugins(), loadLocations(), loadRacks(), loadServerGroups(), loadKvmProfiles(), loadSolProfiles(), loadVirtualMediaProfiles()]);
       await openEditModal(embeddedEditServer);
     } else {
-      await Promise.all([loadServers(), loadPlugins(), loadLocations(), loadRacks(), loadServerGroups(), loadKvmProfiles()]);
+      await Promise.all([loadServers(), loadPlugins(), loadLocations(), loadRacks(), loadServerGroups(), loadKvmProfiles(), loadSolProfiles(), loadVirtualMediaProfiles()]);
       const params = new URLSearchParams(window.location.search);
       const editId = params.get('edit');
       if (editId && servers.length > 0) {
@@ -116,6 +120,22 @@
       kvmProfiles = await listIpmiKvmProfiles();
     } catch (err) {
       console.error('Failed to load IPMI KVM profiles:', err);
+    }
+  }
+
+  async function loadSolProfiles() {
+    try {
+      solProfiles = await listSolProfiles();
+    } catch (err) {
+      console.error('Failed to load SOL profiles:', err);
+    }
+  }
+
+  async function loadVirtualMediaProfiles() {
+    try {
+      virtualMediaProfiles = await listVirtualMediaProfiles();
+    } catch (err) {
+      console.error('Failed to load virtual media profiles:', err);
     }
   }
 
@@ -250,7 +270,9 @@
       ipmi_web_management_url: '',
       ipmi_viewer_username: '',
       ipmi_viewer_password: '',
-      ipmi_kvm_profile: ''
+      ipmi_kvm_profile: '',
+      sol_profile: '',
+      virtual_media_profile: ''
     };
     formError = null;
     pluginConfigError = null;
@@ -291,6 +313,8 @@
       ipmi_viewer_username: server.ipmi_viewer_username || '',
       ipmi_viewer_password: server.ipmi_viewer_password || '',
       ipmi_kvm_profile: server.ipmi_kvm_profile || '',
+      sol_profile: server.sol_profile || '',
+      virtual_media_profile: server.virtual_media_profile || '',
       disks: (server.disks || []).map(d => ({
         type: d.type,
         capacity_gb: d.capacity_gb,
@@ -542,6 +566,8 @@
       const submitData = {
         ...formData,
         ipmi_kvm_profile: formData.ipmi_kvm_profile || null,
+        sol_profile: formData.sol_profile || null,
+        virtual_media_profile: formData.virtual_media_profile || null,
         pxe_kernel_args_general: formData.pxe_kernel_args_general && formData.pxe_kernel_args_general.trim()
           ? formData.pxe_kernel_args_general.trim()
           : null,
@@ -1040,6 +1066,26 @@
               {/each}
             </select>
             <small class="field-help">Native BMC HTML5 KVM in a popup (separate from Open IPMI). The Rackflow host must reach BMC HTTPS.</small>
+          </div>
+          <div class="form-group">
+            <label for="sol-profile">Serial-over-LAN profile</label>
+            <select id="sol-profile" bind:value={formData.sol_profile}>
+              <option value="">Disabled</option>
+              {#each solProfiles as profile}
+                <option value={profile.id}>{profile.display_name}</option>
+              {/each}
+            </select>
+            <small class="field-help">IPMI SOL (and later methods) in a popup. The host OS/BIOS must have serial console redirection enabled to see output.</small>
+          </div>
+          <div class="form-group">
+            <label for="virtual-media-profile">Virtual CD profile</label>
+            <select id="virtual-media-profile" bind:value={formData.virtual_media_profile}>
+              <option value="">Disabled</option>
+              {#each virtualMediaProfiles as profile}
+                <option value={profile.id}>{profile.display_name}</option>
+              {/each}
+            </select>
+            <small class="field-help">BMC virtual CD (ISO mount). Independent of KVM/SOL. The BMC must be able to fetch VIRTUAL_MEDIA_BASE_URL (or PUBLIC_BASE_URL).</small>
           </div>
         </div>
 
