@@ -1,6 +1,6 @@
 """Seed copies bms.ipmi onto bms.kvm for existing presets and overrides."""
 from app.core.client_permissions import PermissionKey
-from app.core.seed_permission_sets import _copy_kvm_from_ipmi, seed_permission_sets
+from app.core.seed_permission_sets import _copy_kvm_from_ipmi, _copy_sol_from_kvm, _copy_virtual_media_from_kvm, seed_permission_sets
 from app.dao.permission_set_dao import PermissionSetDAO
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ProvisioningSource
@@ -45,6 +45,34 @@ def test_copy_kvm_from_ipmi_only_when_unset():
     assert PermissionKey.BMS_KVM not in empty
 
 
+def test_copy_sol_from_kvm_only_when_unset():
+    granted = {PermissionKey.BMS_KVM: True}
+    assert _copy_sol_from_kvm(granted) is True
+    assert granted[PermissionKey.BMS_SOL] is True
+
+    denied = {PermissionKey.BMS_KVM: False}
+    assert _copy_sol_from_kvm(denied) is True
+    assert denied[PermissionKey.BMS_SOL] is False
+
+    already = {PermissionKey.BMS_KVM: False, PermissionKey.BMS_SOL: True}
+    assert _copy_sol_from_kvm(already) is False
+    assert already[PermissionKey.BMS_SOL] is True
+
+
+def test_copy_virtual_media_from_kvm_only_when_unset():
+    granted = {PermissionKey.BMS_KVM: True}
+    assert _copy_virtual_media_from_kvm(granted) is True
+    assert granted[PermissionKey.BMS_VIRTUAL_MEDIA] is True
+
+    denied = {PermissionKey.BMS_KVM: False}
+    assert _copy_virtual_media_from_kvm(denied) is True
+    assert denied[PermissionKey.BMS_VIRTUAL_MEDIA] is False
+
+    already = {PermissionKey.BMS_KVM: False, PermissionKey.BMS_VIRTUAL_MEDIA: True}
+    assert _copy_virtual_media_from_kvm(already) is False
+    assert already[PermissionKey.BMS_VIRTUAL_MEDIA] is True
+
+
 def test_seed_backfills_kvm_from_ipmi_on_preset_and_override(db_session):
     preset = PermissionSetDAO.create(
         db_session,
@@ -60,4 +88,6 @@ def test_seed_backfills_kvm_from_ipmi_on_preset_and_override(db_session):
     db_session.refresh(preset)
     db_session.refresh(service)
     assert preset.permissions[PermissionKey.BMS_KVM] is False
+    assert preset.permissions[PermissionKey.BMS_VIRTUAL_MEDIA] is False
     assert service.permission_overrides[PermissionKey.BMS_KVM] is False
+    assert service.permission_overrides[PermissionKey.BMS_VIRTUAL_MEDIA] is False

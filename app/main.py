@@ -109,6 +109,7 @@ async def lifespan(app: FastAPI):
     _seed_startup_data()
 
     from app.services.ipmi_kvm.hub import ensure_splice_server, shutdown_kvm_hubs
+    from app.services.sol.hub import shutdown_sol_hubs
 
     try:
         await ensure_splice_server()
@@ -127,6 +128,10 @@ async def lifespan(app: FastAPI):
         await shutdown_kvm_hubs()
     except Exception:  # noqa: BLE001
         logger.debug("KVM hub shutdown failed", exc_info=True)
+    try:
+        await shutdown_sol_hubs()
+    except Exception:  # noqa: BLE001
+        logger.debug("SOL hub shutdown failed", exc_info=True)
 
     await _shutdown_background_workers(background_tasks)
 
@@ -387,6 +392,14 @@ api_router.include_router(vm_vnc_api.router, tags=["vm-vnc"])
 from app.api import ipmi_kvm as ipmi_kvm_api
 api_router.include_router(ipmi_kvm_api.profiles_router, tags=["ipmi-kvm"])
 api_router.include_router(ipmi_kvm_api.router, tags=["ipmi-kvm"])
+
+from app.api import sol as sol_api
+api_router.include_router(sol_api.router, tags=["sol"])
+
+from app.api import virtual_media as virtual_media_api
+api_router.include_router(virtual_media_api.profiles_router, tags=["virtual-media"])
+api_router.include_router(virtual_media_api.images_router, tags=["virtual-media"])
+api_router.include_router(virtual_media_api.servers_router, tags=["virtual-media"])
 
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)

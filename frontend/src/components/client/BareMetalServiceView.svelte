@@ -1,14 +1,20 @@
 <script>
   import { Alert, Button } from '../ui/index.js';
-  import { createClientIpmiTicket } from '../../lib/api.js';
+  import { createClientIpmiTicket, getClientVirtualMedia, insertClientVirtualMedia, ejectClientVirtualMedia } from '../../lib/api.js';
 
   /** Bare-metal service detail payload. */
   export let service;
-  /** @type {'overview' | 'console'} */
+  /** @type {'overview' | 'console' | 'media'} */
   export let activeTab = 'overview';
 
   let busy = false;
   let consoleError = '';
+  let media = null;
+  let mediaError = '';
+  let loadingMedia = false;
+  let selectedIso = '';
+  let bootOnce = false;
+  let mediaBusy = false;
 
   async function openIpmi() {
     if (busy) return;
@@ -31,6 +37,63 @@
       `rackflow_kvm_${service.id}`,
       'width=1024,height=768,resizable=yes,scrollbars=yes'
     );
+  }
+
+  function openSol() {
+    if (!service?.id) return;
+    window.open(
+      `/api/client/services/${service.id}/sol-popup`,
+      `rackflow_sol_${service.id}`,
+      'width=1024,height=768,resizable=yes,scrollbars=yes'
+    );
+  }
+
+  let mediaLoadedKey = '';
+
+  async function loadMedia() {
+    if (!service?.id || !service.virtual_media_available) return;
+    const key = `${service.id}:${activeTab}`;
+    if (mediaLoadedKey === key && media) return;
+    mediaLoadedKey = key;
+    loadingMedia = true;
+    mediaError = '';
+    try {
+      media = await getClientVirtualMedia(service.id);
+    } catch (e) {
+      mediaError = e.message || String(e);
+      media = null;
+    } finally {
+      loadingMedia = false;
+    }
+  }
+
+  $: if (activeTab === 'media' && service?.virtual_media_available) {
+    loadMedia();
+  }
+
+  async function handleMount() {
+    if (!selectedIso) return;
+    mediaBusy = true;
+    mediaError = '';
+    try {
+      media = await insertClientVirtualMedia(service.id, selectedIso, bootOnce);
+    } catch (e) {
+      mediaError = e.message || String(e);
+    } finally {
+      mediaBusy = false;
+    }
+  }
+
+  async function handleEject() {
+    mediaBusy = true;
+    mediaError = '';
+    try {
+      media = await ejectClientVirtualMedia(service.id);
+    } catch (e) {
+      mediaError = e.message || String(e);
+    } finally {
+      mediaBusy = false;
+    }
   }
 </script>
 
@@ -99,7 +162,7 @@
 {:else if activeTab === 'console'}
   <section class="stack">
     <p class="muted">
-      Console links are single-use and expire shortly. Open IPMI uses the BMC web UI proxy; Open KVM is a native HTML5 console popup.
+      Console links are single-use and expire shortly. Open IPMI uses the BMC web UI proxy; Open KVM is a native HTML5 console popup; Open Serial is Serial-over-LAN.
     </p>
     {#if consoleError}
       <Alert type="error">{consoleError}</Alert>
@@ -121,6 +184,14 @@
         Open KVM
       </Button>
       {/if}
+      {#if service.sol_console_available}
+      <Button on:click={openSol}>
+        <svg slot="icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" width="15" height="15">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+        Open Serial
+      </Button>
+      {/if}
     </div>
     {#if service.ipmi_viewer_username || service.ipmi_viewer_password}
       <dl class="facts creds">
@@ -137,6 +208,42 @@
           </div>
         {/if}
       </dl>
+    {/if}
+  </section>
+{:else if activeTab === 'media'}
+  <section class="stack">
+    <p class="muted">
+      Mount an ISO from the operator catalog as a virtual CD on this server’s BMC. Optional next-boot-from-CD does not reboot the machine.
+    </p>
+    {#if mediaError}
+      <Alert type="error">{mediaError}</Alert>
+    {/if}
+    {#if loadingMedia}
+      <p class="muted">Loading virtual media…</p>
+    {:else}
+      <p class="muted">
+        {#if media?.inserted}
+          Mounted: <code>{media.image_name || 'ISO'}</code>
+        {:else}
+          No virtual CD inserted
+        {/if}
+      </p>
+      <div class="media-row">
+        <select bind:value={selectedIso} disabled={mediaBusy}>
+          <option value="">Select ISO</option>
+          {#each (media?.isos || []) as iso}
+            <option value={iso.filename}>{iso.filename}</option>
+          {/each}
+        </select>
+        <label class="muted">
+          <input type="checkbox" bind:checked={bootOnce} disabled={mediaBusy} />
+          Set next boot to CD-ROM
+        </label>
+      </div>
+      <div class="console-actions">
+        <Button disabled={mediaBusy || !selectedIso} on:click={handleMount}>{mediaBusy ? 'Working…' : 'Mount'}</Button>
+        <Button variant="secondary" disabled={mediaBusy || !media?.inserted} on:click={handleEject}>Eject</Button>
+      </div>
     {/if}
   </section>
 {/if}
@@ -231,6 +338,20 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+  }
+  .media-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+  }
+  .media-row select {
+    min-width: 220px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
   }
   .muted {
     margin: 0;

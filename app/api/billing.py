@@ -69,6 +69,7 @@ from app.services.os_template_service import (
     get_template_service,
     generate_parameter_password,
 )
+from app.services.virtual_media.iso_catalog import catalog_for_billing
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
@@ -78,6 +79,17 @@ from app.services.ipmi_kvm_ticket_service import (
     build_launch_url as build_kvm_launch_url,
     mint_launch_ticket as mint_kvm_launch_ticket,
 )
+from app.services.sol import sol_ready
+from app.services.virtual_media import virtual_media_ready
+from app.api.sol import perform_sol_send
+from app.api.virtual_media import perform_eject, perform_insert, perform_status
+from app.services.sol.ticket_service import (
+    SolTicketUnavailable,
+    build_launch_url as build_sol_launch_url,
+    mint_launch_ticket as mint_sol_launch_ticket,
+)
+from app.schemas.sol import SolSendRequest, SolSendResponse, SolTicketResponse
+from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
 from app.services.vm_vnc_ticket_service import mint_launch_ticket, build_launch_url, VmVncUnavailable
 from app.schemas.vm_vnc import VmVncTicketResponse
 from app.schemas.ipmi_kvm import IpmiKvmTicketResponse
@@ -2658,6 +2670,7 @@ async def get_service_status(
     power_key = _power_permission_key(service)
     ipmi_granted = bool(client_permissions.get(PermissionKey.BMS_IPMI, False))
     kvm_granted = bool(client_permissions.get(PermissionKey.BMS_KVM, False))
+    sol_granted = bool(client_permissions.get(PermissionKey.BMS_SOL, False))
 
     ipmi_proxy_available = bool(
         server
@@ -2666,6 +2679,9 @@ async def get_service_status(
         and ipmi_granted
     )
     kvm_console_available = bool(server and kvm_ready(server) and kvm_granted)
+    sol_console_available = bool(server and sol_ready(server) and sol_granted)
+    virtual_media_granted = bool(client_permissions.get(PermissionKey.BMS_VIRTUAL_MEDIA, False))
+    virtual_media_available = bool(server and virtual_media_ready(server) and virtual_media_granted)
 
     vnc_console_granted = bool(client_permissions.get(PermissionKey.VM_CONSOLE, False))
     vnc_cid, _vnc_node, vnc_vmid = vm_placement(service)
@@ -2730,6 +2746,8 @@ async def get_service_status(
             getattr(server, "ipmi_viewer_password", None) if ipmi_proxy_available else None
         ),
         "kvm_console_available": kvm_console_available,
+        "sol_console_available": sol_console_available,
+        "virtual_media_available": virtual_media_available,
         "vnc_console_available": vnc_console_available,
         "backups_available": backups_available,
         "proxy_credentials_available": proxy_credentials_available,
@@ -3230,6 +3248,133 @@ async def create_kvm_ticket(
         integration.name,
     )
     return IpmiKvmTicketResponse(launch_url=launch_url, expires_in=settings.ipmi_kvm_launch_ttl_seconds)
+
+
+@router.post("/services/{service_id}/sol-ticket", status_code=status.HTTP_200_OK, response_model=SolTicketResponse)
+async def create_sol_ticket(
+    service_id: int,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+):
+    """Mint a one-time Serial-over-LAN launch ticket.
+
+    Gated by ``bms.sol``. The returned ``launch_url`` opens Rackflow's ``/sol``
+    page. BMC credentials never reach the browser.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+        )
+
+    _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_SOL)
+
+    server = service_linked_server(db, service)
+    if not server:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_NO_LINKED_SERVER_MSG,
+        )
+    if not sol_ready(server):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Serial-over-LAN is not configured for this server",
+        )
+
+    try:
+        token = mint_sol_launch_ticket(server.id)
+        launch_url = build_sol_launch_url(token)
+    except SolTicketUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
+
+    logger.info(
+        "Billing API: Minted SOL launch ticket for service %s (server %s) via integration '%s'",
+        service_id,
+        server.id,
+        integration.name,
+    )
+    return SolTicketResponse(launch_url=launch_url, expires_in=settings.sol_launch_ttl_seconds)
+
+
+@router.post("/services/{service_id}/sol/send", status_code=status.HTTP_200_OK, response_model=SolSendResponse)
+async def billing_sol_send(
+    service_id: int,
+    body: SolSendRequest,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+):
+    """Write bytes into the linked server's SOL hub (billing / WHMCS)."""
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+        )
+    _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_SOL)
+    return await perform_sol_send(
+        db,
+        service_linked_server(db, service),
+        body,
+        source="billing.service",
+        service_id=service.id,
+    )
+
+
+@router.get("/services/{service_id}/virtual-media", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse)
+async def billing_get_virtual_media(
+    service_id: int,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+):
+    """BMC virtual CD status + ISO catalog for a billed service."""
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
+    return await perform_status(service_linked_server(db, service))
+
+
+@router.post("/services/{service_id}/virtual-media/insert", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse)
+async def billing_insert_virtual_media(
+    service_id: int,
+    body: VirtualMediaInsertRequest,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
+    return await perform_insert(
+        db,
+        service_linked_server(db, service),
+        body.filename,
+        boot_once=body.boot_once,
+        source="billing.service",
+        service_id=service.id,
+    )
+
+
+@router.post("/services/{service_id}/virtual-media/eject", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse)
+async def billing_eject_virtual_media(
+    service_id: int,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+):
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    _assert_billing_owned_service(service, integration)
+    require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
+    return await perform_eject(
+        db,
+        service_linked_server(db, service),
+        source="billing.service",
+        service_id=service.id,
+    )
 
 
 @router.post("/services/{service_id}/portal-sso", status_code=status.HTTP_200_OK)
@@ -3936,22 +4081,8 @@ async def list_isos_billing(
     List ISO files available for boot (read-only).
     Returns filenames for use in product configuration.
     """
-    isos_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "isos",
-    )
-    if not os.path.exists(isos_dir):
-        return []
-    result = []
-    for filename in os.listdir(isos_dir):
-        file_path = os.path.join(isos_dir, filename)
-        if os.path.isfile(file_path) and filename.lower().endswith(".iso"):
-            result.append({
-                "id": filename,
-                "name": filename,
-                "size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
-            })
-    return sorted(result, key=lambda x: x["name"])
+    del integration
+    return catalog_for_billing()
 
 
 @router.get("/temp-os", response_model=List[dict])

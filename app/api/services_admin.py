@@ -55,6 +55,11 @@ from app.services.vm_vnc_ticket_service import (
 )
 from app.api.ipmi_kvm import kvm_popup_redirect
 from app.services.ipmi_kvm_ticket_service import build_relative_error_url as kvm_error_url
+from app.api.sol import perform_sol_send, sol_popup_redirect
+from app.services.sol.ticket_service import build_relative_error_url as sol_error_url
+from app.schemas.sol import SolSendRequest, SolSendResponse
+from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
+from app.api.virtual_media import perform_eject, perform_insert, perform_status
 from app.schemas.vm_vnc import VmConsoleTypesResponse, VmVncSessionResponse
 from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody, map_backup_error
 from app.services.vm_backup_service import (
@@ -1013,6 +1018,92 @@ async def admin_kvm_popup(
     if not service:
         return RedirectResponse(url=kvm_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
     return kvm_popup_redirect(service_linked_server(db, service))
+
+
+@router.get("/{service_id}/sol-popup")
+async def admin_sol_popup(
+    service_id: int,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Mint a one-time SOL launch ticket and redirect to ``/sol?t=...``."""
+    del auth
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        return RedirectResponse(url=sol_error_url("Service not found"), status_code=status.HTTP_302_FOUND)
+    return sol_popup_redirect(service_linked_server(db, service))
+
+
+@router.get("/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse)
+async def admin_get_virtual_media(
+    service_id: int,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    del auth
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    return await perform_status(service_linked_server(db, service))
+
+
+@router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse)
+async def admin_insert_virtual_media(
+    service_id: int,
+    body: VirtualMediaInsertRequest,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    del auth
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    return await perform_insert(
+        db,
+        service_linked_server(db, service),
+        body.filename,
+        boot_once=body.boot_once,
+        source="admin_api",
+        service_id=service.id,
+    )
+
+
+@router.post("/{service_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse)
+async def admin_eject_virtual_media(
+    service_id: int,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    del auth
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    return await perform_eject(
+        db,
+        service_linked_server(db, service),
+        source="admin_api",
+        service_id=service.id,
+    )
+
+
+@router.post("/{service_id}/sol/send", response_model=SolSendResponse)
+async def admin_sol_send(
+    service_id: int,
+    body: SolSendRequest,
+    auth: Annotated[dict, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    del auth
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    return await perform_sol_send(
+        db,
+        service_linked_server(db, service),
+        body,
+        source="admin.service",
+        service_id=service.id,
+    )
 
 
 @router.post("/{service_id}/vm/destroy", response_model=ServiceResponse)

@@ -3,7 +3,7 @@
   import ServerControlsPanel from './ServerControlsPanel.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
-  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix, previewServerKernelArgs, openServerIpmiConsole } from '../lib/api.js';
+  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
 
@@ -22,6 +22,12 @@
   let isos = [];
   let loadingISOs = false;
   let selectedISO = null;
+  let virtualMedia = null;
+  let loadingVirtualMedia = false;
+  let virtualMediaError = '';
+  let selectedVirtualIso = '';
+  let virtualBootOnce = false;
+  let virtualMediaBusy = false;
   let scripts = [];
   let loadingScripts = false;
   let selectedScript = null;
@@ -185,6 +191,15 @@
     );
   }
 
+  function handleOpenSol() {
+    if (!serverId) return;
+    window.open(
+      `/api/servers/${serverId}/sol-popup`,
+      `rackflow_sol_${serverId}`,
+      'width=1024,height=768,resizable=yes,scrollbars=yes'
+    );
+  }
+
   async function handleOpenIpmi() {
     openingIpmi = true;
     ipmiLaunchError = null;
@@ -241,6 +256,7 @@
       loadLocations(),
       loadISOs(),
       loadScripts(),
+      loadScripts(),
       loadTemplates(),
       loadServerGroups(),
       id != null ? loadCableRuns() : Promise.resolve(),
@@ -252,6 +268,7 @@
         loadServerActivity(),
         loadServerBandwidth(),
         loadHardwareDetectionReports(),
+        loadVirtualMedia(),
       ]);
     }
     if (id != null) {
@@ -1119,6 +1136,64 @@
     }
   }
 
+  async function loadVirtualMedia() {
+    virtualMediaError = '';
+    if (!server?.virtual_media_profile) {
+      virtualMedia = null;
+      return;
+    }
+    try {
+      loadingVirtualMedia = true;
+      virtualMedia = await getServerVirtualMedia(serverId);
+      const names = (virtualMedia.isos || []).map((iso) => iso.filename);
+      if (selectedVirtualIso && !names.includes(selectedVirtualIso)) {
+        selectedVirtualIso = '';
+      }
+    } catch (err) {
+      console.error('Failed to load virtual media:', err);
+      virtualMedia = null;
+      virtualMediaError = err.message || String(err);
+    } finally {
+      loadingVirtualMedia = false;
+    }
+  }
+
+  async function handleVirtualMediaInsert() {
+    if (!selectedVirtualIso) {
+      alert('Please select an ISO file');
+      return;
+    }
+    if (!confirm(`Mount ISO "${selectedVirtualIso}" as a virtual CD on "${server.name}"?`)) {
+      return;
+    }
+    virtualMediaBusy = true;
+    virtualMediaError = '';
+    try {
+      virtualMedia = await insertServerVirtualMedia(serverId, selectedVirtualIso, virtualBootOnce);
+      await loadServerActivity();
+    } catch (err) {
+      virtualMediaError = err.message || String(err);
+    } finally {
+      virtualMediaBusy = false;
+    }
+  }
+
+  async function handleVirtualMediaEject() {
+    if (!confirm(`Eject the virtual CD on "${server.name}"?`)) {
+      return;
+    }
+    virtualMediaBusy = true;
+    virtualMediaError = '';
+    try {
+      virtualMedia = await ejectServerVirtualMedia(serverId);
+      await loadServerActivity();
+    } catch (err) {
+      virtualMediaError = err.message || String(err);
+    } finally {
+      virtualMediaBusy = false;
+    }
+  }
+
   async function loadBootTask() {
     try {
       bootTask = await getBootTask(serverId);
@@ -1559,7 +1634,7 @@
             {powerActionInProgress === 'reset' ? '…' : 'Reboot'}
           </button>
         </div>
-        {#if server.ipmi_proxy_enabled || server.ipmi_kvm_profile}
+        {#if server.ipmi_proxy_enabled || server.ipmi_kvm_profile || server.sol_profile}
           <div class="left-pane-ipmi">
             <div class="left-pane-ipmi-btns">
             {#if server.ipmi_proxy_enabled}
@@ -1570,6 +1645,11 @@
             {#if server.ipmi_kvm_profile}
             <button type="button" class="btn-open-ipmi" on:click={handleOpenKvm} title="Open native HTML5 KVM in a popup">
               Open KVM
+            </button>
+            {/if}
+            {#if server.sol_profile}
+            <button type="button" class="btn-open-ipmi" on:click={handleOpenSol} title="Open serial-over-LAN in a popup">
+              Open Serial
             </button>
             {/if}
             </div>
@@ -1805,6 +1885,7 @@
               <div class="boot-ops-grid">
                 <div class="boot-op-card">
                   <span class="boot-op-label">Boot from ISO</span>
+                  <span class="boot-op-hint">PXE chainloads the ISO (not BMC virtual media)</span>
                   {#if loadingISOs}
                     <span class="boot-op-hint">Loading…</span>
                   {:else if isos.length === 0}
@@ -1818,6 +1899,41 @@
                         {/each}
                       </select>
                       <button type="button" class="btn-primary btn-sm" on:click={handleBootISO} disabled={!selectedISO || creatingBootTask}>{creatingBootTask ? '…' : 'Boot'}</button>
+                    </div>
+                  {/if}
+                </div>
+                <div class="boot-op-card">
+                  <span class="boot-op-label">BMC virtual CD</span>
+                  {#if !server.virtual_media_profile}
+                    <span class="boot-op-hint">Set a Virtual CD profile on the server to mount ISOs via the BMC</span>
+                  {:else if loadingVirtualMedia}
+                    <span class="boot-op-hint">Loading…</span>
+                  {:else}
+                    <span class="boot-op-hint">
+                      {#if virtualMedia?.inserted}
+                        Mounted: {virtualMedia.image_name || 'ISO'}
+                      {:else}
+                        No virtual CD inserted
+                      {/if}
+                    </span>
+                    {#if virtualMediaError}
+                      <span class="boot-op-hint">{virtualMediaError}</span>
+                    {/if}
+                    <div class="boot-op-row boot-op-row-stack">
+                      <select bind:value={selectedVirtualIso} disabled={virtualMediaBusy} class="boot-op-select">
+                        <option value="">Select ISO</option>
+                        {#each (virtualMedia?.isos || isos) as iso}
+                          <option value={iso.filename}>{iso.filename}</option>
+                        {/each}
+                      </select>
+                      <label class="boot-op-hint">
+                        <input type="checkbox" bind:checked={virtualBootOnce} disabled={virtualMediaBusy} />
+                        Set next boot to CD-ROM
+                      </label>
+                      <div class="boot-op-row">
+                        <button type="button" class="btn-primary btn-sm" on:click={handleVirtualMediaInsert} disabled={!selectedVirtualIso || virtualMediaBusy}>{virtualMediaBusy ? '…' : 'Mount'}</button>
+                        <button type="button" class="btn-secondary btn-sm" on:click={handleVirtualMediaEject} disabled={virtualMediaBusy || !virtualMedia?.inserted}>Eject</button>
+                      </div>
                     </div>
                   {/if}
                 </div>

@@ -288,6 +288,8 @@ def client(db_session, mock_redis, monkeypatch):
     import app.services.client_portal_service as client_portal_service_module
     import app.services.vm_vnc_ticket_service as vm_vnc_ticket_module
     import app.services.ipmi_kvm_ticket_service as ipmi_kvm_ticket_module
+    import app.services.sol.ticket_service as sol_ticket_module
+    import app.services.virtual_media.image_token as virtual_media_image_token_module
     import app.core.commerce_auth as commerce_auth_module
 
     monkeypatch.setattr(redis_module, "redis_client", mock_redis)
@@ -300,6 +302,8 @@ def client(db_session, mock_redis, monkeypatch):
     monkeypatch.setattr(client_portal_service_module, "redis_client", mock_redis)
     monkeypatch.setattr(vm_vnc_ticket_module, "redis_client", mock_redis)
     monkeypatch.setattr(ipmi_kvm_ticket_module, "redis_client", mock_redis)
+    monkeypatch.setattr(sol_ticket_module, "redis_client", mock_redis)
+    monkeypatch.setattr(virtual_media_image_token_module, "redis_client", mock_redis)
     monkeypatch.setattr(commerce_auth_module, "redis_client", mock_redis)
 
     app.dependency_overrides[get_db] = override_get_db

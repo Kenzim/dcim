@@ -248,6 +248,11 @@ function rackflow_ClientArea(array $vars)
     $ipmiViewerPassword = '';
     $vncAvailable = false;
     $kvmAvailable = false;
+    $solAvailable = false;
+    $virtualMediaAvailable = false;
+    $virtualMediaInserted = false;
+    $virtualMediaImage = '';
+    $virtualMediaIsos = array();
     $changePasswordAllowed = false;
     $backupsAllowed = false;
     $backups = array();
@@ -304,6 +309,19 @@ function rackflow_ClientArea(array $vars)
             }
             $vncAvailable = !empty($statusData['vnc_console_available']);
             $kvmAvailable = !empty($statusData['kvm_console_available']);
+            $solAvailable = !empty($statusData['sol_console_available']);
+            $virtualMediaAvailable = !empty($statusData['virtual_media_available']);
+            if ($virtualMediaAvailable) {
+                $media = rackflow_fetchVirtualMedia($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
+                if ($media) {
+                    $virtualMediaInserted = !empty($media['inserted']);
+                    $virtualMediaImage = isset($media['image_name']) ? (string)$media['image_name'] : '';
+                    $virtualMediaIsos = rackflow_isoRowsFromPayload(isset($media['isos']) ? $media['isos'] : array());
+                }
+                if (empty($virtualMediaIsos)) {
+                    $virtualMediaIsos = rackflow_fetchBillingIsos($apiConfig['url'], $apiConfig['key']);
+                }
+            }
             $backupsAllowed = !empty($statusData['backups_available']);
             $clientPermissions = isset($statusData['client_permissions']) && is_array($statusData['client_permissions'])
                 ? $statusData['client_permissions']
@@ -387,6 +405,17 @@ function rackflow_ClientArea(array $vars)
             'rackflow_kvm_available' => $kvmAvailable,
             'rackflow_kvm_open_url' => !empty($params['serviceid'])
                 ? rackflow_kvmOpenEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
+                : '',
+            'rackflow_sol_available' => $solAvailable,
+            'rackflow_sol_open_url' => !empty($params['serviceid'])
+                ? rackflow_solOpenEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
+                : '',
+            'rackflow_virtual_media_available' => $virtualMediaAvailable && !empty($rackflowServiceId),
+            'rackflow_virtual_media_inserted' => $virtualMediaInserted,
+            'rackflow_virtual_media_image' => $virtualMediaImage,
+            'rackflow_virtual_media_isos' => $virtualMediaIsos,
+            'rackflow_virtual_media_action_url' => !empty($params['serviceid'])
+                ? rackflow_virtualMediaActionEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
                 : '',
             // One-click sign-in to the RackFlow client portal, scoped to this client's own
             // service. Gated by product Module Setting (configoption8) and the
@@ -3837,6 +3866,98 @@ function rackflow_backupActionEndpointUrl($whmcsServiceId, $systemUrl = '')
 }
 
 /**
+ * Same-origin URL for the AJAX virtual CD mount/eject endpoint.
+ *
+ * @param int    $whmcsServiceId
+ * @param string $systemUrl
+ * @return string
+ */
+function rackflow_virtualMediaActionEndpointUrl($whmcsServiceId, $systemUrl = '')
+{
+    unset($whmcsServiceId);
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $path = (string)parse_url($systemUrl, PHP_URL_PATH);
+            $basePath = rtrim($path, '/');
+        }
+    }
+    return $basePath . '/modules/servers/rackflow/virtual_media_action.php';
+}
+
+/**
+ * Fetch BMC virtual-media status + ISO catalog from the billing API.
+ *
+ * @param string $apiUrl
+ * @param string $apiKey
+ * @param int    $rackflowSvcId
+ * @return array|null
+ */
+function rackflow_fetchVirtualMedia($apiUrl, $apiKey, $rackflowSvcId)
+{
+    if (empty($apiUrl) || empty($apiKey) || empty($rackflowSvcId)) {
+        return null;
+    }
+    $result = rackflow_apiCall($apiUrl, $apiKey, 'GET', '/api/billing/services/' . (int)$rackflowSvcId . '/virtual-media', null);
+    if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
+        return null;
+    }
+    return $result['data'];
+}
+
+/**
+ * Normalize ISO catalog rows from billing or virtual-media payloads.
+ *
+ * @param mixed $rows
+ * @return array<int, array{filename: string}>
+ */
+function rackflow_isoRowsFromPayload($rows)
+{
+    $out = array();
+    if (!is_array($rows)) {
+        return $out;
+    }
+    foreach ($rows as $iso) {
+        if (!is_array($iso)) {
+            continue;
+        }
+        $name = '';
+        if (!empty($iso['filename'])) {
+            $name = (string)$iso['filename'];
+        } elseif (!empty($iso['name'])) {
+            $name = (string)$iso['name'];
+        } elseif (!empty($iso['id'])) {
+            $name = (string)$iso['id'];
+        }
+        if ($name === '') {
+            continue;
+        }
+        $out[] = array('filename' => $name);
+    }
+    return $out;
+}
+
+/**
+ * ISO catalog from GET /api/billing/isos (WHMCS dropdowns when BMC status is empty).
+ *
+ * @param string $apiUrl
+ * @param string $apiKey
+ * @return array<int, array{filename: string}>
+ */
+function rackflow_fetchBillingIsos($apiUrl, $apiKey)
+{
+    if (empty($apiUrl) || empty($apiKey)) {
+        return array();
+    }
+    $result = rackflow_apiCall($apiUrl, $apiKey, 'GET', '/api/billing/isos', null);
+    if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
+        return array();
+    }
+    return rackflow_isoRowsFromPayload($result['data']);
+}
+
+/**
  * Same-origin URL for the AJAX proxy credential rotation endpoint.
  *
  * @param int    $whmcsServiceId tblhosting.id (included for callers; POST body also sends it)
@@ -3934,6 +4055,28 @@ function rackflow_kvmOpenEndpointUrl($whmcsServiceId, $systemUrl = '')
 }
 
 /**
+ * Same-origin URL for the one-click Serial-over-LAN console open redirect endpoint.
+ * Mirrors {@see rackflow_kvmOpenEndpointUrl()}.
+ *
+ * @param int    $whmcsServiceId tblhosting.id
+ * @param string $systemUrl     Optional WHMCS system URL when the base path cannot be
+ *                                derived from the filesystem.
+ * @return string
+ */
+function rackflow_solOpenEndpointUrl($whmcsServiceId, $systemUrl = '')
+{
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $path = (string)parse_url($systemUrl, PHP_URL_PATH);
+            $basePath = rtrim($path, '/');
+        }
+    }
+    return $basePath . '/modules/servers/rackflow/sol_open.php?serviceid=' . (int)$whmcsServiceId;
+}
+
+/**
  * Mint a one-time IPMI HTML5 KVM launch ticket for a service via the billing API.
  *
  * @param string $apiUrl        Base API URL
@@ -3954,6 +4097,36 @@ function rackflow_mintKvmTicket($apiUrl, $apiKey, $rackflowSvcId)
             $detail = json_encode($detail);
         }
         rackflow_log('mintKvmTicket failed', array(
+            'rackflow_service_id' => (int)$rackflowSvcId,
+            'error' => (string)$detail,
+            'http_code' => isset($result['http_code']) ? $result['http_code'] : null,
+        ));
+        return array('error' => (string)$detail);
+    }
+    return $result['data'];
+}
+
+/**
+ * Mint a one-time Serial-over-LAN launch ticket for a service via the billing API.
+ *
+ * @param string $apiUrl        Base API URL
+ * @param string $apiKey        Billing API key
+ * @param int    $rackflowSvcId RackFlow service ID
+ * @return array Decoded launch payload, or array with 'error' key on failure
+ */
+function rackflow_mintSolTicket($apiUrl, $apiKey, $rackflowSvcId)
+{
+    if (empty($apiUrl) || empty($apiKey) || empty($rackflowSvcId)) {
+        return array('error' => 'API URL, API key, or RackFlow service ID is missing.');
+    }
+    $result = rackflow_apiCall($apiUrl, $apiKey, 'POST', '/api/billing/services/' . (int)$rackflowSvcId . '/sol-ticket', array());
+    if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        if (is_array($detail)) {
+            $detail = json_encode($detail);
+        }
+        rackflow_log('mintSolTicket failed', array(
             'rackflow_service_id' => (int)$rackflowSvcId,
             'error' => (string)$detail,
             'http_code' => isset($result['http_code']) ? $result['http_code'] : null,
@@ -4290,8 +4463,55 @@ function rackflow_renderAdminStatusCard(array $params, $serviceId, $statusData, 
                 . '<a href="' . $kvmHref . '" target="_blank" rel="noopener" class="rf-as__btn rf-as__btn--secondary">Open KVM</a>'
                 . '</div>';
         }
+        if (!empty($statusData['sol_console_available'])) {
+            $solHref = $h(rackflow_solOpenEndpointUrl($serviceId, $systemUrl));
+            $actions .= '<div class="rf-as__action">'
+                . '<div class="rf-as__action-copy"><p class="rf-as__action-title">Serial-over-LAN</p>'
+                . '<p class="rf-as__action-help">Opens in a new tab. The console link is single-use and expires shortly.</p></div>'
+                . '<a href="' . $solHref . '" target="_blank" rel="noopener" class="rf-as__btn rf-as__btn--secondary">Open Serial</a>'
+                . '</div>';
+        }
         if ($actions !== '') {
             $html .= '<div class="rf-as__actions">' . $actions . '</div>';
+        }
+
+        if (!empty($statusData['virtual_media_available'])) {
+            $media = rackflow_fetchVirtualMedia($apiConfig['url'], $apiConfig['key'], (int)$rackflowSvcId);
+            $isos = rackflow_isoRowsFromPayload(($media && isset($media['isos'])) ? $media['isos'] : array());
+            if (empty($isos)) {
+                $isos = rackflow_fetchBillingIsos($apiConfig['url'], $apiConfig['key']);
+            }
+            $inserted = $media && !empty($media['inserted']);
+            $imageName = ($media && !empty($media['image_name'])) ? (string)$media['image_name'] : '';
+            $actionUrl = $h(rackflow_virtualMediaActionEndpointUrl($serviceId, $systemUrl));
+            $html .= '<div class="rf-as__panel" id="rf-as-virtual-media-panel"'
+                . ' data-rf-virtual-media-action="' . $actionUrl . '"'
+                . ' data-rf-service-id="' . (int)$serviceId . '">'
+                . '<p class="rf-as__panel-title">Virtual CD</p>'
+                . '<p class="rf-as__note" id="rf-as-virtual-media-status">'
+                . ($inserted ? ('Mounted: ' . $h($imageName !== '' ? $imageName : 'ISO')) : 'No virtual CD inserted')
+                . '</p>'
+                . '<div class="rf-as__reinstall-form">'
+                . '<div class="rf-as__reinstall-row">'
+                . '<div class="rf-as__reinstall-field">'
+                . '<label class="rf-as__stat-label" for="rf-as-virtual-media-iso">ISO</label>'
+                . '<select id="rf-as-virtual-media-iso" class="rf-as__input">';
+            $html .= '<option value="">Select ISO</option>';
+            foreach ($isos as $iso) {
+                $name = isset($iso['filename']) ? (string)$iso['filename'] : (isset($iso['name']) ? (string)$iso['name'] : '');
+                if ($name === '') {
+                    continue;
+                }
+                $html .= '<option value="' . $h($name) . '">' . $h($name) . '</option>';
+            }
+            $html .= '</select></div></div>'
+                . '<label class="rf-as__note"><input type="checkbox" id="rf-as-virtual-media-boot-once" /> Set next boot to CD-ROM</label>'
+                . '<div class="rf-as__reinstall-row">'
+                . '<button type="button" class="rf-as__btn rf-as__btn--secondary" id="rf-as-virtual-media-mount">Mount</button>'
+                . '<button type="button" class="rf-as__btn rf-as__btn--secondary" id="rf-as-virtual-media-eject">Eject</button>'
+                . '</div>'
+                . '<p class="rf-as__note" id="rf-as-virtual-media-msg" hidden></p>'
+                . '</div></div>';
         }
 
         // HTTP/SOCKS proxy: assigned IP(s) + credentials + ready-to-use URLs,

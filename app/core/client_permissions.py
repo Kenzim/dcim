@@ -26,6 +26,8 @@ class PermissionKey:
     BMS_POWER = "bms.power"
     BMS_IPMI = "bms.ipmi"
     BMS_KVM = "bms.kvm"
+    BMS_SOL = "bms.sol"
+    BMS_VIRTUAL_MEDIA = "bms.virtual_media"
     BMS_REINSTALL = "bms.reinstall"
     BMS_RUN_SCRIPT = "bms.run_script"
 
@@ -68,6 +70,16 @@ PERMISSION_CATALOG: List[Dict] = [
     {
         "key": PermissionKey.BMS_KVM,
         "label": "Open HTML5 KVM console",
+        "service_types": ["bare_metal", "http_proxy"],
+    },
+    {
+        "key": PermissionKey.BMS_SOL,
+        "label": "Open serial-over-LAN console",
+        "service_types": ["bare_metal", "http_proxy"],
+    },
+    {
+        "key": PermissionKey.BMS_VIRTUAL_MEDIA,
+        "label": "Mount / eject BMC virtual CD",
         "service_types": ["bare_metal", "http_proxy"],
     },
     {
@@ -147,6 +159,8 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
         PermissionKey.BMS_POWER: True,
         PermissionKey.BMS_IPMI: True,
         PermissionKey.BMS_KVM: True,
+        PermissionKey.BMS_SOL: True,
+        PermissionKey.BMS_VIRTUAL_MEDIA: True,
         PermissionKey.BMS_REINSTALL: False,
         PermissionKey.BMS_RUN_SCRIPT: False,
     },
@@ -171,6 +185,8 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
         PermissionKey.BMS_POWER: False,
         PermissionKey.BMS_IPMI: False,
         PermissionKey.BMS_KVM: False,
+        PermissionKey.BMS_SOL: False,
+        PermissionKey.BMS_VIRTUAL_MEDIA: False,
         PermissionKey.PROXY_VIEW_CREDENTIALS: True,
         PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
     },
@@ -190,6 +206,8 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.BMS_POWER: True,
             PermissionKey.BMS_IPMI: True,
             PermissionKey.BMS_KVM: True,
+            PermissionKey.BMS_SOL: True,
+            PermissionKey.BMS_VIRTUAL_MEDIA: True,
             PermissionKey.BMS_REINSTALL: True,
             PermissionKey.BMS_RUN_SCRIPT: True,
             PermissionKey.VM_POWER: True,
@@ -212,6 +230,8 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.BMS_POWER: True,
             PermissionKey.BMS_IPMI: True,
             PermissionKey.BMS_KVM: True,
+            PermissionKey.BMS_SOL: True,
+            PermissionKey.BMS_VIRTUAL_MEDIA: True,
             PermissionKey.BMS_REINSTALL: False,
             PermissionKey.BMS_RUN_SCRIPT: False,
             PermissionKey.VM_POWER: True,
@@ -232,6 +252,8 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.BMS_POWER: False,
             PermissionKey.BMS_IPMI: False,
             PermissionKey.BMS_KVM: False,
+            PermissionKey.BMS_SOL: False,
+            PermissionKey.BMS_VIRTUAL_MEDIA: False,
             PermissionKey.BMS_REINSTALL: False,
             PermissionKey.BMS_RUN_SCRIPT: False,
             PermissionKey.VM_POWER: False,
@@ -254,6 +276,8 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.BMS_POWER: False,
             PermissionKey.BMS_IPMI: False,
             PermissionKey.BMS_KVM: False,
+            PermissionKey.BMS_SOL: False,
+            PermissionKey.BMS_VIRTUAL_MEDIA: False,
             PermissionKey.PROXY_VIEW_CREDENTIALS: True,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
         },

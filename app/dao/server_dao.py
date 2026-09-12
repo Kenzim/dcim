@@ -44,6 +44,8 @@ class ServerDAO:
         ipmi_viewer_username: Optional[str] = None,
         ipmi_viewer_password: Optional[str] = None,
         ipmi_kvm_profile: Optional[str] = None,
+        sol_profile: Optional[str] = None,
+        virtual_media_profile: Optional[str] = None,
     ) -> Server:
         """Create a new server"""
         # Use provided pxe_boot_mode/os_boot_mode, or fallback to boot_mode for backward compatibility
@@ -77,6 +79,8 @@ class ServerDAO:
             ipmi_viewer_username=ipmi_viewer_username,
             ipmi_viewer_password=ipmi_viewer_password,
             ipmi_kvm_profile=ipmi_kvm_profile,
+            sol_profile=sol_profile,
+            virtual_media_profile=virtual_media_profile,
         )
         db.add(server)
         db.commit()

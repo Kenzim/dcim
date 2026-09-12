@@ -67,6 +67,17 @@
   background: currentColor;
 }
 .rf-ca__body { padding: 18px 20px 20px; }
+.rf-ca__input {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--rf-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--rf-ink);
+  font-size: 13px;
+}
 .rf-ca__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -545,7 +556,7 @@ button.rf-ca__btn--danger:hover {
       </div>
       {/if}
 
-      {if $rackflow_portal_open_url || $rackflow_ipmi_available || $rackflow_vnc_available || $rackflow_kvm_available}
+      {if $rackflow_portal_open_url || $rackflow_ipmi_available || $rackflow_vnc_available || $rackflow_kvm_available || $rackflow_sol_available || $rackflow_virtual_media_available}
       <div class="rf-ca__actions">
         {if $rackflow_portal_open_url}
         <div class="rf-ca__action">
@@ -592,6 +603,39 @@ button.rf-ca__btn--danger:hover {
             <p class="rf-ca__action-help">Opens in a popup. The console link is single-use and expires shortly.</p>
           </div>
           <a href="{$rackflow_kvm_open_url|escape}" rel="noopener" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-kvm-launch">Open KVM</a>
+        </div>
+        {/if}
+
+        {if $rackflow_sol_available}
+        <div class="rf-ca__action">
+          <div class="rf-ca__action-copy">
+            <p class="rf-ca__action-title">Serial-over-LAN</p>
+            <p class="rf-ca__action-help">Opens in a popup. The console link is single-use and expires shortly.</p>
+          </div>
+          <a href="{$rackflow_sol_open_url|escape}" rel="noopener" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-sol-launch">Open Serial</a>
+        </div>
+        {/if}
+
+        {if $rackflow_virtual_media_available}
+        <div class="rf-ca__action" id="rackflow-virtual-media" data-rf-virtual-media-action="{$rackflow_virtual_media_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}">
+          <div class="rf-ca__action-copy">
+            <p class="rf-ca__action-title">Virtual CD</p>
+            <p class="rf-ca__action-help" id="rackflow-virtual-media-status">
+              {if $rackflow_virtual_media_inserted}Mounted: {$rackflow_virtual_media_image|escape}{else}No virtual CD inserted{/if}
+            </p>
+            <select id="rackflow-virtual-media-iso" class="rf-ca__input">
+              <option value="">Select ISO</option>
+              {foreach from=$rackflow_virtual_media_isos item=iso}
+              <option value="{$iso.filename|escape}">{$iso.filename|escape}</option>
+              {/foreach}
+            </select>
+            <label class="rf-ca__action-help"><input type="checkbox" id="rackflow-virtual-media-boot-once" /> Set next boot to CD-ROM</label>
+            <p class="rf-ca__note" id="rackflow-virtual-media-msg" hidden></p>
+          </div>
+          <div class="rf-ca__action-copy">
+            <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-virtual-media-mount">Mount</button>
+            <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-virtual-media-eject">Eject</button>
+          </div>
         </div>
         {/if}
       </div>
@@ -711,6 +755,80 @@ button.rf-ca__btn--danger:hover {
       e.preventDefault();
       window.open(kvm.href, 'rackflow_kvm', 'width=1024,height=768,resizable=yes,scrollbars=yes');
     });
+  }
+  var sol = document.getElementById('rackflow-sol-launch');
+  if (sol) {
+    sol.addEventListener('click', function (e) {
+      e.preventDefault();
+      window.open(sol.href, 'rackflow_sol', 'width=1024,height=768,resizable=yes,scrollbars=yes');
+    });
+  }
+
+  var vmBox = document.getElementById('rackflow-virtual-media');
+  if (vmBox) {
+    function setVmMsg(text, isError) {
+      var el = document.getElementById('rackflow-virtual-media-msg');
+      if (!el) { return; }
+      if (!text) {
+        el.hidden = true;
+        el.textContent = '';
+        return;
+      }
+      el.hidden = false;
+      el.textContent = text;
+      el.style.color = isError ? '#b42318' : '#0a7a32';
+    }
+    function runVirtualMedia(op) {
+      var url = vmBox.getAttribute('data-rf-virtual-media-action') || '';
+      var sid = vmBox.getAttribute('data-rf-service-id') || '';
+      var iso = document.getElementById('rackflow-virtual-media-iso');
+      var boot = document.getElementById('rackflow-virtual-media-boot-once');
+      if (!url || !sid) {
+        setVmMsg('Virtual media URL missing. Reload the page.', true);
+        return;
+      }
+      if (op === 'insert' && (!iso || !iso.value)) {
+        setVmMsg('Select an ISO.', true);
+        return;
+      }
+      var body = new URLSearchParams();
+      body.set('serviceid', sid);
+      body.set('op', op);
+      if (iso && iso.value) { body.set('filename', iso.value); }
+      if (boot && boot.checked) { body.set('boot_once', '1'); }
+      setVmMsg('Working…', false);
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: body.toString(),
+        credentials: 'same-origin'
+      }).then(function (res) {
+        return res.json().catch(function () {
+          return { ok: false, error: 'Unexpected response (' + res.status + ')' };
+        });
+      }).then(function (data) {
+        if (!data || !data.ok) {
+          setVmMsg((data && data.error) ? data.error : 'Request failed.', true);
+          return;
+        }
+        setVmMsg(data.message || 'Done.', false);
+        var statusEl = document.getElementById('rackflow-virtual-media-status');
+        if (statusEl && data.data) {
+          statusEl.textContent = data.data.inserted
+            ? ('Mounted: ' + (data.data.image_name || 'ISO'))
+            : 'No virtual CD inserted';
+        }
+      }).catch(function (err) {
+        setVmMsg(err && err.message ? err.message : 'Request failed.', true);
+      });
+    }
+    var mountBtn = document.getElementById('rackflow-virtual-media-mount');
+    var ejectBtn = document.getElementById('rackflow-virtual-media-eject');
+    if (mountBtn) { mountBtn.addEventListener('click', function () { runVirtualMedia('insert'); }); }
+    if (ejectBtn) { ejectBtn.addEventListener('click', function () { runVirtualMedia('eject'); }); }
   }
 
   var autoRefresh = document.querySelector('#rackflow-client-area [data-rf-auto-refresh]');

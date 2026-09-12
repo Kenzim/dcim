@@ -25,6 +25,30 @@ def _copy_kvm_from_ipmi(permissions: dict) -> bool:
     return True
 
 
+def _copy_sol_from_kvm(permissions: dict) -> bool:
+    """Copy ``bms.kvm`` onto ``bms.sol`` when SOL was never set.
+
+    Read-only presets that deny KVM would otherwise inherit the bare-metal
+    default (SOL on) via resolver fallthrough.
+    """
+    if PermissionKey.BMS_SOL in permissions:
+        return False
+    if PermissionKey.BMS_KVM not in permissions:
+        return False
+    permissions[PermissionKey.BMS_SOL] = bool(permissions[PermissionKey.BMS_KVM])
+    return True
+
+
+def _copy_virtual_media_from_kvm(permissions: dict) -> bool:
+    """Copy ``bms.kvm`` onto ``bms.virtual_media`` when it was never set."""
+    if PermissionKey.BMS_VIRTUAL_MEDIA in permissions:
+        return False
+    if PermissionKey.BMS_KVM not in permissions:
+        return False
+    permissions[PermissionKey.BMS_VIRTUAL_MEDIA] = bool(permissions[PermissionKey.BMS_KVM])
+    return True
+
+
 def seed_permission_sets(db: Session) -> None:
     """Create built-in permission presets and apply one-time key backfills.
 
@@ -35,6 +59,8 @@ def seed_permission_sets(db: Session) -> None:
       cleared so the new default / preset value applies.
     - Existing presets and sparse overrides that set ``bms.ipmi`` but not
       ``bms.kvm`` copy the IPMI value onto KVM so access does not change.
+    - Existing presets and sparse overrides that set ``bms.kvm`` but not
+      ``bms.sol`` / ``bms.virtual_media`` copy the KVM value onto those keys.
     """
     for preset in SYSTEM_PRESETS:
         existing = PermissionSetDAO.get_by_name(db, preset["name"])
@@ -78,7 +104,12 @@ def seed_permission_sets(db: Session) -> None:
     # Split HTML5 KVM from IPMI proxy without changing existing grants/denials.
     for row in db.query(PermissionSet).all():
         perms = dict(row.permissions or {})
-        if _copy_kvm_from_ipmi(perms):
+        changed = _copy_kvm_from_ipmi(perms)
+        if _copy_sol_from_kvm(perms):
+            changed = True
+        if _copy_virtual_media_from_kvm(perms):
+            changed = True
+        if changed:
             row.permissions = perms
             flag_modified(row, "permissions")
 
@@ -89,7 +120,12 @@ def seed_permission_sets(db: Session) -> None:
     )
     for service in services:
         overrides = dict(service.permission_overrides or {})
-        if _copy_kvm_from_ipmi(overrides):
+        changed = _copy_kvm_from_ipmi(overrides)
+        if _copy_sol_from_kvm(overrides):
+            changed = True
+        if _copy_virtual_media_from_kvm(overrides):
+            changed = True
+        if changed:
             service.permission_overrides = overrides
             flag_modified(service, "permission_overrides")
 
