@@ -9,6 +9,7 @@ Covers:
 """
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -501,3 +502,130 @@ def test_runner_fails_after_retry_budget(db_session, monkeypatch):
     assert "gave up after" in (job.error_message or "")
     db_session.refresh(service)
     assert service.vm.guest_state == VMGuestState.ERROR
+
+
+def test_configure_sizing_grows_disk_and_bridge():
+    from app.services.deployment.steps import ConfigureSizingStep
+
+    plugin = FakePlugin(exists=True)
+    plugin.ensure_primary_disk_gb = AsyncMock(return_value={"disk": "scsi0", "resized": True})
+    ctx = FakeCtx(
+        plugin,
+        alloc=_fake_alloc(),
+        specs={"memory_mb": 4096, "cores": 4, "disk_gb": 80, "network_bridge": "vmbr1"},
+    )
+    _run(ConfigureSizingStep().execute(ctx))
+    assert any(c[0] == "ensure_network_bridge" for c in plugin.calls)
+    assert plugin.ensure_primary_disk_gb.await_count == 1
+
+
+def test_configure_via_guest_agent_executes_network_and_password():
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.deployment.steps import ConfigureViaGuestAgentStep
+
+    plugin = FakePlugin(exists=True, agent=True)
+    ctx = FakeCtx(
+        plugin,
+        alloc=_fake_alloc(),
+        config={
+            "vm_plan": {
+                "strategy_plan": {
+                    "strategy_config": {
+                        "network_mode": "static",
+                        "guest_username": "root",
+                        "guest_password": "secret",
+                    }
+                }
+            },
+            "template_parameters": {"ssh_public_keys": ["ssh-ed25519 AAA test"]},
+        },
+    )
+    with patch(
+        "app.services.deployment.guest_config.configure_linux_network",
+        new=AsyncMock(),
+    ) as net, patch(
+        "app.services.deployment.guest_config.apply_root_authorized_keys",
+        new=AsyncMock(),
+    ) as keys, patch(
+        "app.services.deployment.guest_config.set_guest_password",
+        new=AsyncMock(),
+    ) as pw:
+        _run(ConfigureViaGuestAgentStep().execute(ctx))
+    net.assert_awaited_once()
+    pw.assert_awaited_once()
+    keys.assert_awaited_once()
+
+
+def test_configure_macos_guest_with_smbios_disabled():
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.deployment.steps import ConfigureMacosGuestStep
+
+    plugin = FakePlugin(exists=True, agent=True)
+    ctx = FakeCtx(
+        plugin,
+        alloc=_fake_alloc(),
+        config={
+            "vm_plan": {
+                "strategy_plan": {
+                    "strategy_config": {
+                        "network_mode": "dhcp",
+                        "randomize_smbios": "false",
+                        "guest_username": "client",
+                    }
+                }
+            }
+        },
+    )
+    with patch(
+        "app.services.deployment.guest_config.configure_macos_network",
+        new=AsyncMock(),
+    ) as net, patch(
+        "app.services.deployment.guest_config.apply_opencore_smbios",
+        new=AsyncMock(),
+    ) as smbios:
+        _run(ConfigureMacosGuestStep().execute(ctx))
+    net.assert_awaited_once()
+    smbios.assert_not_awaited()
+
+
+def test_configure_windows_guest_executes():
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.deployment.steps import ConfigureWindowsGuestStep
+
+    plugin = FakePlugin(exists=True, agent=True)
+    ctx = FakeCtx(
+        plugin,
+        alloc=_fake_alloc(),
+        config={
+            "vm_plan": {
+                "strategy_plan": {
+                    "strategy_config": {
+                        "network_mode": "static",
+                        "guest_username": "Administrator",
+                        "guest_password": "WinPass1!",
+                    }
+                }
+            }
+        },
+    )
+    with patch(
+        "app.services.deployment.guest_config.configure_windows_network",
+        new=AsyncMock(),
+    ) as net, patch(
+        "app.services.deployment.guest_config.set_guest_password",
+        new=AsyncMock(),
+    ) as pw:
+        _run(ConfigureWindowsGuestStep().execute(ctx))
+    net.assert_awaited_once()
+    pw.assert_awaited_once()
+
+
+def test_macos_parse_randomize_flag():
+    from app.services.deployment.steps import ConfigureMacosGuestStep
+
+    assert ConfigureMacosGuestStep._parse_randomize_flag("yes") is True
+    assert ConfigureMacosGuestStep._parse_randomize_flag("0") is False
+    assert ConfigureMacosGuestStep._parse_randomize_flag(False) is False
