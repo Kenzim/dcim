@@ -23,6 +23,15 @@ from app.mcp.scopes import scope_allows
 MCP_KEY_PREFIX = "rfmcp_"
 
 
+def _retry_after_seconds(exc: HTTPException) -> Optional[int]:
+    if not exc.headers or not exc.headers.get("Retry-After"):
+        return None
+    try:
+        return int(exc.headers["Retry-After"])
+    except (TypeError, ValueError):
+        return None
+
+
 class MCPAuthError(Exception):
     """ASGI-friendly auth failure (status + message)."""
 
@@ -136,13 +145,11 @@ def authenticate_mcp_bearer(api_key: str, client_ip: Optional[str]) -> McpAuthCo
             settings.mcp_rate_limit_per_ip_window_seconds,
         )
     except HTTPException as exc:
-        retry = None
-        if exc.headers and exc.headers.get("Retry-After"):
-            try:
-                retry = int(exc.headers["Retry-After"])
-            except (TypeError, ValueError):
-                retry = None
-        raise MCPAuthError(status.HTTP_429_TOO_MANY_REQUESTS, str(exc.detail), retry) from exc
+        raise MCPAuthError(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            str(exc.detail),
+            _retry_after_seconds(exc),
+        ) from exc
 
     db = SessionLocal()
     try:
@@ -167,14 +174,10 @@ def authenticate_mcp_bearer(api_key: str, client_ip: Optional[str]) -> McpAuthCo
                 settings.mcp_rate_limit_per_key_window_seconds,
             )
         except HTTPException as exc:
-            retry = None
-            if exc.headers and exc.headers.get("Retry-After"):
-                try:
-                    retry = int(exc.headers["Retry-After"])
-                except (TypeError, ValueError):
-                    retry = None
             raise MCPAuthError(
-                status.HTTP_429_TOO_MANY_REQUESTS, str(exc.detail), retry
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                str(exc.detail),
+                _retry_after_seconds(exc),
             ) from exc
 
         McpApiKeyDAO.touch_last_used(db, row, client_ip)

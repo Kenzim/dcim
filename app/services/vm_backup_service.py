@@ -169,9 +169,21 @@ async def _enrich_backup_identity(
                 parsed = parse_rf_sku_token(token)
     tmpl = resolve_template_from_token(db, token) if token else None
     item["rf_token"] = token
-    item["template_code"] = tmpl.code if tmpl else (parsed.get("template_code") if parsed else None)
-    item["template_name"] = tmpl.name if tmpl else None
-    item["os_type"] = tmpl.os_type if tmpl else None
+    if tmpl:
+        template_code = tmpl.code
+        template_name = tmpl.name
+        os_type = tmpl.os_type
+    elif parsed:
+        template_code = parsed.get("template_code")
+        template_name = None
+        os_type = None
+    else:
+        template_code = None
+        template_name = None
+        os_type = None
+    item["template_code"] = template_code
+    item["template_name"] = template_name
+    item["os_type"] = os_type
     return item
 
 

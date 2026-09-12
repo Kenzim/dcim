@@ -609,6 +609,22 @@ class WaitForBackupRestoreStep(DeploymentStep):
         _write_vm_restore_state(ctx, state)
 
 
+async def _set_guest_state_after_restore(ctx, plugin, start: bool) -> None:
+    from app.models.service_vm import VMGuestState
+
+    if start:
+        try:
+            powered = await plugin.power_on()
+        except Exception as exc:
+            raise DeploymentError(f"Failed to start VM after restore: {exc}") from exc
+        if not powered:
+            raise DeploymentError("Proxmox power_on returned failure after restore")
+        if ctx.service.vm:
+            ctx.service.vm.guest_state = VMGuestState.RUNNING
+    elif ctx.service.vm:
+        ctx.service.vm.guest_state = VMGuestState.STOPPED
+
+
 class FinalizeBackupRestoreStep(DeploymentStep):
     """Start the guest (default) and refresh/clear OS metadata after restore."""
 
@@ -619,25 +635,12 @@ class FinalizeBackupRestoreStep(DeploymentStep):
         return StepOutcome.ready()
 
     async def execute(self, ctx) -> None:
-        from app.models.service_vm import VMGuestState
         from app.services.vm_backup_service import apply_metadata_after_restore
         from app.services.vm_identity_stamp import resolve_template_id_for_restore, stamp_vm_identity
 
         state = _vm_restore_state(ctx.service)
-        start = bool(state.get("start", True))
         plugin = ctx.get_plugin()
-        if start:
-            try:
-                powered = await plugin.power_on()
-            except Exception as exc:
-                raise DeploymentError(f"Failed to start VM after restore: {exc}") from exc
-            if not powered:
-                raise DeploymentError("Proxmox power_on returned failure after restore")
-            if ctx.service.vm:
-                ctx.service.vm.guest_state = VMGuestState.RUNNING
-        else:
-            if ctx.service.vm:
-                ctx.service.vm.guest_state = VMGuestState.STOPPED
+        await _set_guest_state_after_restore(ctx, plugin, bool(state.get("start", True)))
 
         explicit = state.get("vm_template_id")
         volid = state.get("volid") or state.get("normalized_volid")

@@ -14,6 +14,31 @@ from app.models.reseller import Invoice
 from app.services.invoice_service import InvoiceService
 
 
+def _invoice_profile_lines(db: Session, invoice: Invoice) -> list[str]:
+    if not invoice.billing_account_id:
+        return []
+    account = db.execute(
+        select(BillingAccount)
+        .options(joinedload(BillingAccount.profile))
+        .where(BillingAccount.id == invoice.billing_account_id)
+    ).unique().scalar_one_or_none()
+    if not account or not account.profile:
+        return []
+    prof = account.profile
+    lines: list[str] = []
+    for value in (
+        prof.legal_name,
+        prof.company,
+        prof.address_line1,
+        prof.address_line2,
+        ", ".join(part for part in (prof.city, prof.region, prof.postal_code) if part) or None,
+        prof.country,
+    ):
+        if value:
+            lines.append(str(value))
+    return lines
+
+
 class InvoicePdfService:
     @staticmethod
     def render_pdf_bytes(db: Session, invoice: Invoice) -> bytes:
@@ -28,31 +53,7 @@ class InvoicePdfService:
             )
         allocated = InvoiceService.allocated_cents(db, invoice.id)
         remaining = max(0, int(invoice.amount_cents) - allocated)
-
-        profile_lines: list[str] = []
-        if invoice.billing_account_id:
-            account = db.execute(
-                select(BillingAccount)
-                .options(joinedload(BillingAccount.profile))
-                .where(BillingAccount.id == invoice.billing_account_id)
-            ).unique().scalar_one_or_none()
-            if account and account.profile:
-                prof = account.profile
-                for value in (
-                    prof.legal_name,
-                    prof.company,
-                    prof.address_line1,
-                    prof.address_line2,
-                    ", ".join(
-                        part
-                        for part in (prof.city, prof.region, prof.postal_code)
-                        if part
-                    )
-                    or None,
-                    prof.country,
-                ):
-                    if value:
-                        profile_lines.append(str(value))
+        profile_lines = _invoice_profile_lines(db, invoice)
 
         try:
             from reportlab.lib.pagesizes import letter

@@ -122,6 +122,23 @@ def _placement_not_found_error(cluster_id: int, vmid: int, node: Optional[str]) 
     )
 
 
+def _require_cluster_placement(
+    db: Session, service
+) -> tuple[object, int, Optional[str], int]:
+    cluster_id, node_name, raw_vmid = vm_placement(service)
+    if cluster_id is None or raw_vmid is None:
+        raise ProxmoxPlacementError(
+            "VM service is missing Proxmox placement (proxmox_cluster_id, proxmox_vmid)",
+            status_code=400,
+        )
+    cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
+    if cluster is None:
+        raise ProxmoxPlacementError(f"Unknown proxmox_cluster_id {cluster_id}", status_code=404)
+    vmid = int(raw_vmid)
+    node = (node_name or "").strip() or None
+    return cluster, cluster_id, node, vmid
+
+
 async def resolve_proxmox_plugin_for_service(
     db: Session,
     service,
@@ -159,18 +176,7 @@ async def resolve_proxmox_plugin_for_service(
     or (with ``require_guest=True``) the VMID isn't found anywhere in the
     cluster.
     """
-    cluster_id, node_name, raw_vmid = vm_placement(service)
-    if cluster_id is None or raw_vmid is None:
-        raise ProxmoxPlacementError(
-            "VM service is missing Proxmox placement (proxmox_cluster_id, proxmox_vmid)",
-            status_code=400,
-        )
-    cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
-    if cluster is None:
-        raise ProxmoxPlacementError(f"Unknown proxmox_cluster_id {cluster_id}", status_code=404)
-
-    vmid = int(raw_vmid)
-    node = (node_name or "").strip() or None
+    cluster, cluster_id, node, vmid = _require_cluster_placement(db, service)
 
     def _finish(resolved_node: str):
         try:

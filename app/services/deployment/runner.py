@@ -384,6 +384,13 @@ async def _execute_step_and_advance(
     await _advance(db, job, steps, ctx, strategy=strategy)
 
 
+def _step_timed_out(step_def, step_row, now) -> bool:
+    if not step_def.timeout_seconds or step_row.started_at is None:
+        return False
+    started = _as_utc(step_row.started_at)
+    return (now - started).total_seconds() > step_def.timeout_seconds
+
+
 async def run_job_tick(db: Session, job) -> None:
     """Run a single transition for an already-claimed (RUNNING, leased) job."""
     registry = get_deployment_strategy_registry()
@@ -419,17 +426,15 @@ async def run_job_tick(db: Session, job) -> None:
     ctx = DeploymentContext(db, service, job)
     now = _utcnow()
 
-    if step_def.timeout_seconds and step_row.started_at is not None:
-        started = _as_utc(step_row.started_at)
-        if (now - started).total_seconds() > step_def.timeout_seconds:
-            _retry_step_or_fail(
-                db,
-                job,
-                step_row,
-                f"Step '{step_def.name}' timed out after {step_def.timeout_seconds}s",
-                strategy=strategy,
-            )
-            return
+    if _step_timed_out(step_def, step_row, now):
+        _retry_step_or_fail(
+            db,
+            job,
+            step_row,
+            f"Step '{step_def.name}' timed out after {step_def.timeout_seconds}s",
+            strategy=strategy,
+        )
+        return
 
     if step_row.started_at is None:
         step_row.started_at = now

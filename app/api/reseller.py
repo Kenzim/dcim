@@ -553,7 +553,7 @@ async def _provision_charged_service(
     )
     try:
         if kind == ServiceType.VM.value:
-            service = await provision_vm_service(
+            service = provision_vm_service(
                 db=db,
                 body=body,
                 owner_user_id=owner.id,
@@ -561,7 +561,7 @@ async def _provision_charged_service(
                 background_tasks=background_tasks,
             )
         else:
-            service = await provision_bare_metal_service(
+            service = provision_bare_metal_service(
                 db=db,
                 service_data=body,
                 owner_user_id=owner.id,

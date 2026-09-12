@@ -1579,7 +1579,7 @@ async def create_bare_metal_service(
         external_username=service_data.external_username,
         external_email=service_data.external_email,
     )
-    service = await provision_bare_metal_service(
+    service = provision_bare_metal_service(
         db=db,
         service_data=service_data,
         owner_user_id=billing_user.id,
@@ -1786,7 +1786,7 @@ async def create_vm_service(
         external_username=body.external_username,
         external_email=body.external_email,
     )
-    service = await provision_vm_service(
+    service = provision_vm_service(
         db=db,
         body=body,
         owner_user_id=billing_user.id,

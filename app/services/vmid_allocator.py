@@ -37,8 +37,8 @@ def _existing_sticky_reservation(
         return int(existing.vmid)
     if requested_vmid is None and existing.cluster_id != cluster_id:
         raise ValueError(
-            f"Service already has reserved VMID {existing.vmid} in cluster {existing.cluster_id}; "
-            "cross-cluster reassignment requires an admin override workflow."
+            f"Service {service_id} already has reserved VMID {existing.vmid} in cluster "
+            f"{existing.cluster_id}; cross-cluster reassignment requires an admin override workflow."
         )
     return None
 

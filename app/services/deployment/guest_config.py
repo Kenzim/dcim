@@ -204,6 +204,17 @@ def cloudinit_credentials_from_ctx(ctx) -> tuple[Optional[str], Optional[str]]:
     return "root", pass_out
 
 
+def _cloudinit_ipconfig(alloc, mode: str) -> str:
+    if mode == "dhcp":
+        return "ip=dhcp"
+    if not alloc or not (alloc.ip_address or "").strip() or not (alloc.gateway or "").strip():
+        raise DeploymentError("Static cloud-init network requires ip_address and gateway")
+    ip = (alloc.ip_address or "").strip()
+    gw = (alloc.gateway or "").strip()
+    prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
+    return f"ip={ip}/{prefix},gw={gw}"
+
+
 def build_cloudinit_network_payload(
     alloc,
     *,
@@ -217,15 +228,7 @@ def build_cloudinit_network_payload(
     from app.services.ssh_public_keys import proxmox_sshkeys_param
 
     mode = (mode or "static").lower()
-    if mode == "dhcp":
-        payload: Dict[str, Any] = {"ipconfig0": "ip=dhcp"}
-    else:
-        if not alloc or not (alloc.ip_address or "").strip() or not (alloc.gateway or "").strip():
-            raise DeploymentError("Static cloud-init network requires ip_address and gateway")
-        ip = (alloc.ip_address or "").strip()
-        gw = (alloc.gateway or "").strip()
-        prefix = ipv4_netmask_to_prefixlen(alloc.subnet_mask)
-        payload = {"ipconfig0": f"ip={ip}/{prefix},gw={gw}"}
+    payload: Dict[str, Any] = {"ipconfig0": _cloudinit_ipconfig(alloc, mode)}
 
     ns = (nameserver or DEFAULT_CLOUDINIT_NAMESERVERS).strip()
     if ns:
