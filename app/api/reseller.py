@@ -594,7 +594,7 @@ def _provision_charged_service(
         raise
 
 
-async def _create_service(
+def _create_service(
     *,
     kind: str,
     body: BillingBareMetalServiceCreate | BillingVmServiceCreate,
@@ -666,7 +666,7 @@ async def create_bare_metal_service(
         Optional[str], Header(alias="Idempotency-Key")
     ] = None,
 ):
-    return await _create_service(
+    return _create_service(
         kind=(body.service_type or ServiceType.BARE_METAL.value).lower(),
         body=body,
         background_tasks=background_tasks,
@@ -692,7 +692,7 @@ async def create_vm_service(
         Optional[str], Header(alias="Idempotency-Key")
     ] = None,
 ):
-    return await _create_service(
+    return _create_service(
         kind=ServiceType.VM.value,
         body=body,
         background_tasks=background_tasks,
