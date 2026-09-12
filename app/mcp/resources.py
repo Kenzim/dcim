@@ -14,6 +14,8 @@ from app.mcp.runtime import run_tool
 from app.mcp.serialize import location_row, server_row, service_row
 from app.api.server import _get_effective_capabilities_for_server
 
+_INVALID_ID_MSG = "id must be an integer"
+
 
 @mcp.resource("rackflow://server/{id}")
 async def server_resource(id: str) -> str:
@@ -23,7 +25,7 @@ async def server_resource(id: str) -> str:
         try:
             sid = int(id)
         except (TypeError, ValueError) as exc:
-            raise ToolError("id must be an integer") from exc
+            raise ToolError(_INVALID_ID_MSG) from exc
         row = ServerDAO.get_by_id(db, sid)
         if not row:
             raise ToolError("Server not found")
@@ -42,7 +44,7 @@ async def service_resource(id: str) -> str:
         try:
             sid = int(id)
         except (TypeError, ValueError) as exc:
-            raise ToolError("id must be an integer") from exc
+            raise ToolError(_INVALID_ID_MSG) from exc
         row = ServiceDAO.get_by_id(db, sid)
         if not row:
             raise ToolError("Service not found")
@@ -60,7 +62,7 @@ async def location_resource(id: str) -> str:
         try:
             lid = int(id)
         except (TypeError, ValueError) as exc:
-            raise ToolError("id must be an integer") from exc
+            raise ToolError(_INVALID_ID_MSG) from exc
         row = LocationDAO.get_by_id(db, lid)
         if not row:
             raise ToolError("Location not found")

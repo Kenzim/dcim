@@ -18,6 +18,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from typing import Annotated, Any, List, Optional
 from datetime import datetime, timezone
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.billing_auth import get_billing_integration
 from app.models.billing_integration import BillingIntegration
 from app.models.server import Server, BootMode
@@ -142,6 +143,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
 
 _NO_LINKED_SERVER_MSG = "Service has no linked server"
+_SERVICE_NOT_FOUND_MSG = "Service not found"
+_AUDIENCE_ADMIN_OR_CLIENT_MSG = "audience must be admin or client"
+_NOT_VM_SERVICE_MSG = "Not a VM service"
+_BILLING_SERVICE_LITERAL = "billing.service"
+
 
 BillingIntegrationDep = Annotated[BillingIntegration, Depends(get_billing_integration)]
 DbDep = Annotated[Session, Depends(get_db)]
@@ -153,12 +159,12 @@ def _assert_billing_owned_service(service: Service, integration: BillingIntegrat
     if owner is None or owner.billing_integration_id is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
+            detail=_SERVICE_NOT_FOUND_MSG,
         )
     if owner.billing_integration_id != integration.id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
+            detail=_SERVICE_NOT_FOUND_MSG,
         )
 
 
@@ -173,7 +179,7 @@ def _assert_linkable_service(service: Service, integration: BillingIntegration) 
     if owner.billing_integration_id != integration.id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
+            detail=_SERVICE_NOT_FOUND_MSG,
         )
 
 
@@ -317,11 +323,12 @@ def _billing_activity_log_kw(db: Session, service: Service) -> dict:
     return {"service_id": service.id}
 
 
-@router.get("/server-by-ip")
+@router.get("/server-by-ip", responses={**COMMON_ERROR_RESPONSES})
 async def get_server_by_ip(
     ip: str,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Look up a RackFlow server by its primary IP address.
@@ -346,11 +353,11 @@ async def get_server_by_ip(
     }
 
 
-@router.post("/register-service", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register-service", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def register_service(
     data: BillingRegisterService,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Register an existing RackFlow server as a billing service (no provisioning).
@@ -1579,7 +1586,7 @@ async def _provision_vm_service(
     owner_user_id: int,
     actor: ProvisioningActor,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     """
     Create a VM service (no RackFlow Server row; Proxmox placement on service_vm).
@@ -1729,8 +1736,8 @@ async def _provision_vm_service(
 async def create_vm_service(
     body: BillingVmServiceCreate,
     background_tasks: BackgroundTasks,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     billing_user = ensure_user_for_billing_identity(
         db,
@@ -1754,13 +1761,14 @@ async def create_vm_service(
     return _billing_service_response(db, service)
 
 
-@router.get("/services", response_model=List[BillingServiceResponse])
+@router.get("/services", response_model=List[BillingServiceResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_services(
     skip: int = 0,
     limit: int = 100,
     status_filter: Optional[str] = None,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     List services accessible via billing API.
@@ -1793,14 +1801,15 @@ async def list_services(
     return [_billing_service_response(db, s) for s in services]
 
 
-@router.get("/services/lookup", response_model=List[BillingServiceLookupItem])
+@router.get("/services/lookup", response_model=List[BillingServiceLookupItem], responses={**COMMON_ERROR_RESPONSES})
 async def lookup_services(
     q: Optional[str] = None,
     service_id: Optional[int] = None,
     proxmox_vmid: Optional[int] = None,
     server_ip: Optional[str] = None,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """
     Look up services for WHMCS admin linking.
@@ -1901,11 +1910,11 @@ async def lookup_services(
     return results[:50]
 
 
-@router.post("/services/adopt-vm", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/services/adopt-vm", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def adopt_vm_service(
     body: BillingAdoptVmService,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """
     Create a billing VM service bound to an existing Proxmox guest (no clone/provision).
@@ -2037,18 +2046,18 @@ async def adopt_vm_service(
     return _billing_service_response(db, service)
 
 
-@router.get("/services/{service_id}", response_model=BillingServiceDetailResponse)
+@router.get("/services/{service_id}", response_model=BillingServiceDetailResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_service(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """Get service details by ID"""
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -2085,12 +2094,12 @@ async def get_service(
     return BillingServiceDetailResponse(**payload)
 
 
-@router.post("/services/{service_id}/link", response_model=BillingServiceResponse)
+@router.post("/services/{service_id}/link", response_model=BillingServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def link_service(
     service_id: int,
     data: BillingLinkService,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """
     Bind an existing RackFlow service to an external line item (e.g. WHMCS hosting id).
@@ -2100,7 +2109,7 @@ async def link_service(
     """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_linkable_service(service, integration)
 
     external_service_id = (data.external_service_id or "").strip()
@@ -2164,16 +2173,16 @@ async def link_service(
     return _billing_service_response(db, service)
 
 
-@router.post("/services/{service_id}/unlink", response_model=BillingServiceResponse)
+@router.post("/services/{service_id}/unlink", response_model=BillingServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def unlink_service(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Clear ``external_service_id`` on a billing-owned service (does not terminate)."""
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
 
     previous = service.external_service_id
@@ -2192,12 +2201,12 @@ async def unlink_service(
     return _billing_service_response(db, service)
 
 
-@router.put("/services/{service_id}/vm/placement", response_model=BillingServiceResponse)
+@router.put("/services/{service_id}/vm/placement", response_model=BillingServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def update_vm_placement(
     service_id: int,
     body: BillingVmPlacementUpdate,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Update Proxmox cluster/node/VMID for a VM billing service."""
     service = ServiceDAO.get_by_id(db, service_id)
@@ -2275,7 +2284,7 @@ async def update_vm_placement(
     return _billing_service_response(db, service)
 
 
-@router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
 async def terminate_service(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -2295,7 +2304,7 @@ async def terminate_service(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
 
     _assert_billing_owned_service(service, integration)
@@ -2341,12 +2350,12 @@ async def terminate_service(
     return None
 
 
-@router.post("/services/{service_id}/suspend", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/suspend", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def suspend_service(
     service_id: int,
     action: SuspendAction,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Suspend a service.
@@ -2362,7 +2371,7 @@ async def suspend_service(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -2422,12 +2431,12 @@ async def suspend_service(
     return {"status": "suspended", "message": "Service has been suspended"}
 
 
-@router.post("/services/{service_id}/unsuspend", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/unsuspend", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def unsuspend_service(
     service_id: int,
     action: SuspendAction,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Unsuspend a service.
@@ -2442,7 +2451,7 @@ async def unsuspend_service(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -2476,12 +2485,12 @@ async def unsuspend_service(
     return {"status": "active", "message": "Service has been unsuspended"}
 
 
-@router.post("/services/{service_id}/power", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/power", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def power_control(
     service_id: int,
     power_action: PowerAction,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Control server power state via service.
@@ -2498,7 +2507,7 @@ async def power_control(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -2619,11 +2628,11 @@ async def power_control(
     return {"status": "success", "action": action, "message": f"Server power {action} command executed"}
 
 
-@router.get("/services/{service_id}/status", status_code=status.HTTP_200_OK)
+@router.get("/services/{service_id}/status", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def get_service_status(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Get service status including server power state.
@@ -2632,7 +2641,7 @@ async def get_service_status(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -2779,11 +2788,11 @@ async def get_service_status(
     }
 
 
-@router.post("/services/{service_id}/proxy/rotate", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/proxy/rotate", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def rotate_proxy_credentials(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Rotate credentials for every IP assigned to an http_proxy service.
 
@@ -2793,7 +2802,7 @@ async def rotate_proxy_credentials(
     """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     if service.service_type != ServiceType.HTTP_PROXY:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a proxy service")
@@ -2834,18 +2843,18 @@ class BillingReassignVmIpBody(BaseModel):
     )
 
 
-@router.get("/services/{service_id}/available-ips", status_code=status.HTTP_200_OK)
+@router.get("/services/{service_id}/available-ips", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_list_available_vm_ips(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Admin: browse free VM IP pool rows for this service's Proxmox cluster."""
     from app.services.vm_ip_reassign import VmIpReassignError, list_available_ips_for_service
 
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     try:
         return list_available_ips_for_service(db, service)
@@ -2853,19 +2862,19 @@ async def billing_list_available_vm_ips(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.post("/services/{service_id}/reassign-ip", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/reassign-ip", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_reassign_vm_ip(
     service_id: int,
     body: BillingReassignVmIpBody,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Admin: release current VM IP, claim a free pool row, optionally reset guest networking."""
     from app.services.vm_ip_reassign import VmIpReassignError, reassign_vm_ip
 
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     try:
         return await reassign_vm_ip(
@@ -2879,19 +2888,20 @@ async def billing_reassign_vm_ip(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.get("/services/{service_id}/actions", status_code=status.HTTP_200_OK)
+@router.get("/services/{service_id}/actions", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_list_strategy_actions(
     service_id: int,
     audience: str = "client",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     return {"actions": list_actions(db, service, audience)}  # type: ignore[arg-type]
 
 
@@ -2920,26 +2930,27 @@ def _billing_backup_service(
 
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_NOT_VM_SERVICE_MSG)
     if audience == "client":
         require_client_permission(db, service, PermissionKey.VM_BACKUPS)
     return service, map_backup_error
 
 
-@router.get("/services/{service_id}/backups", status_code=status.HTTP_200_OK)
+@router.get("/services/{service_id}/backups", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_list_backups(
     service_id: int,
     audience: str = "client",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     from app.services.vm_backup_service import list_service_backups_and_jobs
 
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
     try:
         items, jobs = await list_service_backups_and_jobs(db, service)
@@ -2948,17 +2959,18 @@ async def billing_list_backups(
     return {"backups": items, "jobs": jobs}
 
 
-@router.get("/services/{service_id}/backup-jobs", status_code=status.HTTP_200_OK)
+@router.get("/services/{service_id}/backup-jobs", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_list_backup_jobs(
     service_id: int,
     audience: str = "client",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     from app.services.vm_backup_service import list_running_backup_jobs
 
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
     try:
         jobs = await list_running_backup_jobs(db, service)
@@ -2967,18 +2979,19 @@ async def billing_list_backup_jobs(
     return {"jobs": jobs}
 
 
-@router.post("/services/{service_id}/backups", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/backups", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_create_backup(
     service_id: int,
     body: BillingBackupCreate,
     audience: str = "client",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     from app.services.vm_backup_service import create_client_backup
 
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
     try:
         return await create_client_backup(
@@ -2988,18 +3001,19 @@ async def billing_create_backup(
         raise map_err(exc) from exc
 
 
-@router.post("/services/{service_id}/backups/delete", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/backups/delete", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_delete_backup(
     service_id: int,
     body: BillingBackupMutate,
     audience: str = "client",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     from app.services.vm_backup_service import delete_client_backup
 
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
     try:
         await delete_client_backup(db, service, volid=body.volid, storage=body.storage)
@@ -3008,19 +3022,20 @@ async def billing_delete_backup(
     return {"status": "ok"}
 
 
-@router.post("/services/{service_id}/backups/restore", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/backups/restore", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_restore_backup(
     service_id: int,
     body: BillingBackupMutate,
     audience: str = "client",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     from app.models.service_vm import VMGuestState
     from app.services.vm_backup_service import restore_service_backup
 
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service, map_err = _billing_backup_service(db, service_id, integration, audience=audience)
     try:
         result = await restore_service_backup(
@@ -3047,25 +3062,26 @@ class BillingVmReinstallBody(BaseModel):
     ssh_public_keys: Optional[str] = None
 
 
-@router.get("/services/{service_id}/vm/reinstall-options", status_code=status.HTTP_200_OK)
+@router.get("/services/{service_id}/vm/reinstall-options", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_vm_reinstall_options(
     service_id: int,
     audience: str = "admin",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Templates available for VM reinstall (product-linked catalog rows)."""
     from app.services.ssh_public_keys import ssh_key_fields_for_service
     from app.services.vm_ssh_keys_service import list_reinstall_templates_for_service
 
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_NOT_VM_SERVICE_MSG)
     if audience == "client":
         require_client_permission(db, service, PermissionKey.VM_REINSTALL)
     fields = ssh_key_fields_for_service(db, service)
@@ -3076,25 +3092,26 @@ async def billing_vm_reinstall_options(
     }
 
 
-@router.post("/services/{service_id}/vm/reinstall", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/vm/reinstall", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_vm_reinstall(
     service_id: int,
     body: Optional[BillingVmReinstallBody] = None,
     audience: str = "admin",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Destroy guest (if any) and reprovision at the reserved VMID (WHMCS / billing)."""
     from app.services.vm_reinstall_service import VmReinstallError, reinstall_vm_guest
 
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_NOT_VM_SERVICE_MSG)
     if audience == "client":
         require_client_permission(db, service, PermissionKey.VM_REINSTALL)
 
@@ -3111,11 +3128,11 @@ async def billing_vm_reinstall(
     return result
 
 
-@router.post("/services/{service_id}/ipmi-ticket", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/ipmi-ticket", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def create_ipmi_ticket(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """
     Mint a one-time IPMI proxy launch ticket for a bare-metal service.
@@ -3127,7 +3144,7 @@ async def create_ipmi_ticket(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG
         )
 
     _assert_billing_owned_service(service, integration)
@@ -3156,11 +3173,11 @@ async def create_ipmi_ticket(
     return payload
 
 
-@router.post("/services/{service_id}/vnc-ticket", status_code=status.HTTP_200_OK, response_model=VmVncTicketResponse)
+@router.post("/services/{service_id}/vnc-ticket", status_code=status.HTTP_200_OK, response_model=VmVncTicketResponse, responses={**COMMON_ERROR_RESPONSES})
 async def create_vnc_ticket(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """
     Mint a one-time VM VNC console launch ticket.
@@ -3174,12 +3191,12 @@ async def create_vnc_ticket(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG
         )
 
     _assert_billing_owned_service(service, integration)
     if service.service_type != ServiceType.VM:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a VM service")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_NOT_VM_SERVICE_MSG)
     require_client_permission(db, service, PermissionKey.VM_CONSOLE)
 
     cid, _node, vmid = vm_placement(service)
@@ -3200,7 +3217,7 @@ async def create_vnc_ticket(
     return VmVncTicketResponse(launch_url=launch_url, expires_in=settings.vm_vnc_launch_ttl_seconds)
 
 
-@router.post("/services/{service_id}/kvm-ticket", status_code=status.HTTP_200_OK, response_model=IpmiKvmTicketResponse)
+@router.post("/services/{service_id}/kvm-ticket", status_code=status.HTTP_200_OK, response_model=IpmiKvmTicketResponse, responses={**COMMON_ERROR_RESPONSES})
 async def create_kvm_ticket(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3217,7 +3234,7 @@ async def create_kvm_ticket(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG
         )
 
     _assert_billing_owned_service(service, integration)
@@ -3250,7 +3267,7 @@ async def create_kvm_ticket(
     return IpmiKvmTicketResponse(launch_url=launch_url, expires_in=settings.ipmi_kvm_launch_ttl_seconds)
 
 
-@router.post("/services/{service_id}/sol-ticket", status_code=status.HTTP_200_OK, response_model=SolTicketResponse)
+@router.post("/services/{service_id}/sol-ticket", status_code=status.HTTP_200_OK, response_model=SolTicketResponse, responses={**COMMON_ERROR_RESPONSES})
 async def create_sol_ticket(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3264,7 +3281,7 @@ async def create_sol_ticket(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG
         )
 
     _assert_billing_owned_service(service, integration)
@@ -3297,7 +3314,7 @@ async def create_sol_ticket(
     return SolTicketResponse(launch_url=launch_url, expires_in=settings.sol_launch_ttl_seconds)
 
 
-@router.post("/services/{service_id}/sol/send", status_code=status.HTTP_200_OK, response_model=SolSendResponse)
+@router.post("/services/{service_id}/sol/send", status_code=status.HTTP_200_OK, response_model=SolSendResponse, responses={**COMMON_ERROR_RESPONSES})
 async def billing_sol_send(
     service_id: int,
     body: SolSendRequest,
@@ -3308,7 +3325,7 @@ async def billing_sol_send(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Service not found"
+            status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG
         )
     _assert_billing_owned_service(service, integration)
     require_client_permission(db, service, PermissionKey.BMS_SOL)
@@ -3316,12 +3333,12 @@ async def billing_sol_send(
         db,
         service_linked_server(db, service),
         body,
-        source="billing.service",
+        source=_BILLING_SERVICE_LITERAL,
         service_id=service.id,
     )
 
 
-@router.get("/services/{service_id}/virtual-media", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse)
+@router.get("/services/{service_id}/virtual-media", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def billing_get_virtual_media(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3330,13 +3347,13 @@ async def billing_get_virtual_media(
     """BMC virtual CD status + ISO catalog for a billed service."""
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_status(service_linked_server(db, service))
 
 
-@router.post("/services/{service_id}/virtual-media/insert", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse)
+@router.post("/services/{service_id}/virtual-media/insert", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def billing_insert_virtual_media(
     service_id: int,
     body: VirtualMediaInsertRequest,
@@ -3345,7 +3362,7 @@ async def billing_insert_virtual_media(
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_insert(
@@ -3353,12 +3370,12 @@ async def billing_insert_virtual_media(
         service_linked_server(db, service),
         body.filename,
         boot_once=body.boot_once,
-        source="billing.service",
+        source=_BILLING_SERVICE_LITERAL,
         service_id=service.id,
     )
 
 
-@router.post("/services/{service_id}/virtual-media/eject", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse)
+@router.post("/services/{service_id}/virtual-media/eject", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def billing_eject_virtual_media(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3366,22 +3383,22 @@ async def billing_eject_virtual_media(
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_eject(
         db,
         service_linked_server(db, service),
-        source="billing.service",
+        source=_BILLING_SERVICE_LITERAL,
         service_id=service.id,
     )
 
 
-@router.post("/services/{service_id}/portal-sso", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/portal-sso", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def create_portal_sso_ticket(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """One-click client portal sign-in for the billing platform's own logged-in user.
 
@@ -3395,7 +3412,7 @@ async def create_portal_sso_ticket(
     """
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
 
     _assert_billing_owned_service(service, integration)
     require_client_permission(db, service, PermissionKey.SERVICE_PORTAL)
@@ -3413,11 +3430,11 @@ async def create_portal_sso_ticket(
     return {"token": token, "redeem_path": "/api/client/sso/redeem", "expires_in": settings.client_sso_ticket_ttl_seconds}
 
 
-@router.get("/services/{service_id}/usage", response_model=ServerUsage)
+@router.get("/services/{service_id}/usage", response_model=ServerUsage, responses={**COMMON_ERROR_RESPONSES})
 async def get_service_usage(
     service_id: int,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Get service resource usage/stats.
@@ -3429,7 +3446,7 @@ async def get_service_usage(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -3467,12 +3484,12 @@ async def get_service_usage(
     )
 
 
-@router.post("/services/{service_id}/actions/run-script", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/actions/run-script", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def run_script_on_service(
     service_id: int,
     action: ServiceActionRunScript,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Run a script on a service's server.
@@ -3485,7 +3502,7 @@ async def run_script_on_service(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -3663,12 +3680,12 @@ async def run_script_on_service(
     }
 
 
-@router.post("/services/{service_id}/actions/reinstall-os", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/actions/reinstall-os", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def reinstall_os_on_service(
     service_id: int,
     action: ServiceActionReinstallOS,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     Reinstall OS on a service's server.
@@ -3683,7 +3700,7 @@ async def reinstall_os_on_service(
     if not service:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found"
+            detail=_SERVICE_NOT_FOUND_MSG
         )
     
     _assert_billing_owned_service(service, integration)
@@ -3914,21 +3931,22 @@ async def reinstall_os_on_service(
 
 # Registered after static /actions/run-script and /actions/reinstall-os so those
 # BMS endpoints are not swallowed by the {action_name} path parameter.
-@router.post("/services/{service_id}/actions/{action_name}", status_code=status.HTTP_200_OK)
+@router.post("/services/{service_id}/actions/{action_name}", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
 async def billing_run_strategy_action(
     service_id: int,
     action_name: str,
     body: StrategyActionRequest,
     audience: str = "client",
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     if audience not in ("admin", "client"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audience must be admin or client")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     try:
         return await run_action(db, service, action_name, body.params, audience)  # type: ignore[arg-type]
     except StrategyActionError as exc:
@@ -4028,12 +4046,13 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
     }
 
 
-@router.get("/products", response_model=List[dict])
+@router.get("/products", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_products_billing(
     service_type: Optional[str] = None,
     include_disabled: bool = False,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """
     List RackFlow catalog products for billing systems (WHMCS Module Settings).
@@ -4057,11 +4076,11 @@ async def list_products_billing(
     return out
 
 
-@router.get("/products/{product_code}", response_model=dict)
+@router.get("/products/{product_code}", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def get_product_billing(
     product_code: str,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """Return one catalog product (by code) with OS/template preview payload."""
     product = ProductDAO.get_by_code(db, product_code)
@@ -4073,9 +4092,9 @@ async def get_product_billing(
     return _billing_product_catalog_item(db, product)
 
 
-@router.get("/isos", response_model=List[dict])
+@router.get("/isos", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_isos_billing(
-    integration: BillingIntegration = Depends(get_billing_integration),
+    integration: BillingIntegrationDep,
 ):
     """
     List ISO files available for boot (read-only).
@@ -4085,9 +4104,9 @@ async def list_isos_billing(
     return catalog_for_billing()
 
 
-@router.get("/temp-os", response_model=List[dict])
+@router.get("/temp-os", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_temp_os_billing(
-    integration: BillingIntegration = Depends(get_billing_integration),
+    integration: BillingIntegrationDep,
 ):
     """
     List temporary OS configurations (e.g. debian-live) for product configuration.
@@ -4104,10 +4123,10 @@ async def list_temp_os_billing(
     ]
 
 
-@router.get("/proxmox/clusters", response_model=List[dict])
+@router.get("/proxmox/clusters", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_proxmox_clusters_billing(
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db),
+    integration: BillingIntegrationDep,
+    db: DbDep,
 ):
     """
     List enabled Proxmox clusters (locations) for WHMCS module/config option loaders.
@@ -4136,12 +4155,13 @@ async def list_proxmox_clusters_billing(
     return out
 
 
-@router.get("/server-groups", response_model=List[dict])
+@router.get("/server-groups", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_server_groups_billing(
     skip: int = 0,
     limit: int = 100,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     List server groups via billing API (read-only).
@@ -4172,10 +4192,10 @@ async def list_server_groups_billing(
     ]
 
 
-@router.get("/scripts", response_model=List[dict])
+@router.get("/scripts", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_available_scripts(
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     List scripts available for execution via billing API.
@@ -4194,11 +4214,12 @@ async def list_available_scripts(
     ]
 
 
-@router.get("/os-templates", response_model=List[dict])
+@router.get("/os-templates", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_available_os_templates(
     service_id: Optional[int] = None,
-    integration: BillingIntegration = Depends(get_billing_integration),
-    db: Session = Depends(get_db)
+    *,
+    integration: BillingIntegrationDep,
+    db: DbDep
 ):
     """
     List OS templates available for reinstallation via billing API.
@@ -4212,7 +4233,7 @@ async def list_available_os_templates(
         if not service:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found",
+                detail=_SERVICE_NOT_FOUND_MSG,
             )
         _assert_billing_owned_service(service, integration)
         group = _service_server_group(db, service)

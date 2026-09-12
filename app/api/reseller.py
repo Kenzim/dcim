@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Annotated, Optional, Union
 
 from fastapi import (
     APIRouter,
@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.core.client_permissions import PermissionKey
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.reseller_auth import get_reseller_by_api_key
 from app.dao.ipam_dao import IPAMDAO
 from app.dao.reseller_dao import ResellerDAO
@@ -61,6 +62,8 @@ from app.services.service_lifecycle import (
     ServiceLifecycleError,
 )
 
+
+DbDep = Annotated[Session, Depends(get_db)]
 
 router = APIRouter(prefix="/reseller", tags=["reseller"])
 logger = logging.getLogger(__name__)
@@ -218,11 +221,12 @@ def _scoped_service(
     return service
 
 
-@router.get("/products")
+@router.get("/products", responses={**COMMON_ERROR_RESPONSES})
 async def list_products(
     service_type: Optional[str] = None,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     wanted = (service_type or "").strip().lower() or None
     return [
@@ -243,11 +247,12 @@ async def list_products(
     ]
 
 
-@router.get("/products/{product_code}")
+@router.get("/products/{product_code}", responses={**COMMON_ERROR_RESPONSES})
 async def get_product(
     product_code: str,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     try:
         product, price = ResellerBillingService.resolve_sellable_product(
@@ -313,10 +318,11 @@ def _visible_resource_scope_ids(
     return None if has_product_quota else set()
 
 
-@router.get("/proxmox/clusters", response_model=list[dict])
+@router.get("/proxmox/clusters", response_model=list[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_proxmox_clusters(
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     """List enabled VM locations visible to this reseller's products/quotas."""
 
@@ -344,12 +350,13 @@ async def list_proxmox_clusters(
     ]
 
 
-@router.get("/server-groups", response_model=list[dict])
+@router.get("/server-groups", response_model=list[dict], responses={**COMMON_ERROR_RESPONSES})
 async def list_server_groups(
     skip: int = 0,
     limit: int = 100,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     """List bare-metal groups visible to this reseller's products/quotas."""
 
@@ -655,7 +662,8 @@ async def create_bare_metal_service(
         default=None, alias="Idempotency-Key"
     ),
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     return await _create_service(
         kind=(body.service_type or ServiceType.BARE_METAL.value).lower(),
@@ -680,7 +688,8 @@ async def create_vm_service(
         default=None, alias="Idempotency-Key"
     ),
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     return await _create_service(
         kind=ServiceType.VM.value,
@@ -692,12 +701,13 @@ async def create_vm_service(
     )
 
 
-@router.get("/services")
+@router.get("/services", responses={**COMMON_ERROR_RESPONSES})
 async def list_services(
     skip: int = 0,
     limit: int = 100,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     return [
         _service_payload(db, service)
@@ -707,11 +717,12 @@ async def list_services(
     ]
 
 
-@router.get("/services/{service_id}")
+@router.get("/services/{service_id}", responses={**COMMON_ERROR_RESPONSES})
 async def get_service(
     service_id: int,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     service = _scoped_service(db, reseller, service_id)
     payload = _service_payload(db, service)
@@ -735,7 +746,8 @@ async def get_service(
 async def terminate_service(
     service_id: int,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     service = _scoped_service(db, reseller, service_id)
     VMIPAllocationDAO.release_for_service(db, service.id)
@@ -764,12 +776,13 @@ async def terminate_service(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/services/{service_id}/suspend")
+@router.post("/services/{service_id}/suspend", responses={**COMMON_ERROR_RESPONSES})
 async def suspend_service(
     service_id: int,
     action: SuspendAction,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     service = _scoped_service(db, reseller, service_id)
     try:
@@ -788,12 +801,13 @@ async def suspend_service(
     }
 
 
-@router.post("/services/{service_id}/unsuspend")
+@router.post("/services/{service_id}/unsuspend", responses={**COMMON_ERROR_RESPONSES})
 async def unsuspend_service(
     service_id: int,
     action: SuspendAction,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     service = _scoped_service(db, reseller, service_id)
     await ServiceLifecycle().unsuspend(
@@ -807,12 +821,13 @@ async def unsuspend_service(
     }
 
 
-@router.post("/services/{service_id}/power")
+@router.post("/services/{service_id}/power", responses={**COMMON_ERROR_RESPONSES})
 async def power_service(
     service_id: int,
     power_action: PowerAction,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     from app.api.billing import _billing_get_plugin_instance
     from app.services.service_resource import service_linked_server
@@ -860,11 +875,12 @@ async def power_service(
     return {"status": "success", "action": action}
 
 
-@router.get("/services/{service_id}/status")
+@router.get("/services/{service_id}/status", responses={**COMMON_ERROR_RESPONSES})
 async def get_service_status(
     service_id: int,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     from app.api.billing import _billing_get_plugin_instance
 
@@ -888,11 +904,12 @@ async def get_service_status(
     }
 
 
-@router.post("/services/{service_id}/portal-sso")
+@router.post("/services/{service_id}/portal-sso", responses={**COMMON_ERROR_RESPONSES})
 async def create_portal_sso(
     service_id: int,
     reseller: Reseller = Depends(get_reseller_by_api_key),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     from app.core.config import settings
 

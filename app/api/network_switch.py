@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import Annotated, List, Optional
 from pydantic import BaseModel
 import asyncio
 from datetime import datetime, timezone, timedelta
 from app.core.database import get_db, SessionLocal
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.auth import require_admin
 from app.dao import NetworkSwitchDAO, LocationDAO, RackDAO, SwitchPortDAO, CableRunDAO, NetworkPortDAO, SwitchBandwidthSampleDAO
 from app.models.network_switch import NetworkSwitch
@@ -15,6 +16,9 @@ from app.services.aggregate_bandwidth_service import get_aggregate_monitored_ban
 import logging
 
 logger = logging.getLogger(__name__)
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter()
 
@@ -124,15 +128,16 @@ class SwitchPortBulkUpdate(BaseModel):
     ports: List[SwitchPortUpdate]
 
 
-@router.get("/", response_model=List[NetworkSwitchResponse])
+@router.get("/", response_model=List[NetworkSwitchResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_switches(
     skip: int = 0,
     limit: int = 100,
     enabled_only: bool = False,
     location_id: int | None = None,
     rack_id: int | None = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all network switches"""
     if location_id:
@@ -151,11 +156,11 @@ async def list_switches(
     return result
 
 
-@router.post("/", response_model=NetworkSwitchResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=NetworkSwitchResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_switch(
     switch_data: NetworkSwitchCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Create a new network switch"""
     # Validate plugin exists in registry
@@ -281,21 +286,22 @@ async def create_switch(
     return switch_dict
 
 
-@router.get("/bandwidth/aggregate", response_model=dict)
+@router.get("/bandwidth/aggregate", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def get_aggregate_bandwidth(
     hours: int = 24,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Aggregate Traffic in / Traffic out across server ports with monitor_bandwidth enabled."""
     return get_aggregate_monitored_bandwidth(db, hours=hours)
 
 
-@router.get("/{switch_id}", response_model=NetworkSwitchResponse)
+@router.get("/{switch_id}", response_model=NetworkSwitchResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_switch(
     switch_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get a network switch by ID"""
     switch = NetworkSwitchDAO.get_by_id(db, switch_id)
@@ -311,12 +317,12 @@ async def get_switch(
     return switch_dict
 
 
-@router.put("/{switch_id}", response_model=NetworkSwitchResponse)
+@router.put("/{switch_id}", response_model=NetworkSwitchResponse, responses={**COMMON_ERROR_RESPONSES})
 async def update_switch(
     switch_id: int,
     switch_data: NetworkSwitchUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Update a network switch"""
     switch = NetworkSwitchDAO.get_by_id(db, switch_id)
@@ -431,11 +437,11 @@ async def update_switch(
     return switch_dict
 
 
-@router.delete("/{switch_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{switch_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
 async def delete_switch(
     switch_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete a network switch"""
     success = NetworkSwitchDAO.delete(db, switch_id)
@@ -446,11 +452,11 @@ async def delete_switch(
         )
 
 
-@router.post("/test", response_model=dict)
+@router.post("/test", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def test_switch_connection(
     test_data: NetworkSwitchTestRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Test switch connection using plugin's test_connection method"""
     # Get switch plugin instance from registry
@@ -491,11 +497,11 @@ async def test_switch_connection(
         }
 
 
-@router.get("/{switch_id}/switch-ports", response_model=dict)
+@router.get("/{switch_id}/switch-ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def get_switch_ports_db(
     switch_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get list of switch ports from database (with cable run info)"""
     switch = NetworkSwitchDAO.get_by_id(db, switch_id)
@@ -570,12 +576,12 @@ async def get_switch_ports_db(
     }
 
 
-@router.put("/{switch_id}/switch-ports", response_model=dict)
+@router.put("/{switch_id}/switch-ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def update_switch_ports_db(
     switch_id: int,
     payload: SwitchPortBulkUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Bulk update switch ports (physical speed / description)."""
     switch = NetworkSwitchDAO.get_by_id(db, switch_id)
@@ -615,11 +621,11 @@ async def update_switch_ports_db(
     }
 
 
-@router.get("/{switch_id}/ports", response_model=dict)
+@router.get("/{switch_id}/ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def get_switch_ports(
     switch_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get list of ports and their statistics for a switch (live from plugin)"""
     switch = NetworkSwitchDAO.get_by_id(db, switch_id)
@@ -715,11 +721,11 @@ def _physical_speed_mbps(port_name: str, port_data: dict) -> int | None:
     return None
 
 
-@router.post("/{switch_id}/regenerate-ports", response_model=dict)
+@router.post("/{switch_id}/regenerate-ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def regenerate_switch_ports(
     switch_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Regenerate switch ports from plugin"""
     print(f"Regenerate ports: starting for switch_id={switch_id}")
@@ -922,14 +928,15 @@ def _downsample_bandwidth(samples: list, resolution_minutes: int):
     return out
 
 
-@router.get("/{switch_id}/bandwidth", response_model=dict)
+@router.get("/{switch_id}/bandwidth", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def get_switch_bandwidth(
     switch_id: int,
     hours: int = 24,
     port_identifier: str | None = None,
     resolution_minutes: int = 0,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Get stored bandwidth samples for a switch (optionally a single port). Bytes are cumulative; Rate is the difference between samples over the chosen interval."""
     switch = NetworkSwitchDAO.get_by_id(db, switch_id)
@@ -991,12 +998,12 @@ async def get_switch_bandwidth(
     return {"switch_id": switch_id, "hours": hours, "resolution_minutes": resolution_minutes or None, "ports": ports}
 
 
-@router.get("/{switch_id}/ports/{port}", response_model=dict)
+@router.get("/{switch_id}/ports/{port}", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def get_switch_port_statistics(
     switch_id: int,
     port: str,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get statistics for a specific port on a switch"""
     switch = NetworkSwitchDAO.get_by_id(db, switch_id)

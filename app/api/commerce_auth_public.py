@@ -77,7 +77,7 @@ def _enqueue_verify_email(db: Session, *, user: User, raw_token: str) -> None:
     )
 
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
+@router.post("/register", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 def register(body: RegisterBody, db: Annotated[Session, Depends(get_db)]):
     mode = settings.commerce_registration_mode
     if mode == "disabled":
@@ -124,7 +124,7 @@ def register(body: RegisterBody, db: Annotated[Session, Depends(get_db)]):
     }
 
 
-@router.post("/verify-email")
+@router.post("/verify-email", responses={**COMMON_ERROR_RESPONSES})
 def verify_email(body: VerifyEmailBody, db: Annotated[Session, Depends(get_db)]):
     token_hash = _hash_token(body.token.strip())
     row = db.execute(
@@ -142,7 +142,7 @@ def verify_email(body: VerifyEmailBody, db: Annotated[Session, Depends(get_db)])
     return {"verified": True, "user_id": row.user_id}
 
 
-@router.post("/password-reset/request")
+@router.post("/password-reset/request", responses={**COMMON_ERROR_RESPONSES})
 def password_reset_request(
     body: PasswordResetRequestBody,
     request: Request,
@@ -193,7 +193,7 @@ def password_reset_request(
     return {"ok": True}
 
 
-@router.post("/password-reset/confirm")
+@router.post("/password-reset/confirm", responses={**COMMON_ERROR_RESPONSES})
 def password_reset_confirm(body: PasswordResetConfirmBody, db: Annotated[Session, Depends(get_db)]):
     token_hash = _hash_token(body.token.strip())
     row = db.execute(

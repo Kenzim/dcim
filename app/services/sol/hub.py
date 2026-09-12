@@ -113,29 +113,23 @@ class SolHub:
 
     async def _lock_loop(self) -> None:
         interval = max(1.0, lock_ttl_seconds() / 3)
-        try:
-            while not self._closed:
-                await asyncio.sleep(interval)
-                if not refresh_lock(self.server_id):
-                    logger.warning("SOL hub lost Redis lock for server %s", self.server_id)
-                    await self.close()
-                    return
-        except asyncio.CancelledError:
-            return
+        while not self._closed:
+            await asyncio.sleep(interval)
+            if not refresh_lock(self.server_id):
+                logger.warning("SOL hub lost Redis lock for server %s", self.server_id)
+                await self.close()
+                return
 
     async def _idle_loop(self) -> None:
-        try:
-            while not self._closed:
-                await asyncio.sleep(2)
-                if self.viewers:
-                    self.touch()
-                    continue
-                if time.monotonic() - self._last_activity >= idle_seconds():
-                    logger.info("SOL hub idle timeout for server %s", self.server_id)
-                    await self.close()
-                    return
-        except asyncio.CancelledError:
-            return
+        while not self._closed:
+            await asyncio.sleep(2)
+            if self.viewers:
+                self.touch()
+                continue
+            if time.monotonic() - self._last_activity >= idle_seconds():
+                logger.info("SOL hub idle timeout for server %s", self.server_id)
+                await self.close()
+                return
 
     async def _reader_loop(self) -> None:
         try:
@@ -145,8 +139,6 @@ class SolHub:
                     break
                 self._append_capture(data)
                 await self._fanout(data)
-        except asyncio.CancelledError:
-            return
         except Exception:  # noqa: BLE001
             logger.warning("SOL hub reader failed for server %s", self.server_id, exc_info=True)
         finally:

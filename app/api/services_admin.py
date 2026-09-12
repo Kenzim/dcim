@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from typing import Annotated, List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.auth import require_admin
 from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
@@ -73,6 +74,9 @@ import logging
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter(prefix="/admin/services", tags=["admin-services"])
 
@@ -490,14 +494,14 @@ async def _sync_guest_state_from_proxmox(db: Session, service: Service) -> None:
     # UNKNOWN: leave stored state unchanged
 
 
-@router.get("/external-users", response_model=List[ExternalUserResponse])
+@router.get("/external-users", response_model=List[ExternalUserResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_external_users(
     integration_id: Optional[int] = None,
     skip: int = 0,
     limit: int = 100,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """List all users with a linked billing identity.
 
@@ -530,11 +534,11 @@ async def list_external_users(
     return result
 
 
-@router.get("/external-users/{external_user_id}", response_model=ExternalUserResponse)
+@router.get("/external-users/{external_user_id}", response_model=ExternalUserResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_external_user(
     external_user_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Get billing-identity details for a user (see ``list_external_users``)."""
     user = UserDAO.get_by_id(db, external_user_id)
@@ -559,7 +563,7 @@ async def get_external_user(
     )
 
 
-@router.get("", response_model=List[ServiceResponse])
+@router.get("", response_model=List[ServiceResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_services(
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
@@ -571,8 +575,8 @@ async def list_services(
     skip: int = 0,
     limit: int = 100,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """List all services"""
     query = db.query(Service)
@@ -639,13 +643,13 @@ async def list_services(
     return [_service_to_admin_response(db, s) for s in services]
 
 
-@router.get("/unassigned", response_model=List[ServiceResponse])
+@router.get("/unassigned", response_model=List[ServiceResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_unassigned_services(
     skip: int = 0,
     limit: int = 100,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     services = (
         db.query(Service)
@@ -658,15 +662,15 @@ async def list_unassigned_services(
     return [_service_to_admin_response(db, s) for s in services]
 
 
-@router.get("/vm", response_model=List[ServiceResponse])
+@router.get("/vm", response_model=List[ServiceResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_vm_services_admin(
     status_filter: Optional[str] = None,
     owner_user_id: Optional[int] = None,
     skip: int = 0,
     limit: int = 100,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     query = db.query(Service).filter(Service.service_type == ServiceType.VM)
     if status_filter:
@@ -681,15 +685,15 @@ async def list_vm_services_admin(
     return [_service_to_admin_response(db, s) for s in services]
 
 
-@router.get("/bare-metal", response_model=List[ServiceResponse])
+@router.get("/bare-metal", response_model=List[ServiceResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_bare_metal_services_admin(
     status_filter: Optional[str] = None,
     owner_user_id: Optional[int] = None,
     skip: int = 0,
     limit: int = 100,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     query = db.query(Service).filter(Service.service_type != ServiceType.VM)
     if status_filter:
@@ -704,11 +708,11 @@ async def list_bare_metal_services_admin(
     return [_service_to_admin_response(db, s) for s in services]
 
 
-@router.get("/vm/{service_id}", response_model=ServiceResponse)
+@router.get("/vm/{service_id}", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_vm_service_admin(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """
     Return a VM service. Guest power/existence is refreshed from Proxmox on each
@@ -722,13 +726,13 @@ async def get_vm_service_admin(
     return _service_to_admin_response(db, service)
 
 
-@router.get("/{service_id}/deployment-jobs", response_model=List[DeploymentJobResponse])
+@router.get("/{service_id}/deployment-jobs", response_model=List[DeploymentJobResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_deployment_jobs(
     service_id: int,
     limit: int = 50,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """List deployment jobs (with ordered step timelines) for a VM service."""
     service = ServiceDAO.get_by_id(db, service_id)
@@ -738,12 +742,12 @@ async def list_deployment_jobs(
     return [_deployment_job_to_response(j) for j in jobs]
 
 
-@router.get("/{service_id}/deployment-jobs/{job_id}", response_model=DeploymentJobResponse)
+@router.get("/{service_id}/deployment-jobs/{job_id}", response_model=DeploymentJobResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_deployment_job(
     service_id: int,
     job_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Return a single deployment job and its ordered step timeline."""
     job = VMDeploymentJobDAO.get_by_id(db, job_id)
@@ -752,11 +756,11 @@ async def get_deployment_job(
     return _deployment_job_to_response(job)
 
 
-@router.get("/bare-metal/{service_id}", response_model=ServiceResponse)
+@router.get("/bare-metal/{service_id}", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_bare_metal_service_admin(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.service_type == ServiceType.VM:
@@ -764,11 +768,11 @@ async def get_bare_metal_service_admin(
     return _service_to_admin_response(db, service)
 
 
-@router.post("/{service_id}/provision-vm", response_model=ServiceResponse)
+@router.post("/{service_id}/provision-vm", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 def admin_provision_vm_service(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """
     Resolve placement (auto-place + reserve VMID if needed) and enqueue a durable
@@ -791,12 +795,12 @@ def admin_provision_vm_service(
     return _service_to_admin_response(db, service)
 
 
-@router.put("/{service_id}/vm/placement", response_model=ServiceResponse)
+@router.put("/{service_id}/vm/placement", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_update_vm_placement(
     service_id: int,
     body: VmPlacementUpdateBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service or service.service_type != ServiceType.VM or not service.vm:
@@ -850,12 +854,12 @@ async def admin_update_vm_placement(
     return _service_to_admin_response(db, service)
 
 
-@router.post("/{service_id}/vm/power", response_model=ServiceResponse)
+@router.post("/{service_id}/vm/power", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_vm_power_action(
     service_id: int,
     body: VmPowerActionBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -901,11 +905,11 @@ async def admin_vm_power_action(
     return _service_to_admin_response(db, service)
 
 
-@router.get("/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse)
+@router.get("/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_get_vm_console_types(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Report which console types (noVNC/serial) this VM actually supports.
 
@@ -925,13 +929,13 @@ async def admin_get_vm_console_types(
     return VmConsoleTypesResponse(**available)
 
 
-@router.post("/{service_id}/vm/vnc-session", response_model=VmVncSessionResponse)
+@router.post("/{service_id}/vm/vnc-session", response_model=VmVncSessionResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_create_vm_vnc_session(
     service_id: int,
     console_type: Optional[str] = None,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Mint a VNC/serial console session for a VM service (admin).
 
@@ -976,13 +980,13 @@ async def admin_create_vm_vnc_session(
     )
 
 
-@router.get("/{service_id}/vm/vnc-popup")
+@router.get("/{service_id}/vm/vnc-popup", responses={**COMMON_ERROR_RESPONSES})
 async def admin_vm_vnc_popup(
     service_id: int,
     type: Optional[str] = None,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Mint a one-time console launch ticket and redirect to ``/vnc?t=...``.
 
@@ -1006,11 +1010,11 @@ async def admin_vm_vnc_popup(
     return RedirectResponse(url=build_relative_launch_url(token), status_code=status.HTTP_302_FOUND)
 
 
-@router.get("/{service_id}/kvm-popup")
+@router.get("/{service_id}/kvm-popup", responses={**COMMON_ERROR_RESPONSES})
 async def admin_kvm_popup(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
     del auth
@@ -1020,11 +1024,11 @@ async def admin_kvm_popup(
     return kvm_popup_redirect(service_linked_server(db, service))
 
 
-@router.get("/{service_id}/sol-popup")
+@router.get("/{service_id}/sol-popup", responses={**COMMON_ERROR_RESPONSES})
 async def admin_sol_popup(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Mint a one-time SOL launch ticket and redirect to ``/sol?t=...``."""
     del auth
@@ -1034,11 +1038,11 @@ async def admin_sol_popup(
     return sol_popup_redirect(service_linked_server(db, service))
 
 
-@router.get("/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse)
+@router.get("/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_get_virtual_media(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     del auth
     service = ServiceDAO.get_by_id(db, service_id)
@@ -1047,12 +1051,12 @@ async def admin_get_virtual_media(
     return await perform_status(service_linked_server(db, service))
 
 
-@router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse)
+@router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_insert_virtual_media(
     service_id: int,
     body: VirtualMediaInsertRequest,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     del auth
     service = ServiceDAO.get_by_id(db, service_id)
@@ -1068,11 +1072,11 @@ async def admin_insert_virtual_media(
     )
 
 
-@router.post("/{service_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse)
+@router.post("/{service_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_eject_virtual_media(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     del auth
     service = ServiceDAO.get_by_id(db, service_id)
@@ -1086,12 +1090,12 @@ async def admin_eject_virtual_media(
     )
 
 
-@router.post("/{service_id}/sol/send", response_model=SolSendResponse)
+@router.post("/{service_id}/sol/send", response_model=SolSendResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_sol_send(
     service_id: int,
     body: SolSendRequest,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     del auth
     service = ServiceDAO.get_by_id(db, service_id)
@@ -1106,11 +1110,11 @@ async def admin_sol_send(
     )
 
 
-@router.post("/{service_id}/vm/destroy", response_model=ServiceResponse)
+@router.post("/{service_id}/vm/destroy", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_destroy_vm_guest(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1171,11 +1175,11 @@ async def admin_destroy_vm_guest(
     return _service_to_admin_response(db, service)
 
 
-@router.post("/{service_id}/vm/recreate", response_model=ServiceResponse)
+@router.post("/{service_id}/vm/recreate", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 def admin_recreate_vm_guest(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1216,12 +1220,12 @@ def admin_recreate_vm_guest(
     return _service_to_admin_response(db, service)
 
 
-@router.put("/{service_id}/vm/ssh-keys")
+@router.put("/{service_id}/vm/ssh-keys", responses={**COMMON_ERROR_RESPONSES})
 async def admin_put_vm_ssh_keys(
     service_id: int,
     body: VmSshKeysBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Validate, store SSH public keys, and best-effort apply via guest agent."""
     from app.services.vm_ssh_keys_service import VmSshKeysError, save_and_apply_ssh_public_keys
@@ -1237,11 +1241,11 @@ async def admin_put_vm_ssh_keys(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.get("/{service_id}/vm/ssh-keys")
+@router.get("/{service_id}/vm/ssh-keys", responses={**COMMON_ERROR_RESPONSES})
 async def admin_get_vm_ssh_keys(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     from app.services.ssh_public_keys import ssh_key_fields_for_service
     from app.services.vm_ssh_keys_service import list_reinstall_templates_for_service
@@ -1259,13 +1263,13 @@ async def admin_get_vm_ssh_keys(
     }
 
 
-@router.post("/{service_id}/vm/reinstall", response_model=ServiceResponse)
+@router.post("/{service_id}/vm/reinstall", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def admin_reinstall_vm_guest(
     service_id: int,
     body: Optional[VmReinstallBody] = None,
     *,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Destroy the guest (if present) then reprovision at the same reserved VMID."""
     from app.services.vm_ssh_keys_service import VmSshKeysError, apply_template_change_for_reinstall
@@ -1332,11 +1336,11 @@ async def admin_reinstall_vm_guest(
     return result
 
 
-@router.get("/{service_id}/vm/backups")
+@router.get("/{service_id}/vm/backups", responses={**COMMON_ERROR_RESPONSES})
 async def admin_list_vm_backups(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1348,12 +1352,12 @@ async def admin_list_vm_backups(
     return {"backups": items, "jobs": jobs}
 
 
-@router.post("/{service_id}/vm/backups")
+@router.post("/{service_id}/vm/backups", responses={**COMMON_ERROR_RESPONSES})
 async def admin_create_vm_backup(
     service_id: int,
     body: BackupCreateBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1366,12 +1370,12 @@ async def admin_create_vm_backup(
         raise map_backup_error(exc) from exc
 
 
-@router.post("/{service_id}/vm/backups/delete")
+@router.post("/{service_id}/vm/backups/delete", responses={**COMMON_ERROR_RESPONSES})
 async def admin_delete_vm_backup(
     service_id: int,
     body: BackupMutateBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1383,12 +1387,12 @@ async def admin_delete_vm_backup(
     return {"status": "ok"}
 
 
-@router.post("/{service_id}/vm/backups/restore")
+@router.post("/{service_id}/vm/backups/restore", responses={**COMMON_ERROR_RESPONSES})
 async def admin_restore_vm_backup(
     service_id: int,
     body: BackupMutateBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1411,11 +1415,11 @@ async def admin_restore_vm_backup(
     return result
 
 
-@router.get("/{service_id}", response_model=ServiceResponse)
+@router.get("/{service_id}", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_service(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Get service details"""
     service = ServiceDAO.get_by_id(db, service_id)
@@ -1428,11 +1432,11 @@ async def get_service(
     return _service_to_admin_response(db, service)
 
 
-@router.delete("/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{service_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
 async def delete_service_completely(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Hard-delete a service and all dependent extension rows."""
     service = ServiceDAO.get_by_id(db, service_id)
@@ -1454,12 +1458,12 @@ async def delete_service_completely(
     return None
 
 
-@router.put("/{service_id}/owner", response_model=ServiceResponse)
+@router.put("/{service_id}/owner", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def assign_service_owner(
     service_id: int,
     body: ServiceOwnerAssignBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1473,12 +1477,12 @@ async def assign_service_owner(
     return _service_to_admin_response(db, service)
 
 
-@router.put("/{service_id}/permissions", response_model=ServiceResponse)
+@router.put("/{service_id}/permissions", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def assign_service_permissions(
     service_id: int,
     body: ServicePermissionsAssignBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Set this service's permission preset and/or sparse per-key overrides
     (the two most-specific layers in the resolution hierarchy — see
@@ -1494,11 +1498,11 @@ async def assign_service_permissions(
     return _service_to_admin_response(db, service)
 
 
-@router.get("/{service_id}/effective-permissions", response_model=Dict[str, bool])
+@router.get("/{service_id}/effective-permissions", response_model=Dict[str, bool], responses={**COMMON_ERROR_RESPONSES})
 async def get_service_effective_permissions(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Preview the fully-resolved client permission map for this service."""
     service = ServiceDAO.get_by_id(db, service_id)
@@ -1511,11 +1515,11 @@ class StrategyActionBody(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
-@router.get("/{service_id}/actions")
+@router.get("/{service_id}/actions", responses={**COMMON_ERROR_RESPONSES})
 async def admin_list_strategy_actions(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     from app.services.strategy_actions import list_actions
 
@@ -1525,13 +1529,13 @@ async def admin_list_strategy_actions(
     return {"actions": list_actions(db, service, "admin")}
 
 
-@router.post("/{service_id}/actions/{action_name}")
+@router.post("/{service_id}/actions/{action_name}", responses={**COMMON_ERROR_RESPONSES})
 async def admin_run_strategy_action(
     service_id: int,
     action_name: str,
     body: StrategyActionBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     from app.services.strategy_actions import StrategyActionError, run_action
 
@@ -1560,11 +1564,11 @@ class ReassignVmIpBody(BaseModel):
     )
 
 
-@router.get("/{service_id}/available-ips")
+@router.get("/{service_id}/available-ips", responses={**COMMON_ERROR_RESPONSES})
 async def admin_list_available_vm_ips(
     service_id: int,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Browse free VM IP pool rows usable on this service's Proxmox cluster."""
     from app.services.vm_ip_reassign import VmIpReassignError, list_available_ips_for_service
@@ -1578,12 +1582,12 @@ async def admin_list_available_vm_ips(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.post("/{service_id}/reassign-ip")
+@router.post("/{service_id}/reassign-ip", responses={**COMMON_ERROR_RESPONSES})
 async def admin_reassign_vm_ip(
     service_id: int,
     body: ReassignVmIpBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Release the current VM IP, claim a free pool row, and optionally reset guest networking."""
     from app.services.vm_ip_reassign import VmIpReassignError, reassign_vm_ip
@@ -1603,12 +1607,12 @@ async def admin_reassign_vm_ip(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.put("/{service_id}/status", response_model=ServiceResponse)
+@router.put("/{service_id}/status", response_model=ServiceResponse, responses={**COMMON_ERROR_RESPONSES})
 async def update_service_status(
     service_id: int,
     body: ServiceStatusUpdateBody,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
@@ -1825,12 +1829,12 @@ def _create_admin_vm_core(
     return service
 
 
-@router.post("/vm", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/vm", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_vm_service_admin(
     body: AdminVmServiceCreate,
     background_tasks: BackgroundTasks,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """
     Create a VM service (``services`` + ``service_vm``).
@@ -1846,11 +1850,11 @@ async def create_vm_service_admin(
     return _service_to_admin_response(db, service)
 
 
-@router.post("/internal-test-vm", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/internal-test-vm", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_internal_test_vm_service(
     body: InternalTestVMServiceCreate,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """
     Legacy: same as ``POST /admin/services/vm`` but Proxmox placement was required.
@@ -1872,11 +1876,11 @@ async def create_internal_test_vm_service(
     return _service_to_admin_response(db, service)
 
 
-@router.post("/http-proxy", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/http-proxy", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_http_proxy_service_admin(
     body: AdminHttpProxyServiceCreate,
-    auth: Annotated[dict, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
+    auth: AdminDep,
+    db: DbDep,
 ):
     """
     Create an http_proxy service with no linked rack Server; IP(s) are

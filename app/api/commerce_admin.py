@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -35,6 +35,9 @@ from app.services.gdpr_service import GdprService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceService
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter(
     prefix="/admin/commerce",
@@ -228,13 +231,14 @@ def _get_invoice_or_404(db: Session, invoice_id: int) -> Invoice:
 # --- Orders ---
 
 
-@router.get("/orders")
+@router.get("/orders", responses={**COMMON_ERROR_RESPONSES})
 def list_orders(
     status_filter: Optional[OrderStatus] = Query(default=None, alias="status"),
     q: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     rows = OrderDAO.list_admin(
         db, status=status_filter, q=q, limit=limit, offset=offset
@@ -243,7 +247,7 @@ def list_orders(
 
 
 @router.get("/orders/{order_id}", responses={**COMMON_ERROR_RESPONSES})
-def get_order(order_id: int, db: Session = Depends(get_db)):
+def get_order(order_id: int, db: DbDep):
     order = db.execute(
         select(Order).options(joinedload(Order.items)).where(Order.id == order_id)
     ).unique().scalar_one_or_none()
@@ -256,8 +260,8 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
 def accept_order(
     order_id: int,
     request: Request,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     order = _get_order_or_404(db, order_id)
     if order.status not in {
@@ -305,8 +309,8 @@ def accept_order(
 def retry_fulfill_order(
     order_id: int,
     request: Request,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     order = _get_order_or_404(db, order_id)
     if order.status not in {
@@ -340,8 +344,8 @@ def retry_fulfill_order(
 def cancel_order(
     order_id: int,
     request: Request,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     order = _get_order_or_404(db, order_id)
     if order.status in {OrderStatus.ACTIVE, OrderStatus.CANCELLED}:
@@ -376,13 +380,14 @@ def cancel_order(
 # --- Invoices ---
 
 
-@router.get("/invoices")
+@router.get("/invoices", responses={**COMMON_ERROR_RESPONSES})
 def list_invoices(
     status_filter: Optional[InvoiceStatus] = Query(default=None, alias="status"),
     billing_account_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = (
         select(Invoice)
@@ -398,13 +403,13 @@ def list_invoices(
 
 
 @router.get("/invoices/{invoice_id}", responses={**COMMON_ERROR_RESPONSES})
-def get_invoice(invoice_id: int, db: Session = Depends(get_db)):
+def get_invoice(invoice_id: int, db: DbDep):
     invoice = _get_invoice_or_404(db, invoice_id)
     return _serialize_invoice(db, invoice, payments=True)
 
 
 @router.get("/invoices/{invoice_id}/pdf", responses={**COMMON_ERROR_RESPONSES})
-def get_invoice_pdf(invoice_id: int, db: Session = Depends(get_db)):
+def get_invoice_pdf(invoice_id: int, db: DbDep):
     invoice = _get_invoice_or_404(db, invoice_id)
     try:
         pdf_bytes = InvoicePdfService.render_pdf_bytes(db, invoice)
@@ -424,8 +429,8 @@ def mark_invoice_paid(
     invoice_id: int,
     body: MarkPaidBody,
     request: Request,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     invoice = _get_invoice_or_404(db, invoice_id)
     if invoice.status == InvoiceStatus.VOID:
@@ -464,8 +469,8 @@ def mark_invoice_paid(
 def void_invoice(
     invoice_id: int,
     request: Request,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     invoice = _get_invoice_or_404(db, invoice_id)
     if invoice.status == InvoiceStatus.PAID:
@@ -488,14 +493,15 @@ def void_invoice(
 # --- Transactions ---
 
 
-@router.get("/transactions")
+@router.get("/transactions", responses={**COMMON_ERROR_RESPONSES})
 def list_transactions(
     gateway: Optional[str] = None,
     status_filter: Optional[PaymentStatus] = Query(default=None, alias="status"),
     billing_account_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = (
         select(Payment)
@@ -523,14 +529,15 @@ def list_transactions(
 # --- Gateway logs ---
 
 
-@router.get("/gateway-logs")
+@router.get("/gateway-logs", responses={**COMMON_ERROR_RESPONSES})
 def list_gateway_logs(
     gateway: Optional[str] = None,
     invoice_id: Optional[int] = None,
     billing_account_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = select(PaymentGatewayLog).order_by(
         PaymentGatewayLog.created_at.desc(), PaymentGatewayLog.id.desc()
@@ -548,12 +555,13 @@ def list_gateway_logs(
 # --- Email messages ---
 
 
-@router.get("/email-messages")
+@router.get("/email-messages", responses={**COMMON_ERROR_RESPONSES})
 def list_email_messages(
     status_filter: Optional[EmailMessageStatus] = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     rows = EmailMessageService.list_admin(
         db, status=status_filter, limit=limit, offset=offset
@@ -562,7 +570,7 @@ def list_email_messages(
 
 
 @router.post("/email-messages/{message_id}/retry", responses={**COMMON_ERROR_RESPONSES})
-def retry_email_message(message_id: int, db: Session = Depends(get_db)):
+def retry_email_message(message_id: int, db: DbDep):
     row = EmailMessageService.retry(db, message_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Email message not found")
@@ -573,14 +581,15 @@ def retry_email_message(message_id: int, db: Session = Depends(get_db)):
 # --- Audit ---
 
 
-@router.get("/audit-events")
+@router.get("/audit-events", responses={**COMMON_ERROR_RESPONSES})
 def list_audit_events(
     action: Optional[str] = None,
     billing_account_id: Optional[int] = None,
     subject_user_id: Optional[int] = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = select(UserAuditEvent).order_by(
         UserAuditEvent.created_at.desc(), UserAuditEvent.id.desc()
@@ -598,13 +607,14 @@ def list_audit_events(
 # --- Billing accounts ---
 
 
-@router.get("/billing-accounts")
+@router.get("/billing-accounts", responses={**COMMON_ERROR_RESPONSES})
 def list_billing_accounts(
     status_filter: Optional[BillingAccountStatus] = Query(default=None, alias="status"),
     q: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     rows = BillingAccountDAO.list_for_admin(
         db, status=status_filter, q=q, limit=limit, offset=offset
@@ -613,7 +623,7 @@ def list_billing_accounts(
 
 
 @router.get("/billing-accounts/{account_id}", responses={**COMMON_ERROR_RESPONSES})
-def get_billing_account(account_id: int, db: Session = Depends(get_db)):
+def get_billing_account(account_id: int, db: DbDep):
     row = BillingAccountDAO.get(db, account_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Billing account not found")
@@ -639,15 +649,15 @@ def get_billing_account(account_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/settings/{key}", responses={**COMMON_ERROR_RESPONSES})
-def get_setting(key: str, db: Session = Depends(get_db)):
+def get_setting(key: str, db: DbDep):
     value = SystemSettingDAO.get(db, key.strip())
     if value is None:
         raise HTTPException(status_code=404, detail="Setting not found")
     return {"key": key.strip(), "value": value}
 
 
-@router.put("/settings/{key}")
-def put_setting(key: str, body: SettingUpdateBody, db: Session = Depends(get_db)):
+@router.put("/settings/{key}", responses={**COMMON_ERROR_RESPONSES})
+def put_setting(key: str, body: SettingUpdateBody, db: DbDep):
     row = SystemSettingDAO.set(db, key.strip(), body.value)
     db.commit()
     return {"key": row.key, "value": row.value, "updated_at": row.updated_at}
@@ -656,14 +666,14 @@ def put_setting(key: str, body: SettingUpdateBody, db: Session = Depends(get_db)
 # --- Outbound webhooks ---
 
 
-@router.get("/webhooks")
-def list_webhooks(db: Session = Depends(get_db)):
+@router.get("/webhooks", responses={**COMMON_ERROR_RESPONSES})
+def list_webhooks(db: DbDep):
     rows = list(db.execute(select(WebhookEndpoint).order_by(WebhookEndpoint.id)).scalars())
     return [CommerceWebhookService.serialize_endpoint(row) for row in rows]
 
 
-@router.post("/webhooks", status_code=status.HTTP_201_CREATED)
-def create_webhook(body: WebhookCreateBody, db: Session = Depends(get_db)):
+@router.post("/webhooks", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+def create_webhook(body: WebhookCreateBody, db: DbDep):
     row = CommerceWebhookService.create_endpoint(
         db,
         url=body.url,
@@ -679,7 +689,7 @@ def create_webhook(body: WebhookCreateBody, db: Session = Depends(get_db)):
 def update_webhook(
     endpoint_id: int,
     body: WebhookUpdateBody,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     row = db.get(WebhookEndpoint, endpoint_id)
     if row is None:
@@ -703,7 +713,7 @@ def update_webhook(
     status_code=status.HTTP_204_NO_CONTENT,
     responses={**COMMON_ERROR_RESPONSES},
 )
-def delete_webhook(endpoint_id: int, db: Session = Depends(get_db)):
+def delete_webhook(endpoint_id: int, db: DbDep):
     row = db.get(WebhookEndpoint, endpoint_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Webhook endpoint not found")
@@ -715,7 +725,7 @@ def delete_webhook(endpoint_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/users/{user_id}/export", responses={**COMMON_ERROR_RESPONSES})
-def export_user(user_id: int, db: Session = Depends(get_db)):
+def export_user(user_id: int, db: DbDep):
     if db.get(User, user_id) is None:
         raise HTTPException(status_code=404, detail="User not found")
     try:
@@ -726,7 +736,7 @@ def export_user(user_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/users/{user_id}/anonymize", responses={**COMMON_ERROR_RESPONSES})
-def anonymize_user(user_id: int, db: Session = Depends(get_db)):
+def anonymize_user(user_id: int, db: DbDep):
     try:
         result = GdprService.anonymize_user(db, user_id)
     except ValueError as exc:
@@ -742,7 +752,7 @@ def anonymize_user(user_id: int, db: Session = Depends(get_db)):
 def force_cancel_service(
     service_id: int,
     body: ForceCancelBody,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     from app.dao.commerce_dao import BillingAccountDAO
     from app.models.service import Service

@@ -97,24 +97,7 @@ async def perform_eject(
         raise virtual_media_http_error(exc) from exc
 
 
-def _range_response(request: Request, path: Path, filename: str) -> Response:
-    file_size = path.stat().st_size
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Type": "application/octet-stream",
-        "Content-Disposition": f'inline; filename="{filename}"',
-    }
-    range_header = (request.headers.get("range") or "").strip()
-    if not range_header:
-        if request.method == "HEAD":
-            return Response(status_code=200, headers={**headers, "Content-Length": str(file_size)})
-        return FileResponse(
-            path,
-            media_type="application/octet-stream",
-            filename=filename,
-            content_disposition_type="inline",
-            headers={"Accept-Ranges": "bytes"},
-        )
+def _parse_byte_range(range_header: str, file_size: int) -> tuple[int, int]:
     if not range_header.lower().startswith("bytes="):
         raise HTTPException(status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
     spec = range_header.split("=", 1)[1].strip()
@@ -138,7 +121,28 @@ def _range_response(request: Request, path: Path, filename: str) -> Response:
             status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
             headers={"Content-Range": f"bytes */{file_size}"},
         )
-    end = min(end, file_size - 1)
+    return start, min(end, file_size - 1)
+
+
+def _range_response(request: Request, path: Path, filename: str) -> Response:
+    file_size = path.stat().st_size
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": f'inline; filename="{filename}"',
+    }
+    range_header = (request.headers.get("range") or "").strip()
+    if not range_header:
+        if request.method == "HEAD":
+            return Response(status_code=200, headers={**headers, "Content-Length": str(file_size)})
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename=filename,
+            content_disposition_type="inline",
+            headers={"Accept-Ranges": "bytes"},
+        )
+    start, end = _parse_byte_range(range_header, file_size)
     length = end - start + 1
     range_headers = {
         **headers,

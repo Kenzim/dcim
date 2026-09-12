@@ -11,9 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, C
 from fastapi.responses import PlainTextResponse, FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from typing import Optional, List, Dict, Any
+from typing import Annotated, Optional, List, Dict, Any
 from pydantic import BaseModel, Field, field_validator
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.config import settings
 from app.core.auth import require_admin, get_current_user, security
 from app.dao import (
@@ -46,6 +47,9 @@ import os
 import ipaddress
 
 logger = logging.getLogger(__name__)
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter()
 
@@ -364,12 +368,13 @@ def normalize_mac_address(mac: str) -> str:
     return mac.upper()
 
 
-@router.get("/pxe", response_class=PlainTextResponse)
+@router.get("/pxe", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_pxe_boot_file(
     mac: Optional[str] = Query(None, description="MAC address of the network port requesting PXE boot"),
     script: Optional[bool] = Query(False, description="Return script content instead of iPXE script (for initramfs)"),
     token: Optional[str] = Query(None, description="Download token required when script=true"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Get PXE boot file (iPXE script) or script content for a server based on MAC address.
@@ -686,10 +691,11 @@ exit
         )
 
 
-@router.get("/pxe/info")
+@router.get("/pxe/info", responses={**COMMON_ERROR_RESPONSES})
 async def get_pxe_info(
     mac: str = Query(..., description="MAC address of the network port"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Get PXE boot configuration information for a server.
@@ -984,10 +990,10 @@ def _normalize_hardware_report_payload(payload: HardwareDetectionReportIngest) -
     }
 
 
-@router.get("/cloud-init/user-data", response_class=PlainTextResponse)
+@router.get("/cloud-init/user-data", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_cloud_init_user_data(
     request: Request,
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """Serve generic cloud-init user-data for the server identified by requester IP."""
     source_ip = _get_request_source_ip(request)
@@ -1011,10 +1017,10 @@ async def get_cloud_init_user_data(
     )
 
 
-@router.get("/cloud-init/meta-data", response_class=PlainTextResponse)
+@router.get("/cloud-init/meta-data", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_cloud_init_meta_data(
     request: Request,
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """Serve cloud-init meta-data for the server identified by requester IP."""
     source_ip = _get_request_source_ip(request)
@@ -1038,12 +1044,13 @@ async def get_cloud_init_meta_data(
     )
 
 
-@router.post("/hardware-detection/report", response_model=dict)
+@router.post("/hardware-detection/report", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
 async def ingest_hardware_detection_report(
     payload: HardwareDetectionReportIngest,
     request: Request,
     token: str = Query(..., description="download token tied to detection boot task"),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     """Receive hardware detection report from booted detection script."""
     token_service = get_download_token_service()
@@ -1134,12 +1141,12 @@ class BootTaskResponse(BaseModel):
         from_attributes = True
 
 
-@router.post("/{server_id}/boot-task", response_model=BootTaskResponse)
+@router.post("/{server_id}/boot-task", response_model=BootTaskResponse, responses={**COMMON_ERROR_RESPONSES})
 async def create_boot_task(
     server_id: int,
     boot_task_data: BootTaskCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """
     Create a boot task for a server.
@@ -1618,11 +1625,11 @@ async def create_boot_task(
     )
 
 
-@router.get("/{server_id}/boot-task", response_model=Optional[BootTaskResponse])
+@router.get("/{server_id}/boot-task", response_model=Optional[BootTaskResponse], responses={**COMMON_ERROR_RESPONSES})
 async def get_boot_task(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get the active boot task for a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -1654,11 +1661,11 @@ async def get_boot_task(
     )
 
 
-@router.delete("/{server_id}/boot-task")
+@router.delete("/{server_id}/boot-task", responses={**COMMON_ERROR_RESPONSES})
 async def cancel_boot_task(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Cancel any pending boot tasks for a server"""
     server = ServerDAO.get_by_id(db, server_id)
@@ -1674,11 +1681,12 @@ async def cancel_boot_task(
     return {"cancelled": count}
 
 
-@router.get("/scripts/{task_id}", response_class=PlainTextResponse)
+@router.get("/scripts/{task_id}", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_script(
     task_id: int,
     token: Optional[str] = Query(None, description="Download token authorizing access to this boot task's script"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Serve script content for a boot task.
@@ -1731,10 +1739,10 @@ async def get_script(
 
 # Kernel and Initrd Serving Endpoints
 
-@router.get("/kernel/{filename}")
+@router.get("/kernel/{filename}", responses={**COMMON_ERROR_RESPONSES})
 async def get_kernel(
     filename: str,
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """
     Serve Linux kernel files.
@@ -1772,10 +1780,10 @@ async def get_kernel(
     )
 
 
-@router.get("/initrd/{filename}")
+@router.get("/initrd/{filename}", responses={**COMMON_ERROR_RESPONSES})
 async def get_initrd(
     filename: str,
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """
     Serve initrd/initramfs files.
@@ -1815,10 +1823,10 @@ async def get_initrd(
 
 # Custom Scripts Endpoints
 
-@router.get("/scripts")
+@router.get("/scripts", responses={**COMMON_ERROR_RESPONSES})
 async def list_scripts(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """
     List all available scripts from database.
@@ -1843,14 +1851,15 @@ async def list_scripts(
     ]
 
 
-@router.get("/scripts/by-id/{script_id_or_name}")
+@router.get("/scripts/by-id/{script_id_or_name}", responses={**COMMON_ERROR_RESPONSES})
 async def get_script_by_id_or_name(
     script_id_or_name: str,
     request: Request,
     token: Optional[str] = Query(None, description="Download token authorizing script access"),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     auth_token: Optional[str] = Cookie(None, alias="auth_token"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Get script content by ID or name.
@@ -1916,10 +1925,10 @@ async def get_script_by_id_or_name(
 
 # ISO Serving Endpoints
 
-@router.get("/isos")
+@router.get("/isos", responses={**COMMON_ERROR_RESPONSES})
 async def list_isos(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """
     List all available ISO files.
@@ -1934,13 +1943,14 @@ async def list_isos(
     ]
 
 
-@router.get("/isos/{filename}")
+@router.get("/isos/{filename}", responses={**COMMON_ERROR_RESPONSES})
 @router.head("/isos/{filename}")
 async def get_iso(
     filename: str,
     request: Request,
     token: Optional[str] = Query(None, description="One-time download token"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Serve ISO image files.
@@ -2022,9 +2032,9 @@ async def get_iso(
 
 # Temporary OS Endpoints
 
-@router.get("/temp-os")
+@router.get("/temp-os", responses={**COMMON_ERROR_RESPONSES})
 async def list_temp_os(
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """
     List all available temporary OSes.
@@ -2047,13 +2057,13 @@ async def list_temp_os(
     ]
 
 
-@router.get("/temp-os/{os_id}/files/{filename}")
+@router.get("/temp-os/{os_id}/files/{filename}", responses={**COMMON_ERROR_RESPONSES})
 @router.head("/temp-os/{os_id}/files/{filename}")
 async def get_temp_os_file(
     os_id: str,
     filename: str,
     request: Request,
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """
     Serve files for temporary OSes from their directory.
@@ -2113,7 +2123,7 @@ async def get_temp_os_file(
 
 # Live OS Image Serving Endpoints
 
-@router.get("/images/{filename}")
+@router.get("/images/{filename}", responses={**COMMON_ERROR_RESPONSES})
 @router.head("/images/{filename}")
 async def get_live_os_image(
     filename: str,
@@ -2173,13 +2183,14 @@ async def get_live_os_image(
 
 # Disk Image Serving Endpoints
 
-@router.get("/disk-images/{filename}")
+@router.get("/disk-images/{filename}", responses={**COMMON_ERROR_RESPONSES})
 @router.head("/disk-images/{filename}")
 async def get_disk_image(
     filename: str,
     request: Request,
     token: Optional[str] = Query(None, description="One-time download token"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Serve disk image files (ISOs, disk images, etc.) from disk_images/ directory.
@@ -2257,14 +2268,15 @@ async def get_disk_image(
 
 # Template Files Serving Endpoints
 
-@router.get("/template-files/{template_id}/{file_path:path}")
+@router.get("/template-files/{template_id}/{file_path:path}", responses={**COMMON_ERROR_RESPONSES})
 @router.head("/template-files/{template_id}/{file_path:path}")
 async def get_template_file(
     template_id: str,
     file_path: str,
     request: Request,
     token: Optional[str] = Query(None, description="One-time download token"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Serve any file under os_templates/{template_id}/ (template root).
@@ -2354,10 +2366,10 @@ async def get_template_file(
     )
 
 
-@router.post("/download-token/{token}/terminate")
+@router.post("/download-token/{token}/terminate", responses={**COMMON_ERROR_RESPONSES})
 async def terminate_download_token(
     token: str,
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """
     Explicitly terminate a download token.

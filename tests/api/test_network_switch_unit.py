@@ -98,7 +98,11 @@ async def test_switch_connection_returns_plugin_success_and_optional_info(monkey
     registry = MagicMock()
     registry.get_plugin.return_value = plugin
     monkeypatch.setattr(api, "get_switch_registry", lambda: registry)
-    result = await api.test_switch_connection(api.NetworkSwitchTestRequest(plugin_name="x", plugin_config={}), db=MagicMock())
+    result = await api.test_switch_connection(
+        api.NetworkSwitchTestRequest(plugin_name="x", plugin_config={}),
+        auth={},
+        db=MagicMock(),
+    )
     assert result == {"success": True, "switch_info": {"model": "test"}}
 
 
@@ -112,5 +116,9 @@ async def test_switch_connection_maps_plugin_construction_errors(monkeypatch, ex
     registry.get_plugin.side_effect = exc_type
     monkeypatch.setattr(api, "get_switch_registry", lambda: registry)
     with pytest.raises(HTTPException) as exc:
-        await api.test_switch_connection(api.NetworkSwitchTestRequest(plugin_name="x", plugin_config={}), db=MagicMock())
+        await api.test_switch_connection(
+            api.NetworkSwitchTestRequest(plugin_name="x", plugin_config={}),
+            auth={},
+            db=MagicMock(),
+        )
     assert exc.value.status_code == status_code

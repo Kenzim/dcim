@@ -1,3 +1,4 @@
+from typing import Annotated
 """Public VM guest VNC console endpoints: launch-ticket redeem + WS bridge.
 
 Mounted at ``/api/vnc``.
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.service_dao import ServiceDAO
 from app.plugins.base import PowerState
@@ -52,6 +54,8 @@ from app.services.vm_vnc_ticket_service import (
 
 logger = logging.getLogger(__name__)
 
+DbDep = Annotated[Session, Depends(get_db)]
+
 router = APIRouter(prefix="/vnc", tags=["vm-vnc"])
 
 
@@ -64,8 +68,8 @@ def _placement_http_error(exc: ProxmoxPlacementError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=str(exc))
 
 
-@router.post("/redeem", response_model=VmVncSessionResponse)
-async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: Session = Depends(get_db)):
+@router.post("/redeem", response_model=VmVncSessionResponse, responses={**COMMON_ERROR_RESPONSES})
+async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: DbDep):
     """Consume a launch ticket and mint a WS session for the ``/vnc`` page.
 
     Called by the browser (unauthenticated) after a WHMCS "Open VNC console"
@@ -120,8 +124,8 @@ async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: Session = Depen
     )
 
 
-@router.post("/refresh", response_model=VmVncSessionResponse)
-async def refresh_vnc_session(body: VmVncRedeemRequest, db: Session = Depends(get_db)):
+@router.post("/refresh", response_model=VmVncSessionResponse, responses={**COMMON_ERROR_RESPONSES})
+async def refresh_vnc_session(body: VmVncRedeemRequest, db: DbDep):
     """Mint a fresh Proxmox console proxy for an existing WS session.
 
     Used by the console viewer's Reconnect button. The Rackflow ``ws_token``
@@ -190,8 +194,8 @@ async def refresh_vnc_session(body: VmVncRedeemRequest, db: Session = Depends(ge
     )
 
 
-@router.post("/power", response_model=VmVncPowerResponse)
-async def console_power_action(body: VmVncPowerRequest, db: Session = Depends(get_db)):
+@router.post("/power", response_model=VmVncPowerResponse, responses={**COMMON_ERROR_RESPONSES})
+async def console_power_action(body: VmVncPowerRequest, db: DbDep):
     """Power on/off/reboot the VM bound to a console WS session.
 
     Authenticated only by the ``ws_token`` (same as ``/ws`` / ``/refresh``),
@@ -349,7 +353,7 @@ async def _serial_keepalive(upstream) -> None:
 
 
 @router.websocket("/ws")
-async def vnc_websocket(websocket: WebSocket, token: str, db: Session = Depends(get_db)):
+async def vnc_websocket(websocket: WebSocket, token: str, db: DbDep):
     """Bridge the browser's noVNC WebSocket to Proxmox's ``vncwebsocket``.
 
     Auth is via the ``token`` query param (a WS session token minted by one
