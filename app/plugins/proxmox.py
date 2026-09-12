@@ -199,7 +199,7 @@ class ProxmoxPlugin(ServerPlugin):
         self.node = new_node
         return True
 
-    async def _get_with_relocate(self, url_for_node: Callable[[], str], *, timeout: float = 10.0):
+    async def _get_with_relocate(self, url_for_node: Callable[[], str], *, http_timeout: float = 10.0):
         """GET a node-scoped URL; on 404, try one relocate + retry.
 
         ``url_for_node`` is a zero-arg callable that builds the URL from
@@ -207,10 +207,10 @@ class ProxmoxPlugin(ServerPlugin):
         ``self.node`` before the retry.
         """
         headers = await self._get_headers()
-        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
             response = await client.get(url_for_node(), headers=headers)
         if response.status_code == 404 and await self._relocate_and_retry():
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
                 response = await client.get(url_for_node(), headers=headers)
         return response
 
@@ -219,15 +219,15 @@ class ProxmoxPlugin(ServerPlugin):
         url_for_node: Callable[[], str],
         *,
         data: Optional[Dict[str, Any]] = None,
-        timeout: float = 15.0,
+        http_timeout: float = 15.0,
     ):
         """POST a node-scoped URL; on 404, try one relocate + retry (see
         :meth:`_get_with_relocate`)."""
         headers = await self._get_headers()
-        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
             response = await client.post(url_for_node(), headers=headers, data=data)
         if response.status_code == 404 and await self._relocate_and_retry():
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=timeout) as client:
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
                 response = await client.post(url_for_node(), headers=headers, data=data)
         return response
 
@@ -414,11 +414,42 @@ class ProxmoxPlugin(ServerPlugin):
             logger.debug("[ProxmoxPlugin.guest_agent_ready] agent ping failed for VM %s: %s", self.vmid, exc)
             return False
 
+    async def _poll_guest_exec_status(
+        self,
+        client: httpx.AsyncClient,
+        status_url: str,
+        headers: dict,
+        pid: int,
+        max_wait: float,
+    ) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_wait
+        while loop.time() < deadline:
+            try:
+                st = await client.get(status_url, headers=headers, params={"pid": int(pid)})
+                st.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                body = (exc.response.text or "").lower()
+                if exc.response.status_code >= 500 and "timeout" in body:
+                    await asyncio.sleep(1.0)
+                    continue
+                raise
+            data = st.json().get("data") or {}
+            if data.get("exited"):
+                return {
+                    "exitcode": data.get("exitcode"),
+                    "out-data": data.get("out-data") or "",
+                    "err-data": data.get("err-data") or "",
+                    "pid": int(pid),
+                }
+            await asyncio.sleep(0.4)
+        raise TimeoutError(f"guest-exec timed out after {max_wait}s (pid={pid})")
+
     async def guest_exec(
         self,
         command: list,
         input_data: Optional[str] = None,
-        timeout: float = 180.0,
+        max_wait: float = 180.0,
     ) -> Dict[str, Any]:
         """Run a command via QEMU guest agent and wait for completion.
 
@@ -446,30 +477,9 @@ class ProxmoxPlugin(ServerPlugin):
             pid = (response.json().get("data") or {}).get("pid")
             if pid is None:
                 raise RuntimeError(f"guest-exec returned no pid: {response.text}")
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + timeout
-            while loop.time() < deadline:
-                try:
-                    st = await client.get(status_url, headers=headers, params={"pid": int(pid)})
-                    st.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    # Long diskutil operations can briefly trip Proxmox's
-                    # guest-exec-status timeout; keep polling until our deadline.
-                    body = (exc.response.text or "").lower()
-                    if exc.response.status_code >= 500 and "timeout" in body:
-                        await asyncio.sleep(1.0)
-                        continue
-                    raise
-                data = st.json().get("data") or {}
-                if data.get("exited"):
-                    return {
-                        "exitcode": data.get("exitcode"),
-                        "out-data": data.get("out-data") or "",
-                        "err-data": data.get("err-data") or "",
-                        "pid": int(pid),
-                    }
-                await asyncio.sleep(0.4)
-        raise TimeoutError(f"guest-exec timed out after {timeout}s (pid={pid})")
+            return await self._poll_guest_exec_status(
+                client, status_url, headers, int(pid), max_wait
+            )
 
     async def _macos_password_accepted(self, username: str, password: str) -> bool:
         """Return True if ``dscl -authonly`` accepts the credentials."""
@@ -506,7 +516,7 @@ class ProxmoxPlugin(ServerPlugin):
                     "-Command",
                     script,
                 ],
-                timeout=60.0,
+                max_wait=60.0,
             )
         except Exception as exc:
             logger.debug("Windows password fallback guest-exec failed: %s", exc)
@@ -527,6 +537,54 @@ class ProxmoxPlugin(ServerPlugin):
             )
             return False
         return False
+
+    def _macos_password_candidates(
+        self,
+        password: str,
+        old_password: Optional[str],
+        old_passwords: Optional[Sequence[str]],
+    ) -> List[Optional[str]]:
+        candidates: List[Optional[str]] = []
+        for value in [old_password, *(old_passwords or [])]:
+            if value and value != password and value not in candidates:
+                candidates.append(str(value))
+        candidates.append(None)
+        return candidates
+
+    async def _try_macos_password_candidates(
+        self, username: str, password: str, candidates: List[Optional[str]]
+    ) -> str:
+        user_path = shlex.quote(f"/Users/{username}")
+        last_detail = ""
+        for old in candidates:
+            attempts = []
+            if old is not None:
+                attempts.append(
+                    "dscl . -passwd "
+                    f"{user_path} {shlex.quote(old)} {shlex.quote(password)} 2>&1; echo EXIT:$?"
+                )
+                attempts.append(
+                    "sysadminctl -resetPasswordFor "
+                    f"{shlex.quote(username)} -newPassword {shlex.quote(password)} "
+                    f"-oldPassword {shlex.quote(old)} 2>&1; echo EXIT:$?"
+                )
+            else:
+                attempts.append(
+                    f"dscl . -passwd {user_path} {shlex.quote(password)} 2>&1; echo EXIT:$?"
+                )
+            for script in attempts:
+                result = await self.guest_exec(["/bin/sh", "-c", script])
+                detail = (
+                    f"old={'set' if old is not None else 'none'} "
+                    f"exit={result.get('exitcode')} "
+                    f"out={(result.get('out-data') or '')[:240]!r} "
+                    f"err={(result.get('err-data') or '')[:240]!r}"
+                )
+                last_detail = detail
+                if await self._macos_password_accepted(username, password):
+                    logger.info("macOS password set for %r (%s)", username, detail)
+                    return ""
+        return last_detail
 
     async def guest_set_user_password(
         self,
@@ -567,43 +625,13 @@ class ProxmoxPlugin(ServerPlugin):
         if await self._macos_password_accepted(username, password):
             return
 
-        candidates: List[Optional[str]] = []
-        for value in [old_password, *(old_passwords or [])]:
-            if value and value != password and value not in candidates:
-                candidates.append(str(value))
-        # Last resort: single-arg dscl (works only without Secure Token).
-        candidates.append(None)
-
-        user_path = shlex.quote(f"/Users/{username}")
-        last_detail = ""
-        for old in candidates:
-            attempts = []
-            if old is not None:
-                attempts.append(
-                    "dscl . -passwd "
-                    f"{user_path} {shlex.quote(old)} {shlex.quote(password)} 2>&1; echo EXIT:$?"
-                )
-                attempts.append(
-                    "sysadminctl -resetPasswordFor "
-                    f"{shlex.quote(username)} -newPassword {shlex.quote(password)} "
-                    f"-oldPassword {shlex.quote(old)} 2>&1; echo EXIT:$?"
-                )
-            else:
-                attempts.append(
-                    f"dscl . -passwd {user_path} {shlex.quote(password)} 2>&1; echo EXIT:$?"
-                )
-            for script in attempts:
-                result = await self.guest_exec(["/bin/sh", "-c", script])
-                detail = (
-                    f"old={'set' if old is not None else 'none'} "
-                    f"exit={result.get('exitcode')} "
-                    f"out={(result.get('out-data') or '')[:240]!r} "
-                    f"err={(result.get('err-data') or '')[:240]!r}"
-                )
-                last_detail = detail
-                if await self._macos_password_accepted(username, password):
-                    logger.info("macOS password set for %r (%s)", username, detail)
-                    return
+        last_detail = await self._try_macos_password_candidates(
+            username,
+            password,
+            self._macos_password_candidates(password, old_password, old_passwords),
+        )
+        if not last_detail:
+            return
 
         raise RuntimeError(
             f"Failed to set password for {username!r}: agent/set-user-password "
@@ -699,7 +727,7 @@ class ProxmoxPlugin(ServerPlugin):
 
             response = await self._post_with_relocate(
                 lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/start",
-                timeout=30.0,
+                http_timeout=30.0,
             )
             response.raise_for_status()
             upid = response.json().get("data")
@@ -742,7 +770,7 @@ class ProxmoxPlugin(ServerPlugin):
             action = "stop" if force else "shutdown"
             response = await self._post_with_relocate(
                 lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/{action}",
-                timeout=30.0,
+                http_timeout=30.0,
             )
             response.raise_for_status()
 
@@ -764,7 +792,7 @@ class ProxmoxPlugin(ServerPlugin):
         try:
             response = await self._post_with_relocate(
                 lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/reset",
-                timeout=30.0,
+                http_timeout=30.0,
             )
             response.raise_for_status()
 
@@ -795,12 +823,12 @@ class ProxmoxPlugin(ServerPlugin):
         response = await self._post_with_relocate(
             lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/vncproxy",
             data={"websocket": 1},
-            timeout=15.0,
+            http_timeout=15.0,
         )
         response.raise_for_status()
         data = response.json().get("data") or {}
         if not data.get("port") or not data.get("ticket"):
-            raise Exception("Proxmox did not return a VNC proxy port/ticket")
+            raise RuntimeError("Proxmox did not return a VNC proxy port/ticket")
         return {
             "port": int(data["port"]),
             "ticket": str(data["ticket"]),
@@ -831,7 +859,7 @@ class ProxmoxPlugin(ServerPlugin):
         """
         response = await self._get_with_relocate(
             lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/config",
-            timeout=15.0,
+            http_timeout=15.0,
         )
         response.raise_for_status()
         data = response.json().get("data") or {}
@@ -858,12 +886,12 @@ class ProxmoxPlugin(ServerPlugin):
         """
         response = await self._post_with_relocate(
             lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/termproxy",
-            timeout=15.0,
+            http_timeout=15.0,
         )
         response.raise_for_status()
         data = response.json().get("data") or {}
         if not data.get("port") or not data.get("ticket"):
-            raise Exception("Proxmox did not return a terminal proxy port/ticket")
+            raise RuntimeError("Proxmox did not return a terminal proxy port/ticket")
         return {
             "port": int(data["port"]),
             "ticket": str(data["ticket"]),
@@ -1063,6 +1091,11 @@ class ProxmoxPlugin(ServerPlugin):
             response.raise_for_status()
             return response.json().get("data") or {}
 
+    def _net_config_with_bridge(self, current: str, bridge_name: str) -> str:
+        parts = [p for p in current.split(",") if p and not p.startswith("bridge=")]
+        parts.append(f"bridge={bridge_name}")
+        return ",".join(parts)
+
     async def ensure_network_bridge(
         self,
         bridge: str,
@@ -1097,9 +1130,7 @@ class ProxmoxPlugin(ServerPlugin):
             if part == f"bridge={bridge_name}":
                 return {"changed": False, "net_key": key, "value": current}
 
-        parts = [p for p in current.split(",") if p and not p.startswith("bridge=")]
-        parts.append(f"bridge={bridge_name}")
-        updated = ",".join(parts)
+        updated = self._net_config_with_bridge(current, bridge_name)
         if updated == current:
             return {"changed": False, "net_key": key, "value": current}
 

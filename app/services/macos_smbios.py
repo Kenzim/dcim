@@ -11,10 +11,12 @@ import string
 import uuid
 from typing import Dict, Optional
 
+_DEFAULT_SMBIOS_MODEL = "iMacPro1,1"
+
 
 # Model → serial/board prefixes commonly used with OpenCore GenSMBIOS.
 _MODEL_PREFIXES = {
-    "iMacPro1,1": ("C02", "C02"),
+    _DEFAULT_SMBIOS_MODEL: ("C02", "C02"),
     "MacPro7,1": ("F5K", "F5K"),
     "iMac19,1": ("C02", "C02"),
     "MacBookPro16,1": ("C02", "C02"),
@@ -26,12 +28,12 @@ def _rand_alnum(n: int) -> str:
     return "".join(random.choice(alphabet) for _ in range(n))
 
 
-def generate_smbios(model: str = "iMacPro1,1") -> Dict[str, str]:
+def generate_smbios(model: str = _DEFAULT_SMBIOS_MODEL) -> Dict[str, str]:
     """Return PlatformInfo Generic fields for OpenCore + Proxmox smbios1.
 
     Keys: SystemProductName, SystemSerialNumber, MLB, SystemUUID, ROM_HEX
     """
-    product = (model or "iMacPro1,1").strip() or "iMacPro1,1"
+    product = (model or _DEFAULT_SMBIOS_MODEL).strip() or _DEFAULT_SMBIOS_MODEL
     serial_prefix, mlb_prefix = _MODEL_PREFIXES.get(product, ("C02", "C02"))
     # 12-char serial (prefix + body), 17-char MLB — GenSMBIOS-shaped.
     serial = f"{serial_prefix}{_rand_alnum(12 - len(serial_prefix))}"

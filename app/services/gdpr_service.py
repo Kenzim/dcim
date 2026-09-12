@@ -21,6 +21,87 @@ from app.models.user import User
 _SCRUBBED = "[redacted]"
 
 
+def _export_orders(db: Session, account) -> list[dict[str, Any]]:
+    if not account:
+        return []
+    order_rows = list(
+        db.execute(
+            select(Order)
+            .where(Order.billing_account_id == account.id)
+            .order_by(Order.created_at.desc())
+        ).scalars()
+    )
+    return [
+        {
+            "id": row.id,
+            "order_number": row.order_number,
+            "status": row.status.value,
+            "total_cents": row.total_cents,
+            "currency": row.currency,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in order_rows
+    ]
+
+
+def _export_invoices(db: Session, account) -> list[dict[str, Any]]:
+    if not account:
+        return []
+    invoice_rows = list(
+        db.execute(
+            select(Invoice)
+            .where(Invoice.billing_account_id == account.id)
+            .order_by(Invoice.created_at.desc())
+        ).scalars()
+    )
+    return [
+        {
+            "id": row.id,
+            "invoice_number": row.invoice_number,
+            "purpose": row.purpose.value,
+            "status": row.status.value,
+            "amount_cents": row.amount_cents,
+            "currency": row.currency,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "paid_at": row.paid_at.isoformat() if row.paid_at else None,
+        }
+        for row in invoice_rows
+    ]
+
+
+def _export_tickets(db: Session, account) -> list[dict[str, Any]]:
+    if not account:
+        return []
+    ticket_rows = list(
+        db.execute(
+            select(Ticket)
+            .where(Ticket.billing_account_id == account.id)
+            .order_by(Ticket.created_at.desc())
+        ).scalars()
+    )
+    return [
+        {
+            "id": row.id,
+            "ticket_number": row.ticket_number,
+            "subject": row.subject,
+            "status": row.status.value,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in ticket_rows
+    ]
+
+
+def _export_billing_profile(profile) -> Optional[dict[str, Any]]:
+    if not profile:
+        return None
+    return {
+        "legal_name": profile.legal_name,
+        "company": profile.company,
+        "country": profile.country,
+        "invoice_email": profile.invoice_email,
+    }
+
+
 class GdprService:
     @staticmethod
     def export_user_data(db: Session, user_id: int) -> dict[str, Any]:
@@ -30,70 +111,6 @@ class GdprService:
 
         account = BillingAccountDAO.get_by_user_id(db, user_id)
         profile = account.profile if account and account.profile else None
-
-        orders = []
-        if account:
-            order_rows = list(
-                db.execute(
-                    select(Order)
-                    .where(Order.billing_account_id == account.id)
-                    .order_by(Order.created_at.desc())
-                ).scalars()
-            )
-            orders = [
-                {
-                    "id": row.id,
-                    "order_number": row.order_number,
-                    "status": row.status.value,
-                    "total_cents": row.total_cents,
-                    "currency": row.currency,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                }
-                for row in order_rows
-            ]
-
-        invoices = []
-        if account:
-            invoice_rows = list(
-                db.execute(
-                    select(Invoice)
-                    .where(Invoice.billing_account_id == account.id)
-                    .order_by(Invoice.created_at.desc())
-                ).scalars()
-            )
-            invoices = [
-                {
-                    "id": row.id,
-                    "invoice_number": row.invoice_number,
-                    "purpose": row.purpose.value,
-                    "status": row.status.value,
-                    "amount_cents": row.amount_cents,
-                    "currency": row.currency,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                    "paid_at": row.paid_at.isoformat() if row.paid_at else None,
-                }
-                for row in invoice_rows
-            ]
-
-        tickets = []
-        if account:
-            ticket_rows = list(
-                db.execute(
-                    select(Ticket)
-                    .where(Ticket.billing_account_id == account.id)
-                    .order_by(Ticket.created_at.desc())
-                ).scalars()
-            )
-            tickets = [
-                {
-                    "id": row.id,
-                    "ticket_number": row.ticket_number,
-                    "subject": row.subject,
-                    "status": row.status.value,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                }
-                for row in ticket_rows
-            ]
 
         emails = list(
             db.execute(
@@ -127,17 +144,10 @@ class GdprService:
                 "email": user.email,
                 "created_at": user.created_at.isoformat() if user.created_at else None,
             },
-            "billing_profile": {
-                "legal_name": profile.legal_name if profile else None,
-                "company": profile.company if profile else None,
-                "country": profile.country if profile else None,
-                "invoice_email": profile.invoice_email if profile else None,
-            }
-            if profile
-            else None,
-            "orders": orders,
-            "invoices": invoices,
-            "tickets": tickets,
+            "billing_profile": _export_billing_profile(profile),
+            "orders": _export_orders(db, account),
+            "invoices": _export_invoices(db, account),
+            "tickets": _export_tickets(db, account),
             "emails": [
                 {
                     "id": row.id,

@@ -602,13 +602,15 @@ class KvmHub:
 
 
 async def wait_local_hub(server_id: int, timeout: float = 30.0) -> Optional[KvmHub]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        hub = get_local_hub(server_id)
-        if hub is not None and hub.is_alive:
-            return hub
-        await asyncio.sleep(0.05)
-    return get_local_hub(server_id)
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                hub = get_local_hub(server_id)
+                if hub is not None and hub.is_alive:
+                    return hub
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        return get_local_hub(server_id)
 
 
 async def prefetch_decode_worker(server_id: int, profile: IpmiKvmProfile, auth: BmcKvmAuth) -> None:
@@ -703,7 +705,8 @@ async def _close_kvm_attempt(profile: IpmiKvmProfile, cm, upstream) -> None:
         try:
             stop = profile.stop_frame()
             if stop:
-                await asyncio.wait_for(upstream.send(stop), 3)
+                async with asyncio.timeout(3):
+                    await upstream.send(stop)
         except Exception:  # noqa: BLE001
             pass
     if cm is not None:
@@ -1056,8 +1059,9 @@ async def _wait_for_server_asset_activity(server_id: int, timeout: float) -> Non
     event = _server_asset_event(server_id)
     event.clear()
     try:
-        await asyncio.wait_for(event.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+        async with asyncio.timeout(timeout):
+            await event.wait()
+    except TimeoutError:
         pass
 
 

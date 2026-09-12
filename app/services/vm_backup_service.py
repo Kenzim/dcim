@@ -125,6 +125,30 @@ def _item_payload(
     }
 
 
+async def _backup_rf_token_from_extract(
+    plugin,
+    volid: str,
+    extract_cache: dict[str, Optional[str]],
+) -> Optional[str]:
+    from app.services.vm_identity_stamp import (
+        extract_smbios1_from_config_text,
+        get_smbios1_sku,
+        parse_rf_sku_token,
+    )
+
+    if not hasattr(plugin, "extract_backup_config"):
+        return None
+    if volid not in extract_cache:
+        try:
+            extract_cache[volid] = await plugin.extract_backup_config(str(volid))
+        except Exception:
+            extract_cache[volid] = None
+    config_text = extract_cache.get(volid)
+    smbios1 = extract_smbios1_from_config_text(config_text)
+    parsed = parse_rf_sku_token(get_smbios1_sku(smbios1))
+    return parsed.get("raw") if parsed else None
+
+
 async def _enrich_backup_identity(
     db: Session,
     plugin,
@@ -133,31 +157,16 @@ async def _enrich_backup_identity(
     extract_cache: dict[str, Optional[str]],
 ) -> dict[str, Any]:
     """Attach template_code/name/os_type from PBS notes or extractconfig smbios1 sku."""
-    from app.services.vm_identity_stamp import (
-        extract_smbios1_from_config_text,
-        get_smbios1_sku,
-        parse_rf_sku_token,
-        resolve_template_from_token,
-    )
+    from app.services.vm_identity_stamp import parse_rf_sku_token, resolve_template_from_token
 
-    token = None
     parsed = parse_rf_sku_token(item.get("notes"))
-    if parsed:
-        token = parsed.get("raw")
+    token = parsed.get("raw") if parsed else None
     if not token:
         volid = item.get("volid")
-        if volid and hasattr(plugin, "extract_backup_config"):
-            if volid not in extract_cache:
-                try:
-                    extract_cache[volid] = await plugin.extract_backup_config(str(volid))
-                except Exception:
-                    extract_cache[volid] = None
-            config_text = extract_cache.get(volid)
-            smbios1 = extract_smbios1_from_config_text(config_text)
-            sku = get_smbios1_sku(smbios1)
-            parsed = parse_rf_sku_token(sku)
-            if parsed:
-                token = parsed.get("raw")
+        if volid:
+            token = await _backup_rf_token_from_extract(plugin, str(volid), extract_cache)
+            if token:
+                parsed = parse_rf_sku_token(token)
     tmpl = resolve_template_from_token(db, token) if token else None
     item["rf_token"] = token
     item["template_code"] = tmpl.code if tmpl else (parsed.get("template_code") if parsed else None)
@@ -189,56 +198,120 @@ async def list_service_backups(db: Session, service: Service) -> List[dict[str, 
 _BACKUP_TASK_TYPES = frozenset({"vzdump", "qmrestore", "qrestore", "imgcopy"})
 
 
+def _backup_task_matches_vmid(row: dict[str, Any], vmid: int) -> bool:
+    row_vmid = row.get("vmid")
+    try:
+        if row_vmid is not None and int(row_vmid) != int(vmid):
+            return False
+    except (TypeError, ValueError):
+        upid = str(row.get("upid") or "")
+        if f":{vmid}:" not in upid and str(row_vmid) != str(vmid):
+            return False
+    return True
+
+
+def _backup_job_from_task_row(
+    row: dict[str, Any], *, vmid: int, node: str, client_storage: str
+) -> dict[str, Any]:
+    t = str(row.get("type") or "").lower()
+    kind = "backup" if t == "vzdump" else "restore"
+    storage = client_storage if kind == "backup" else None
+    return {
+        "upid": row.get("upid"),
+        "type": t,
+        "kind": kind,
+        "scope": "client" if kind == "backup" else "restore",
+        "status": row.get("status") or "RUNNING",
+        "vmid": vmid,
+        "node": row.get("node") or node,
+        "starttime": row.get("starttime"),
+        "storage": storage,
+        "user": row.get("user"),
+    }
+
+
+async def _list_running_task_rows(plugin, vmid: int, service_id: int) -> list:
+    try:
+        return await plugin.list_tasks(running_only=True, vmid=vmid, limit=40)
+    except Exception:
+        try:
+            return await plugin.list_tasks(running_only=True, limit=80)
+        except Exception as exc:
+            logger.warning("Failed to list Proxmox tasks for service %s: %s", service_id, exc)
+            return []
+
+
 async def list_running_backup_jobs(db: Session, service: Service) -> List[dict[str, Any]]:
     """Return active Proxmox tasks related to backup/restore for this VMID."""
     plugin, _cid, node, vmid = await get_vm_backup_plugin(db, service)
-    client_storage = ""
     try:
         client_storage = resolve_backup_settings(db, service).client_storage
     except BackupConfigError:
         client_storage = ""
-    try:
-        rows = await plugin.list_tasks(running_only=True, vmid=vmid, limit=40)
-    except Exception:
-        try:
-            # Fallback: list all active node tasks and filter locally.
-            rows = await plugin.list_tasks(running_only=True, limit=80)
-        except Exception as exc:
-            logger.warning("Failed to list Proxmox tasks for service %s: %s", service.id, exc)
-            return []
+    rows = await _list_running_task_rows(plugin, vmid, service.id)
     jobs: List[dict[str, Any]] = []
     for row in rows:
         t = str(row.get("type") or "").lower()
-        if t not in _BACKUP_TASK_TYPES:
+        if t not in _BACKUP_TASK_TYPES or not _backup_task_matches_vmid(row, vmid):
             continue
-        row_vmid = row.get("vmid")
-        try:
-            if row_vmid is not None and int(row_vmid) != int(vmid):
-                continue
-        except (TypeError, ValueError):
-            # vzdump id is often the vmid as string; also match UPID payload.
-            upid = str(row.get("upid") or "")
-            if f":{vmid}:" not in upid and not str(row_vmid) == str(vmid):
-                continue
-        kind = "backup" if t == "vzdump" else "restore"
-        # Client-initiated vzdumps always target product client storage.
-        storage = client_storage if kind == "backup" else None
-        jobs.append(
-            {
-                "upid": row.get("upid"),
-                "type": t,
-                "kind": kind,
-                # UI label: show client scope for in-flight vzdump (not bare "backup").
-                "scope": "client" if kind == "backup" else "restore",
-                "status": row.get("status") or "RUNNING",
-                "vmid": vmid,
-                "node": row.get("node") or node,
-                "starttime": row.get("starttime"),
-                "storage": storage,
-                "user": row.get("user"),
-            }
-        )
+        jobs.append(_backup_job_from_task_row(row, vmid=vmid, node=node, client_storage=client_storage))
     return jobs
+
+
+def _is_client_backup_row(row: dict[str, Any], client_storage: str) -> bool:
+    if row.get("kind") != "client":
+        return False
+    store = (row.get("storage") or "").strip()
+    return not client_storage or store == client_storage or store == ""
+
+
+def _backup_job_start_times(jobs: List[dict[str, Any]]) -> List[int]:
+    starts: List[int] = []
+    for job in jobs:
+        raw = job.get("starttime")
+        if raw is None:
+            continue
+        try:
+            starts.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return starts
+
+
+def _mark_best_client_backup_for_start(
+    backups: List[dict[str, Any]], start: int, client_storage: str
+) -> bool:
+    best: Optional[dict[str, Any]] = None
+    best_delta: Optional[int] = None
+    for row in backups:
+        if not isinstance(row, dict) or not _is_client_backup_row(row, client_storage):
+            continue
+        raw_ctime = row.get("ctime")
+        if raw_ctime is None:
+            continue
+        try:
+            ctime = int(raw_ctime)
+        except (TypeError, ValueError):
+            continue
+        if ctime < start - 120:
+            continue
+        delta = abs(ctime - start)
+        if best is None or delta < best_delta:
+            best = row
+            best_delta = delta
+    if best is None:
+        return False
+    best["running"] = True
+    best["deletable"] = False
+    return True
+
+
+def _mark_first_client_backup_running(backups: List[dict[str, Any]], client_storage: str) -> None:
+    for row in backups:
+        if isinstance(row, dict) and _is_client_backup_row(row, client_storage):
+            row["running"] = True
+            row["deletable"] = False
+            break
 
 
 def mark_running_client_backups(
@@ -256,55 +329,12 @@ def mark_running_client_backups(
     if not backup_jobs or not backups:
         return
 
-    starts: List[int] = []
-    for j in backup_jobs:
-        raw = j.get("starttime")
-        if raw is None:
-            continue
-        try:
-            starts.append(int(raw))
-        except (TypeError, ValueError):
-            continue
-
-    def _is_client_row(row: dict[str, Any]) -> bool:
-        if row.get("kind") != "client":
-            return False
-        store = (row.get("storage") or "").strip()
-        return not client_storage or store == client_storage or store == ""
-
-    matched = False
-    for start in starts:
-        best: Optional[dict[str, Any]] = None
-        best_delta: Optional[int] = None
-        for row in backups:
-            if not isinstance(row, dict) or not _is_client_row(row):
-                continue
-            raw_ctime = row.get("ctime")
-            if raw_ctime is None:
-                continue
-            try:
-                ctime = int(raw_ctime)
-            except (TypeError, ValueError):
-                continue
-            # Snapshot ctime is at/near task start; allow small clock skew.
-            if ctime < start - 120:
-                continue
-            delta = abs(ctime - start)
-            if best is None or delta < best_delta:
-                best = row
-                best_delta = delta
-        if best is not None:
-            best["running"] = True
-            best["deletable"] = False
-            matched = True
-
-    # Fallback: job running but no starttime/ctime match — mark newest client row.
+    matched = any(
+        _mark_best_client_backup_for_start(backups, start, client_storage)
+        for start in _backup_job_start_times(backup_jobs)
+    )
     if not matched:
-        for row in backups:
-            if isinstance(row, dict) and _is_client_row(row):
-                row["running"] = True
-                row["deletable"] = False
-                break
+        _mark_first_client_backup_running(backups, client_storage)
 
 
 async def list_service_backups_and_jobs(
@@ -506,6 +536,50 @@ def apply_metadata_after_restore(
     ServiceDAO.update(db, service)
 
 
+def _existing_restore_job_response(
+    existing, service: Service, *, volid: str, normalized: str, kind: str, start: bool
+) -> Optional[dict[str, Any]]:
+    if existing.strategy_name != RESTORE_BACKUP_STRATEGY:
+        return None
+    prev = dict((service.config or {}).get("vm_restore") or {})
+    if prev.get("volid") not in (volid, normalized) and prev.get("normalized_volid") != normalized:
+        return None
+    return {
+        "status": "queued",
+        "job_id": existing.id,
+        "volid": normalized,
+        "kind": kind,
+        "start": bool(prev.get("start", start)),
+        "async": True,
+    }
+
+
+def _build_vm_restore_config(
+    settings: BackupSettings,
+    *,
+    normalized: str,
+    storage: Optional[str],
+    kind: str,
+    start: bool,
+    vm_template_id: Optional[int],
+    job_id: Optional[int] = None,
+) -> dict[str, Any]:
+    restore = {
+        "volid": normalized,
+        "storage": storage or (
+            settings.client_storage if kind == "client" else settings.platform_storage
+        ),
+        "kind": kind,
+        "start": bool(start),
+        "vm_template_id": int(vm_template_id) if vm_template_id is not None else None,
+        "status": "queued",
+        "metadata_stale": False,
+    }
+    if job_id is not None:
+        restore["job_id"] = job_id
+    return restore
+
+
 def enqueue_restore_backup_job(
     db: Session,
     service: Service,
@@ -524,43 +598,33 @@ def enqueue_restore_backup_job(
     if service.service_type != ServiceType.VM:
         raise BackupConfigError("Not a VM service")
 
-    # Validate volid/storage against configured backup storages up front.
     settings = resolve_backup_settings(db, service)
     kind, normalized = _resolve_backup_kind(settings, storage or "", volid)
 
     existing = VMDeploymentJobDAO.get_active_for_service(db, service.id)
     if existing is not None:
-        if existing.strategy_name == RESTORE_BACKUP_STRATEGY:
-            cfg = dict(service.config or {})
-            prev = dict(cfg.get("vm_restore") or {})
-            if prev.get("volid") in (volid, normalized) or prev.get("normalized_volid") == normalized:
-                return {
-                    "status": "queued",
-                    "job_id": existing.id,
-                    "volid": normalized,
-                    "kind": kind,
-                    "start": bool(prev.get("start", start)),
-                    "async": True,
-                }
+        queued = _existing_restore_job_response(
+            existing, service, volid=volid, normalized=normalized, kind=kind, start=start
+        )
+        if queued is not None:
+            return queued
         raise BackupConfigError(
             f"Another deployment job is already active (job {existing.id}, "
             f"{existing.strategy_name}). Wait for it to finish before restoring."
         )
 
     strategy = get_deployment_strategy_registry().get(RESTORE_BACKUP_STRATEGY)
-    cfg = dict(service.config or {})
-    cfg["vm_restore"] = {
-        "volid": normalized,
-        "storage": storage or (
-            settings.client_storage if kind == "client" else settings.platform_storage
+    service.config = {
+        **dict(service.config or {}),
+        "vm_restore": _build_vm_restore_config(
+            settings,
+            normalized=normalized,
+            storage=storage,
+            kind=kind,
+            start=start,
+            vm_template_id=vm_template_id,
         ),
-        "kind": kind,
-        "start": bool(start),
-        "vm_template_id": int(vm_template_id) if vm_template_id is not None else None,
-        "status": "queued",
-        "metadata_stale": False,
     }
-    service.config = cfg
     if service.vm:
         service.vm.guest_state = VMGuestState.PROVISIONING
         service.vm.guest_last_error = None
@@ -573,11 +637,18 @@ def enqueue_restore_backup_job(
         step_names=strategy.step_names(),
         max_attempts=strategy.max_attempts,
     )
-    cfg = dict(service.config or {})
-    restore = dict(cfg.get("vm_restore") or {})
-    restore["job_id"] = job.id
-    cfg["vm_restore"] = restore
-    service.config = cfg
+    service.config = {
+        **dict(service.config or {}),
+        "vm_restore": _build_vm_restore_config(
+            settings,
+            normalized=normalized,
+            storage=storage,
+            kind=kind,
+            start=start,
+            vm_template_id=vm_template_id,
+            job_id=job.id,
+        ),
+    }
     ServiceDAO.update(db, service)
 
     logger.info(
@@ -599,6 +670,26 @@ def enqueue_restore_backup_job(
     }
 
 
+def _backup_notes_from_rows(rows: list, target: str) -> Optional[str]:
+    for row in rows:
+        row_vol = str(row.get("volid") or "")
+        if row_vol == target or row_vol.endswith(":" + target) or target.endswith(row_vol):
+            notes = row.get("notes") or row.get("note")
+            if notes:
+                return str(notes)
+    return None
+
+
+def _backup_lookup_storages(settings: BackupSettings, storage: Optional[str]) -> list[str]:
+    storages: list[str] = []
+    if storage:
+        storages.append(str(storage))
+    for candidate in (settings.client_storage, settings.platform_storage):
+        if candidate and candidate not in storages:
+            storages.append(candidate)
+    return storages
+
+
 async def lookup_backup_notes(
     db: Session,
     service: Service,
@@ -609,24 +700,15 @@ async def lookup_backup_notes(
     """Return PBS/PVE notes for a backup volid (best-effort)."""
     settings = resolve_backup_settings(db, service)
     plugin, _cid, _node, vmid = await get_vm_backup_plugin(db, service)
-    storages: list[str] = []
-    if storage:
-        storages.append(str(storage))
-    for candidate in (settings.client_storage, settings.platform_storage):
-        if candidate and candidate not in storages:
-            storages.append(candidate)
     target = str(volid or "").strip()
-    for st in storages:
+    for st in _backup_lookup_storages(settings, storage):
         try:
             rows = await plugin.list_backups(st, vmid=vmid)
         except Exception:
             continue
-        for row in rows:
-            row_vol = str(row.get("volid") or "")
-            if row_vol == target or row_vol.endswith(":" + target) or target.endswith(row_vol):
-                notes = row.get("notes") or row.get("note")
-                if notes:
-                    return str(notes)
+        notes = _backup_notes_from_rows(rows, target)
+        if notes:
+            return notes
     return None
 
 

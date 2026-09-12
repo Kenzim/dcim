@@ -177,36 +177,52 @@ async def list_families(
     return result
 
 
+def _validate_proxy_ip_count(defaults: dict) -> None:
+    if "ip_count" not in defaults or defaults["ip_count"] is None:
+        return
+    try:
+        ip_count = int(defaults["ip_count"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be an integer")
+    if ip_count < 1 or ip_count > 32:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be between 1 and 32")
+
+
+def _validate_proxy_integer_fields(defaults: dict, keys: tuple[str, ...]) -> None:
+    for key in keys:
+        if key not in defaults or defaults[key] is None:
+            continue
+        try:
+            int(defaults[key])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"defaults.{key} must be an integer")
+
+
+def _validate_proxy_subnet_group(db: Session, defaults: dict) -> None:
+    if defaults.get("subnet_group_id") is None:
+        return
+    from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
+
+    group = ProxySubnetGroupDAO.get_by_id(db, int(defaults["subnet_group_id"]))
+    if not group:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="defaults.subnet_group_id does not refer to an existing proxy subnet group",
+        )
+
+
 def _validate_proxy_defaults(defaults: dict, db: Session | None = None) -> None:
     """Light validation for the http_proxy family/product ``defaults``/
     ``overrides`` JSON blob: ip_count/subnet_id/subnet_group_id/location_id,
     when present, must be sane. Everything else in the dict is passed through
     untouched."""
-    if "ip_count" in defaults and defaults["ip_count"] is not None:
-        try:
-            ip_count = int(defaults["ip_count"])
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be an integer")
-        if ip_count < 1 or ip_count > 32:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.ip_count must be between 1 and 32")
-    for key in ("subnet_id", "location_id", "subnet_group_id"):
-        if key in defaults and defaults[key] is not None:
-            try:
-                int(defaults[key])
-            except (TypeError, ValueError):
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"defaults.{key} must be an integer")
+    _validate_proxy_ip_count(defaults)
+    _validate_proxy_integer_fields(defaults, ("subnet_id", "location_id", "subnet_group_id"))
     if "allocation_strategy" in defaults and defaults["allocation_strategy"] is not None:
         if not isinstance(defaults["allocation_strategy"], str):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="defaults.allocation_strategy must be a string")
-    if db is not None and defaults.get("subnet_group_id") is not None:
-        from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
-
-        group = ProxySubnetGroupDAO.get_by_id(db, int(defaults["subnet_group_id"]))
-        if not group:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="defaults.subnet_group_id does not refer to an existing proxy subnet group",
-            )
+    if db is not None:
+        _validate_proxy_subnet_group(db, defaults)
 
 
 @router.post("/families", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
@@ -358,6 +374,49 @@ async def list_products(
     return result
 
 
+def _validate_product_update_family(db: Session, update_data: dict) -> None:
+    if "family_id" not in update_data or update_data["family_id"] is None:
+        return
+    family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
+    if not family:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
+
+
+def _validate_product_update_overrides(db: Session, row, update_data: dict) -> None:
+    if "overrides" not in update_data or update_data["overrides"] is None:
+        return
+    target_family = row.family
+    if "family_id" in update_data and update_data["family_id"] is not None:
+        target_family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
+    if target_family and target_family.service_type == "http_proxy":
+        _validate_proxy_defaults(update_data["overrides"], db=db)
+
+
+def _validate_product_update_permission_set(db: Session, update_data: dict) -> None:
+    if "permission_set_id" not in update_data or update_data["permission_set_id"] is None:
+        return
+    if PermissionSetDAO.get_by_id(db, update_data["permission_set_id"]) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
+
+
+def _validate_product_update_code(db: Session, row, update_data: dict) -> None:
+    if "code" not in update_data:
+        return
+    existing = ProductDAO.get_by_code(db, update_data["code"])
+    if existing and existing.id != row.id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Product code already exists")
+
+
+def _validate_product_vm_template_ids(db: Session, vm_template_ids: list[int]) -> None:
+    valid_ids = {tmpl.id for tmpl in VMTemplateDAO.get_all(db)}
+    missing = sorted(set(vm_template_ids) - valid_ids)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown vm_template_ids: {missing}",
+        )
+
+
 @router.put("/products/{product_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_product(
     product_id: int,
@@ -369,32 +428,13 @@ async def update_product(
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
     update_data = data.model_dump(exclude_unset=True)
-    if "family_id" in update_data and update_data["family_id"] is not None:
-        family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
-        if not family:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
-    if "overrides" in update_data and update_data["overrides"] is not None:
-        target_family = row.family
-        if "family_id" in update_data and update_data["family_id"] is not None:
-            target_family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
-        if target_family and target_family.service_type == "http_proxy":
-            _validate_proxy_defaults(update_data["overrides"], db=db)
-    if "permission_set_id" in update_data and update_data["permission_set_id"] is not None:
-        if PermissionSetDAO.get_by_id(db, update_data["permission_set_id"]) is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
-    if "code" in update_data:
-        existing = ProductDAO.get_by_code(db, update_data["code"])
-        if existing and existing.id != row.id:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Product code already exists")
+    _validate_product_update_family(db, update_data)
+    _validate_product_update_overrides(db, row, update_data)
+    _validate_product_update_permission_set(db, update_data)
+    _validate_product_update_code(db, row, update_data)
     vm_template_ids = update_data.pop("vm_template_ids", None)
     if vm_template_ids is not None:
-        valid_ids = {tmpl.id for tmpl in VMTemplateDAO.get_all(db)}
-        missing = sorted(set(vm_template_ids) - valid_ids)
-        if missing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unknown vm_template_ids: {missing}",
-            )
+        _validate_product_vm_template_ids(db, vm_template_ids)
 
     ProductDAO.update(db, row, **update_data)
     if vm_template_ids is not None:

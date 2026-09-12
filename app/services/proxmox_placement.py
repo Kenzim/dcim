@@ -94,6 +94,34 @@ def attach_relocator(plugin, db: Session, service, cluster: _ProxmoxClusterLike,
     plugin.set_relocator(functools.partial(_relocate_vm, db, service, cluster, int(vmid)))
 
 
+async def _resolve_on_cached_node(
+    db: Session,
+    service,
+    cluster,
+    *,
+    node: str,
+    vmid: int,
+    persist: bool,
+) -> Optional[Tuple[object, int, str, int]]:
+    try:
+        plugin = _build_plugin(cluster, node, vmid)
+    except ValueError as exc:
+        raise ProxmoxPlacementError(str(exc), status_code=400) from exc
+    if persist:
+        plugin.set_relocator(functools.partial(_relocate_vm, db, service, cluster, vmid))
+    if await plugin.vm_exists():
+        return plugin, cluster.id, node, vmid
+    return None
+
+
+def _placement_not_found_error(cluster_id: int, vmid: int, node: Optional[str]) -> ProxmoxPlacementError:
+    return ProxmoxPlacementError(
+        f"VM {vmid} was not found on any node in Proxmox cluster {cluster_id}"
+        + (f" (last known node: {node})" if node else ""),
+        status_code=404,
+    )
+
+
 async def resolve_proxmox_plugin_for_service(
     db: Session,
     service,
@@ -157,10 +185,11 @@ async def resolve_proxmox_plugin_for_service(
         return _finish(node)
 
     if node:
-        _plugin, _cid, _node, _vmid = _finish(node)
-        if await _plugin.vm_exists():
-            return _plugin, _cid, _node, _vmid
-        # Cached node is stale (404) -- fall through to a cluster-wide search.
+        cached = await _resolve_on_cached_node(
+            db, service, cluster, node=node, vmid=vmid, persist=persist
+        )
+        if cached is not None:
+            return cached
 
     found_node = await find_node_for_vmid(cluster, vmid)
     if found_node:
@@ -169,16 +198,11 @@ async def resolve_proxmox_plugin_for_service(
         return _finish(found_node)
 
     if not require_guest:
-        # Provisioning path with no cached node yet: caller must place first.
         raise ProxmoxPlacementError(
             "VM service is missing Proxmox placement (proxmox_cluster_id, proxmox_node_name, proxmox_vmid)",
             status_code=400,
         )
-    raise ProxmoxPlacementError(
-        f"VM {vmid} was not found on any node in Proxmox cluster {cluster_id}"
-        + (f" (last known node: {node})" if node else ""),
-        status_code=404,
-    )
+    raise _placement_not_found_error(cluster_id, vmid, node)
 
 
 def _node_free_ram_score(node) -> float:
@@ -220,6 +244,17 @@ def _cluster_has_template(cluster, template_name: str) -> bool:
     )
 
 
+def _placement_candidate_nodes(cluster, template_name: str, shared_storage: bool):
+    if shared_storage and not _cluster_has_template(cluster, template_name):
+        return
+    for node in cluster.nodes or []:
+        if not node.enabled:
+            continue
+        if not shared_storage and not _node_has_template(node, template_name):
+            continue
+        yield node
+
+
 def auto_place_vm(
     db: Session,
     *,
@@ -247,13 +282,7 @@ def auto_place_vm(
     """
     best: Optional[Tuple[float, int, str]] = None
     for cluster in _candidate_clusters(db, cluster_id):
-        if shared_storage and not _cluster_has_template(cluster, template_name):
-            continue
-        for node in cluster.nodes or []:
-            if not node.enabled:
-                continue
-            if not shared_storage and not _node_has_template(node, template_name):
-                continue
+        for node in _placement_candidate_nodes(cluster, template_name, shared_storage):
             score = _node_free_ram_score(node)
             if best is None or score > best[0]:
                 best = (score, cluster.id, node.node_name)

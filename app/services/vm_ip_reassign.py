@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -60,6 +60,45 @@ def list_available_ips_for_service(db: Session, service: Service) -> Dict[str, A
         "current": current,
         "available": [_serialize_alloc(r) for r in rows],
     }
+
+
+def _restore_previous_ip_assignment(
+    db: Session, service: Service, old_id: int, cluster_id: int
+) -> None:
+    try:
+        VMIPAllocationDAO.assign_specific_to_service(
+            db,
+            service_id=service.id,
+            allocation_id=old_id,
+            proxmox_cluster_id=cluster_id,
+        )
+    except ValueError:
+        logger.exception(
+            "Failed to restore previous IP allocation %s for service %s",
+            old_id,
+            service.id,
+        )
+
+
+async def _maybe_reset_network_after_reassign(
+    db: Session, service: Service, reset_network: bool
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not reset_network:
+        return None, None
+    try:
+        result = await run_action(db, service, "reset_network", {}, "admin")
+        db.commit()
+        return result, None
+    except StrategyActionError as exc:
+        logger.warning(
+            "IP reassigned for service %s but reset_network failed: %s",
+            service.id,
+            exc,
+        )
+        return None, str(exc)
+    except Exception as exc:
+        logger.exception("IP reassigned for service %s but reset_network raised", service.id)
+        return None, str(exc) or "Guest network reset failed"
 
 
 async def reassign_vm_ip(
@@ -124,21 +163,8 @@ async def reassign_vm_ip(
             proxmox_cluster_id=cluster_id,
         )
     except ValueError as exc:
-        # Best-effort restore of the previous assignment if the claim fails.
         if old_id is not None:
-            try:
-                VMIPAllocationDAO.assign_specific_to_service(
-                    db,
-                    service_id=service.id,
-                    allocation_id=old_id,
-                    proxmox_cluster_id=cluster_id,
-                )
-            except ValueError:
-                logger.exception(
-                    "Failed to restore previous IP allocation %s for service %s",
-                    old_id,
-                    service.id,
-                )
+            _restore_previous_ip_assignment(db, service, old_id, cluster_id)
         raise VmIpReassignError(str(exc), 409) from exc
 
     cfg = dict(service.config or {})
@@ -149,24 +175,9 @@ async def reassign_vm_ip(
     db.commit()
     db.refresh(service)
 
-    network_result: Optional[Dict[str, Any]] = None
-    network_error: Optional[str] = None
-    if reset_network:
-        try:
-            network_result = await run_action(db, service, "reset_network", {}, "admin")
-            db.commit()
-        except StrategyActionError as exc:
-            network_error = str(exc)
-            logger.warning(
-                "IP reassigned for service %s but reset_network failed: %s",
-                service.id,
-                exc,
-            )
-        except Exception as exc:
-            network_error = str(exc) or "Guest network reset failed"
-            logger.exception(
-                "IP reassigned for service %s but reset_network raised", service.id
-            )
+    network_result, network_error = await _maybe_reset_network_after_reassign(
+        db, service, reset_network
+    )
 
     log_server_activity_success(
         db,
@@ -198,6 +209,4 @@ async def reassign_vm_ip(
     }
     if network_error:
         out["network_error"] = network_error
-        # IP swap succeeded; surface as 200 with partial status so callers can
-        # retry Reset Guest Network without rolling back the pool assignment.
     return out

@@ -215,18 +215,56 @@ class SuperMicroKvmProfile(IpmiKvmProfile):
             open_timeout=20,
         )
 
+    async def _insyde_recv(self, buf: bytearray, upstream: Any, nbytes: int) -> None:
+        while len(buf) < nbytes:
+            data = await asyncio.wait_for(upstream.recv(), 15)
+            if isinstance(data, str):
+                data = data.encode("latin1")
+            buf.extend(data)
+
+    def _insyde_security_type(self, types: list[int]) -> int:
+        if 16 in types:
+            return 16
+        if 15 in types:
+            return 15
+        raise IpmiKvmUnavailable(f"Unsupported KVM security types: {types}")
+
+    async def _insyde_auth_failure_reason(
+        self, buf: bytearray, upstream: Any, result: int
+    ) -> str:
+        if result != 1:
+            return ""
+        await self._insyde_recv(buf, upstream, 4)
+        rlen = struct.unpack(">I", bytes(buf[:4]))[0]
+        del buf[:4]
+        if not rlen:
+            return ""
+        await self._insyde_recv(buf, upstream, rlen)
+        reason = bytes(buf[:rlen]).decode("latin1", "replace")
+        del buf[:rlen]
+        return reason
+
+    async def _insyde_finish_server_init(
+        self, buf: bytearray, upstream: Any, auth: BmcKvmAuth
+    ) -> bytes:
+        await upstream.send(b"\x01")
+        await self._insyde_recv(buf, upstream, 24)
+        width, height = struct.unpack(">HH", bytes(buf[:4]))
+        name_len = struct.unpack(">I", bytes(buf[20:24]))[0]
+        del buf[:24]
+        if name_len > 4096:
+            raise IpmiKvmUnavailable("BMC sent an invalid KVM handshake")
+        await self._insyde_recv(buf, upstream, name_len + _INSIDE_EXT)
+        del buf[: name_len + _INSIDE_EXT]
+        auth.fb_width = int(width)
+        auth.fb_height = int(height)
+        await upstream.send(framebuffer_update_request(width, height))
+        return bytes(buf)
+
     async def handshake(self, upstream: Any, auth: BmcKvmAuth) -> bytes:
         buf = bytearray()
-
-        async def need(n: int) -> None:
-            while len(buf) < n:
-                data = await asyncio.wait_for(upstream.recv(), 15)
-                if isinstance(data, str):
-                    data = data.encode("latin1")
-                buf.extend(data)
-
         try:
-            await need(12)
+            await self._insyde_recv(buf, upstream, 12)
             version = bytes(buf[:12])
             if not version.startswith(b"RFB "):
                 raise IpmiKvmUnavailable(f"Unexpected KVM hello ({version!r})")
@@ -235,54 +273,28 @@ class SuperMicroKvmProfile(IpmiKvmProfile):
             if len(reply) != 12:
                 reply = _RFB_INSIDE
             await upstream.send(reply)
-            await need(1)
+            await self._insyde_recv(buf, upstream, 1)
             ntypes = buf[0]
             del buf[:1]
             if ntypes == 0 or ntypes > 32:
                 raise IpmiKvmUnavailable("BMC sent no KVM security types")
-            await need(ntypes)
+            await self._insyde_recv(buf, upstream, ntypes)
             types = list(buf[:ntypes])
             del buf[:ntypes]
-            if 16 in types:
-                chosen = 16
-            elif 15 in types:
-                chosen = 15
-            else:
-                raise IpmiKvmUnavailable(f"Unsupported KVM security types: {types}")
-            await upstream.send(bytes([chosen]))
-            await need(_AUTH_LEN)
+            await upstream.send(bytes([self._insyde_security_type(types)]))
+            await self._insyde_recv(buf, upstream, _AUTH_LEN)
             del buf[:_AUTH_LEN]
             await upstream.send(insyde_auth_payload(auth.kvm_token))
-            await need(4)
+            await self._insyde_recv(buf, upstream, 4)
             result = struct.unpack(">I", bytes(buf[:4]))[0]
             del buf[:4]
             if result != 0:
-                reason = ""
-                if result == 1:
-                    await need(4)
-                    rlen = struct.unpack(">I", bytes(buf[:4]))[0]
-                    del buf[:4]
-                    if rlen:
-                        await need(rlen)
-                        reason = bytes(buf[:rlen]).decode("latin1", "replace")
-                        del buf[:rlen]
+                reason = await self._insyde_auth_failure_reason(buf, upstream, result)
                 detail = "KVM token rejected"
                 if reason:
                     detail = f"{detail} ({reason})"
                 raise IpmiKvmUnavailable(detail)
-            await upstream.send(b"\x01")
-            await need(24)
-            width, height = struct.unpack(">HH", bytes(buf[:4]))
-            name_len = struct.unpack(">I", bytes(buf[20:24]))[0]
-            del buf[:24]
-            if name_len > 4096:
-                raise IpmiKvmUnavailable("BMC sent an invalid KVM handshake")
-            await need(name_len + _INSIDE_EXT)
-            del buf[: name_len + _INSIDE_EXT]
-            auth.fb_width = int(width)
-            auth.fb_height = int(height)
-            await upstream.send(framebuffer_update_request(width, height))
-            return bytes(buf)
+            return await self._insyde_finish_server_init(buf, upstream, auth)
         except TimeoutError as exc:
             raise IpmiKvmUnavailable("BMC KVM handshake timed out") from exc
 

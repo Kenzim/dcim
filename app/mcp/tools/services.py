@@ -28,6 +28,8 @@ from app.services.service_product_snapshot import build_product_snapshot
 from app.services.vm_backup_service import list_service_backups_and_jobs
 from app.services.vm_strategy_executor import provision_vm_service_async
 
+_MSG_SERVICE_NOT_FOUND = "Service not found"
+
 
 def _auth(ctx):
     return ctx.as_admin_auth()
@@ -63,7 +65,7 @@ async def get_service(service_id: int) -> dict:
     def work(db, ctx):
         row = ServiceDAO.get_by_id(db, service_id)
         if not row:
-            raise ValueError("Service not found")
+            raise ValueError(_MSG_SERVICE_NOT_FOUND)
         return service_row(db, row)
 
     return await run_tool("get_service", "read", work, args={"service_id": service_id})
@@ -76,7 +78,7 @@ async def list_service_backups(service_id: int) -> dict:
     async def work(db, ctx):
         row = ServiceDAO.get_by_id(db, service_id)
         if not row:
-            raise ValueError("Service not found")
+            raise ValueError(_MSG_SERVICE_NOT_FOUND)
         items, jobs = await list_service_backups_and_jobs(db, row)
         return {"backups": items, "jobs": jobs}
 
@@ -89,7 +91,7 @@ async def list_deployment_jobs(service_id: int, limit: int = 20) -> dict:
 
     def work(db, ctx):
         if not ServiceDAO.get_by_id(db, service_id):
-            raise ValueError("Service not found")
+            raise ValueError(_MSG_SERVICE_NOT_FOUND)
         cap = max(1, min(int(limit or 20), 50))
         jobs = VMDeploymentJobDAO.list_by_service(db, service_id, limit=cap)
         return {
@@ -256,7 +258,7 @@ async def service_power(service_id: int, action: str, confirm: bool = False) -> 
     async def work(db, ctx):
         service = ServiceDAO.get_by_id(db, service_id)
         if not service:
-            raise ValueError("Service not found")
+            raise ValueError(_MSG_SERVICE_NOT_FOUND)
         if service.service_type == ServiceType.VM:
             body = VmPowerActionBody(action=action_norm)
             await admin_vm_power_action(service_id, body, _auth(ctx), db)

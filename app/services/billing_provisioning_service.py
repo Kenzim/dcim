@@ -47,7 +47,7 @@ async def provision_bare_metal_service(
     # implementation is incrementally moved out of the large billing router.
     from app.api.billing import _provision_bare_metal_service
 
-    return await _provision_bare_metal_service(
+    return _provision_bare_metal_service(
         service_data=service_data,
         owner_user_id=owner_user_id,
         actor=actor,
@@ -65,7 +65,7 @@ async def provision_vm_service(
 ) -> Service:
     from app.api.billing import _provision_vm_service
 
-    return await _provision_vm_service(
+    return _provision_vm_service(
         body=body,
         owner_user_id=owner_user_id,
         actor=actor,

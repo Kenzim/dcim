@@ -15,6 +15,8 @@ from app.mcp.scopes import normalize_scopes
 from app.models.mcp_api_key import McpApiKey
 
 from typing import Annotated
+
+_MSG_MCP_KEY_NOT_FOUND = "MCP key not found"
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 
@@ -134,7 +136,7 @@ async def get_mcp_key(
 ):
     row = McpApiKeyDAO.get_by_id(db, key_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP key not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_MCP_KEY_NOT_FOUND)
     return _to_response(row)
 
 
@@ -147,7 +149,7 @@ async def update_mcp_key(
 ):
     row = McpApiKeyDAO.get_by_id(db, key_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP key not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_MCP_KEY_NOT_FOUND)
 
     if body.name is not None:
         row.name = body.name
@@ -174,7 +176,7 @@ async def rotate_mcp_key(
 ):
     row = McpApiKeyDAO.get_by_id(db, key_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP key not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_MCP_KEY_NOT_FOUND)
     row = McpApiKeyDAO.rotate_api_key(db, row)
     return _to_response(row, reveal=True)
 
@@ -186,5 +188,5 @@ async def delete_mcp_key(
     db: DbDep,
 ):
     if not McpApiKeyDAO.delete(db, key_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP key not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_MCP_KEY_NOT_FOUND)
     return None

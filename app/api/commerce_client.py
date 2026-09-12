@@ -18,6 +18,8 @@ from app.core.commerce_auth import (
     require_client_session,
     require_commerce_enabled,
 )
+
+_MSG_INVOICE_NOT_FOUND = "Invoice not found"
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
@@ -421,7 +423,7 @@ def get_invoice(
 ):
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.billing_account_id != account.id:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise HTTPException(status_code=404, detail=_MSG_INVOICE_NOT_FOUND)
     return _serialize_invoice(db, invoice)
 
 
@@ -433,7 +435,7 @@ def get_invoice_pdf(
 ):
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.billing_account_id != account.id:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise HTTPException(status_code=404, detail=_MSG_INVOICE_NOT_FOUND)
     try:
         pdf_bytes = InvoicePdfService.render_pdf_bytes(db, invoice)
     except RuntimeError as exc:
@@ -457,7 +459,7 @@ def pay_invoice(
     _block_impersonation_money_actions(auth)
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.billing_account_id != account.id:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise HTTPException(status_code=404, detail=_MSG_INVOICE_NOT_FOUND)
     if invoice.status == InvoiceStatus.PAID:
         return {"status": "paid", "invoice_id": invoice.id}
     if invoice.status == InvoiceStatus.VOID:

@@ -597,7 +597,7 @@ async def _provision_charged_service(
 async def _create_service(
     *,
     kind: str,
-    body: Union[BillingBareMetalServiceCreate, BillingVmServiceCreate],
+    body: BillingBareMetalServiceCreate | BillingVmServiceCreate,
     background_tasks: BackgroundTasks,
     reseller: Reseller,
     db: Session,

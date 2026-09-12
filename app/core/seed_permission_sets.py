@@ -49,6 +49,70 @@ def _copy_virtual_media_from_kvm(permissions: dict) -> bool:
     return True
 
 
+def _backfill_bms_keys(permissions: dict) -> bool:
+    changed = _copy_kvm_from_ipmi(permissions)
+    if _copy_sol_from_kvm(permissions):
+        changed = True
+    if _copy_virtual_media_from_kvm(permissions):
+        changed = True
+    return changed
+
+
+def _ensure_system_presets(db: Session) -> None:
+    for preset in SYSTEM_PRESETS:
+        existing = PermissionSetDAO.get_by_name(db, preset["name"])
+        if existing:
+            continue
+        PermissionSetDAO.create(
+            db,
+            name=preset["name"],
+            description=preset.get("description"),
+            permissions=preset.get("permissions") or {},
+            is_system=True,
+        )
+
+
+def _enable_change_password_on_presets(db: Session) -> None:
+    for row in db.query(PermissionSet).all():
+        if (row.name or "").strip().lower() == "read-only":
+            continue
+        perms = dict(row.permissions or {})
+        if perms.get(PermissionKey.VM_CHANGE_PASSWORD) is True:
+            continue
+        perms[PermissionKey.VM_CHANGE_PASSWORD] = True
+        row.permissions = perms
+        flag_modified(row, "permissions")
+
+
+def _clear_sparse_change_password_denials(db: Session) -> None:
+    services = db.query(Service).filter(Service.permission_overrides.isnot(None)).all()
+    for service in services:
+        overrides = dict(service.permission_overrides or {})
+        if PermissionKey.VM_CHANGE_PASSWORD not in overrides:
+            continue
+        if overrides.get(PermissionKey.VM_CHANGE_PASSWORD) is False:
+            del overrides[PermissionKey.VM_CHANGE_PASSWORD]
+            service.permission_overrides = overrides or None
+            flag_modified(service, "permission_overrides")
+
+
+def _backfill_bms_keys_on_presets(db: Session) -> None:
+    for row in db.query(PermissionSet).all():
+        perms = dict(row.permissions or {})
+        if _backfill_bms_keys(perms):
+            row.permissions = perms
+            flag_modified(row, "permissions")
+
+
+def _backfill_bms_keys_on_services(db: Session) -> None:
+    services = db.query(Service).filter(Service.permission_overrides.isnot(None)).all()
+    for service in services:
+        overrides = dict(service.permission_overrides or {})
+        if _backfill_bms_keys(overrides):
+            service.permission_overrides = overrides
+            flag_modified(service, "permission_overrides")
+
+
 def seed_permission_sets(db: Session) -> None:
     """Create built-in permission presets and apply one-time key backfills.
 
@@ -62,71 +126,9 @@ def seed_permission_sets(db: Session) -> None:
     - Existing presets and sparse overrides that set ``bms.kvm`` but not
       ``bms.sol`` / ``bms.virtual_media`` copy the KVM value onto those keys.
     """
-    for preset in SYSTEM_PRESETS:
-        existing = PermissionSetDAO.get_by_name(db, preset["name"])
-        if existing:
-            continue
-        PermissionSetDAO.create(
-            db,
-            name=preset["name"],
-            description=preset.get("description"),
-            permissions=preset.get("permissions") or {},
-            is_system=True,
-        )
-
-    # Enable change-password on every non-read-only preset (system + custom).
-    presets = db.query(PermissionSet).all()
-    for row in presets:
-        if (row.name or "").strip().lower() == "read-only":
-            continue
-        perms = dict(row.permissions or {})
-        if perms.get(PermissionKey.VM_CHANGE_PASSWORD) is True:
-            continue
-        perms[PermissionKey.VM_CHANGE_PASSWORD] = True
-        row.permissions = perms
-        flag_modified(row, "permissions")
-
-    # Drop sparse denials so the updated defaults/presets take effect.
-    services = (
-        db.query(Service)
-        .filter(Service.permission_overrides.isnot(None))
-        .all()
-    )
-    for service in services:
-        overrides = dict(service.permission_overrides or {})
-        if PermissionKey.VM_CHANGE_PASSWORD not in overrides:
-            continue
-        if overrides.get(PermissionKey.VM_CHANGE_PASSWORD) is False:
-            del overrides[PermissionKey.VM_CHANGE_PASSWORD]
-            service.permission_overrides = overrides or None
-            flag_modified(service, "permission_overrides")
-
-    # Split HTML5 KVM from IPMI proxy without changing existing grants/denials.
-    for row in db.query(PermissionSet).all():
-        perms = dict(row.permissions or {})
-        changed = _copy_kvm_from_ipmi(perms)
-        if _copy_sol_from_kvm(perms):
-            changed = True
-        if _copy_virtual_media_from_kvm(perms):
-            changed = True
-        if changed:
-            row.permissions = perms
-            flag_modified(row, "permissions")
-
-    services = (
-        db.query(Service)
-        .filter(Service.permission_overrides.isnot(None))
-        .all()
-    )
-    for service in services:
-        overrides = dict(service.permission_overrides or {})
-        changed = _copy_kvm_from_ipmi(overrides)
-        if _copy_sol_from_kvm(overrides):
-            changed = True
-        if _copy_virtual_media_from_kvm(overrides):
-            changed = True
-        if changed:
-            service.permission_overrides = overrides
-            flag_modified(service, "permission_overrides")
-
+    _ensure_system_presets(db)
+    _enable_change_password_on_presets(db)
+    _clear_sparse_change_password_denials(db)
+    _backfill_bms_keys_on_presets(db)
+    _backfill_bms_keys_on_services(db)
     db.commit()

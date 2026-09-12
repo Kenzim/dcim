@@ -8,6 +8,8 @@ from sqlalchemy.sql import func
 
 from app.core.database import Base
 
+_FK_SET_NULL = "SET NULL"
+
 _FK_BILLING_ACCOUNTS = "billing_accounts.id"
 _FK_USERS = "users.id"
 
@@ -22,19 +24,19 @@ class UserAuditEvent(Base):
     id = Column(Integer, primary_key=True, index=True)
     actor_user_id = Column(
         Integer,
-        ForeignKey(_FK_USERS, ondelete="SET NULL"),
+        ForeignKey(_FK_USERS, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
     subject_user_id = Column(
         Integer,
-        ForeignKey(_FK_USERS, ondelete="SET NULL"),
+        ForeignKey(_FK_USERS, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
     billing_account_id = Column(
         Integer,
-        ForeignKey(_FK_BILLING_ACCOUNTS, ondelete="SET NULL"),
+        ForeignKey(_FK_BILLING_ACCOUNTS, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )
@@ -46,7 +48,7 @@ class UserAuditEvent(Base):
     event_metadata = Column("metadata", JSON, nullable=False, default=dict)
     impersonated_by = Column(
         Integer,
-        ForeignKey(_FK_USERS, ondelete="SET NULL"),
+        ForeignKey(_FK_USERS, ondelete=_FK_SET_NULL),
         nullable=True,
         index=True,
     )

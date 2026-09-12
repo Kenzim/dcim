@@ -13,6 +13,12 @@ from app.services.deployment.actions import (
     RANDOMIZE_SMBIOS_ACTION,
     StrategyAction,
 )
+
+_LABEL_GUEST_USERNAME = "Guest username"
+_LABEL_NETWORK_MODE = "Network mode"
+_HELP_NETWORK_MODE = "static uses Rackflow VM IP allocation; dhcp leaves DHCP."
+_LABEL_CLIENT_ACTIONS = "Client-visible actions"
+_HELP_CLIENT_ACTIONS = "Action names end-users may invoke (also gated by permissions)."
 from app.services.deployment.step import DeploymentStep
 from app.services.deployment.steps import (
     ApplyGuestPasswordStep,
@@ -52,25 +58,25 @@ class CloudinitCloneStrategy(DeploymentStrategy):
         return [
             OptionField(
                 name="guest_username",
-                label="Guest username",
+                label=_LABEL_GUEST_USERNAME,
                 field_type="string",
                 default="root",
                 description="Always root for cloud-init Linux; password is applied to root (ciuser).",
             ),
             OptionField(
                 name="network_mode",
-                label="Network mode",
+                label=_LABEL_NETWORK_MODE,
                 field_type="select",
                 default="static",
                 choices=["static", "dhcp"],
-                description="static uses Rackflow VM IP allocation; dhcp leaves DHCP.",
+                description=_HELP_NETWORK_MODE,
             ),
             OptionField(
                 name="client_actions",
-                label="Client-visible actions",
+                label=_LABEL_CLIENT_ACTIONS,
                 field_type="string_list",
                 default=["change_password"],
-                description="Action names end-users may invoke (also gated by permissions).",
+                description=_HELP_CLIENT_ACTIONS,
             ),
         ]
 
@@ -110,7 +116,7 @@ class MacosGuestAgentStrategy(DeploymentStrategy):
         return [
             OptionField(
                 name="guest_username",
-                label="Guest username",
+                label=_LABEL_GUEST_USERNAME,
                 field_type="string",
                 default="client",
                 description="macOS user for password changes.",
@@ -127,11 +133,11 @@ class MacosGuestAgentStrategy(DeploymentStrategy):
             ),
             OptionField(
                 name="network_mode",
-                label="Network mode",
+                label=_LABEL_NETWORK_MODE,
                 field_type="select",
                 default="static",
                 choices=["static", "dhcp"],
-                description="static uses Rackflow VM IP allocation; dhcp leaves DHCP.",
+                description=_HELP_NETWORK_MODE,
             ),
             OptionField(
                 name="randomize_smbios",
@@ -162,10 +168,10 @@ class MacosGuestAgentStrategy(DeploymentStrategy):
             ),
             OptionField(
                 name="client_actions",
-                label="Client-visible actions",
+                label=_LABEL_CLIENT_ACTIONS,
                 field_type="string_list",
                 default=["change_password"],
-                description="Action names end-users may invoke (also gated by permissions).",
+                description=_HELP_CLIENT_ACTIONS,
             ),
         ]
 
@@ -192,25 +198,25 @@ class WindowsGuestAgentStrategy(DeploymentStrategy):
         return [
             OptionField(
                 name="guest_username",
-                label="Guest username",
+                label=_LABEL_GUEST_USERNAME,
                 field_type="string",
                 default="Administrator",
                 description="Windows local user for password changes (default Administrator).",
             ),
             OptionField(
                 name="network_mode",
-                label="Network mode",
+                label=_LABEL_NETWORK_MODE,
                 field_type="select",
                 default="static",
                 choices=["static", "dhcp"],
-                description="static uses Rackflow VM IP allocation; dhcp leaves DHCP.",
+                description=_HELP_NETWORK_MODE,
             ),
             OptionField(
                 name="client_actions",
-                label="Client-visible actions",
+                label=_LABEL_CLIENT_ACTIONS,
                 field_type="string_list",
                 default=["change_password"],
-                description="Action names end-users may invoke (also gated by permissions).",
+                description=_HELP_CLIENT_ACTIONS,
             ),
         ]
 

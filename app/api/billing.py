@@ -209,25 +209,41 @@ def _validate_optional_proxmox_cluster(db: Session, cid: Optional[int]) -> None:
         )
 
 
+def _billing_proxy_assignments(db: Session, service: Service):
+    if service.service_type != ServiceType.HTTP_PROXY:
+        return None
+    return [assignment_payload(a) for a in IPAMDAO.get_assignment_by_service(db, service.id)]
+
+
+def _billing_vm_ip_fields(service: Service) -> tuple[Optional[int], Optional[str]]:
+    if not service.vm:
+        return None, None
+    vm_ip_allocation_id = service.vm.vm_ip_allocation_id
+    if service.vm.vm_ip_allocation:
+        return vm_ip_allocation_id, service.vm.vm_ip_allocation.ip_address
+    if not service.config:
+        return vm_ip_allocation_id, None
+    cfg = service.config or {}
+    return (
+        vm_ip_allocation_id or cfg.get("vm_ip_allocation_id"),
+        cfg.get("vm_ip_address"),
+    )
+
+
+def _billing_external_user_id(service: Service) -> Optional[int]:
+    owner = service.owner_user
+    if owner and owner.billing_integration_id:
+        return service.owner_user_id
+    return None
+
+
 def _billing_service_response(db: Session, service: Service) -> BillingServiceResponse:
     server = service_linked_server(db, service)
     cid, node, vmid = vm_placement(service)
-    proxy_assignments = None
-    if service.service_type == ServiceType.HTTP_PROXY:
-        proxy_assignments = [
-            assignment_payload(a) for a in IPAMDAO.get_assignment_by_service(db, service.id)
-        ]
+    proxy_assignments = _billing_proxy_assignments(db, service)
     src = service.provisioning_source or ProvisioningSource.BILLING
     vm_tid = service.vm.vm_template_id if service.vm else None
-    vm_ip_allocation_id = None
-    vm_ip_address = None
-    if service.vm:
-        vm_ip_allocation_id = service.vm.vm_ip_allocation_id
-        if service.vm.vm_ip_allocation:
-            vm_ip_address = service.vm.vm_ip_allocation.ip_address
-        elif service.config:
-            vm_ip_address = (service.config or {}).get("vm_ip_address")
-            vm_ip_allocation_id = vm_ip_allocation_id or (service.config or {}).get("vm_ip_allocation_id")
+    vm_ip_allocation_id, vm_ip_address = _billing_vm_ip_fields(service)
     return BillingServiceResponse(
         id=service.id,
         name=service.name,
@@ -237,11 +253,7 @@ def _billing_service_response(db: Session, service: Service) -> BillingServiceRe
         os_code=service.os_code,
         vm_template_id=vm_tid,
         server_id=service_server_id_for_response(service),
-        external_user_id=(
-            service.owner_user_id
-            if service.owner_user and service.owner_user.billing_integration_id
-            else None
-        ),
+        external_user_id=_billing_external_user_id(service),
         provisioning_source=src.value if hasattr(src, "value") else str(src),
         proxmox_cluster_id=cid,
         proxmox_node_name=node,
@@ -1476,7 +1488,7 @@ def _provision_bare_metal_new_server(
     return service
 
 
-async def _provision_bare_metal_service(
+def _provision_bare_metal_service(
     service_data: BillingBareMetalServiceCreate,
     owner_user_id: int,
     actor: ProvisioningActor,
@@ -1581,7 +1593,93 @@ async def create_bare_metal_service(
     return _billing_service_response(db, service)
 
 
-async def _provision_vm_service(
+def _validate_vm_service_create_body(body: BillingVmServiceCreate) -> None:
+    if (body.service_config or {}).get("server_group_id"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="VM services cannot use server_group_id; use bare-metal provisioning for pooled servers",
+        )
+    if body.vm_template_id is not None and not body.product_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="vm_template_id requires product_code (template must be linked to that product in the catalog)",
+        )
+
+
+def _billing_vm_product_snapshot(
+    db: Session,
+    product_code: Optional[str],
+    os_code: Optional[str],
+    *,
+    vm_template_id: Optional[int] = None,
+) -> tuple[dict, Optional[str]]:
+    if not product_code:
+        return {}, os_code
+    try:
+        return build_product_snapshot(
+            db,
+            product_code,
+            os_code,
+            ServiceType.VM,
+            vm_template_id=vm_template_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _assign_vm_service_ip_or_fail(db: Session, service: Service, proxmox_cluster_id: Optional[int]):
+    allocation = VMIPAllocationDAO.assign_next_free_to_service(
+        db,
+        service_id=service.id,
+        proxmox_cluster_id=proxmox_cluster_id,
+    )
+    if allocation is not None:
+        return allocation
+    ServiceDAO.delete(db, service.id)
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "No free VM IP address available to allocate. Add enabled addresses under VM IP allocations. "
+            "For services without Proxmox cluster placement, only pool rows with no cluster restriction apply; "
+            "when a cluster is set, rows restricted to that cluster (or unrestricted rows) may be used."
+        ),
+    )
+
+
+def _vm_service_create_log_details(actor: ProvisioningActor, allocation) -> dict:
+    return {
+        **actor.details,
+        "vm_ip_allocation_id": allocation.id,
+        "vm_ip_address": allocation.ip_address,
+    }
+
+
+def _build_vm_service_config(
+    db: Session,
+    service: Service,
+    body: BillingVmServiceCreate,
+    allocation,
+    effective_os_code: Optional[str],
+) -> tuple[dict, bool]:
+    cfg = {
+        **(service.config or {}),
+        "vm_ip_allocation_id": allocation.id,
+        "vm_ip_address": allocation.ip_address,
+    }
+    if not (body.product_code and effective_os_code):
+        return cfg, False
+    cfg["vm_plan"] = VMProvisioningService.plan_provisioning(
+        db=db,
+        service_id=service.id,
+        product_code=body.product_code,
+        os_code=body.os_code,
+        vm_template_id=body.vm_template_id,
+        context={"service_id": service.id, "vm_ip_allocation_id": allocation.id},
+    )
+    return cfg, True
+
+
+def _provision_vm_service(
     body: BillingVmServiceCreate,
     owner_user_id: int,
     actor: ProvisioningActor,
@@ -1602,34 +1700,13 @@ async def _provision_vm_service(
         actor.name,
     )
 
-    if (body.service_config or {}).get("server_group_id"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="VM services cannot use server_group_id; use bare-metal provisioning for pooled servers",
-        )
-    if body.vm_template_id is not None and not body.product_code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="vm_template_id requires product_code (template must be linked to that product in the catalog)",
-        )
-
+    _validate_vm_service_create_body(body)
     if ServiceDAO.get_by_name(db, body.name):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Service with this name already exists")
 
-    resolved_service_type = ServiceType.VM
-    product_snapshot: dict = {}
-    effective_os_code = body.os_code
-    if body.product_code:
-        try:
-            product_snapshot, effective_os_code = build_product_snapshot(
-                db,
-                body.product_code,
-                body.os_code,
-                resolved_service_type,
-                vm_template_id=body.vm_template_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    product_snapshot, effective_os_code = _billing_vm_product_snapshot(
+        db, body.product_code, body.os_code, vm_template_id=body.vm_template_id
+    )
 
     _validate_optional_proxmox_cluster(db, body.proxmox_cluster_id)
 
@@ -1652,21 +1729,8 @@ async def _provision_vm_service(
     )
     db.refresh(service)
 
-    allocation = VMIPAllocationDAO.assign_next_free_to_service(
-        db,
-        service_id=service.id,
-        proxmox_cluster_id=body.proxmox_cluster_id,
-    )
-    if allocation is None:
-        ServiceDAO.delete(db, service.id)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "No free VM IP address available to allocate. Add enabled addresses under VM IP allocations. "
-                "For services without Proxmox cluster placement, only pool rows with no cluster restriction apply; "
-                "when a cluster is set, rows restricted to that cluster (or unrestricted rows) may be used."
-            ),
-        )
+    allocation = _assign_vm_service_ip_or_fail(db, service, body.proxmox_cluster_id)
+    log_details = _vm_service_create_log_details(actor, allocation)
 
     log_server_activity_attempt(
         db,
@@ -1675,30 +1739,10 @@ async def _provision_vm_service(
         action="create",
         source=actor.source,
         message=f"Creating VM service '{service.name}'",
-        details={
-            **actor.details,
-            "vm_ip_allocation_id": allocation.id,
-            "vm_ip_address": allocation.ip_address,
-        },
+        details=log_details,
     )
 
-    cfg = {
-        **(service.config or {}),
-        "vm_ip_allocation_id": allocation.id,
-        "vm_ip_address": allocation.ip_address,
-    }
-    has_plan = False
-    if body.product_code and effective_os_code:
-        vm_plan = VMProvisioningService.plan_provisioning(
-            db=db,
-            service_id=service.id,
-            product_code=body.product_code,
-            os_code=body.os_code,
-            vm_template_id=body.vm_template_id,
-            context={"service_id": service.id, "vm_ip_allocation_id": allocation.id},
-        )
-        cfg["vm_plan"] = vm_plan
-        has_plan = True
+    cfg, has_plan = _build_vm_service_config(db, service, body, allocation, effective_os_code)
     service.config = cfg
     ServiceDAO.update(db, service)
 
@@ -1709,11 +1753,7 @@ async def _provision_vm_service(
         action="create",
         source=actor.source,
         message=f"Created VM service '{service.name}'",
-        details={
-            **actor.details,
-            "vm_ip_allocation_id": allocation.id,
-            "vm_ip_address": allocation.ip_address,
-        },
+        details=log_details,
     )
 
     # Auto-provision requires a resolved OS strategy (vm_plan). Without one the
@@ -1801,6 +1841,96 @@ async def list_services(
     return [_billing_service_response(db, s) for s in services]
 
 
+def _lookup_services_integration_query(db: Session, integration: BillingIntegration):
+    owner = aliased(User)
+    return (
+        db.query(Service)
+        .outerjoin(owner, Service.owner_user_id == owner.id)
+        .outerjoin(ServiceVm, ServiceVm.service_id == Service.id)
+        .outerjoin(ServiceBareMetal, ServiceBareMetal.service_id == Service.id)
+        .outerjoin(Server, Server.id == ServiceBareMetal.server_id)
+        .filter(
+            or_(
+                Service.owner_user_id.is_(None),
+                owner.billing_integration_id.is_(None),
+                owner.billing_integration_id == integration.id,
+            )
+        )
+    )
+
+
+def _apply_lookup_server_ip_filter(
+    query,
+    db: Session,
+    ip: str,
+    *,
+    text: Optional[str],
+    proxmox_vmid: Optional[int],
+):
+    server = ServerDAO.get_by_ip(db, ip)
+    if not server:
+        if text is None and proxmox_vmid is None:
+            return query, True
+        return query.filter(Service.id == -1), False
+    return query.filter(ServiceBareMetal.server_id == server.id), False
+
+
+def _apply_lookup_text_filter(query, text: str):
+    like = f"%{text}%"
+    vmid_prefix = f"{text}%"
+    clauses = [
+        Service.name.ilike(like),
+        cast(ServiceVm.proxmox_vmid, String).like(vmid_prefix),
+        cast(ServiceVm.proxmox_vmid, String).like(like),
+        Server.server_ip.ilike(like),
+        Server.name.ilike(like),
+    ]
+    if text.isdigit():
+        clauses.append(Service.id == int(text))
+        clauses.append(ServiceVm.proxmox_vmid == int(text))
+    return query.filter(or_(*clauses))
+
+
+async def _append_proxmox_lookup_results(
+    db: Session,
+    results: List[BillingServiceLookupItem],
+    *,
+    text: Optional[str],
+    proxmox_vmid: Optional[int],
+) -> None:
+    proxmox_q = text
+    if proxmox_q is None and proxmox_vmid is not None:
+        proxmox_q = str(int(proxmox_vmid))
+    if not proxmox_q:
+        return
+
+    from app.services.proxmox_vm_search import search_proxmox_vms
+
+    seen_vmids = {
+        (r.proxmox_cluster_id, r.proxmox_vmid)
+        for r in results
+        if r.proxmox_cluster_id is not None and r.proxmox_vmid is not None
+    }
+    for guest in await search_proxmox_vms(db, proxmox_q, limit=25):
+        key = (guest["cluster_id"], guest["vmid"])
+        if key in seen_vmids:
+            continue
+        seen_vmids.add(key)
+        results.append(
+            BillingServiceLookupItem(
+                id=None,
+                name=guest["name"],
+                service_type="vm",
+                status=guest.get("status") or None,
+                proxmox_cluster_id=guest["cluster_id"],
+                proxmox_node_name=guest["node_name"],
+                proxmox_vmid=guest["vmid"],
+                source="proxmox",
+                proxmox_status=guest.get("status") or None,
+            )
+        )
+
+
 @router.get("/services/lookup", response_model=List[BillingServiceLookupItem], responses=COMMON_ERROR_RESPONSES)
 async def lookup_services(
     q: Optional[str] = None,
@@ -1828,86 +1958,80 @@ async def lookup_services(
             detail="Provide q, service_id, proxmox_vmid, and/or server_ip",
         )
 
-    owner = aliased(User)
-    query = (
-        db.query(Service)
-        .outerjoin(owner, Service.owner_user_id == owner.id)
-        .outerjoin(ServiceVm, ServiceVm.service_id == Service.id)
-        .outerjoin(ServiceBareMetal, ServiceBareMetal.service_id == Service.id)
-        .outerjoin(Server, Server.id == ServiceBareMetal.server_id)
-        .filter(
-            or_(
-                Service.owner_user_id.is_(None),
-                owner.billing_integration_id.is_(None),
-                owner.billing_integration_id == integration.id,
-            )
-        )
-    )
+    query = _lookup_services_integration_query(db, integration)
     if service_id is not None:
         query = query.filter(Service.id == int(service_id))
     if proxmox_vmid is not None:
         query = query.filter(ServiceVm.proxmox_vmid == int(proxmox_vmid))
     if ip is not None:
-        server = ServerDAO.get_by_ip(db, ip)
-        if not server:
-            # Still allow Proxmox guest search below when q/vmid provided.
-            if text is None and proxmox_vmid is None:
-                return []
-            query = query.filter(Service.id == -1)
-        else:
-            query = query.filter(ServiceBareMetal.server_id == server.id)
+        query, empty = _apply_lookup_server_ip_filter(
+            query, db, ip, text=text, proxmox_vmid=proxmox_vmid
+        )
+        if empty:
+            return []
 
     if text is not None:
-        like = f"%{text}%"
-        vmid_prefix = f"{text}%"
-        clauses = [
-            Service.name.ilike(like),
-            cast(ServiceVm.proxmox_vmid, String).like(vmid_prefix),
-            cast(ServiceVm.proxmox_vmid, String).like(like),
-            Server.server_ip.ilike(like),
-            Server.name.ilike(like),
-        ]
-        if text.isdigit():
-            clauses.append(Service.id == int(text))
-            clauses.append(ServiceVm.proxmox_vmid == int(text))
-        query = query.filter(or_(*clauses))
+        query = _apply_lookup_text_filter(query, text)
 
     services = query.distinct().order_by(Service.id).limit(50).all()
     results: List[BillingServiceLookupItem] = [
         _lookup_item_from_service(db, s) for s in services
     ]
-    seen_vmids = {
-        (r.proxmox_cluster_id, r.proxmox_vmid)
-        for r in results
-        if r.proxmox_cluster_id is not None and r.proxmox_vmid is not None
-    }
 
-    proxmox_q = text
-    if proxmox_q is None and proxmox_vmid is not None:
-        proxmox_q = str(int(proxmox_vmid))
-    if proxmox_q:
-        from app.services.proxmox_vm_search import search_proxmox_vms
-
-        for guest in await search_proxmox_vms(db, proxmox_q, limit=25):
-            key = (guest["cluster_id"], guest["vmid"])
-            if key in seen_vmids:
-                continue
-            seen_vmids.add(key)
-            results.append(
-                BillingServiceLookupItem(
-                    id=None,
-                    name=guest["name"],
-                    service_type="vm",
-                    status=guest.get("status") or None,
-                    proxmox_cluster_id=guest["cluster_id"],
-                    proxmox_node_name=guest["node_name"],
-                    proxmox_vmid=guest["vmid"],
-                    source="proxmox",
-                    proxmox_status=guest.get("status") or None,
-                )
-            )
+    await _append_proxmox_lookup_results(
+        db, results, text=text, proxmox_vmid=proxmox_vmid
+    )
 
     return results[:50]
+
+
+def _validate_adopt_vm_inputs(db: Session, cluster_id: int, node_name: str, vmid: int) -> None:
+    if cluster_id <= 0 or node_name == "" or vmid <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="proxmox_cluster_id, proxmox_node_name, and proxmox_vmid are required",
+        )
+    if ProxmoxInventoryDAO.get_cluster(db, cluster_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxmox cluster not found")
+    conflict = (
+        db.query(ServiceVm)
+        .filter(
+            ServiceVm.proxmox_cluster_id == cluster_id,
+            ServiceVm.proxmox_vmid == vmid,
+        )
+        .first()
+    )
+    if conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"VMID {vmid} is already bound to RackFlow service {conflict.service_id}",
+        )
+
+
+def _assert_adopt_external_service_available(
+    db: Session, external_service_id: str, integration: BillingIntegration
+) -> None:
+    existing = ServiceDAO.get_by_external_service_id_and_integration(
+        db, external_service_id, integration.id
+    )
+    if existing and existing.status != ServiceStatus.TERMINATED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"External service id '{external_service_id}' is already linked to "
+                f"RackFlow service {existing.id}"
+            ),
+        )
+
+
+def _unique_adopt_service_name(db: Session, body: BillingAdoptVmService, vmid: int) -> str:
+    base_name = (body.name or "").strip() or f"vm-{vmid}"
+    name = base_name
+    suffix = 1
+    while ServiceDAO.get_by_name(db, name):
+        suffix += 1
+        name = f"{base_name}-{suffix}"
+    return name
 
 
 @router.post("/services/adopt-vm", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
@@ -1924,27 +2048,7 @@ async def adopt_vm_service(
     cluster_id = int(body.proxmox_cluster_id)
     node_name = (body.proxmox_node_name or "").strip()
     vmid = int(body.proxmox_vmid)
-    if cluster_id <= 0 or node_name == "" or vmid <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="proxmox_cluster_id, proxmox_node_name, and proxmox_vmid are required",
-        )
-    if ProxmoxInventoryDAO.get_cluster(db, cluster_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxmox cluster not found")
-
-    conflict = (
-        db.query(ServiceVm)
-        .filter(
-            ServiceVm.proxmox_cluster_id == cluster_id,
-            ServiceVm.proxmox_vmid == vmid,
-        )
-        .first()
-    )
-    if conflict:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"VMID {vmid} is already bound to RackFlow service {conflict.service_id}",
-        )
+    _validate_adopt_vm_inputs(db, cluster_id, node_name, vmid)
 
     external_service_id = (body.external_service_id or "").strip()
     if not external_service_id:
@@ -1952,17 +2056,7 @@ async def adopt_vm_service(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="external_service_id is required",
         )
-    existing = ServiceDAO.get_by_external_service_id_and_integration(
-        db, external_service_id, integration.id
-    )
-    if existing and existing.status != ServiceStatus.TERMINATED:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"External service id '{external_service_id}' is already linked to "
-                f"RackFlow service {existing.id}"
-            ),
-        )
+    _assert_adopt_external_service_available(db, external_service_id, integration)
 
     billing_user = ensure_user_for_billing_identity(
         db,
@@ -1972,25 +2066,10 @@ async def adopt_vm_service(
         external_email=body.external_email,
     )
 
-    base_name = (body.name or "").strip() or f"vm-{vmid}"
-    name = base_name
-    suffix = 1
-    while ServiceDAO.get_by_name(db, name):
-        suffix += 1
-        name = f"{base_name}-{suffix}"
-
-    product_snapshot: dict = {}
-    effective_os_code = body.os_code
-    if body.product_code:
-        try:
-            product_snapshot, effective_os_code = build_product_snapshot(
-                db,
-                body.product_code,
-                body.os_code,
-                ServiceType.VM,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    name = _unique_adopt_service_name(db, body, vmid)
+    product_snapshot, effective_os_code = _billing_vm_product_snapshot(
+        db, body.product_code, body.os_code
+    )
 
     service = ServiceDAO.create_vm(
         db,
@@ -2094,6 +2173,44 @@ async def get_service(
     return BillingServiceDetailResponse(**payload)
 
 
+def _link_service_assign_owner(
+    service: Service,
+    data: BillingLinkService,
+    integration: BillingIntegration,
+    db: Session,
+) -> None:
+    """Claim an unowned service or reassign billing ownership when external_user_id is set."""
+    currently_billed = (
+        service.owner_user is not None and service.owner_user.billing_integration_id is not None
+    )
+    need_user = not currently_billed or (
+        data.external_user_id is not None and str(data.external_user_id).strip() != ""
+    )
+    if not need_user:
+        return
+
+    ext_id = (
+        str(data.external_user_id).strip()
+        if data.external_user_id is not None and str(data.external_user_id).strip() != ""
+        else None
+    )
+    if not ext_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="external_user_id is required when claiming an unowned service",
+        )
+    billing_user = ensure_user_for_billing_identity(
+        db,
+        billing_integration_id=integration.id,
+        external_user_id=ext_id,
+        external_username=data.external_username,
+        external_email=data.external_email,
+    )
+    service.owner_user_id = billing_user.id
+    if service.provisioning_source == ProvisioningSource.INTERNAL:
+        service.provisioning_source = ProvisioningSource.BILLING
+
+
 @router.post("/services/{service_id}/link", response_model=BillingServiceResponse, responses=COMMON_ERROR_RESPONSES)
 async def link_service(
     service_id: int,
@@ -2131,32 +2248,7 @@ async def link_service(
             ),
         )
 
-    # Claiming an unowned/internal service requires a billing owner.
-    currently_billed = service.owner_user is not None and service.owner_user.billing_integration_id is not None
-    need_user = not currently_billed or (
-        data.external_user_id is not None and str(data.external_user_id).strip() != ""
-    )
-    if need_user:
-        ext_id = (
-            str(data.external_user_id).strip()
-            if data.external_user_id is not None and str(data.external_user_id).strip() != ""
-            else None
-        )
-        if not ext_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="external_user_id is required when claiming an unowned service",
-            )
-        billing_user = ensure_user_for_billing_identity(
-            db,
-            billing_integration_id=integration.id,
-            external_user_id=ext_id,
-            external_username=data.external_username,
-            external_email=data.external_email,
-        )
-        service.owner_user_id = billing_user.id
-        if service.provisioning_source == ProvisioningSource.INTERNAL:
-            service.provisioning_source = ProvisioningSource.BILLING
+    _link_service_assign_owner(service, data, integration, db)
 
     service.external_service_id = external_service_id
     ServiceDAO.update(db, service)
@@ -3958,38 +4050,42 @@ async def billing_run_strategy_action(
         ) from exc
 
 
-def _billing_product_catalog_item(db: Session, product) -> dict:
-    """Serialize a catalog product for WHMCS module settings / checkout sync."""
-    family = product.family
+def _billing_product_effective_specs(db: Session, product, family) -> dict:
     effective_specs = ProductVMConfigDAO.resolve_effective_config(db, product)
-    if not effective_specs:
-        effective_specs = {
-            **((family.defaults if family else None) or {}),
-            **(product.overrides or {}),
-        }
+    if effective_specs:
+        return effective_specs
+    return {
+        **((family.defaults if family else None) or {}),
+        **(product.overrides or {}),
+    }
 
-    os_profiles = []
-    family_type = family.service_type if family is not None else None
-    if family is not None and family_type != "bare_metal":
-        for mapping in family.os_mappings or []:
-            profile = mapping.os_profile
-            if profile is None or not profile.enabled:
-                continue
-            os_profiles.append(
-                {
-                    "id": profile.id,
-                    "code": profile.code,
-                    "name": profile.name,
-                    "os_family": profile.os_family,
-                    "strategy_name": profile.strategy_name,
-                }
-            )
-    os_profiles.sort(key=lambda row: (row.get("name") or row.get("code") or "").lower())
 
+def _billing_product_os_profiles(family) -> list[dict]:
+    if family is None or family.service_type == "bare_metal":
+        return []
+    profiles = []
+    for mapping in family.os_mappings or []:
+        profile = mapping.os_profile
+        if profile is None or not profile.enabled:
+            continue
+        profiles.append(
+            {
+                "id": profile.id,
+                "code": profile.code,
+                "name": profile.name,
+                "os_family": profile.os_family,
+                "strategy_name": profile.strategy_name,
+            }
+        )
+    profiles.sort(key=lambda row: (row.get("name") or row.get("code") or "").lower())
+    return profiles
+
+
+def _billing_product_vm_templates(product) -> list[dict]:
     from app.services.ssh_public_keys import os_type_accepts_ssh_key
     from app.services.vm_install_type_strategy import resolve_vm_template_strategy
 
-    vm_templates = []
+    templates = []
     for mapping in product.vm_template_mappings or []:
         tmpl = mapping.vm_template
         if tmpl is None or not tmpl.enabled:
@@ -3999,7 +4095,7 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
             strategy_name = resolve_vm_template_strategy(tmpl.os_type).get("strategy_name")
         except ValueError:
             strategy_name = None
-        vm_templates.append(
+        templates.append(
             {
                 "id": tmpl.id,
                 "code": tmpl.code,
@@ -4010,15 +4106,28 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
                 "accepts_ssh_key": os_type_accepts_ssh_key(tmpl.os_type),
             }
         )
-    vm_templates.sort(key=lambda row: (row.get("name") or "").lower())
+    templates.sort(key=lambda row: (row.get("name") or "").lower())
+    return templates
 
-    checkout_os_mode = "none"
+
+def _billing_product_checkout_os_mode(family_type, vm_templates: list, os_profiles: list) -> str:
     if vm_templates:
-        checkout_os_mode = "vm_template"
-    elif family_type == "bare_metal":
-        checkout_os_mode = "server_group"
-    elif os_profiles:
-        checkout_os_mode = "os_profile"
+        return "vm_template"
+    if family_type == "bare_metal":
+        return "server_group"
+    if os_profiles:
+        return "os_profile"
+    return "none"
+
+
+def _billing_product_catalog_item(db: Session, product) -> dict:
+    """Serialize a catalog product for WHMCS module settings / checkout sync."""
+    family = product.family
+    family_type = family.service_type if family is not None else None
+    effective_specs = _billing_product_effective_specs(db, product, family)
+    os_profiles = _billing_product_os_profiles(family)
+    vm_templates = _billing_product_vm_templates(product)
+    checkout_os_mode = _billing_product_checkout_os_mode(family_type, vm_templates, os_profiles)
 
     return {
         "id": product.id,

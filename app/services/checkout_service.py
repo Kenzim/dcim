@@ -355,6 +355,80 @@ class CheckoutService:
         return invoice
 
     @staticmethod
+    def _redeem_coupon_for_order(
+        db: Session,
+        *,
+        account: BillingAccount,
+        order: Order,
+        quote: QuoteResult,
+        product: FrontendProduct,
+    ) -> None:
+        if not quote.coupon_code:
+            return
+        coupon = CheckoutService._find_coupon(db, quote.coupon_code, frontend_product=product)
+        if coupon is None:
+            return
+        coupon.used_count = int(coupon.used_count or 0) + 1
+        db.add(
+            CouponRedemption(
+                coupon_id=coupon.id,
+                billing_account_id=account.id,
+                order_id=order.id,
+            )
+        )
+
+    @staticmethod
+    def _enqueue_checkout_emails(
+        db: Session,
+        *,
+        account: BillingAccount,
+        order: Order,
+        quote: QuoteResult,
+        user_id: int,
+        invoice: Optional[Invoice],
+    ) -> None:
+        from app.models.user import User
+
+        user = db.get(User, user_id)
+        recipient = user.email if user else None
+        if not recipient:
+            return
+        EmailMessageService.enqueue(
+            db,
+            to_address=recipient,
+            event=EmailEvent.ORDER_CONFIRMATION,
+            idempotency_key=f"order:{order.id}:confirmation",
+            data={
+                "order_number": order.order_number,
+                "order_id": order.id,
+                "amount_cents": quote.total_cents,
+                "currency": quote.currency,
+            },
+            billing_account_id=account.id,
+            user_id=user_id,
+            related_type="order",
+            related_id=str(order.id),
+        )
+        if invoice is None:
+            return
+        EmailMessageService.enqueue(
+            db,
+            to_address=recipient,
+            event=EmailEvent.INVOICE_CREATED,
+            idempotency_key=f"invoice:{invoice.id}:created",
+            data={
+                "invoice_number": invoice.invoice_number,
+                "invoice_id": invoice.id,
+                "amount_cents": quote.total_cents,
+                "currency": quote.currency,
+            },
+            billing_account_id=account.id,
+            user_id=user_id,
+            related_type="invoice",
+            related_id=str(invoice.id),
+        )
+
+    @staticmethod
     def place_order(
         db: Session,
         *,
@@ -436,19 +510,9 @@ class CheckoutService:
             note="Order placed",
         )
 
-        if quote.coupon_code:
-            coupon = CheckoutService._find_coupon(
-                db, quote.coupon_code, frontend_product=product
-            )
-            if coupon is not None:
-                coupon.used_count = int(coupon.used_count or 0) + 1
-                db.add(
-                    CouponRedemption(
-                        coupon_id=coupon.id,
-                        billing_account_id=account.id,
-                        order_id=order.id,
-                    )
-                )
+        CheckoutService._redeem_coupon_for_order(
+            db, account=account, order=order, quote=quote, product=product
+        )
 
         invoice = None
         if quote.total_cents > 0:
@@ -462,44 +526,14 @@ class CheckoutService:
 
         db.flush()
         try:
-            from app.models.user import User
-
-            user = db.get(User, user_id)
-            recipient = user.email if user else None
-            if recipient:
-                EmailMessageService.enqueue(
-                    db,
-                    to_address=recipient,
-                    event=EmailEvent.ORDER_CONFIRMATION,
-                    idempotency_key=f"order:{order.id}:confirmation",
-                    data={
-                        "order_number": order.order_number,
-                        "order_id": order.id,
-                        "amount_cents": quote.total_cents,
-                        "currency": quote.currency,
-                    },
-                    billing_account_id=account.id,
-                    user_id=user_id,
-                    related_type="order",
-                    related_id=str(order.id),
-                )
-                if invoice is not None:
-                    EmailMessageService.enqueue(
-                        db,
-                        to_address=recipient,
-                        event=EmailEvent.INVOICE_CREATED,
-                        idempotency_key=f"invoice:{invoice.id}:created",
-                        data={
-                            "invoice_number": invoice.invoice_number,
-                            "invoice_id": invoice.id,
-                            "amount_cents": quote.total_cents,
-                            "currency": quote.currency,
-                        },
-                        billing_account_id=account.id,
-                        user_id=user_id,
-                        related_type="invoice",
-                        related_id=str(invoice.id),
-                    )
+            CheckoutService._enqueue_checkout_emails(
+                db,
+                account=account,
+                order=order,
+                quote=quote,
+                user_id=user_id,
+                invoice=invoice,
+            )
         except Exception:
             logger.warning("Failed to enqueue checkout emails for order %s", order.id, exc_info=True)
         return order

@@ -269,7 +269,7 @@ async def test_provision_bare_metal_via_server_group(db_session, monkeypatch):
         service_config={"server_group_id": group.id, "template_parameters": {"admin_password": "x"}},
     )
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
-    service = await billing._provision_bare_metal_service(data, owner.id, actor, db_session)
+    service = billing._provision_bare_metal_service(data, owner.id, actor, db_session)
     assert service.status == ServiceStatus.PENDING
     assert service.bare_metal.server_id == server.id
 
@@ -301,7 +301,7 @@ async def test_provision_bare_metal_group_queue_failure(db_session, monkeypatch)
     )
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(data, owner.id, actor, db_session)
+        billing._provision_bare_metal_service(data, owner.id, actor, db_session)
     assert exc.value.status_code == 500
 
 
@@ -352,7 +352,7 @@ async def test_provision_vm_with_ip_plan_and_auto_provision(db_session, monkeypa
         auto_provision=True,
     )
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
-    service = await billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
+    service = billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
     assert service.id in scheduled
     assert (service.config or {}).get("vm_ip_address") == "198.51.100.90"
     assert (service.config or {}).get("vm_ip_allocation_id") == alloc.id
@@ -370,7 +370,7 @@ async def test_provision_vm_conflicts_when_no_free_ip(db_session, monkeypatch):
     body = BillingVmServiceCreate(name="no-ip-vm", external_user_id="e", auto_provision=False)
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
+        billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
     assert exc.value.status_code == 409
 
 
@@ -387,7 +387,7 @@ async def test_provision_vm_duplicate_name(db_session):
     body = BillingVmServiceCreate(name="dup-vm", external_user_id="e")
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
+        billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
     assert exc.value.status_code == 400
 
 
@@ -722,7 +722,7 @@ async def test_provision_bm_validation_branches(db_session, monkeypatch):
         location_id=99999,
     )
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(missing_loc, owner.id, actor, db_session)
+        billing._provision_bare_metal_service(missing_loc, owner.id, actor, db_session)
     assert exc.value.status_code == 404
 
     ServerDAO.create(
@@ -740,7 +740,7 @@ async def test_provision_bm_validation_branches(db_session, monkeypatch):
         location_id=loc.id,
     )
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(dup, owner.id, actor, db_session)
+        billing._provision_bare_metal_service(dup, owner.id, actor, db_session)
     assert exc.value.status_code == 400
 
     bad_boot = BillingBareMetalServiceCreate(
@@ -751,7 +751,7 @@ async def test_provision_bm_validation_branches(db_session, monkeypatch):
         os_boot_mode="legacy",
     )
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(bad_boot, owner.id, actor, db_session)
+        billing._provision_bare_metal_service(bad_boot, owner.id, actor, db_session)
     assert exc.value.status_code == 400
 
     bad_disk = BillingBareMetalServiceCreate(
@@ -762,7 +762,7 @@ async def test_provision_bm_validation_branches(db_session, monkeypatch):
         disks=[{"type": "nvme", "capacity_gb": 100, "is_os_disk": True}],
     )
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(bad_disk, owner.id, actor, db_session)
+        billing._provision_bare_metal_service(bad_disk, owner.id, actor, db_session)
     assert exc.value.status_code == 400
 
 

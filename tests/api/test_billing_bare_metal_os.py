@@ -283,7 +283,7 @@ async def test_provision_bare_metal_rejects_unpermitted_template(db_session, mon
     )
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
     with pytest.raises(HTTPException) as exc:
-        await billing._provision_bare_metal_service(data, owner.id, actor, db_session)
+        billing._provision_bare_metal_service(data, owner.id, actor, db_session)
     assert exc.value.status_code == 400
     assert "not permitted" in str(exc.value.detail)
 
@@ -323,6 +323,6 @@ async def test_provision_bare_metal_queues_permitted_template(db_session, monkey
         },
     )
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
-    service = await billing._provision_bare_metal_service(data, owner.id, actor, db_session)
+    service = billing._provision_bare_metal_service(data, owner.id, actor, db_session)
     assert service.status == ServiceStatus.PENDING
     assert queued["template_id"] == "ubuntu-cloud-image"

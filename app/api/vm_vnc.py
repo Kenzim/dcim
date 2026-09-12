@@ -1,4 +1,7 @@
 from typing import Annotated
+
+_MSG_SERVICE_NOT_FOUND = "Service not found"
+_MSG_CONSOLE_SESSION_INVALID = "Console session is invalid or has expired"
 """Public VM guest VNC console endpoints: launch-ticket redeem + WS bridge.
 
 Mounted at ``/api/vnc``.
@@ -83,7 +86,7 @@ async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: DbDep):
 
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
 
     try:
         plugin, cid, _node, vmid = await resolve_proxmox_plugin_for_service(db, service)
@@ -137,11 +140,11 @@ async def refresh_vnc_session(body: VmVncRedeemRequest, db: DbDep):
     """
     session = get_ws_session(body.token)
     if session is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Console session is invalid or has expired")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_CONSOLE_SESSION_INVALID)
 
     service = ServiceDAO.get_by_id(db, session["service_id"])
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
 
     # Rebuild from the service's current placement (not the frozen session
     # node) so a migrate mid-console can recover on refresh.
@@ -176,7 +179,7 @@ async def refresh_vnc_session(body: VmVncRedeemRequest, db: DbDep):
         node_name=plugin.node if plugin.node != node else None,
     )
     if updated is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Console session is invalid or has expired")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_CONSOLE_SESSION_INVALID)
 
     # Remaining TTL is whatever Redis still has; surface the configured
     # session TTL as a conservative upper bound for the client UI.
@@ -205,11 +208,11 @@ async def console_power_action(body: VmVncPowerRequest, db: DbDep):
     """
     session = get_ws_session(body.token)
     if session is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Console session is invalid or has expired")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_MSG_CONSOLE_SESSION_INVALID)
 
     service = ServiceDAO.get_by_id(db, session["service_id"])
     if not service:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
 
     # Rebuild from the service's current placement (not the frozen session
     # node) so a migrate mid-console can still be power-controlled.

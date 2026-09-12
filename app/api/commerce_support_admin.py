@@ -16,6 +16,8 @@ from app.dao.ticket_dao import TicketDAO, TicketDepartmentDAO, TicketMessageDAO
 from app.models.support_ticket import Ticket, TicketStatus
 from app.services.ticket_service import TicketService
 
+_MSG_TICKET_NOT_FOUND = "Ticket not found"
+
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 
@@ -117,7 +119,7 @@ def list_tickets(
 def get_ticket(ticket_id: int, db: DbDep):
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+        raise HTTPException(status_code=404, detail=_MSG_TICKET_NOT_FOUND)
     ticket.messages = TicketMessageDAO.list_for_ticket(db, ticket_id)
     return _serialize_ticket(ticket, include_messages=True)
 
@@ -131,7 +133,7 @@ def reply_to_ticket(
 ):
     ticket = TicketDAO.get(db, ticket_id)
     if ticket is None:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+        raise HTTPException(status_code=404, detail=_MSG_TICKET_NOT_FOUND)
     try:
         message = TicketService.add_message(
             db,
@@ -155,7 +157,7 @@ def patch_ticket(
 ):
     ticket = TicketDAO.get(db, ticket_id)
     if ticket is None:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+        raise HTTPException(status_code=404, detail=_MSG_TICKET_NOT_FOUND)
     data = body.model_dump(exclude_unset=True)
     if "status" in data:
         ticket.status = data["status"]

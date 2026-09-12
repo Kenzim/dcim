@@ -100,6 +100,22 @@ class _PacketBuf:
         return pkt
 
 
+def _megarac_session_from_login(login: httpx.Response) -> tuple[str, str, dict]:
+    try:
+        body = login.json()
+    except ValueError as exc:
+        raise IpmiKvmUnavailable("BMC login returned a non-JSON response") from exc
+    if login.status_code >= 400 or body.get("ok") != 0:
+        raise IpmiKvmUnavailable("BMC login failed")
+    cookie = login.cookies.get("QSESSIONID") or ""
+    if not cookie and "QSESSIONID=" in (login.headers.get("set-cookie") or ""):
+        cookie = login.headers["set-cookie"].split("QSESSIONID=", 1)[1].split(";", 1)[0]
+    csrf = body.get("CSRFToken") or ""
+    if not cookie or not csrf:
+        raise IpmiKvmUnavailable("BMC login did not return a session")
+    return cookie, str(csrf), body if isinstance(body, dict) else {}
+
+
 async def megarac_web_session(origin: str, username: str, password: str) -> tuple[str, str, dict]:
     """Log into AMI MegaRAC. Return ``(QSESSIONID, CSRFToken, login_json)``."""
     async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=20.0) as client:
@@ -115,19 +131,37 @@ async def megarac_web_session(origin: str, username: str, password: str) -> tupl
             )
         except httpx.RequestError as exc:
             raise IpmiKvmUnavailable(f"Could not reach BMC web UI: {exc}") from exc
+        return _megarac_session_from_login(login)
+
+
+async def _megarac_kvm_token(
+    origin: str, cookie: str, csrf: str
+) -> tuple[str, str, str]:
+    """Return ``(token, client_ip, server_ip_hint)`` from ``/api/kvm/token``."""
+    async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=20.0) as client:
         try:
-            body = login.json()
-        except ValueError as exc:
-            raise IpmiKvmUnavailable("BMC login returned a non-JSON response") from exc
-        if login.status_code >= 400 or body.get("ok") != 0:
-            raise IpmiKvmUnavailable("BMC login failed")
-        cookie = login.cookies.get("QSESSIONID") or ""
-        if not cookie and "QSESSIONID=" in (login.headers.get("set-cookie") or ""):
-            cookie = login.headers["set-cookie"].split("QSESSIONID=", 1)[1].split(";", 1)[0]
-        csrf = body.get("CSRFToken") or ""
-        if not cookie or not csrf:
-            raise IpmiKvmUnavailable("BMC login did not return a session")
-        return cookie, str(csrf), body if isinstance(body, dict) else {}
+            tok = await client.get(
+                f"{origin}/api/kvm/token",
+                headers={
+                    "Origin": origin,
+                    "X-CSRFTOKEN": csrf,
+                    "Cookie": f"QSESSIONID={cookie}",
+                },
+            )
+            token_body = tok.json()
+        except (httpx.RequestError, ValueError) as exc:
+            raise IpmiKvmUnavailable(f"BMC KVM token failed: {exc}") from exc
+    token = token_body.get("token")
+    if not token:
+        raise IpmiKvmUnavailable("BMC did not return a KVM token")
+    client_ip = str(token_body.get("client_ip") or "")
+    server_ip = str(
+        token_body.get("server_ip")
+        or token_body.get("server_addr")
+        or token_body.get("server_name")
+        or ""
+    )
+    return str(token), client_ip, server_ip
 
 
 class AsrockRackKvmProfile(IpmiKvmProfile):
@@ -142,39 +176,21 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
         username, password = self.credentials(server)
         origin, hostname = self.origin_and_host(server)
         cookie, csrf, body = await megarac_web_session(origin, username, password)
-        async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=20.0) as client:
-            try:
-                tok = await client.get(
-                    f"{origin}/api/kvm/token",
-                    headers={
-                        "Origin": origin,
-                        "X-CSRFTOKEN": csrf,
-                        "Cookie": f"QSESSIONID={cookie}",
-                    },
-                )
-                token_body = tok.json()
-            except (httpx.RequestError, ValueError) as exc:
-                raise IpmiKvmUnavailable(f"BMC KVM token failed: {exc}") from exc
-            token = token_body.get("token")
-            if not token:
-                raise IpmiKvmUnavailable("BMC did not return a KVM token")
-            client_ip = token_body.get("client_ip") or body.get("remote_addr") or ""
-            server_ip = (
-                token_body.get("server_ip")
-                or body.get("server_addr")
-                or body.get("server_name")
-                or hostname
-            )
+        token, client_ip, server_ip_hint = await _megarac_kvm_token(origin, cookie, csrf)
+        client_ip = client_ip or str(body.get("remote_addr") or "")
+        server_ip = server_ip_hint or str(
+            body.get("server_addr") or body.get("server_name") or hostname
+        )
         return BmcKvmAuth(
             https_base=origin,
             origin=origin,
             hostname=hostname,
             cookie=cookie,
             csrf=csrf,
-            kvm_token=str(token),
-            client_ip=str(client_ip),
+            kvm_token=token,
+            client_ip=client_ip,
             username=username,
-            server_ip=str(server_ip or ""),
+            server_ip=server_ip,
         )
 
     def hello_frame(self, auth: BmcKvmAuth) -> bytes:
@@ -211,38 +227,42 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
             open_timeout=20,
         )
 
+    async def _recv_ivtp_packet(self, buf: _PacketBuf, upstream: Any) -> bytes:
+        while True:
+            pkt = buf.take()
+            if pkt is not None:
+                return pkt
+            data = await asyncio.wait_for(upstream.recv(), 15)
+            if isinstance(data, str):
+                data = data.encode("latin1")
+            buf.feed(data)
+
+    async def _await_ivtp_validated(
+        self, buf: _PacketBuf, upstream: Any, auth: BmcKvmAuth, hello: bytes | None
+    ) -> bytes:
+        first = await self._recv_ivtp_packet(buf, upstream)
+        typ = struct.unpack_from("<H", first)[0]
+        if typ == _IVTP_MAX_SESSION:
+            raise IpmiKvmUnavailable("BMC reports KVM max sessions")
+        if typ != _IVTP_ALLOWED:
+            raise IpmiKvmUnavailable(f"Unexpected KVM hello (0x{typ:x})")
+        await upstream.send(hello if hello is not None else self.hello_frame(auth))
+        while True:
+            pkt = await self._recv_ivtp_packet(buf, upstream)
+            typ = struct.unpack_from("<H", pkt)[0]
+            if typ != _IVTP_VALIDATED:
+                continue
+            if len(pkt) < 9 or pkt[8] != 1:
+                code = pkt[8] if len(pkt) > 8 else -1
+                raise IpmiKvmUnavailable(f"KVM token rejected ({code})")
+            return pkt + buf.buf
+
     async def handshake(
         self, upstream: Any, auth: BmcKvmAuth, hello: bytes | None = None
     ) -> bytes:
         buf = _PacketBuf()
-
-        async def next_pkt() -> bytes:
-            while True:
-                pkt = buf.take()
-                if pkt is not None:
-                    return pkt
-                data = await asyncio.wait_for(upstream.recv(), 15)
-                if isinstance(data, str):
-                    data = data.encode("latin1")
-                buf.feed(data)
-
         try:
-            first = await next_pkt()
-            typ = struct.unpack_from("<H", first)[0]
-            if typ == _IVTP_MAX_SESSION:
-                raise IpmiKvmUnavailable("BMC reports KVM max sessions")
-            if typ != _IVTP_ALLOWED:
-                raise IpmiKvmUnavailable(f"Unexpected KVM hello (0x{typ:x})")
-            await upstream.send(hello if hello is not None else self.hello_frame(auth))
-            while True:
-                pkt = await next_pkt()
-                typ = struct.unpack_from("<H", pkt)[0]
-                if typ != _IVTP_VALIDATED:
-                    continue
-                if len(pkt) < 9 or pkt[8] != 1:
-                    code = pkt[8] if len(pkt) > 8 else -1
-                    raise IpmiKvmUnavailable(f"KVM token rejected ({code})")
-                return pkt + buf.buf
+            return await self._await_ivtp_validated(buf, upstream, auth, hello)
         except TimeoutError as exc:
             raise IpmiKvmUnavailable("BMC KVM handshake timed out") from exc
 

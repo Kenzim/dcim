@@ -13,6 +13,8 @@ from app.models.proxy_subnet_group import ProxySubnetGroup
 
 
 from typing import Annotated
+
+_MSG_PROXY_SUBNET_GROUP_NOT_FOUND = "Proxy subnet group not found"
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 
@@ -136,7 +138,7 @@ async def get_proxy_subnet_group(
 ):
     row = ProxySubnetGroupDAO.get_by_id(db, group_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy subnet group not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PROXY_SUBNET_GROUP_NOT_FOUND)
     return _to_response(row)
 
 
@@ -149,7 +151,7 @@ async def update_proxy_subnet_group(
 ):
     row = ProxySubnetGroupDAO.get_by_id(db, group_id)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy subnet group not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PROXY_SUBNET_GROUP_NOT_FOUND)
     try:
         row = ProxySubnetGroupDAO.update(
             db,
@@ -171,4 +173,4 @@ async def delete_proxy_subnet_group(
     db: DbDep,
 ):
     if not ProxySubnetGroupDAO.delete(db, group_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy subnet group not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_PROXY_SUBNET_GROUP_NOT_FOUND)
