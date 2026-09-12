@@ -342,7 +342,9 @@ def generate_dhcpd_conf(
         
         # Determine boot mode and iPXE filename (use pxe_boot_mode for DHCP, fallback to boot_mode for backward compatibility)
         pxe_boot_mode = server.pxe_boot_mode.value if hasattr(server, 'pxe_boot_mode') and server.pxe_boot_mode else (server.boot_mode.value if hasattr(server, 'boot_mode') else "uefi")
-        ipxe_filename = "pxe/snponly.efi" if pxe_boot_mode == "uefi" else "pxe/undionly.kpxe"
+        # BIOS PXE ROMs (Intel Boot Agent on add-in NICs) hang or ignore subdirectory
+        # TFTP paths. Serve undionly from the TFTP chroot root; UEFI SNP is fine under pxe/.
+        ipxe_filename = "pxe/snponly.efi" if pxe_boot_mode == "uefi" else "undionly.kpxe"
         
         # Automatically determine next-server IP based on which subnet the PXE IP belongs to
         api_ip = None
