@@ -350,3 +350,146 @@ async def test_update_server_success(
     assert result["enabled"] is False
     assert row.name == "renamed"
     assert row.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_create_and_update_location(
+    db_session, mcp_sessionlocal, mcp_auth_ctx_write
+):
+    from app.mcp.tools.inventory import create_location, update_location
+
+    created = await create_location("new-dc", description="site")
+    assert created["name"] == "new-dc"
+    updated = await update_location(created["id"], name="renamed-dc")
+    assert updated["name"] == "renamed-dc"
+
+
+@pytest.mark.asyncio
+async def test_update_location_not_found(db_session, mcp_sessionlocal, mcp_auth_ctx_write):
+    from app.mcp.tools.inventory import update_location
+
+    with pytest.raises(ToolError, match="Location not found"):
+        await update_location(99999, name="x")
+
+
+@pytest.mark.asyncio
+async def test_rack_crud_flow(db_session, mcp_sessionlocal, mcp_auth_ctx_write):
+    from app.models.rack import Rack
+    from app.mcp.tools.inventory import create_rack, list_racks, update_rack
+
+    loc = Location(name="rack-loc", description="")
+    db_session.add(loc)
+    db_session.commit()
+    db_session.refresh(loc)
+
+    created = await create_rack(loc.id, name="R-A", units=48, description="row 1")
+    assert created["name"] == "R-A"
+    assert created["units"] == 48
+
+    listed = await list_racks(location_id=loc.id)
+    assert any(r["name"] == "R-A" for r in listed["racks"])
+
+    updated = await update_rack(created["id"], name="R-B", units=42)
+    assert updated["name"] == "R-B"
+    assert updated["units"] == 42
+
+
+@pytest.mark.asyncio
+async def test_create_rack_duplicate_name(
+    db_session, mcp_sessionlocal, mcp_auth_ctx_write
+):
+    from app.models.rack import Rack
+    from app.mcp.tools.inventory import create_rack
+
+    loc = Location(name="dup-rack-loc", description="")
+    db_session.add(loc)
+    db_session.commit()
+    db_session.refresh(loc)
+    db_session.add(Rack(location_id=loc.id, name="R1", units=42))
+    db_session.commit()
+
+    with pytest.raises(ToolError, match="already exists"):
+        await create_rack(loc.id, name="R1")
+
+
+@pytest.mark.asyncio
+async def test_delete_server_requires_confirm_and_success(
+    db_session, mcp_sessionlocal, mcp_auth_ctx_destructive
+):
+    from app.mcp.tools.inventory import delete_server
+
+    loc = Location(name="del-loc", description="")
+    db_session.add(loc)
+    db_session.commit()
+    db_session.refresh(loc)
+    server = Server(
+        name="del-me",
+        server_ip="10.9.9.9",
+        location_id=loc.id,
+        plugin_name="ipmi",
+        plugin_config={},
+    )
+    db_session.add(server)
+    db_session.commit()
+    db_session.refresh(server)
+
+    with pytest.raises(ToolError, match="confirm"):
+        await delete_server(server.id, confirm=False)
+
+    result = await delete_server(server.id, confirm=True)
+    assert result["deleted"] is True
+    assert result["server_id"] == server.id
+
+
+@pytest.mark.asyncio
+async def test_list_server_groups_and_activity(
+    db_session, mcp_sessionlocal, mcp_auth_ctx_read
+):
+    from app.mcp.tools.inventory import get_server_activity, list_server_groups
+
+    groups = await list_server_groups()
+    assert "groups" in groups
+
+    loc = Location(name="act-loc", description="")
+    db_session.add(loc)
+    db_session.commit()
+    db_session.refresh(loc)
+    server = Server(
+        name="act-srv",
+        server_ip="10.8.8.8",
+        location_id=loc.id,
+        plugin_name="ipmi",
+        plugin_config={},
+    )
+    db_session.add(server)
+    db_session.commit()
+    db_session.refresh(server)
+
+    activity = await get_server_activity(server.id, limit=5)
+    assert activity["activity"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_server_bandwidth_empty_ports(
+    db_session, mcp_sessionlocal, mcp_auth_ctx_read
+):
+    from app.mcp.tools.inventory import get_server_bandwidth
+
+    loc = Location(name="bw-loc", description="")
+    db_session.add(loc)
+    db_session.commit()
+    db_session.refresh(loc)
+    server = Server(
+        name="bw-srv",
+        server_ip="10.7.7.7",
+        location_id=loc.id,
+        plugin_name="ipmi",
+        plugin_config={},
+    )
+    db_session.add(server)
+    db_session.commit()
+    db_session.refresh(server)
+
+    result = await get_server_bandwidth(server.id)
+    assert result["server_id"] == server.id
+    assert result["ports"] == []
