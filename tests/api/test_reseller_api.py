@@ -578,7 +578,7 @@ def test_failed_provisioning_refunds_credit_and_voids_invoice(
     product = _product(db_session)
     _allow(db_session, reseller, product)
 
-    async def fail_provision(**_kwargs):
+    def fail_provision(**_kwargs):
         raise RuntimeError("provisioning exploded")
 
     monkeypatch.setattr(

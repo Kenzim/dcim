@@ -36,7 +36,7 @@ class ProvisioningActor:
         return f"{self.kind}:{self.name}"
 
 
-async def provision_bare_metal_service(
+def provision_bare_metal_service(
     *,
     db: Session,
     service_data: BillingBareMetalServiceCreate,
@@ -55,7 +55,7 @@ async def provision_bare_metal_service(
     )
 
 
-async def provision_vm_service(
+def provision_vm_service(
     *,
     db: Session,
     body: BillingVmServiceCreate,

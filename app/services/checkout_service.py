@@ -579,6 +579,43 @@ class CheckoutService:
         return service
 
     @staticmethod
+    def _fulfill_order_item(db: Session, locked: Order, item: Any) -> Optional[str]:
+        item.fulfill_status = OrderItemFulfillStatus.FULFILLING
+        db.flush()
+        try:
+            service = CheckoutService._provision_order_item(
+                db, order=locked, item=item
+            )
+            item.service_id = service.id
+            product_bundle = CheckoutService._load_product_bundle(
+                db, item.frontend_product_id
+            )
+            plan = next(
+                (p for p in product_bundle.price_plans if p.id == item.price_plan_id),
+                None,
+            )
+            account = db.get(BillingAccount, locked.billing_account_id)
+            if plan is not None and account is not None:
+                catalog_product = (
+                    product_bundle.product.id if product_bundle.product else None
+                )
+                CommerceRecurringService.ensure_for_fulfilled_item(
+                    db,
+                    service=service,
+                    item=item,
+                    billing_account=account,
+                    plan=plan,
+                    product_id=catalog_product,
+                )
+            item.fulfill_status = OrderItemFulfillStatus.FULFILLED
+            return None
+        except Exception as exc:
+            item.fulfill_status = OrderItemFulfillStatus.FAILED
+            item.error_message = str(exc)[:2000]
+            logger.exception("Provision failed for order item %s", item.id)
+            return f"Item {item.id}: {exc}"
+
+    @staticmethod
     def mark_paid_and_fulfill(db: Session, order: Order) -> Order:
         locked = OrderDAO.get_for_update(db, order.id)
         if locked is None:
@@ -602,39 +639,9 @@ class CheckoutService:
 
         errors: list[str] = []
         for item in OrderItemDAO.list_for_order(db, locked.id):
-            item.fulfill_status = OrderItemFulfillStatus.FULFILLING
-            db.flush()
-            try:
-                service = CheckoutService._provision_order_item(
-                    db, order=locked, item=item
-                )
-                item.service_id = service.id
-                product_bundle = CheckoutService._load_product_bundle(
-                    db, item.frontend_product_id
-                )
-                plan = next(
-                    (p for p in product_bundle.price_plans if p.id == item.price_plan_id),
-                    None,
-                )
-                account = db.get(BillingAccount, locked.billing_account_id)
-                if plan is not None and account is not None:
-                    catalog_product = (
-                        product_bundle.product.id if product_bundle.product else None
-                    )
-                    CommerceRecurringService.ensure_for_fulfilled_item(
-                        db,
-                        service=service,
-                        item=item,
-                        billing_account=account,
-                        plan=plan,
-                        product_id=catalog_product,
-                    )
-                item.fulfill_status = OrderItemFulfillStatus.FULFILLED
-            except Exception as exc:
-                item.fulfill_status = OrderItemFulfillStatus.FAILED
-                item.error_message = str(exc)[:2000]
-                errors.append(f"Item {item.id}: {exc}")
-                logger.exception("Provision failed for order item %s", item.id)
+            failure = CheckoutService._fulfill_order_item(db, locked, item)
+            if failure:
+                errors.append(failure)
             db.flush()
 
         if errors:

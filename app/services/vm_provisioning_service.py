@@ -46,6 +46,25 @@ def _normalize_vm_specs(specs: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _resolve_effective_specs(
+    db: Session,
+    product,
+    context: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    family = product.family
+    effective_specs = ProductVMConfigDAO.resolve_effective_config(db, product)
+    if not effective_specs:
+        effective_specs = dict(family.defaults or {})
+        effective_specs.update(product.overrides or {})
+    effective_specs = _normalize_vm_specs(effective_specs)
+    vm_ip_allocation_id = (context or {}).get("vm_ip_allocation_id")
+    if vm_ip_allocation_id:
+        allocation = VMIPAllocationDAO.get_by_id(db, int(vm_ip_allocation_id))
+        if allocation and allocation.bridge_name:
+            effective_specs["network_bridge"] = allocation.bridge_name
+    return effective_specs
+
+
 class VMProvisioningService:
     """Orchestrates VM provisioning flow with strategy framework stubs."""
 
@@ -80,17 +99,7 @@ class VMProvisioningService:
             raise ValueError(f"Unknown product_code '{product_code}'")
 
         family = product.family
-        effective_specs = ProductVMConfigDAO.resolve_effective_config(db, product)
-        if not effective_specs:
-            effective_specs = dict(family.defaults or {})
-            effective_specs.update(product.overrides or {})
-        effective_specs = _normalize_vm_specs(effective_specs)
-        # Per-IP bridge overrides default network bridge from VM config.
-        vm_ip_allocation_id = (context or {}).get("vm_ip_allocation_id")
-        if vm_ip_allocation_id:
-            allocation = VMIPAllocationDAO.get_by_id(db, int(vm_ip_allocation_id))
-            if allocation and allocation.bridge_name:
-                effective_specs["network_bridge"] = allocation.bridge_name
+        effective_specs = _resolve_effective_specs(db, product, context)
 
         strategy = get_vm_os_strategy_registry().resolve(strategy_name)
         request = VMProvisionRequest(

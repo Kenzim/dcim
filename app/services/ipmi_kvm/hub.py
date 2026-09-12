@@ -601,9 +601,9 @@ class KvmHub:
         await self._kick_viewers(viewers, reason)
 
 
-async def wait_local_hub(server_id: int, timeout: float = 30.0) -> Optional[KvmHub]:
+async def wait_local_hub(server_id: int, max_wait: float = 30.0) -> Optional[KvmHub]:
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(max_wait):
             while True:
                 hub = get_local_hub(server_id)
                 if hub is not None and hub.is_alive:
@@ -842,7 +842,7 @@ async def _handle_splice(connection) -> None:
         if lock is None or lock["instance_id"] != INSTANCE_ID:
             await connection.close()
             return
-        hub = await wait_local_hub(server_id, timeout=30.0)
+        hub = await wait_local_hub(server_id, max_wait=30.0)
     if hub is None or not hub.attach_secret:
         await connection.close()
         return
@@ -927,7 +927,7 @@ async def _own_or_wait_hub(server_id: int, profile: IpmiKvmProfile) -> Optional[
         if lock is None:
             return await _try_start_owner(server_id, profile)
         if lock["instance_id"] == INSTANCE_ID:
-            return await wait_local_hub(server_id, timeout=30.0)
+            return await wait_local_hub(server_id, max_wait=30.0)
         return None
 
 
@@ -940,7 +940,7 @@ async def _try_local_splice_viewer(
 ) -> bool:
     if lock["instance_id"] != INSTANCE_ID:
         return False
-    hub = await wait_local_hub(server_id, timeout=15.0)
+    hub = await wait_local_hub(server_id, max_wait=15.0)
     if hub is None:
         return False
     await _add_local_viewer(websocket, hub)
@@ -1055,11 +1055,11 @@ def _asset_wait_should_stop(start: float, server_id: int, saw_lock: bool) -> boo
     return not saw_lock and (time.monotonic() - start) > _ASSET_NO_LOCK_GRACE_SECONDS
 
 
-async def _wait_for_server_asset_activity(server_id: int, timeout: float) -> None:
+async def _wait_for_server_asset_activity(server_id: int, max_wait: float) -> None:
     event = _server_asset_event(server_id)
     event.clear()
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(max_wait):
             await event.wait()
     except TimeoutError:
         pass

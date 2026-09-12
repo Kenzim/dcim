@@ -101,6 +101,23 @@ async def _maybe_reset_network_after_reassign(
         return None, str(exc) or "Guest network reset failed"
 
 
+def _load_reassign_targets(
+    db: Session, service: Service, allocation_id: int
+) -> tuple[Optional[object], object, Optional[int]]:
+    if service.service_type != ServiceType.VM or not service.vm:
+        raise VmIpReassignError("IP reassignment is only supported for VM services", 400)
+    cluster_id, _, _ = vm_placement(service)
+    old_alloc = None
+    if service.vm.vm_ip_allocation_id:
+        old_alloc = VMIPAllocationDAO.get_by_id(db, service.vm.vm_ip_allocation_id)
+    if old_alloc and old_alloc.id == allocation_id:
+        raise VmIpReassignError("Selected IP is already assigned to this service", 409)
+    new_preview = VMIPAllocationDAO.get_by_id(db, allocation_id)
+    if not new_preview:
+        raise VmIpReassignError(f"VM IP allocation {allocation_id} not found", 404)
+    return old_alloc, new_preview, cluster_id
+
+
 async def reassign_vm_ip(
     db: Session,
     service: Service,
@@ -116,20 +133,7 @@ async def reassign_vm_ip(
     For ``cloudinit_clone``, reset_network regenerates cloud-init and **reboots**
     the guest so the new address is applied.
     """
-    if service.service_type != ServiceType.VM or not service.vm:
-        raise VmIpReassignError("IP reassignment is only supported for VM services", 400)
-
-    cluster_id, _, _ = vm_placement(service)
-    old_alloc = None
-    if service.vm.vm_ip_allocation_id:
-        old_alloc = VMIPAllocationDAO.get_by_id(db, service.vm.vm_ip_allocation_id)
-
-    if old_alloc and old_alloc.id == allocation_id:
-        raise VmIpReassignError("Selected IP is already assigned to this service", 409)
-
-    new_preview = VMIPAllocationDAO.get_by_id(db, allocation_id)
-    if not new_preview:
-        raise VmIpReassignError(f"VM IP allocation {allocation_id} not found", 404)
+    old_alloc, new_preview, cluster_id = _load_reassign_targets(db, service, allocation_id)
 
     log_server_activity_attempt(
         db,

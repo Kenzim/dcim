@@ -88,7 +88,7 @@ async def _try_apply_authorized_keys(db: Session, service: Service, keys: List[s
 
 
 def _validate_template_for_product(
-    db: Session, service: Service, vm_template_id: int, tmpl
+    db: Session, service: Service, vm_template_id: int, _tmpl
 ) -> None:
     if not service.product_code:
         return
