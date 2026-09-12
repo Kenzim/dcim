@@ -8,6 +8,7 @@ from app.services.virtual_media.base import VirtualMediaUnavailable
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _ISOS_DIR = _REPO_ROOT / "isos"
+_INVALID_ISO_FILENAME_MSG = "Invalid ISO filename"
 
 
 def isos_dir() -> Path:
@@ -17,11 +18,11 @@ def isos_dir() -> Path:
 def validate_iso_filename(filename: str) -> str:
     name = (filename or "").strip()
     if not name or name != Path(name).name:
-        raise VirtualMediaUnavailable("Invalid ISO filename")
+        raise VirtualMediaUnavailable(_INVALID_ISO_FILENAME_MSG)
     if ".." in name or "/" in name or "\\" in name or "\x00" in name:
-        raise VirtualMediaUnavailable("Invalid ISO filename")
+        raise VirtualMediaUnavailable(_INVALID_ISO_FILENAME_MSG)
     if not name.lower().endswith(".iso"):
-        raise VirtualMediaUnavailable("Invalid ISO filename")
+        raise VirtualMediaUnavailable(_INVALID_ISO_FILENAME_MSG)
     return name
 
 
@@ -31,7 +32,7 @@ def iso_path(filename: str) -> Path:
     try:
         path.relative_to(isos_dir().resolve())
     except ValueError as exc:
-        raise VirtualMediaUnavailable("Invalid ISO filename") from exc
+        raise VirtualMediaUnavailable(_INVALID_ISO_FILENAME_MSG) from exc
     return path
 
 

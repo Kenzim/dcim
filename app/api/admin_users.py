@@ -14,7 +14,7 @@ Two routers:
   accounts. Staff accounts have no client portal / owned-services concept.
 """
 import logging
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr
@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.permission_set_dao import PermissionSetDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
@@ -33,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 clients_router = APIRouter(prefix="/admin/clients", tags=["admin-clients"])
 admins_router = APIRouter(prefix="/admin/admins", tags=["admin-admins"])
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +158,9 @@ async def list_clients(
     q: Optional[str] = None,
     has_password: Optional[bool] = None,
     integration_id: Optional[int] = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     """List all client (non-admin) identities.
 
@@ -202,8 +207,8 @@ async def list_clients(
 @clients_router.get("/external/{external_user_id}", response_model=ClientProfile)
 async def get_client_external_profile(
     external_user_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Resolve a billing identity to its client profile.
 
@@ -219,8 +224,8 @@ async def get_client_external_profile(
 @clients_router.get("/{user_id}", response_model=ClientProfile)
 async def get_client_profile(
     user_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     user = UserDAO.get_by_id(db, user_id)
     if not user or user.is_admin:
@@ -260,8 +265,8 @@ async def get_client_profile(
 @clients_router.post("", response_model=ClientProfile, status_code=status.HTTP_201_CREATED)
 async def create_client(
     body: ClientCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Create a new client account not tied to any billing identity.
 
@@ -284,8 +289,8 @@ async def create_client(
 async def set_client_password(
     user_id: int,
     body: ClientSetPasswordBody,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     user = UserDAO.get_by_id(db, user_id)
     if not user or user.is_admin:
@@ -302,8 +307,8 @@ async def set_client_password(
 async def set_client_permission_set(
     user_id: int,
     body: ClientPermissionSetAssignBody,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Assign (or clear, with ``permission_set_id: null``) this client's default
     permission preset. Sits above the product default and below per-service
@@ -323,8 +328,8 @@ async def set_client_permission_set(
 async def impersonate_client(
     user_id: int,
     request: Request,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Mint a short-lived Bearer session for ``user_id`` so an admin can open
     the client portal as that user in a new tab, without touching the admin's
@@ -375,8 +380,8 @@ async def impersonate_client(
 
 @admins_router.get("", response_model=List[AdminListItem])
 async def list_admins(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     admins = db.query(User).filter(User.is_admin == True).order_by(User.username).all()  # noqa: E712
     return [AdminListItem(id=a.id, username=a.username, email=a.email) for a in admins]
@@ -385,8 +390,8 @@ async def list_admins(
 @admins_router.post("", response_model=AdminListItem, status_code=status.HTTP_201_CREATED)
 async def create_admin(
     body: AdminCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if UserDAO.get_by_username(db, body.username):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already in use")
@@ -403,8 +408,8 @@ async def create_admin(
 async def update_admin(
     admin_id: int,
     body: AdminUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     admin = UserDAO.get_by_id(db, admin_id)
     if not admin or not admin.is_admin:
@@ -425,8 +430,8 @@ async def update_admin(
 @admins_router.delete("/{admin_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_admin(
     admin_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     admin = UserDAO.get_by_id(db, admin_id)
     if not admin or not admin.is_admin:

@@ -10,7 +10,7 @@ server-side login.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Annotated, List, Optional
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, status
@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.server_dao import ServerDAO
 from app.models.server import Server
 from app.models.server_activity import ServerActivityEventType
@@ -61,6 +62,9 @@ from app.services.server_activity_logger import (
 logger = logging.getLogger(__name__)
 
 profiles_router = APIRouter(prefix="/ipmi-kvm", tags=["ipmi-kvm"])
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/kvm", tags=["ipmi-kvm"])
 
 _ASSET_COOKIE = "kvm_asset"
@@ -121,17 +125,17 @@ def _set_asset_cookie(
 
 
 @profiles_router.get("/profiles", response_model=List[IpmiKvmProfileInfo])
-async def admin_list_kvm_profiles(auth: dict = Depends(require_admin)):
+async def admin_list_kvm_profiles(auth: AdminDep):
     """Admin dropdown values for ``servers.ipmi_kvm_profile``."""
     del auth
     return [IpmiKvmProfileInfo(**item) for item in list_profiles()]
 
 
-@router.post("/redeem", response_model=IpmiKvmSessionResponse)
+@router.post("/redeem", response_model=IpmiKvmSessionResponse, responses={**COMMON_ERROR_RESPONSES})
 async def redeem_kvm_launch_ticket(
     body: IpmiKvmRedeemRequest,
     request: Request,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     """Consume a launch ticket and mint a viewer-only WS session."""
     server_id = redeem_launch_ticket(body.token)
@@ -165,7 +169,7 @@ def _normalize_asset_path(raw: str) -> str:
     return cleaned
 
 
-@router.get("/assets/{asset_path:path}")
+@router.get("/assets/{asset_path:path}", responses={**COMMON_ERROR_RESPONSES})
 async def proxy_kvm_asset(
     asset_path: str,
     request: Request,
@@ -260,10 +264,11 @@ async def _run_chassis_power(plugin, action: str) -> bool:
     raise ValueError(f"Unsupported chassis power action: {action}")
 
 
-@router.get("/power", response_model=IpmiKvmPowerStateResponse)
+@router.get("/power", response_model=IpmiKvmPowerStateResponse, responses={**COMMON_ERROR_RESPONSES})
 async def kvm_power_state(
     token: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     """Chassis power status + IPMI action catalog for the KVM popup (ws_token auth)."""
     session = _kvm_session_or_400(token)
@@ -288,11 +293,12 @@ async def kvm_power_state(
     )
 
 
-@router.post("/power", response_model=IpmiKvmPowerStateResponse)
+@router.post("/power", response_model=IpmiKvmPowerStateResponse, responses={**COMMON_ERROR_RESPONSES})
 async def kvm_power_action(
     body: IpmiKvmPowerRequest,
     token: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     """Run an IPMI chassis power verb on the server bound to this KVM session."""
     session = _kvm_session_or_400(token or body.token)

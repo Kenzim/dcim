@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ServiceStatus, ServiceType
 from app.services.service_resource import service_linked_server, vm_placement
@@ -63,6 +64,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+DbDep = Annotated[Session, Depends(get_db)]
 
 router = APIRouter(prefix="/services", tags=["services-client"])
 
@@ -203,12 +206,12 @@ def _client_primary_ip(db: Session, service) -> Optional[str]:
     return None
 
 
-@router.get("/me", response_model=List[ClientServiceResponse])
+@router.get("/me", response_model=List[ClientServiceResponse], responses={**COMMON_ERROR_RESPONSES})
 async def list_my_services(
     service_type: Optional[str] = None,
     *,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -239,11 +242,11 @@ async def list_my_services(
     return responses
 
 
-@router.get("/{service_id}")
+@router.get("/{service_id}", responses={**COMMON_ERROR_RESPONSES})
 async def client_get_service(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Owner-scoped service detail for the portal.
 
@@ -358,12 +361,12 @@ async def client_get_service(
     return detail
 
 
-@router.post("/{service_id}/power")
+@router.post("/{service_id}/power", responses={**COMMON_ERROR_RESPONSES})
 async def client_power_service(
     service_id: int,
     body: PowerAction,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Power on/off/reboot/reset for a service the caller owns.
 
@@ -479,11 +482,11 @@ async def client_power_service(
     return {"status": "success", "action": action, "message": f"Server power {action} command executed"}
 
 
-@router.post("/{service_id}/ipmi-ticket")
+@router.post("/{service_id}/ipmi-ticket", responses={**COMMON_ERROR_RESPONSES})
 async def create_ipmi_ticket(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Mint a one-time IPMI proxy launch ticket for a service the caller owns."""
     user_id = auth.get("user_id")
@@ -506,11 +509,11 @@ async def create_ipmi_ticket(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
 
 
-@router.get("/{service_id}/kvm-popup")
+@router.get("/{service_id}/kvm-popup", responses={**COMMON_ERROR_RESPONSES})
 async def kvm_popup_redirect_handler(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Mint a one-time HTML5 KVM launch ticket and redirect to ``/kvm?t=...``."""
     user_id = auth.get("user_id")
@@ -531,11 +534,11 @@ async def kvm_popup_redirect_handler(
     return kvm_popup_redirect(service_linked_server(db, service))
 
 
-@router.get("/{service_id}/sol-popup")
+@router.get("/{service_id}/sol-popup", responses={**COMMON_ERROR_RESPONSES})
 async def sol_popup_redirect_handler(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Mint a one-time SOL launch ticket and redirect to ``/sol?t=...``."""
     user_id = auth.get("user_id")
@@ -556,11 +559,11 @@ async def sol_popup_redirect_handler(
     return sol_popup_redirect(service_linked_server(db, service))
 
 
-@router.get("/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse)
+@router.get("/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def client_get_virtual_media(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -572,12 +575,12 @@ async def client_get_virtual_media(
     return await perform_status(service_linked_server(db, service))
 
 
-@router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse)
+@router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def client_insert_virtual_media(
     service_id: int,
     body: VirtualMediaInsertRequest,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -596,11 +599,11 @@ async def client_insert_virtual_media(
     )
 
 
-@router.post("/{service_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse)
+@router.post("/{service_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
 async def client_eject_virtual_media(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -617,12 +620,12 @@ async def client_eject_virtual_media(
     )
 
 
-@router.post("/{service_id}/sol/send", response_model=SolSendResponse)
+@router.post("/{service_id}/sol/send", response_model=SolSendResponse, responses={**COMMON_ERROR_RESPONSES})
 async def client_sol_send(
     service_id: int,
     body: SolSendRequest,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Write bytes into the linked server's SOL hub for a service the caller owns."""
     user_id = auth.get("user_id")
@@ -651,11 +654,11 @@ def _client_owned_proxy_service(db: Session, service_id: int, user_id, permissio
     return service
 
 
-@router.get("/{service_id}/proxy/credentials")
+@router.get("/{service_id}/proxy/credentials", responses={**COMMON_ERROR_RESPONSES})
 async def client_get_proxy_credentials(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """List assigned proxy IP(s) + credentials + ready-to-use URLs for a service the caller owns."""
     user_id = auth.get("user_id")
@@ -666,11 +669,11 @@ async def client_get_proxy_credentials(
     return {"assignments": [assignment_payload(a) for a in assignments]}
 
 
-@router.post("/{service_id}/proxy/rotate")
+@router.post("/{service_id}/proxy/rotate", responses={**COMMON_ERROR_RESPONSES})
 async def client_rotate_proxy_credentials(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Rotate credentials (new username+password, same IP(s)) for a service the caller owns."""
     user_id = auth.get("user_id")
@@ -713,11 +716,11 @@ async def _client_owned_vm_plugin(db: Session, service_id: int, user_id):
     return service, plugin, cid, node, vmid
 
 
-@router.get("/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse)
+@router.get("/{service_id}/vm/console-types", response_model=VmConsoleTypesResponse, responses={**COMMON_ERROR_RESPONSES})
 async def get_vnc_console_types(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Report which console types (noVNC/serial) this VM actually supports,
     for a VM service the caller owns. Fetched by the client portal UI before
@@ -736,13 +739,13 @@ async def get_vnc_console_types(
     return VmConsoleTypesResponse(**available)
 
 
-@router.post("/{service_id}/vm/vnc-session", response_model=VmVncSessionResponse)
+@router.post("/{service_id}/vm/vnc-session", response_model=VmVncSessionResponse, responses={**COMMON_ERROR_RESPONSES})
 async def create_vnc_session(
     service_id: int,
     console_type: Optional[str] = None,
     *,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Mint a VNC/serial console session for a VM service the caller owns.
 
@@ -790,11 +793,11 @@ class ClientStrategyActionBody(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
-@router.get("/{service_id}/actions")
+@router.get("/{service_id}/actions", responses={**COMMON_ERROR_RESPONSES})
 async def client_list_strategy_actions(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     from app.services.strategy_actions import list_actions
 
@@ -807,13 +810,13 @@ async def client_list_strategy_actions(
     return {"actions": list_actions(db, service, "client")}
 
 
-@router.post("/{service_id}/actions/{action_name}")
+@router.post("/{service_id}/actions/{action_name}", responses={**COMMON_ERROR_RESPONSES})
 async def client_run_strategy_action(
     service_id: int,
     action_name: str,
     body: ClientStrategyActionBody,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     from app.services.strategy_actions import StrategyActionError, run_action
 
@@ -844,11 +847,11 @@ def _client_owned_vm_service(db: Session, service_id: int, user_id, permission: 
     return service
 
 
-@router.get("/{service_id}/vm/backups")
+@router.get("/{service_id}/vm/backups", responses={**COMMON_ERROR_RESPONSES})
 async def client_list_vm_backups(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -861,12 +864,12 @@ async def client_list_vm_backups(
     return {"backups": items, "jobs": jobs}
 
 
-@router.post("/{service_id}/vm/backups")
+@router.post("/{service_id}/vm/backups", responses={**COMMON_ERROR_RESPONSES})
 async def client_create_vm_backup(
     service_id: int,
     body: BackupCreateBody,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -880,12 +883,12 @@ async def client_create_vm_backup(
         raise map_backup_error(exc) from exc
 
 
-@router.post("/{service_id}/vm/backups/delete")
+@router.post("/{service_id}/vm/backups/delete", responses={**COMMON_ERROR_RESPONSES})
 async def client_delete_vm_backup(
     service_id: int,
     body: BackupMutateBody,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -898,12 +901,12 @@ async def client_delete_vm_backup(
     return {"status": "ok"}
 
 
-@router.post("/{service_id}/vm/backups/restore")
+@router.post("/{service_id}/vm/backups/restore", responses={**COMMON_ERROR_RESPONSES})
 async def client_restore_vm_backup(
     service_id: int,
     body: BackupMutateBody,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     user_id = auth.get("user_id")
     if not user_id:
@@ -928,11 +931,11 @@ async def client_restore_vm_backup(
     return result
 
 
-@router.get("/{service_id}/vm/ssh-keys")
+@router.get("/{service_id}/vm/ssh-keys", responses={**COMMON_ERROR_RESPONSES})
 async def client_get_vm_ssh_keys(
     service_id: int,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Return stored keys + reinstall template choices for the service owner."""
     from app.services.ssh_public_keys import ssh_key_fields_for_service
@@ -954,12 +957,12 @@ async def client_get_vm_ssh_keys(
     }
 
 
-@router.put("/{service_id}/vm/ssh-keys")
+@router.put("/{service_id}/vm/ssh-keys", responses={**COMMON_ERROR_RESPONSES})
 async def client_put_vm_ssh_keys(
     service_id: int,
     body: VmSshKeysBody,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     from app.services.vm_ssh_keys_service import VmSshKeysError, save_and_apply_ssh_public_keys
 
@@ -973,13 +976,13 @@ async def client_put_vm_ssh_keys(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.post("/{service_id}/vm/reinstall")
+@router.post("/{service_id}/vm/reinstall", responses={**COMMON_ERROR_RESPONSES})
 async def client_reinstall_vm(
     service_id: int,
     body: Optional[VmReinstallBody] = None,
     *,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Destroy guest (if any) and reprovision at the same reserved VMID."""
     from app.services.vm_reinstall_service import VmReinstallError, reinstall_vm_guest
@@ -1001,13 +1004,13 @@ async def client_reinstall_vm(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.get("/{service_id}/vm/vnc-popup")
+@router.get("/{service_id}/vm/vnc-popup", responses={**COMMON_ERROR_RESPONSES})
 async def vnc_popup_redirect(
     service_id: int,
     type: Optional[str] = None,
     *,
     auth: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_db)],
+    db: DbDep,
 ):
     """Mint a one-time console launch ticket and redirect to ``/vnc?t=...``.
 

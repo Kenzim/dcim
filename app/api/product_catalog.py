@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -7,12 +7,16 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.product_catalog_dao import ProductFamilyDAO, ProductDAO, OSProfileDAO, ProductFamilyOSProfileDAO, VMTemplateDAO
 from app.dao.vm_config_dao import FamilyVMConfigDAO, ProductVMConfigDAO
 from app.dao.permission_set_dao import PermissionSetDAO
 from app.models.service import Service, ServiceStatus
 from app.services.vm_install_type_strategy import INSTALL_TYPE_STRATEGIES, list_os_type_schemas
 
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter(prefix="/product-catalog", tags=["product-catalog"])
 # VM template os_type values are the provisioning strategy keys (model + strategy merged).
@@ -145,10 +149,10 @@ class OSProfileUpdate(BaseModel):
     enabled: Optional[bool] = None
 
 
-@router.get("/families")
+@router.get("/families", responses={**COMMON_ERROR_RESPONSES})
 async def list_families(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     families = ProductFamilyDAO.get_all(db)
     result = []
@@ -205,11 +209,11 @@ def _validate_proxy_defaults(defaults: dict, db: Session | None = None) -> None:
             )
 
 
-@router.post("/families", status_code=status.HTTP_201_CREATED)
+@router.post("/families", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_family(
     data: ProductFamilyCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if data.service_type not in ALLOWED_FAMILY_SERVICE_TYPES:
         raise HTTPException(
@@ -242,12 +246,12 @@ async def create_family(
     return {"id": family.id}
 
 
-@router.put("/families/{family_id}")
+@router.put("/families/{family_id}", responses={**COMMON_ERROR_RESPONSES})
 async def update_family(
     family_id: int,
     data: ProductFamilyUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProductFamilyDAO.get_by_id(db, family_id)
     if not row:
@@ -274,12 +278,12 @@ async def update_family(
     return {"status": "ok"}
 
 
-@router.post("/families/{family_id}/bulk-defaults")
+@router.post("/families/{family_id}/bulk-defaults", responses={**COMMON_ERROR_RESPONSES})
 async def bulk_update_family_defaults(
     family_id: int,
     defaults: dict[str, Any],
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProductFamilyDAO.get_by_id(db, family_id)
     if not row:
@@ -290,11 +294,11 @@ async def bulk_update_family_defaults(
     return {"status": "ok", "defaults": merged}
 
 
-@router.post("/products", status_code=status.HTTP_201_CREATED)
+@router.post("/products", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_product(
     data: ProductCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if data.family_id is not None:
         family = ProductFamilyDAO.get_by_id(db, data.family_id)
@@ -323,10 +327,10 @@ async def create_product(
     return {"id": row.id}
 
 
-@router.get("/products")
+@router.get("/products", responses={**COMMON_ERROR_RESPONSES})
 async def list_products(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     rows = ProductDAO.get_all(db)
     result = []
@@ -354,12 +358,12 @@ async def list_products(
     return result
 
 
-@router.put("/products/{product_id}")
+@router.put("/products/{product_id}", responses={**COMMON_ERROR_RESPONSES})
 async def update_product(
     product_id: int,
     data: ProductUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProductDAO.get_by_id(db, product_id)
     if not row:
@@ -399,11 +403,11 @@ async def update_product(
     return {"status": "ok"}
 
 
-@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
 async def delete_product(
     product_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProductDAO.get_by_id(db, product_id)
     if not row:
@@ -427,9 +431,9 @@ async def delete_product(
     return None
 
 
-@router.get("/vm-templates/os-types")
+@router.get("/vm-templates/os-types", responses={**COMMON_ERROR_RESPONSES})
 async def list_vm_template_os_types(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     detailed: bool = False,
 ):
     """Return allowed os_type strings, or detailed strategy schemas when ``detailed=true``."""
@@ -438,10 +442,10 @@ async def list_vm_template_os_types(
     return ALLOWED_VM_OS_TYPES
 
 
-@router.get("/vm-templates")
+@router.get("/vm-templates", responses={**COMMON_ERROR_RESPONSES})
 async def list_vm_templates(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     from app.services.ssh_public_keys import os_type_accepts_ssh_key
 
@@ -464,11 +468,11 @@ async def list_vm_templates(
     ]
 
 
-@router.post("/vm-templates", status_code=status.HTTP_201_CREATED)
+@router.post("/vm-templates", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_vm_template(
     data: VMTemplateCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if data.os_type not in ALLOWED_VM_OS_TYPES:
         raise HTTPException(
@@ -492,12 +496,12 @@ async def create_vm_template(
     return {"id": row.id, "code": row.code}
 
 
-@router.put("/vm-templates/{template_id}")
+@router.put("/vm-templates/{template_id}", responses={**COMMON_ERROR_RESPONSES})
 async def update_vm_template(
     template_id: int,
     data: VMTemplateUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = VMTemplateDAO.get_by_id(db, template_id)
     if not row:
@@ -524,22 +528,22 @@ async def update_vm_template(
     return {"status": "ok"}
 
 
-@router.delete("/vm-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/vm-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
 async def delete_vm_template(
     template_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if not VMTemplateDAO.delete(db, template_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VM template not found")
     return None
 
 
-@router.get("/families/{family_id}/vm-config")
+@router.get("/families/{family_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
 async def get_family_vm_config(
     family_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     family = ProductFamilyDAO.get_by_id(db, family_id)
     if not family:
@@ -551,12 +555,12 @@ async def get_family_vm_config(
     }
 
 
-@router.put("/families/{family_id}/vm-config")
+@router.put("/families/{family_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
 async def upsert_family_vm_config(
     family_id: int,
     data: FamilyVMConfigUpsert,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     family = ProductFamilyDAO.get_by_id(db, family_id)
     if not family:
@@ -568,11 +572,11 @@ async def upsert_family_vm_config(
     return {"status": "ok"}
 
 
-@router.get("/products/{product_id}/vm-config")
+@router.get("/products/{product_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
 async def get_product_vm_config(
     product_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     product = ProductDAO.get_by_id(db, product_id)
     if not product:
@@ -586,12 +590,12 @@ async def get_product_vm_config(
     }
 
 
-@router.put("/products/{product_id}/vm-config")
+@router.put("/products/{product_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
 async def upsert_product_vm_config(
     product_id: int,
     data: ProductVMConfigUpsert,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     product = ProductDAO.get_by_id(db, product_id)
     if not product:
@@ -608,10 +612,10 @@ async def upsert_product_vm_config(
     return {"status": "ok"}
 
 
-@router.get("/os-profiles")
+@router.get("/os-profiles", responses={**COMMON_ERROR_RESPONSES})
 async def list_os_profiles(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     rows = OSProfileDAO.get_all(db)
     return [
@@ -627,11 +631,11 @@ async def list_os_profiles(
     ]
 
 
-@router.post("/os-profiles", status_code=status.HTTP_201_CREATED)
+@router.post("/os-profiles", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_os_profile(
     data: OSProfileCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if OSProfileDAO.get_by_code(db, data.code):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OS profile code already exists")
@@ -639,12 +643,12 @@ async def create_os_profile(
     return {"id": row.id}
 
 
-@router.put("/os-profiles/{os_profile_id}")
+@router.put("/os-profiles/{os_profile_id}", responses={**COMMON_ERROR_RESPONSES})
 async def update_os_profile(
     os_profile_id: int,
     data: OSProfileUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = OSProfileDAO.get_by_id(db, os_profile_id)
     if not row:
@@ -653,12 +657,12 @@ async def update_os_profile(
     return {"status": "ok"}
 
 
-@router.post("/families/{family_id}/os-profiles/{os_profile_id}")
+@router.post("/families/{family_id}/os-profiles/{os_profile_id}", responses={**COMMON_ERROR_RESPONSES})
 async def attach_os_profile(
     family_id: int,
     os_profile_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     family = ProductFamilyDAO.get_by_id(db, family_id)
     os_profile = OSProfileDAO.get_by_id(db, os_profile_id)
@@ -668,12 +672,12 @@ async def attach_os_profile(
     return {"status": "ok"}
 
 
-@router.delete("/families/{family_id}/os-profiles/{os_profile_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/families/{family_id}/os-profiles/{os_profile_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
 async def detach_os_profile(
     family_id: int,
     os_profile_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     ProductFamilyOSProfileDAO.detach(db, family_id, os_profile_id)
     return None

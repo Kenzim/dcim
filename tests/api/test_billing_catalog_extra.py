@@ -13,15 +13,12 @@ def _headers(key):
     return {"Authorization": f"Bearer {key}"}
 
 
-def test_billing_catalog_files_and_temp_os(client, db_session, monkeypatch, tmp_path):
+def test_billing_catalog_files_and_temp_os(client, db_session, monkeypatch):
     key = _key(db_session)
-    iso = tmp_path / "rescue.ISO"
-    iso.write_bytes(b"x" * 1024)
-    (tmp_path / "ignore.txt").write_text("x")
-    monkeypatch.setattr("app.api.billing.os.path.exists", lambda path: True)
-    monkeypatch.setattr("app.api.billing.os.listdir", lambda path: ["rescue.ISO", "ignore.txt"])
-    monkeypatch.setattr("app.api.billing.os.path.isfile", lambda path: path.endswith("ISO"))
-    monkeypatch.setattr("app.api.billing.os.path.getsize", lambda path: 1024 * 1024 * 3)
+    monkeypatch.setattr(
+        "app.api.billing.catalog_for_billing",
+        lambda: [{"id": "rescue.ISO", "name": "rescue.ISO", "size_mb": 3.0}],
+    )
 
     isos = client.get("/api/billing/isos", headers=_headers(key))
     assert isos.status_code == 200
@@ -39,7 +36,7 @@ def test_billing_catalog_files_and_temp_os(client, db_session, monkeypatch, tmp_
 
 def test_billing_catalog_templates_and_empty_iso_dir(client, db_session, monkeypatch):
     key = _key(db_session)
-    monkeypatch.setattr("app.api.billing.os.path.exists", lambda path: False)
+    monkeypatch.setattr("app.api.billing.catalog_for_billing", lambda: [])
     assert client.get("/api/billing/isos", headers=_headers(key)).json() == []
 
     param = SimpleNamespace(type="password", label="Password", required=True, default=None, options=None, help="secret")

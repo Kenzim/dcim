@@ -246,7 +246,7 @@ def mark_running_client_backups(
     jobs: List[dict[str, Any]],
     *,
     client_storage: str,
-) -> List[dict[str, Any]]:
+) -> None:
     """Flag client backups that PBS already lists while vzdump is still running.
 
     In-progress snapshots often appear in storage content before the task ends;
@@ -254,7 +254,7 @@ def mark_running_client_backups(
     """
     backup_jobs = [j for j in jobs if isinstance(j, dict) and j.get("kind") == "backup"]
     if not backup_jobs or not backups:
-        return backups
+        return
 
     starts: List[int] = []
     for j in backup_jobs:
@@ -305,7 +305,6 @@ def mark_running_client_backups(
                 row["running"] = True
                 row["deletable"] = False
                 break
-    return backups
 
 
 async def list_service_backups_and_jobs(

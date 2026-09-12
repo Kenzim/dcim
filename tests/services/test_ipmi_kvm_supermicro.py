@@ -121,12 +121,21 @@ class _FakeResponse:
         self.cookies = cookies or {}
 
 
+class _FakeCookieJar:
+    def __init__(self):
+        self.values = {}
+
+    def set(self, name, value, *args, **kwargs):
+        del args, kwargs
+        self.values[name] = value
+
+
 class _FakeAsyncClient:
     last = None
 
     def __init__(self, *args, **kwargs):
         del args, kwargs
-        self.cookies = {}
+        self.cookies = _FakeCookieJar()
         self.posts = []
         self.gets = []
         type(self).last = self
@@ -158,17 +167,20 @@ class _FakeAsyncClient:
 
 @pytest.mark.asyncio
 async def test_login_uses_btoa_form_and_last_sid(monkeypatch):
+    aten_calls: list[tuple[str, str, str]] = []
+
+    async def _fake_aten(origin: str, username: str, password: str) -> str:
+        aten_calls.append((origin, username, password))
+        return "wxPdutVoNclTRDL"
+
+    monkeypatch.setattr("app.services.ipmi_kvm.supermicro.aten_web_session", _fake_aten)
     monkeypatch.setattr("app.services.ipmi_kvm.supermicro.httpx.AsyncClient", _FakeAsyncClient)
     auth = await SuperMicroKvmProfile().login(_Srv())
     assert auth.cookie == "wxPdutVoNclTRDL"
     assert auth.kvm_token == "BR2/XCGBLuhswneDsPUXjA=="
     assert auth.csrf == "csrf-token-value"
     assert auth.hostname == "10.16.251.158"
-    posted = _FakeAsyncClient.last.posts[0]
-    assert posted["url"].endswith("/cgi/login.cgi")
-    assert posted["data"]["name"] == b64_basic("ADMIN")
-    assert posted["data"]["pwd"] == b64_basic("secret")
-    assert posted["data"]["check"] == "00"
+    assert aten_calls == [("https://10.16.251.158", "ADMIN", "secret")]
     assert "man_ikvm_html5_bootstrap" in _FakeAsyncClient.last.gets[0]["url"]
 
 

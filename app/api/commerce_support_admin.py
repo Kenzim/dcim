@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
@@ -11,9 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.ticket_dao import TicketDAO, TicketDepartmentDAO, TicketMessageDAO
 from app.models.support_ticket import Ticket, TicketStatus
 from app.services.ticket_service import TicketService
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter(
     prefix="/admin/support",
@@ -80,13 +84,13 @@ def _serialize_ticket(ticket: Ticket, *, include_messages: bool = False) -> dict
     return payload
 
 
-@router.get("/departments")
-def list_departments(db: Session = Depends(get_db)):
+@router.get("/departments", responses={**COMMON_ERROR_RESPONSES})
+def list_departments(db: DbDep):
     rows = TicketDepartmentDAO.list_admin(db)
     return [_serialize_department(row) for row in rows]
 
 
-@router.get("/tickets")
+@router.get("/tickets", responses={**COMMON_ERROR_RESPONSES})
 def list_tickets(
     status_filter: Optional[TicketStatus] = Query(default=None, alias="status"),
     department_id: Optional[int] = None,
@@ -94,7 +98,8 @@ def list_tickets(
     q: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     rows = TicketService.list_admin_queue(
         db,
@@ -108,8 +113,8 @@ def list_tickets(
     return [_serialize_ticket(row) for row in rows]
 
 
-@router.get("/tickets/{ticket_id}")
-def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
+@router.get("/tickets/{ticket_id}", responses={**COMMON_ERROR_RESPONSES})
+def get_ticket(ticket_id: int, db: DbDep):
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail="Ticket not found")
@@ -117,12 +122,12 @@ def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
     return _serialize_ticket(ticket, include_messages=True)
 
 
-@router.post("/tickets/{ticket_id}/reply", status_code=status.HTTP_201_CREATED)
+@router.post("/tickets/{ticket_id}/reply", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 def reply_to_ticket(
     ticket_id: int,
     body: TicketReplyBody,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     ticket = TicketDAO.get(db, ticket_id)
     if ticket is None:
@@ -142,11 +147,11 @@ def reply_to_ticket(
     return _serialize_message(message)
 
 
-@router.patch("/tickets/{ticket_id}")
+@router.patch("/tickets/{ticket_id}", responses={**COMMON_ERROR_RESPONSES})
 def patch_ticket(
     ticket_id: int,
     body: TicketPatchBody,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     ticket = TicketDAO.get(db, ticket_id)
     if ticket is None:

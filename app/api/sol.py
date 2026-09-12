@@ -7,7 +7,7 @@ credentials never reach the browser.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, status
 from fastapi.responses import RedirectResponse
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.server_dao import ServerDAO
 from app.models.server import Server
 from app.models.server_activity import ServerActivityEventType
@@ -41,6 +42,9 @@ from app.services.sol.ticket_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter(prefix="/sol", tags=["sol"])
 
@@ -120,17 +124,17 @@ async def perform_sol_send(
     )
 
 
-@router.get("/profiles", response_model=List[SolProfileInfo])
-async def admin_list_sol_profiles(auth: dict = Depends(require_admin)):
+@router.get("/profiles", response_model=List[SolProfileInfo], responses={**COMMON_ERROR_RESPONSES})
+async def admin_list_sol_profiles(auth: AdminDep):
     """Admin dropdown values for ``servers.sol_profile``."""
     del auth
     return [SolProfileInfo(**item) for item in list_profiles()]
 
 
-@router.post("/redeem", response_model=SolSessionResponse)
+@router.post("/redeem", response_model=SolSessionResponse, responses={**COMMON_ERROR_RESPONSES})
 async def redeem_sol_launch_ticket(
     body: SolRedeemRequest,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     """Consume a launch ticket and mint a viewer-only WS session."""
     server_id = redeem_launch_ticket(body.token)

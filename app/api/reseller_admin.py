@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.auth import require_admin
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.reseller_auth import issue_reseller_api_key
 from app.dao.reseller_dao import ResellerDAO
 from app.models.product_catalog import Product
@@ -74,6 +75,9 @@ from app.services.payments.usdt_crypto import format_token_units
 from app.services.payments.usdt_rpc import EthereumRpcClient, EthereumRpcError
 from app.services.payments.usdt_watcher import UsdtWatcher
 
+
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter(
     prefix="/admin",
@@ -834,17 +838,17 @@ def _admin_usdt_rpc() -> EthereumRpcClient:
     )
 
 
-@router.get("/reseller-groups")
-async def list_reseller_groups(db: Session = Depends(get_db)):
+@router.get("/reseller-groups", responses={**COMMON_ERROR_RESPONSES})
+async def list_reseller_groups(db: DbDep):
     groups = list(
         db.execute(select(ResellerGroup).order_by(ResellerGroup.name)).scalars()
     )
     return [_group_payload(db, group) for group in groups]
 
 
-@router.post("/reseller-groups", status_code=status.HTTP_201_CREATED)
+@router.post("/reseller-groups", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_reseller_group(
-    body: ResellerGroupCreate, db: Session = Depends(get_db)
+    body: ResellerGroupCreate, db: DbDep
 ):
     duplicate = db.execute(
         select(ResellerGroup).where(
@@ -865,16 +869,16 @@ async def create_reseller_group(
     return _group_payload(db, group)
 
 
-@router.get("/reseller-groups/{group_id}")
-async def get_reseller_group(group_id: int, db: Session = Depends(get_db)):
+@router.get("/reseller-groups/{group_id}", responses={**COMMON_ERROR_RESPONSES})
+async def get_reseller_group(group_id: int, db: DbDep):
     return _group_payload(db, _group_or_404(db, group_id))
 
 
-@router.put("/reseller-groups/{group_id}")
+@router.put("/reseller-groups/{group_id}", responses={**COMMON_ERROR_RESPONSES})
 async def update_reseller_group(
     group_id: int,
     body: ResellerGroupUpdate,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     group = _group_or_404(db, group_id)
     changes = body.model_dump(exclude_unset=True)
@@ -902,9 +906,9 @@ async def update_reseller_group(
     return _group_payload(db, group)
 
 
-@router.delete("/reseller-groups/{group_id}", status_code=204)
+@router.delete("/reseller-groups/{group_id}", status_code=204, responses={**COMMON_ERROR_RESPONSES})
 async def delete_reseller_group(
-    group_id: int, db: Session = Depends(get_db)
+    group_id: int, db: DbDep
 ):
     group = _group_or_404(db, group_id)
     if _counts_for_group(db, group.id)["member_count"]:
@@ -922,8 +926,8 @@ async def delete_reseller_group(
 
 # Static reseller collection routes are intentionally declared before
 # /resellers/{reseller_id}, so their names cannot be consumed as an id.
-@router.get("/resellers/prices")
-async def list_base_product_prices(db: Session = Depends(get_db)):
+@router.get("/resellers/prices", responses={**COMMON_ERROR_RESPONSES})
+async def list_base_product_prices(db: DbDep):
     products = list(db.execute(select(Product).order_by(Product.name)).scalars())
     prices = {
         row.product_id: row
@@ -932,11 +936,11 @@ async def list_base_product_prices(db: Session = Depends(get_db)):
     return [_base_price_payload(product, prices.get(product.id)) for product in products]
 
 
-@router.put("/resellers/prices/{product_id}")
+@router.put("/resellers/prices/{product_id}", responses={**COMMON_ERROR_RESPONSES})
 async def upsert_base_product_price(
     product_id: int,
     body: BasePriceUpsert,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     product = _product_or_404(db, product_id)
     price = db.execute(
@@ -953,12 +957,13 @@ async def upsert_base_product_price(
     return _base_price_payload(product, price)
 
 
-@router.get("/resellers/quotas")
+@router.get("/resellers/quotas", responses={**COMMON_ERROR_RESPONSES})
 async def list_stock_quotas(
     reseller_id: Optional[int] = None,
     group_id: Optional[int] = None,
     effective_only: bool = False,
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     if reseller_id is not None and group_id is not None:
         raise HTTPException(
@@ -972,9 +977,9 @@ async def list_stock_quotas(
     )
 
 
-@router.post("/resellers/quotas", status_code=status.HTTP_201_CREATED)
+@router.post("/resellers/quotas", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_stock_quota(
-    body: StockQuotaCreate, db: Session = Depends(get_db)
+    body: StockQuotaCreate, db: DbDep
 ):
     if body.reseller_id is not None:
         _reseller_or_404(db, body.reseller_id)
@@ -1000,11 +1005,11 @@ async def create_stock_quota(
     return _quota_payload(db, quota)
 
 
-@router.put("/resellers/quotas/{quota_id}")
+@router.put("/resellers/quotas/{quota_id}", responses={**COMMON_ERROR_RESPONSES})
 async def update_stock_quota(
     quota_id: int,
     body: StockQuotaUpdate,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     quota = db.get(StockQuota, quota_id)
     if quota is None:
@@ -1030,8 +1035,8 @@ async def update_stock_quota(
     return _quota_payload(db, quota)
 
 
-@router.delete("/resellers/quotas/{quota_id}", status_code=204)
-async def delete_stock_quota(quota_id: int, db: Session = Depends(get_db)):
+@router.delete("/resellers/quotas/{quota_id}", status_code=204, responses={**COMMON_ERROR_RESPONSES})
+async def delete_stock_quota(quota_id: int, db: DbDep):
     quota = db.get(StockQuota, quota_id)
     if quota is None:
         raise HTTPException(status_code=404, detail="Stock quota not found")
@@ -1066,7 +1071,7 @@ def _invoice_detail_options():
     )
 
 
-@router.get("/resellers/invoices")
+@router.get("/resellers/invoices", responses={**COMMON_ERROR_RESPONSES})
 async def list_admin_reseller_invoices(
     reseller_id: Optional[int] = None,
     invoice_status: Optional[InvoiceStatus] = Query(default=None, alias="status"),
@@ -1074,7 +1079,8 @@ async def list_admin_reseller_invoices(
     q: Optional[str] = Query(default=None, max_length=128),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = select(Invoice).options(*_invoice_base_options())
     if reseller_id is not None:
@@ -1103,9 +1109,9 @@ async def list_admin_reseller_invoices(
     return [_invoice_payload(db, row) for row in rows]
 
 
-@router.get("/resellers/invoices/{invoice_id}")
+@router.get("/resellers/invoices/{invoice_id}", responses={**COMMON_ERROR_RESPONSES})
 async def get_admin_reseller_invoice(
-    invoice_id: int, db: Session = Depends(get_db)
+    invoice_id: int, db: DbDep
 ):
     invoice = db.execute(
         select(Invoice)
@@ -1117,14 +1123,15 @@ async def get_admin_reseller_invoice(
     return _invoice_payload(db, invoice, include_payments=True)
 
 
-@router.get("/resellers/payments")
+@router.get("/resellers/payments", responses={**COMMON_ERROR_RESPONSES})
 async def list_admin_reseller_payments(
     reseller_id: Optional[int] = None,
     payment_status: Optional[PaymentStatus] = Query(default=None, alias="status"),
     gateway: Optional[str] = Query(default=None, max_length=64),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = (
         select(Payment)
@@ -1150,9 +1157,9 @@ async def list_admin_reseller_payments(
     return [_payment_payload(row) for row in rows]
 
 
-@router.get("/resellers/payments/{payment_id}")
+@router.get("/resellers/payments/{payment_id}", responses={**COMMON_ERROR_RESPONSES})
 async def get_admin_reseller_payment(
-    payment_id: int, db: Session = Depends(get_db)
+    payment_id: int, db: DbDep
 ):
     payment = db.execute(
         select(Payment)
@@ -1164,12 +1171,12 @@ async def get_admin_reseller_payment(
     return _payment_payload(payment)
 
 
-@router.post("/resellers/payments/{payment_id}/refund")
+@router.post("/resellers/payments/{payment_id}/refund", responses={**COMMON_ERROR_RESPONSES})
 async def refund_admin_reseller_payment(
     payment_id: int,
     body: PaymentRefundRequest,
-    db: Session = Depends(get_db),
-    auth: dict = Depends(require_admin),
+    db: DbDep,
+    auth: AdminDep,
 ):
     try:
         payment = PaymentRefundService().refund(
@@ -1192,7 +1199,7 @@ async def refund_admin_reseller_payment(
     return _payment_payload(payment)
 
 
-@router.get("/resellers/billing-cycles")
+@router.get("/resellers/billing-cycles", responses={**COMMON_ERROR_RESPONSES})
 async def list_admin_billing_cycles(
     reseller_id: Optional[int] = None,
     cycle_state: Optional[BillingCycleState] = Query(
@@ -1200,7 +1207,8 @@ async def list_admin_billing_cycles(
     ),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = select(BillingCycle).join(ServiceBilling)
     if reseller_id is not None:
@@ -1218,9 +1226,9 @@ async def list_admin_billing_cycles(
     return [_billing_cycle_payload(row) for row in rows]
 
 
-@router.post("/resellers/billing-cycles/run-due")
+@router.post("/resellers/billing-cycles/run-due", responses={**COMMON_ERROR_RESPONSES})
 async def run_admin_billing_batch(
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     owner = f"admin-{uuid.uuid4().hex}"
     service = RecurringBillingService()
@@ -1236,10 +1244,10 @@ async def run_admin_billing_batch(
         db.commit()
 
 
-@router.get("/resellers/billing-cycles/{cycle_id}")
+@router.get("/resellers/billing-cycles/{cycle_id}", responses={**COMMON_ERROR_RESPONSES})
 async def get_admin_billing_cycle(
     cycle_id: int,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     cycle = db.get(BillingCycle, cycle_id)
     if cycle is None:
@@ -1247,10 +1255,10 @@ async def get_admin_billing_cycle(
     return _billing_cycle_payload(cycle)
 
 
-@router.post("/resellers/billing-cycles/{cycle_id}/retry")
+@router.post("/resellers/billing-cycles/{cycle_id}/retry", responses={**COMMON_ERROR_RESPONSES})
 async def retry_admin_billing_cycle(
     cycle_id: int,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     cycle = db.execute(
         select(BillingCycle)
@@ -1287,7 +1295,7 @@ async def retry_admin_billing_cycle(
     return _billing_cycle_payload(cycle)
 
 
-@router.get("/resellers/notification-outbox")
+@router.get("/resellers/notification-outbox", responses={**COMMON_ERROR_RESPONSES})
 async def list_admin_notification_outbox(
     reseller_id: Optional[int] = None,
     outbox_status: Optional[NotificationOutboxStatus] = Query(
@@ -1295,7 +1303,8 @@ async def list_admin_notification_outbox(
     ),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = select(NotificationOutbox)
     if reseller_id is not None:
@@ -1316,10 +1325,10 @@ async def list_admin_notification_outbox(
     return [_outbox_payload(row) for row in rows]
 
 
-@router.post("/resellers/notification-outbox/{outbox_id}/retry")
+@router.post("/resellers/notification-outbox/{outbox_id}/retry", responses={**COMMON_ERROR_RESPONSES})
 async def retry_admin_notification(
     outbox_id: int,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     row = db.execute(
         select(NotificationOutbox)
@@ -1343,7 +1352,7 @@ async def retry_admin_notification(
     return _outbox_payload(row)
 
 
-@router.get("/resellers/usdt-deposits")
+@router.get("/resellers/usdt-deposits", responses={**COMMON_ERROR_RESPONSES})
 async def list_admin_usdt_deposits(
     reseller_id: Optional[int] = None,
     deposit_status: Optional[UsdtDepositStatus] = Query(
@@ -1351,7 +1360,8 @@ async def list_admin_usdt_deposits(
     ),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = select(UsdtDeposit)
     if reseller_id is not None:
@@ -1369,10 +1379,10 @@ async def list_admin_usdt_deposits(
     return [_admin_usdt_payload(db, row) for row in rows]
 
 
-@router.get("/resellers/usdt-deposits/{deposit_id}")
+@router.get("/resellers/usdt-deposits/{deposit_id}", responses={**COMMON_ERROR_RESPONSES})
 async def get_admin_usdt_deposit(
     deposit_id: int,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     return _admin_usdt_payload(
         db,
@@ -1381,11 +1391,11 @@ async def get_admin_usdt_deposit(
     )
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/rescan")
+@router.post("/resellers/usdt-deposits/{deposit_id}/rescan", responses={**COMMON_ERROR_RESPONSES})
 async def rescan_admin_usdt_deposit(
     deposit_id: int,
     body: UsdtRescanRequest,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     deposit = _usdt_deposit_or_404(db, deposit_id)
     cursor = db.execute(
@@ -1420,10 +1430,10 @@ async def rescan_admin_usdt_deposit(
     }
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/reconcile")
+@router.post("/resellers/usdt-deposits/{deposit_id}/reconcile", responses={**COMMON_ERROR_RESPONSES})
 async def reconcile_admin_usdt_deposit(
     deposit_id: int,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     _usdt_deposit_or_404(db, deposit_id)
     if not settings.usdt_enabled:
@@ -1440,10 +1450,10 @@ async def reconcile_admin_usdt_deposit(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/sweep-retry")
+@router.post("/resellers/usdt-deposits/{deposit_id}/sweep-retry", responses={**COMMON_ERROR_RESPONSES})
 async def retry_admin_usdt_sweep(
     deposit_id: int,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     deposit = db.execute(
         select(UsdtDeposit)
@@ -1462,11 +1472,11 @@ async def retry_admin_usdt_sweep(
     return _admin_usdt_payload(db, deposit)
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/manual-review")
+@router.post("/resellers/usdt-deposits/{deposit_id}/manual-review", responses={**COMMON_ERROR_RESPONSES})
 async def mark_admin_usdt_manual_review(
     deposit_id: int,
     body: UsdtManualReviewRequest,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     deposit = db.execute(
         select(UsdtDeposit)
@@ -1483,12 +1493,13 @@ async def mark_admin_usdt_manual_review(
     return _admin_usdt_payload(db, deposit)
 
 
-@router.get("/resellers")
+@router.get("/resellers", responses={**COMMON_ERROR_RESPONSES})
 async def list_resellers(
     q: Optional[str] = None,
     reseller_status: Optional[ResellerStatus] = Query(default=None, alias="status"),
     group_id: Optional[int] = None,
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     stmt = select(Reseller).join(User, User.id == Reseller.user_id)
     if reseller_status is not None:
@@ -1509,9 +1520,9 @@ async def list_resellers(
     return [_reseller_payload(db, row, include_details=True) for row in rows]
 
 
-@router.post("/resellers", status_code=status.HTTP_201_CREATED)
+@router.post("/resellers", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
 async def create_reseller(
-    body: ResellerCreate, db: Session = Depends(get_db)
+    body: ResellerCreate, db: DbDep
 ):
     username_owner = db.execute(
         select(User).where(func.lower(User.username) == body.username.lower())
@@ -1570,8 +1581,8 @@ async def create_reseller(
     return {**_reseller_payload(db, reseller, include_details=True), "api_key": plaintext_key}
 
 
-@router.get("/resellers/{reseller_id}")
-async def get_reseller(reseller_id: int, db: Session = Depends(get_db)):
+@router.get("/resellers/{reseller_id}", responses={**COMMON_ERROR_RESPONSES})
+async def get_reseller(reseller_id: int, db: DbDep):
     return _reseller_payload(
         db, _reseller_or_404(db, reseller_id), include_details=True
     )
@@ -1643,11 +1654,11 @@ def _apply_billing_hold_change(reseller: Reseller, changes: dict) -> None:
         reseller.billing_hold_reason = (hold_reason or "").strip() or None
 
 
-@router.put("/resellers/{reseller_id}")
+@router.put("/resellers/{reseller_id}", responses={**COMMON_ERROR_RESPONSES})
 async def update_reseller(
     reseller_id: int,
     body: ResellerUpdate,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     reseller = _reseller_or_404(db, reseller_id)
     changes = body.model_dump(exclude_unset=True)
@@ -1663,8 +1674,8 @@ async def update_reseller(
     return _reseller_payload(db, reseller, include_details=True)
 
 
-@router.delete("/resellers/{reseller_id}")
-async def disable_reseller(reseller_id: int, db: Session = Depends(get_db)):
+@router.delete("/resellers/{reseller_id}", responses={**COMMON_ERROR_RESPONSES})
+async def disable_reseller(reseller_id: int, db: DbDep):
     reseller = _reseller_or_404(db, reseller_id)
     reseller.status = ResellerStatus.DISABLED
     db.commit()
@@ -1672,9 +1683,9 @@ async def disable_reseller(reseller_id: int, db: Session = Depends(get_db)):
     return _reseller_payload(db, reseller, include_details=True)
 
 
-@router.post("/resellers/{reseller_id}/rotate-key")
+@router.post("/resellers/{reseller_id}/rotate-key", responses={**COMMON_ERROR_RESPONSES})
 async def rotate_reseller_key(
-    reseller_id: int, db: Session = Depends(get_db)
+    reseller_id: int, db: DbDep
 ):
     reseller = _reseller_or_404(db, reseller_id)
     plaintext_key = issue_reseller_api_key(db, reseller)
@@ -1687,9 +1698,9 @@ async def rotate_reseller_key(
     }
 
 
-@router.get("/reseller-groups/{group_id}/prices")
+@router.get("/reseller-groups/{group_id}/prices", responses={**COMMON_ERROR_RESPONSES})
 async def list_group_product_prices(
-    group_id: int, db: Session = Depends(get_db)
+    group_id: int, db: DbDep
 ):
     _group_or_404(db, group_id)
     products = list(db.execute(select(Product).order_by(Product.name)).scalars())
@@ -1713,12 +1724,12 @@ async def list_group_product_prices(
     ]
 
 
-@router.put("/reseller-groups/{group_id}/prices/{product_id}")
+@router.put("/reseller-groups/{group_id}/prices/{product_id}", responses={**COMMON_ERROR_RESPONSES})
 async def upsert_group_product_price(
     group_id: int,
     product_id: int,
     body: GroupPriceUpsert,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     _group_or_404(db, group_id)
     product = _product_or_404(db, product_id)
@@ -1745,7 +1756,7 @@ async def upsert_group_product_price(
     "/reseller-groups/{group_id}/prices/{product_id}", status_code=204
 )
 async def delete_group_product_price(
-    group_id: int, product_id: int, db: Session = Depends(get_db)
+    group_id: int, product_id: int, db: DbDep
 ):
     _group_or_404(db, group_id)
     _product_or_404(db, product_id)
@@ -1762,9 +1773,9 @@ async def delete_group_product_price(
     return Response(status_code=204)
 
 
-@router.get("/reseller-groups/{group_id}/product-access")
+@router.get("/reseller-groups/{group_id}/product-access", responses={**COMMON_ERROR_RESPONSES})
 async def list_group_product_access(
-    group_id: int, db: Session = Depends(get_db)
+    group_id: int, db: DbDep
 ):
     _group_or_404(db, group_id)
     products = list(db.execute(select(Product).order_by(Product.name)).scalars())
@@ -1793,12 +1804,12 @@ async def list_group_product_access(
     ]
 
 
-@router.put("/reseller-groups/{group_id}/product-access/{product_id}")
+@router.put("/reseller-groups/{group_id}/product-access/{product_id}", responses={**COMMON_ERROR_RESPONSES})
 async def upsert_group_product_access(
     group_id: int,
     product_id: int,
     body: ProductAccessUpsert,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     _group_or_404(db, group_id)
     _product_or_404(db, product_id)
@@ -1823,7 +1834,7 @@ async def upsert_group_product_access(
     status_code=204,
 )
 async def delete_group_product_access(
-    group_id: int, product_id: int, db: Session = Depends(get_db)
+    group_id: int, product_id: int, db: DbDep
 ):
     _group_or_404(db, group_id)
     _product_or_404(db, product_id)
@@ -1840,9 +1851,9 @@ async def delete_group_product_access(
     return Response(status_code=204)
 
 
-@router.get("/resellers/{reseller_id}/product-access")
+@router.get("/resellers/{reseller_id}/product-access", responses={**COMMON_ERROR_RESPONSES})
 async def list_reseller_product_access(
-    reseller_id: int, db: Session = Depends(get_db)
+    reseller_id: int, db: DbDep
 ):
     reseller = _reseller_or_404(db, reseller_id)
     products = list(db.execute(select(Product).order_by(Product.name)).scalars())
@@ -1894,12 +1905,12 @@ async def list_reseller_product_access(
     return result
 
 
-@router.put("/resellers/{reseller_id}/product-access/{product_id}")
+@router.put("/resellers/{reseller_id}/product-access/{product_id}", responses={**COMMON_ERROR_RESPONSES})
 async def upsert_reseller_product_access(
     reseller_id: int,
     product_id: int,
     body: ProductAccessUpsert,
-    db: Session = Depends(get_db),
+    db: DbDep,
 ):
     _reseller_or_404(db, reseller_id)
     _product_or_404(db, product_id)
@@ -1924,7 +1935,7 @@ async def upsert_reseller_product_access(
     status_code=204,
 )
 async def delete_reseller_product_access(
-    reseller_id: int, product_id: int, db: Session = Depends(get_db)
+    reseller_id: int, product_id: int, db: DbDep
 ):
     _reseller_or_404(db, reseller_id)
     _product_or_404(db, product_id)
@@ -1941,12 +1952,12 @@ async def delete_reseller_product_access(
     return Response(status_code=204)
 
 
-@router.post("/resellers/{reseller_id}/credit-adjustments")
+@router.post("/resellers/{reseller_id}/credit-adjustments", responses={**COMMON_ERROR_RESPONSES})
 async def adjust_reseller_credit(
     reseller_id: int,
     body: CreditAdjustmentCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     _reseller_or_404(db, reseller_id)
     idempotency_key = body.idempotency_key or (
@@ -1989,12 +2000,13 @@ async def adjust_reseller_credit(
     }
 
 
-@router.get("/resellers/{reseller_id}/ledger")
+@router.get("/resellers/{reseller_id}/ledger", responses={**COMMON_ERROR_RESPONSES})
 async def list_reseller_ledger(
     reseller_id: int,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     _reseller_or_404(db, reseller_id)
     rows = list(

@@ -21,7 +21,7 @@ _KNOWN_COLLECTIONS = (
 
 
 def _join(origin: str, path: str) -> str:
-    if path.startswith("http://") or path.startswith("https://"):
+    if path.startswith(("http://", "https://")):
         return path
     return f"{origin.rstrip('/')}/{path.lstrip('/')}"
 
