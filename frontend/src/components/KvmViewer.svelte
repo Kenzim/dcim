@@ -63,6 +63,7 @@
   let status = 'connecting';
   let errorMessage = '';
   let resText = '';
+  let noSignal = false;
   let ws = null;
   let worker = null;
   let keepAlive = null;
@@ -170,10 +171,26 @@
     status = 'connected';
     errorMessage = '';
     autoRetries = 0;
+    if (!videoFrames) noSignal = true;
     keepAlive = setInterval(() => send(ivtp(IVTP.CMD_KEEPALIVE, 0, null)), 3000);
     send(ivtp(IVTP.CMD_FULL, 1, null));
     nudgeMouse();
     latencyProbe.attach(ws);
+  }
+
+  function showNoSignal({ nudge = true } = {}) {
+    noSignal = true;
+    resText = '';
+    if (ctx && canvas) {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    if (nudge) nudgeMouse();
+  }
+
+  function markHasVideo(w, h) {
+    noSignal = false;
+    if (w && h) resText = `${w}×${h}`;
   }
 
   function postDecodeBuffer(w, h) {
@@ -185,7 +202,7 @@
     worker.postMessage({ cmd: 'resolution_changed', imageBuffer, w, h });
   }
 
-  function resetImage(w, h) {
+  function resetImage(w, h, { advertise = true } = {}) {
     if (!canvas || !ctx) return;
     canvas.width = w;
     canvas.height = h;
@@ -194,7 +211,7 @@
     imageBuffer = new ImageData(w, h);
     ctx.putImageData(imageBuffer, 0, 0);
     postDecodeBuffer(w, h);
-    resText = `${w}×${h}`;
+    if (advertise) resText = `${w}×${h}`;
     letterboxCanvas(canvas, stage);
   }
 
@@ -222,7 +239,15 @@
         CompressData: { CompressSize: csize },
       };
       compressSize = csize;
-      if (x && y && canvas && (x !== canvas.width || y !== canvas.height)) {
+      if (!x || !y || !csize) {
+        showNoSignal({ nudge: false });
+        prevComplete = true;
+        frameChunks = [];
+        frameGot = 0;
+        return;
+      }
+      markHasVideo(x, y);
+      if (canvas && (x !== canvas.width || y !== canvas.height)) {
         resetImage(x, y);
       }
       frameChunks = [payload.subarray(88)];
@@ -279,11 +304,7 @@
         send(ivtp(IVTP.CMD_KEEPALIVE, 0, null));
         break;
       case IVTP.CMD_BLANK:
-        if (ctx && canvas) {
-          ctx.fillStyle = '#000';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-        }
-        nudgeMouse();
+        showNoSignal();
         break;
       case IVTP.CMD_STOP:
         errorMessage = `BMC stopped KVM session (${pktStatus})`;
@@ -407,6 +428,8 @@
     modifiers = 0;
     buttons = 0;
     imageBuffer = null;
+    noSignal = false;
+    resText = '';
   }
 
   function startWorker() {
@@ -422,6 +445,7 @@
     };
     worker.onmessage = (e) => {
       if (e.data.cmd === 'draw') {
+        if (noSignal) return;
         imageBuffer = e.data.ibuf;
         if (imageBuffer && ctx) ctx.putImageData(imageBuffer, 0, 0);
       } else if (e.data.cmd === 'exception') {
@@ -484,7 +508,7 @@
     fatal = null;
     resetDecodeState();
     startWorker();
-    resetImage(640, 480);
+    resetImage(640, 480, { advertise: false });
     openSocket();
   }
 
@@ -578,8 +602,10 @@
   {pasting}
   {reconnecting}
   extraLabel={resText}
+  {noSignal}
   {latencyMs}
   {latencySamples}
+  powerToken={session.ws_token}
   onCad={sendCtrlAltDel}
   onPaste={pasteClipboard}
   onReconnect={() => reconnect()}

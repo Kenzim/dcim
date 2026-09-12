@@ -100,6 +100,36 @@ class _PacketBuf:
         return pkt
 
 
+async def megarac_web_session(origin: str, username: str, password: str) -> tuple[str, str, dict]:
+    """Log into AMI MegaRAC. Return ``(QSESSIONID, CSRFToken, login_json)``."""
+    async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=20.0) as client:
+        try:
+            login = await client.post(
+                f"{origin}/api/session",
+                data={"username": username, "password": password},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": origin,
+                    "Referer": origin + "/",
+                },
+            )
+        except httpx.RequestError as exc:
+            raise IpmiKvmUnavailable(f"Could not reach BMC web UI: {exc}") from exc
+        try:
+            body = login.json()
+        except ValueError as exc:
+            raise IpmiKvmUnavailable("BMC login returned a non-JSON response") from exc
+        if login.status_code >= 400 or body.get("ok") != 0:
+            raise IpmiKvmUnavailable("BMC login failed")
+        cookie = login.cookies.get("QSESSIONID") or ""
+        if not cookie and "QSESSIONID=" in (login.headers.get("set-cookie") or ""):
+            cookie = login.headers["set-cookie"].split("QSESSIONID=", 1)[1].split(";", 1)[0]
+        csrf = body.get("CSRFToken") or ""
+        if not cookie or not csrf:
+            raise IpmiKvmUnavailable("BMC login did not return a session")
+        return cookie, str(csrf), body if isinstance(body, dict) else {}
+
+
 class AsrockRackKvmProfile(IpmiKvmProfile):
     id = "asrockrack"
     display_name = "ASRockRack (AMI MegaRAC HTML5 KVM)"
@@ -111,31 +141,8 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
     async def login(self, server: Server) -> BmcKvmAuth:
         username, password = self.credentials(server)
         origin, hostname = self.origin_and_host(server)
+        cookie, csrf, body = await megarac_web_session(origin, username, password)
         async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=20.0) as client:
-            try:
-                login = await client.post(
-                    f"{origin}/api/session",
-                    data={"username": username, "password": password},
-                    headers={
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "Origin": origin,
-                        "Referer": origin + "/",
-                    },
-                )
-            except httpx.RequestError as exc:
-                raise IpmiKvmUnavailable(f"Could not reach BMC web UI: {exc}") from exc
-            try:
-                body = login.json()
-            except ValueError as exc:
-                raise IpmiKvmUnavailable("BMC login returned a non-JSON response") from exc
-            if login.status_code >= 400 or body.get("ok") != 0:
-                raise IpmiKvmUnavailable("BMC login failed")
-            cookie = login.cookies.get("QSESSIONID") or ""
-            if not cookie and "QSESSIONID=" in (login.headers.get("set-cookie") or ""):
-                cookie = login.headers["set-cookie"].split("QSESSIONID=", 1)[1].split(";", 1)[0]
-            csrf = body.get("CSRFToken") or ""
-            if not cookie or not csrf:
-                raise IpmiKvmUnavailable("BMC login did not return a session")
             try:
                 tok = await client.get(
                     f"{origin}/api/kvm/token",

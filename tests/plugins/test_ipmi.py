@@ -3,7 +3,11 @@ Tests for IPMI plugin
 """
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
-from app.plugins.ipmi import IPMIPlugin
+from app.plugins.ipmi import (
+    IPMIPlugin,
+    describe_chassis_power_actions,
+    normalize_chassis_power_action,
+)
 from app.plugins.base import PowerState
 
 
@@ -293,3 +297,59 @@ async def test_ipmi_plugin_not_implemented_methods():
         with patch.object(plugin, "_run_ipmitool", new=AsyncMock(return_value=(b"Boot parameter data: force pxe\n", b"", 0))):
             boot = await plugin.get_boot_order()
             assert boot["current_device"] == "pxe"
+
+
+def test_describe_chassis_power_actions_enablement():
+    ids = ["on", "soft", "off", "reset", "cycle", "diag"]
+    off = {row["id"]: row["enabled"] for row in describe_chassis_power_actions("off")}
+    assert list(off) == ids
+    assert off == {"on": True, "soft": False, "off": False, "reset": False, "cycle": False, "diag": False}
+    on = {row["id"]: row["enabled"] for row in describe_chassis_power_actions(PowerState.ON)}
+    assert on["on"] is False
+    assert on["cycle"] is True
+    unknown = describe_chassis_power_actions(None)
+    assert [row["id"] for row in unknown] == ids
+    assert all(row["enabled"] for row in unknown)
+
+
+def test_normalize_chassis_power_aliases():
+    assert normalize_chassis_power_action("reboot") == "reset"
+    assert normalize_chassis_power_action("WARM") == "reset"
+    assert normalize_chassis_power_action("cold") == "cycle"
+    assert normalize_chassis_power_action("nmi") == "diag"
+    assert normalize_chassis_power_action("shutdown") == "soft"
+    assert normalize_chassis_power_action("on") == "on"
+
+
+@pytest.mark.asyncio
+async def test_chassis_power_maps_ipmitool_verbs():
+    config = {"hostname": "192.168.1.100", "username": "admin", "password": "password"}
+    with patch("shutil.which", return_value="/usr/bin/ipmitool"):
+        plugin = IPMIPlugin(config)
+        plugin._run_ipmitool = AsyncMock(return_value=(b"", b"", 0))
+        assert await plugin.chassis_power("cycle") is True
+        plugin._run_ipmitool.assert_awaited_with("power cycle")
+        assert await plugin.chassis_power("reboot") is True
+        plugin._run_ipmitool.assert_awaited_with("power reset")
+        assert await plugin.chassis_power("diag") is True
+        plugin._run_ipmitool.assert_awaited_with("power diag")
+
+
+@pytest.mark.asyncio
+async def test_chassis_power_rejects_unknown_action():
+    config = {"hostname": "192.168.1.100", "username": "admin", "password": "password"}
+    with patch("shutil.which", return_value="/usr/bin/ipmitool"):
+        plugin = IPMIPlugin(config)
+        with pytest.raises(ValueError, match="Unsupported chassis power action"):
+            await plugin.chassis_power("explode")
+
+
+@pytest.mark.asyncio
+async def test_power_off_falls_back_to_hard_off():
+    config = {"hostname": "192.168.1.100", "username": "admin", "password": "password"}
+    with patch("shutil.which", return_value="/usr/bin/ipmitool"):
+        plugin = IPMIPlugin(config)
+        plugin._run_ipmitool = AsyncMock(side_effect=[(b"", b"unsupported", 1), (b"", b"", 0)])
+        assert await plugin.power_off() is True
+        assert plugin._run_ipmitool.await_args_list[0].args[0] == "power soft"
+        assert plugin._run_ipmitool.await_args_list[1].args[0] == "power off"

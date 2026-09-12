@@ -1,4 +1,5 @@
 """IPMI HTML5 KVM API: profiles, redeem, tickets, popups, status flag."""
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.core.client_permissions import PermissionKey
@@ -9,6 +10,7 @@ from app.dao.server_dao import ServerDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
 from app.models.service import ProvisioningSource, ServiceStatus
+from app.plugins.base import PowerState
 from app.services.ipmi_kvm.base import BmcKvmAuth
 from app.services.ipmi_kvm.hub_lock import cache_kvm_asset
 from app.services.ipmi_kvm_ticket_service import mint_launch_ticket, mint_viewer_session, mint_ws_session
@@ -369,3 +371,80 @@ def test_billing_kvm_ticket_allowed_when_ipmi_proxy_denied(client, db_session, m
     assert ticket.status_code == 200, ticket.text
     deny_proxy = client.post(f"/api/billing/services/{service.id}/ipmi-ticket", headers=headers)
     assert deny_proxy.status_code == 403, deny_proxy.text
+
+
+def _mint_kvm_ws(server):
+    return mint_ws_session(
+        server.id,
+        "asrockrack",
+        hostname="10.16.251.138",
+        username="admin",
+    )
+
+
+def _fake_power_plugin(state=PowerState.ON, ok=True):
+    from app.plugins.ipmi import describe_chassis_power_actions
+
+    return SimpleNamespace(
+        get_power_state=AsyncMock(return_value=state),
+        list_chassis_power_actions=describe_chassis_power_actions,
+        chassis_power=AsyncMock(return_value=ok),
+    )
+
+
+def _patch_kvm_plugin(monkeypatch, plugin):
+    monkeypatch.setattr(
+        "app.api.ipmi_kvm.get_registry",
+        lambda: SimpleNamespace(get_plugin=lambda *args, **kwargs: plugin),
+    )
+
+
+def test_kvm_power_rejects_unknown_token(client):
+    resp = client.get("/api/kvm/power?token=nope")
+    assert resp.status_code == 400, resp.text
+    resp = client.post("/api/kvm/power", json={"token": "nope", "action": "reset"})
+    assert resp.status_code == 400, resp.text
+
+
+def test_kvm_power_get_lists_ipmi_actions(client, db_session, monkeypatch):
+    server = _server(db_session, name="kvm-power-get")
+    minted = _mint_kvm_ws(server)
+    _patch_kvm_plugin(monkeypatch, _fake_power_plugin(PowerState.ON))
+    resp = client.get(f"/api/kvm/power?token={minted['ws_token']}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["power_state"] == "on"
+    ids = [row["id"] for row in body["actions"]]
+    assert ids == ["on", "soft", "off", "reset", "cycle", "diag"]
+    enabled = {row["id"]: row["enabled"] for row in body["actions"]}
+    assert enabled["on"] is False
+    assert enabled["cycle"] is True
+
+
+def test_kvm_power_post_cycle_and_reboot_alias(client, db_session, monkeypatch):
+    server = _server(db_session, name="kvm-power-post")
+    minted = _mint_kvm_ws(server)
+    plugin = _fake_power_plugin(PowerState.ON)
+    _patch_kvm_plugin(monkeypatch, plugin)
+    resp = client.post("/api/kvm/power", json={"token": minted["ws_token"], "action": "cycle"})
+    assert resp.status_code == 200, resp.text
+    plugin.chassis_power.assert_awaited_with("cycle")
+    resp = client.post("/api/kvm/power", json={"token": minted["ws_token"], "action": "reboot"})
+    assert resp.status_code == 200, resp.text
+    plugin.chassis_power.assert_awaited_with("reset")
+
+
+def test_kvm_power_post_rejects_unknown_action(client, db_session, monkeypatch):
+    server = _server(db_session, name="kvm-power-bad")
+    minted = _mint_kvm_ws(server)
+    _patch_kvm_plugin(monkeypatch, _fake_power_plugin())
+    resp = client.post("/api/kvm/power", json={"token": minted["ws_token"], "action": "explode"})
+    assert resp.status_code == 400, resp.text
+
+
+def test_kvm_power_post_command_failure_is_502(client, db_session, monkeypatch):
+    server = _server(db_session, name="kvm-power-fail")
+    minted = _mint_kvm_ws(server)
+    _patch_kvm_plugin(monkeypatch, _fake_power_plugin(ok=False))
+    resp = client.post("/api/kvm/power", json={"token": minted["ws_token"], "action": "off"})
+    assert resp.status_code == 502, resp.text

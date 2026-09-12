@@ -2,7 +2,8 @@
 
 Packet policy
 -------------
-* BMC → viewers: video ``0x19``, blank ``0x09``, active ``0x27``, stop ``0x08``.
+* BMC → viewers: video ``0x19``, blank ``0x09`` (no host video / no signal),
+  active ``0x27``, stop ``0x08``.
 * Hello ``0x17`` / validated ``0x13`` stay hub-internal after handshake.
 * Viewer HID ``0x01``: forward immediately (last packet wins; no queue).
 * Viewer keepalive / FULL / STOP: drop. Hub keepalives the BMC every 3s.

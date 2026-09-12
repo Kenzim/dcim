@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 import shutil
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Sequence
 
 from app.plugins.base import (
     ServerPlugin,
@@ -19,15 +19,75 @@ from app.plugins.capabilities import Capability, ActionDef, UIPattern
 
 logger = logging.getLogger(__name__)
 
+# ipmitool ``chassis power`` / ``power`` verbs (IPMI chassis control).
+CHASSIS_POWER_COMMANDS = {
+    "on": "power on",
+    "soft": "power soft",
+    "off": "power off",
+    "reset": "power reset",
+    "cycle": "power cycle",
+    "diag": "power diag",
+}
+
+CHASSIS_POWER_ALIASES = {
+    "reboot": "reset",
+    "warm": "reset",
+    "cold": "cycle",
+    "nmi": "diag",
+    "shutdown": "soft",
+    "hard": "off",
+    "immediate": "off",
+}
+
+CHASSIS_POWER_ACTIONS: Sequence[dict[str, Optional[str]]] = (
+    {"id": "on", "label": "Power On", "confirm": None},
+    {"id": "soft", "label": "Soft Off (ACPI)", "confirm": "Send an ACPI shutdown to the host?"},
+    {"id": "off", "label": "Power Off (immediate)", "confirm": "Immediately cut chassis power?"},
+    {"id": "reset", "label": "Reset (warm reboot)", "confirm": "Warm-reset the host (pulse the reset line)?"},
+    {"id": "cycle", "label": "Power Cycle (cold reboot)", "confirm": "Cold-reboot the chassis (power off, then on)?"},
+    {"id": "diag", "label": "NMI", "confirm": "Send a diagnostic interrupt (NMI)?"},
+)
+
+
+def normalize_chassis_power_action(action: str) -> str:
+    raw = (action or "").strip().lower()
+    return CHASSIS_POWER_ALIASES.get(raw, raw)
+
+
+def describe_chassis_power_actions(power_state: str | PowerState | None) -> list[dict[str, Any]]:
+    """Toolbar catalog for IPMI chassis power, with enablement from current state."""
+    if isinstance(power_state, PowerState):
+        state = power_state.value
+    else:
+        state = (power_state or "unknown").strip().lower() or "unknown"
+    actions: list[dict[str, Any]] = []
+    for row in CHASSIS_POWER_ACTIONS:
+        action_id = str(row["id"])
+        enabled = True
+        if state == "off":
+            enabled = action_id == "on"
+        elif state == "on":
+            enabled = action_id != "on"
+        actions.append(
+            {
+                "id": action_id,
+                "label": row["label"],
+                "confirm": row["confirm"],
+                "enabled": enabled,
+            }
+        )
+    return actions
+
 
 class IPMIPlugin(ServerPlugin):
     """
     IPMI plugin for physical server power management via ipmitool.
 
-    Supports POWER_CONTROL only:
+    Supports POWER_CONTROL:
     - test_connection: Test IPMI connection (mc info + power status)
     - get_power_state: Get chassis power state
-    - power_on / power_off / power_reset: Chassis power commands
+    - chassis_power: IPMI on / soft / off / reset / cycle / diag
+    - power_on / power_off / power_reset: wrappers used by the server API
     """
 
     PLUGIN_NAME = "ipmi"
@@ -209,34 +269,37 @@ class IPMIPlugin(ServerPlugin):
             return PowerState.OFF
         return PowerState.UNKNOWN
 
-    async def power_on(self) -> bool:
-        """Power on the chassis."""
-        _stdout, stderr, rc = await self._run_ipmitool("power on")
+    def list_chassis_power_actions(self, power_state: PowerState | str | None = None) -> list[dict[str, Any]]:
+        return describe_chassis_power_actions(power_state)
+
+    async def chassis_power(self, action: str) -> bool:
+        """Run one IPMI chassis power verb (on, soft, off, reset, cycle, diag)."""
+        cmd = CHASSIS_POWER_COMMANDS.get(normalize_chassis_power_action(action))
+        if cmd is None:
+            raise ValueError(f"Unsupported chassis power action: {action}")
+        _stdout, stderr, rc = await self._run_ipmitool(cmd)
         if rc != 0:
-            logger.warning(f"ipmitool power on failed: {stderr.decode(errors='replace')}")
+            logger.warning("ipmitool %s failed: %s", cmd, stderr.decode(errors="replace"))
             return False
         return True
+
+    async def power_on(self) -> bool:
+        """Power on the chassis."""
+        return await self.chassis_power("on")
 
     async def power_off(self, force: bool = False) -> bool:
         """Power off the chassis. force=True uses hard off if supported."""
-        cmd = "power off" if force else "power soft"
-        _stdout, stderr, rc = await self._run_ipmitool(cmd)
-        if rc != 0:
-            # Some BMCs only support "power off" (hard)
-            if not force:
-                _stdout, stderr, rc = await self._run_ipmitool("power off")
-            if rc != 0:
-                logger.warning(f"ipmitool power off failed: {stderr.decode(errors='replace')}")
-                return False
-        return True
+        if force:
+            return await self.chassis_power("off")
+        ok = await self.chassis_power("soft")
+        if ok:
+            return True
+        # Some BMCs only support "power off" (hard)
+        return await self.chassis_power("off")
 
     async def power_reset(self) -> bool:
-        """Reset (cycle) the chassis power."""
-        _stdout, stderr, rc = await self._run_ipmitool("power reset")
-        if rc != 0:
-            logger.warning(f"ipmitool power reset failed: {stderr.decode(errors='replace')}")
-            return False
-        return True
+        """Warm-reset the chassis (pulse the reset line)."""
+        return await self.chassis_power("reset")
 
     async def list_users(self) -> List[Dict[str, Any]]:
         raise NotImplementedError("IPMI plugin does not support user control")

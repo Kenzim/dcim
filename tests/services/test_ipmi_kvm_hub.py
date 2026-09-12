@@ -12,6 +12,7 @@ import websockets
 from app.core.config import settings
 from app.services.ipmi_kvm.asrockrack import ivtp
 from app.services.ipmi_kvm.hub import (
+    IVTP_BLANK,
     IVTP_FULL,
     IVTP_HID,
     IVTP_STOP,
@@ -183,6 +184,19 @@ async def test_two_clients_get_the_same_video_frame():
         await a.client_disconnect()
         await b.client_disconnect()
         await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_blank_screen_is_forwarded_to_viewers():
+    """IVTP 0x09 is host 'no signal'; the viewer overlays that, so the hub must fan it out."""
+    async with make_hub(server_id=41) as (hub, upstream, _profile):
+        viewer = FakeViewer()
+        task = await attach(hub, viewer)
+        frame = ivtp(IVTP_BLANK, 0)
+        upstream.push(frame)
+        assert await viewer.recv_frame() == frame
+        await viewer.client_disconnect()
+        await asyncio.wait_for(task, timeout=2)
 
 
 @pytest.mark.asyncio
