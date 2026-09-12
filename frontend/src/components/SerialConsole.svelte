@@ -3,7 +3,7 @@
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import '@xterm/xterm/css/xterm.css';
-  import { readClipboardOrPrompt, typeIntoSerialWs } from '../lib/clipboardType.js';
+  import { readClipboardOrPrompt, typeIntoSerialWs, normalizeSerialText } from '../lib/clipboardType.js';
 
   // Session credentials minted by the admin/client "vnc-session" endpoints
   // or by POST /api/vnc/redeem, for a VM whose console_type is "serial"
@@ -12,6 +12,11 @@
   // backend WS bridge authenticates the Proxmox term stream itself.
   export let wsToken;
   export let wsPath = '/api/vnc/ws';
+  // SOL often has no OS/BIOS echo; echo locally so typing is visible.
+  export let localEcho = false;
+  export let statusHint = '';
+  // IPMI SOL: ipmitool intercepts Ctrl-] after a newline (help is Ctrl-] then ?).
+  export let ipmiSolEscape = false;
   // Optional: async () => session. Called before reconnect so we can mint a
   // fresh Proxmox proxy (old tickets die when the upstream WS closes).
   export let refreshSession = null;
@@ -37,6 +42,46 @@
     ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
   }
 
+  function echoLocal(data) {
+    if (!term || !data) return;
+    for (const ch of data) {
+      if (ch === '\r') {
+        term.write('\r\n');
+      } else if (ch === '\n') {
+        continue;
+      } else if (ch === '\u007f' || ch === '\b') {
+        term.write('\b \b');
+      } else if (ch === '\u0015') {
+        // Ctrl-U: visually clear the current line
+        term.write('\r\x1b[K');
+      } else if (ch === '\u001d') {
+        term.write('^]');
+      } else if (ch === '\u0003') {
+        term.write('^C');
+      } else {
+        term.write(ch);
+      }
+    }
+  }
+
+  function focusTerm() {
+    term?.focus();
+  }
+
+  function sendRaw(text) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !text) return;
+    ws.send(new TextEncoder().encode(text));
+  }
+
+  function sendIpmiHelp() {
+    // Enter first so ipmitool will honor the escape, then Ctrl-] ?
+    sendRaw('\r\x1d?');
+    if (localEcho && term) {
+      echoLocal('\r\x1d?');
+    }
+    term?.focus();
+  }
+
   function connect() {
     status = 'connecting';
     errorMessage = '';
@@ -55,8 +100,22 @@
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(new TextEncoder().encode(data));
         }
+        if (localEcho && term) {
+          echoLocal(data);
+        }
       });
       term.onResize(sendResize);
+      term.attachCustomKeyEventHandler((ev) => {
+        if (!ipmiSolEscape || ev.type !== 'keydown' || ev.repeat) return true;
+        const bracket = ev.code === 'BracketRight' || ev.key === ']';
+        if (ev.ctrlKey && !ev.altKey && !ev.metaKey && bracket) {
+          sendRaw('\x1d');
+          if (localEcho) echoLocal('\x1d');
+          ev.preventDefault();
+          return false;
+        }
+        return true;
+      });
     }
 
     try {
@@ -139,7 +198,9 @@
   /** Type arbitrary text into the serial console (used by Paste Password). */
   export async function typeText(text) {
     if (status !== 'connected' || !text) return;
+    const outgoing = normalizeSerialText(text);
     await typeIntoSerialWs(ws, text);
+    if (localEcho) echoLocal(outgoing);
     term?.focus();
   }
 
@@ -175,7 +236,19 @@
         Error
       {/if}
     </span>
+    {#if statusHint}
+      <span class="serial-hint">{statusHint}</span>
+    {/if}
     <div class="serial-toolbar-actions">
+      <label class="serial-echo">
+        <input type="checkbox" bind:checked={localEcho} />
+        Local echo
+      </label>
+      {#if ipmiSolEscape}
+      <button type="button" class="serial-btn" on:click={sendIpmiHelp} disabled={status !== 'connected'}>
+        Ctrl-] ?
+      </button>
+      {/if}
       <button type="button" class="serial-btn" on:click={pasteClipboard} disabled={status !== 'connected' || pasting}>
         {pasting ? 'Typing…' : 'Paste Clipboard'}
       </button>
@@ -187,7 +260,7 @@
   {#if errorMessage}
     <p class="serial-error">{errorMessage}</p>
   {/if}
-  <div class="serial-screen" bind:this={containerEl}></div>
+  <div class="serial-screen" bind:this={containerEl} on:click={focusTerm} on:keydown={focusTerm} role="application" tabindex="-1"></div>
 </div>
 
 <style>
@@ -230,6 +303,26 @@
   .serial-toolbar-actions {
     display: flex;
     gap: 8px;
+    align-items: center;
+    margin-left: auto;
+  }
+
+  .serial-hint {
+    flex: 1;
+    min-width: 0;
+    color: #9a9a9a;
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  .serial-echo {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #c8c8c8;
+    cursor: pointer;
+    white-space: nowrap;
   }
 
   .serial-btn {

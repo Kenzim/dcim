@@ -6,6 +6,7 @@ import Reseller from './Reseller.svelte';
 import Login from '../components/Login.svelte';
 import VncLaunch from './VncLaunch.svelte';
 import KvmLaunch from './KvmLaunch.svelte';
+import SolLaunch from './SolLaunch.svelte';
 
 export default {
   '/': Home,
@@ -21,4 +22,5 @@ export default {
   // full-viewport with no admin/client chrome.
   '/vnc': VncLaunch,
   '/kvm': KvmLaunch,
+  '/sol': SolLaunch,
 };
