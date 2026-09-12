@@ -13,6 +13,10 @@ from app.core.auth import require_admin
 from app.dao.script_dao import ScriptDAO
 import logging
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/scripts", tags=["scripts-admin"])
@@ -51,8 +55,8 @@ class ScriptResponse(BaseModel):
 @router.post("", response_model=ScriptResponse, status_code=status.HTTP_201_CREATED)
 async def create_script(
     script_data: ScriptCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Create a new script"""
     # Check if script with same name already exists
@@ -90,8 +94,9 @@ async def create_script(
 async def list_scripts(
     enabled_only: bool = False,
     user_executable_only: bool = False,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all scripts"""
     logger.info(f"List scripts endpoint called by user {auth.get('username', 'unknown')}")
@@ -116,8 +121,8 @@ async def list_scripts(
 @router.get("/{script_id}", response_model=ScriptResponse)
 async def get_script(
     script_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get script details"""
     script = ScriptDAO.get_by_id(db, script_id)
@@ -143,8 +148,8 @@ async def get_script(
 async def update_script(
     script_id: int,
     script_data: ScriptUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Update a script"""
     script = ScriptDAO.get_by_id(db, script_id)
@@ -191,8 +196,8 @@ async def update_script(
 @router.delete("/{script_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_script(
     script_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete a script"""
     success = ScriptDAO.delete(db, script_id)

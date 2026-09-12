@@ -12,6 +12,10 @@ from app.models.service import ServiceType
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/ipam", tags=["ipam"])
 
 
@@ -76,8 +80,8 @@ def _subnet_payload(s, db: Optional[Session] = None) -> dict:
 
 @router.get("/subnets")
 async def list_subnets(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     subnets = IPAMDAO.list_subnets(db)
     return [_subnet_payload(s, db) for s in subnets]
@@ -86,8 +90,8 @@ async def list_subnets(
 @router.post("/subnets", status_code=status.HTTP_201_CREATED)
 async def create_subnet(
     data: SubnetCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     try:
         row = IPAMDAO.create_subnet(db, **data.model_dump())
@@ -100,8 +104,8 @@ async def create_subnet(
 async def update_subnet(
     subnet_id: int,
     data: SubnetUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     try:
         row = IPAMDAO.update_subnet(
@@ -124,8 +128,8 @@ async def update_subnet(
 @router.delete("/subnets/{subnet_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_subnet(
     subnet_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     try:
         IPAMDAO.delete_subnet(db, subnet_id)
@@ -138,8 +142,8 @@ async def delete_subnet(
 
 @router.get("/assignments")
 async def list_assignments(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     assignments = IPAMDAO.list_assignments(db)
     rows = []
@@ -167,8 +171,8 @@ async def list_assignments(
 @router.post("/assignments", status_code=status.HTTP_201_CREATED)
 async def assign_ip(
     data: AssignIPRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     service = ServiceDAO.get_by_id(db, data.service_id)
     if not service:
@@ -200,8 +204,9 @@ async def assign_ip(
 async def release_ip(
     assignment_id: int,
     released_by: Optional[str] = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     ok = IPAMDAO.release_ip(db, assignment_id=assignment_id, released_by=released_by)
     if not ok:
@@ -213,8 +218,8 @@ async def release_ip(
 async def rotate_assignment_credentials(
     assignment_id: int,
     data: RotateCredentialsRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Generate fresh username/password for an existing assignment (same IP)."""
     username = data.username or generate_proxy_username()
@@ -240,8 +245,8 @@ async def rotate_assignment_credentials(
 @router.get("/services/{service_id}/assignments")
 async def list_service_assignments(
     service_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     assignments = IPAMDAO.get_assignment_by_service(db, service_id=service_id)
     return [
@@ -260,8 +265,9 @@ async def list_service_assignments(
 @router.get("/history")
 async def list_history(
     service_id: Optional[int] = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     rows = IPAMDAO.list_history(db, service_id=service_id)
     return [

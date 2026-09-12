@@ -149,7 +149,7 @@ class OSProfileUpdate(BaseModel):
     enabled: Optional[bool] = None
 
 
-@router.get("/families", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/families", responses=COMMON_ERROR_RESPONSES)
 async def list_families(
     auth: AdminDep,
     db: DbDep,
@@ -209,7 +209,7 @@ def _validate_proxy_defaults(defaults: dict, db: Session | None = None) -> None:
             )
 
 
-@router.post("/families", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/families", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_family(
     data: ProductFamilyCreate,
     auth: AdminDep,
@@ -246,7 +246,7 @@ async def create_family(
     return {"id": family.id}
 
 
-@router.put("/families/{family_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/families/{family_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_family(
     family_id: int,
     data: ProductFamilyUpdate,
@@ -278,7 +278,7 @@ async def update_family(
     return {"status": "ok"}
 
 
-@router.post("/families/{family_id}/bulk-defaults", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/families/{family_id}/bulk-defaults", responses=COMMON_ERROR_RESPONSES)
 async def bulk_update_family_defaults(
     family_id: int,
     defaults: dict[str, Any],
@@ -294,7 +294,7 @@ async def bulk_update_family_defaults(
     return {"status": "ok", "defaults": merged}
 
 
-@router.post("/products", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/products", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_product(
     data: ProductCreate,
     auth: AdminDep,
@@ -327,7 +327,7 @@ async def create_product(
     return {"id": row.id}
 
 
-@router.get("/products", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products", responses=COMMON_ERROR_RESPONSES)
 async def list_products(
     auth: AdminDep,
     db: DbDep,
@@ -358,7 +358,7 @@ async def list_products(
     return result
 
 
-@router.put("/products/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/products/{product_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_product(
     product_id: int,
     data: ProductUpdate,
@@ -403,7 +403,7 @@ async def update_product(
     return {"status": "ok"}
 
 
-@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 async def delete_product(
     product_id: int,
     auth: AdminDep,
@@ -431,7 +431,7 @@ async def delete_product(
     return None
 
 
-@router.get("/vm-templates/os-types", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/vm-templates/os-types", responses=COMMON_ERROR_RESPONSES)
 async def list_vm_template_os_types(
     auth: AdminDep,
     detailed: bool = False,
@@ -442,7 +442,7 @@ async def list_vm_template_os_types(
     return ALLOWED_VM_OS_TYPES
 
 
-@router.get("/vm-templates", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/vm-templates", responses=COMMON_ERROR_RESPONSES)
 async def list_vm_templates(
     auth: AdminDep,
     db: DbDep,
@@ -468,7 +468,7 @@ async def list_vm_templates(
     ]
 
 
-@router.post("/vm-templates", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/vm-templates", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_vm_template(
     data: VMTemplateCreate,
     auth: AdminDep,
@@ -496,7 +496,7 @@ async def create_vm_template(
     return {"id": row.id, "code": row.code}
 
 
-@router.put("/vm-templates/{template_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/vm-templates/{template_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_vm_template(
     template_id: int,
     data: VMTemplateUpdate,
@@ -528,7 +528,7 @@ async def update_vm_template(
     return {"status": "ok"}
 
 
-@router.delete("/vm-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/vm-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 async def delete_vm_template(
     template_id: int,
     auth: AdminDep,
@@ -539,7 +539,7 @@ async def delete_vm_template(
     return None
 
 
-@router.get("/families/{family_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/families/{family_id}/vm-config", responses=COMMON_ERROR_RESPONSES)
 async def get_family_vm_config(
     family_id: int,
     auth: AdminDep,
@@ -555,7 +555,7 @@ async def get_family_vm_config(
     }
 
 
-@router.put("/families/{family_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/families/{family_id}/vm-config", responses=COMMON_ERROR_RESPONSES)
 async def upsert_family_vm_config(
     family_id: int,
     data: FamilyVMConfigUpsert,
@@ -572,7 +572,7 @@ async def upsert_family_vm_config(
     return {"status": "ok"}
 
 
-@router.get("/products/{product_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products/{product_id}/vm-config", responses=COMMON_ERROR_RESPONSES)
 async def get_product_vm_config(
     product_id: int,
     auth: AdminDep,
@@ -590,7 +590,7 @@ async def get_product_vm_config(
     }
 
 
-@router.put("/products/{product_id}/vm-config", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/products/{product_id}/vm-config", responses=COMMON_ERROR_RESPONSES)
 async def upsert_product_vm_config(
     product_id: int,
     data: ProductVMConfigUpsert,
@@ -612,7 +612,7 @@ async def upsert_product_vm_config(
     return {"status": "ok"}
 
 
-@router.get("/os-profiles", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/os-profiles", responses=COMMON_ERROR_RESPONSES)
 async def list_os_profiles(
     auth: AdminDep,
     db: DbDep,
@@ -631,7 +631,7 @@ async def list_os_profiles(
     ]
 
 
-@router.post("/os-profiles", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/os-profiles", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_os_profile(
     data: OSProfileCreate,
     auth: AdminDep,
@@ -643,7 +643,7 @@ async def create_os_profile(
     return {"id": row.id}
 
 
-@router.put("/os-profiles/{os_profile_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/os-profiles/{os_profile_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_os_profile(
     os_profile_id: int,
     data: OSProfileUpdate,
@@ -657,7 +657,7 @@ async def update_os_profile(
     return {"status": "ok"}
 
 
-@router.post("/families/{family_id}/os-profiles/{os_profile_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/families/{family_id}/os-profiles/{os_profile_id}", responses=COMMON_ERROR_RESPONSES)
 async def attach_os_profile(
     family_id: int,
     os_profile_id: int,
@@ -672,7 +672,7 @@ async def attach_os_profile(
     return {"status": "ok"}
 
 
-@router.delete("/families/{family_id}/os-profiles/{os_profile_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/families/{family_id}/os-profiles/{os_profile_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 async def detach_os_profile(
     family_id: int,
     os_profile_id: int,

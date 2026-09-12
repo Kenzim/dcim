@@ -8,6 +8,10 @@ from app.dao import ServerGroupDAO, ServerDAO
 from app.models.server_group import ServerGroup, server_group_association
 from app.models.server import Server
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter()
 
 
@@ -80,8 +84,9 @@ class ServerGroupAddServers(BaseModel):
 async def list_server_groups(
     skip: int = 0,
     limit: int = 100,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all server groups"""
     server_groups = ServerGroupDAO.get_all(db, skip=skip, limit=limit)
@@ -111,8 +116,8 @@ async def list_server_groups(
 @router.get("/{group_id}", response_model=ServerGroupDetailResponse)
 async def get_server_group(
     group_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get a server group by ID with its servers"""
     group = ServerGroupDAO.get_by_id(db, group_id)
@@ -155,8 +160,8 @@ async def get_server_group(
 @router.post("/", response_model=ServerGroupResponse, status_code=status.HTTP_201_CREATED)
 async def create_server_group(
     group_data: ServerGroupCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Create a new server group"""
     # Check if group with same name already exists
@@ -202,8 +207,8 @@ async def create_server_group(
 async def update_server_group(
     group_id: int,
     group_data: ServerGroupUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Update a server group"""
     group = ServerGroupDAO.get_by_id(db, group_id)
@@ -264,8 +269,8 @@ async def update_server_group(
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_server_group(
     group_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete a server group"""
     success = ServerGroupDAO.delete(db, group_id)
@@ -281,8 +286,8 @@ async def delete_server_group(
 async def add_servers_to_group(
     group_id: int,
     request: ServerGroupAddServers,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Add servers to a server group"""
     group = ServerGroupDAO.get_by_id(db, group_id)
@@ -320,8 +325,8 @@ async def add_servers_to_group(
 async def remove_server_from_group(
     group_id: int,
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Remove a server from a server group"""
     group = ServerGroupDAO.get_by_id(db, group_id)

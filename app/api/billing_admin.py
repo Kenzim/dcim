@@ -14,6 +14,10 @@ from app.dao.billing_integration_dao import BillingIntegrationDAO
 from app.integrations.registry import get_integration_registry
 import logging
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/billing/integrations", tags=["billing-admin"])
@@ -82,8 +86,8 @@ def _to_response(integration, reveal: bool = False) -> BillingIntegrationRespons
 @router.post("", response_model=BillingIntegrationResponse, status_code=status.HTTP_201_CREATED)
 async def create_integration(
     integration_data: BillingIntegrationCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Create a new billing integration"""
     # Validate integration type exists
@@ -124,8 +128,9 @@ async def create_integration(
 @router.get("", response_model=List[BillingIntegrationResponse])
 async def list_integrations(
     enabled_only: bool = False,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all billing integrations"""
     integrations = BillingIntegrationDAO.get_all(db, enabled_only=enabled_only)
@@ -134,7 +139,7 @@ async def list_integrations(
 
 @router.get("/types", response_model=List[dict])
 async def list_integration_types(
-    auth: dict = Depends(require_admin)
+    auth: AdminDep
 ):
     """List available integration types"""
     registry = get_integration_registry()
@@ -154,8 +159,8 @@ async def list_integration_types(
 @router.get("/{integration_id}", response_model=BillingIntegrationResponse)
 async def get_integration(
     integration_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get integration details"""
     integration = BillingIntegrationDAO.get_by_id(db, integration_id)
@@ -172,8 +177,8 @@ async def get_integration(
 async def update_integration(
     integration_id: int,
     integration_data: BillingIntegrationUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Update an integration"""
     integration = BillingIntegrationDAO.get_by_id(db, integration_id)
@@ -213,8 +218,8 @@ async def update_integration(
 @router.post("/{integration_id}/rotate-key", response_model=BillingIntegrationResponse)
 async def rotate_api_key(
     integration_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Generate a new API key for an integration"""
     integration = BillingIntegrationDAO.get_by_id(db, integration_id)
@@ -234,8 +239,8 @@ async def rotate_api_key(
 @router.delete("/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_integration(
     integration_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete an integration"""
     success = BillingIntegrationDAO.delete(db, integration_id)

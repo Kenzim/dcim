@@ -128,7 +128,7 @@ class SwitchPortBulkUpdate(BaseModel):
     ports: List[SwitchPortUpdate]
 
 
-@router.get("/", response_model=List[NetworkSwitchResponse], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/", response_model=List[NetworkSwitchResponse], responses=COMMON_ERROR_RESPONSES)
 async def list_switches(
     skip: int = 0,
     limit: int = 100,
@@ -156,7 +156,7 @@ async def list_switches(
     return result
 
 
-@router.post("/", response_model=NetworkSwitchResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/", response_model=NetworkSwitchResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_switch(
     switch_data: NetworkSwitchCreate,
     auth: AdminDep,
@@ -286,7 +286,7 @@ async def create_switch(
     return switch_dict
 
 
-@router.get("/bandwidth/aggregate", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/bandwidth/aggregate", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_aggregate_bandwidth(
     hours: int = 24,
     *,
@@ -297,7 +297,7 @@ async def get_aggregate_bandwidth(
     return get_aggregate_monitored_bandwidth(db, hours=hours)
 
 
-@router.get("/{switch_id}", response_model=NetworkSwitchResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{switch_id}", response_model=NetworkSwitchResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_switch(
     switch_id: int,
     auth: AdminDep,
@@ -317,7 +317,7 @@ async def get_switch(
     return switch_dict
 
 
-@router.put("/{switch_id}", response_model=NetworkSwitchResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.put("/{switch_id}", response_model=NetworkSwitchResponse, responses=COMMON_ERROR_RESPONSES)
 async def update_switch(
     switch_id: int,
     switch_data: NetworkSwitchUpdate,
@@ -437,7 +437,7 @@ async def update_switch(
     return switch_dict
 
 
-@router.delete("/{switch_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/{switch_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 async def delete_switch(
     switch_id: int,
     auth: AdminDep,
@@ -452,7 +452,7 @@ async def delete_switch(
         )
 
 
-@router.post("/test", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/test", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def test_switch_connection(
     test_data: NetworkSwitchTestRequest,
     auth: AdminDep,
@@ -497,7 +497,7 @@ async def test_switch_connection(
         }
 
 
-@router.get("/{switch_id}/switch-ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{switch_id}/switch-ports", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_switch_ports_db(
     switch_id: int,
     auth: AdminDep,
@@ -576,7 +576,7 @@ async def get_switch_ports_db(
     }
 
 
-@router.put("/{switch_id}/switch-ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.put("/{switch_id}/switch-ports", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def update_switch_ports_db(
     switch_id: int,
     payload: SwitchPortBulkUpdate,
@@ -621,7 +621,7 @@ async def update_switch_ports_db(
     }
 
 
-@router.get("/{switch_id}/ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{switch_id}/ports", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_switch_ports(
     switch_id: int,
     auth: AdminDep,
@@ -721,7 +721,7 @@ def _physical_speed_mbps(port_name: str, port_data: dict) -> int | None:
     return None
 
 
-@router.post("/{switch_id}/regenerate-ports", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{switch_id}/regenerate-ports", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def regenerate_switch_ports(
     switch_id: int,
     auth: AdminDep,
@@ -928,7 +928,7 @@ def _downsample_bandwidth(samples: list, resolution_minutes: int):
     return out
 
 
-@router.get("/{switch_id}/bandwidth", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{switch_id}/bandwidth", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_switch_bandwidth(
     switch_id: int,
     hours: int = 24,
@@ -998,7 +998,7 @@ async def get_switch_bandwidth(
     return {"switch_id": switch_id, "hours": hours, "resolution_minutes": resolution_minutes or None, "ports": ports}
 
 
-@router.get("/{switch_id}/ports/{port}", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{switch_id}/ports/{port}", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_switch_port_statistics(
     switch_id: int,
     port: str,

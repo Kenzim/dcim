@@ -14,6 +14,10 @@ from app.dao.mcp_api_key_dao import McpApiKeyDAO
 from app.mcp.scopes import normalize_scopes
 from app.models.mcp_api_key import McpApiKey
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/admin/mcp-keys", tags=["mcp-admin"])
 
 
@@ -97,8 +101,8 @@ def _parse_allowlist(entries: Optional[List[str]]) -> Optional[List[str]]:
 
 @router.get("", response_model=List[McpApiKeyResponse])
 async def list_mcp_keys(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     return [_to_response(row) for row in McpApiKeyDAO.get_all(db)]
 
@@ -106,8 +110,8 @@ async def list_mcp_keys(
 @router.post("", response_model=McpApiKeyResponse, status_code=status.HTTP_201_CREATED)
 async def create_mcp_key(
     body: McpApiKeyCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = McpApiKeyDAO.create(
         db,
@@ -125,8 +129,8 @@ async def create_mcp_key(
 @router.get("/{key_id}", response_model=McpApiKeyResponse)
 async def get_mcp_key(
     key_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = McpApiKeyDAO.get_by_id(db, key_id)
     if not row:
@@ -138,8 +142,8 @@ async def get_mcp_key(
 async def update_mcp_key(
     key_id: int,
     body: McpApiKeyUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = McpApiKeyDAO.get_by_id(db, key_id)
     if not row:
@@ -165,8 +169,8 @@ async def update_mcp_key(
 @router.post("/{key_id}/rotate", response_model=McpApiKeyResponse)
 async def rotate_mcp_key(
     key_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = McpApiKeyDAO.get_by_id(db, key_id)
     if not row:
@@ -178,8 +182,8 @@ async def rotate_mcp_key(
 @router.delete("/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_mcp_key(
     key_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if not McpApiKeyDAO.delete(db, key_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP key not found")

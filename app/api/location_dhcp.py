@@ -17,6 +17,10 @@ from app.services.dhcp_config_service import (
     DHCPInterfaceConfig,
 )
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter()
 
 
@@ -49,8 +53,8 @@ class DHCPConfigUpdate(BaseModel):
 @router.get("/locations/{location_id}/dhcp/status", response_model=Dict[str, Any])
 async def get_location_dhcp_status(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Get DHCP status for this location's runner."""
     instance = _get_dhcp_instance(db, location_id)
@@ -63,8 +67,8 @@ async def get_location_dhcp_status(
 @router.get("/locations/{location_id}/dhcp/settings", response_model=DHCPConfig)
 async def get_location_dhcp_settings(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
 ):
     """
@@ -84,8 +88,8 @@ async def get_location_dhcp_settings(
 async def update_location_dhcp_settings(
     location_id: int,
     update: DHCPConfigUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
 ):
     """
@@ -125,8 +129,8 @@ async def update_location_dhcp_settings(
 @router.post("/locations/{location_id}/dhcp/start", response_model=Dict[str, Any])
 async def start_location_dhcp(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_dhcp_instance(db, location_id)
     code, body = await call_dhcp_runner(instance, db, "POST", "/start")
@@ -138,8 +142,8 @@ async def start_location_dhcp(
 @router.post("/locations/{location_id}/dhcp/stop", response_model=Dict[str, Any])
 async def stop_location_dhcp(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_dhcp_instance(db, location_id)
     code, body = await call_dhcp_runner(instance, db, "POST", "/stop")
@@ -151,8 +155,8 @@ async def stop_location_dhcp(
 @router.post("/locations/{location_id}/dhcp/restart", response_model=Dict[str, Any])
 async def restart_location_dhcp(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_dhcp_instance(db, location_id)
     code, body = await call_dhcp_runner(instance, db, "POST", "/restart")
@@ -164,8 +168,8 @@ async def restart_location_dhcp(
 @router.get("/locations/{location_id}/dhcp/config")
 async def get_location_dhcp_config_raw(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Get raw dhcpd.conf content from the runner."""
     instance = _get_dhcp_instance(db, location_id)
@@ -179,8 +183,8 @@ async def get_location_dhcp_config_raw(
 async def put_location_dhcp_config_raw(
     request: Request,
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Write raw dhcpd.conf content to the runner."""
     content = await request.body()
@@ -194,8 +198,8 @@ async def put_location_dhcp_config_raw(
 @router.post("/locations/{location_id}/dhcp/regenerate")
 async def regenerate_location_dhcp_config(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Regenerate dhcpd.conf from DB (servers in this location) and push to runner."""
     from app.services.dhcp_config_generator import generate_dhcpd_conf
@@ -223,8 +227,9 @@ async def regenerate_location_dhcp_config(
 async def get_location_dhcp_logs(
     location_id: int,
     limit: int = 100,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Get recent logs from the DHCP runner."""
     instance = _get_dhcp_instance(db, location_id)

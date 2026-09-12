@@ -22,6 +22,10 @@ from app.services.virtual_media.image_token import lookup_image_token
 from app.services.virtual_media.iso_catalog import iso_path, validate_iso_filename
 from app.services.virtual_media.orchestrator import eject_media, get_status, insert_media
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 logger = logging.getLogger(__name__)
 
 profiles_router = APIRouter(prefix="/virtual-media", tags=["virtual-media"])
@@ -158,7 +162,7 @@ def _range_response(request: Request, path: Path, filename: str) -> Response:
 
 
 @profiles_router.get("/profiles", response_model=list[VirtualMediaProfileInfo])
-async def admin_list_virtual_media_profiles(auth: dict = Depends(require_admin)):
+async def admin_list_virtual_media_profiles(auth: AdminDep):
     """Admin dropdown values for ``servers.virtual_media_profile``."""
     del auth
     return [VirtualMediaProfileInfo(**item) for item in list_profiles()]
@@ -183,8 +187,8 @@ async def serve_virtual_media_image(token: str, filename: str, request: Request)
 @servers_router.get("/{server_id}/virtual-media", response_model=VirtualMediaStatusResponse)
 async def admin_get_virtual_media(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     del auth
     return await perform_status(ServerDAO.get_by_id(db, server_id))
@@ -194,8 +198,8 @@ async def admin_get_virtual_media(
 async def admin_insert_virtual_media(
     server_id: int,
     body: VirtualMediaInsertRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     del auth
     return await perform_insert(
@@ -210,8 +214,8 @@ async def admin_insert_virtual_media(
 @servers_router.post("/{server_id}/virtual-media/eject", response_model=VirtualMediaStatusResponse)
 async def admin_eject_virtual_media(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     del auth
     return await perform_eject(db, ServerDAO.get_by_id(db, server_id), source="admin_api")

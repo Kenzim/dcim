@@ -17,6 +17,10 @@ from app.dao import ServiceInstanceDAO, LocationDAO
 from app.models.service_instance import ServiceInstance
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/service-instances", tags=["service-instances"])
 
 # DHCP/TFTP runner base_urls legitimately point at RFC1918 addresses
@@ -111,8 +115,9 @@ def _call_runner_health(base_url: str, api_key: str, use_auth: bool) -> tuple[bo
 @router.get("/", response_model=List[ServiceInstanceResponse])
 async def list_service_instances(
     location_id: Optional[int] = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     """List service instances, optionally filtered by location_id."""
     instances = ServiceInstanceDAO.get_all(db, location_id=location_id)
@@ -122,8 +127,8 @@ async def list_service_instances(
 @router.post("/", response_model=ServiceInstanceResponse, status_code=status.HTTP_201_CREATED)
 async def create_service_instance(
     data: ServiceInstanceCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Create a new service instance."""
     if data.service_type not in ("dhcp", "tftp"):
@@ -162,8 +167,8 @@ async def create_service_instance(
 @router.get("/{instance_id}", response_model=ServiceInstanceResponse)
 async def get_service_instance(
     instance_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Get a service instance by ID."""
     instance = ServiceInstanceDAO.get_by_id(db, instance_id)
@@ -179,8 +184,8 @@ async def get_service_instance(
 async def update_service_instance(
     instance_id: int,
     data: ServiceInstanceUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Update a service instance."""
     instance = ServiceInstanceDAO.get_by_id(db, instance_id)
@@ -197,8 +202,8 @@ async def update_service_instance(
 @router.delete("/{instance_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_service_instance(
     instance_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Delete a service instance."""
     instance = ServiceInstanceDAO.get_by_id(db, instance_id)
@@ -214,8 +219,8 @@ async def delete_service_instance(
 async def test_service_instance(
     instance_id: int,
     body: ServiceInstanceTestBody,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Test connection to the runner. Requires api_key (we don't store plaintext)."""
     instance = ServiceInstanceDAO.get_by_id(db, instance_id)

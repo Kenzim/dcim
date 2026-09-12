@@ -12,6 +12,10 @@ from app.dao.proxy_runner_dao import ProxyRunnerDAO
 from app.models.proxy_runner import ProxyRunner
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/admin/proxy-runners", tags=["proxy-runners"])
 
 
@@ -61,8 +65,8 @@ def _to_response(row: ProxyRunner, *, api_key: Optional[str] = None) -> ProxyRun
 @router.get("", response_model=List[ProxyRunnerResponse])
 @router.get("/", response_model=List[ProxyRunnerResponse])
 async def list_proxy_runners(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     return [_to_response(row) for row in ProxyRunnerDAO.get_all(db)]
 
@@ -71,8 +75,8 @@ async def list_proxy_runners(
 @router.post("/", response_model=ProxyRunnerResponse, status_code=status.HTTP_201_CREATED)
 async def create_proxy_runner(
     data: ProxyRunnerCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     name = (data.name or "").strip()
     if not name:
@@ -87,8 +91,8 @@ async def create_proxy_runner(
 @router.get("/{runner_id}", response_model=ProxyRunnerResponse)
 async def get_proxy_runner(
     runner_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxyRunnerDAO.get_by_id(db, runner_id)
     if not row:
@@ -100,8 +104,8 @@ async def get_proxy_runner(
 async def update_proxy_runner(
     runner_id: int,
     data: ProxyRunnerUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxyRunnerDAO.get_by_id(db, runner_id)
     if not row:
@@ -115,8 +119,8 @@ async def update_proxy_runner(
 @router.post("/{runner_id}/rotate-key", response_model=ProxyRunnerKeyResponse)
 async def rotate_proxy_runner_key(
     runner_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxyRunnerDAO.get_by_id(db, runner_id)
     if not row:
@@ -131,8 +135,8 @@ async def rotate_proxy_runner_key(
 @router.delete("/{runner_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_proxy_runner(
     runner_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if not ProxyRunnerDAO.delete(db, runner_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy runner not found")

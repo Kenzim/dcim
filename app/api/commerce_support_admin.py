@@ -84,20 +84,20 @@ def _serialize_ticket(ticket: Ticket, *, include_messages: bool = False) -> dict
     return payload
 
 
-@router.get("/departments", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/departments", responses=COMMON_ERROR_RESPONSES)
 def list_departments(db: DbDep):
     rows = TicketDepartmentDAO.list_admin(db)
     return [_serialize_department(row) for row in rows]
 
 
-@router.get("/tickets", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/tickets", responses=COMMON_ERROR_RESPONSES)
 def list_tickets(
-    status_filter: Optional[TicketStatus] = Query(default=None, alias="status"),
+    status_filter: Annotated[Optional[TicketStatus], Query(alias="status")] = None,
     department_id: Optional[int] = None,
     assigned_admin_id: Optional[int] = None,
     q: Optional[str] = None,
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     db: DbDep,
 ):
@@ -113,7 +113,7 @@ def list_tickets(
     return [_serialize_ticket(row) for row in rows]
 
 
-@router.get("/tickets/{ticket_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/tickets/{ticket_id}", responses=COMMON_ERROR_RESPONSES)
 def get_ticket(ticket_id: int, db: DbDep):
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
@@ -122,7 +122,7 @@ def get_ticket(ticket_id: int, db: DbDep):
     return _serialize_ticket(ticket, include_messages=True)
 
 
-@router.post("/tickets/{ticket_id}/reply", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/tickets/{ticket_id}/reply", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def reply_to_ticket(
     ticket_id: int,
     body: TicketReplyBody,
@@ -147,7 +147,7 @@ def reply_to_ticket(
     return _serialize_message(message)
 
 
-@router.patch("/tickets/{ticket_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.patch("/tickets/{ticket_id}", responses=COMMON_ERROR_RESPONSES)
 def patch_ticket(
     ticket_id: int,
     body: TicketPatchBody,

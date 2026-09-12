@@ -8,6 +8,10 @@ from app.dao import CableRunDAO, SwitchPortDAO, NetworkPortDAO
 from app.models.cable_run import CableRun
 import logging
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -92,8 +96,8 @@ def _cable_run_to_response(db: Session, cable_run: CableRun) -> CableRunResponse
 @router.post("/", response_model=CableRunResponse, status_code=status.HTTP_201_CREATED)
 async def create_cable_run(
     cable_data: CableRunCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Create a cable run between two ports (each can be a switch port or server port)."""
     for ref in (cable_data.port_a, cable_data.port_b):
@@ -147,8 +151,9 @@ async def list_cable_runs(
     limit: int = 100,
     switch_id: int | None = None,
     server_id: int | None = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: AdminDep,
+    db: DbDep
 ):
     """List cable runs, optionally filtered by switch_id or server_id."""
     # Coerce to int so query params passed as strings (e.g. ?server_id=1) always match DB integers
@@ -166,8 +171,8 @@ async def list_cable_runs(
 @router.get("/{cable_run_id}", response_model=CableRunResponse)
 async def get_cable_run(
     cable_run_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get a cable run by ID."""
     cable_run = CableRunDAO.get_by_id(db, cable_run_id)
@@ -183,8 +188,8 @@ async def get_cable_run(
 async def update_cable_run(
     cable_run_id: int,
     cable_data: CableRunUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Update a cable run (metadata only; endpoints cannot be changed)."""
     cable_run = CableRunDAO.get_by_id(db, cable_run_id)
@@ -206,8 +211,8 @@ async def update_cable_run(
 @router.delete("/{cable_run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_cable_run(
     cable_run_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete a cable run."""
     success = CableRunDAO.delete(db, cable_run_id)

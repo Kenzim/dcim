@@ -18,6 +18,10 @@ from app.dao.server_dao import ServerDAO
 from app.services.server_activity_logger import log_server_activity_success, log_server_activity_failure
 import logging
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/servers/{server_id}/installation-tasks", tags=["installation-tasks"])
@@ -102,8 +106,8 @@ class InstallationTaskResponse(BaseModel):
 @router.post("/purge-pending")
 async def purge_pending_installation_tasks(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete all pending installation tasks for this server (admin only)."""
     server = ServerDAO.get_by_id(db, server_id)
@@ -120,8 +124,8 @@ async def purge_pending_installation_tasks(
 @router.get("", response_model=List[InstallationTaskResponse])
 async def get_installation_history(
     server_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get installation history for a server"""
     # Verify server exists
@@ -162,7 +166,8 @@ async def update_installation_logs(
     task_id: int,
     log_data: InstallationTaskLogUpdate,
     token: Optional[str] = Query(None, description="Download token bound to the boot task"),
-    db: Session = Depends(get_db)
+    *,
+    db: DbDep
 ):
     """
     Update installation task logs.
@@ -267,8 +272,8 @@ async def update_installation_task_status(
     server_id: int,
     task_id: int,
     body: InstallationTaskStatusUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """
     Manually update installation task status (admin only).

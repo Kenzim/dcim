@@ -264,12 +264,12 @@ def _serialize_ticket(ticket, *, include_messages: bool = False) -> dict:
 # --- Products ---
 
 
-@router.get("/products", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products", responses=COMMON_ERROR_RESPONSES)
 def browse_products(
     category_id: Optional[int] = None,
     q: Optional[str] = None,
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     db: DbDep,
 ):
@@ -287,7 +287,7 @@ def browse_products(
     return [_serialize_client_product(row) for row in rows]
 
 
-@router.get("/products/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products/{product_id}", responses=COMMON_ERROR_RESPONSES)
 def get_product(product_id: int, db: DbDep):
     row = FrontendProductDAO.get_product_with_plans(db, product_id)
     if row is None or not row.enabled:
@@ -297,7 +297,7 @@ def get_product(product_id: int, db: DbDep):
     return _serialize_client_product(row, detailed=True)
 
 
-@router.post("/quote", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/quote", responses=COMMON_ERROR_RESPONSES)
 def quote_checkout(
     body: QuoteRequest,
     *,
@@ -322,7 +322,7 @@ def quote_checkout(
     }
 
 
-@router.post("/checkout", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/checkout", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def checkout(
     body: CheckoutRequest,
     request: Request,
@@ -360,11 +360,11 @@ def checkout(
 # --- Orders ---
 
 
-@router.get("/orders", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/orders", responses=COMMON_ERROR_RESPONSES)
 def list_orders(
-    status_filter: Optional[OrderStatus] = Query(default=None, alias="status"),
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    status_filter: Annotated[Optional[OrderStatus], Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     account: AccountDep,
     db: DbDep,
@@ -375,7 +375,7 @@ def list_orders(
     return [_serialize_order(row) for row in rows]
 
 
-@router.get("/orders/{order_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/orders/{order_id}", responses=COMMON_ERROR_RESPONSES)
 def get_order(
     order_id: int,
     account: AccountDep,
@@ -393,11 +393,11 @@ def get_order(
 # --- Invoices ---
 
 
-@router.get("/invoices", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/invoices", responses=COMMON_ERROR_RESPONSES)
 def list_invoices(
-    status_filter: Optional[InvoiceStatus] = Query(default=None, alias="status"),
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    status_filter: Annotated[Optional[InvoiceStatus], Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     account: AccountDep,
     db: DbDep,
@@ -413,7 +413,7 @@ def list_invoices(
     return [_serialize_invoice(db, row) for row in rows]
 
 
-@router.get("/invoices/{invoice_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/invoices/{invoice_id}", responses=COMMON_ERROR_RESPONSES)
 def get_invoice(
     invoice_id: int,
     account: AccountDep,
@@ -425,7 +425,7 @@ def get_invoice(
     return _serialize_invoice(db, invoice)
 
 
-@router.get("/invoices/{invoice_id}/pdf", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/invoices/{invoice_id}/pdf", responses=COMMON_ERROR_RESPONSES)
 def get_invoice_pdf(
     invoice_id: int,
     account: AccountDep,
@@ -447,7 +447,7 @@ def get_invoice_pdf(
     )
 
 
-@router.post("/invoices/{invoice_id}/pay", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/invoices/{invoice_id}/pay", responses=COMMON_ERROR_RESPONSES)
 def pay_invoice(
     invoice_id: int,
     auth: ClientSessionDep,
@@ -502,7 +502,7 @@ def pay_invoice(
 # --- Payment methods (stub) ---
 
 
-@router.get("/payment-methods", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/payment-methods", responses=COMMON_ERROR_RESPONSES)
 def list_payment_methods():
     return {
         "items": [],
@@ -516,7 +516,7 @@ def list_payment_methods():
 # --- Ticket departments ---
 
 
-@router.get("/ticket-departments", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/ticket-departments", responses=COMMON_ERROR_RESPONSES)
 def list_ticket_departments(db: DbDep):
     from app.dao.ticket_dao import TicketDepartmentDAO
 
@@ -536,7 +536,7 @@ def list_ticket_departments(db: DbDep):
 # --- Service lifecycle ---
 
 
-@router.post("/services/{service_id}/cancel", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/cancel", responses=COMMON_ERROR_RESPONSES)
 def cancel_service(
     service_id: int,
     body: ServiceCancelBody,
@@ -557,7 +557,7 @@ def cancel_service(
     return result
 
 
-@router.post("/services/{service_id}/upgrade", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/upgrade", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def upgrade_service(
     service_id: int,
     body: ServiceUpgradeBody,
@@ -584,10 +584,10 @@ def upgrade_service(
 # --- Emails ---
 
 
-@router.get("/emails", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/emails", responses=COMMON_ERROR_RESPONSES)
 def list_emails(
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     auth: ClientSessionDep,
     db: DbDep,
@@ -611,10 +611,10 @@ def list_emails(
 # --- Activity ---
 
 
-@router.get("/activity", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/activity", responses=COMMON_ERROR_RESPONSES)
 def list_activity(
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     auth: ClientSessionDep,
     db: DbDep,
@@ -645,7 +645,7 @@ def list_activity(
 # --- Billing profile ---
 
 
-@router.get("/profile", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/profile", responses=COMMON_ERROR_RESPONSES)
 def get_profile(
     account: AccountDep,
     db: DbDep,
@@ -669,7 +669,7 @@ def get_profile(
     }
 
 
-@router.put("/profile", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/profile", responses=COMMON_ERROR_RESPONSES)
 def update_profile(
     body: ProfileUpdate,
     account: AccountDep,
@@ -699,7 +699,7 @@ def update_profile(
 # --- Discord ---
 
 
-@router.get("/discord/authorize-url", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/discord/authorize-url", responses=COMMON_ERROR_RESPONSES)
 def discord_authorize_url(
     auth: ClientSessionDep,
 ):
@@ -714,7 +714,7 @@ def discord_authorize_url(
     return {"authorize_url": url, "state": state}
 
 
-@router.post("/discord/callback", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/discord/callback", responses=COMMON_ERROR_RESPONSES)
 def discord_callback(
     body: DiscordCallbackBody,
     auth: ClientSessionDep,
@@ -742,7 +742,7 @@ def discord_callback(
     }
 
 
-@router.delete("/discord", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/discord", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def discord_unlink(
     auth: ClientSessionDep,
     db: DbDep,
@@ -755,11 +755,11 @@ def discord_unlink(
 # --- Support tickets ---
 
 
-@router.get("/tickets", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/tickets", responses=COMMON_ERROR_RESPONSES)
 def list_tickets(
-    status_filter: Optional[TicketStatus] = Query(default=None, alias="status"),
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    status_filter: Annotated[Optional[TicketStatus], Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     account: AccountDep,
     db: DbDep,
@@ -770,7 +770,7 @@ def list_tickets(
     return [_serialize_ticket(row) for row in rows]
 
 
-@router.post("/tickets", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/tickets", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_ticket(
     body: TicketCreate,
     auth: ClientSessionDep,
@@ -794,7 +794,7 @@ def create_ticket(
     return _serialize_ticket(ticket)
 
 
-@router.get("/tickets/{ticket_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/tickets/{ticket_id}", responses=COMMON_ERROR_RESPONSES)
 def get_ticket(
     ticket_id: int,
     account: AccountDep,
@@ -814,7 +814,7 @@ def get_ticket(
     return _serialize_ticket(ticket, include_messages=True)
 
 
-@router.post("/tickets/{ticket_id}/messages", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/tickets/{ticket_id}/messages", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def add_ticket_message(
     ticket_id: int,
     body: TicketMessageCreate,
@@ -848,7 +848,7 @@ def add_ticket_message(
 # --- TOTP 2FA stubs ---
 
 
-@router.post("/2fa/setup", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/2fa/setup", responses=COMMON_ERROR_RESPONSES)
 def totp_setup(
     auth: ClientSessionDep,
     db: DbDep,
@@ -885,7 +885,7 @@ def totp_setup(
     return {"secret": secret, "otpauth_uri": uri}
 
 
-@router.post("/2fa/confirm", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/2fa/confirm", responses=COMMON_ERROR_RESPONSES)
 def totp_confirm(
     body: TotpConfirmBody,
     auth: ClientSessionDep,
@@ -910,7 +910,7 @@ def totp_confirm(
     return {"enabled": True}
 
 
-@router.post("/2fa/disable", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/2fa/disable", responses=COMMON_ERROR_RESPONSES)
 def totp_disable(
     body: TotpDisableBody,
     auth: ClientSessionDep,

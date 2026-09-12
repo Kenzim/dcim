@@ -976,7 +976,7 @@ def _server_has_capability(db: Session, server: Server, capability_id: str) -> b
     return False
 
 
-@router.post("/test", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/test", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def test_server_connection(
     test_data: ServerTestRequest,
     auth: AdminDep,
@@ -1018,7 +1018,7 @@ async def test_server_connection(
         }
 
 
-@router.post("/{server_id}/test-capabilities", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/test-capabilities", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def test_server_capabilities(
     server_id: int,
     auth: AdminDep,
@@ -1045,7 +1045,7 @@ async def test_server_capabilities(
     }
 
 
-@router.get("/{server_id}/capabilities", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/capabilities", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_server_capabilities(
     server_id: int,
     auth: AdminDep,
@@ -1057,7 +1057,7 @@ async def get_server_capabilities(
     return _build_server_capabilities_payload(db, server)
 
 
-@router.post("/{server_id}/capabilities", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/capabilities", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def update_server_capabilities(
     server_id: int,
     payload: ServerCapabilitiesUpdateRequest,
@@ -1089,7 +1089,7 @@ async def update_server_capabilities(
     return _build_server_capabilities_payload(db, server)
 
 
-@router.get("/", response_model=List[ServerResponse], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/", response_model=List[ServerResponse], responses=COMMON_ERROR_RESPONSES)
 async def list_servers(
     skip: int = 0,
     limit: int = 100,
@@ -1137,7 +1137,7 @@ async def list_servers(
     return result
 
 
-@router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_server(
     server_data: ServerCreate,
     auth: AdminDep,
@@ -1363,7 +1363,7 @@ async def create_server(
         )
 
 
-@router.post("/{server_id}/ipmi-ticket", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/ipmi-ticket", responses=COMMON_ERROR_RESPONSES)
 async def create_server_ipmi_ticket(
     server_id: int,
     auth: AdminDep,
@@ -1383,7 +1383,7 @@ async def create_server_ipmi_ticket(
         ) from exc
 
 
-@router.get("/{server_id}/kvm-popup", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/kvm-popup", responses=COMMON_ERROR_RESPONSES)
 async def server_kvm_popup(
     server_id: int,
     auth: AdminDep,
@@ -1394,7 +1394,7 @@ async def server_kvm_popup(
     return kvm_popup_redirect(ServerDAO.get_by_id(db, server_id))
 
 
-@router.get("/{server_id}/sol-popup", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/sol-popup", responses=COMMON_ERROR_RESPONSES)
 async def server_sol_popup(
     server_id: int,
     auth: AdminDep,
@@ -1405,7 +1405,7 @@ async def server_sol_popup(
     return sol_popup_redirect(ServerDAO.get_by_id(db, server_id))
 
 
-@router.post("/{server_id}/sol/send", response_model=SolSendResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/sol/send", response_model=SolSendResponse, responses=COMMON_ERROR_RESPONSES)
 async def server_sol_send(
     server_id: int,
     body: SolSendRequest,
@@ -1419,7 +1419,7 @@ async def server_sol_send(
     )
 
 
-@router.get("/{server_id}", response_model=ServerResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}", response_model=ServerResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_server(
     server_id: int,
     auth: AdminDep,
@@ -1483,7 +1483,7 @@ async def get_server(
     }
 
 
-@router.post("/{server_id}/hardware-detection/run", response_model=HardwareDetectionRunResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/hardware-detection/run", response_model=HardwareDetectionRunResponse, responses=COMMON_ERROR_RESPONSES)
 async def run_hardware_detection(
     server_id: int,
     auth: AdminDep,
@@ -1577,7 +1577,7 @@ async def run_hardware_detection(
     )
 
 
-@router.post("/{server_id}/boot/fix-boot-order", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/boot/fix-boot-order", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def queue_boot_order_fix(
     server_id: int,
     auth: AdminDep,
@@ -1673,7 +1673,7 @@ async def queue_boot_order_fix(
     }
 
 
-@router.get("/{server_id}/hardware-detection/reports", response_model=List[HardwareDetectionReportResponse], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/hardware-detection/reports", response_model=List[HardwareDetectionReportResponse], responses=COMMON_ERROR_RESPONSES)
 async def list_hardware_detection_reports(
     server_id: int,
     status_filter: Optional[str] = None,
@@ -1695,7 +1695,7 @@ async def list_hardware_detection_reports(
     return [HardwareDetectionReportResponse.from_model(r) for r in reports]
 
 
-@router.get("/{server_id}/hardware-detection/reports/{report_id}", response_model=HardwareDetectionReportResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/hardware-detection/reports/{report_id}", response_model=HardwareDetectionReportResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_hardware_detection_report(
     server_id: int,
     report_id: int,
@@ -1708,7 +1708,7 @@ async def get_hardware_detection_report(
     return HardwareDetectionReportResponse.from_model(report)
 
 
-@router.get("/{server_id}/hardware-detection/reports/{report_id}/diff", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/hardware-detection/reports/{report_id}/diff", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_hardware_detection_diff(
     server_id: int,
     report_id: int,
@@ -1731,7 +1731,7 @@ async def get_hardware_detection_diff(
     }
 
 
-@router.post("/{server_id}/hardware-detection/reports/{report_id}/reject", response_model=HardwareDetectionReportResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/hardware-detection/reports/{report_id}/reject", response_model=HardwareDetectionReportResponse, responses=COMMON_ERROR_RESPONSES)
 async def reject_hardware_detection_report(
     server_id: int,
     report_id: int,
@@ -1751,7 +1751,7 @@ async def reject_hardware_detection_report(
     return HardwareDetectionReportResponse.from_model(report)
 
 
-@router.post("/{server_id}/hardware-detection/reports/{report_id}/apply", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/hardware-detection/reports/{report_id}/apply", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def apply_hardware_detection_report(
     server_id: int,
     report_id: int,
@@ -1787,7 +1787,7 @@ async def apply_hardware_detection_report(
     }
 
 
-@router.delete("/{server_id}/hardware-detection/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/{server_id}/hardware-detection/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 async def delete_hardware_detection_report(
     server_id: int,
     report_id: int,
@@ -1849,7 +1849,7 @@ def _downsample_bandwidth_server(samples: list, resolution_minutes: int):
     return out
 
 
-@router.get("/{server_id}/bandwidth", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/bandwidth", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_server_bandwidth(
     server_id: int,
     hours: int = 24,
@@ -1929,7 +1929,7 @@ async def get_server_bandwidth(
     return {"server_id": server_id, "hours": hours, "resolution_minutes": resolution_minutes or None, "ports": result}
 
 
-@router.put("/{server_id}", response_model=ServerResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.put("/{server_id}", response_model=ServerResponse, responses=COMMON_ERROR_RESPONSES)
 async def update_server(
     server_id: int,
     server_data: ServerUpdate,
@@ -2228,7 +2228,7 @@ async def update_server(
     }
 
 
-@router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 async def delete_server(
     server_id: int,
     auth: AdminDep,
@@ -2262,7 +2262,7 @@ async def delete_server(
 # ========== Power Control Endpoints ==========
 
 
-@router.get("/{server_id}/activity", response_model=List[ServerActivityResponse], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/activity", response_model=List[ServerActivityResponse], responses=COMMON_ERROR_RESPONSES)
 async def get_server_activity(
     server_id: int,
     limit: int = 100,
@@ -2283,7 +2283,7 @@ async def get_server_activity(
     return [ServerActivityResponse.from_model(entry) for entry in entries]
 
 
-@router.get("/{server_id}/power-state", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/power-state", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_server_power_state(
     server_id: int,
     auth: AdminDep,
@@ -2320,7 +2320,7 @@ async def get_server_power_state(
         )
 
 
-@router.post("/{server_id}/power-on", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/power-on", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def power_on_server(
     server_id: int,
     auth: AdminDep,
@@ -2397,7 +2397,7 @@ async def power_on_server(
         )
 
 
-@router.post("/{server_id}/power-off", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/power-off", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def power_off_server(
     server_id: int,
     force: bool = False,
@@ -2477,7 +2477,7 @@ async def power_off_server(
         )
 
 
-@router.post("/{server_id}/power-reset", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/power-reset", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def power_reset_server(
     server_id: int,
     auth: AdminDep,
@@ -2554,7 +2554,7 @@ async def power_reset_server(
         )
 
 
-@router.get("/{server_id}/boot/options", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/boot/options", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_server_boot_options(
     server_id: int,
     auth: AdminDep,
@@ -2604,7 +2604,7 @@ async def get_server_boot_options(
         )
 
 
-@router.post("/{server_id}/boot/set", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/boot/set", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def set_server_boot_option(
     server_id: int,
     payload: ServerBootSetRequest,
@@ -2705,7 +2705,7 @@ async def set_server_boot_option(
         )
 
 
-@router.post("/{server_id}/boot/kernel-args-preview", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/boot/kernel-args-preview", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def preview_server_kernel_args(
     server_id: int,
     payload: ServerKernelArgsPreviewRequest,

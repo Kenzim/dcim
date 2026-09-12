@@ -323,7 +323,7 @@ def _billing_activity_log_kw(db: Session, service: Service) -> dict:
     return {"service_id": service.id}
 
 
-@router.get("/server-by-ip", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/server-by-ip", responses=COMMON_ERROR_RESPONSES)
 async def get_server_by_ip(
     ip: str,
     *,
@@ -353,7 +353,7 @@ async def get_server_by_ip(
     }
 
 
-@router.post("/register-service", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/register-service", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def register_service(
     data: BillingRegisterService,
     integration: BillingIntegrationDep,
@@ -1761,7 +1761,7 @@ async def create_vm_service(
     return _billing_service_response(db, service)
 
 
-@router.get("/services", response_model=List[BillingServiceResponse], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services", response_model=List[BillingServiceResponse], responses=COMMON_ERROR_RESPONSES)
 async def list_services(
     skip: int = 0,
     limit: int = 100,
@@ -1801,7 +1801,7 @@ async def list_services(
     return [_billing_service_response(db, s) for s in services]
 
 
-@router.get("/services/lookup", response_model=List[BillingServiceLookupItem], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/lookup", response_model=List[BillingServiceLookupItem], responses=COMMON_ERROR_RESPONSES)
 async def lookup_services(
     q: Optional[str] = None,
     service_id: Optional[int] = None,
@@ -1910,7 +1910,7 @@ async def lookup_services(
     return results[:50]
 
 
-@router.post("/services/adopt-vm", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/adopt-vm", response_model=BillingServiceResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def adopt_vm_service(
     body: BillingAdoptVmService,
     integration: BillingIntegrationDep,
@@ -2046,7 +2046,7 @@ async def adopt_vm_service(
     return _billing_service_response(db, service)
 
 
-@router.get("/services/{service_id}", response_model=BillingServiceDetailResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}", response_model=BillingServiceDetailResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_service(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -2094,7 +2094,7 @@ async def get_service(
     return BillingServiceDetailResponse(**payload)
 
 
-@router.post("/services/{service_id}/link", response_model=BillingServiceResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/link", response_model=BillingServiceResponse, responses=COMMON_ERROR_RESPONSES)
 async def link_service(
     service_id: int,
     data: BillingLinkService,
@@ -2173,7 +2173,7 @@ async def link_service(
     return _billing_service_response(db, service)
 
 
-@router.post("/services/{service_id}/unlink", response_model=BillingServiceResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/unlink", response_model=BillingServiceResponse, responses=COMMON_ERROR_RESPONSES)
 async def unlink_service(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -2201,7 +2201,7 @@ async def unlink_service(
     return _billing_service_response(db, service)
 
 
-@router.put("/services/{service_id}/vm/placement", response_model=BillingServiceResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.put("/services/{service_id}/vm/placement", response_model=BillingServiceResponse, responses=COMMON_ERROR_RESPONSES)
 async def update_vm_placement(
     service_id: int,
     body: BillingVmPlacementUpdate,
@@ -2284,7 +2284,7 @@ async def update_vm_placement(
     return _billing_service_response(db, service)
 
 
-@router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 async def terminate_service(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -2350,7 +2350,7 @@ async def terminate_service(
     return None
 
 
-@router.post("/services/{service_id}/suspend", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/suspend", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def suspend_service(
     service_id: int,
     action: SuspendAction,
@@ -2431,7 +2431,7 @@ async def suspend_service(
     return {"status": "suspended", "message": "Service has been suspended"}
 
 
-@router.post("/services/{service_id}/unsuspend", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/unsuspend", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def unsuspend_service(
     service_id: int,
     action: SuspendAction,
@@ -2485,7 +2485,7 @@ async def unsuspend_service(
     return {"status": "active", "message": "Service has been unsuspended"}
 
 
-@router.post("/services/{service_id}/power", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/power", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def power_control(
     service_id: int,
     power_action: PowerAction,
@@ -2628,7 +2628,7 @@ async def power_control(
     return {"status": "success", "action": action, "message": f"Server power {action} command executed"}
 
 
-@router.get("/services/{service_id}/status", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/status", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def get_service_status(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -2788,7 +2788,7 @@ async def get_service_status(
     }
 
 
-@router.post("/services/{service_id}/proxy/rotate", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/proxy/rotate", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def rotate_proxy_credentials(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -2843,7 +2843,7 @@ class BillingReassignVmIpBody(BaseModel):
     )
 
 
-@router.get("/services/{service_id}/available-ips", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/available-ips", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_list_available_vm_ips(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -2862,7 +2862,7 @@ async def billing_list_available_vm_ips(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.post("/services/{service_id}/reassign-ip", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/reassign-ip", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_reassign_vm_ip(
     service_id: int,
     body: BillingReassignVmIpBody,
@@ -2888,7 +2888,7 @@ async def billing_reassign_vm_ip(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@router.get("/services/{service_id}/actions", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/actions", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_list_strategy_actions(
     service_id: int,
     audience: str = "client",
@@ -2939,7 +2939,7 @@ def _billing_backup_service(
     return service, map_backup_error
 
 
-@router.get("/services/{service_id}/backups", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/backups", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_list_backups(
     service_id: int,
     audience: str = "client",
@@ -2959,7 +2959,7 @@ async def billing_list_backups(
     return {"backups": items, "jobs": jobs}
 
 
-@router.get("/services/{service_id}/backup-jobs", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/backup-jobs", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_list_backup_jobs(
     service_id: int,
     audience: str = "client",
@@ -2979,7 +2979,7 @@ async def billing_list_backup_jobs(
     return {"jobs": jobs}
 
 
-@router.post("/services/{service_id}/backups", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/backups", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_create_backup(
     service_id: int,
     body: BillingBackupCreate,
@@ -3001,7 +3001,7 @@ async def billing_create_backup(
         raise map_err(exc) from exc
 
 
-@router.post("/services/{service_id}/backups/delete", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/backups/delete", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_delete_backup(
     service_id: int,
     body: BillingBackupMutate,
@@ -3022,7 +3022,7 @@ async def billing_delete_backup(
     return {"status": "ok"}
 
 
-@router.post("/services/{service_id}/backups/restore", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/backups/restore", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_restore_backup(
     service_id: int,
     body: BillingBackupMutate,
@@ -3062,7 +3062,7 @@ class BillingVmReinstallBody(BaseModel):
     ssh_public_keys: Optional[str] = None
 
 
-@router.get("/services/{service_id}/vm/reinstall-options", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/vm/reinstall-options", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_vm_reinstall_options(
     service_id: int,
     audience: str = "admin",
@@ -3092,7 +3092,7 @@ async def billing_vm_reinstall_options(
     }
 
 
-@router.post("/services/{service_id}/vm/reinstall", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/vm/reinstall", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_vm_reinstall(
     service_id: int,
     body: Optional[BillingVmReinstallBody] = None,
@@ -3128,7 +3128,7 @@ async def billing_vm_reinstall(
     return result
 
 
-@router.post("/services/{service_id}/ipmi-ticket", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/ipmi-ticket", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def create_ipmi_ticket(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3173,7 +3173,7 @@ async def create_ipmi_ticket(
     return payload
 
 
-@router.post("/services/{service_id}/vnc-ticket", status_code=status.HTTP_200_OK, response_model=VmVncTicketResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/vnc-ticket", status_code=status.HTTP_200_OK, response_model=VmVncTicketResponse, responses=COMMON_ERROR_RESPONSES)
 async def create_vnc_ticket(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3217,7 +3217,7 @@ async def create_vnc_ticket(
     return VmVncTicketResponse(launch_url=launch_url, expires_in=settings.vm_vnc_launch_ttl_seconds)
 
 
-@router.post("/services/{service_id}/kvm-ticket", status_code=status.HTTP_200_OK, response_model=IpmiKvmTicketResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/kvm-ticket", status_code=status.HTTP_200_OK, response_model=IpmiKvmTicketResponse, responses=COMMON_ERROR_RESPONSES)
 async def create_kvm_ticket(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3267,7 +3267,7 @@ async def create_kvm_ticket(
     return IpmiKvmTicketResponse(launch_url=launch_url, expires_in=settings.ipmi_kvm_launch_ttl_seconds)
 
 
-@router.post("/services/{service_id}/sol-ticket", status_code=status.HTTP_200_OK, response_model=SolTicketResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/sol-ticket", status_code=status.HTTP_200_OK, response_model=SolTicketResponse, responses=COMMON_ERROR_RESPONSES)
 async def create_sol_ticket(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3314,7 +3314,7 @@ async def create_sol_ticket(
     return SolTicketResponse(launch_url=launch_url, expires_in=settings.sol_launch_ttl_seconds)
 
 
-@router.post("/services/{service_id}/sol/send", status_code=status.HTTP_200_OK, response_model=SolSendResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/sol/send", status_code=status.HTTP_200_OK, response_model=SolSendResponse, responses=COMMON_ERROR_RESPONSES)
 async def billing_sol_send(
     service_id: int,
     body: SolSendRequest,
@@ -3338,7 +3338,7 @@ async def billing_sol_send(
     )
 
 
-@router.get("/services/{service_id}/virtual-media", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/virtual-media", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses=COMMON_ERROR_RESPONSES)
 async def billing_get_virtual_media(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3353,7 +3353,7 @@ async def billing_get_virtual_media(
     return await perform_status(service_linked_server(db, service))
 
 
-@router.post("/services/{service_id}/virtual-media/insert", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/virtual-media/insert", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses=COMMON_ERROR_RESPONSES)
 async def billing_insert_virtual_media(
     service_id: int,
     body: VirtualMediaInsertRequest,
@@ -3375,7 +3375,7 @@ async def billing_insert_virtual_media(
     )
 
 
-@router.post("/services/{service_id}/virtual-media/eject", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/virtual-media/eject", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses=COMMON_ERROR_RESPONSES)
 async def billing_eject_virtual_media(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3394,7 +3394,7 @@ async def billing_eject_virtual_media(
     )
 
 
-@router.post("/services/{service_id}/portal-sso", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/portal-sso", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def create_portal_sso_ticket(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3430,7 +3430,7 @@ async def create_portal_sso_ticket(
     return {"token": token, "redeem_path": "/api/client/sso/redeem", "expires_in": settings.client_sso_ticket_ttl_seconds}
 
 
-@router.get("/services/{service_id}/usage", response_model=ServerUsage, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}/usage", response_model=ServerUsage, responses=COMMON_ERROR_RESPONSES)
 async def get_service_usage(
     service_id: int,
     integration: BillingIntegrationDep,
@@ -3484,7 +3484,7 @@ async def get_service_usage(
     )
 
 
-@router.post("/services/{service_id}/actions/run-script", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/actions/run-script", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def run_script_on_service(
     service_id: int,
     action: ServiceActionRunScript,
@@ -3680,7 +3680,7 @@ async def run_script_on_service(
     }
 
 
-@router.post("/services/{service_id}/actions/reinstall-os", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/actions/reinstall-os", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def reinstall_os_on_service(
     service_id: int,
     action: ServiceActionReinstallOS,
@@ -3931,7 +3931,7 @@ async def reinstall_os_on_service(
 
 # Registered after static /actions/run-script and /actions/reinstall-os so those
 # BMS endpoints are not swallowed by the {action_name} path parameter.
-@router.post("/services/{service_id}/actions/{action_name}", status_code=status.HTTP_200_OK, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/services/{service_id}/actions/{action_name}", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def billing_run_strategy_action(
     service_id: int,
     action_name: str,
@@ -4046,7 +4046,7 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
     }
 
 
-@router.get("/products", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products", response_model=List[dict], responses=COMMON_ERROR_RESPONSES)
 async def list_products_billing(
     service_type: Optional[str] = None,
     include_disabled: bool = False,
@@ -4076,7 +4076,7 @@ async def list_products_billing(
     return out
 
 
-@router.get("/products/{product_code}", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products/{product_code}", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def get_product_billing(
     product_code: str,
     integration: BillingIntegrationDep,
@@ -4092,7 +4092,7 @@ async def get_product_billing(
     return _billing_product_catalog_item(db, product)
 
 
-@router.get("/isos", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/isos", response_model=List[dict], responses=COMMON_ERROR_RESPONSES)
 async def list_isos_billing(
     integration: BillingIntegrationDep,
 ):
@@ -4104,7 +4104,7 @@ async def list_isos_billing(
     return catalog_for_billing()
 
 
-@router.get("/temp-os", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/temp-os", response_model=List[dict], responses=COMMON_ERROR_RESPONSES)
 async def list_temp_os_billing(
     integration: BillingIntegrationDep,
 ):
@@ -4123,7 +4123,7 @@ async def list_temp_os_billing(
     ]
 
 
-@router.get("/proxmox/clusters", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/proxmox/clusters", response_model=List[dict], responses=COMMON_ERROR_RESPONSES)
 async def list_proxmox_clusters_billing(
     integration: BillingIntegrationDep,
     db: DbDep,
@@ -4155,7 +4155,7 @@ async def list_proxmox_clusters_billing(
     return out
 
 
-@router.get("/server-groups", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/server-groups", response_model=List[dict], responses=COMMON_ERROR_RESPONSES)
 async def list_server_groups_billing(
     skip: int = 0,
     limit: int = 100,
@@ -4192,7 +4192,7 @@ async def list_server_groups_billing(
     ]
 
 
-@router.get("/scripts", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/scripts", response_model=List[dict], responses=COMMON_ERROR_RESPONSES)
 async def list_available_scripts(
     integration: BillingIntegrationDep,
     db: DbDep
@@ -4214,7 +4214,7 @@ async def list_available_scripts(
     ]
 
 
-@router.get("/os-templates", response_model=List[dict], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/os-templates", response_model=List[dict], responses=COMMON_ERROR_RESPONSES)
 async def list_available_os_templates(
     service_id: Optional[int] = None,
     *,

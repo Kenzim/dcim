@@ -7,6 +7,10 @@ from app.core.auth import require_admin
 from app.dao import LocationDAO
 from app.models.location import Location
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter()
 
 
@@ -26,8 +30,8 @@ class LocationResponse(BaseModel):
 
 @router.get("/", response_model=List[LocationResponse])
 async def list_locations(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all locations"""
     locations = LocationDAO.get_all(db)
@@ -37,8 +41,8 @@ async def list_locations(
 @router.post("/", response_model=LocationResponse, status_code=status.HTTP_201_CREATED)
 async def create_location(
     location_data: LocationCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Create a new location"""
     # Check if location with same name already exists
@@ -60,8 +64,8 @@ async def create_location(
 @router.get("/{location_id}", response_model=LocationResponse)
 async def get_location(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get a location by ID"""
     location = LocationDAO.get_by_id(db, location_id)
@@ -77,8 +81,8 @@ async def get_location(
 async def update_location(
     location_id: int,
     location_data: LocationCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Update a location"""
     location = LocationDAO.get_by_id(db, location_id)
@@ -105,8 +109,8 @@ async def update_location(
 @router.delete("/{location_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_location(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete a location"""
     success = LocationDAO.delete(db, location_id)

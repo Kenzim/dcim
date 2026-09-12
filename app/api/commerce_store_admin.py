@@ -354,11 +354,11 @@ def _product_fields(body: ProductCreate | ProductUpdate, *, creating: bool) -> d
 # --- Categories ---
 
 
-@router.get("/categories", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/categories", responses=COMMON_ERROR_RESPONSES)
 def list_categories(
     enabled_only: bool = False,
-    limit: int = Query(default=200, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     db: DbDep,
 ):
@@ -368,7 +368,7 @@ def list_categories(
     return [_serialize_category(row) for row in rows]
 
 
-@router.post("/categories", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/categories", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_category(body: CategoryCreate, db: DbDep):
     if FrontendProductCategoryDAO.get_by_slug(db, body.slug):
         raise HTTPException(status_code=409, detail="Category slug already exists")
@@ -377,7 +377,7 @@ def create_category(body: CategoryCreate, db: DbDep):
     return _serialize_category(row)
 
 
-@router.get("/categories/{category_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/categories/{category_id}", responses=COMMON_ERROR_RESPONSES)
 def get_category(category_id: int, db: DbDep):
     row = FrontendProductCategoryDAO.get(db, category_id)
     if row is None:
@@ -385,7 +385,7 @@ def get_category(category_id: int, db: DbDep):
     return _serialize_category(row)
 
 
-@router.put("/categories/{category_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/categories/{category_id}", responses=COMMON_ERROR_RESPONSES)
 def update_category(
     category_id: int, body: CategoryUpdate, db: DbDep
 ):
@@ -402,7 +402,7 @@ def update_category(
     return _serialize_category(row)
 
 
-@router.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def delete_category(category_id: int, db: DbDep):
     row = FrontendProductCategoryDAO.get(db, category_id)
     if row is None:
@@ -414,12 +414,12 @@ def delete_category(category_id: int, db: DbDep):
 # --- Products ---
 
 
-@router.get("/products", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products", responses=COMMON_ERROR_RESPONSES)
 def list_products(
     enabled_only: bool = False,
     category_id: Optional[int] = None,
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     db: DbDep,
 ):
@@ -433,7 +433,7 @@ def list_products(
     return [_serialize_product(row) for row in rows]
 
 
-@router.post("/products", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/products", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_product(body: ProductCreate, db: DbDep):
     if FrontendProductDAO.get_by_slug(db, body.slug):
         raise HTTPException(status_code=409, detail="Product slug already exists")
@@ -442,7 +442,7 @@ def create_product(body: ProductCreate, db: DbDep):
     return _serialize_product(row)
 
 
-@router.get("/products/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products/{product_id}", responses=COMMON_ERROR_RESPONSES)
 def get_product(product_id: int, db: DbDep):
     row = FrontendProductDAO.get_product_with_plans(db, product_id)
     if row is None:
@@ -459,7 +459,7 @@ def get_product(product_id: int, db: DbDep):
     return payload
 
 
-@router.put("/products/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/products/{product_id}", responses=COMMON_ERROR_RESPONSES)
 def update_product(
     product_id: int, body: ProductUpdate, db: DbDep
 ):
@@ -476,7 +476,7 @@ def update_product(
     return _serialize_product(row)
 
 
-@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def delete_product(product_id: int, db: DbDep):
     row = FrontendProductDAO.get(db, product_id)
     if row is None:
@@ -488,7 +488,7 @@ def delete_product(product_id: int, db: DbDep):
 # --- Price plans ---
 
 
-@router.post("/products/{product_id}/plans", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/products/{product_id}/plans", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_price_plan(
     product_id: int, body: PricePlanCreate, db: DbDep
 ):
@@ -502,7 +502,7 @@ def create_price_plan(
     return _serialize_plan(row)
 
 
-@router.put("/plans/{plan_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/plans/{plan_id}", responses=COMMON_ERROR_RESPONSES)
 def update_price_plan(plan_id: int, body: PricePlanUpdate, db: DbDep):
     row = PricePlanDAO.get(db, plan_id)
     if row is None:
@@ -512,7 +512,7 @@ def update_price_plan(plan_id: int, body: PricePlanUpdate, db: DbDep):
     return _serialize_plan(row)
 
 
-@router.delete("/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def delete_price_plan(plan_id: int, db: DbDep):
     row = PricePlanDAO.get(db, plan_id)
     if row is None:
@@ -521,7 +521,7 @@ def delete_price_plan(plan_id: int, db: DbDep):
     db.commit()
 
 
-@router.post("/plans/{plan_id}/cycles", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/plans/{plan_id}/cycles", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_plan_cycle(
     plan_id: int, body: PricePlanCycleCreate, db: DbDep
 ):
@@ -533,7 +533,7 @@ def create_plan_cycle(
     return _serialize_cycle(row)
 
 
-@router.put("/cycles/{cycle_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/cycles/{cycle_id}", responses=COMMON_ERROR_RESPONSES)
 def update_plan_cycle(
     cycle_id: int, body: PricePlanCycleUpdate, db: DbDep
 ):
@@ -545,7 +545,7 @@ def update_plan_cycle(
     return _serialize_cycle(row)
 
 
-@router.delete("/cycles/{cycle_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/cycles/{cycle_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def delete_plan_cycle(cycle_id: int, db: DbDep):
     row = PricePlanCycleDAO.get(db, cycle_id)
     if row is None:
@@ -557,7 +557,7 @@ def delete_plan_cycle(cycle_id: int, db: DbDep):
 # --- Product options ---
 
 
-@router.get("/products/{product_id}/options", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products/{product_id}/options", responses=COMMON_ERROR_RESPONSES)
 def list_product_options(product_id: int, db: DbDep):
     product = FrontendProductDAO.get(db, product_id)
     if product is None:
@@ -569,7 +569,7 @@ def list_product_options(product_id: int, db: DbDep):
     ]
 
 
-@router.post("/products/{product_id}/options", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/products/{product_id}/options", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_product_option(
     product_id: int, body: ProductOptionCreate, db: DbDep
 ):
@@ -583,7 +583,7 @@ def create_product_option(
     return _serialize_option(row)
 
 
-@router.put("/options/{option_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/options/{option_id}", responses=COMMON_ERROR_RESPONSES)
 def update_product_option(
     option_id: int, body: ProductOptionUpdate, db: DbDep
 ):
@@ -595,7 +595,7 @@ def update_product_option(
     return _serialize_option(row)
 
 
-@router.delete("/options/{option_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/options/{option_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def delete_product_option(option_id: int, db: DbDep):
     row = ProductOptionDAO.get(db, option_id)
     if row is None:
@@ -604,7 +604,7 @@ def delete_product_option(option_id: int, db: DbDep):
     db.commit()
 
 
-@router.post("/options/{option_id}/values", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/options/{option_id}/values", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_option_value(
     option_id: int, body: ProductOptionValueCreate, db: DbDep
 ):
@@ -616,7 +616,7 @@ def create_option_value(
     return _serialize_option_value(row)
 
 
-@router.put("/values/{value_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/values/{value_id}", responses=COMMON_ERROR_RESPONSES)
 def update_option_value(
     value_id: int, body: ProductOptionValueUpdate, db: DbDep
 ):
@@ -628,7 +628,7 @@ def update_option_value(
     return _serialize_option_value(row)
 
 
-@router.delete("/values/{value_id}", status_code=status.HTTP_204_NO_CONTENT, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/values/{value_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def delete_option_value(value_id: int, db: DbDep):
     row = ProductOptionValueDAO.get(db, value_id)
     if row is None:
@@ -640,11 +640,11 @@ def delete_option_value(value_id: int, db: DbDep):
 # --- Coupons ---
 
 
-@router.get("/coupons", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/coupons", responses=COMMON_ERROR_RESPONSES)
 def list_coupons(
     enabled_only: bool = False,
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     db: DbDep,
 ):
@@ -652,7 +652,7 @@ def list_coupons(
     return [_serialize_coupon(row) for row in rows]
 
 
-@router.post("/coupons", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/coupons", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_coupon(body: CouponCreate, db: DbDep):
     if CouponDAO.get_by_code(db, body.code):
         raise HTTPException(status_code=409, detail="Coupon code already exists")
@@ -661,7 +661,7 @@ def create_coupon(body: CouponCreate, db: DbDep):
     return _serialize_coupon(row)
 
 
-@router.put("/coupons/{coupon_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/coupons/{coupon_id}", responses=COMMON_ERROR_RESPONSES)
 def update_coupon(coupon_id: int, body: CouponUpdate, db: DbDep):
     row = CouponDAO.get(db, coupon_id)
     if row is None:
@@ -679,12 +679,12 @@ def update_coupon(coupon_id: int, body: CouponUpdate, db: DbDep):
 # --- Tax rates ---
 
 
-@router.get("/tax-rates", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/tax-rates", responses=COMMON_ERROR_RESPONSES)
 def list_tax_rates(
     enabled_only: bool = False,
     country: Optional[str] = None,
-    limit: int = Query(default=200, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
     *,
     db: DbDep,
 ):
@@ -694,7 +694,7 @@ def list_tax_rates(
     return [_serialize_tax_rate(row) for row in rows]
 
 
-@router.post("/tax-rates", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/tax-rates", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_tax_rate(body: TaxRateCreate, db: DbDep):
     data = body.model_dump()
     data["country"] = data["country"].upper()
@@ -703,7 +703,7 @@ def create_tax_rate(body: TaxRateCreate, db: DbDep):
     return _serialize_tax_rate(row)
 
 
-@router.put("/tax-rates/{tax_rate_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/tax-rates/{tax_rate_id}", responses=COMMON_ERROR_RESPONSES)
 def update_tax_rate(
     tax_rate_id: int, body: TaxRateUpdate, db: DbDep
 ):

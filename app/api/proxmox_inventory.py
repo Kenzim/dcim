@@ -12,6 +12,10 @@ from app.models.proxmox_inventory import ProxmoxCapacitySnapshot, ProxmoxNode, P
 from app.services.vm_provisioning_service import VMProvisioningService
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/proxmox", tags=["proxmox"])
 
 CLUSTER_NOT_FOUND = "Cluster not found"
@@ -89,16 +93,16 @@ class VMPlanRequest(BaseModel):
 
 @router.get("/clusters")
 async def list_clusters(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     return VMProvisioningService.get_cluster_capacity_summary(db)
 
 
 @router.get("/backup-storages")
 async def list_backup_storages(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Distinct synced storage names suitable for product backup config dropdowns."""
     rows = ProxmoxInventoryDAO.list_distinct_storage_names(db, backup_capable_only=True)
@@ -111,8 +115,8 @@ async def list_backup_storages(
 @router.post("/clusters", status_code=status.HTTP_201_CREATED)
 async def create_cluster(
     data: ClusterCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxmoxInventoryDAO.create_cluster(db, **data.model_dump())
     return {"id": row.id}
@@ -122,8 +126,8 @@ async def create_cluster(
 async def update_cluster(
     cluster_id: int,
     data: ClusterUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not row:
@@ -158,8 +162,8 @@ async def _proxmox_auth(cluster) -> dict[str, str]:
 @router.post("/clusters/{cluster_id}/sync")
 async def sync_cluster_inventory(
     cluster_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not cluster:
@@ -255,8 +259,8 @@ async def sync_cluster_inventory(
 @router.get("/clusters/{cluster_id}/inventory")
 async def get_cluster_inventory(
     cluster_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not cluster:
@@ -360,8 +364,8 @@ def _node_overview_payload(node: ProxmoxNode, snapshot: Optional[ProxmoxCapacity
 @router.get("/clusters/{cluster_id}/overview")
 async def get_cluster_overview(
     cluster_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """
     Detailed single-cluster view: cluster identity, cluster-wide capacity
@@ -418,8 +422,8 @@ async def get_cluster_overview(
 async def upsert_node(
     cluster_id: int,
     data: NodeUpsert,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     cluster = ProxmoxInventoryDAO.get_cluster(db, cluster_id)
     if not cluster:
@@ -432,8 +436,8 @@ async def upsert_node(
 async def upsert_storage(
     node_id: int,
     data: StorageUpsert,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxmoxInventoryDAO.upsert_storage(db, node_id=node_id, **data.model_dump())
     return {"id": row.id}
@@ -443,8 +447,8 @@ async def upsert_storage(
 async def upsert_template(
     node_id: int,
     data: TemplateUpsert,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxmoxInventoryDAO.upsert_template(db, node_id=node_id, **data.model_dump())
     return {"id": row.id}
@@ -454,8 +458,8 @@ async def upsert_template(
 async def add_capacity_snapshot(
     node_id: int,
     data: CapacityCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxmoxInventoryDAO.add_capacity_snapshot(db, node_id=node_id, **data.model_dump())
     ProxmoxInventoryDAO.prune_capacity_snapshots(db, node_id=node_id)
@@ -466,8 +470,8 @@ async def add_capacity_snapshot(
 @router.post("/vm/plan")
 async def plan_vm_provisioning(
     data: VMPlanRequest,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     try:
         return VMProvisioningService.plan_provisioning(

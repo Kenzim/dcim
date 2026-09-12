@@ -25,6 +25,7 @@ from app.core.auth import require_admin
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
+from app.core.route_errors import require_found
 from app.core.reseller_auth import issue_reseller_api_key
 from app.dao.reseller_dao import ResellerDAO
 from app.models.product_catalog import Product
@@ -262,24 +263,15 @@ def _enum_value(value):
 
 
 def _group_or_404(db: Session, group_id: int) -> ResellerGroup:
-    group = db.get(ResellerGroup, group_id)
-    if group is None:
-        raise HTTPException(status_code=404, detail="Reseller group not found")
-    return group
+    return require_found(db.get(ResellerGroup, group_id), "Reseller group not found")
 
 
 def _reseller_or_404(db: Session, reseller_id: int) -> Reseller:
-    reseller = db.get(Reseller, reseller_id)
-    if reseller is None:
-        raise HTTPException(status_code=404, detail="Reseller not found")
-    return reseller
+    return require_found(db.get(Reseller, reseller_id), "Reseller not found")
 
 
 def _product_or_404(db: Session, product_id: int) -> Product:
-    product = db.get(Product, product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return product
+    return require_found(db.get(Product, product_id), "Product not found")
 
 
 def _counts_for_group(db: Session, group_id: int) -> dict:
@@ -824,10 +816,7 @@ def _admin_usdt_payload(
 
 
 def _usdt_deposit_or_404(db: Session, deposit_id: int) -> UsdtDeposit:
-    deposit = db.get(UsdtDeposit, deposit_id)
-    if deposit is None:
-        raise HTTPException(status_code=404, detail=_USDT_DEPOSIT_NOT_FOUND)
-    return deposit
+    return require_found(db.get(UsdtDeposit, deposit_id), _USDT_DEPOSIT_NOT_FOUND)
 
 
 def _admin_usdt_rpc() -> EthereumRpcClient:
@@ -838,7 +827,7 @@ def _admin_usdt_rpc() -> EthereumRpcClient:
     )
 
 
-@router.get("/reseller-groups", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/reseller-groups", responses=COMMON_ERROR_RESPONSES)
 async def list_reseller_groups(db: DbDep):
     groups = list(
         db.execute(select(ResellerGroup).order_by(ResellerGroup.name)).scalars()
@@ -846,7 +835,7 @@ async def list_reseller_groups(db: DbDep):
     return [_group_payload(db, group) for group in groups]
 
 
-@router.post("/reseller-groups", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/reseller-groups", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_reseller_group(
     body: ResellerGroupCreate, db: DbDep
 ):
@@ -869,12 +858,12 @@ async def create_reseller_group(
     return _group_payload(db, group)
 
 
-@router.get("/reseller-groups/{group_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/reseller-groups/{group_id}", responses=COMMON_ERROR_RESPONSES)
 async def get_reseller_group(group_id: int, db: DbDep):
     return _group_payload(db, _group_or_404(db, group_id))
 
 
-@router.put("/reseller-groups/{group_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/reseller-groups/{group_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_reseller_group(
     group_id: int,
     body: ResellerGroupUpdate,
@@ -906,7 +895,7 @@ async def update_reseller_group(
     return _group_payload(db, group)
 
 
-@router.delete("/reseller-groups/{group_id}", status_code=204, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/reseller-groups/{group_id}", status_code=204, responses=COMMON_ERROR_RESPONSES)
 async def delete_reseller_group(
     group_id: int, db: DbDep
 ):
@@ -926,7 +915,7 @@ async def delete_reseller_group(
 
 # Static reseller collection routes are intentionally declared before
 # /resellers/{reseller_id}, so their names cannot be consumed as an id.
-@router.get("/resellers/prices", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/prices", responses=COMMON_ERROR_RESPONSES)
 async def list_base_product_prices(db: DbDep):
     products = list(db.execute(select(Product).order_by(Product.name)).scalars())
     prices = {
@@ -936,7 +925,7 @@ async def list_base_product_prices(db: DbDep):
     return [_base_price_payload(product, prices.get(product.id)) for product in products]
 
 
-@router.put("/resellers/prices/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/resellers/prices/{product_id}", responses=COMMON_ERROR_RESPONSES)
 async def upsert_base_product_price(
     product_id: int,
     body: BasePriceUpsert,
@@ -957,7 +946,7 @@ async def upsert_base_product_price(
     return _base_price_payload(product, price)
 
 
-@router.get("/resellers/quotas", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/quotas", responses=COMMON_ERROR_RESPONSES)
 async def list_stock_quotas(
     reseller_id: Optional[int] = None,
     group_id: Optional[int] = None,
@@ -977,7 +966,7 @@ async def list_stock_quotas(
     )
 
 
-@router.post("/resellers/quotas", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/quotas", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_stock_quota(
     body: StockQuotaCreate, db: DbDep
 ):
@@ -1005,7 +994,7 @@ async def create_stock_quota(
     return _quota_payload(db, quota)
 
 
-@router.put("/resellers/quotas/{quota_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/resellers/quotas/{quota_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_stock_quota(
     quota_id: int,
     body: StockQuotaUpdate,
@@ -1035,7 +1024,7 @@ async def update_stock_quota(
     return _quota_payload(db, quota)
 
 
-@router.delete("/resellers/quotas/{quota_id}", status_code=204, responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/resellers/quotas/{quota_id}", status_code=204, responses=COMMON_ERROR_RESPONSES)
 async def delete_stock_quota(quota_id: int, db: DbDep):
     quota = db.get(StockQuota, quota_id)
     if quota is None:
@@ -1071,14 +1060,14 @@ def _invoice_detail_options():
     )
 
 
-@router.get("/resellers/invoices", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/invoices", responses=COMMON_ERROR_RESPONSES)
 async def list_admin_reseller_invoices(
     reseller_id: Optional[int] = None,
-    invoice_status: Optional[InvoiceStatus] = Query(default=None, alias="status"),
+    invoice_status: Annotated[Optional[InvoiceStatus], Query(alias="status")] = None,
     purpose: Optional[InvoicePurpose] = None,
-    q: Optional[str] = Query(default=None, max_length=128),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    q: Annotated[Optional[str], Query(max_length=128)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     db: DbDep,
 ):
@@ -1109,7 +1098,7 @@ async def list_admin_reseller_invoices(
     return [_invoice_payload(db, row) for row in rows]
 
 
-@router.get("/resellers/invoices/{invoice_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/invoices/{invoice_id}", responses=COMMON_ERROR_RESPONSES)
 async def get_admin_reseller_invoice(
     invoice_id: int, db: DbDep
 ):
@@ -1123,13 +1112,13 @@ async def get_admin_reseller_invoice(
     return _invoice_payload(db, invoice, include_payments=True)
 
 
-@router.get("/resellers/payments", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/payments", responses=COMMON_ERROR_RESPONSES)
 async def list_admin_reseller_payments(
     reseller_id: Optional[int] = None,
-    payment_status: Optional[PaymentStatus] = Query(default=None, alias="status"),
-    gateway: Optional[str] = Query(default=None, max_length=64),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    payment_status: Annotated[Optional[PaymentStatus], Query(alias="status")] = None,
+    gateway: Annotated[Optional[str], Query(max_length=64)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     db: DbDep,
 ):
@@ -1157,7 +1146,7 @@ async def list_admin_reseller_payments(
     return [_payment_payload(row) for row in rows]
 
 
-@router.get("/resellers/payments/{payment_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/payments/{payment_id}", responses=COMMON_ERROR_RESPONSES)
 async def get_admin_reseller_payment(
     payment_id: int, db: DbDep
 ):
@@ -1171,7 +1160,7 @@ async def get_admin_reseller_payment(
     return _payment_payload(payment)
 
 
-@router.post("/resellers/payments/{payment_id}/refund", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/payments/{payment_id}/refund", responses=COMMON_ERROR_RESPONSES)
 async def refund_admin_reseller_payment(
     payment_id: int,
     body: PaymentRefundRequest,
@@ -1199,14 +1188,14 @@ async def refund_admin_reseller_payment(
     return _payment_payload(payment)
 
 
-@router.get("/resellers/billing-cycles", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/billing-cycles", responses=COMMON_ERROR_RESPONSES)
 async def list_admin_billing_cycles(
     reseller_id: Optional[int] = None,
-    cycle_state: Optional[BillingCycleState] = Query(
-        default=None, alias="state"
-    ),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    cycle_state: Annotated[
+        Optional[BillingCycleState], Query(alias="state")
+    ] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     db: DbDep,
 ):
@@ -1226,7 +1215,7 @@ async def list_admin_billing_cycles(
     return [_billing_cycle_payload(row) for row in rows]
 
 
-@router.post("/resellers/billing-cycles/run-due", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/billing-cycles/run-due", responses=COMMON_ERROR_RESPONSES)
 async def run_admin_billing_batch(
     db: DbDep,
 ):
@@ -1244,7 +1233,7 @@ async def run_admin_billing_batch(
         db.commit()
 
 
-@router.get("/resellers/billing-cycles/{cycle_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/billing-cycles/{cycle_id}", responses=COMMON_ERROR_RESPONSES)
 async def get_admin_billing_cycle(
     cycle_id: int,
     db: DbDep,
@@ -1255,7 +1244,7 @@ async def get_admin_billing_cycle(
     return _billing_cycle_payload(cycle)
 
 
-@router.post("/resellers/billing-cycles/{cycle_id}/retry", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/billing-cycles/{cycle_id}/retry", responses=COMMON_ERROR_RESPONSES)
 async def retry_admin_billing_cycle(
     cycle_id: int,
     db: DbDep,
@@ -1295,14 +1284,14 @@ async def retry_admin_billing_cycle(
     return _billing_cycle_payload(cycle)
 
 
-@router.get("/resellers/notification-outbox", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/notification-outbox", responses=COMMON_ERROR_RESPONSES)
 async def list_admin_notification_outbox(
     reseller_id: Optional[int] = None,
-    outbox_status: Optional[NotificationOutboxStatus] = Query(
-        default=None, alias="status"
-    ),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    outbox_status: Annotated[
+        Optional[NotificationOutboxStatus], Query(alias="status")
+    ] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     db: DbDep,
 ):
@@ -1325,7 +1314,7 @@ async def list_admin_notification_outbox(
     return [_outbox_payload(row) for row in rows]
 
 
-@router.post("/resellers/notification-outbox/{outbox_id}/retry", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/notification-outbox/{outbox_id}/retry", responses=COMMON_ERROR_RESPONSES)
 async def retry_admin_notification(
     outbox_id: int,
     db: DbDep,
@@ -1352,14 +1341,14 @@ async def retry_admin_notification(
     return _outbox_payload(row)
 
 
-@router.get("/resellers/usdt-deposits", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/usdt-deposits", responses=COMMON_ERROR_RESPONSES)
 async def list_admin_usdt_deposits(
     reseller_id: Optional[int] = None,
-    deposit_status: Optional[UsdtDepositStatus] = Query(
-        default=None, alias="status"
-    ),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    deposit_status: Annotated[
+        Optional[UsdtDepositStatus], Query(alias="status")
+    ] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     db: DbDep,
 ):
@@ -1379,7 +1368,7 @@ async def list_admin_usdt_deposits(
     return [_admin_usdt_payload(db, row) for row in rows]
 
 
-@router.get("/resellers/usdt-deposits/{deposit_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/usdt-deposits/{deposit_id}", responses=COMMON_ERROR_RESPONSES)
 async def get_admin_usdt_deposit(
     deposit_id: int,
     db: DbDep,
@@ -1391,7 +1380,7 @@ async def get_admin_usdt_deposit(
     )
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/rescan", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/usdt-deposits/{deposit_id}/rescan", responses=COMMON_ERROR_RESPONSES)
 async def rescan_admin_usdt_deposit(
     deposit_id: int,
     body: UsdtRescanRequest,
@@ -1430,7 +1419,7 @@ async def rescan_admin_usdt_deposit(
     }
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/reconcile", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/usdt-deposits/{deposit_id}/reconcile", responses=COMMON_ERROR_RESPONSES)
 async def reconcile_admin_usdt_deposit(
     deposit_id: int,
     db: DbDep,
@@ -1450,7 +1439,7 @@ async def reconcile_admin_usdt_deposit(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/sweep-retry", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/usdt-deposits/{deposit_id}/sweep-retry", responses=COMMON_ERROR_RESPONSES)
 async def retry_admin_usdt_sweep(
     deposit_id: int,
     db: DbDep,
@@ -1472,7 +1461,7 @@ async def retry_admin_usdt_sweep(
     return _admin_usdt_payload(db, deposit)
 
 
-@router.post("/resellers/usdt-deposits/{deposit_id}/manual-review", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/usdt-deposits/{deposit_id}/manual-review", responses=COMMON_ERROR_RESPONSES)
 async def mark_admin_usdt_manual_review(
     deposit_id: int,
     body: UsdtManualReviewRequest,
@@ -1493,10 +1482,10 @@ async def mark_admin_usdt_manual_review(
     return _admin_usdt_payload(db, deposit)
 
 
-@router.get("/resellers", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers", responses=COMMON_ERROR_RESPONSES)
 async def list_resellers(
     q: Optional[str] = None,
-    reseller_status: Optional[ResellerStatus] = Query(default=None, alias="status"),
+    reseller_status: Annotated[Optional[ResellerStatus], Query(alias="status")] = None,
     group_id: Optional[int] = None,
     *,
     db: DbDep,
@@ -1520,7 +1509,7 @@ async def list_resellers(
     return [_reseller_payload(db, row, include_details=True) for row in rows]
 
 
-@router.post("/resellers", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 async def create_reseller(
     body: ResellerCreate, db: DbDep
 ):
@@ -1581,7 +1570,7 @@ async def create_reseller(
     return {**_reseller_payload(db, reseller, include_details=True), "api_key": plaintext_key}
 
 
-@router.get("/resellers/{reseller_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/{reseller_id}", responses=COMMON_ERROR_RESPONSES)
 async def get_reseller(reseller_id: int, db: DbDep):
     return _reseller_payload(
         db, _reseller_or_404(db, reseller_id), include_details=True
@@ -1654,7 +1643,7 @@ def _apply_billing_hold_change(reseller: Reseller, changes: dict) -> None:
         reseller.billing_hold_reason = (hold_reason or "").strip() or None
 
 
-@router.put("/resellers/{reseller_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/resellers/{reseller_id}", responses=COMMON_ERROR_RESPONSES)
 async def update_reseller(
     reseller_id: int,
     body: ResellerUpdate,
@@ -1674,7 +1663,7 @@ async def update_reseller(
     return _reseller_payload(db, reseller, include_details=True)
 
 
-@router.delete("/resellers/{reseller_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/resellers/{reseller_id}", responses=COMMON_ERROR_RESPONSES)
 async def disable_reseller(reseller_id: int, db: DbDep):
     reseller = _reseller_or_404(db, reseller_id)
     reseller.status = ResellerStatus.DISABLED
@@ -1683,7 +1672,7 @@ async def disable_reseller(reseller_id: int, db: DbDep):
     return _reseller_payload(db, reseller, include_details=True)
 
 
-@router.post("/resellers/{reseller_id}/rotate-key", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/{reseller_id}/rotate-key", responses=COMMON_ERROR_RESPONSES)
 async def rotate_reseller_key(
     reseller_id: int, db: DbDep
 ):
@@ -1698,7 +1687,7 @@ async def rotate_reseller_key(
     }
 
 
-@router.get("/reseller-groups/{group_id}/prices", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/reseller-groups/{group_id}/prices", responses=COMMON_ERROR_RESPONSES)
 async def list_group_product_prices(
     group_id: int, db: DbDep
 ):
@@ -1724,7 +1713,7 @@ async def list_group_product_prices(
     ]
 
 
-@router.put("/reseller-groups/{group_id}/prices/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/reseller-groups/{group_id}/prices/{product_id}", responses=COMMON_ERROR_RESPONSES)
 async def upsert_group_product_price(
     group_id: int,
     product_id: int,
@@ -1753,7 +1742,9 @@ async def upsert_group_product_price(
 
 
 @router.delete(
-    "/reseller-groups/{group_id}/prices/{product_id}", status_code=204
+    "/reseller-groups/{group_id}/prices/{product_id}",
+    status_code=204,
+    responses=COMMON_ERROR_RESPONSES,
 )
 async def delete_group_product_price(
     group_id: int, product_id: int, db: DbDep
@@ -1773,7 +1764,7 @@ async def delete_group_product_price(
     return Response(status_code=204)
 
 
-@router.get("/reseller-groups/{group_id}/product-access", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/reseller-groups/{group_id}/product-access", responses=COMMON_ERROR_RESPONSES)
 async def list_group_product_access(
     group_id: int, db: DbDep
 ):
@@ -1804,7 +1795,7 @@ async def list_group_product_access(
     ]
 
 
-@router.put("/reseller-groups/{group_id}/product-access/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/reseller-groups/{group_id}/product-access/{product_id}", responses=COMMON_ERROR_RESPONSES)
 async def upsert_group_product_access(
     group_id: int,
     product_id: int,
@@ -1832,6 +1823,7 @@ async def upsert_group_product_access(
 @router.delete(
     "/reseller-groups/{group_id}/product-access/{product_id}",
     status_code=204,
+    responses=COMMON_ERROR_RESPONSES,
 )
 async def delete_group_product_access(
     group_id: int, product_id: int, db: DbDep
@@ -1851,7 +1843,7 @@ async def delete_group_product_access(
     return Response(status_code=204)
 
 
-@router.get("/resellers/{reseller_id}/product-access", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/{reseller_id}/product-access", responses=COMMON_ERROR_RESPONSES)
 async def list_reseller_product_access(
     reseller_id: int, db: DbDep
 ):
@@ -1905,7 +1897,7 @@ async def list_reseller_product_access(
     return result
 
 
-@router.put("/resellers/{reseller_id}/product-access/{product_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/resellers/{reseller_id}/product-access/{product_id}", responses=COMMON_ERROR_RESPONSES)
 async def upsert_reseller_product_access(
     reseller_id: int,
     product_id: int,
@@ -1933,6 +1925,7 @@ async def upsert_reseller_product_access(
 @router.delete(
     "/resellers/{reseller_id}/product-access/{product_id}",
     status_code=204,
+    responses=COMMON_ERROR_RESPONSES,
 )
 async def delete_reseller_product_access(
     reseller_id: int, product_id: int, db: DbDep
@@ -1952,7 +1945,7 @@ async def delete_reseller_product_access(
     return Response(status_code=204)
 
 
-@router.post("/resellers/{reseller_id}/credit-adjustments", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/resellers/{reseller_id}/credit-adjustments", responses=COMMON_ERROR_RESPONSES)
 async def adjust_reseller_credit(
     reseller_id: int,
     body: CreditAdjustmentCreate,
@@ -2000,11 +1993,11 @@ async def adjust_reseller_credit(
     }
 
 
-@router.get("/resellers/{reseller_id}/ledger", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/resellers/{reseller_id}/ledger", responses=COMMON_ERROR_RESPONSES)
 async def list_reseller_ledger(
     reseller_id: int,
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     db: DbDep,
 ):
