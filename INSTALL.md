@@ -160,6 +160,20 @@ MCP_RATE_LIMIT_PER_IP_WINDOW_SECONDS=60
 
 When `MCP_ENABLED=true`, remote clients POST to `https://<host>/mcp` with `Authorization: Bearer rfmcp_…`. Keys are hashed (SHA-256); plaintext is shown once on create/rotate. Scopes are `read`, `write`, and `destructive` (`read` ⊂ `write` ⊂ `destructive`). Optional CIDR allowlists apply per key. Do not give billing/WHMCS keys access to MCP.
 
+### BMC virtual CD (virtual media)
+
+The BMC **pulls** the ISO over HTTP from RackFlow (`InsertMedia`). Set a base URL the BMC can reach on the management network. Prefer HTTP; many BMCs reject HTTPS with a private CA. Do **not** reuse the PXE next-server URL.
+
+```bash
+# .env
+# Required for BMCs that cannot reach PUBLIC_APP_URL (typical).
+VIRTUAL_MEDIA_BASE_URL=http://10.0.0.1:8000
+# Fallback chain if VIRTUAL_MEDIA_BASE_URL is unset: PUBLIC_BASE_URL then PUBLIC_APP_URL
+VIRTUAL_MEDIA_TOKEN_TTL_SECONDS=14400
+```
+
+Image fetch is `GET|HEAD /api/virtual-media/images/{token}/{filename}` (path token, HTTP Range). Tokens last four hours by default and are revoked on eject. Assign a Virtual CD profile on the server (ASRockRack / Gigabyte / SuperMicro). Optional “set next boot to CD-ROM” does not reboot.
+
 ### Building images only
 
 - Main app: `docker build --target app -t dcim-app .` (required: default is last stage, bandwidth-poller)
