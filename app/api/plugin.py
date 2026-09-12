@@ -7,6 +7,10 @@ from app.core.auth import require_admin
 from app.plugins.registry import get_registry
 import logging
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -14,8 +18,8 @@ router = APIRouter()
 
 @router.get("/", response_model=List[dict])
 async def list_plugins(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all available server plugins with their metadata and capabilities (with UI schema)."""
     registry = get_registry()
@@ -25,8 +29,8 @@ async def list_plugins(
 @router.get("/{plugin_name}")
 async def get_plugin_details(
     plugin_name: str,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get detailed information about a specific server plugin including capabilities with UI schema."""
     registry = get_registry()
@@ -41,8 +45,8 @@ async def get_plugin_details(
 
 @router.post("/sync")
 async def sync_plugins(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """
     No-op: Plugins are no longer stored in the database.

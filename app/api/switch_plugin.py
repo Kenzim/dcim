@@ -8,6 +8,10 @@ from app.plugins.switch_registry import get_switch_registry
 from app.core.plugin_capabilities import get_switch_plugin_capabilities
 import logging
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -15,8 +19,8 @@ router = APIRouter()
 
 @router.get("/", response_model=List[dict])
 async def list_switch_plugins(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all available switch plugins with their metadata"""
     registry = get_switch_registry()
@@ -42,8 +46,8 @@ async def list_switch_plugins(
 @router.get("/{plugin_name}")
 async def get_switch_plugin_details(
     plugin_name: str,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get detailed information about a specific switch plugin"""
     registry = get_switch_registry()
@@ -83,8 +87,8 @@ async def get_switch_plugin_details(
 
 @router.post("/sync")
 async def sync_switch_plugins(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """
     No-op: Switch plugins are no longer stored in the database.

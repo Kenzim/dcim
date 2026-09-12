@@ -24,6 +24,10 @@ def get_dhcp_service_with_db(db: Session = Depends(get_db)):
     return get_dhcp_service(db)
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/dhcp", tags=["dhcp"])
 
 
@@ -41,8 +45,8 @@ class DHCPConfigUpdate(BaseModel):
 
 @router.post("/start", response_model=Dict[str, Any])
 async def start_dhcp_server(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
     dhcp_service: DHCPService = Depends(get_dhcp_service_with_db),
 ):
@@ -69,7 +73,7 @@ async def start_dhcp_server(
 
 @router.post("/stop", response_model=Dict[str, Any])
 async def stop_dhcp_server(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     dhcp_service: DHCPService = Depends(get_dhcp_service_with_db)
 ):
     """
@@ -91,8 +95,8 @@ async def stop_dhcp_server(
 
 @router.post("/restart", response_model=Dict[str, Any])
 async def restart_dhcp_server(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
     dhcp_service: DHCPService = Depends(get_dhcp_service_with_db),
 ):
@@ -119,8 +123,8 @@ async def restart_dhcp_server(
 
 @router.post("/reload", response_model=Dict[str, Any])
 async def reload_dhcp_server(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
     dhcp_service: DHCPService = Depends(get_dhcp_service_with_db),
 ):
@@ -148,7 +152,7 @@ async def reload_dhcp_server(
 
 @router.get("/status", response_model=Dict[str, Any])
 async def get_dhcp_status(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     dhcp_service: DHCPService = Depends(get_dhcp_service_with_db)
 ):
     """
@@ -162,8 +166,8 @@ async def get_dhcp_status(
 
 @router.get("/config", response_model=DHCPConfig)
 async def get_dhcp_config(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
 ):
     """
@@ -177,8 +181,8 @@ async def get_dhcp_config(
 
 @router.post("/regenerate", response_model=Dict[str, Any])
 async def regenerate_dhcp_config(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
     dhcp_service: DHCPService = Depends(get_dhcp_service_with_db)
 ):
@@ -217,8 +221,8 @@ async def regenerate_dhcp_config(
 @router.put("/config", response_model=DHCPConfig)
 async def update_dhcp_config(
     config_data: DHCPConfigUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: DHCPConfigService = Depends(get_dhcp_config_service),
     dhcp_service: DHCPService = Depends(get_dhcp_service_with_db)
 ):

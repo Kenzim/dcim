@@ -18,6 +18,10 @@ from app.core.database import get_db
 from app.core.client_permissions import ALL_PERMISSION_KEYS, PERMISSION_CATALOG
 from app.dao.permission_set_dao import PermissionSetDAO
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/admin/permission-sets", tags=["admin-permission-sets"])
 
 
@@ -69,7 +73,7 @@ def _to_response(row) -> PermissionSetResponse:
 
 @router.get("/catalog", response_model=List[Dict[str, Any]])
 async def get_permission_catalog(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
 ):
     """The fixed catalog of permission keys, grouped by applicable service type."""
     return PERMISSION_CATALOG
@@ -77,8 +81,8 @@ async def get_permission_catalog(
 
 @router.get("", response_model=List[PermissionSetResponse])
 async def list_permission_sets(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     return [_to_response(row) for row in PermissionSetDAO.get_all(db)]
 
@@ -86,8 +90,8 @@ async def list_permission_sets(
 @router.post("", response_model=PermissionSetResponse, status_code=status.HTTP_201_CREATED)
 async def create_permission_set(
     data: PermissionSetCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     _validate_permission_keys(data.permissions)
     if PermissionSetDAO.get_by_name(db, data.name):
@@ -99,8 +103,8 @@ async def create_permission_set(
 @router.get("/{permission_set_id}", response_model=PermissionSetResponse)
 async def get_permission_set(
     permission_set_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = PermissionSetDAO.get_by_id(db, permission_set_id)
     if not row:
@@ -112,8 +116,8 @@ async def get_permission_set(
 async def update_permission_set(
     permission_set_id: int,
     data: PermissionSetUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = PermissionSetDAO.get_by_id(db, permission_set_id)
     if not row:
@@ -132,8 +136,8 @@ async def update_permission_set(
 @router.delete("/{permission_set_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_permission_set(
     permission_set_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = PermissionSetDAO.get_by_id(db, permission_set_id)
     if not row:

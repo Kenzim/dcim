@@ -368,7 +368,7 @@ def normalize_mac_address(mac: str) -> str:
     return mac.upper()
 
 
-@router.get("/pxe", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/pxe", response_class=PlainTextResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_pxe_boot_file(
     mac: Optional[str] = Query(None, description="MAC address of the network port requesting PXE boot"),
     script: Optional[bool] = Query(False, description="Return script content instead of iPXE script (for initramfs)"),
@@ -691,7 +691,7 @@ exit
         )
 
 
-@router.get("/pxe/info", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/pxe/info", responses=COMMON_ERROR_RESPONSES)
 async def get_pxe_info(
     mac: str = Query(..., description="MAC address of the network port"),
     *,
@@ -990,7 +990,7 @@ def _normalize_hardware_report_payload(payload: HardwareDetectionReportIngest) -
     }
 
 
-@router.get("/cloud-init/user-data", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/cloud-init/user-data", response_class=PlainTextResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_cloud_init_user_data(
     request: Request,
     db: DbDep
@@ -1017,7 +1017,7 @@ async def get_cloud_init_user_data(
     )
 
 
-@router.get("/cloud-init/meta-data", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/cloud-init/meta-data", response_class=PlainTextResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_cloud_init_meta_data(
     request: Request,
     db: DbDep
@@ -1044,7 +1044,7 @@ async def get_cloud_init_meta_data(
     )
 
 
-@router.post("/hardware-detection/report", response_model=dict, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/hardware-detection/report", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def ingest_hardware_detection_report(
     payload: HardwareDetectionReportIngest,
     request: Request,
@@ -1141,7 +1141,7 @@ class BootTaskResponse(BaseModel):
         from_attributes = True
 
 
-@router.post("/{server_id}/boot-task", response_model=BootTaskResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/{server_id}/boot-task", response_model=BootTaskResponse, responses=COMMON_ERROR_RESPONSES)
 async def create_boot_task(
     server_id: int,
     boot_task_data: BootTaskCreate,
@@ -1625,7 +1625,7 @@ async def create_boot_task(
     )
 
 
-@router.get("/{server_id}/boot-task", response_model=Optional[BootTaskResponse], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/{server_id}/boot-task", response_model=Optional[BootTaskResponse], responses=COMMON_ERROR_RESPONSES)
 async def get_boot_task(
     server_id: int,
     auth: AdminDep,
@@ -1661,7 +1661,7 @@ async def get_boot_task(
     )
 
 
-@router.delete("/{server_id}/boot-task", responses={**COMMON_ERROR_RESPONSES})
+@router.delete("/{server_id}/boot-task", responses=COMMON_ERROR_RESPONSES)
 async def cancel_boot_task(
     server_id: int,
     auth: AdminDep,
@@ -1681,7 +1681,7 @@ async def cancel_boot_task(
     return {"cancelled": count}
 
 
-@router.get("/scripts/{task_id}", response_class=PlainTextResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/scripts/{task_id}", response_class=PlainTextResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_script(
     task_id: int,
     token: Optional[str] = Query(None, description="Download token authorizing access to this boot task's script"),
@@ -1739,7 +1739,7 @@ async def get_script(
 
 # Kernel and Initrd Serving Endpoints
 
-@router.get("/kernel/{filename}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/kernel/{filename}", responses=COMMON_ERROR_RESPONSES)
 async def get_kernel(
     filename: str,
     db: DbDep
@@ -1780,7 +1780,7 @@ async def get_kernel(
     )
 
 
-@router.get("/initrd/{filename}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/initrd/{filename}", responses=COMMON_ERROR_RESPONSES)
 async def get_initrd(
     filename: str,
     db: DbDep
@@ -1823,7 +1823,7 @@ async def get_initrd(
 
 # Custom Scripts Endpoints
 
-@router.get("/scripts", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/scripts", responses=COMMON_ERROR_RESPONSES)
 async def list_scripts(
     auth: AdminDep,
     db: DbDep
@@ -1851,7 +1851,7 @@ async def list_scripts(
     ]
 
 
-@router.get("/scripts/by-id/{script_id_or_name}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/scripts/by-id/{script_id_or_name}", responses=COMMON_ERROR_RESPONSES)
 async def get_script_by_id_or_name(
     script_id_or_name: str,
     request: Request,
@@ -1925,7 +1925,7 @@ async def get_script_by_id_or_name(
 
 # ISO Serving Endpoints
 
-@router.get("/isos", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/isos", responses=COMMON_ERROR_RESPONSES)
 async def list_isos(
     auth: AdminDep,
     db: DbDep,
@@ -1943,7 +1943,7 @@ async def list_isos(
     ]
 
 
-@router.get("/isos/{filename}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/isos/{filename}", responses=COMMON_ERROR_RESPONSES)
 @router.head("/isos/{filename}")
 async def get_iso(
     filename: str,
@@ -2032,7 +2032,7 @@ async def get_iso(
 
 # Temporary OS Endpoints
 
-@router.get("/temp-os", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/temp-os", responses=COMMON_ERROR_RESPONSES)
 async def list_temp_os(
     db: DbDep
 ):
@@ -2057,7 +2057,7 @@ async def list_temp_os(
     ]
 
 
-@router.get("/temp-os/{os_id}/files/{filename}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/temp-os/{os_id}/files/{filename}", responses=COMMON_ERROR_RESPONSES)
 @router.head("/temp-os/{os_id}/files/{filename}")
 async def get_temp_os_file(
     os_id: str,
@@ -2123,7 +2123,7 @@ async def get_temp_os_file(
 
 # Live OS Image Serving Endpoints
 
-@router.get("/images/{filename}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/images/{filename}", responses=COMMON_ERROR_RESPONSES)
 @router.head("/images/{filename}")
 async def get_live_os_image(
     filename: str,
@@ -2183,7 +2183,7 @@ async def get_live_os_image(
 
 # Disk Image Serving Endpoints
 
-@router.get("/disk-images/{filename}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/disk-images/{filename}", responses=COMMON_ERROR_RESPONSES)
 @router.head("/disk-images/{filename}")
 async def get_disk_image(
     filename: str,
@@ -2268,7 +2268,7 @@ async def get_disk_image(
 
 # Template Files Serving Endpoints
 
-@router.get("/template-files/{template_id}/{file_path:path}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/template-files/{template_id}/{file_path:path}", responses=COMMON_ERROR_RESPONSES)
 @router.head("/template-files/{template_id}/{file_path:path}")
 async def get_template_file(
     template_id: str,
@@ -2366,7 +2366,7 @@ async def get_template_file(
     )
 
 
-@router.post("/download-token/{token}/terminate", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/download-token/{token}/terminate", responses=COMMON_ERROR_RESPONSES)
 async def terminate_download_token(
     token: str,
     db: DbDep

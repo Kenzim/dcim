@@ -2,13 +2,15 @@
 API endpoints for OS installation templates.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from typing import Annotated, List
 from app.core.auth import require_admin
 from app.services.os_template_service import get_template_service, OSTemplate
 from pydantic import BaseModel
 import logging
 
 logger = logging.getLogger(__name__)
+
+AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter()
 
@@ -30,7 +32,7 @@ class TemplateResponse(BaseModel):
 
 @router.get("/", response_model=List[TemplateResponse])
 async def list_templates(
-    auth: dict = Depends(require_admin)
+    auth: AdminDep
 ):
     """List all available OS installation templates"""
     service = get_template_service()
@@ -64,7 +66,7 @@ async def list_templates(
 @router.get("/{template_id}", response_model=TemplateResponse)
 async def get_template(
     template_id: str,
-    auth: dict = Depends(require_admin)
+    auth: AdminDep
 ):
     """Get a specific template by ID"""
     service = get_template_service()
@@ -99,7 +101,7 @@ async def get_template(
 
 @router.post("/reload")
 async def reload_templates(
-    auth: dict = Depends(require_admin)
+    auth: AdminDep
 ):
     """Reload templates from disk"""
     service = get_template_service()

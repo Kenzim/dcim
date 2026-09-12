@@ -131,7 +131,7 @@ async def admin_list_kvm_profiles(auth: AdminDep):
     return [IpmiKvmProfileInfo(**item) for item in list_profiles()]
 
 
-@router.post("/redeem", response_model=IpmiKvmSessionResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/redeem", response_model=IpmiKvmSessionResponse, responses=COMMON_ERROR_RESPONSES)
 async def redeem_kvm_launch_ticket(
     body: IpmiKvmRedeemRequest,
     request: Request,
@@ -169,11 +169,11 @@ def _normalize_asset_path(raw: str) -> str:
     return cleaned
 
 
-@router.get("/assets/{asset_path:path}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/assets/{asset_path:path}", responses=COMMON_ERROR_RESPONSES)
 async def proxy_kvm_asset(
     asset_path: str,
     request: Request,
-    token: Optional[str] = Query(None),
+    token: Annotated[Optional[str], Query()] = None,
 ):
     """Proxy AMI ``decode_worker.js`` (and other ``libs/kvm/`` assets) from the BMC."""
     ws_token = (token or "").strip() or (request.cookies.get(_ASSET_COOKIE) or "").strip()
@@ -264,9 +264,9 @@ async def _run_chassis_power(plugin, action: str) -> bool:
     raise ValueError(f"Unsupported chassis power action: {action}")
 
 
-@router.get("/power", response_model=IpmiKvmPowerStateResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.get("/power", response_model=IpmiKvmPowerStateResponse, responses=COMMON_ERROR_RESPONSES)
 async def kvm_power_state(
-    token: Optional[str] = Query(None),
+    token: Annotated[Optional[str], Query()] = None,
     *,
     db: DbDep,
 ):
@@ -293,10 +293,10 @@ async def kvm_power_state(
     )
 
 
-@router.post("/power", response_model=IpmiKvmPowerStateResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/power", response_model=IpmiKvmPowerStateResponse, responses=COMMON_ERROR_RESPONSES)
 async def kvm_power_action(
     body: IpmiKvmPowerRequest,
-    token: Optional[str] = Query(None),
+    token: Annotated[Optional[str], Query()] = None,
     *,
     db: DbDep,
 ):

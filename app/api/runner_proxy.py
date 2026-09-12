@@ -10,6 +10,9 @@ from app.models.proxy_runner import ProxyRunner
 from app.models.service import ServiceStatus
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+
 router = APIRouter(prefix="/runner/proxy", tags=["proxy-runner"])
 
 
@@ -42,7 +45,8 @@ async def get_proxy_config(
     request: Request,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     token = _extract_token(authorization, x_api_key)
     if not token:

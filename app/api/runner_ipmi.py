@@ -23,6 +23,9 @@ from app.core.database import get_db
 from app.models.server import Server
 from app.services.ipmi_ticket_service import get_ipmi_ticket_service
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/runner/ipmi", tags=["ipmi-proxy-runner"])
@@ -63,7 +66,8 @@ class RedeemRequest(BaseModel):
 async def get_ipmi_proxy_config(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     """Return uuid -> upstream mappings for all proxy-enabled servers."""
     _authenticate_runner(authorization, x_api_key)
@@ -93,7 +97,8 @@ async def redeem_ipmi_ticket(
     body: RedeemRequest,
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+    *,
+    db: DbDep,
 ):
     """Consume a one-time launch ticket and return the target upstream + session TTL."""
     _authenticate_runner(authorization, x_api_key)

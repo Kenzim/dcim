@@ -11,6 +11,10 @@ from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/vm-ip-allocations", tags=["vm-ip-allocations"])
 
 
@@ -103,8 +107,9 @@ async def list_vm_ip_allocations(
     enabled: Optional[bool] = None,
     assigned: Optional[bool] = None,
     cluster_id: Optional[int] = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     rows = VMIPAllocationDAO.list_all(
         db,
@@ -119,8 +124,8 @@ async def list_vm_ip_allocations(
 
 @router.get("/tags")
 async def list_vm_ip_allocation_tags(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     """Distinct batch tags already in use, for the bulk-add autocomplete."""
     return VMIPAllocationDAO.list_distinct_tags(db)
@@ -129,8 +134,8 @@ async def list_vm_ip_allocation_tags(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_vm_ip_allocation(
     data: VMIPCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     _validate_ip(data.ip_address, "ip_address")
     _validate_ip(data.gateway, "gateway")
@@ -154,8 +159,8 @@ async def create_vm_ip_allocation(
 @router.post("/bulk", status_code=status.HTTP_201_CREATED)
 async def create_vm_ip_allocations_bulk(
     data: VMIPBulkCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     _validate_ip(data.start_ip, "start_ip")
     _validate_ip(data.end_ip, "end_ip")
@@ -190,8 +195,8 @@ async def create_vm_ip_allocations_bulk(
 @router.put("/bulk")
 async def bulk_update_vm_ip_allocations(
     data: VMIPBulkUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if not data.ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No ids provided")
@@ -224,8 +229,8 @@ async def bulk_update_vm_ip_allocations(
 async def update_vm_ip_allocation(
     allocation_id: int,
     data: VMIPUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = VMIPAllocationDAO.get_by_id(db, allocation_id)
     if not row:
@@ -251,8 +256,8 @@ async def update_vm_ip_allocation(
 @router.delete("/{allocation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vm_ip_allocation(
     allocation_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = VMIPAllocationDAO.get_by_id(db, allocation_id)
     if not row:

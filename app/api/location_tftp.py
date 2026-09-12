@@ -10,6 +10,10 @@ from app.core.auth import require_admin
 from app.dao import ServiceInstanceDAO, LocationDAO
 from app.services.runner_client import call_tftp_runner
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter()
 
 
@@ -29,8 +33,8 @@ def _get_tftp_instance(db: Session, location_id: int):
 @router.get("/locations/{location_id}/tftp/status")
 async def get_location_tftp_status(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_tftp_instance(db, location_id)
     code, body = await call_tftp_runner(instance, db, "GET", "/status")
@@ -42,8 +46,8 @@ async def get_location_tftp_status(
 @router.post("/locations/{location_id}/tftp/start")
 async def start_location_tftp(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_tftp_instance(db, location_id)
     code, body = await call_tftp_runner(instance, db, "POST", "/start")
@@ -55,8 +59,8 @@ async def start_location_tftp(
 @router.post("/locations/{location_id}/tftp/stop")
 async def stop_location_tftp(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_tftp_instance(db, location_id)
     code, body = await call_tftp_runner(instance, db, "POST", "/stop")
@@ -68,8 +72,8 @@ async def stop_location_tftp(
 @router.post("/locations/{location_id}/tftp/restart")
 async def restart_location_tftp(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_tftp_instance(db, location_id)
     code, body = await call_tftp_runner(instance, db, "POST", "/restart")
@@ -81,8 +85,8 @@ async def restart_location_tftp(
 @router.get("/locations/{location_id}/tftp/config")
 async def get_location_tftp_config(
     location_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_tftp_instance(db, location_id)
     code, body = await call_tftp_runner(instance, db, "GET", "/config")
@@ -95,8 +99,9 @@ async def get_location_tftp_config(
 async def get_location_tftp_logs(
     location_id: int,
     limit: int = 100,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    *,
+    auth: AdminDep,
+    db: DbDep,
 ):
     instance = _get_tftp_instance(db, location_id)
     code, body = await call_tftp_runner(instance, db, "GET", f"/logs?limit={limit}")

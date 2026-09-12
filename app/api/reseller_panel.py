@@ -22,6 +22,7 @@ from app.core.auth import require_reseller
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
+from app.core.route_errors import conflict, forbidden, not_found, require_found, service_unavailable
 from app.core.reseller_auth import issue_reseller_api_key
 from app.dao.reseller_dao import ResellerDAO
 from app.models.product_catalog import Product
@@ -147,7 +148,7 @@ def _invoice_or_404(
 ) -> Invoice:
     invoice = db.get(Invoice, invoice_id)
     if invoice is None or invoice.reseller_id != reseller.id:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        not_found("Invoice not found")
     return invoice
 
 
@@ -463,7 +464,7 @@ def _usdt_deposit_payload(db: Session, deposit: UsdtDeposit) -> dict:
     }
 
 
-@router.get("/dashboard", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/dashboard", responses=COMMON_ERROR_RESPONSES)
 def dashboard(
     reseller: ResellerDep,
     db: DbDep,
@@ -522,7 +523,7 @@ def dashboard(
     }
 
 
-@router.get("/products", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/products", responses=COMMON_ERROR_RESPONSES)
 def list_products(
     reseller: ResellerDep,
     db: DbDep,
@@ -535,7 +536,7 @@ def list_products(
     ]
 
 
-@router.put("/products/{product_id}/client-permissions", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/products/{product_id}/client-permissions", responses=COMMON_ERROR_RESPONSES)
 def update_product_client_permissions(
     product_id: int,
     body: ClientProductPermissionsUpdate,
@@ -581,7 +582,7 @@ def update_product_client_permissions(
     return _product_policy_payload(db, reseller, product, price)
 
 
-@router.get("/quotas", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/quotas", responses=COMMON_ERROR_RESPONSES)
 def list_quotas(
     reseller: ResellerDep,
     db: DbDep,
@@ -592,10 +593,10 @@ def list_quotas(
     ]
 
 
-@router.get("/clients", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/clients", responses=COMMON_ERROR_RESPONSES)
 def list_clients(
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     reseller: ResellerDep,
     db: DbDep,
@@ -610,7 +611,7 @@ def list_clients(
     return [_client_payload(db, client) for client in clients]
 
 
-@router.get("/clients/{client_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/clients/{client_id}", responses=COMMON_ERROR_RESPONSES)
 def get_client(
     client_id: int,
     reseller: ResellerDep,
@@ -621,16 +622,16 @@ def get_client(
     )
 
 
-@router.get("/services", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services", responses=COMMON_ERROR_RESPONSES)
 def list_services(
-    billing_status: Optional[ServiceBillingStatus] = Query(
-        default=None, alias="status"
-    ),
+    billing_status: Annotated[
+        Optional[ServiceBillingStatus], Query(alias="status")
+    ] = None,
     service_status: Optional[ServiceStatus] = None,
-    client_id: Optional[int] = Query(default=None, gt=0),
-    product_id: Optional[int] = Query(default=None, gt=0),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    client_id: Annotated[Optional[int], Query(gt=0)] = None,
+    product_id: Annotated[Optional[int], Query(gt=0)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     reseller: ResellerDep,
     db: DbDep,
@@ -656,7 +657,7 @@ def list_services(
     return [_service_billing_payload(row) for row in rows]
 
 
-@router.get("/services/{service_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/services/{service_id}", responses=COMMON_ERROR_RESPONSES)
 def get_service(
     service_id: int,
     reseller: ResellerDep,
@@ -673,7 +674,7 @@ def get_service(
     return _service_billing_payload(row, detail=True)
 
 
-@router.get("/api-key", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/api-key", responses=COMMON_ERROR_RESPONSES)
 def get_api_key(
     reseller: ResellerDep,
 ):
@@ -684,7 +685,7 @@ def get_api_key(
     }
 
 
-@router.post("/api-key/rotate", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/api-key/rotate", responses=COMMON_ERROR_RESPONSES)
 def rotate_api_key(
     body: ApiKeyRotate,
     reseller: ResellerDep,
@@ -712,7 +713,7 @@ def rotate_api_key(
     }
 
 
-@router.get("/payment-config", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/payment-config", responses=COMMON_ERROR_RESPONSES)
 def payment_config(
     reseller: ResellerDep,
 ):
@@ -745,7 +746,7 @@ def payment_config(
     }
 
 
-@router.get("/balance", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/balance", responses=COMMON_ERROR_RESPONSES)
 def balance(reseller: ResellerDep):
     return {
         "balance_cents": reseller.cached_balance_cents,
@@ -753,13 +754,13 @@ def balance(reseller: ResellerDep):
     }
 
 
-@router.get("/invoices", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/invoices", responses=COMMON_ERROR_RESPONSES)
 def list_invoices(
-    invoice_status: Optional[InvoiceStatus] = Query(
-        default=None, alias="status"
-    ),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    invoice_status: Annotated[
+        Optional[InvoiceStatus], Query(alias="status")
+    ] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     reseller: ResellerDep,
     db: DbDep,
@@ -776,7 +777,7 @@ def list_invoices(
     ]
 
 
-@router.get("/invoices/{invoice_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/invoices/{invoice_id}", responses=COMMON_ERROR_RESPONSES)
 def get_invoice(
     invoice_id: int,
     reseller: ResellerDep,
@@ -787,7 +788,7 @@ def get_invoice(
     )
 
 
-@router.get("/invoices/{invoice_id}/payments", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/invoices/{invoice_id}/payments", responses=COMMON_ERROR_RESPONSES)
 def list_invoice_payments(
     invoice_id: int,
     reseller: ResellerDep,
@@ -803,6 +804,7 @@ def list_invoice_payments(
 @router.post(
     "/invoices/{invoice_id}/usdt-deposit",
     status_code=status.HTTP_201_CREATED,
+    responses=COMMON_ERROR_RESPONSES,
 )
 def create_usdt_deposit(
     invoice_id: int,
@@ -814,10 +816,7 @@ def create_usdt_deposit(
         invoice.status != InvoiceStatus.OPEN
         or invoice.purpose != InvoicePurpose.CREDIT_TOPUP
     ):
-        raise HTTPException(
-            status_code=409,
-            detail="Only open credit top-up invoices accept USDT",
-        )
+        conflict("Only open credit top-up invoices accept USDT")
     try:
         with _usdt_rpc() as rpc:
             deposit = create_or_get_deposit(
@@ -831,13 +830,13 @@ def create_usdt_deposit(
         return _usdt_deposit_payload(db, deposit)
     except UsdtConfigurationError as exc:
         db.rollback()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        service_unavailable(str(exc))
     except (UsdtDepositError, EthereumRpcError) as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        conflict(str(exc))
 
 
-@router.get("/invoices/{invoice_id}/usdt-deposit", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/invoices/{invoice_id}/usdt-deposit", responses=COMMON_ERROR_RESPONSES)
 def get_usdt_deposit(
     invoice_id: int,
     reseller: ResellerDep,
@@ -852,10 +851,10 @@ def get_usdt_deposit(
     return _usdt_deposit_payload(db, deposit)
 
 
-@router.get("/ledger", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/ledger", responses=COMMON_ERROR_RESPONSES)
 def list_ledger(
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     *,
     reseller: ResellerDep,
     db: DbDep,
@@ -873,7 +872,7 @@ def list_ledger(
     return [_ledger_payload(entry) for entry in entries]
 
 
-@router.post("/top-up-invoices", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/top-up-invoices", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def create_topup_invoice(
     body: TopupInvoiceCreate,
     reseller: ResellerDep,
@@ -900,7 +899,7 @@ def create_topup_invoice(
     return InvoiceService.serialize(db, invoice)
 
 
-@router.post("/stripe/setup-intent", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/stripe/setup-intent", responses=COMMON_ERROR_RESPONSES)
 def create_setup_intent(
     reseller: ResellerDep,
     db: DbDep,
@@ -915,7 +914,7 @@ def create_setup_intent(
     return {"client_secret": setup_intent.client_secret}
 
 
-@router.post("/paypal/setup-token", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/paypal/setup-token", responses=COMMON_ERROR_RESPONSES)
 def create_paypal_setup_token(
     reseller: ResellerDep,
     db: DbDep,
@@ -933,7 +932,7 @@ def create_paypal_setup_token(
     }
 
 
-@router.get("/payment-methods", responses={**COMMON_ERROR_RESPONSES})
+@router.get("/payment-methods", responses=COMMON_ERROR_RESPONSES)
 def list_payment_methods(
     reseller: ResellerDep,
     db: DbDep,
@@ -966,7 +965,7 @@ def _register_method(
     return method
 
 
-@router.post("/payment-methods", status_code=status.HTTP_201_CREATED, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/payment-methods", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
 def register_payment_method(
     body: PaymentMethodRegister,
     reseller: ResellerDep,
@@ -995,15 +994,15 @@ def register_paypal_payment_method(
             label=body.label,
         )
     except PaymentMethodOwnershipError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        forbidden(str(exc))
     except PaymentGatewayError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        conflict(str(exc))
     db.commit()
     db.refresh(method)
     return _method_payload(method)
 
 
-@router.put("/payment-methods/reorder", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/payment-methods/reorder", responses=COMMON_ERROR_RESPONSES)
 def reorder_payment_methods(
     body: PaymentMethodReorder,
     reseller: ResellerDep,
@@ -1032,7 +1031,7 @@ def reorder_payment_methods(
     ]
 
 
-@router.put("/payment-methods/{method_id}", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/payment-methods/{method_id}", responses=COMMON_ERROR_RESPONSES)
 def sync_payment_method(
     method_id: int,
     body: PaymentMethodRegister,
@@ -1065,14 +1064,14 @@ def delete_payment_method(
     try:
         PaymentOrchestrator().detach_method(db, reseller, method_id)
     except PaymentMethodOwnershipError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        not_found(str(exc))
     except PaymentGatewayError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        service_unavailable(str(exc))
     db.commit()
     return None
 
 
-@router.put("/charge-preference", responses={**COMMON_ERROR_RESPONSES})
+@router.put("/charge-preference", responses=COMMON_ERROR_RESPONSES)
 def update_charge_preference(
     body: ChargePreferenceUpdate,
     reseller: ResellerDep,
@@ -1083,7 +1082,7 @@ def update_charge_preference(
     return {"charge_preference": reseller.charge_preference.value}
 
 
-@router.post("/invoices/{invoice_id}/pay", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/invoices/{invoice_id}/pay", responses=COMMON_ERROR_RESPONSES)
 def pay_invoice(
     invoice_id: int,
     body: InvoicePay,
@@ -1125,7 +1124,7 @@ def pay_invoice(
     return InvoiceService.serialize(db, invoice, payments=True)
 
 
-@router.post("/webhooks/stripe", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/webhooks/stripe", responses=COMMON_ERROR_RESPONSES)
 async def stripe_webhook(
     request: Request,
     stripe_signature: Optional[str] = Header(
@@ -1168,7 +1167,7 @@ async def stripe_webhook(
     return {"received": True, "duplicate": not processed}
 
 
-@router.post("/webhooks/paypal", responses={**COMMON_ERROR_RESPONSES})
+@router.post("/webhooks/paypal", responses=COMMON_ERROR_RESPONSES)
 async def paypal_webhook(
     request: Request,
     db: DbDep,

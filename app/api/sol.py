@@ -124,14 +124,14 @@ async def perform_sol_send(
     )
 
 
-@router.get("/profiles", response_model=List[SolProfileInfo], responses={**COMMON_ERROR_RESPONSES})
+@router.get("/profiles", response_model=List[SolProfileInfo], responses=COMMON_ERROR_RESPONSES)
 async def admin_list_sol_profiles(auth: AdminDep):
     """Admin dropdown values for ``servers.sol_profile``."""
     del auth
     return [SolProfileInfo(**item) for item in list_profiles()]
 
 
-@router.post("/redeem", response_model=SolSessionResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/redeem", response_model=SolSessionResponse, responses=COMMON_ERROR_RESPONSES)
 async def redeem_sol_launch_ticket(
     body: SolRedeemRequest,
     db: DbDep,

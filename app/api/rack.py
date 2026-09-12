@@ -7,6 +7,10 @@ from app.core.auth import require_admin
 from app.dao import RackDAO, LocationDAO
 from app.models.rack import Rack
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter()
 
 
@@ -47,8 +51,9 @@ class RackResponse(BaseModel):
 async def list_racks(
     location_id: int | None = None,
     row: int | None = None,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    *,
+    auth: AdminDep,
+    db: DbDep
 ):
     """List all racks, optionally filtered by location and/or row"""
     if location_id and row is not None:
@@ -63,8 +68,8 @@ async def list_racks(
 @router.post("/", response_model=RackResponse, status_code=status.HTTP_201_CREATED)
 async def create_rack(
     rack_data: RackCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Create a new rack"""
     # Validate location exists
@@ -106,8 +111,8 @@ async def create_rack(
 @router.get("/{rack_id}", response_model=RackResponse)
 async def get_rack(
     rack_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get a rack by ID"""
     rack = RackDAO.get_by_id(db, rack_id)
@@ -123,8 +128,8 @@ async def get_rack(
 async def update_rack(
     rack_id: int,
     rack_data: RackUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Update a rack"""
     rack = RackDAO.get_by_id(db, rack_id)
@@ -171,8 +176,8 @@ async def update_rack(
 @router.delete("/{rack_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_rack(
     rack_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Delete a rack"""
     success = RackDAO.delete(db, rack_id)
@@ -186,8 +191,8 @@ async def delete_rack(
 @router.get("/{rack_id}/servers", response_model=List[dict])
 async def get_rack_servers(
     rack_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db)
+    auth: AdminDep,
+    db: DbDep
 ):
     """Get all servers in a rack, organized by rack unit"""
     rack = RackDAO.get_by_id(db, rack_id)

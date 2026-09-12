@@ -19,6 +19,9 @@ from app.schemas.user import (
     ChangePasswordRequest,
 )
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+
 router = APIRouter()
 
 
@@ -27,7 +30,7 @@ async def login(
     login_data: UserLogin,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db)
+    db: DbDep
 ):
     """Login endpoint - returns API token and sets auth_token cookie"""
     # Get client IP (resolved before any auth work so it can be used for
@@ -111,7 +114,7 @@ async def login(
 async def logout(
     request: Request,
     response: Response,
-    auth: dict = Depends(get_current_user)
+    auth: Annotated[dict, Depends(get_current_user)]
 ):
     """Logout endpoint - deletes token from Redis and clears cookie"""
     # Get token from request
@@ -151,8 +154,8 @@ async def logout(
 async def change_password(
     body: ChangePasswordRequest,
     request: Request,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: DbDep,
 ):
     """Change the current user's password. Requires current password."""
     user_id = auth.get("user_id")
@@ -198,8 +201,8 @@ async def change_password(
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_details(
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: DbDep,
 ):
     """Get current user details"""
     user_id = auth.get("user_id")
@@ -228,8 +231,8 @@ async def get_current_user_details(
 @router.get("/sessions", response_model=List[SessionResponse])
 async def get_user_sessions(
     request: Request,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: DbDep
 ):
     """Get all active sessions/tokens for the current user.
 
@@ -292,8 +295,8 @@ async def get_user_sessions(
 async def delete_session(
     token_id: str,
     request: Request,
-    auth: dict = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: DbDep
 ):
     """Delete a specific session/token.
 

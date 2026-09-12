@@ -12,6 +12,10 @@ from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
 from app.models.proxy_subnet_group import ProxySubnetGroup
 
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/admin/proxy-subnet-groups", tags=["proxy-subnet-groups"])
 
 
@@ -97,8 +101,8 @@ def _to_response(row: ProxySubnetGroup) -> ProxySubnetGroupResponse:
 @router.get("", response_model=List[ProxySubnetGroupResponse])
 @router.get("/", response_model=List[ProxySubnetGroupResponse])
 async def list_proxy_subnet_groups(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     return [_to_response(row) for row in ProxySubnetGroupDAO.list_all(db)]
 
@@ -107,8 +111,8 @@ async def list_proxy_subnet_groups(
 @router.post("/", response_model=ProxySubnetGroupResponse, status_code=status.HTTP_201_CREATED)
 async def create_proxy_subnet_group(
     data: ProxySubnetGroupCreate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     try:
         row = ProxySubnetGroupDAO.create(
@@ -127,8 +131,8 @@ async def create_proxy_subnet_group(
 @router.get("/{group_id}", response_model=ProxySubnetGroupResponse)
 async def get_proxy_subnet_group(
     group_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxySubnetGroupDAO.get_by_id(db, group_id)
     if not row:
@@ -140,8 +144,8 @@ async def get_proxy_subnet_group(
 async def update_proxy_subnet_group(
     group_id: int,
     data: ProxySubnetGroupUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     row = ProxySubnetGroupDAO.get_by_id(db, group_id)
     if not row:
@@ -163,8 +167,8 @@ async def update_proxy_subnet_group(
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_proxy_subnet_group(
     group_id: int,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
 ):
     if not ProxySubnetGroupDAO.delete(db, group_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proxy subnet group not found")

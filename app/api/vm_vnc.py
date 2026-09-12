@@ -68,7 +68,7 @@ def _placement_http_error(exc: ProxmoxPlacementError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=str(exc))
 
 
-@router.post("/redeem", response_model=VmVncSessionResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/redeem", response_model=VmVncSessionResponse, responses=COMMON_ERROR_RESPONSES)
 async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: DbDep):
     """Consume a launch ticket and mint a WS session for the ``/vnc`` page.
 
@@ -124,7 +124,7 @@ async def redeem_vnc_launch_ticket(body: VmVncRedeemRequest, db: DbDep):
     )
 
 
-@router.post("/refresh", response_model=VmVncSessionResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/refresh", response_model=VmVncSessionResponse, responses=COMMON_ERROR_RESPONSES)
 async def refresh_vnc_session(body: VmVncRedeemRequest, db: DbDep):
     """Mint a fresh Proxmox console proxy for an existing WS session.
 
@@ -194,7 +194,7 @@ async def refresh_vnc_session(body: VmVncRedeemRequest, db: DbDep):
     )
 
 
-@router.post("/power", response_model=VmVncPowerResponse, responses={**COMMON_ERROR_RESPONSES})
+@router.post("/power", response_model=VmVncPowerResponse, responses=COMMON_ERROR_RESPONSES)
 async def console_power_action(body: VmVncPowerRequest, db: DbDep):
     """Power on/off/reboot the VM bound to a console WS session.
 

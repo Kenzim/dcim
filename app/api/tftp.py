@@ -16,6 +16,10 @@ from app.services.tftp_config_service import (
 from app.core.auth import require_admin
 from app.core.database import get_db
 
+from typing import Annotated
+DbDep = Annotated[Session, Depends(get_db)]
+AdminDep = Annotated[dict, Depends(require_admin)]
+
 router = APIRouter(prefix="/tftp", tags=["tftp"])
 
 
@@ -37,7 +41,7 @@ class TFTPConfigUpdate(BaseModel):
 
 @router.post("/start", response_model=Dict[str, Any])
 async def start_tftp_server(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
@@ -59,7 +63,7 @@ async def start_tftp_server(
 
 @router.post("/stop", response_model=Dict[str, Any])
 async def stop_tftp_server(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
@@ -81,7 +85,7 @@ async def stop_tftp_server(
 
 @router.post("/restart", response_model=Dict[str, Any])
 async def restart_tftp_server(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
@@ -103,7 +107,7 @@ async def restart_tftp_server(
 
 @router.post("/reload", response_model=Dict[str, Any])
 async def reload_tftp_server(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
@@ -127,7 +131,7 @@ async def reload_tftp_server(
 
 @router.get("/status", response_model=Dict[str, Any])
 async def get_tftp_status(
-    auth: dict = Depends(require_admin),
+    auth: AdminDep,
     tftp_service: TFTPService = Depends(get_tftp_service_with_db)
 ):
     """
@@ -141,8 +145,8 @@ async def get_tftp_status(
 
 @router.get("/config", response_model=TFTPConfig)
 async def get_tftp_config(
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: TFTPConfigService = Depends(get_tftp_config_service),
 ):
     """
@@ -157,8 +161,8 @@ async def get_tftp_config(
 @router.put("/config", response_model=TFTPConfig)
 async def update_tftp_config(
     config_data: TFTPConfigUpdate,
-    auth: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
+    auth: AdminDep,
+    db: DbDep,
     config_service: TFTPConfigService = Depends(get_tftp_config_service),
     tftp_service: TFTPService = Depends(get_tftp_service_with_db),
 ):
