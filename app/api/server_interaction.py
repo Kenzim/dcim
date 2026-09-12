@@ -37,7 +37,7 @@ from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
 )
-from app.utils.shell_escape import shell_escape_double_quoted
+from app.services.virtual_media.iso_catalog import list_iso_files, pxe_iso_url
 from app.models.server_activity import ServerActivityEventType
 import asyncio
 import logging
@@ -1926,27 +1926,12 @@ async def list_isos(
 
     Returns a list of ISO files available in the isos/ directory.
     """
-    isos_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "isos"
-    )
-    
-    if not os.path.exists(isos_dir):
-        return []
-    
-    iso_files = []
-    for filename in os.listdir(isos_dir):
-        file_path = os.path.join(isos_dir, filename)
-        if os.path.isfile(file_path) and filename.lower().endswith('.iso'):
-            file_size = os.path.getsize(file_path)
-            iso_files.append({
-                "filename": filename,
-                "size_bytes": file_size,
-                "size_mb": round(file_size / (1024 * 1024), 2),
-                "url": f"{_get_base_url_for_pxe_ip(db, None)}/api/servers/interaction/isos/{filename}"
-            })
-    
-    return sorted(iso_files, key=lambda x: x["filename"])
+    del auth
+    base_url = _get_base_url_for_pxe_ip(db, None)
+    return [
+        {**row, "url": pxe_iso_url(base_url, row["filename"])}
+        for row in list_iso_files()
+    ]
 
 
 @router.get("/isos/{filename}")
