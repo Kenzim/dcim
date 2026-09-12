@@ -43,3 +43,19 @@ def test_render_pdf_bytes_without_reportlab(db_session: Session):
     with patch.dict("sys.modules", {"reportlab": None, "reportlab.lib": None}):
         with pytest.raises(RuntimeError, match="reportlab"):
             InvoicePdfService.render_pdf_bytes(db_session, invoice)
+
+
+def test_render_pdf_bytes_success(db_session: Session):
+    user = _make_user(db_session, "pdf-user")
+    account = BillingAccountDAO.ensure_client_account(db_session, user.id)
+    invoice = InvoiceService.create(
+        db_session,
+        billing_account_id=account.id,
+        purpose=InvoicePurpose.ORDER_CHARGE,
+        amount_cents=1500,
+        description="rendered invoice",
+    )
+    db_session.commit()
+    pdf_bytes = InvoicePdfService.render_pdf_bytes(db_session, invoice)
+    assert pdf_bytes.startswith(b"%PDF")
+    assert len(pdf_bytes) > 200

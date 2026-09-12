@@ -145,6 +145,48 @@ def test_admin_commerce_webhooks_list_create(client, test_admin_user):
     assert any(row["id"] == body["id"] for row in listed2.json())
 
 
+def test_admin_commerce_audit_and_billing_accounts(client, db_session: Session, test_admin_user):
+    user = _make_user(db_session, f"audit-{uuid.uuid4().hex[:6]}")
+    _seed_order(db_session, user)
+    token = _login_admin(client)
+    audit = client.get("/api/admin/commerce/audit-events", headers=_auth(token))
+    assert audit.status_code == 200, audit.text
+    accounts = client.get("/api/admin/commerce/billing-accounts", headers=_auth(token))
+    assert accounts.status_code == 200, accounts.text
+    assert len(accounts.json()) >= 1
+
+
+def test_admin_commerce_invoice_pdf(client, db_session: Session, test_admin_user):
+    user = _make_user(db_session, f"pdf-{uuid.uuid4().hex[:6]}")
+    account = BillingAccountDAO.ensure_client_account(db_session, user.id)
+    invoice = InvoiceService.create(
+        db_session,
+        billing_account_id=account.id,
+        purpose=InvoicePurpose.ORDER_CHARGE,
+        amount_cents=990,
+        description="pdf route",
+    )
+    db_session.commit()
+    token = _login_admin(client)
+    r = client.get(
+        f"/api/admin/commerce/invoices/{invoice.id}/pdf",
+        headers=_auth(token),
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/pdf")
+    assert r.content.startswith(b"%PDF")
+
+
+def test_admin_commerce_transactions_and_gateway_logs(client, test_admin_user):
+    token = _login_admin(client)
+    tx = client.get("/api/admin/commerce/transactions", headers=_auth(token))
+    assert tx.status_code == 200, tx.text
+    logs = client.get("/api/admin/commerce/gateway-logs", headers=_auth(token))
+    assert logs.status_code == 200, logs.text
+    emails = client.get("/api/admin/commerce/email-messages", headers=_auth(token))
+    assert emails.status_code == 200, emails.text
+
+
 def test_admin_commerce_requires_admin(client, db_session: Session):
     user = _make_user(db_session, f"nonadmin-{uuid.uuid4().hex[:6]}")
     login = client.post(
