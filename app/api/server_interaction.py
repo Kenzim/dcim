@@ -40,6 +40,7 @@ from app.services.server_activity_logger import (
 )
 from app.services.virtual_media.iso_catalog import list_iso_files, pxe_iso_url
 from app.models.server_activity import ServerActivityEventType
+from app.utils.shell_escape import shell_escape_double_quoted
 import asyncio
 import logging
 import re
@@ -123,6 +124,20 @@ def _script_url_with_token(base_url: str, boot_task_id: int) -> str:
         single_use=False,
     )
     return f"{base_url}/api/servers/interaction/scripts/{boot_task_id}?token={token}"
+
+
+def _inject_script_url_param(kernel_params: Optional[str], base_url: str, boot_task_id: int) -> str:
+    """Put a fresh tokenized script_url on the kernel cmdline, replacing any existing one.
+
+    Billing/queue paths sometimes persist a tokenless ``script_url=`` before PXE
+    runs. The PXE generator must overwrite that, otherwise debian-live fetches
+    ``/scripts/{id}`` without a token and gets 401.
+    """
+    from urllib.parse import quote
+
+    encoded = quote(_script_url_with_token(base_url, boot_task_id), safe=":/?=&")
+    params = re.sub(r"\s*script_url=\S+", "", kernel_params or "").strip()
+    return f"{params} script_url={encoded}".strip()
 
 
 def _normalize_kernel_args(value: Optional[str]) -> str:
@@ -625,13 +640,11 @@ exit
                         
                         # Merge with per-server PXE args (network args default to legacy behavior).
                         kernel_params = _merge_server_kernel_args(kernel_params, server, port, db)
-                        # Add script URL if script exists
+                        # Always overwrite script_url with a token minted at PXE serve time.
                         if boot_task.script_content:
-                            script_url = _script_url_with_token(base_url, boot_task.id)
-                            from urllib.parse import quote
-                            encoded_script_url = quote(script_url, safe=':/?=&')
-                            if "script_url=" not in kernel_params:
-                                kernel_params = f"{kernel_params} script_url={encoded_script_url}"
+                            kernel_params = _inject_script_url_param(
+                                kernel_params, base_url, boot_task.id
+                            )
 
                         # Generate iPXE script for temporary OS
                         if boot_task.status == BootTaskStatus.PENDING:
@@ -878,6 +891,12 @@ def _build_cloud_init_user_data(server, installation_task) -> str:
             "ssh_pwauth: true",
             "package_update: false",
             "package_upgrade: false",
+            "runcmd:",
+            "  - [ systemctl, daemon-reload ]",
+            "  - [ systemctl, enable, --now, serial-getty@ttyS0.service ]",
+            "  - [ systemctl, enable, --now, serial-getty@ttyS1.service ]",
+            "  - [ systemctl, enable, --now, serial-getty@ttyS2.service ]",
+            "  - update-grub || true",
             "final_message: " + _safe_yaml_single_quoted(f"Rackflow cloud-init completed for server {server.id}"),
         ]
     )
@@ -1518,14 +1537,11 @@ async def create_boot_task(
     
     # For Debian Live (squashfs), add script URL to kernel params if script exists
     if boot_task.temp_os_id == "debian-live" and boot_task.script_content:
-        script_url = _script_url_with_token(base_url, boot_task.id)
-        from urllib.parse import quote
-        encoded_script_url = quote(script_url, safe=':/?=&')
-        if "script_url=" not in boot_task.kernel_params:
-            updated_kernel_params = f"{boot_task.kernel_params} script_url={encoded_script_url}"
-            boot_task.kernel_params = updated_kernel_params
-            db.commit()
-            db.refresh(boot_task)
+        boot_task.kernel_params = _inject_script_url_param(
+            boot_task.kernel_params, base_url, boot_task.id
+        )
+        db.commit()
+        db.refresh(boot_task)
     
     # If this is a template-based installation, create InstallationTask and save credentials
     installation_task = None

@@ -1,4 +1,5 @@
 Start-Transcript -Path C:\Windows\Temp\firstboot.log
+$script:AdminPasswordPlain = $null
 
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "DCIM First Boot Configuration Script" -ForegroundColor Cyan
@@ -36,6 +37,7 @@ if (Test-Path $pwFile) {
             }
             Write-Host "  Password to set: $maskedPassword" -ForegroundColor Gray
             
+            $script:AdminPasswordPlain = $passwordPlain
             $securePassword = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
 
             # Set local Administrator password
@@ -175,16 +177,17 @@ Write-Host ""
 
 Write-Host "[5/6] Extending C: partition to maximum size..." -ForegroundColor Yellow
 
-# 4a. Use diskpart: select volume C, extend, exit
+# 4a. Use diskpart: select volume C, extend filesystem (and extend partition if free space exists)
 $diskpartScript = @"
 select volume C
 extend
+extend filesystem
 exit
 "@
 $diskpartFile = Join-Path $env:TEMP "dcim_extend_c.diskpart"
 try {
     Set-Content -Path $diskpartFile -Value $diskpartScript -Encoding ASCII -ErrorAction Stop
-    Write-Host "  Running diskpart to extend C: (select volume C, extend)..." -ForegroundColor Gray
+    Write-Host "  Running diskpart to extend C: (select volume C, extend, extend filesystem)..." -ForegroundColor Gray
     $diskpartOut = & diskpart /s $diskpartFile 2>&1
     $diskpartOut | ForEach-Object { Write-Host "  diskpart: $_" -ForegroundColor Gray }
     if ($LASTEXITCODE -eq 0) {
@@ -213,17 +216,28 @@ try {
     Write-Host "  Max supported C: size: $supportedMaxGB GB" -ForegroundColor Gray
 
     if ($deltaBytes -lt 1MB) {
-        Write-Host "  C: is already using all available space (no extendable free space >= 1 MB)" -ForegroundColor Green
-        Write-Host "  [SKIP] No further extension needed" -ForegroundColor Yellow
+        Write-Host "  C: partition is already using all available space" -ForegroundColor Green
     } elseif ($partition.Size -ge $supported.SizeMax) {
-        Write-Host "  C: is already at maximum size ($supportedMaxGB GB)" -ForegroundColor Green
-        Write-Host "  [SKIP] No further extension needed" -ForegroundColor Yellow
+        Write-Host "  C: partition is already at maximum size ($supportedMaxGB GB)" -ForegroundColor Green
     } else {
         $targetBytes = [math]::Floor(($supported.SizeMax - 1MB) / 1MB) * 1MB
         $targetGB    = [math]::Round($targetBytes / 1GB, 2)
         Write-Host "  Extending via PowerShell to: $targetGB GB..." -ForegroundColor Gray
         Resize-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -Size $targetBytes -ErrorAction Stop
         Write-Host "  [SUCCESS] Extended C: to approximately $targetGB GB" -ForegroundColor Green
+    }
+
+    # Partition can be full while NTFS is still the image size (~20 GB).
+    $vol = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
+    $partNow = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
+    if ($vol.Size -lt ($partNow.Size - 8MB)) {
+        Write-Host "  NTFS is smaller than the partition; running extend filesystem..." -ForegroundColor Gray
+        $fsFile = Join-Path $env:TEMP "dcim_extend_fs.diskpart"
+        Set-Content -Path $fsFile -Value "select volume C`r`nextend filesystem`r`nexit" -Encoding ASCII
+        & diskpart /s $fsFile | ForEach-Object { Write-Host "  diskpart: $_" -ForegroundColor Gray }
+        Remove-Item $fsFile -Force -ErrorAction SilentlyContinue
+        $vol = Get-Volume -DriveLetter $driveLetter -ErrorAction SilentlyContinue
+        Write-Host "  C: filesystem size now $([math]::Round($vol.Size / 1GB, 2)) GB" -ForegroundColor Green
     }
 } catch {
     $msg = $_.Exception.Message
@@ -235,6 +249,205 @@ try {
         Write-Host "  Error details: $msg" -ForegroundColor Red
     }
 }
+
+Write-Host ""
+
+# --------------------------------
+# 5b. Persist diskpart + serial admin cmd for every startup
+# --------------------------------
+
+$scriptsDir = "C:\Windows\Setup\Scripts"
+if (!(Test-Path $scriptsDir)) {
+    New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null
+}
+
+$extendFile = Join-Path $scriptsDir "extend-c.diskpart"
+Set-Content -Path $extendFile -Value @"
+select volume C
+extend
+extend filesystem
+exit
+"@ -Encoding ASCII
+
+$serialPs1 = Join-Path $scriptsDir "serial-admin-cmd.ps1"
+Set-Content -Path $serialPs1 -Value @'
+$log = "C:\Windows\Temp\serial-admin-cmd.log"
+function L($m) { Add-Content $log ("{0} {1}" -f (Get-Date -Format o), $m) -ErrorAction SilentlyContinue }
+L "ps getty boot"
+
+$mtx = New-Object System.Threading.Mutex($false, "Global\DCIM-SerialAdminCmd")
+if (-not $mtx.WaitOne(0)) { L "already running"; return }
+
+$script:QuietEmptyUntil = [datetime]::MinValue
+
+function SW($sp, [string]$s) {
+  if ([string]::IsNullOrEmpty($s)) { return }
+  $b = [Text.Encoding]::UTF8.GetBytes($s)
+  $sp.BaseStream.Write($b, 0, $b.Length)
+  $sp.BaseStream.Flush()
+}
+
+function Mark-HostWrite($sp) {
+  Start-Sleep -Milliseconds 20
+  try { $sp.DiscardInBuffer() } catch {}
+  $script:QuietEmptyUntil = (Get-Date).AddSeconds(2)
+}
+
+function Get-Cwd {
+  try { (Get-Location).Path } catch { "C:\" }
+}
+
+function Write-Prompt($sp) {
+  SW $sp ("$(Get-Cwd)`r`nRF> ")
+  Mark-HostWrite $sp
+}
+
+function Drain-Eol($sp) {
+  $prev = $sp.ReadTimeout
+  $sp.ReadTimeout = 30
+  try {
+    while ($true) {
+      try { $b = $sp.ReadByte() } catch { break }
+      if ($b -ne 10 -and $b -ne 13) { break }
+    }
+  } finally { $sp.ReadTimeout = $prev }
+}
+
+function Read-SerialLine($sp) {
+  $sb = New-Object System.Text.StringBuilder
+  $escState = 0
+  while ($sp.IsOpen) {
+    $b = -1
+    try { $b = $sp.ReadByte() } catch [System.TimeoutException] { continue } catch { return $null }
+    if ($b -lt 0) { continue }
+    if ($escState -eq 1) {
+      if ($b -eq 91) { $escState = 2; continue }
+      $escState = 0
+      continue
+    }
+    if ($escState -eq 2) { $escState = 0; continue }
+    if ($b -eq 27) { $escState = 1; continue }
+    if ($b -eq 10) { continue }
+    if ($b -eq 13) {
+      Drain-Eol $sp
+      return $sb.ToString()
+    }
+    if ($b -eq 3) { return "" }
+    if ($b -eq 21) { [void]$sb.Clear(); continue }
+    if ($b -eq 8 -or $b -eq 127) {
+      if ($sb.Length -gt 0) { [void]$sb.Remove($sb.Length - 1, 1) }
+      continue
+    }
+    if ($b -ge 32 -and $b -le 126) { [void]$sb.Append([char]$b) }
+  }
+  return $null
+}
+
+function Write-CmdOutput($sp, [string]$path) {
+  if (!(Test-Path $path)) { return }
+  $bytes = [IO.File]::ReadAllBytes($path)
+  if ($bytes.Length -eq 0) { return }
+  $txt = [Text.Encoding]::Default.GetString($bytes)
+  $txt = $txt -replace "`r`n", "`n" -replace "`r", "`n" -replace "`n", "`r`n"
+  SW $sp $txt
+  if (-not $txt.EndsWith("`n")) { SW $sp "`r`n" }
+}
+
+foreach ($name in @("COM2", "COM1", "COM3")) {
+  try {
+    $sp = New-Object System.IO.Ports.SerialPort $name, 115200, None, 8, One
+    $sp.Handshake = "None"
+    $sp.DtrEnable = $true
+    $sp.RtsEnable = $true
+    $sp.ReadTimeout = 50
+    $sp.WriteTimeout = 2000
+    $sp.NewLine = "`r`n"
+    $sp.Open()
+    L "opened $name"
+    SW $sp "`r`nRackflow serial console - Administrator@$env:COMPUTERNAME`r`n"
+    SW $sp "Microsoft Windows [Version $([Environment]::OSVersion.Version)]`r`n"
+    Write-Prompt $sp
+    while ($sp.IsOpen) {
+      $line = Read-SerialLine $sp
+      if ($null -eq $line) { break }
+      $line = $line.Trim()
+      if ($line -eq "") {
+        if ((Get-Date) -lt $script:QuietEmptyUntil) { continue }
+        Write-Prompt $sp
+        continue
+      }
+      L "exec $line"
+      $tmpo = "$env:TEMP\rf-ser.out"; $tmpe = "$env:TEMP\rf-ser.err"
+      cmd.exe /c $line > $tmpo 2>$tmpe
+      Write-CmdOutput $sp $tmpo
+      Write-CmdOutput $sp $tmpe
+      Write-Prompt $sp
+    }
+    try { $sp.Close() } catch {}
+  } catch { L "$name fail $_" }
+}
+L "ps getty end"
+'@ -Encoding UTF8
+
+function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra) {
+    schtasks /Delete /TN $name /F 2>$null | Out-Null
+    for ($i = 1; $i -le 5; $i++) {
+        cmd.exe /c "schtasks /Create /TN `"$name`" /SC ONSTART /RU SYSTEM /RL HIGHEST $extra /TR `"$tr`" /F"
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  [SUCCESS] Startup task $name registered" -ForegroundColor Green
+            return
+        }
+        Write-Warning "  schtasks $name attempt $i failed (exit $LASTEXITCODE); retrying"
+        Start-Sleep -Seconds 3
+    }
+    Write-Warning "  Failed to create $name after retries"
+    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $name -Value $tr -PropertyType String -Force | Out-Null
+}
+
+Invoke-DcimSchtasks -name "DCIM-ExtendC" -tr "diskpart.exe /s $extendFile" -extra ""
+Invoke-DcimSchtasks -name "DCIM-SerialAdminCmd" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $serialPs1" -extra "/DELAY 0000:15"
+try {
+    $null = ([wmiclass]"Win32_Process").Create("powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$serialPs1`"")
+    Write-Host "  Serial admin cmd started in background" -ForegroundColor Gray
+} catch {
+    Write-Warning "  Could not start serial admin cmd immediately: $_"
+}
+
+Write-Host "[5c] Configuring Administrator auto-logon and serial console..." -ForegroundColor Yellow
+
+try {
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableCAD" -Value 1 -Type DWord -ErrorAction Stop
+    Write-Host "  Disabled Ctrl+Alt+Del requirement" -ForegroundColor Green
+} catch {
+    Write-Warning "  Failed to disable CAD: $_"
+}
+
+if ($script:AdminPasswordPlain) {
+    try {
+        $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+        Set-ItemProperty -Path $winlogon -Name "AutoAdminLogon" -Value "1" -Type String -ErrorAction Stop
+        Set-ItemProperty -Path $winlogon -Name "DefaultUserName" -Value "Administrator" -Type String -ErrorAction Stop
+        Set-ItemProperty -Path $winlogon -Name "DefaultPassword" -Value $script:AdminPasswordPlain -Type String -ErrorAction Stop
+        Set-ItemProperty -Path $winlogon -Name "DefaultDomainName" -Value $env:COMPUTERNAME -Type String -ErrorAction Stop
+        Set-ItemProperty -Path $winlogon -Name "Shell" -Value "cmd.exe" -Type String -ErrorAction Stop
+        Remove-ItemProperty -Path $winlogon -Name "AutoLogonCount" -ErrorAction SilentlyContinue
+        Write-Host "  [SUCCESS] AutoAdminLogon enabled for Administrator (shell=cmd.exe)" -ForegroundColor Green
+    } catch {
+        Write-Warning "  Failed to enable AutoAdminLogon: $_"
+    }
+} else {
+    Write-Warning "  Skipping AutoAdminLogon (no Administrator password available)"
+}
+
+try {
+    Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop | Out-Null
+    New-NetFirewallRule -DisplayName "RF-WinRM-5985" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    Write-Host "  WinRM / WinRS enabled on 5985" -ForegroundColor Green
+} catch {
+    Write-Warning "  Failed to enable WinRM: $_"
+}
+
+Write-Host "  Serial Administrator cmd attaches to COM2 (then COM1/COM3) at 115200" -ForegroundColor Gray
 
 Write-Host ""
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.dao.product_catalog_dao import OSProfileDAO, ProductDAO, ProductFamilyDAO, VMTemplateDAO
+from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO, VMTemplateDAO
 from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 
@@ -47,21 +47,6 @@ async def list_products() -> dict:
         }
 
     return await run_tool("list_products", "read", work)
-
-
-@mcp.tool()
-async def list_os_profiles() -> dict:
-    """List OS profiles."""
-
-    def work(db, ctx):
-        return {
-            "os_profiles": [
-                {"id": r.id, "name": r.name, "code": r.code, "enabled": r.enabled}
-                for r in OSProfileDAO.get_all(db)
-            ]
-        }
-
-    return await run_tool("list_os_profiles", "read", work)
 
 
 @mcp.tool()

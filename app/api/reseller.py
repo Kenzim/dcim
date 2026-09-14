@@ -42,11 +42,12 @@ from app.schemas.billing import (
     PowerAction,
     SuspendAction,
 )
-from app.services.billing_provisioning_service import (
+from app.services.provisioning import (
     ProvisioningActor,
-    provision_bare_metal_service,
-    provision_vm_service,
+    ProvisioningError,
+    ProvisioningService,
 )
+from app.services.provisioning.adapters import from_billing_bare_metal, from_billing_vm
 from app.services.client_permission_resolver import require_client_permission
 from app.services.client_portal_service import mint_sso_ticket
 from app.services.reseller_billing_service import (
@@ -553,20 +554,11 @@ def _provision_charged_service(
     )
     try:
         if kind == ServiceType.VM.value:
-            service = provision_vm_service(
-                db=db,
-                body=body,
-                owner_user_id=owner.id,
-                actor=actor,
-                background_tasks=background_tasks,
-            )
+            req = from_billing_vm(body, owner.id)
+            service = ProvisioningService.create(db, req, actor)
         else:
-            service = provision_bare_metal_service(
-                db=db,
-                service_data=body,
-                owner_user_id=owner.id,
-                actor=actor,
-            )
+            req = from_billing_bare_metal(body, owner.id)
+            service = ProvisioningService.create(db, req, actor)
         effective_permissions = (
             ResellerBillingService.effective_client_product_permissions(
                 db, reseller.id, charge.product
@@ -584,6 +576,12 @@ def _provision_charged_service(
             db, reseller=reseller, service=service, charge=charge
         )
         return service
+    except ProvisioningError as exc:
+        ResellerBillingService.compensate_failed_deploy(
+            db, reseller=reseller, charge=charge, error=exc
+        )
+        _cleanup_failed_service(db, reseller, owner, body, service)
+        raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
     except Exception as exc:
         ResellerBillingService.compensate_failed_deploy(
             db, reseller=reseller, charge=charge, error=exc

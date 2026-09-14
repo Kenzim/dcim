@@ -96,17 +96,17 @@ async def test_provision_vm_calls_core(
     mcp_auth_ctx_write, mcp_sessionlocal, db_session, monkeypatch
 ):
     fake = SimpleNamespace(id=42, status=ServiceStatus.PENDING)
-    monkeypatch.setattr(
-        "app.mcp.tools.services._create_admin_vm_core", lambda db, body: fake
-    )
-    called = {}
+    created = {}
 
-    def _enqueue(db, service_id):
-        called["id"] = service_id
-        return fake, None
+    def _create(db, req, actor):
+        created["name"] = req.name
+        created["product_code"] = req.product_code
+        created["vm_template_id"] = req.vm_template_id
+        created["auto_provision"] = req.auto_provision
+        return fake
 
     monkeypatch.setattr(
-        "app.mcp.tools.services.provision_vm_service_async", _enqueue
+        "app.mcp.tools.services.ProvisioningService.create", _create
     )
     monkeypatch.setattr(
         "app.mcp.tools.services.service_row",
@@ -119,7 +119,9 @@ async def test_provision_vm_calls_core(
         name="vm-a", product_code="sku", vm_template_id=1, auto_provision=True
     )
     assert result["id"] == 42
-    assert called["id"] == 42
+    assert created["name"] == "vm-a"
+    assert created["vm_template_id"] == 1
+    assert created["auto_provision"] is True
 
 
 @pytest.mark.asyncio

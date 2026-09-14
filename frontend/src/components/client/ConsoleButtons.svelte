@@ -27,7 +27,7 @@
     window.open(
       `/api/client/services/${service.id}/vm/vnc-popup${query}`,
       `rackflow_console_${service.id}`,
-      'width=1024,height=768,resizable=yes,scrollbars=yes'
+      'width=1400,height=960,resizable=yes,scrollbars=yes'
     );
   }
 </script>

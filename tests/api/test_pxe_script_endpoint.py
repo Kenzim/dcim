@@ -191,3 +191,45 @@ def test_get_pxe_script_content_normal_pxe_request(client, db_session, test_pxe_
     # Should return iPXE script, not the script content
     assert "#!ipxe" in response.text
     assert "#!/bin/sh" not in response.text
+
+
+def test_inject_script_url_param_replaces_existing(monkeypatch):
+    from app.api import server_interaction as si
+
+    monkeypatch.setattr(
+        si,
+        "_script_url_with_token",
+        lambda base, tid: f"{base}/api/servers/interaction/scripts/{tid}?token=fresh",
+    )
+    out = si._inject_script_url_param(
+        "boot=live script_url=http://old.example/api/servers/interaction/scripts/9",
+        "http://pxe:8000",
+        9,
+    )
+    assert "boot=live" in out
+    assert "token=fresh" in out
+    assert "old.example" not in out
+
+
+def test_temp_os_pxe_replaces_tokenless_script_url(client, db_session, test_pxe_port, test_server):
+    """Pre-injected tokenless script_url must not win over the PXE token."""
+    boot_task = BootTaskDAO.create(
+        db=db_session,
+        server_id=test_server.id,
+        boot_type="temp_os",
+        temp_os_id="debian-live",
+        kernel_params=(
+            "boot=live script_url=http://old.example/api/servers/interaction/scripts/1"
+        ),
+        script_content="#!/bin/bash\necho install\n",
+        description="tokenless script_url in kernel_params",
+    )
+    response = client.get(
+        "/api/servers/interaction/pxe",
+        params={"mac": "00:0e:1e:6f:16:b0"},
+    )
+    assert response.status_code == 200
+    assert "#!ipxe" in response.text
+    assert "token=" in response.text
+    assert "old.example" not in response.text
+    assert f"scripts/{boot_task.id}" in response.text

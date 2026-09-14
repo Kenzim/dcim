@@ -84,7 +84,7 @@ function rackflow_reseller_ensureOsChoicePricing($choiceId)
     }
 }
 
-function rackflow_reseller_syncOsOption($productId, array $catalogProduct, $enabled)
+function rackflow_reseller_syncOsOption($productId, array $catalogProduct, $enabled, $groupOsTemplates = array())
 {
     if (empty($productId) || !class_exists('\Illuminate\Database\Capsule\Manager')) {
         return false;
@@ -127,12 +127,14 @@ function rackflow_reseller_syncOsOption($productId, array $catalogProduct, $enab
                     $choices[] = 'rfvt:' . (int)$template['id'] . '|' . $label;
                 }
             }
-        } else {
-            foreach (isset($catalogProduct['os_profiles']) && is_array($catalogProduct['os_profiles']) ? $catalogProduct['os_profiles'] : array() as $profile) {
-                if (!empty($profile['code'])) {
-                    $label = !empty($profile['name']) ? $profile['name'] : $profile['code'];
-                    $choices[] = 'rfos:' . $profile['code'] . '|' . $label;
+        } elseif ($mode === 'server_group') {
+            foreach ($groupOsTemplates as $template) {
+                $tid = is_array($template) ? (isset($template['id']) ? $template['id'] : '') : $template;
+                if ($tid === '' || $tid === null) {
+                    continue;
                 }
+                $label = is_array($template) && !empty($template['name']) ? $template['name'] : (string)$tid;
+                $choices[] = 'rfot:' . $tid . '|' . $label;
             }
         }
     }
@@ -507,6 +509,7 @@ add_hook('AdminProductConfigFieldsSave', 1, function (array $vars) {
         $params['serverid'] = $serverId;
     }
     $catalogProduct = $productCode !== '' ? rackflow_reseller_fetchProduct($params, $productCode) : array();
-    rackflow_reseller_syncOsOption($productId, $catalogProduct, $enabled && !empty($catalogProduct));
+    $groupOsTemplates = rackflow_reseller_osTemplatesForServerGroup($params, isset($options[4]) ? $options[4] : '');
+    rackflow_reseller_syncOsOption($productId, $catalogProduct, $enabled && !empty($catalogProduct), $groupOsTemplates);
     rackflow_reseller_ensureSshKeysCustomField($productId);
 });

@@ -29,11 +29,23 @@ from app.models.storefront import (
     ProductOptionType,
 )
 from app.services.markdown_sanitize import sanitize_markdown_to_html
+from app.services.provisioning import ALLOWED_PROVISION_KEYS
 
 _MSG_CATEGORY_NOT_FOUND = "Category not found"
 _MSG_PRODUCT_NOT_FOUND = "Product not found"
 _MSG_PRICE_PLAN_NOT_FOUND = "Price plan not found"
 _MSG_PRODUCT_OPTION_NOT_FOUND = "Product option not found"
+
+
+def _validate_provision_key(key: Optional[str]) -> None:
+    if key in (None, ""):
+        return
+    if key not in ALLOWED_PROVISION_KEYS:
+        allowed = ", ".join(sorted(ALLOWED_PROVISION_KEYS))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown provision_key '{key}'. Allowed: {allowed}",
+        )
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -616,6 +628,7 @@ def create_option_value(
     option = ProductOptionDAO.get(db, option_id)
     if option is None:
         raise HTTPException(status_code=404, detail=_MSG_PRODUCT_OPTION_NOT_FOUND)
+    _validate_provision_key(body.provision_key)
     row = ProductOptionValueDAO.create(db, option_id=option_id, **body.model_dump())
     db.commit()
     return _serialize_option_value(row)
@@ -628,7 +641,10 @@ def update_option_value(
     row = ProductOptionValueDAO.get(db, value_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Option value not found")
-    row = ProductOptionValueDAO.update(db, row, **body.model_dump(exclude_unset=True))
+    data = body.model_dump(exclude_unset=True)
+    if "provision_key" in data:
+        _validate_provision_key(data.get("provision_key"))
+    row = ProductOptionValueDAO.update(db, row, **data)
     db.commit()
     return _serialize_option_value(row)
 

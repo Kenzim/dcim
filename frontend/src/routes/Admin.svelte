@@ -38,8 +38,6 @@
   import ProxmoxClusterDetail from '../components/ProxmoxClusterDetail.svelte';
   import ProxyIpam from '../components/ProxyIpam.svelte';
   import ProxyRunners from '../components/ProxyRunners.svelte';
-  import ProxyCatalog from '../components/ProxyCatalog.svelte';
-  import BareMetalCatalog from '../components/BareMetalCatalog.svelte';
   import PermissionSets from '../components/PermissionSets.svelte';
   import Resellers from '../components/Resellers.svelte';
   import ResellerDetail from '../components/ResellerDetail.svelte';
@@ -93,11 +91,18 @@
     if (routePath.startsWith('bare-metal-services/')) {
       return `/admin/services/${routePath.slice('bare-metal-services/'.length)}`;
     }
+    if (routePath === 'bare-metal-catalog') {
+      return '/admin/product-catalog?type=bare_metal';
+    }
+    if (routePath === 'proxy-catalog') {
+      return '/admin/product-catalog?type=http_proxy';
+    }
     return null;
   }
 
   $: {
-    const path = $currentRoute || window.location.pathname;
+    const rawPath = $currentRoute || window.location.pathname;
+    const path = String(rawPath).split('?')[0].split('#')[0];
     // Remove leading slash and split
     const routePath = path.startsWith('/') ? path.slice(1) : path;
     const parts = routePath.split('/').filter(p => p);
@@ -312,10 +317,6 @@
         <ProxyIpam />
       {:else if routeName === 'proxy-runners'}
         <ProxyRunners />
-      {:else if routeName === 'proxy-catalog'}
-        <ProxyCatalog />
-      {:else if routeName === 'bare-metal-catalog'}
-        <BareMetalCatalog />
       {:else if routeName === 'server-groups'}
         <ServerGroups />
       {:else if routeName.startsWith('server-groups/') && groupId}

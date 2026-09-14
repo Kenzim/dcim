@@ -310,7 +310,7 @@ add_hook('ClientAreaFooterOutput', 2, function (array $vars) {
         return true;
       }
       var txt = tokenFromOsValue(opts[o].text || '');
-      if (txt && (txt.indexOf('rfvt:') === 0 || txt.indexOf('rfos:') === 0)) {
+      if (txt && (txt.indexOf('rfvt:') === 0 || txt.indexOf('rfot:') === 0)) {
         return true;
       }
     }
@@ -726,6 +726,9 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
   }
+  .rf-ms__preview-grid--single {
+    grid-template-columns: 1fr;
+  }
   .rf-ms__preview-block {
     background: #fff;
     border: 1px solid var(--rf-line);
@@ -788,7 +791,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
 <script type="text/javascript">
 (function () {
   // ConfigOptions order in rackflow_ConfigOptions():
-  // 1 Service Type, 2 Product Code, 3 OS Code, 4 Server Group,
+  // 1 Service Type, 2 Product Code, 3 Default OS template (rfvt:/rfot:), 4 Server Group,
   // 5 Proxmox Location, 6 Proxmox Node, 7 Customer OS Selection,
   // 8 Allow Client Portal Sign-In (Yes/No)
   var IDX = {
@@ -948,13 +951,13 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       var templates = (group && group.os_templates) ? group.os_templates : [];
       templates.forEach(function (t) {
         if (!t.id) return;
-        \$sel.append(\$('<option/>').attr('value', t.id).text(t.name || t.id));
+        \$sel.append(\$('<option/>').attr('value', 'rfot:' + t.id).text(t.name || t.id));
       });
-    } else if (product) {
-      var profiles = product.os_profiles || [];
-      profiles.forEach(function (os) {
-        if (!os.code) return;
-        \$sel.append(\$('<option/>').attr('value', os.code).text(os.name || os.code));
+    } else if (st === 'vm' && product) {
+      var vmTemplates = product.vm_templates || [];
+      vmTemplates.forEach(function (t) {
+        if (!t.id) return;
+        \$sel.append(\$('<option/>').attr('value', 'rfvt:' + t.id).text(t.name || ('Template ' + t.id)));
       });
     }
     if (selected) {
@@ -1022,6 +1025,18 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     } else {
       templates.forEach(function (t) {
         \$tmpl.append(\$('<li/>').text(t.name || ('Template #' + t.id)));
+      });
+    }
+
+    var \$os = \$ui.find('[data-rf-preview-os]');
+    \$os.empty();
+    var group = findServerGroup(\$ui.find('[data-rf-field="serverGroup"]').val() || '');
+    var osTemplates = (group && group.os_templates) ? group.os_templates : [];
+    if (!osTemplates.length) {
+      \$os.append('<li><span>No OS templates permitted on the selected server group.</span></li>');
+    } else {
+      osTemplates.forEach(function (t) {
+        \$os.append(\$('<li/>').text(t.name || t.id));
       });
     }
 
@@ -1150,11 +1165,39 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
     var st = \$ui.find('input[name="rf_service_type"]:checked').val() || 'bare_metal';
     var isVm = (st === 'vm');
     var isProxy = (st === 'http_proxy');
+    var isBm = (st === 'bare_metal');
     \$ui.find('[data-rf-panel="vm"]').toggle(isVm);
     \$ui.find('[data-rf-panel="bm"]').toggle(!isVm);
     // Default OS is bare-metal/legacy; VM installs come from linked templates,
     // and http_proxy has no OS to install at all.
-    \$ui.find('[data-rf-field-wrap="osCode"]').toggle(!isVm && !isProxy);
+    \$ui.find('[data-rf-field-wrap="osCode"]').toggle(isBm);
+    // Specs / VM templates are catalog VM fields. Bare metal uses the
+    // server group's permitted OS templates; HTTP proxy has neither.
+    \$ui.find('[data-rf-preview-for="vm"]').toggle(isVm);
+    \$ui.find('[data-rf-preview-for="bare_metal"]').toggle(isBm);
+    \$ui.find('[data-rf-preview-grid]').toggle(isVm || isBm).toggleClass('rf-ms__preview-grid--single', isBm);
+    \$ui.find('[data-rf-lead]').text(
+      isVm
+        ? 'Pick a RackFlow catalog product. Specs and linked VM templates are loaded from RackFlow.'
+        : (isBm
+          ? 'Pick a RackFlow catalog product and a server group. Checkout OS comes from the group’s permitted templates.'
+          : 'Pick a RackFlow catalog product. Proxy IPs are assigned from that product’s IPAM subnet.')
+    );
+    \$ui.find('[data-rf-product-help]').text(
+      isVm
+        ? 'Catalog product this WHMCS package provisions (plan + templates).'
+        : (isProxy
+          ? 'Catalog product this WHMCS package provisions (IPAM subnet).'
+          : 'Catalog product this WHMCS package provisions (permissions and family).')
+    );
+    \$ui.find('[data-rf-customer-os-help]').html(
+      isVm
+        ? 'On Save, syncs a WHMCS <strong>OS</strong> option from this product’s VM templates. Turn off to hide it.'
+        : (isBm
+          ? 'On Save, syncs a WHMCS <strong>OS</strong> option from the selected server group’s OS templates. Turn off to hide it.'
+          : 'Not used for HTTP proxy products.')
+    );
+    \$ui.find('[data-rf-field-wrap="customerOs"]').toggle(!isProxy);
     // The "bm" panel's Server Group field is required for bare metal but only
     // a legacy/optional override for http_proxy (which normally provisions
     // straight from the product's IPAM subnet, no server group needed).
@@ -1181,7 +1224,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '    <div class="rf-ms__head">'
       + '      <div>'
       + '        <h3 class="rf-ms__title">RackFlow settings</h3>'
-      + '        <p class="rf-ms__lead">Pick a RackFlow catalog product. Specs and linked VM templates are loaded from RackFlow.</p>'
+      + '        <p class="rf-ms__lead" data-rf-lead>Pick a RackFlow catalog product. Specs and linked VM templates are loaded from RackFlow.</p>'
       + '      </div>'
       + '      <a class="rf-ms__git" href="' + GIT_UPDATE_URL + '">Git updates</a>'
       + '    </div>'
@@ -1198,7 +1241,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '      <div class="rf-ms__field">'
       + '        <label for="rf_product_code">RackFlow product</label>'
       + '        <select id="rf_product_code" data-rf-field="productCode"></select>'
-      + '        <p class="rf-help">Catalog product this WHMCS package provisions (plan + templates).</p>'
+      + '        <p class="rf-help" data-rf-product-help>Catalog product this WHMCS package provisions (plan + templates).</p>'
       + '      </div>'
       + '      <div class="rf-ms__field" data-rf-field-wrap="osCode">'
       + '        <label for="rf_os_code">Default OS template <span style="font-weight:500;color:var(--rf-muted)">(optional)</span></label>'
@@ -1209,19 +1252,20 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '    <div class="rf-ms__preview" data-rf-preview hidden>'
       + '      <h4 data-rf-preview-title></h4>'
       + '      <p class="rf-ms__preview-meta" data-rf-preview-meta></p>'
-      + '      <div class="rf-ms__preview-grid">'
-      + '        <div class="rf-ms__preview-block"><h5>Specs</h5><ul data-rf-preview-specs></ul></div>'
-      + '        <div class="rf-ms__preview-block"><h5>VM templates</h5><ul data-rf-preview-templates></ul></div>'
+      + '      <div class="rf-ms__preview-grid" data-rf-preview-grid>'
+      + '        <div class="rf-ms__preview-block" data-rf-preview-for="vm"><h5>Specs</h5><ul data-rf-preview-specs></ul></div>'
+      + '        <div class="rf-ms__preview-block" data-rf-preview-for="vm"><h5>VM templates</h5><ul data-rf-preview-templates></ul></div>'
+      + '        <div class="rf-ms__preview-block" data-rf-preview-for="bare_metal"><h5>OS templates</h5><ul data-rf-preview-os></ul></div>'
       + '      </div>'
       + '      <p class="rf-help" style="margin-top:10px" data-rf-preview-mode></p>'
       + '    </div>'
       + '    <div class="rf-ms__panel">'
       + '      <p class="rf-ms__panel-title">Checkout &amp; client area</p>'
-      + '      <div class="rf-ms__check">'
+      + '      <div class="rf-ms__check" data-rf-field-wrap="customerOs">'
       + '        <input type="checkbox" id="rf_customer_os" data-rf-field="customerOs"/>'
       + '        <div>'
           + '          <label for="rf_customer_os">Let customers choose OS at checkout</label>'
-          + '          <p>On Save, syncs a WHMCS <strong>OS</strong> option from this product’s VM templates or the selected server group’s OS templates. Turn off to hide it.</p>'
+          + '          <p data-rf-customer-os-help>On Save, syncs a WHMCS <strong>OS</strong> option from this product’s VM templates or the selected server group’s OS templates (rfvt:/rfot:). Turn off to hide it.</p>'
       + '        </div>'
       + '      </div>'
       + '      <div class="rf-ms__check" style="margin-top:10px">'

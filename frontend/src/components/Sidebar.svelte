@@ -40,14 +40,14 @@
   $: isScriptsActive = currentPath.startsWith('/admin/scripts');
   $: isPermissionSetsActive = currentPath.startsWith('/admin/permission-sets');
   $: isAssetManagerActive = currentPath.startsWith('/admin/asset-manager');
-  $: isProductCatalogActive = currentPath.startsWith('/admin/product-catalog');
+  $: isProductCatalogActive = currentPath.startsWith('/admin/product-catalog')
+    || currentPath.startsWith('/admin/bare-metal-catalog')
+    || currentPath.startsWith('/admin/proxy-catalog');
   $: isVmTemplatesActive = currentPath.startsWith('/admin/vm-templates');
   $: isVmIpAllocationsActive = currentPath.startsWith('/admin/vm-ip-allocations');
   $: isProxmoxInventoryActive = currentPath.startsWith('/admin/proxmox-inventory');
   $: isProxyIpamActive = currentPath.startsWith('/admin/proxy-ipam');
   $: isProxyRunnersActive = currentPath.startsWith('/admin/proxy-runners');
-  $: isProxyCatalogActive = currentPath.startsWith('/admin/proxy-catalog');
-  $: isBareMetalCatalogActive = currentPath.startsWith('/admin/bare-metal-catalog');
   $: isServerGroupsActive = currentPath.startsWith('/admin/server-groups');
   $: isUserActive = currentPath === '/admin/user' || currentPath === '/admin/user/';
   $: isStoreCategoriesActive = currentPath.startsWith('/admin/store/categories');
@@ -163,68 +163,58 @@
     </div>
 
     <div class="nav-group">
-        <div class="nav-group-label">PROXMOX</div>
-        <ul class="nav-list">
-          <li class="nav-item">
-            <a href="/admin/product-catalog" class="nav-link" class:active={isProductCatalogActive}>
-              <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-              </svg>
-              <span>VM Product Catalog</span>
-            </a>
-          </li>
-          <li class="nav-item">
-            <a href="/admin/vm-templates" class="nav-link" class:active={isVmTemplatesActive}>
-              <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-              </svg>
-              <span>VM Templates</span>
-            </a>
-          </li>
-          <li class="nav-item">
-            <a href="/admin/vm-ip-allocations" class="nav-link" class:active={isVmIpAllocationsActive}>
-              <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" />
-              </svg>
-              <span>VM IP Allocations</span>
-            </a>
-          </li>
-          <li class="nav-item">
-            <a href="/admin/proxmox-inventory" class="nav-link" class:active={isProxmoxInventoryActive}>
-              <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7h18M3 12h18M3 17h18" />
-              </svg>
-              <span>Proxmox Inventory</span>
-            </a>
-          </li>
-        </ul>
-      </div>
-
-    <div class="nav-group">
-      <div class="nav-group-label">SERVICES</div>
+      <div class="nav-group-label">CATALOG</div>
       <ul class="nav-list">
         <li class="nav-item">
-          <a href="/admin/bare-metal-catalog" class="nav-link" class:active={isBareMetalCatalogActive}>
+          <a href="/admin/product-catalog" class="nav-link" class:active={isProductCatalogActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
             </svg>
-            <span>Bare Metal Catalog</span>
+            <span>Product Catalog</span>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">VM</div>
+      <ul class="nav-list">
+        <li class="nav-item">
+          <a href="/admin/vm-templates" class="nav-link" class:active={isVmTemplatesActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+            </svg>
+            <span>VM Templates</span>
           </a>
         </li>
         <li class="nav-item">
-          <a href="/admin/proxy-catalog" class="nav-link" class:active={isProxyCatalogActive}>
+          <a href="/admin/vm-ip-allocations" class="nav-link" class:active={isVmIpAllocationsActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" />
             </svg>
-            <span>Proxy Catalog</span>
+            <span>VM IP Allocations</span>
           </a>
         </li>
+        <li class="nav-item">
+          <a href="/admin/proxmox-inventory" class="nav-link" class:active={isProxmoxInventoryActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7h18M3 12h18M3 17h18" />
+            </svg>
+            <span>Inventory</span>
+          </a>
+        </li>
+      </ul>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">PROXY</div>
+      <ul class="nav-list">
         <li class="nav-item">
           <a href="/admin/proxy-ipam" class="nav-link" class:active={isProxyIpamActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
-            <span>IPAM & Proxy</span>
+            <span>IPAM</span>
           </a>
         </li>
         <li class="nav-item">
@@ -235,6 +225,12 @@
             <span>Proxy Runners</span>
           </a>
         </li>
+      </ul>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">SERVICES</div>
+      <ul class="nav-list">
         <li class="nav-item">
           <a href="/admin/services" class="nav-link" class:active={isServicesActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">

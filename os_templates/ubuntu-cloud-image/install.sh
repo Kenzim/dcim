@@ -10,7 +10,8 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 DCIM_STATUS_REPORTED=0
 
 json_escape() {
-  sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g'
+  python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null || \
+    sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g; s/\r//g; s/$/\\n/' | tr -d '\n'
 }
 
 report_installation_status() {
@@ -207,13 +208,96 @@ else
 fi
 sync
 
+configure_rackflow_serial() {
+  local root="$1"
+  install -d "$root/usr/local/sbin"
+  install -d "$root/etc/systemd/system/serial-getty@.service.d"
+  install -d "$root/etc/systemd/system/getty.target.wants"
+  install -d "$root/etc/default/grub.d"
+
+  cat > "$root/usr/local/sbin/rackflow-serial-sh" <<'SERIALSH'
+#!/bin/bash
+# Line-oriented serial admin shell. Host does not echo; keep SOL Local echo on.
+# Prompt "RF> " is the delimiter for programmatic SOL send.
+# SOL Enter is CR; encode_sol_stdin turns that into CRLF. Ignore CR so one
+# Enter is one command, not an extra empty read that reprints the prompt.
+exec >/dev/tty 2>&1
+stty sane 2>/dev/null || true
+stty 115200 cs8 -parenb -cstopb -crtscts -ixon -ixoff 2>/dev/null || true
+stty -echo icanon -icrnl igncr 2>/dev/null || true
+export HOME=/root USER=root LOGNAME=root
+cd /root 2>/dev/null || cd /
+printf '\r\nRackflow serial console - root@%s\r\n' "$(hostname 2>/dev/null || echo host)"
+prompt() { printf 'RF> '; }
+prompt
+while IFS= read -r line || [ -n "$line" ]; do
+  line="${line%$'\r'}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [ -z "$line" ] && continue
+  case "$line" in
+    exit|logout|quit) printf '\r\n'; exit 0 ;;
+  esac
+  if [[ "$line" == cd || "$line" == cd[[:space:]]* ]]; then
+    eval "$line" || true
+  else
+    bash -lc "$line" || true
+  fi
+  prompt
+done
+SERIALSH
+  chmod 0755 "$root/usr/local/sbin/rackflow-serial-sh"
+
+  cat > "$root/etc/systemd/system/serial-getty@.service.d/rackflow.conf" <<'GETTY'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud 115200,57600,38400,9600 -n -l /usr/local/sbin/rackflow-serial-sh %I $TERM
+GETTY
+
+  cat > "$root/etc/default/grub.d/99-rackflow-serial.cfg" <<'GRUB'
+GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX console=tty0 console=ttyS0,115200n8 console=ttyS1,115200n8"
+GRUB
+
+  for tty in ttyS0 ttyS1 ttyS2; do
+    ln -sf /lib/systemd/system/serial-getty@.service \
+      "$root/etc/systemd/system/getty.target.wants/serial-getty@${tty}.service"
+  done
+
+  if command -v chroot >/dev/null 2>&1; then
+    chroot "$root" usermod -s /bin/bash root >/dev/null 2>&1 || true
+    chroot "$root" usermod -U root >/dev/null 2>&1 || true
+  fi
+
+  local grubcfg
+  for grubcfg in "$root/boot/grub/grub.cfg" "$root/boot/grub2/grub.cfg"; do
+    [ -f "$grubcfg" ] || continue
+    if grep -q 'console=ttyS1,115200' "$grubcfg"; then
+      continue
+    fi
+    if grep -q 'console=ttyS0' "$grubcfg"; then
+      sed -i 's/console=ttyS0/console=ttyS0,115200n8 console=ttyS1,115200n8/g' "$grubcfg" || true
+    else
+      sed -i '/^[[:space:]]*linux/ s/$/ console=tty0 console=ttyS0,115200n8 console=ttyS1,115200n8/' "$grubcfg" || true
+    fi
+  done
+}
+
 echo "Injecting cloud-init datasource config into image"
-modprobe nbd max_part=8 || true
-qemu-nbd --disconnect /dev/nbd0 >/dev/null 2>&1 || true
-qemu-nbd --connect=/dev/nbd0 "$TARGET_DISK" || fail "Failed to expose installed disk via qemu-nbd"
+partprobe "$TARGET_DISK" >/dev/null 2>&1 || true
 sleep 2
 
-ROOT_PART="$(lsblk -nrpo NAME,FSTYPE /dev/nbd0 | awk '$2 ~ /ext4|xfs|btrfs/ {print $1}' | tail -1)"
+ROOT_PART="$(lsblk -nrpo NAME,FSTYPE "$TARGET_DISK" | awk '$2 ~ /ext4|xfs|btrfs/ {print $1}' | tail -1)"
+if [ -z "$ROOT_PART" ]; then
+  echo "Partitions not visible on $TARGET_DISK, trying qemu-nbd -f raw"
+  modprobe nbd max_part=8 || true
+  qemu-nbd --disconnect /dev/nbd0 >/dev/null 2>&1 || true
+  qemu-nbd --connect=/dev/nbd0 -f raw "$TARGET_DISK" || fail "Failed to expose installed disk via qemu-nbd"
+  sleep 2
+  ROOT_PART="$(lsblk -nrpo NAME,FSTYPE /dev/nbd0 | awk '$2 ~ /ext4|xfs|btrfs/ {print $1}' | tail -1)"
+  NBD_USED=1
+else
+  NBD_USED=0
+fi
 [ -n "$ROOT_PART" ] || fail "Could not detect Linux root partition on installed image"
 
 mkdir -p /mnt/ubuntu-root
@@ -233,8 +317,13 @@ users:
   - default
 EOF
 
+echo "Configuring Rackflow serial console (ttyS0/ttyS1/ttyS2, 115200, autologin root)"
+configure_rackflow_serial /mnt/ubuntu-root
+
 umount /mnt/ubuntu-root || true
-qemu-nbd --disconnect /dev/nbd0 || true
+if [ "${NBD_USED:-0}" = "1" ]; then
+  qemu-nbd --disconnect /dev/nbd0 || true
+fi
 sync
 
 echo "Ubuntu cloud image deployed successfully."

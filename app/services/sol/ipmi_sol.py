@@ -151,6 +151,19 @@ class IpmiSolProfile(SolProfile):
             raise SolUnavailable(f"ipmitool {' '.join(subcommand)} timed out") from exc
         return stdout or b"", stderr or b"", proc.returncode or 0
 
+    async def _tune_interactive_sol(
+        self, hostname: str, username: str, password: str, port: int
+    ) -> None:
+        """Cut SOL character batching so output is not delayed ~1s per packet."""
+        for params in (
+            ("sol", "set", "character-accumulate-level", "1"),
+            ("sol", "set", "character-send-threshold", "1"),
+        ):
+            try:
+                await self._run_ipmitool(hostname, username, password, port, *params, max_wait=8)
+            except SolUnavailable:
+                logger.debug("SOL latency tune %s failed", params[2], exc_info=True)
+
     async def open_session(self, server: Server) -> SolByteSession:
         self._require_ipmitool()
         hostname, username, password, port = self.credentials(server)
@@ -161,6 +174,9 @@ class IpmiSolProfile(SolProfile):
             await self._run_ipmitool(hostname, username, password, port, "sol", "deactivate")
         except SolUnavailable:
             pass
+
+        # BMC default accumulate is often 200×5ms = 1s, which delays every echoed byte.
+        await self._tune_interactive_sol(hostname, username, password, port)
 
         master_fd, slave_fd = pty.openpty()
         try:

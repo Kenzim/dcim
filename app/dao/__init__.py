@@ -25,7 +25,7 @@ from app.dao.asset_dao import AssetDAO
 from app.dao.server_activity_dao import ServerActivityDAO
 from app.dao.hardware_detection_report_dao import HardwareDetectionReportDAO
 from app.dao.server_capability_dao import ServerCapabilityDAO
-from app.dao.product_catalog_dao import ProductFamilyDAO, ProductDAO, OSProfileDAO, ProductFamilyOSProfileDAO, VMTemplateDAO
+from app.dao.product_catalog_dao import ProductFamilyDAO, ProductDAO, VMTemplateDAO
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.ipam_dao import IPAMDAO
 from app.dao.vm_config_dao import FamilyVMConfigDAO, ProductVMConfigDAO
@@ -34,6 +34,6 @@ from app.dao.vmid_reservation_dao import VMIDReservationDAO
 from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.dao.reseller_dao import EffectiveProductPrice, ResellerDAO
 
-__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ServiceDAO", "BillingIntegrationDAO", "McpApiKeyDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "ProxyRunnerDAO", "ProxySubnetGroupDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "OSProfileDAO", "ProductFamilyOSProfileDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "VMDeploymentJobDAO"]
+__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ServiceDAO", "BillingIntegrationDAO", "McpApiKeyDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "ProxyRunnerDAO", "ProxySubnetGroupDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "VMDeploymentJobDAO"]
 __all__ += ["EffectiveProductPrice", "ResellerDAO"]
 

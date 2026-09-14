@@ -45,23 +45,27 @@ def test_product_catalog_and_vm_plan(client, test_admin_user):
         },
     )
     assert product.status_code == 201, product.text
+    product_id = product.json()["id"]
 
-    os_profile = client.post(
-        "/api/product-catalog/os-profiles",
+    tmpl = client.post(
+        "/api/product-catalog/vm-templates",
         headers=headers,
         json={
-            "code": "linux-ubuntu",
-            "name": "Ubuntu",
-            "os_family": "linux",
-            "strategy_name": "stub",
-            "strategy_config": {"template": "ubuntu-template"},
+            "code": "linux-ubuntu-plan",
+            "name": "Ubuntu cloud",
+            "os_type": "Linux - Cloudinit",
+            "proxmox_template_name": "ci-ubuntu-plan-test",
         },
     )
-    assert os_profile.status_code == 201, os_profile.text
-    os_id = os_profile.json()["id"]
+    assert tmpl.status_code == 201, tmpl.text
+    tmpl_id = tmpl.json()["id"]
 
-    attach = client.post(f"/api/product-catalog/families/{family_id}/os-profiles/{os_id}", headers=headers)
-    assert attach.status_code == 200, attach.text
+    upd = client.put(
+        f"/api/product-catalog/products/{product_id}",
+        headers=headers,
+        json={"vm_template_ids": [tmpl_id]},
+    )
+    assert upd.status_code == 200, upd.text
 
     vm_plan = client.post(
         "/api/proxmox/vm/plan",
@@ -69,13 +73,13 @@ def test_product_catalog_and_vm_plan(client, test_admin_user):
         json={
             "service_id": 101,
             "product_code": "vm-small",
-            "os_code": "linux-ubuntu",
+            "vm_template_id": tmpl_id,
             "context": {"order_id": "abc"},
         },
     )
     assert vm_plan.status_code == 200, vm_plan.text
     payload = vm_plan.json()
-    assert payload["strategy_name"] == "stub"
+    assert payload["strategy_name"] == "cloudinit_clone"
     assert payload["effective_specs"]["cpu_count"] == 2
     assert payload["effective_specs"]["ram_mb"] == 4096
     # Canonical keys the Proxmox executor reads must be derived from the

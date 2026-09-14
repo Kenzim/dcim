@@ -447,6 +447,18 @@
       if (e.data.cmd === 'draw') {
         if (noSignal) return;
         imageBuffer = e.data.ibuf;
+        if (
+          imageBuffer &&
+          canvas &&
+          imageBuffer.width &&
+          imageBuffer.height &&
+          (imageBuffer.width !== canvas.width || imageBuffer.height !== canvas.height)
+        ) {
+          canvas.width = imageBuffer.width;
+          canvas.height = imageBuffer.height;
+          resText = `${imageBuffer.width}×${imageBuffer.height}`;
+          letterboxCanvas(canvas, stage);
+        }
         if (imageBuffer && ctx) ctx.putImageData(imageBuffer, 0, 0);
       } else if (e.data.cmd === 'exception') {
         errorMessage = 'decode error';
@@ -641,6 +653,8 @@
 <style>
   .kvm-stage {
     flex: 1;
+    width: 100%;
+    height: 100%;
     min-height: 0;
     display: flex;
     align-items: center;
@@ -650,6 +664,8 @@
   }
   .kvm-canvas {
     flex: none;
+    max-width: 100%;
+    max-height: 100%;
     background: #000;
     outline: none;
     cursor: crosshair;

@@ -197,6 +197,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `download_token_service.py` | One-time download tokens for boot media |
 | `server_activity_logger.py` | Server activity log writes |
 | `vm_provisioning_service.py` / `vm_strategy_executor.py` / `vm_os_strategy.py` / `vm_install_type_strategy.py` | VM provision strategies |
+| `provisioning/` | Unified service create (`ProvisioningService.create` + `ProvisionRequest`); used by billing, admin, MCP, reseller, and commerce checkout |
+| `checkout_service.py` | Retail checkout quote/place + fulfillment via `ProvisioningService` |
 | `proxmox_placement.py` / `vmid_allocator.py` / `ip_allocation.py` | Placement, VMID, IP assignment |
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
@@ -294,12 +296,12 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/os-templates` | `OSTemplates.svelte` |
 | `/admin/scripts` | `Scripts.svelte` |
 | `/admin/asset-manager` | `AssetManager.svelte` |
-| `/admin/product-catalog` | `ProductCatalog.svelte` (VM families/products only) |
-| `/admin/bare-metal-catalog` | `BareMetalCatalog.svelte` (bare_metal families/products; installable OS is on the server group) |
+| `/admin/product-catalog` | `ProductCatalog.svelte` (tabs: VM / Bare metal / HTTP proxy via `?type=`) |
+| `/admin/bare-metal-catalog` | Redirects to `/admin/product-catalog?type=bare_metal` |
 | `/admin/vm-templates` | `VMTemplates.svelte` |
 | `/admin/vm-ip-allocations` | `VMIpAllocations.svelte` |
 | `/admin/proxmox-inventory` | `ProxmoxInventory.svelte` |
-| `/admin/proxy-catalog` | `ProxyCatalog.svelte` (http_proxy families/products + subnet groups) |
+| `/admin/proxy-catalog` | Redirects to `/admin/product-catalog?type=http_proxy` |
 | `/admin/proxy-ipam` | `ProxyIpam.svelte` (IPAM proxy flag) |
 | `/admin/proxy-runners` | `ProxyRunners.svelte` (standalone proxy runners) |
 | `/admin/billing-integrations` | `BillingIntegrations.svelte` |
@@ -361,7 +363,7 @@ App selects remote runners when `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` (or legacy
 
 Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_template_service.py` / `temp_os_service.py`.
 
-**WHMCS OS source:** bare-metal Default OS and checkout OS come from the product's **server group** (`permitted_os_templates`, exposed as `os_templates` on `GET /api/billing/server-groups`). Catalog `os_profiles` are not used for bare metal; they remain for the legacy VM `os_code` path. Provisioning installs `service_config.template_id` (WHMCS token `rfot:{id}`).
+**WHMCS OS source:** bare-metal Default OS and checkout OS come from the product's **server group** (`permitted_os_templates`, exposed as `os_templates` on `GET /api/billing/server-groups`). VM checkout OS is catalog `vm_templates` (`rfvt:{id}`). Provisioning installs `service_config.template_id` (WHMCS token `rfot:{id}`).
 
 ---
 
@@ -369,7 +371,7 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 
 | Path | Role |
 |---|---|
-| `whmcs/modules/servers/rackflow/rackflow.php` | Provisioning module (Create/Suspend/Power/Register, etc.). Bare-metal checkout OS tokens are `rfot:{template_id}` from the server group. |
+| `whmcs/modules/servers/rackflow/rackflow.php` | Provisioning module (Create/Suspend/Power/Register, etc.). Bare-metal checkout OS tokens are `rfot:{template_id}` from the server group; VM OS tokens are `rfvt:{id}`. Service type is taken from the catalog product family. |
 | `whmcs/modules/servers/rackflow/git_update.php` | Admin git-archive download + in-place module file sync |
 | `whmcs/modules/servers/rackflow/module_update.php` | Admin UI to check/apply git module updates |
 | `whmcs/modules/servers/rackflow/module_update_action.php` | Admin JSON API for git module updates |

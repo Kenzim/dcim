@@ -9,8 +9,10 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.services_client import (
+    _best_effort_power_state,
     _client_primary_ip,
     _client_service_availability,
+    _client_service_detail_fields,
     _power_permission_key,
     _service_to_client_response,
     _validate_client_power_action,
@@ -162,3 +164,53 @@ def test_validate_client_power_action_guards(db_session):
     with pytest.raises(HTTPException) as exc2:
         _validate_client_power_action(active, "reboot", disabled_server)
     assert exc2.value.status_code == 403
+
+
+def test_client_service_detail_fields_masks_ipmi_when_unavailable(db_session):
+    owner = _user(db_session, "detail-owner")
+    server = _server(db_session, "detail-srv", "10.80.0.1")
+    service = ServiceDAO.create_bare_metal(
+        db_session,
+        name="detail-bm",
+        server_id=server.id,
+        owner_user_id=owner.id,
+        provisioning_source=ProvisioningSource.INTERNAL,
+    )
+    permissions = {PermissionKey.BMS_IPMI: False, PermissionKey.BMS_POWER: True}
+    availability = _client_service_availability(
+        service,
+        server,
+        permissions,
+        cid=None,
+        node=None,
+        vmid=None,
+    )
+    fields = _client_service_detail_fields(
+        db_session,
+        service,
+        server,
+        permissions,
+        PowerState.ON,
+        availability,
+    )
+    assert fields["primary_ip"] == "10.80.0.1"
+    assert fields["power_state"] == "on"
+    assert fields["ipmi_viewer_username"] is None
+    assert fields["installation"] is None
+
+
+@pytest.mark.asyncio
+async def test_best_effort_power_state_returns_unknown_on_failure(db_session):
+    owner = _user(db_session, "pwr-unknown")
+    service = ServiceDAO.create_vm(
+        db_session,
+        name="pwr-vm",
+        owner_user_id=owner.id,
+        provisioning_source=ProvisioningSource.INTERNAL,
+    )
+    with patch(
+        "app.api.services_client._client_plugin_instance",
+        new=AsyncMock(side_effect=RuntimeError("no plugin")),
+    ):
+        state = await _best_effort_power_state(db_session, service)
+    assert state == PowerState.UNKNOWN
