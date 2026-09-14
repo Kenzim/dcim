@@ -29,7 +29,7 @@ When `false`, `/api/client/commerce/*` returns **503**. Admin store/commerce rou
 
 1. **Catalog** — Map WHMCS products to `frontend_products` + `price_plans` linked to existing catalog `products`.
 2. **Parallel run** — New retail signups use commerce checkout; existing WHMCS services stay on `/api/billing` until manually moved or renewed through commerce.
-3. **Fulfillment** — Paid commerce orders call the same provisioning stack (`CheckoutService` → `Service` rows) as billing integrations; recurring retail services get `service_billings.billing_account_id`.
+3. **Fulfillment** — Paid commerce orders call `ProvisioningService` (the same stack as `/api/billing`, admin, MCP, and reseller) and write `service_vm` / `service_bare_metal` children, deployment jobs, and proxy IPs. Recurring retail services get `service_billings.billing_account_id`.
 4. **Cutover** — Disable WHMCS product sales when commerce covers the SKU; keep `/api/billing` for suspend/power/reinstall on legacy lines until terminated.
 
 ## Billing API stability

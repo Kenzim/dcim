@@ -39,12 +39,16 @@ export function letterboxCanvas(canvas, stage) {
   if (!canvas || !stage) return 0;
   const fw = canvas.width || 1;
   const fh = canvas.height || 1;
-  const availW = stage.clientWidth;
-  const availH = stage.clientHeight;
+  const rect = typeof stage.getBoundingClientRect === 'function' ? stage.getBoundingClientRect() : null;
+  const availW = stage.clientWidth || rect?.width || 0;
+  const availH = stage.clientHeight || rect?.height || 0;
   if (!availW || !availH) return 0;
   const scale = Math.min(availW / fw, availH / fh);
+  if (!scale) return 0;
   canvas.style.width = `${fw * scale}px`;
   canvas.style.height = `${fh * scale}px`;
+  canvas.style.maxWidth = '100%';
+  canvas.style.maxHeight = '100%';
   return scale;
 }
 

@@ -35,7 +35,7 @@
     window.open(
       `/api/client/services/${service.id}/kvm-popup`,
       `rackflow_kvm_${service.id}`,
-      'width=1024,height=768,resizable=yes,scrollbars=yes'
+      'width=1400,height=960,resizable=yes,scrollbars=yes'
     );
   }
 
@@ -44,7 +44,7 @@
     window.open(
       `/api/client/services/${service.id}/sol-popup`,
       `rackflow_sol_${service.id}`,
-      'width=1024,height=768,resizable=yes,scrollbars=yes'
+      'width=1400,height=960,resizable=yes,scrollbars=yes'
     );
   }
 

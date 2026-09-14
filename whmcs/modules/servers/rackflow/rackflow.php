@@ -482,14 +482,14 @@ function rackflow_ConfigOptions()
             'Type' => 'dropdown',
             'Loader' => 'rackflow_ProductCodeLoader',
             'SimpleMode' => true,
-            'Description' => 'RackFlow catalog product (products.code). Bare metal/VM: plans, OS profiles, and VM templates come from this product. HTTP proxy: IP count/subnet/allocation strategy defaults come from this product\'s http_proxy family — required to auto-assign IP(s) from IPAM on create.',
+            'Description' => 'RackFlow catalog product (products.code). Service type, plans, and OS templates come from this product. HTTP proxy: IP count/subnet/allocation strategy defaults come from this product\'s family — required to auto-assign IP(s) from IPAM on create.',
         ),
-        // configoption3 — default OS template (bare metal) / unused for VM
+        // configoption3 — default OS template token (rfvt: / rfot:)
         'OS Code' => array(
             'Type' => 'text',
             'Size' => '40',
             'SimpleMode' => true,
-            'Description' => 'Bare metal only: optional default OS template id (from the server group) when the customer does not choose one. Leave blank for no default. Not used for VM or HTTP proxy.',
+            'Description' => 'Optional default OS template token when checkout OS is off: rfvt:{id} for VM, rfot:{id} for bare metal. Leave blank for no default.',
         ),
         // configoption4 — bare_metal (required) / http_proxy (legacy, optional)
         'RackFlow Server Group' => array(
@@ -868,10 +868,10 @@ function rackflow_CreateAccount(array $params)
         }
         
         // Module Settings (ConfigOptions order):
-        //   configoption1 = Service Type (bare_metal|vm|http_proxy)
+        //   configoption1 = Service Type fallback (catalog product family wins)
         //   configoption2 = Product Code (RackFlow catalog products.code)
-        //   configoption3 = OS Code (default when no checkout selection)
-        //   configoption4 = RackFlow Server Group ID (bare-metal / http_proxy)
+        //   configoption3 = default OS template token (rfvt:/rfot:)
+        //   configoption4 = RackFlow Server Group ID (bare-metal)
         //   configoption5 = Proxmox Location (cluster id, VM)
         //   configoption6 = Proxmox Node (optional, VM)
         //   configoption7 = Customer OS Selection (yes/no → sync order-form option)
@@ -896,21 +896,18 @@ function rackflow_CreateAccount(array $params)
         if (isset($params['configoptions']['product_code']) && $params['configoptions']['product_code'] !== '') {
             $productCode = (string)$params['configoptions']['product_code'];
         }
-        if (isset($params['configoptions']['service_type']) && $params['configoptions']['service_type'] !== '') {
-            $serviceType = (string)$params['configoptions']['service_type'];
-        }
         if (!$productCode) {
             $productCode = 'whmcs-product-' . (isset($params['packageid']) ? (int)$params['packageid'] : 0);
         }
+        $catalogProduct = rackflow_fetchCatalogProduct($params, $productCode);
+        if (!empty($catalogProduct['service_type'])) {
+            $serviceType = (string)$catalogProduct['service_type'];
+        }
+        if (isset($params['configoptions']['service_type']) && $params['configoptions']['service_type'] !== '') {
+            $serviceType = (string)$params['configoptions']['service_type'];
+        }
 
-        // Get Location ID and Plugin Name from server custom fields or use defaults
-        $locationId = isset($params['servercustomfields']['location_id']) ? (int)$params['servercustomfields']['location_id'] : 1;
-        $pluginName = isset($params['servercustomfields']['plugin_name']) ? $params['servercustomfields']['plugin_name'] : 'proxmox';
-        
-        // Get service details from WHMCS
         $serviceName = isset($params['serviceid']) ? 'service-' . $params['serviceid'] : 'service-' . time();
-        $serverName = isset($params['domain']) ? $params['domain'] : $serviceName;
-        $serverIp = isset($params['customfields']['server_ip']) ? $params['customfields']['server_ip'] : '';
         
         // Get user information
         $externalUserId = isset($params['userid']) ? (string)$params['userid'] : '';
@@ -960,13 +957,10 @@ function rackflow_CreateAccount(array $params)
             $resolved = rackflow_resolveCheckoutOsSelection($params, $productCode, $checkoutOs);
             if (!empty($resolved['vm_template_id'])) {
                 $vmTemplateId = (int)$resolved['vm_template_id'];
-                // Template strategy owns the effective OS; don't also send os_code.
                 $osCode = null;
             } elseif (!empty($resolved['template_id'])) {
                 $checkoutTemplateId = (string)$resolved['template_id'];
                 $osCode = null;
-            } elseif (!empty($resolved['os_code'])) {
-                $osCode = (string)$resolved['os_code'];
             }
         }
 
@@ -980,6 +974,11 @@ function rackflow_CreateAccount(array $params)
                 $templateId = rackflow_bareMetalTemplateIdFromOsSetting($osCode);
             }
             $osCode = null;
+        } elseif (strtolower($serviceType) === 'vm' && ($vmTemplateId === null || $vmTemplateId <= 0) && $osCode) {
+            $resolvedDefault = rackflow_resolveCheckoutOsSelection($params, $productCode, $osCode);
+            if (!empty($resolvedDefault['vm_template_id'])) {
+                $vmTemplateId = (int)$resolvedDefault['vm_template_id'];
+            }
         }
         if (!empty($templateId)) {
             $serviceConfig['template_id'] = $templateId;
@@ -1013,9 +1012,6 @@ function rackflow_CreateAccount(array $params)
             if ($vmTemplateId !== null && $vmTemplateId > 0) {
                 $serviceData['vm_template_id'] = $vmTemplateId;
             }
-            if ($osCode !== null && $osCode !== '') {
-                $serviceData['os_code'] = $osCode;
-            }
             if ($proxmoxClusterId !== null && $proxmoxClusterId > 0) {
                 $serviceData['proxmox_cluster_id'] = $proxmoxClusterId;
             }
@@ -1035,6 +1031,9 @@ function rackflow_CreateAccount(array $params)
             }
             $serviceData['auto_provision'] = $autoProvision;
         } else {
+            if (strtolower($serviceType) === 'bare_metal' && !$serverGroupId) {
+                return 'Error: RackFlow Server Group is required for bare metal products';
+            }
             $serviceData = array(
                 'name' => $serviceName,
                 'external_service_id' => isset($params['serviceid']) ? (string)$params['serviceid'] : null,
@@ -1042,20 +1041,8 @@ function rackflow_CreateAccount(array $params)
                 'external_username' => $externalUsername,
                 'external_email' => $externalEmail,
                 'product_code' => $productCode,
-                'os_code' => $osCode,
                 'service_type' => $serviceType,
-                'server_name' => $serverName,
-                'server_ip' => $serverIp ?: '0.0.0.0',
                 'description' => isset($params['productname']) ? $params['productname'] : null,
-                'cpu_count' => isset($params['configoptions']['cpu_count']) ? (int)$params['configoptions']['cpu_count'] : 1,
-                'ram_gb' => isset($params['configoptions']['ram_gb']) ? (int)$params['configoptions']['ram_gb'] : null,
-                'port_speed_mbps' => isset($params['configoptions']['port_speed_mbps']) ? (int)$params['configoptions']['port_speed_mbps'] : null,
-                'location_id' => $locationId,
-                'plugin_name' => $pluginName,
-                'plugin_config' => isset($params['configoptions']['plugin_config']) ? $params['configoptions']['plugin_config'] : array(),
-                'os_boot_mode' => isset($params['configoptions']['os_boot_mode']) ? $params['configoptions']['os_boot_mode'] : 'uefi',
-                'disks' => isset($params['configoptions']['disks']) ? $params['configoptions']['disks'] : array(),
-                'network_ports' => isset($params['configoptions']['network_ports']) ? $params['configoptions']['network_ports'] : array(),
                 'service_config' => $serviceConfig,
             );
         }
@@ -1067,29 +1054,7 @@ function rackflow_CreateAccount(array $params)
         }
         
         $service = $result['data'];
-        
-        // If server group is specified, assign server to group
-        if ($serverGroupId && isset($service['server_id']) && $service['server_id'] !== null) {
-            // Add server to group via admin API
-            // Note: This requires admin API access, not billing API
-            // If using billing API key, this will fail gracefully
-            $groupResult = rackflow_apiCall($apiUrl, $apiKey, 'POST', '/api/server-groups/' . $serverGroupId . '/servers', array(
-                'server_ids' => array($service['server_id'])
-            ));
-            
-            if (!$groupResult['success']) {
-                // Log but don't fail - server group assignment is optional
-                logModuleCall(
-                    'rackflow',
-                    __FUNCTION__ . '_server_group',
-                    array('server_id' => $service['server_id'], 'group_id' => $serverGroupId),
-                    $groupResult['error'],
-                    ''
-                );
-                // Continue - service was created successfully
-            }
-        }
-        
+
         // Store RackFlow service ID in custom field for future reference
         if (isset($params['serviceid']) && isset($params['packageid']) && isset($service['id'])) {
             $rackflowServiceId = (int)$service['id'];
@@ -1695,6 +1660,36 @@ function rackflow_fetchCatalogProducts(array $params, $serviceType = null)
 }
 
 /**
+ * Fetch one catalog product by code, or an empty array on failure.
+ *
+ * @param array $params
+ * @param string|null $productCode
+ * @return array
+ */
+function rackflow_fetchCatalogProduct(array $params, $productCode)
+{
+    $productCode = trim((string)$productCode);
+    if ($productCode === '') {
+        return array();
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return array();
+    }
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'GET',
+        '/api/billing/products/' . rawurlencode($productCode),
+        null
+    );
+    if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
+        return array();
+    }
+    return $result['data'];
+}
+
+/**
  * Whether Customer OS Selection (configoption7) is enabled.
  *
  * @param mixed $raw
@@ -1787,9 +1782,9 @@ function rackflow_ensureConfigOptionSubPricing($subOptionId)
  * Sync / hide the order-form "OS" configurable option for a product.
  *
  * Sub-option names are customer-facing labels. CreateAccount resolves them back
- * to a VM template id, OS template id, or OS profile code via the RackFlow
- * catalog (see rackflow_resolveCheckoutOsSelection). Machine tokens rfvt:{id} /
- * rfot:{template_id} / rfos:{code} are also accepted if present.
+ * to a VM template id or OS template id via the RackFlow catalog
+ * (see rackflow_resolveCheckoutOsSelection). Machine tokens rfvt:{id} /
+ * rfot:{template_id} are also accepted if present.
  *
  * @param int $productId WHMCS tblproducts.id
  * @param array $catalogProduct one item from /api/billing/products
@@ -1901,14 +1896,6 @@ function rackflow_syncCheckoutOsOption($productId, array $catalogProduct, $enabl
                 }
                 $label = !empty($tmpl['name']) ? (string)$tmpl['name'] : (string)$tmpl['id'];
                 $choices[] = 'rfot:' . (string)$tmpl['id'] . '|' . $label;
-            }
-        } elseif (!empty($catalogProduct['os_profiles']) && is_array($catalogProduct['os_profiles'])) {
-            foreach ($catalogProduct['os_profiles'] as $profile) {
-                if (empty($profile['code'])) {
-                    continue;
-                }
-                $label = !empty($profile['name']) ? (string)$profile['name'] : (string)$profile['code'];
-                $choices[] = 'rfos:' . (string)$profile['code'] . '|' . $label;
             }
         }
 
@@ -2059,9 +2046,9 @@ function rackflow_bareMetalTemplateIdFromOsSetting($raw)
 }
 
 /**
- * Resolve a checkout OS selection into vm_template_id, template_id, and/or os_code.
+ * Resolve a checkout OS selection into vm_template_id and/or template_id.
  *
- * Accepts machine tokens (rfvt:/rfot:/rfos:), bare ids/codes, "token|Label" WHMCS
+ * Accepts machine tokens (rfvt:/rfot:), bare ids, "token|Label" WHMCS
  * pipe forms, or friendly labels matched against the catalog product.
  *
  * @param array $params
@@ -2090,35 +2077,12 @@ function rackflow_resolveCheckoutOsSelection(array $params, $productCode, $selec
         $out['template_id'] = $m[1];
         return $out;
     }
-    if (preg_match('/^rfos:(.+)$/', $raw, $m)) {
-        $out['os_code'] = $m[1];
-        return $out;
-    }
     if (ctype_digit($raw)) {
         $out['vm_template_id'] = (int)$raw;
         return $out;
     }
 
-    // Treat as OS code, disk template id, or friendly name — confirm against catalog when possible.
-    $out['os_code'] = $raw;
-    if ($productCode === null || $productCode === '') {
-        return $out;
-    }
-    $apiConfig = rackflow_getApiConfig($params);
-    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
-        return $out;
-    }
-    $result = rackflow_apiCall(
-        $apiConfig['url'],
-        $apiConfig['key'],
-        'GET',
-        '/api/billing/products/' . rawurlencode((string)$productCode),
-        null
-    );
-    if (!$result['success'] || !isset($result['data']) || !is_array($result['data'])) {
-        return $out;
-    }
-    $product = $result['data'];
+    $product = rackflow_fetchCatalogProduct($params, $productCode);
     $needle = strtolower($raw);
 
     if (!empty($product['vm_templates']) && is_array($product['vm_templates'])) {
@@ -2131,7 +2095,6 @@ function rackflow_resolveCheckoutOsSelection(array $params, $productCode, $selec
             }
             if ((string)$tmpl['id'] === $raw || $name === $needle || $label === $needle) {
                 $out['vm_template_id'] = (int)$tmpl['id'];
-                $out['os_code'] = null;
                 return $out;
             }
         }
@@ -2143,17 +2106,6 @@ function rackflow_resolveCheckoutOsSelection(array $params, $productCode, $selec
             $name = isset($tmpl['name']) ? strtolower((string)$tmpl['name']) : '';
             if ($tid !== '' && ($tid === $raw || strtolower($tid) === $needle || $name === $needle)) {
                 $out['template_id'] = $tid;
-                $out['os_code'] = null;
-                return $out;
-            }
-        }
-    }
-    if (!empty($product['os_profiles']) && is_array($product['os_profiles'])) {
-        foreach ($product['os_profiles'] as $profile) {
-            $code = isset($profile['code']) ? (string)$profile['code'] : '';
-            $name = isset($profile['name']) ? strtolower((string)$profile['name']) : '';
-            if ($code === $raw || strtolower($code) === $needle || $name === $needle) {
-                $out['os_code'] = $code !== '' ? $code : $raw;
                 return $out;
             }
         }
@@ -2474,7 +2426,7 @@ function rackflow_ensureSshKeysCustomField($productId)
 }
 
 /**
- * Build rfvt:/rfos: → accepts_ssh_key map from a billing catalog product payload.
+ * Build rfvt:/rfot: → accepts_ssh_key map from a billing catalog product payload.
  *
  * @param array $catalogProduct
  * @return array<string,bool>
@@ -2500,19 +2452,11 @@ function rackflow_sshAcceptMapFromCatalog(array $catalogProduct, $groupOsTemplat
             $map[$token] = !empty($tmpl['accepts_ssh_key']);
         }
     }
-    if (!empty($catalogProduct['os_profiles']) && is_array($catalogProduct['os_profiles'])) {
-        foreach ($catalogProduct['os_profiles'] as $profile) {
-            if (empty($profile['code'])) {
-                continue;
-            }
-            $map['rfos:' . (string)$profile['code']] = false;
-        }
-    }
     return $map;
 }
 
 /**
- * Extract rfvt:/rfos: token from a WHMCS config sub optionname ("token|Label").
+ * Extract rfvt:/rfot: token from a WHMCS config sub optionname ("token|Label").
  *
  * @param string $optionname
  * @return string
@@ -2528,7 +2472,7 @@ function rackflow_checkoutOsTokenFromOptionname($optionname)
         $raw = substr($raw, 0, $pipe);
     }
     $raw = trim($raw);
-    if (preg_match('/^(rfvt:\d+|rfos:[A-Za-z0-9._-]+|rfot:[A-Za-z0-9._-]+)$/', $raw)) {
+    if (preg_match('/^(rfvt:\d+|rfot:[A-Za-z0-9._-]+)$/', $raw)) {
         return $raw;
     }
     return '';
@@ -2537,7 +2481,7 @@ function rackflow_checkoutOsTokenFromOptionname($optionname)
 /**
  * Checkout SSH visibility map: catalog tokens plus WHMCS sub-option IDs.
  *
- * Order-form <select> values are tblproductconfigoptionssub.id, not rfvt:/rfos:
+ * Order-form <select> values are tblproductconfigoptionssub.id, not rfvt:/rfot:
  * tokens, so the client script needs numeric keys as well.
  *
  * @param int $productId

@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 import app.api.billing as billing
+import app.services.provisioning.bare_metal as bm
 from app.models.service import ServiceStatus, ServiceType
 from app.services.proxmox_placement import ProxmoxPlacementError
 from app.services.service_lifecycle import ServiceLifecycleError
@@ -44,7 +45,7 @@ def test_group_selection_and_template_rules(monkeypatch):
     occupied = SimpleNamespace(id=2, enabled=True)
     free = SimpleNamespace(id=3, enabled=True)
     monkeypatch.setattr(
-        billing.ServerGroupDAO, "get_by_id",
+        bm.ServerGroupDAO, "get_by_id",
         lambda _db, ident: None if ident == 0 else SimpleNamespace(
             name="pool",
             enable_os_templates=True,
@@ -53,7 +54,7 @@ def test_group_selection_and_template_rules(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        billing.ServiceDAO, "get_by_server",
+        bm.ServiceDAO, "get_by_server",
         lambda _db, ident: [SimpleNamespace(status=ServiceStatus.ACTIVE)] if ident == 2 else [],
     )
     assert billing._select_free_server_in_group(None, 2) is free
@@ -71,7 +72,7 @@ def test_group_selection_and_template_rules(monkeypatch):
 
 def test_determine_template_requires_enable_and_lists_choices(monkeypatch):
     monkeypatch.setattr(
-        billing.ServerGroupDAO,
+        bm.ServerGroupDAO,
         "get_by_id",
         lambda _db, ident: SimpleNamespace(
             name="multi",
@@ -167,10 +168,6 @@ def test_billing_product_helpers():
     family = SimpleNamespace(
         service_type="vm",
         defaults={"memory_mb": 2048},
-        os_mappings=[
-            SimpleNamespace(os_profile=SimpleNamespace(id=1, code="deb", name="Debian", enabled=True, os_family="linux", strategy_name="cloudinit")),
-            SimpleNamespace(os_profile=SimpleNamespace(id=2, code="off", name="Off", enabled=False, os_family="linux", strategy_name="cloudinit")),
-        ],
     )
     product = SimpleNamespace(
         overrides={"cores": 2},
@@ -178,14 +175,11 @@ def test_billing_product_helpers():
             SimpleNamespace(vm_template=SimpleNamespace(id=10, code="tpl", name="Ubuntu", enabled=True, os_type="linux-cloudinit", proxmox_template_name="ubuntu")),
         ],
     )
-    profiles = billing._billing_product_os_profiles(family)
-    assert len(profiles) == 1
-    assert profiles[0]["code"] == "deb"
     templates = billing._billing_product_vm_templates(product)
     assert templates[0]["code"] == "tpl"
-    assert billing._billing_product_checkout_os_mode("vm", templates, profiles) == "vm_template"
-    assert billing._billing_product_checkout_os_mode("bare_metal", [], profiles) == "server_group"
-    assert billing._billing_product_checkout_os_mode("vm", [], []) == "none"
+    assert billing._billing_product_checkout_os_mode("vm", templates) == "vm_template"
+    assert billing._billing_product_checkout_os_mode("bare_metal", []) == "server_group"
+    assert billing._billing_product_checkout_os_mode("vm", []) == "none"
 
 
 def test_apply_lookup_filters(monkeypatch):

@@ -185,3 +185,63 @@ def test_store_get_404s(client, test_admin_user):
     token = _login_admin(client)
     assert client.get("/api/admin/store/categories/999999", headers=_auth(token)).status_code == 404
     assert client.get("/api/admin/store/products/999999", headers=_auth(token)).status_code == 404
+
+
+def test_store_option_value_rejects_unknown_provision_key(
+    client, db_session: Session, test_admin_user
+):
+    token = _login_admin(client)
+    catalog = _catalog_product(db_session)
+    slug = f"opt-{uuid.uuid4().hex[:8]}"
+    product = client.post(
+        "/api/admin/store/products",
+        headers=_auth(token),
+        json={
+            "name": "Option Offer",
+            "slug": slug,
+            "product_id": catalog.id,
+            "service_type": "vm",
+            "enabled": True,
+            "visibility": FrontendProductVisibility.PUBLIC.value,
+            "sort_order": 0,
+            "features": [],
+            "specs": {},
+            "require_discord": False,
+        },
+    )
+    assert product.status_code == 201, product.text
+    fp_id = product.json()["id"]
+
+    option = client.post(
+        f"/api/admin/store/products/{fp_id}/options",
+        headers=_auth(token),
+        json={"code": "os", "name": "OS", "option_type": "select"},
+    )
+    assert option.status_code == 201, option.text
+    option_id = option.json()["id"]
+
+    bad = client.post(
+        f"/api/admin/store/options/{option_id}/values",
+        headers=_auth(token),
+        json={
+            "code": "bad",
+            "name": "Bad",
+            "provision_key": "not_a_real_key",
+            "provision_value": "1",
+        },
+    )
+    assert bad.status_code == 400, bad.text
+    assert "provision_key" in bad.text
+
+    ok = client.post(
+        f"/api/admin/store/options/{option_id}/values",
+        headers=_auth(token),
+        json={
+            "code": "debian",
+            "name": "Debian",
+            "provision_key": "vm_template_id",
+            "provision_value": "12",
+        },
+    )
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["provision_key"] == "vm_template_id"

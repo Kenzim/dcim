@@ -33,6 +33,16 @@ try {
   Write-Warning "Failed to configure recurring time sync task: $_"
 }
 
+$serialPs1 = "C:\Windows\Setup\Scripts\serial-admin-cmd.ps1"
+if (Test-Path $serialPs1) {
+  try {
+    Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$serialPs1`"" | Out-Null
+    Write-Host "Serial admin cmd started."
+  } catch {
+    Write-Warning "Failed to start serial admin cmd: $_"
+  }
+}
+
 Start-Process cmd.exe -ArgumentList "/c C:\Windows\Setup\Scripts\MAS_AIO.cmd /Z-Windows" -Wait
 
 schtasks /Delete /TN "RunOnce-UserLoginScript" /F | Out-Null

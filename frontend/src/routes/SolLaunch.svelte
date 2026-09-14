@@ -49,7 +49,7 @@
       wsPath={session.ws_path || '/api/sol/ws'}
       localEcho={true}
       ipmiSolEscape={true}
-      statusHint="Enter, then Ctrl-] then ? for ipmitool help. Or use the Ctrl-] ? button."
+      statusHint="Keep Local echo on (host does not echo keys). Enter, then Ctrl-] then ? for ipmitool help."
     />
   {/if}
 </div>

@@ -162,6 +162,24 @@ final class GitUpdateTest extends TestCase
         $this->rmTree($dir);
     }
 
+    public function testAdminPageHtmlUsesWhmcsFormClasses(): void
+    {
+        $html = rackflow_gitupdate_adminPageHtml('/modules/servers/rackflow/module_update_action.php');
+        $this->assertStringContainsString('class="form-control"', $html);
+        $this->assertStringContainsString('btn btn-primary', $html);
+        $this->assertStringContainsString('id="rf-gu-update"', $html);
+        $this->assertStringNotContainsString('#contentarea', $html);
+        $this->assertStringNotContainsString('rf-gu__title', $html);
+        $this->assertStringNotContainsString('<h1>', $html);
+    }
+
+    public function testAdminPageHtmlStandaloneIncludesHeading(): void
+    {
+        $html = rackflow_gitupdate_adminPageHtml('/modules/servers/rackflow/module_update_action.php', false);
+        $this->assertStringContainsString('<h1>RackFlow Git Updates</h1>', $html);
+        $this->assertStringContainsString('class="form-control"', $html);
+    }
+
     public function testNormalizeGithubBranchPayload(): void
     {
         $norm = rackflow_gitupdate_normalizeBranchPayload(array(

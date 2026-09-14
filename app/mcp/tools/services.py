@@ -5,34 +5,45 @@ from __future__ import annotations
 from typing import Optional
 
 from app.api.services_admin import (
-    AdminHttpProxyServiceCreate,
-    AdminVmServiceCreate,
     ServiceStatusUpdateBody,
     VmPowerActionBody,
-    _create_admin_vm_core,
     admin_reinstall_vm_guest,
     admin_restore_vm_backup,
     admin_vm_power_action,
-    create_http_proxy_service_admin,
     update_service_status,
 )
 from app.api.vm_backup_routes import BackupMutateBody
-from app.dao.server_dao import ServerDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 from app.mcp.serialize import service_row
-from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
-from app.services.service_product_snapshot import build_product_snapshot
+from app.models.service import ServiceStatus, ServiceType
+from app.services.provisioning import (
+    ProvisionRequest,
+    ProvisioningActor,
+    ProvisioningError,
+    ProvisioningService,
+    infer_provisioning_source,
+)
 from app.services.vm_backup_service import list_service_backups_and_jobs
-from app.services.vm_strategy_executor import provision_vm_service_async
 
 _MSG_SERVICE_NOT_FOUND = "Service not found"
 
 
 def _auth(ctx):
     return ctx.as_admin_auth()
+
+
+def _mcp_actor() -> ProvisioningActor:
+    return ProvisioningActor(kind="mcp", actor_id=0, name="mcp", source="mcp")
+
+
+def _create(db, req: ProvisionRequest):
+    try:
+        return ProvisioningService.create(db, req, _mcp_actor())
+    except ProvisioningError as exc:
+        raise ValueError(exc.message) from exc
 
 
 @mcp.tool()
@@ -128,23 +139,20 @@ async def provision_vm(
     """Create a VM service and optionally enqueue provisioning."""
 
     def work(db, ctx):
-        body = AdminVmServiceCreate(
+        req = ProvisionRequest(
             name=name,
-            product_code=product_code,
-            vm_template_id=vm_template_id,
+            service_type=ServiceType.VM,
             owner_user_id=owner_user_id,
+            product_code=product_code,
+            description=description,
+            provisioning_source=infer_provisioning_source(db, owner_user_id),
+            auto_provision=auto_provision,
+            vm_template_id=vm_template_id,
             proxmox_cluster_id=proxmox_cluster_id,
             proxmox_node_name=proxmox_node_name,
             proxmox_vmid=proxmox_vmid,
-            auto_provision=auto_provision,
-            description=description,
         )
-        service = _create_admin_vm_core(db, body)
-        if auto_provision and service.status != ServiceStatus.TERMINATED:
-            try:
-                provision_vm_service_async(db, service.id)
-            except ValueError:
-                pass
+        service = _create(db, req)
         return service_row(db, service)
 
     return await run_tool(
@@ -172,18 +180,19 @@ async def provision_http_proxy(
 ) -> dict:
     """Create an HTTP-proxy service and auto-assign IPAM addresses."""
 
-    async def work(db, ctx):
-        body = AdminHttpProxyServiceCreate(
+    def work(db, ctx):
+        req = ProvisionRequest(
             name=name,
-            product_code=product_code,
+            service_type=ServiceType.HTTP_PROXY,
             owner_user_id=owner_user_id,
+            product_code=product_code,
+            description=description,
+            provisioning_source=infer_provisioning_source(db, owner_user_id),
             ip_count=ip_count,
             subnet_id=subnet_id,
-            description=description,
         )
-        resp = await create_http_proxy_service_admin(body, _auth(ctx), db)
-        row = ServiceDAO.get_by_id(db, resp.id)
-        return service_row(db, row)
+        service = _create(db, req)
+        return service_row(db, service)
 
     return await run_tool(
         "provision_http_proxy",
@@ -196,50 +205,29 @@ async def provision_http_proxy(
 @mcp.tool()
 async def provision_bare_metal(
     name: str,
-    server_id: int,
+    server_id: Optional[int] = None,
+    server_group_id: Optional[int] = None,
     owner_user_id: Optional[int] = None,
     product_code: Optional[str] = None,
-    os_code: Optional[str] = None,
+    template_id: Optional[str] = None,
     description: Optional[str] = None,
 ) -> dict:
-    """Create a bare-metal service linked to an existing rack server."""
+    """Create a bare-metal service on an existing rack server or a server group."""
 
     def work(db, ctx):
-        if ServiceDAO.get_by_name(db, name):
-            raise ValueError("A service with this name already exists")
-        server = ServerDAO.get_by_id(db, server_id)
-        if not server:
-            raise ValueError("Server not found")
-        if ServiceDAO.get_by_server(db, server_id):
-            raise ValueError("Server is already assigned to a service")
-        snapshot = {}
-        effective_os = os_code
-        if product_code:
-            snapshot, effective_os = build_product_snapshot(
-                db, product_code, os_code, ServiceType.BARE_METAL
-            )
-        from app.dao.user_dao import UserDAO
-
-        owner = UserDAO.get_by_id(db, owner_user_id) if owner_user_id else None
-        prov = (
-            ProvisioningSource.BILLING
-            if owner is not None and owner.billing_integration_id
-            else ProvisioningSource.INTERNAL
-        )
-        row = ServiceDAO.create_bare_metal(
-            db,
+        req = ProvisionRequest(
             name=name,
-            server_id=server_id,
-            owner_user_id=owner_user_id,
             service_type=ServiceType.BARE_METAL,
-            status=ServiceStatus.PENDING,
-            description=description,
+            owner_user_id=owner_user_id,
             product_code=product_code,
-            os_code=effective_os,
-            product_snapshot=snapshot,
-            provisioning_source=prov,
+            description=description,
+            provisioning_source=infer_provisioning_source(db, owner_user_id),
+            server_id=server_id,
+            server_group_id=server_group_id,
+            template_id=template_id,
         )
-        return service_row(db, row)
+        service = _create(db, req)
+        return service_row(db, service)
 
     return await run_tool(
         "provision_bare_metal",

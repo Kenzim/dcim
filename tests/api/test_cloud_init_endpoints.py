@@ -183,3 +183,18 @@ def test_cloud_init_user_data_includes_chpasswd_type_text(client, db_session):
     response = client.get("/api/servers/interaction/cloud-init/user-data", headers=headers)
     assert response.status_code == 200
     assert "type: text" in response.text
+    assert "serial-getty@ttyS1.service" in response.text
+    assert "serial-getty@ttyS0.service" in response.text
+
+
+def test_ubuntu_install_sh_configures_serial_console():
+    from pathlib import Path
+
+    text = Path("os_templates/ubuntu-cloud-image/install.sh").read_text()
+    assert "rackflow-serial-sh" in text
+    assert "serial-getty@" in text
+    assert "RF>" in text
+    assert "console=ttyS1,115200" in text
+    assert "partprobe" in text
+    assert "igncr" in text
+    assert "qemu-nbd --connect=/dev/nbd0 -f raw" in text

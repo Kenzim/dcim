@@ -18,15 +18,20 @@ from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
 from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.dao.ipam_dao import IPAMDAO
-from app.services.proxy_provisioning import assignment_payload, auto_assign_proxy_ips, resolve_proxy_ip_request
+from app.services.proxy_provisioning import assignment_payload
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.permission_set_dao import PermissionSetDAO
 from app.services.client_permission_resolver import resolve_client_permissions
 from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
 from app.models.service_bare_metal import ServiceBareMetal
 from app.models.user import User
-from app.services.service_product_snapshot import build_product_snapshot
-from app.services.vm_provisioning_service import VMProvisioningService
+from app.services.provisioning import (
+    ProvisionRequest,
+    ProvisioningActor,
+    ProvisioningError,
+    ProvisioningService,
+    infer_provisioning_source,
+)
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox, reserve_vmid_for_service
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
@@ -42,7 +47,6 @@ from app.models.server_activity import ServerActivityEventType
 from app.services.vm_strategy_executor import (
     provision_vm_service_async,
     resolve_vm_strategy_name_for_service,
-    schedule_vm_auto_provision,
 )
 from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.services.proxmox_placement import (
@@ -182,17 +186,24 @@ class ServicePermissionsAssignBody(BaseModel):
     )
 
 
-class InternalTestVMServiceCreate(BaseModel):
-    """Create a VM service without billing / external user (lab or QA)."""
+class AdminBareMetalServiceCreate(BaseModel):
+    """Create a bare-metal service on a pooled group or an existing rack server."""
 
     name: str = Field(..., description=_MSG_UNIQUE_SERVICE_NAME)
-    product_code: str
-    vm_template_id: int = Field(..., description="Catalog VM template id (must be linked to product; sets OS strategy)")
-    proxmox_cluster_id: int
-    proxmox_node_name: str
-    proxmox_vmid: int
+    product_code: Optional[str] = None
     description: Optional[str] = None
     service_config: Optional[Dict[str, Any]] = None
+    owner_user_id: Optional[int] = Field(
+        None,
+        description=(
+            "users.id canonical owner in RackFlow. provisioning_source is "
+            "billing when this user has a linked billing identity, internal otherwise."
+        ),
+    )
+    external_service_id: Optional[str] = Field(None, description="Optional external line-item id (e.g. WHMCS service id)")
+    server_group_id: Optional[int] = Field(None, description="Pick a free server from this group")
+    server_id: Optional[int] = Field(None, description="Pin to an existing rack server")
+    template_id: Optional[str] = Field(None, description="OS template id from the server group's permitted list")
 
 
 class AdminVmServiceCreate(BaseModel):
@@ -254,6 +265,26 @@ class AdminHttpProxyServiceCreate(BaseModel):
     subnet_id: Optional[int] = Field(None, description="Override which subnet to assign from (wins over subnet_group_id)")
     subnet_group_id: Optional[int] = Field(None, description="Override which proxy subnet group to assign from")
     allocation_strategy: Optional[str] = Field(None, description="Override allocation strategy")
+
+
+def _admin_actor(auth: dict) -> ProvisioningActor:
+    return ProvisioningActor(
+        kind="admin",
+        actor_id=int(auth.get("user_id") or 0),
+        name=str(auth.get("username") or "admin"),
+        source="admin_api",
+    )
+
+
+def _raise_provisioning(exc: ProvisioningError) -> None:
+    raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+
+
+def _admin_provision(db: Session, req: ProvisionRequest, auth: dict) -> Service:
+    try:
+        return ProvisioningService.create(db, req, _admin_actor(auth))
+    except ProvisioningError as exc:
+        _raise_provisioning(exc)
 
 
 class ServiceOwnerAssignBody(BaseModel):
@@ -1670,168 +1701,24 @@ async def update_service_status(
     return _service_to_admin_response(db, service)
 
 
-def _create_admin_vm_core(
-    db: Session,
-    body: AdminVmServiceCreate,
-    background_tasks: Optional[BackgroundTasks] = None,
-) -> Service:
-    """Shared create logic for POST /vm and legacy internal-test-vm."""
-    if ServiceDAO.get_by_name(db, body.name):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A service with this name already exists",
-        )
-
-    if body.proxmox_cluster_id is not None:
-        if ProxmoxInventoryDAO.get_cluster(db, body.proxmox_cluster_id) is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Proxmox cluster not found",
-            )
-
-    owner_uid = body.owner_user_id
-    owner_user = UserDAO.get_by_id(db, owner_uid) if owner_uid is not None else None
-    if owner_uid is not None and owner_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=_MSG_OWNER_USER_NOT_FOUND,
-        )
-    prov = (
-        ProvisioningSource.BILLING
-        if owner_user is not None and owner_user.billing_integration_id
-        else ProvisioningSource.INTERNAL
-    )
-
-    try:
-        product_snapshot, effective_os_code = build_product_snapshot(
-            db,
-            body.product_code,
-            None,
-            ServiceType.VM,
-            vm_template_id=body.vm_template_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-
-    node = (body.proxmox_node_name or "").strip() or None
-    vmid = body.proxmox_vmid
-    if vmid is not None and body.proxmox_cluster_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="proxmox_vmid requires proxmox_cluster_id",
-        )
-
-    service = ServiceDAO.create_vm(
-        db,
+def _admin_vm_request(db: Session, body: AdminVmServiceCreate) -> ProvisionRequest:
+    source = infer_provisioning_source(db, body.owner_user_id)
+    return ProvisionRequest(
         name=body.name,
-        owner_user_id=owner_uid,
+        service_type=ServiceType.VM,
+        owner_user_id=body.owner_user_id,
+        product_code=body.product_code,
         external_service_id=body.external_service_id,
-        status=ServiceStatus.PENDING,
         description=body.description,
-        config=body.service_config or {},
-        product_code=body.product_code,
-        os_code=effective_os_code,
-        product_snapshot=product_snapshot,
-        provisioning_source=prov,
-        proxmox_cluster_id=body.proxmox_cluster_id,
-        proxmox_node_name=node,
-        proxmox_vmid=vmid,
+        provisioning_source=source,
+        auto_provision=bool(body.auto_provision),
+        service_config=dict(body.service_config or {}),
         vm_template_id=body.vm_template_id,
-    )
-    db.refresh(service)
-
-    if service.vm and body.proxmox_cluster_id is not None:
-        try:
-            reserved_vmid = reserve_vmid_for_service(
-                db,
-                cluster_id=body.proxmox_cluster_id,
-                service_id=service.id,
-                requested_vmid=vmid,
-            )
-        except ValueError as exc:
-            ServiceDAO.delete(db, service.id)
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        service.vm.proxmox_vmid = int(reserved_vmid)
-        db.commit()
-        db.refresh(service)
-
-    allocation = VMIPAllocationDAO.assign_next_free_to_service(
-        db,
-        service_id=service.id,
         proxmox_cluster_id=body.proxmox_cluster_id,
+        proxmox_node_name=body.proxmox_node_name,
+        proxmox_vmid=body.proxmox_vmid,
+        leave_pending_on_placement_error=True,
     )
-    if allocation is None:
-        ServiceDAO.delete(db, service.id)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "No free VM IP address available to allocate. Add enabled addresses under VM IP allocations. "
-                "For services without Proxmox cluster placement, only pool rows with no cluster restriction apply; "
-                "when a cluster is set, rows restricted to that cluster (or unrestricted rows) may be used."
-            ),
-        )
-
-    log_server_activity_attempt(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create_admin_vm",
-        source="admin_api",
-        message=f"Creating VM service '{body.name}' (pending)",
-        details={
-            "proxmox_cluster_id": body.proxmox_cluster_id,
-            "proxmox_node_name": node,
-            "proxmox_vmid": vmid,
-            "provisioning_source": prov.value,
-            "vm_ip_allocation_id": allocation.id,
-            "vm_ip_address": allocation.ip_address,
-        },
-    )
-
-    vm_plan = VMProvisioningService.plan_provisioning(
-        db=db,
-        service_id=service.id,
-        product_code=body.product_code,
-        os_code=None,
-        vm_template_id=body.vm_template_id,
-        context={"service_id": service.id, "vm_ip_allocation_id": allocation.id},
-    )
-    service.config = {
-        **(service.config or {}),
-        "vm_ip_allocation_id": allocation.id,
-        "vm_ip_address": allocation.ip_address,
-        "vm_plan": vm_plan,
-    }
-    ServiceDAO.update(db, service)
-
-    log_server_activity_success(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create_admin_vm",
-        source="admin_api",
-        message=f"Created pending VM service '{body.name}'",
-        details={
-            "service_id": service.id,
-            "vm_ip_allocation_id": allocation.id,
-            "vm_ip_address": allocation.ip_address,
-        },
-    )
-
-    if body.auto_provision and background_tasks is not None:
-        try:
-            schedule_vm_auto_provision(db, service, background_tasks)
-        except ValueError as exc:
-            # Placement could not be resolved. Keep the pending service (IP is
-            # already allocated) so it can be fixed and provisioned manually.
-            _set_guest_state(db, service, VMGuestState.ERROR, error=str(exc))
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        logger.info("Admin API: auto-provisioning queued for VM service %s", service.id)
-
-    return service
 
 
 @router.post("/vm", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
@@ -1850,34 +1737,43 @@ async def create_vm_service_admin(
     ``config.vm_provision.status``). Set ``auto_provision`` false to create a pending service
     for the manual two-phase flow.
     """
-    service = _create_admin_vm_core(db, body, background_tasks)
+    del background_tasks
+    service = _admin_provision(db, _admin_vm_request(db, body), auth)
     logger.info("Admin API: created VM service %s", service.id)
     return _service_to_admin_response(db, service)
 
 
-@router.post("/internal-test-vm", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
-async def create_internal_test_vm_service(
-    body: InternalTestVMServiceCreate,
+@router.post("/bare-metal", response_model=ServiceResponse, status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
+async def create_bare_metal_service_admin(
+    body: AdminBareMetalServiceCreate,
     auth: AdminDep,
     db: DbDep,
 ):
-    """
-    Legacy: same as ``POST /admin/services/vm`` but Proxmox placement was required.
-    Prefer ``POST /admin/services/vm`` with optional placement.
-    """
-    admin_body = AdminVmServiceCreate(
+    """Create a bare-metal service on a server group or an existing rack server."""
+    cfg = dict(body.service_config or {})
+    group_id = body.server_group_id if body.server_group_id is not None else cfg.get("server_group_id")
+    server_id = body.server_id if body.server_id is not None else cfg.get("server_id")
+    template_id = body.template_id or cfg.get("template_id")
+    if group_id is not None:
+        cfg["server_group_id"] = int(group_id)
+    if template_id:
+        cfg["template_id"] = template_id
+    req = ProvisionRequest(
         name=body.name,
+        service_type=ServiceType.BARE_METAL,
+        owner_user_id=body.owner_user_id,
         product_code=body.product_code,
-        vm_template_id=body.vm_template_id,
+        external_service_id=body.external_service_id,
         description=body.description,
-        service_config=body.service_config,
-        proxmox_cluster_id=body.proxmox_cluster_id,
-        proxmox_node_name=body.proxmox_node_name,
-        proxmox_vmid=body.proxmox_vmid,
-        auto_provision=False,
+        provisioning_source=infer_provisioning_source(db, body.owner_user_id),
+        service_config=cfg,
+        server_group_id=int(group_id) if group_id is not None else None,
+        server_id=int(server_id) if server_id is not None else None,
+        template_id=template_id,
+        template_parameters=cfg.get("template_parameters") or None,
     )
-    service = _create_admin_vm_core(db, admin_body)
-    logger.info("Admin API: created internal test VM service %s (legacy path)", service.id)
+    service = _admin_provision(db, req, auth)
+    logger.info("Admin API: created bare-metal service %s", service.id)
     return _service_to_admin_response(db, service)
 
 
@@ -1892,89 +1788,20 @@ async def create_http_proxy_service_admin(
     auto-assigned from IPAM immediately (status becomes ``active`` as soon
     as at least one IP is assigned, ``pending`` if the pool is exhausted).
     """
-    if ServiceDAO.get_by_name(db, body.name):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A service with this name already exists")
-
-    owner_uid = body.owner_user_id
-    owner_user = UserDAO.get_by_id(db, owner_uid) if owner_uid is not None else None
-    if owner_uid is not None and owner_user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_OWNER_USER_NOT_FOUND)
-    prov = (
-        ProvisioningSource.BILLING
-        if owner_user is not None and owner_user.billing_integration_id
-        else ProvisioningSource.INTERNAL
-    )
-
-    product_snapshot: Dict[str, Any] = {}
-    if body.product_code:
-        try:
-            product_snapshot, _os_code = build_product_snapshot(
-                db, body.product_code, None, ServiceType.HTTP_PROXY
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    service = ServiceDAO.create_bare_metal(
-        db,
+    req = ProvisionRequest(
         name=body.name,
-        server_id=None,
-        owner_user_id=owner_uid,
-        external_service_id=body.external_service_id,
         service_type=ServiceType.HTTP_PROXY,
-        status=ServiceStatus.PENDING,
-        description=body.description,
-        config=body.service_config or {},
+        owner_user_id=body.owner_user_id,
         product_code=body.product_code,
-        product_snapshot=product_snapshot,
-        provisioning_source=prov,
+        external_service_id=body.external_service_id,
+        description=body.description,
+        provisioning_source=infer_provisioning_source(db, body.owner_user_id),
+        service_config=dict(body.service_config or {}),
+        ip_count=body.ip_count,
+        subnet_id=body.subnet_id,
+        subnet_group_id=body.subnet_group_id,
+        allocation_strategy=body.allocation_strategy,
     )
-    db.refresh(service)
-
-    log_server_activity_attempt(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create_admin_http_proxy",
-        source="admin_api",
-        message=f"Creating proxy service '{body.name}' (pending)",
-        details={"provisioning_source": prov.value},
-    )
-
-    ip_req = resolve_proxy_ip_request(
-        product_snapshot.get("effective_specs"),
-        override_ip_count=body.ip_count,
-        override_subnet_id=body.subnet_id,
-        override_strategy=body.allocation_strategy,
-        override_subnet_group_id=body.subnet_group_id,
-    )
-    try:
-        assignments = auto_assign_proxy_ips(
-            db,
-            service,
-            ip_count=ip_req.ip_count,
-            subnet_id=ip_req.subnet_id,
-            subnet_group_id=ip_req.subnet_group_id,
-            strategy=ip_req.strategy,
-            assigned_by="admin",
-        )
-    except Exception as exc:
-        ServiceDAO.delete(db, service.id)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-    ServiceDAO.update(db, service)
-
-    log_server_activity_success(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create_admin_http_proxy",
-        source="admin_api",
-        message=f"Created proxy service '{body.name}' ({len(assignments)}/{ip_req.ip_count} IP(s) assigned)",
-        details={"assigned_ip_count": len(assignments), "requested_ip_count": ip_req.ip_count},
-    )
-    logger.info(
-        "Admin API: created http_proxy service %s (%s/%s IPs)",
-        service.id,
-        len(assignments),
-        ip_req.ip_count,
-    )
+    service = _admin_provision(db, req, auth)
+    logger.info("Admin API: created http_proxy service %s", service.id)
     return _service_to_admin_response(db, service)

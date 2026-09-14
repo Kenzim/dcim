@@ -438,6 +438,8 @@
 <style>
   .kvm-stage {
     flex: 1;
+    width: 100%;
+    height: 100%;
     min-height: 0;
     display: flex;
     align-items: center;
@@ -447,6 +449,8 @@
   }
   .kvm-canvas {
     flex: none;
+    max-width: 100%;
+    max-height: 100%;
     background: #000;
     outline: none;
     cursor: crosshair;

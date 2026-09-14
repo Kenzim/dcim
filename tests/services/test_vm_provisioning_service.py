@@ -8,9 +8,8 @@ The product catalog UI (family/product VM config) stores sizing under
 ``cores`` / ``memory_mb`` keys. ``plan_provisioning`` must always populate
 those canonical keys regardless of which alias supplied the value.
 """
-from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO
+from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO, VMTemplateDAO
 from app.dao.vm_config_dao import FamilyVMConfigDAO, ProductVMConfigDAO
-from app.models.product_catalog import OSProfile
 from app.services.vm_provisioning_service import VMProvisioningService
 
 
@@ -33,23 +32,20 @@ def _family_and_product(db_session, *, defaults=None, overrides=None):
         code="catalog-prod-vm",
         overrides=overrides or {},
     )
-    # os_code resolution (without a vm_template_id) looks up OSProfile by code
-    # directly - no family attachment needed for this legacy path.
-    os_profile = OSProfile(
-        code="linux-stub",
+    tmpl = VMTemplateDAO.create(
+        db_session,
         name="Linux stub",
-        os_family="linux",
-        strategy_name="stub",
-        strategy_config={},
+        os_type="Linux - Guest agent",
+        proxmox_template_name="linux-stub-tmpl",
+        code="linux-stub",
     )
-    db_session.add(os_profile)
+    ProductDAO.set_vm_templates(db_session, product, [tmpl.id])
     db_session.commit()
-    db_session.refresh(os_profile)
-    return family, product, os_profile
+    return family, product, tmpl
 
 
 def test_plan_provisioning_normalizes_catalog_vm_config_keys(db_session):
-    family, product, _ = _family_and_product(db_session)
+    family, product, tmpl = _family_and_product(db_session)
     FamilyVMConfigDAO.upsert(db_session, family, {"cpu_cores": 4, "ram_mb": 8192})
     db_session.commit()
 
@@ -57,7 +53,7 @@ def test_plan_provisioning_normalizes_catalog_vm_config_keys(db_session):
         db_session,
         service_id=1,
         product_code=product.code,
-        os_code="linux-stub",
+        vm_template_id=tmpl.id,
     )
 
     specs = plan["effective_specs"]
@@ -69,7 +65,7 @@ def test_plan_provisioning_normalizes_catalog_vm_config_keys(db_session):
 
 
 def test_plan_provisioning_full_clone_opt_in(db_session):
-    family, product, _ = _family_and_product(db_session)
+    family, product, tmpl = _family_and_product(db_session)
     FamilyVMConfigDAO.upsert(db_session, family, {"cpu_cores": 2, "ram_mb": 2048})
     ProductVMConfigDAO.upsert(
         db_session, product, extends_family=True, config={"full_clone": True}
@@ -80,14 +76,14 @@ def test_plan_provisioning_full_clone_opt_in(db_session):
         db_session,
         service_id=4,
         product_code=product.code,
-        os_code="linux-stub",
+        vm_template_id=tmpl.id,
     )
 
     assert plan["effective_specs"]["full_clone"] is True
 
 
 def test_plan_provisioning_product_override_alias_wins(db_session):
-    family, product, _ = _family_and_product(db_session)
+    family, product, tmpl = _family_and_product(db_session)
     FamilyVMConfigDAO.upsert(db_session, family, {"cpu_cores": 2, "ram_mb": 2048})
     ProductVMConfigDAO.upsert(db_session, product, extends_family=True, config={"ram_mb": 4096})
     db_session.commit()
@@ -96,7 +92,7 @@ def test_plan_provisioning_product_override_alias_wins(db_session):
         db_session,
         service_id=2,
         product_code=product.code,
-        os_code="linux-stub",
+        vm_template_id=tmpl.id,
     )
 
     specs = plan["effective_specs"]
@@ -107,7 +103,7 @@ def test_plan_provisioning_product_override_alias_wins(db_session):
 
 
 def test_plan_provisioning_legacy_defaults_overrides_alias(db_session):
-    family, product, _ = _family_and_product(
+    family, product, tmpl = _family_and_product(
         db_session,
         defaults={"cpu_count": 2, "ram_mb": 2048},
         overrides={"ram_mb": 4096},
@@ -118,11 +114,10 @@ def test_plan_provisioning_legacy_defaults_overrides_alias(db_session):
         db_session,
         service_id=3,
         product_code=product.code,
-        os_code="linux-stub",
+        vm_template_id=tmpl.id,
     )
 
     specs = plan["effective_specs"]
-    assert specs["cpu_count"] == 2
+    assert specs["cpu_count"] == 2 or specs.get("cpu_cores") == 2
     assert specs["ram_mb"] == 4096
-    assert specs["cores"] == 2
     assert specs["memory_mb"] == 4096

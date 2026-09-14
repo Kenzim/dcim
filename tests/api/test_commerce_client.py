@@ -177,6 +177,109 @@ def test_checkout_free_trial_or_zero_setup_order(client, db_session: Session):
     assert body.get("order_number") or body.get("id") or body.get("order")
 
 
+def test_commerce_product_detail_and_quote(client, db_session: Session):
+    user = _make_user(db_session, "quote-user")
+    fp, plan = _seed_fp(db_session)
+    _login(client, "quote-user")
+
+    detail = client.get(f"/api/client/commerce/products/{fp.id}")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["id"] == fp.id
+    assert body.get("price_plans") or body.get("plans")
+
+    quote = client.post(
+        "/api/client/commerce/quote",
+        json={
+            "frontend_product_id": fp.id,
+            "price_plan_id": plan.id,
+            "cycle_interval": "monthly",
+            "options": {},
+        },
+    )
+    assert quote.status_code == 200, quote.text
+    assert quote.json()["total_cents"] >= 0
+
+
+def test_commerce_orders_list_and_profile(client, db_session: Session):
+    user = _make_user(db_session, "orders-user")
+    fp, plan = _seed_fp(db_session)
+    plan.pricing_model = PricePlanPricingModel.FREE
+    plan.setup_cents = 0
+    db_session.commit()
+    _login(client, "orders-user")
+    nonce = uuid.uuid4().hex
+    placed = client.post(
+        "/api/client/commerce/checkout",
+        json={
+            "frontend_product_id": fp.id,
+            "price_plan_id": plan.id,
+            "cycle_interval": None,
+            "options": {},
+            "checkout_nonce": nonce,
+            "terms_version": "1",
+        },
+    )
+    assert placed.status_code in (200, 201), placed.text
+
+    listed = client.get("/api/client/commerce/orders")
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()) >= 1
+
+    profile = client.get("/api/client/commerce/profile")
+    assert profile.status_code == 200, profile.text
+    assert profile.json()["billing_account_id"] is not None
+
+
+def test_commerce_ticket_departments_list(client, db_session: Session):
+    user = _make_user(db_session, "dept-user")
+    _login(client, "dept-user")
+    resp = client.get("/api/client/commerce/ticket-departments")
+    assert resp.status_code == 200, resp.text
+    assert isinstance(resp.json(), list)
+
+
+def test_commerce_invoices_and_order_detail(client, db_session: Session):
+    user = _make_user(db_session, "invoice-user")
+    account = BillingAccountDAO.ensure_client_account(db_session, user.id)
+    fp, plan = _seed_fp(db_session)
+    plan.pricing_model = PricePlanPricingModel.FREE
+    plan.setup_cents = 0
+    db_session.commit()
+    _login(client, "invoice-user")
+    nonce = uuid.uuid4().hex
+    placed = client.post(
+        "/api/client/commerce/checkout",
+        json={
+            "frontend_product_id": fp.id,
+            "price_plan_id": plan.id,
+            "cycle_interval": None,
+            "options": {},
+            "checkout_nonce": nonce,
+            "terms_version": "1",
+        },
+    )
+    assert placed.status_code in (200, 201), placed.text
+    order_id = placed.json().get("id") or placed.json().get("order_id")
+    if order_id is None and placed.json().get("order"):
+        order_id = placed.json()["order"].get("id")
+
+    invoices = client.get("/api/client/commerce/invoices")
+    assert invoices.status_code == 200, invoices.text
+    assert isinstance(invoices.json(), list)
+
+    if order_id is not None:
+        detail = client.get(f"/api/client/commerce/orders/{order_id}")
+        assert detail.status_code == 200, detail.text
+
+    activity = client.get("/api/client/commerce/activity")
+    assert activity.status_code == 200, activity.text
+    assert isinstance(activity.json(), list)
+
+    methods = client.get("/api/client/commerce/payment-methods")
+    assert methods.status_code == 200, methods.text
+
+
 def test_staff_notes_hidden_from_client(client, db_session: Session):
     from app.models.support_ticket import TicketDepartment
     from app.services.ticket_service import TicketService

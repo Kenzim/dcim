@@ -5,8 +5,6 @@ from sqlalchemy.orm import Session
 from app.models.product_catalog import (
     ProductFamily,
     Product,
-    OSProfile,
-    ProductFamilyOSProfile,
     VMTemplate,
     ProductVMTemplate,
 )
@@ -153,96 +151,6 @@ class ProductDAO:
             .first()
             is not None
         )
-
-
-class OSProfileDAO:
-    @staticmethod
-    def create(
-        db: Session,
-        code: str,
-        name: str,
-        os_family: str,
-        strategy_name: Optional[str] = None,
-        strategy_config: Optional[dict] = None,
-        enabled: bool = True,
-    ) -> OSProfile:
-        row = OSProfile(
-            code=code,
-            name=name,
-            os_family=os_family,
-            strategy_name=strategy_name,
-            strategy_config=strategy_config or {},
-            enabled=enabled,
-        )
-        db.add(row)
-        db.commit()
-        db.refresh(row)
-        return row
-
-    @staticmethod
-    def get_by_id(db: Session, os_profile_id: int) -> Optional[OSProfile]:
-        return db.query(OSProfile).filter(OSProfile.id == os_profile_id).first()
-
-    @staticmethod
-    def get_by_code(db: Session, code: str) -> Optional[OSProfile]:
-        return db.query(OSProfile).filter(OSProfile.code == code).first()
-
-    @staticmethod
-    def get_all(db: Session) -> List[OSProfile]:
-        return db.query(OSProfile).order_by(OSProfile.name).all()
-
-    @staticmethod
-    def update(db: Session, row: OSProfile, **kwargs) -> OSProfile:
-        for key, value in kwargs.items():
-            setattr(row, key, value)
-        db.commit()
-        db.refresh(row)
-        return row
-
-    @staticmethod
-    def delete(db: Session, os_profile_id: int) -> bool:
-        row = OSProfileDAO.get_by_id(db, os_profile_id)
-        if not row:
-            return False
-        db.delete(row)
-        db.commit()
-        return True
-
-
-class ProductFamilyOSProfileDAO:
-    @staticmethod
-    def attach(db: Session, family_id: int, os_profile_id: int) -> ProductFamilyOSProfile:
-        existing = (
-            db.query(ProductFamilyOSProfile)
-            .filter(
-                ProductFamilyOSProfile.family_id == family_id,
-                ProductFamilyOSProfile.os_profile_id == os_profile_id,
-            )
-            .first()
-        )
-        if existing:
-            return existing
-        row = ProductFamilyOSProfile(family_id=family_id, os_profile_id=os_profile_id)
-        db.add(row)
-        db.commit()
-        db.refresh(row)
-        return row
-
-    @staticmethod
-    def detach(db: Session, family_id: int, os_profile_id: int) -> bool:
-        row = (
-            db.query(ProductFamilyOSProfile)
-            .filter(
-                ProductFamilyOSProfile.family_id == family_id,
-                ProductFamilyOSProfile.os_profile_id == os_profile_id,
-            )
-            .first()
-        )
-        if not row:
-            return False
-        db.delete(row)
-        db.commit()
-        return True
 
 
 class VMTemplateDAO:

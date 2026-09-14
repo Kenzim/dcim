@@ -1033,74 +1033,63 @@ function rackflow_gitupdate_apply(array $settings)
 }
 
 /**
- * @param string $actionUrl
+ * Markup for the git-update form. Uses WHMCS Blend/Bootstrap 3 classes so
+ * the addon page (addonmodules.php) matches the rest of admin. Do not wrap
+ * this in WHMCS\Admin from /modules/servers/rackflow/ — those templates
+ * resolve CSS/JS relative to this directory and 404.
+ *
+ * @param string $actionUrl JSON POST endpoint
+ * @param bool $embedded True when WHMCS already printed the page heading
  * @return string
  */
-function rackflow_gitupdate_adminPageHtml($actionUrl)
+function rackflow_gitupdate_adminPageHtml($actionUrl, $embedded = true)
 {
     $actionUrlJson = json_encode($actionUrl, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
     if ($actionUrlJson === false) {
         $actionUrlJson = '""';
     }
+    $heading = $embedded ? '' : '<h1>RackFlow Git Updates</h1>';
     return <<<HTML
 <div class="rf-gu">
-  <div class="rf-gu__card">
-    <div class="rf-gu__head">
-      <div>
-        <h2 class="rf-gu__title">RackFlow git updates</h2>
-        <p class="rf-gu__lead">Download <code>whmcs/modules/servers/rackflow</code> from a GitHub or Forgejo/Gitea branch and replace the files on this WHMCS server. This is not WHMCS's own updater.</p>
-      </div>
-    </div>
-    <div class="rf-gu__grid">
-      <div class="rf-gu__field rf-gu__field--wide">
-        <label for="rf-gu-url">Git repository URL</label>
-        <input id="rf-gu-url" type="text" autocomplete="off" placeholder="https://github.com/Kenzim/dcim"/>
-        <p class="rf-gu__help">HTTPS clone URL, or SSH form <code>git@host:owner/repo.git</code> (converted to HTTP(S) for download).</p>
-      </div>
-      <div class="rf-gu__field">
-        <label for="rf-gu-branch">Branch</label>
-        <input id="rf-gu-branch" type="text" autocomplete="off" placeholder="main"/>
-      </div>
-      <div class="rf-gu__field">
-        <label for="rf-gu-token">Access token <span>(optional)</span></label>
-        <input id="rf-gu-token" type="password" autocomplete="new-password" placeholder=""/>
-        <p class="rf-gu__help">Leave blank to keep a saved token. Needed for private repos.</p>
-      </div>
-    </div>
-    <label class="rf-gu__check"><input id="rf-gu-clear-token" type="checkbox"/> Clear saved token</label>
-    <label class="rf-gu__check"><input id="rf-gu-insecure" type="checkbox"/> Allow insecure TLS (LAN git with a self-signed certificate)</label>
-    <label class="rf-gu__check"><input id="rf-gu-reseller" type="checkbox" checked/> Also update <code>rackflow_reseller</code> if that module is installed</label>
-    <div class="rf-gu__status" id="rf-gu-meta"></div>
-    <div class="rf-gu__actions">
-      <button type="button" class="rf-gu__btn" id="rf-gu-save">Save settings</button>
-      <button type="button" class="rf-gu__btn" id="rf-gu-check">Check for updates</button>
-      <button type="button" class="rf-gu__btn rf-gu__btn--primary" id="rf-gu-update">Update now</button>
-    </div>
-    <pre class="rf-gu__log" id="rf-gu-log">Loading…</pre>
+  {$heading}
+  <p>Download <code>whmcs/modules/servers/rackflow</code> from a GitHub or Forgejo/Gitea branch and replace the files on this WHMCS server. This is not WHMCS's own updater.</p>
+  <div class="form-group">
+    <label for="rf-gu-url">Git repository URL</label>
+    <input id="rf-gu-url" class="form-control" type="text" autocomplete="off" placeholder="https://github.com/Kenzim/dcim"/>
+    <span class="help-block">HTTPS clone URL, or SSH form <code>git@host:owner/repo.git</code> (converted to HTTP(S) for download).</span>
   </div>
+  <div class="row">
+    <div class="col-sm-4">
+      <div class="form-group">
+        <label for="rf-gu-branch">Branch</label>
+        <input id="rf-gu-branch" class="form-control" type="text" autocomplete="off" placeholder="main"/>
+      </div>
+    </div>
+    <div class="col-sm-8">
+      <div class="form-group">
+        <label for="rf-gu-token">Access token <span class="text-muted">(optional)</span></label>
+        <input id="rf-gu-token" class="form-control" type="password" autocomplete="new-password" placeholder=""/>
+        <span class="help-block">Leave blank to keep a saved token. Needed for private repos.</span>
+      </div>
+    </div>
+  </div>
+  <div class="checkbox"><label><input id="rf-gu-clear-token" type="checkbox"/> Clear saved token</label></div>
+  <div class="checkbox"><label><input id="rf-gu-insecure" type="checkbox"/> Allow insecure TLS (LAN git with a self-signed certificate)</label></div>
+  <div class="checkbox"><label><input id="rf-gu-reseller" type="checkbox" checked/> Also update <code>rackflow_reseller</code> if that module is installed</label></div>
+  <div class="well" id="rf-gu-meta"></div>
+  <p>
+    <button type="button" class="btn btn-default" id="rf-gu-save">Save settings</button>
+    <button type="button" class="btn btn-default" id="rf-gu-check">Check for updates</button>
+    <button type="button" class="btn btn-primary" id="rf-gu-update">Update now</button>
+  </p>
+  <pre class="well" id="rf-gu-log">Loading…</pre>
 </div>
 <style>
-.rf-gu { --ink:#1c2430; --muted:#5b6775; --line:#d5dce5; --bg:#f4f6f8; --accent:#0f6e56; --accent-soft:#e7f5ef; font-family:"Segoe UI",system-ui,-apple-system,sans-serif; color:var(--ink); max-width:920px; margin-bottom: 88px; }
-.rf-gu * { box-sizing:border-box; }
-.rf-gu__card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:22px 24px 20px; overflow: hidden; }
-.rf-gu__title { margin:0 0 6px; font-size:18px; font-weight:700; }
-.rf-gu__lead { margin:0; color:var(--muted); font-size:13px; line-height:1.45; max-width:70ch; }
-.rf-gu__lead code, .rf-gu__help code, .rf-gu__check code { font-size:12px; }
-.rf-gu__grid { display:grid; grid-template-columns:1fr 160px 1fr; gap:14px 16px; margin:18px 0 12px; }
-.rf-gu__field--wide { grid-column:1 / -1; }
-.rf-gu__field label { display:block; margin:0 0 6px; font-size:12px; font-weight:650; }
-.rf-gu__field label span { font-weight:500; color:var(--muted); }
-.rf-gu__field input { width:100%; height:36px; padding:6px 10px; border:1px solid var(--line); border-radius:8px; font-size:13px; }
-.rf-gu__help { margin:6px 0 0; font-size:11px; color:var(--muted); line-height:1.4; }
-.rf-gu__check { display:flex; align-items:center; gap:8px; margin:8px 0; font-size:13px; }
-.rf-gu__status { margin:14px 0 0; padding:12px 14px; background:var(--bg); border:1px solid var(--line); border-radius:10px; font-size:13px; line-height:1.45; white-space:pre-wrap; }
-.rf-gu__actions { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0; }
-.rf-gu__btn { height:36px; padding:0 14px; border:1px solid var(--line); border-radius:8px; background:#fff; font-size:13px; font-weight:650; cursor:pointer; }
-.rf-gu__btn--primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-.rf-gu__btn:disabled { opacity:.55; cursor:wait; }
-.rf-gu__log { margin:0; padding:12px 14px; background:#0f1720; color:#d7e2ea; border-radius:10px; font-size:12px; line-height:1.45; white-space:pre-wrap; min-height:6em; max-height: 16em; overflow: auto; }
-#contentarea { padding-bottom: 96px; }
-@media (max-width: 800px) { .rf-gu__grid { grid-template-columns:1fr; } }
+.rf-gu { max-width: 920px; }
+.rf-gu #rf-gu-meta, .rf-gu #rf-gu-log { white-space: pre-wrap; }
+.rf-gu #rf-gu-log { background: #1b2430; color: #d7e2ea; min-height: 6em; max-height: 16em; overflow: auto; }
+.rf-gu .checkbox { margin-top: 4px; margin-bottom: 4px; }
+.rf-gu .btn[disabled] { opacity: .55; cursor: wait; }
 </style>
 <script>
 (function () {

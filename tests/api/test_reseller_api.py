@@ -2,10 +2,8 @@ import pytest
 
 from app.core.reseller_auth import issue_reseller_api_key
 from app.models.product_catalog import (
-    OSProfile,
     Product,
     ProductFamily,
-    ProductFamilyOSProfile,
     ProductVMTemplate,
     VMTemplate,
 )
@@ -341,30 +339,12 @@ def test_loader_resources_are_hidden_without_compatible_quota(
     assert response.json() == []
 
 
-def test_product_loader_returns_only_linked_enabled_os_and_templates(
+def test_product_loader_returns_only_linked_enabled_templates(
     client, db_session
 ):
     reseller, key = _reseller(db_session, "product-options")
     product = _vm_product(db_session)
     _allow(db_session, reseller, product)
-    linked_os = OSProfile(
-        code="linked-linux",
-        name="Linked Linux",
-        os_family="linux",
-        enabled=True,
-    )
-    disabled_os = OSProfile(
-        code="disabled-linux",
-        name="Disabled Linux",
-        os_family="linux",
-        enabled=False,
-    )
-    unlinked_os = OSProfile(
-        code="unlinked-linux",
-        name="Unlinked Linux",
-        os_family="linux",
-        enabled=True,
-    )
     linked_template = VMTemplate(
         code="linked-template",
         name="Linked Template",
@@ -381,29 +361,16 @@ def test_product_loader_returns_only_linked_enabled_os_and_templates(
     )
     db_session.add_all(
         [
-            linked_os,
-            disabled_os,
-            unlinked_os,
             linked_template,
             unlinked_template,
         ]
     )
     db_session.flush()
-    db_session.add_all(
-        [
-            ProductFamilyOSProfile(
-                family_id=product.family_id,
-                os_profile_id=linked_os.id,
-            ),
-            ProductFamilyOSProfile(
-                family_id=product.family_id,
-                os_profile_id=disabled_os.id,
-            ),
-            ProductVMTemplate(
-                product_id=product.id,
-                vm_template_id=linked_template.id,
-            ),
-        ]
+    db_session.add(
+        ProductVMTemplate(
+            product_id=product.id,
+            vm_template_id=linked_template.id,
+        )
     )
     db_session.commit()
 
@@ -413,9 +380,7 @@ def test_product_loader_returns_only_linked_enabled_os_and_templates(
     )
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert [row["code"] for row in payload["os_profiles"]] == [
-        "linked-linux"
-    ]
+    assert "os_profiles" not in payload
     assert [row["code"] for row in payload["vm_templates"]] == [
         "linked-template"
     ]
@@ -578,11 +543,11 @@ def test_failed_provisioning_refunds_credit_and_voids_invoice(
     product = _product(db_session)
     _allow(db_session, reseller, product)
 
-    def fail_provision(**_kwargs):
+    def fail_provision(*_args, **_kwargs):
         raise RuntimeError("provisioning exploded")
 
     monkeypatch.setattr(
-        "app.api.reseller.provision_bare_metal_service", fail_provision
+        "app.api.reseller.ProvisioningService.create", fail_provision
     )
     headers = _headers(key, "failing-deploy")
     body = _create_body(

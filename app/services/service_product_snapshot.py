@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from app.dao.product_catalog_dao import OSProfileDAO, ProductDAO, VMTemplateDAO
+from app.dao.product_catalog_dao import ProductDAO, VMTemplateDAO
 from app.models.service import ServiceType
 from app.dao.vm_config_dao import ProductVMConfigDAO
 from app.services.vm_install_type_strategy import resolve_vm_template_strategy
@@ -19,13 +19,12 @@ def build_product_snapshot(
     vm_template_id: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """
-    Validate product/os/template against service_type and return (product_snapshot, effective_os_code).
+    Validate product/template against service_type and return (product_snapshot, effective_os_code).
 
-    For VM services with ``vm_template_id``, strategy comes only from ``VMTemplate.os_type``
-    (merged model + strategy, e.g. *Linux - Cloudinit* → ``cloudinit_clone``).
+    For VM services with ``vm_template_id``, strategy comes only from ``VMTemplate.os_type``.
     ``effective_os_code`` is the synthetic billing code for that strategy (stored on ``Service.os_code``).
 
-    Legacy: ``os_code`` alone still resolves an ``OSProfile`` from the catalog when no template is given.
+    ``os_code`` is accepted only as a consistency check against the template's billing code.
 
     Raises ValueError with a human-readable message on validation failure.
     """
@@ -61,7 +60,6 @@ def build_product_snapshot(
     }
 
     effective_os_code: Optional[str] = None
-    vm_template_row = None
 
     if resolved_service_type == ServiceType.VM and vm_template_id is not None:
         vm_template_row = VMTemplateDAO.get_by_id(db, vm_template_id)
@@ -102,18 +100,9 @@ def build_product_snapshot(
             "source": "vm_template_os_type",
         }
     elif os_code:
-        os_profile = OSProfileDAO.get_by_code(db, os_code)
-        if not os_profile:
-            raise ValueError(f"Unknown os_code '{os_code}'")
-        effective_os_code = os_code
-        snapshot["os_profile"] = {
-            "id": os_profile.id,
-            "code": os_profile.code,
-            "name": os_profile.name,
-            "family": os_profile.os_family,
-            "strategy_name": os_profile.strategy_name,
-            "strategy_config": os_profile.strategy_config or {},
-            "source": "os_profile",
-        }
+        raise ValueError(
+            "os_code is no longer supported; provision VMs with vm_template_id "
+            "(template os_type defines the strategy)"
+        )
 
     return snapshot, effective_os_code

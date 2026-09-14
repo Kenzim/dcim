@@ -13,7 +13,7 @@ from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
 from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
 from app.schemas.billing import BillingBareMetalServiceCreate
-from app.services.billing_provisioning_service import ProvisioningActor
+from app.services.provisioning import ProvisioningActor
 
 
 def _key(db, name="bm-os"):
@@ -272,7 +272,8 @@ async def test_provision_bare_metal_rejects_unpermitted_template(db_session, mon
         enable_os_templates=True,
         permitted_os_templates=["ubuntu-cloud-image"],
     )
-    monkeypatch.setattr(billing, "_select_free_server_in_group", lambda *_: server)
+    group.servers.append(server)
+    db_session.commit()
     data = BillingBareMetalServiceCreate(
         name="bm-os-rej-svc",
         external_user_id="e",
@@ -306,13 +307,14 @@ async def test_provision_bare_metal_queues_permitted_template(db_session, monkey
         enable_os_templates=True,
         permitted_os_templates=["ubuntu-cloud-image"],
     )
+    group.servers.append(server)
+    db_session.commit()
     queued = {}
 
     def capture(**kwargs):
         queued.update(kwargs)
         return SimpleNamespace(id=1), SimpleNamespace(id=2, boot_task_id=1)
 
-    monkeypatch.setattr(billing, "_select_free_server_in_group", lambda *_: server)
     monkeypatch.setattr(billing, "_queue_template_install_for_service", capture)
     data = BillingBareMetalServiceCreate(
         name="bm-os-ok-svc",

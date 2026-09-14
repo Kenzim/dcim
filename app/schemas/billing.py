@@ -8,34 +8,27 @@ from datetime import datetime
 
 # Service schemas for billing API
 class BillingBareMetalServiceCreate(BaseModel):
-    """Create bare-metal or http_proxy service (uses RackFlow Server + service_bare_metal)."""
+    """Create bare-metal or http_proxy service.
+
+    Bare metal requires ``service_config.server_group_id`` (pooled rack server).
+    HTTP proxy assigns IPs from IPAM; no rack Server is created.
+    """
     name: str = Field(..., description="Service name")
     external_service_id: Optional[str] = Field(None, description="Service ID in external system")
     external_user_id: str = Field(..., description="User ID in external system")
     external_username: Optional[str] = Field(None, description="Username in external system")
     external_email: Optional[str] = Field(None, description="Email in external system")
     product_code: Optional[str] = Field(None, description="RackFlow product code")
-    os_code: Optional[str] = Field(None, description="RackFlow OS profile code")
     service_type: Optional[str] = Field("bare_metal", description="bare_metal or http_proxy")
-    # Server configuration
-    server_name: Optional[str] = Field(None, description="Server name")
-    server_ip: Optional[str] = Field(None, description="Server IP address")
-    description: Optional[str] = Field(None, description="Service/Server description")
-    cpu_count: int = Field(1, description="Number of CPUs")
-    cpu_model: Optional[str] = Field(None, description="CPU model")
-    ram_gb: Optional[int] = Field(None, description="RAM in GB")
-    port_speed_mbps: Optional[int] = Field(None, description="Port speed in Mbps")
-    location_id: Optional[int] = Field(None, description="Location ID")
-    plugin_name: Optional[str] = Field(None, description="Plugin name (folder name on disk)")
-    plugin_config: Dict[str, Any] = Field(default_factory=dict, description="Plugin configuration")
-    os_boot_mode: Optional[str] = Field("uefi", description="OS boot mode (uefi/bios)")
-    disks: List[Dict[str, Any]] = Field(default_factory=list, description="Disks configuration")
-    network_ports: List[Dict[str, Any]] = Field(default_factory=list, description="Network ports configuration")
-    service_config: Optional[Dict[str, Any]] = Field(None, description="Service-specific configuration")
-    # Optional authoritative Proxmox placement (VM services); also mirrored on Server plugin_config when applicable
-    proxmox_cluster_id: Optional[int] = Field(None, description="Deprecated for BM create; ignored")
-    proxmox_node_name: Optional[str] = Field(None, description="Deprecated for BM create; ignored")
-    proxmox_vmid: Optional[int] = Field(None, description="Deprecated for BM create; ignored")
+    description: Optional[str] = Field(None, description="Service description")
+    service_config: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Type-specific config. Bare metal: server_group_id (required), "
+            "template_id, template_parameters. Proxy: ip_count, subnet_id, "
+            "subnet_group_id, allocation_strategy."
+        ),
+    )
 
 
 class BillingVmServiceCreate(BaseModel):
@@ -49,10 +42,6 @@ class BillingVmServiceCreate(BaseModel):
     vm_template_id: Optional[int] = Field(
         None,
         description="Catalog VM template id (preferred); linked to product. Strategy = template os_type (e.g. Linux - Cloudinit)",
-    )
-    os_code: Optional[str] = Field(
-        None,
-        description="Legacy: RackFlow OS profile code when not using vm_template_id",
     )
     description: Optional[str] = Field(None, description="Service description")
     service_config: Optional[Dict[str, Any]] = Field(None, description="Service-specific configuration")
@@ -107,7 +96,6 @@ class BillingAdoptVmService(BaseModel):
     proxmox_vmid: int
     name: Optional[str] = Field(None, description="Service name; defaults to Proxmox guest name")
     product_code: Optional[str] = None
-    os_code: Optional[str] = None
 
 
 class BillingVmPlacementUpdate(BaseModel):

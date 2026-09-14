@@ -48,7 +48,7 @@ function rackflow_reseller_ConfigOptions()
             'Type' => 'text',
             'Size' => '40',
             'SimpleMode' => true,
-            'Description' => 'Optional default OS profile code when the customer does not select an OS.',
+            'Description' => 'Optional default OS template token (rfvt:{id} or rfot:{id}) when the customer does not select an OS.',
         ),
         'RackFlow Server Group' => array(
             'Type' => 'dropdown',
@@ -462,22 +462,17 @@ function rackflow_reseller_resolveOsSelection($selected, array $catalogProduct =
         $value = trim(explode('|', $value, 2)[0]);
     }
     if (preg_match('/^rfvt:(\d+)$/', $value, $match)) {
-        return array('vm_template_id' => (int)$match[1], 'os_code' => null);
+        return array('vm_template_id' => (int)$match[1], 'os_code' => null, 'template_id' => null);
     }
-    if (preg_match('/^rfos:(.+)$/', $value, $match)) {
-        return array('vm_template_id' => null, 'os_code' => trim($match[1]));
+    if (preg_match('/^rfot:(.+)$/', $value, $match)) {
+        return array('vm_template_id' => null, 'os_code' => null, 'template_id' => trim($match[1]));
     }
     foreach (isset($catalogProduct['vm_templates']) && is_array($catalogProduct['vm_templates']) ? $catalogProduct['vm_templates'] : array() as $template) {
         if ((isset($template['name']) && strcasecmp($value, (string)$template['name']) === 0) || (isset($template['code']) && $value === (string)$template['code'])) {
-            return array('vm_template_id' => (int)$template['id'], 'os_code' => null);
+            return array('vm_template_id' => (int)$template['id'], 'os_code' => null, 'template_id' => null);
         }
     }
-    foreach (isset($catalogProduct['os_profiles']) && is_array($catalogProduct['os_profiles']) ? $catalogProduct['os_profiles'] : array() as $profile) {
-        if ((isset($profile['name']) && strcasecmp($value, (string)$profile['name']) === 0) || (isset($profile['code']) && $value === (string)$profile['code'])) {
-            return array('vm_template_id' => null, 'os_code' => (string)$profile['code']);
-        }
-    }
-    return array('vm_template_id' => null, 'os_code' => $value !== '' ? $value : null);
+    return array('vm_template_id' => null, 'os_code' => null, 'template_id' => $value !== '' ? $value : null);
 }
 
 function rackflow_reseller_clientValue(array $params, $name, $fallback = '')
@@ -506,9 +501,39 @@ function rackflow_reseller_fetchProduct(array $params, $productCode)
     return $result['success'] && is_array($result['data']) ? $result['data'] : array();
 }
 
+function rackflow_reseller_osTemplatesForServerGroup(array $params, $serverGroupId)
+{
+    $serverGroupId = trim((string)$serverGroupId);
+    if ($serverGroupId === '') {
+        return array();
+    }
+    $config = rackflow_reseller_getApiConfig($params);
+    if (empty($config['url']) || empty($config['key'])) {
+        return array();
+    }
+    $result = rackflow_reseller_apiCall($config['url'], $config['key'], 'GET', '/api/reseller/server-groups');
+    if (!$result['success'] || !is_array($result['data'])) {
+        return array();
+    }
+    foreach ($result['data'] as $group) {
+        if (!isset($group['id']) || (string)$group['id'] !== $serverGroupId) {
+            continue;
+        }
+        $out = array();
+        foreach (isset($group['permitted_os_templates']) && is_array($group['permitted_os_templates']) ? $group['permitted_os_templates'] : array() as $tid) {
+            $out[] = array('id' => $tid, 'name' => (string)$tid);
+        }
+        return $out;
+    }
+    return array();
+}
+
 function rackflow_reseller_buildCreateRequest(array $params, array $catalogProduct = array())
 {
     $serviceType = rackflow_reseller_configuredServiceType($params);
+    if (!empty($catalogProduct['service_type'])) {
+        $serviceType = strtolower(trim((string)$catalogProduct['service_type']));
+    }
     $productCode = !empty($params['configoption2']) ? trim((string)$params['configoption2']) : '';
     $productOverride = rackflow_reseller_configOptionValue($params, array('product_code', 'Product Code'));
     if ($productOverride !== null) {
@@ -537,6 +562,7 @@ function rackflow_reseller_buildCreateRequest(array $params, array $catalogProdu
 
     $osCode = !empty($params['configoption3']) ? trim((string)$params['configoption3']) : null;
     $vmTemplateId = null;
+    $templateId = null;
     $selection = rackflow_reseller_configOptionValue($params, array('Operating System', 'OS', 'os_code', 'vm_template_id'));
     if ($selection === null && $osCode !== null && $osCode !== '') {
         $selection = $osCode;
@@ -544,7 +570,7 @@ function rackflow_reseller_buildCreateRequest(array $params, array $catalogProdu
     if ($selection !== null) {
         $resolved = rackflow_reseller_resolveOsSelection($selection, $catalogProduct);
         $vmTemplateId = $resolved['vm_template_id'];
-        $osCode = $resolved['os_code'];
+        $templateId = !empty($resolved['template_id']) ? $resolved['template_id'] : null;
     }
     $base = array(
         'name' => 'whmcs-service-' . $serviceId,
@@ -566,8 +592,6 @@ function rackflow_reseller_buildCreateRequest(array $params, array $catalogProdu
         $payload['auto_provision'] = true;
         if ($vmTemplateId) {
             $payload['vm_template_id'] = (int)$vmTemplateId;
-        } elseif ($osCode) {
-            $payload['os_code'] = $osCode;
         }
         $cluster = rackflow_reseller_configOptionValue($params, array('proxmox_cluster_id', 'Location', 'location'));
         if ($cluster === null && !empty($params['configoption5'])) {
@@ -597,19 +621,18 @@ function rackflow_reseller_buildCreateRequest(array $params, array $catalogProdu
         $group = $params['configoption4'];
     }
     $groupId = rackflow_reseller_parseIntegerSetting($group);
+    if ($serviceType === 'bare_metal' && !$groupId) {
+        return array('ok' => false, 'error' => 'RackFlow Server Group is required for bare metal products.');
+    }
     if ($groupId) {
         $serviceConfig['server_group_id'] = $groupId;
     }
+    if ($templateId && $serviceType === 'bare_metal') {
+        $serviceConfig['template_id'] = $templateId;
+    }
     $payload = $base;
     $payload['service_type'] = $serviceType;
-    $payload['server_name'] = !empty($params['domain']) ? (string)$params['domain'] : $base['name'];
     $payload['service_config'] = $serviceConfig;
-    if ($osCode && $serviceType === 'bare_metal') {
-        $payload['os_code'] = $osCode;
-    }
-    if (!empty($params['dedicatedip'])) {
-        $payload['server_ip'] = (string)$params['dedicatedip'];
-    }
     return array(
         'ok' => true,
         'endpoint' => '/api/reseller/bare-metal/services',

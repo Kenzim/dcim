@@ -2297,6 +2297,27 @@ export async function createInternalTestVmService(payload) {
 }
 
 /**
+ * Admin: create a bare-metal service from a server group or pinned server.
+ * POST /admin/services/bare-metal
+ */
+export async function createAdminBareMetalService(payload) {
+  const response = await fetch(`${API_BASE}/admin/services/bare-metal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    const detail = err.detail;
+    throw new Error(
+      typeof detail === 'string' ? detail : detail ? JSON.stringify(detail) : 'Failed to create bare-metal service'
+    );
+  }
+  return await response.json();
+}
+
+/**
  * Admin: create an http_proxy service with no linked server; IP(s) are
  * auto-assigned from IPAM immediately.
  * POST /admin/services/http-proxy
@@ -2932,8 +2953,10 @@ export async function deleteScript(scriptId) {
 }
 
 // Product catalog API
-export async function listProductFamilies() {
-  const response = await fetch(`${API_BASE}/product-catalog/families`, {
+export async function listProductFamilies(serviceType = null) {
+  const url = new URL(`${API_BASE}/product-catalog/families`, window.location.origin);
+  if (serviceType) url.searchParams.set('service_type', serviceType);
+  const response = await fetch(url.toString(), {
     method: 'GET',
     credentials: 'include',
   });
@@ -2986,8 +3009,10 @@ export async function createCatalogProduct(data) {
   return await response.json();
 }
 
-export async function listCatalogProducts() {
-  const response = await fetch(`${API_BASE}/product-catalog/products`, {
+export async function listCatalogProducts(serviceType = null) {
+  const url = new URL(`${API_BASE}/product-catalog/products`, window.location.origin);
+  if (serviceType) url.searchParams.set('service_type', serviceType);
+  const response = await fetch(url.toString(), {
     method: 'GET',
     credentials: 'include',
   });
@@ -3271,58 +3296,6 @@ export async function updateProductVmConfig(productId, data) {
   return await response.json();
 }
 
-export async function listCatalogOSProfiles() {
-  const response = await fetch(`${API_BASE}/product-catalog/os-profiles`, {
-    method: 'GET',
-    credentials: 'include',
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || 'Failed to list OS profiles');
-  }
-  return await response.json();
-}
-
-export async function createCatalogOSProfile(data) {
-  const response = await fetch(`${API_BASE}/product-catalog/os-profiles`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(data),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || 'Failed to create OS profile');
-  }
-  return await response.json();
-}
-
-export async function attachCatalogOSProfile(familyId, osProfileId) {
-  const response = await fetch(`${API_BASE}/product-catalog/families/${familyId}/os-profiles/${osProfileId}`, {
-    method: 'POST',
-    credentials: 'include',
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || 'Failed to attach OS profile');
-  }
-  return await response.json();
-}
-
-export async function detachCatalogOSProfile(familyId, osProfileId) {
-  const response = await fetch(`${API_BASE}/product-catalog/families/${familyId}/os-profiles/${osProfileId}`, {
-    method: 'DELETE',
-    credentials: 'include',
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || 'Failed to detach OS profile');
-  }
-  if (response.status === 204) return null;
-  return await response.json().catch(() => null);
-}
-
-// Proxmox inventory API
 export async function listProxmoxClusters() {
   const response = await fetch(`${API_BASE}/proxmox/clusters`, { method: 'GET', credentials: 'include' });
   if (!response.ok) {

@@ -24,7 +24,7 @@ from app.models.commerce_order import (
 )
 from app.models.product_catalog import Product
 from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus
-from app.models.service import ProvisioningSource, Service, ServiceStatus, ServiceType
+from app.models.service import ProvisioningSource, Service, ServiceType
 from app.models.storefront import (
     FrontendProduct,
     PricePlan,
@@ -38,6 +38,13 @@ from app.services.commerce_recurring_service import CommerceRecurringService
 from app.services.commerce_webhook_service import CommerceWebhookService
 from app.services.email_message_service import EmailEvent, EmailMessageService
 from app.services.invoice_service import InvoiceService
+from app.services.provisioning import (
+    ALLOWED_PROVISION_KEYS,
+    ProvisionRequest,
+    ProvisioningActor,
+    ProvisioningError,
+    ProvisioningService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -547,6 +554,18 @@ class CheckoutService:
         return ServiceType.BARE_METAL
 
     @staticmethod
+    def _provision_keys_from_item_config(config: Optional[dict[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for value in (config or {}).values():
+            if not isinstance(value, dict):
+                continue
+            key = value.get("provision_key")
+            raw = value.get("provision_value")
+            if key in ALLOWED_PROVISION_KEYS and raw not in (None, ""):
+                out[str(key)] = raw
+        return out
+
+    @staticmethod
     def _provision_order_item(
         db: Session,
         *,
@@ -556,27 +575,55 @@ class CheckoutService:
         product = CheckoutService._load_product_bundle(db, item.frontend_product_id)
         catalog: Optional[Product] = product.product
         product_code = catalog.code if catalog else None
-        service_type = CheckoutService._map_service_type(product.service_type)
+        catalog_type = None
+        if catalog is not None and catalog.family is not None:
+            catalog_type = catalog.family.service_type
+        service_type = CheckoutService._map_service_type(catalog_type or product.service_type)
+        keys = CheckoutService._provision_keys_from_item_config(item.config)
 
-        service = Service(
-            name=item.name_snapshot,
-            owner_user_id=order.user_id,
+        def _int(name: str):
+            raw = keys.get(name)
+            if raw in (None, ""):
+                return None
+            return int(raw)
+
+        req = ProvisionRequest(
+            name=item.name_snapshot or f"order-{order.order_number}-{item.id}",
             service_type=service_type,
-            status=ServiceStatus.PENDING,
-            description=f"Order #{order.order_number}",
-            config=dict(item.config or {}),
+            owner_user_id=order.user_id,
             product_code=product_code,
-            product_snapshot={
+            description=f"Order #{order.order_number}",
+            provisioning_source=ProvisioningSource.BILLING,
+            auto_provision=True,
+            service_config=dict(item.config or {}),
+            extra_snapshot={
                 "frontend_product_id": product.id,
                 "price_plan_id": item.price_plan_id,
                 "cycle_interval": item.cycle_interval,
             },
             permission_set_id=product.permission_set_id,
-            provisioning_source=ProvisioningSource.BILLING,
+            server_group_id=_int("server_group_id"),
+            server_id=_int("server_id"),
+            template_id=keys.get("template_id"),
+            vm_template_id=_int("vm_template_id"),
+            proxmox_cluster_id=_int("proxmox_cluster_id"),
+            proxmox_node_name=keys.get("proxmox_node_name"),
+            proxmox_vmid=_int("proxmox_vmid"),
+            ip_count=_int("ip_count"),
+            subnet_id=_int("subnet_id"),
+            subnet_group_id=_int("subnet_group_id"),
+            allocation_strategy=keys.get("allocation_strategy"),
         )
-        db.add(service)
-        db.flush()
-        return service
+        actor = ProvisioningActor(
+            kind="commerce",
+            actor_id=int(order.user_id or 0),
+            name="checkout",
+            source="commerce",
+        )
+        try:
+            return ProvisioningService.create(db, req, actor)
+        except ProvisioningError as exc:
+            raise CheckoutError(exc.message) from exc
 
     @staticmethod
     def _fulfill_order_item(db: Session, locked: Order, item: Any) -> Optional[str]:

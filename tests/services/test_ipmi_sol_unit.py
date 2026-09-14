@@ -91,6 +91,22 @@ def test_encode_sol_stdin_preserves_lf_only_lines():
 
 
 @pytest.mark.asyncio
+async def test_tune_interactive_sol_sets_low_accumulate():
+    profile = ipmi_sol.IpmiSolProfile()
+    calls: list[tuple] = []
+
+    async def _fake_run(*args, **_kwargs):
+        calls.append(args)
+        return b"", b"", 0
+
+    profile._run_ipmitool = _fake_run  # type: ignore[method-assign]
+    await profile._tune_interactive_sol("10.0.0.5", "admin", "pass", 623)
+    subcommands = [args[4:] for args in calls]
+    assert ("sol", "set", "character-accumulate-level", "1") in subcommands
+    assert ("sol", "set", "character-send-threshold", "1") in subcommands
+
+
+@pytest.mark.asyncio
 async def test_open_session_starts_ipmitool_activate(monkeypatch):
     profile = ipmi_sol.IpmiSolProfile()
     server = MagicMock()
@@ -130,7 +146,7 @@ async def test_open_session_starts_ipmitool_activate(monkeypatch):
 
     session = await profile.open_session(server)
     assert isinstance(session, ipmi_sol.IpmiSolByteSession)
-    assert deactivate_calls >= 1
+    assert deactivate_calls >= 3
     create_proc.assert_called_once()
     call_args = create_proc.call_args[0]
     assert call_args[-2:] == ("sol", "activate")

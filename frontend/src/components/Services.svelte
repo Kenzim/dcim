@@ -10,8 +10,10 @@
     getProxmoxClusterInventory,
     createAdminVmService,
     createAdminHttpProxyService,
+    createAdminBareMetalService,
     listIpamSubnets,
     listProxySubnetGroups,
+    getServerGroups,
   } from '../lib/api.js';
   import { onMount } from 'svelte';
 
@@ -52,6 +54,20 @@
     auto_provision: true,
   };
 
+  let showBmForm = false;
+  let bmBusy = false;
+  let bmError = null;
+  let serverGroups = [];
+  let bmForm = {
+    name: '',
+    product_code: '',
+    server_group_id: '',
+    server_id: '',
+    template_id: '',
+    description: '',
+    external_user_id: '',
+    external_service_id: '',
+  };
   let showProxyForm = false;
   let proxyBusy = false;
   let proxyError = null;
@@ -112,6 +128,18 @@
     (p) => p.family_service_type === 'http_proxy' && p.enabled !== false,
   );
 
+  $: bmCatalogProducts = (catalogProducts || []).filter(
+    (p) => p.family_service_type === 'bare_metal' && p.enabled !== false,
+  );
+
+  $: selectedBmGroup = serverGroups.find(
+    (g) => String(g.id) === String(bmForm.server_group_id),
+  );
+
+  $: bmTemplateOptions = selectedBmGroup
+    ? (selectedBmGroup.permitted_os_templates || [])
+    : [];
+
   $: selectedVmCatalogProduct = vmCatalogProducts.find(
     (p) => p.code === internalVmForm.product_code,
   );
@@ -147,6 +175,59 @@
       if (Number.isFinite(cid)) {
         await loadProxmoxNodesForCluster(cid);
       }
+    }
+  }
+
+  async function toggleBmForm() {
+    showBmForm = !showBmForm;
+    bmError = null;
+    if (showBmForm) {
+      await loadVmCatalog();
+      try {
+        serverGroups = await getServerGroups();
+      } catch (e) {
+        serverGroups = [];
+      }
+    }
+  }
+
+  async function submitBm() {
+    bmError = null;
+    bmBusy = true;
+    try {
+      if (!bmForm.name.trim()) throw new Error('Name is required');
+      const payload = { name: bmForm.name.trim() };
+      if (bmForm.product_code.trim()) payload.product_code = bmForm.product_code.trim();
+      if (bmForm.description.trim()) payload.description = bmForm.description.trim();
+      const groupId = parseInt(String(bmForm.server_group_id), 10);
+      if (Number.isFinite(groupId)) payload.server_group_id = groupId;
+      const serverId = parseInt(String(bmForm.server_id), 10);
+      if (Number.isFinite(serverId)) payload.server_id = serverId;
+      if (bmForm.template_id.trim()) payload.template_id = bmForm.template_id.trim();
+      const extId = parseInt(String(bmForm.external_user_id), 10);
+      if (Number.isFinite(extId)) payload.external_user_id = extId;
+      if (bmForm.external_service_id.trim()) payload.external_service_id = bmForm.external_service_id.trim();
+      if (!payload.server_group_id && !payload.server_id) {
+        throw new Error('Choose a server group or pin an existing server id.');
+      }
+      const created = await createAdminBareMetalService(payload);
+      bmForm = {
+        name: '',
+        product_code: '',
+        server_group_id: '',
+        server_id: '',
+        template_id: '',
+        description: '',
+        external_user_id: '',
+        external_service_id: '',
+      };
+      showBmForm = false;
+      await loadServices();
+      if (created?.id) openService(created);
+    } catch (e) {
+      bmError = e.message || String(e);
+    } finally {
+      bmBusy = false;
     }
   }
 
@@ -381,6 +462,11 @@
         <option value="billing">Billing</option>
         <option value="internal">Internal test</option>
       </select>
+      {#if serviceTypeFilter === 'bare_metal' || serviceTypeFilter === 'all'}
+        <button type="button" class="btn-primary" on:click={toggleBmForm}>
+          {showBmForm ? 'Hide' : '+'} Create bare metal
+        </button>
+      {/if}
       {#if serviceTypeFilter === 'vm' || serviceTypeFilter === 'all'}
         <button type="button" class="btn-primary" on:click={toggleInternalVmForm}>
           {showInternalVmForm ? 'Hide' : '+'} Create pending VM
@@ -393,6 +479,70 @@
       {/if}
     </div>
   </div>
+
+  {#if showBmForm && (serviceTypeFilter === 'bare_metal' || serviceTypeFilter === 'all')}
+    <div class="internal-vm-panel">
+      <h4>Create bare-metal service</h4>
+      <p class="hint">
+        Picks a free server from a <strong>server group</strong> (or pins an existing rack server) and
+        queues the OS template if one is selected. Product is optional; group templates come from the group.
+      </p>
+      {#if bmError}<div class="error">{bmError}</div>{/if}
+      <div class="form-grid">
+        <label>Service name <input bind:value={bmForm.name} placeholder="unique name" /></label>
+        <label>
+          Bare-metal product (optional)
+          <select bind:value={bmForm.product_code}>
+            <option value="">— no product —</option>
+            {#each bmCatalogProducts as p}
+              <option value={p.code}>{p.name} ({p.code})</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          Server group
+          <select bind:value={bmForm.server_group_id}>
+            <option value="">— none (pin a server id) —</option>
+            {#each serverGroups as g}
+              <option value={String(g.id)}>{g.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          Pin server id (optional)
+          <input bind:value={bmForm.server_id} placeholder="existing servers.id" />
+        </label>
+        <label>
+          OS template
+          <select bind:value={bmForm.template_id}>
+            <option value="">— group default / none —</option>
+            {#each bmTemplateOptions as tid}
+              <option value={tid}>{tid}</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          Billing owner (optional)
+          <select bind:value={bmForm.external_user_id}>
+            <option value="">Internal / lab — no external user</option>
+            {#each externalUsers as u}
+              <option value={String(u.id)}>
+                {u.external_username || u.external_user_id} — {u.integration_name} (id {u.id})
+              </option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          External service id (optional)
+          <input bind:value={bmForm.external_service_id} placeholder="e.g. WHMCS service id" />
+        </label>
+        <label class="full-width">Description <input bind:value={bmForm.description} /></label>
+      </div>
+      <button type="button" class="btn-primary" disabled={bmBusy} on:click={submitBm}>
+        {bmBusy ? 'Creating…' : 'Create bare-metal service'}
+      </button>
+    </div>
+  {/if}
 
   {#if showProxyForm && (serviceTypeFilter === 'http_proxy' || serviceTypeFilter === 'all')}
     <div class="internal-vm-panel">

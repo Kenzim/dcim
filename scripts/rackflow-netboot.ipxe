@@ -1,0 +1,20 @@
+#!ipxe
+# Embedded in the Rackflow netboot ISO (virtual CD). iPXE DHCP is already
+# detected by dhcpd (user-class iPXE) and given the HTTP PXE script URL.
+echo
+echo Rackflow netboot ISO
+echo
+autoboot || goto fallback
+
+:fallback
+echo autoboot failed; trying HTTP PXE script
+isset ${next-server} || goto fail
+chain http://${next-server}:8000/api/servers/interaction/pxe?mac=${mac} || goto fail
+goto eof
+
+:fail
+echo
+echo Netboot failed. Check AIC link, DHCP, and next-server.
+shell
+
+:eof

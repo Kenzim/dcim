@@ -36,6 +36,15 @@ def test_template_files_serves_firstboot_and_user_login(mock_redis, monkeypatch)
     )
     assert resp_firstboot.status_code == 200
     assert "firstboot" in resp_firstboot.text.lower()
+    assert "extend filesystem" in resp_firstboot.text.lower()
+    assert "serial-admin-cmd.ps1" in resp_firstboot.text.lower()
+    assert "readbyte" in resp_firstboot.text.lower()
+    assert "rf>" in resp_firstboot.text.lower()
+    assert "rackflow serial" in resp_firstboot.text.lower()
+    assert "discardinbuffer" in resp_firstboot.text.lower()
+    assert "[2j" not in resp_firstboot.text.lower()
+    assert "autoadminlogon" in resp_firstboot.text.lower()
+    assert "enable-psremoting" in resp_firstboot.text.lower()
 
     # user-login.ps1 should be served from os_templates/{template_id}/user-login.ps1
     token2 = token_service.generate_token(
@@ -47,6 +56,7 @@ def test_template_files_serves_firstboot_and_user_login(mock_redis, monkeypatch)
     )
     assert resp_user_login.status_code == 200
     assert "user-login" in resp_user_login.text.lower()
+    assert "serial-admin-cmd.ps1" in resp_user_login.text.lower()
 
 
 def test_template_files_serves_deploy_path_with_slash(mock_redis, monkeypatch):

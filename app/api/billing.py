@@ -21,7 +21,7 @@ from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.billing_auth import get_billing_integration
 from app.models.billing_integration import BillingIntegration
-from app.models.server import Server, BootMode
+from app.models.server import Server
 from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
 from app.schemas.billing import (
     BillingBareMetalServiceCreate,
@@ -49,21 +49,18 @@ from app.utils.shell_escape import shell_escape_double_quoted
 from app.dao.disk_dao import DiskDAO
 from app.dao.network_port_dao import NetworkPortDAO
 from app.plugins.registry import get_registry
-from app.dao.location_dao import LocationDAO
 from app.dao.user_dao import UserDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.dao.ipam_dao import IPAMDAO
-from app.services.proxy_provisioning import assignment_payload, auto_assign_proxy_ips, resolve_proxy_ip_request
+from app.services.proxy_provisioning import assignment_payload
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.script_dao import ScriptDAO
 from app.dao.boot_task_dao import BootTaskDAO
-from app.dao.product_catalog_dao import ProductDAO, OSProfileDAO
+from app.dao.product_catalog_dao import ProductDAO
 from app.dao.vm_config_dao import ProductVMConfigDAO
-from app.models.disk import DiskType
 from app.models.boot_task import BootTask, BootType, BootTaskStatus
-from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
 from app.services.os_template_service import (
     PasswordGenerateConfig,
@@ -107,8 +104,7 @@ from app.services.server_activity_logger import (
     log_server_activity_failure,
 )
 from app.models.server_activity import ServerActivityEventType
-from app.api.server_interaction import _get_base_url_for_pxe_ip
-from app.services.vm_provisioning_service import VMProvisioningService
+from app.api.server_interaction import _get_base_url_for_pxe_ip, _inject_script_url_param
 from app.services.service_product_snapshot import build_product_snapshot
 from app.services.service_resource import (
     service_linked_server,
@@ -119,11 +115,15 @@ from app.services.proxmox_placement import (
     ProxmoxPlacementError,
     resolve_proxmox_plugin_for_service,
 )
-from app.services.vm_strategy_executor import schedule_vm_auto_provision
-from app.services.billing_provisioning_service import (
+from app.services.provisioning import (
     ProvisioningActor,
-    provision_bare_metal_service,
-    provision_vm_service,
+    ProvisioningError,
+    ProvisioningService,
+)
+from app.services.provisioning.adapters import from_billing_bare_metal, from_billing_vm
+from app.services.provisioning.bare_metal import (
+    determine_template_for_group as _bm_determine_template_for_group,
+    select_free_server_in_group as _bm_select_free_server_in_group,
 )
 from app.services.service_lifecycle import (
     ServiceLifecycle,
@@ -484,46 +484,16 @@ async def register_service(
     return _billing_service_response(db, service)
 
 
+def _raise_provisioning(exc: ProvisioningError) -> None:
+    raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+
+
 def _select_free_server_in_group(db: Session, group_id: int) -> Server:
-    """
-    Select a free server from a server group.
-
-    "Free" means:
-    - Server is enabled
-    - Server belongs to the group
-    - No associated services in non-terminated state
-    """
-    group = ServerGroupDAO.get_by_id(db, group_id)
-    if not group:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Server group not found",
-        )
-
-    if not group.servers:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No servers in this server group",
-        )
-
-    candidates: list[Server] = []
-    for server in group.servers:
-        if not server.enabled:
-            continue
-        services = ServiceDAO.get_by_server(db, server.id)
-        has_active = any(s.status != ServiceStatus.TERMINATED for s in services)
-        if not has_active:
-            candidates.append(server)
-
-    if not candidates:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="No free servers available in this group",
-        )
-
-    # Simple selection policy: smallest ID first for determinism
-    candidates.sort(key=lambda s: s.id)
-    return candidates[0]
+    try:
+        return _bm_select_free_server_in_group(db, group_id)
+    except ProvisioningError as exc:
+        _raise_provisioning(exc)
+        raise
 
 
 def _determine_template_for_group(
@@ -531,53 +501,11 @@ def _determine_template_for_group(
     group_id: int,
     explicit_template_id: str | None,
 ) -> str:
-    """
-    Determine which OS template to use for a server group.
-
-    Rules:
-    - OS templates must be enabled on the group.
-    - If explicit_template_id is provided, verify it's permitted (when list is non-empty).
-    - Otherwise, if exactly one permitted_os_templates entry exists, use that.
-    - Else, require explicit template_id.
-    """
-    group = ServerGroupDAO.get_by_id(db, group_id)
-    if not group:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Server group not found",
-        )
-
-    group_name = getattr(group, "name", None) or str(group_id)
-    if not (getattr(group, "enable_os_templates", False) or False):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"OS templates are not enabled for server group '{group_name}'",
-        )
-
-    permitted = [str(tid) for tid in (group.permitted_os_templates or [])]
-
-    if explicit_template_id:
-        if permitted and explicit_template_id not in permitted:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Template '{explicit_template_id}' is not permitted for "
-                    f"server group '{group_name}'"
-                ),
-            )
-        return explicit_template_id
-
-    if permitted and len(permitted) == 1:
-        return permitted[0]
-
-    permitted_list = ", ".join(permitted) if permitted else "(none)"
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=(
-            f"OS template must be specified for server group '{group_name}'. "
-            f"Permitted templates: {permitted_list}"
-        ),
-    )
+    try:
+        return _bm_determine_template_for_group(db, group_id, explicit_template_id)
+    except ProvisioningError as exc:
+        _raise_provisioning(exc)
+        raise
 
 
 def _os_template_param_field(param: Any, field: str, default=None):
@@ -911,7 +839,7 @@ def _queue_template_install_for_service(
         boot_task_id=boot_task.id,
         allowed_files=allowed_files if allowed_files else None,
         allowed_patterns=["logs-*"],
-        expires_in=900,
+        expires_in=3600,
     )
 
     # Inject token-based URLs and all variables into script
@@ -957,16 +885,13 @@ def _queue_template_install_for_service(
     db.commit()
     db.refresh(boot_task)
 
-    # Ensure script_url is present in kernel params for debian-live
+    # Tokenized script_url for debian-live (PXE will mint a fresh token at serve time too)
     if boot_task.temp_os_id == "debian-live" and boot_task.script_content:
-        from urllib.parse import quote
-
-        script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
-        encoded_script_url = quote(script_url, safe=":/?=&")
-        if "script_url=" not in boot_task.kernel_params:
-            boot_task.kernel_params = f"{boot_task.kernel_params} script_url={encoded_script_url}"
-            db.commit()
-            db.refresh(boot_task)
+        boot_task.kernel_params = _inject_script_url_param(
+            boot_task.kernel_params, base_url, boot_task.id
+        )
+        db.commit()
+        db.refresh(boot_task)
 
     # Create installation task for tracking
     installation_task = InstallationTaskDAO.create(
@@ -1023,543 +948,28 @@ def _queue_template_install_for_service(
     return boot_task, installation_task
 
 
-def _bare_metal_product_snapshot(
-    db: Session,
-    service_data: BillingBareMetalServiceCreate,
-    resolved_service_type: ServiceType,
-) -> dict:
-    if not service_data.product_code:
-        return {}
-    product = ProductDAO.get_by_code(db, service_data.product_code)
-    if not product:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Unknown product_code '{service_data.product_code}'",
-        )
-    family = product.family
-    if not family:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Product '{product.code}' has no catalog family",
-        )
-    if family.service_type != resolved_service_type.value:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Product '{product.code}' belongs to service_type "
-                f"'{family.service_type}', not '{resolved_service_type.value}'"
-            ),
-        )
-    effective_specs = ProductVMConfigDAO.resolve_effective_config(db, product)
-    if not effective_specs:
-        effective_specs = {**(family.defaults or {}), **(product.overrides or {})}
-    product_snapshot = {
-        "family": {
-            "id": family.id,
-            "code": family.code,
-            "name": family.name,
-            "service_type": family.service_type,
-            "provisioning_backend": family.provisioning_backend,
-        },
-        "product": {
-            "id": product.id,
-            "code": product.code,
-            "name": product.name,
-        },
-        "effective_specs": effective_specs,
-    }
-    if service_data.os_code:
-        os_profile = OSProfileDAO.get_by_code(db, service_data.os_code)
-        if not os_profile:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Unknown os_code '{service_data.os_code}'",
-            )
-        product_snapshot["os_profile"] = {
-            "id": os_profile.id,
-            "code": os_profile.code,
-            "name": os_profile.name,
-            "family": os_profile.os_family,
-            "strategy_name": os_profile.strategy_name,
-        }
-    return product_snapshot
-
-
-def _resolve_bare_metal_server_defaults(
-    db: Session,
-    service_data: BillingBareMetalServiceCreate,
-) -> tuple[str, int]:
-    plugin_name = service_data.plugin_name or "proxmox"
-    location_id = service_data.location_id or 1
-    if not service_data.product_code:
-        return plugin_name, location_id
-    product = ProductDAO.get_by_code(db, service_data.product_code)
-    if product and product.family:
-        family_defaults = product.family.defaults or {}
-        plugin_name = family_defaults.get("plugin_name", plugin_name)
-        location_id = family_defaults.get("location_id", location_id)
-    return plugin_name, location_id
-
-
-def _parse_bare_metal_boot_mode(service_data: BillingBareMetalServiceCreate) -> BootMode:
-    try:
-        if service_data.os_boot_mode:
-            return BootMode(service_data.os_boot_mode.lower())
-        return BootMode.UEFI
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Invalid os_boot_mode: {service_data.os_boot_mode}. "
-                "Must be 'uefi' or 'bios'"
-            ),
-        )
-
-
-def _create_bare_metal_server_disks(db: Session, server_id: int, disks: list | None) -> None:
-    if not disks:
-        return
-    for disk_data in disks:
-        try:
-            disk_type = DiskType(disk_data.get("type", "ssd").upper())
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Invalid disk type: {disk_data.get('type')}. "
-                    "Must be 'ssd' or 'hdd'"
-                ),
-            )
-        DiskDAO.create(
-            db,
-            server_id=server_id,
-            type=disk_type,
-            capacity_gb=disk_data.get("capacity_gb", 0),
-            description=disk_data.get("description"),
-            serial_number=disk_data.get("serial_number"),
-            is_os_disk=disk_data.get("is_os_disk", False),
-        )
-
-
-def _create_bare_metal_server_network_ports(
-    db: Session,
-    server_id: int,
-    network_ports: list | None,
-) -> None:
-    if not network_ports:
-        return
-    for port_data in network_ports:
-        NetworkPortDAO.create(
-            db,
-            server_id=server_id,
-            name=port_data.get("name", "eth0"),
-            mac_address=port_data.get("mac_address"),
-            speed_mbps=port_data.get("speed_mbps", 1000),
-            lag_group=port_data.get("lag_group"),
-            monitor_bandwidth=port_data.get("monitor_bandwidth", False),
-            pxe_boot=port_data.get("pxe_boot", False),
-            pxe_ip=port_data.get("pxe_ip"),
-            description=port_data.get("description"),
-        )
-
-
-def _queue_bare_metal_group_template_install(
-    db: Session,
-    *,
-    service: Service,
-    server: Server,
-    actor: ProvisioningActor,
-    server_group_id: int,
-    service_config: dict,
-) -> None:
-    explicit_template_id = service_config.get("template_id")
-    template_params = service_config.get("template_parameters") or {}
-    template_id = _determine_template_for_group(db, server_group_id, explicit_template_id)
-    log_server_activity_attempt(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.INSTALL,
-        action="queue_template_install",
-        source=actor.source,
-        message=f"Queueing template install '{template_id}'",
-        details={
-            "service_id": service.id,
-            "template_id": template_id,
-            **actor.details,
-        },
-    )
-    try:
-        _, installation_task = _queue_template_install_for_service(
-            db=db,
-            service=service,
-            template_id=template_id,
-            template_parameters=template_params,
-        )
-    except Exception as exc:
-        log_server_activity_failure(
-            db,
-            server_id=server.id,
-            event_type=ServerActivityEventType.INSTALL,
-            action="queue_template_install",
-            source=actor.source,
-            message=f"Failed to queue template install '{template_id}'",
-            details={
-                "service_id": service.id,
-                "template_id": template_id,
-                **actor.details,
-            },
-            error=exc,
-        )
-        log_server_activity_failure(
-            db,
-            server_id=server.id,
-            event_type=ServerActivityEventType.SERVICE,
-            action="create",
-            source=actor.source,
-            message=f"Service '{service.name}' provisioning failed",
-            details={
-                "service_id": service.id,
-                **actor.details,
-            },
-            error=exc,
-        )
-        raise
-    log_server_activity_success(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.INSTALL,
-        action="queue_template_install",
-        source=actor.source,
-        message=f"Queued template install '{template_id}'",
-        details={
-            "service_id": service.id,
-            "template_id": template_id,
-            "installation_task_id": installation_task.id,
-            "boot_task_id": installation_task.boot_task_id,
-        },
-    )
-
-
-def _provision_bare_metal_server_group(
-    db: Session,
-    *,
-    service_data: BillingBareMetalServiceCreate,
-    owner_user_id: int,
-    actor: ProvisioningActor,
-    resolved_service_type: ServiceType,
-    service_config: dict,
-    server_group_id: int,
-    product_snapshot: dict,
-) -> Service:
-    server = _select_free_server_in_group(db, server_group_id)
-    service = ServiceDAO.create_bare_metal(
-        db,
-        name=service_data.name,
-        server_id=server.id,
-        owner_user_id=owner_user_id,
-        external_service_id=service_data.external_service_id,
-        service_type=resolved_service_type,
-        status=ServiceStatus.PENDING,
-        description=service_data.description,
-        config=service_config,
-        product_code=service_data.product_code,
-        os_code=service_data.os_code,
-        product_snapshot=product_snapshot,
-    )
-    db.refresh(service)
-    log_server_activity_attempt(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=f"Creating service '{service.name}'",
-        details={
-            "service_id": service.id,
-            **actor.details,
-            "server_group_id": server_group_id,
-        },
-    )
-    if resolved_service_type == ServiceType.BARE_METAL:
-        _queue_bare_metal_group_template_install(
-            db,
-            service=service,
-            server=server,
-            actor=actor,
-            server_group_id=server_group_id,
-            service_config=service_config,
-        )
-    log_server_activity_success(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=f"Created service '{service.name}'",
-        details={
-            "service_id": service.id,
-            **actor.details,
-            "server_group_id": server_group_id,
-        },
-    )
-    logger.info(
-        "Billing API: Service '%s' (ID: %s) created on existing server %s via group %s",
-        service.name,
-        service.id,
-        server.id,
-        server_group_id,
-    )
-    return service
-
-
-def _provision_bare_metal_http_proxy(
-    db: Session,
-    *,
-    service_data: BillingBareMetalServiceCreate,
-    owner_user_id: int,
-    actor: ProvisioningActor,
-    resolved_service_type: ServiceType,
-    service_config: dict,
-    product_snapshot: dict,
-) -> Service:
-    service = ServiceDAO.create_bare_metal(
-        db,
-        name=service_data.name,
-        server_id=None,
-        owner_user_id=owner_user_id,
-        external_service_id=service_data.external_service_id,
-        service_type=resolved_service_type,
-        status=ServiceStatus.PENDING,
-        description=service_data.description,
-        config=service_config,
-        product_code=service_data.product_code,
-        os_code=service_data.os_code,
-        product_snapshot=product_snapshot,
-    )
-    db.refresh(service)
-    log_server_activity_attempt(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=f"Creating proxy service '{service.name}'",
-        details={"service_id": service.id, **actor.details},
-    )
-    ip_req = resolve_proxy_ip_request(
-        product_snapshot.get("effective_specs"),
-        override_ip_count=service_config.get("ip_count"),
-        override_subnet_id=service_config.get("subnet_id"),
-        override_strategy=service_config.get("allocation_strategy"),
-        override_subnet_group_id=service_config.get("subnet_group_id"),
-    )
-    assignments = auto_assign_proxy_ips(
-        db,
-        service,
-        ip_count=ip_req.ip_count,
-        subnet_id=ip_req.subnet_id,
-        subnet_group_id=ip_req.subnet_group_id,
-        strategy=ip_req.strategy,
-        assigned_by=actor.assigned_by,
-    )
-    ServiceDAO.update(db, service)
-    log_server_activity_success(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=(
-            f"Created proxy service '{service.name}' "
-            f"({len(assignments)}/{ip_req.ip_count} IP(s) assigned)"
-        ),
-        details={
-            "service_id": service.id,
-            **actor.details,
-            "assigned_ip_count": len(assignments),
-            "requested_ip_count": ip_req.ip_count,
-        },
-    )
-    logger.info(
-        "Billing API: Proxy service '%s' (ID: %s) created with %s/%s IP(s) assigned",
-        service.name,
-        service.id,
-        len(assignments),
-        ip_req.ip_count,
-    )
-    return service
-
-
-def _provision_bare_metal_new_server(
-    db: Session,
-    *,
-    service_data: BillingBareMetalServiceCreate,
-    owner_user_id: int,
-    actor: ProvisioningActor,
-    resolved_service_type: ServiceType,
-    product_snapshot: dict,
-) -> Service:
-    plugin_name, location_id = _resolve_bare_metal_server_defaults(db, service_data)
-    registry = get_registry()
-    plugin_class = registry.get_plugin_class(plugin_name)
-    if not plugin_class:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Plugin '{plugin_name}' not found",
-        )
-    location = LocationDAO.get_by_id(db, int(location_id))
-    if not location:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Location not found",
-        )
-    server_name = service_data.server_name or service_data.name
-    if ServerDAO.get_by_name(db, server_name):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Server with this name already exists",
-        )
-    os_boot_mode = _parse_bare_metal_boot_mode(service_data)
-    server = ServerDAO.create(
-        db,
-        name=server_name,
-        server_ip=service_data.server_ip or "0.0.0.0",
-        description=service_data.description,
-        cpu_count=service_data.cpu_count,
-        cpu_model=service_data.cpu_model,
-        ram_gb=service_data.ram_gb,
-        port_speed_mbps=service_data.port_speed_mbps,
-        location_id=int(location_id),
-        plugin_name=plugin_name,
-        plugin_config=service_data.plugin_config,
-        enabled=True,
-        boot_mode=os_boot_mode,
-        os_boot_mode=os_boot_mode,
-        pxe_boot_mode=os_boot_mode,
-    )
-    _create_bare_metal_server_disks(db, server.id, service_data.disks)
-    _create_bare_metal_server_network_ports(db, server.id, service_data.network_ports)
-    log_server_activity_attempt(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=f"Creating service '{service_data.name}'",
-        details={
-            "external_service_id": service_data.external_service_id,
-            **actor.details,
-        },
-    )
-    service = ServiceDAO.create_bare_metal(
-        db,
-        name=service_data.name,
-        server_id=server.id,
-        owner_user_id=owner_user_id,
-        external_service_id=service_data.external_service_id,
-        service_type=resolved_service_type,
-        status=ServiceStatus.PENDING,
-        description=service_data.description,
-        config=service_data.service_config,
-        product_code=service_data.product_code,
-        os_code=service_data.os_code,
-        product_snapshot=product_snapshot,
-    )
-    db.refresh(service)
-    log_server_activity_success(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=f"Created service '{service.name}'",
-        details={
-            "service_id": service.id,
-            "external_service_id": service.external_service_id,
-            **actor.details,
-        },
-    )
-    logger.info(
-        "Billing API: Service '%s' (ID: %s) created successfully on new server %s",
-        service.name,
-        service.id,
-        server.id,
-    )
-    return service
-
-
 def _provision_bare_metal_service(
     service_data: BillingBareMetalServiceCreate,
     owner_user_id: int,
     actor: ProvisioningActor,
     db: Session,
 ):
-    """
-    Create a bare-metal or http_proxy service (RackFlow Server + service_bare_metal).
-
-    Modes match the legacy billing create: new server, or server_group provisioning with optional OS install.
-    VM products must use ``POST /billing/vm/services``.
-    """
-    logger.info(
-        "Provisioning service '%s' via %s '%s'",
-        service_data.name,
-        actor.kind,
-        actor.name,
-    )
-
-    if ServiceDAO.get_by_name(db, service_data.name):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service with this name already exists",
-        )
-
+    """Create a bare-metal or http_proxy service via ProvisioningService."""
     try:
-        resolved_service_type = ServiceType((service_data.service_type or "bare_metal").lower())
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid service_type. Must be bare_metal, vm, or http_proxy",
-        )
+        req = from_billing_bare_metal(service_data, owner_user_id)
+        return ProvisioningService.create(db, req, actor)
+    except ProvisioningError as exc:
+        _raise_provisioning(exc)
 
-    if resolved_service_type == ServiceType.VM:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="VM services must be created via POST /billing/vm/services",
-        )
 
-    product_snapshot = _bare_metal_product_snapshot(db, service_data, resolved_service_type)
-    service_config = service_data.service_config or {}
-    server_group_id = service_config.get("server_group_id")
-
-    if server_group_id:
-        return _provision_bare_metal_server_group(
-            db,
-            service_data=service_data,
-            owner_user_id=owner_user_id,
-            actor=actor,
-            resolved_service_type=resolved_service_type,
-            service_config=service_config,
-            server_group_id=int(server_group_id),
-            product_snapshot=product_snapshot,
-        )
-    if resolved_service_type == ServiceType.HTTP_PROXY:
-        return _provision_bare_metal_http_proxy(
-            db,
-            service_data=service_data,
-            owner_user_id=owner_user_id,
-            actor=actor,
-            resolved_service_type=resolved_service_type,
-            service_config=service_config,
-            product_snapshot=product_snapshot,
-        )
-    return _provision_bare_metal_new_server(
-        db,
-        service_data=service_data,
-        owner_user_id=owner_user_id,
-        actor=actor,
-        resolved_service_type=resolved_service_type,
-        product_snapshot=product_snapshot,
-    )
+def provision_bare_metal_service(
+    *,
+    db: Session,
+    service_data: BillingBareMetalServiceCreate,
+    owner_user_id: int,
+    actor: ProvisioningActor,
+):
+    return _provision_bare_metal_service(service_data, owner_user_id, actor, db)
 
 
 @router.post(
@@ -1593,33 +1003,19 @@ async def create_bare_metal_service(
     return _billing_service_response(db, service)
 
 
-def _validate_vm_service_create_body(body: BillingVmServiceCreate) -> None:
-    if (body.service_config or {}).get("server_group_id"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="VM services cannot use server_group_id; use bare-metal provisioning for pooled servers",
-        )
-    if body.vm_template_id is not None and not body.product_code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="vm_template_id requires product_code (template must be linked to that product in the catalog)",
-        )
-
-
 def _billing_vm_product_snapshot(
     db: Session,
     product_code: Optional[str],
-    os_code: Optional[str],
     *,
     vm_template_id: Optional[int] = None,
 ) -> tuple[dict, Optional[str]]:
     if not product_code:
-        return {}, os_code
+        return {}, None
     try:
         return build_product_snapshot(
             db,
             product_code,
-            os_code,
+            None,
             ServiceType.VM,
             vm_template_id=vm_template_id,
         )
@@ -1627,145 +1023,30 @@ def _billing_vm_product_snapshot(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-def _assign_vm_service_ip_or_fail(db: Session, service: Service, proxmox_cluster_id: Optional[int]):
-    allocation = VMIPAllocationDAO.assign_next_free_to_service(
-        db,
-        service_id=service.id,
-        proxmox_cluster_id=proxmox_cluster_id,
-    )
-    if allocation is not None:
-        return allocation
-    ServiceDAO.delete(db, service.id)
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=(
-            "No free VM IP address available to allocate. Add enabled addresses under VM IP allocations. "
-            "For services without Proxmox cluster placement, only pool rows with no cluster restriction apply; "
-            "when a cluster is set, rows restricted to that cluster (or unrestricted rows) may be used."
-        ),
-    )
-
-
-def _vm_service_create_log_details(actor: ProvisioningActor, allocation) -> dict:
-    return {
-        **actor.details,
-        "vm_ip_allocation_id": allocation.id,
-        "vm_ip_address": allocation.ip_address,
-    }
-
-
-def _build_vm_service_config(
-    db: Session,
-    service: Service,
-    body: BillingVmServiceCreate,
-    allocation,
-    effective_os_code: Optional[str],
-) -> tuple[dict, bool]:
-    cfg = {
-        **(service.config or {}),
-        "vm_ip_allocation_id": allocation.id,
-        "vm_ip_address": allocation.ip_address,
-    }
-    if not (body.product_code and effective_os_code):
-        return cfg, False
-    cfg["vm_plan"] = VMProvisioningService.plan_provisioning(
-        db=db,
-        service_id=service.id,
-        product_code=body.product_code,
-        os_code=body.os_code,
-        vm_template_id=body.vm_template_id,
-        context={"service_id": service.id, "vm_ip_allocation_id": allocation.id},
-    )
-    return cfg, True
-
-
 def _provision_vm_service(
     body: BillingVmServiceCreate,
     owner_user_id: int,
     actor: ProvisioningActor,
     background_tasks: BackgroundTasks,
-    db: DbDep,
+    db: Session,
 ):
-    """
-    Create a VM service (no RackFlow Server row; Proxmox placement on service_vm).
+    """Create a VM service via ProvisioningService."""
+    try:
+        req = from_billing_vm(body, owner_user_id)
+        return ProvisioningService.create(db, req, actor)
+    except ProvisioningError as exc:
+        _raise_provisioning(exc)
 
-    When ``auto_provision`` is true (default) and a product/OS strategy is resolved, RackFlow
-    resolves placement (auto-places from inventory if node omitted), reserves a VMID, and
-    provisions the guest in the background. Poll ``GET /billing/services/{id}``.
-    """
-    logger.info(
-        "Provisioning VM service '%s' via %s '%s'",
-        body.name,
-        actor.kind,
-        actor.name,
-    )
 
-    _validate_vm_service_create_body(body)
-    if ServiceDAO.get_by_name(db, body.name):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Service with this name already exists")
-
-    product_snapshot, effective_os_code = _billing_vm_product_snapshot(
-        db, body.product_code, body.os_code, vm_template_id=body.vm_template_id
-    )
-
-    _validate_optional_proxmox_cluster(db, body.proxmox_cluster_id)
-
-    service = ServiceDAO.create_vm(
-        db,
-        name=body.name,
-        owner_user_id=owner_user_id,
-        external_service_id=body.external_service_id,
-        status=ServiceStatus.PENDING,
-        description=body.description,
-        config=body.service_config or {},
-        product_code=body.product_code,
-        os_code=effective_os_code,
-        product_snapshot=product_snapshot,
-        provisioning_source=ProvisioningSource.BILLING,
-        proxmox_cluster_id=body.proxmox_cluster_id,
-        proxmox_node_name=body.proxmox_node_name,
-        proxmox_vmid=body.proxmox_vmid,
-        vm_template_id=body.vm_template_id,
-    )
-    db.refresh(service)
-
-    allocation = _assign_vm_service_ip_or_fail(db, service, body.proxmox_cluster_id)
-    log_details = _vm_service_create_log_details(actor, allocation)
-
-    log_server_activity_attempt(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=f"Creating VM service '{service.name}'",
-        details=log_details,
-    )
-
-    cfg, has_plan = _build_vm_service_config(db, service, body, allocation, effective_os_code)
-    service.config = cfg
-    ServiceDAO.update(db, service)
-
-    log_server_activity_success(
-        db,
-        service_id=service.id,
-        event_type=ServerActivityEventType.SERVICE,
-        action="create",
-        source=actor.source,
-        message=f"Created VM service '{service.name}'",
-        details=log_details,
-    )
-
-    # Auto-provision requires a resolved OS strategy (vm_plan). Without one the
-    # service stays pending for the manual two-phase flow.
-    if body.auto_provision and has_plan:
-        try:
-            schedule_vm_auto_provision(db, service, background_tasks)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        logger.info("Billing API: auto-provisioning queued for VM service %s", service.id)
-
-    return service
+def provision_vm_service(
+    *,
+    db: Session,
+    body: BillingVmServiceCreate,
+    owner_user_id: int,
+    actor: ProvisioningActor,
+    background_tasks: BackgroundTasks,
+):
+    return _provision_vm_service(body, owner_user_id, actor, background_tasks, db)
 
 
 @router.post(
@@ -2068,7 +1349,7 @@ async def adopt_vm_service(
 
     name = _unique_adopt_service_name(db, body, vmid)
     product_snapshot, effective_os_code = _billing_vm_product_snapshot(
-        db, body.product_code, body.os_code
+        db, body.product_code
     )
 
     service = ServiceDAO.create_vm(
@@ -3708,14 +2989,11 @@ async def run_script_on_service(
 
         # Add script URL to kernel params after boot task creation (for debian-live)
         if boot_task.script_content:
-            script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
-            from urllib.parse import quote
-            encoded_script_url = quote(script_url, safe=':/?=&')
-            if "script_url=" not in boot_task.kernel_params:
-                updated_kernel_params = f"{boot_task.kernel_params} script_url={encoded_script_url}"
-                boot_task.kernel_params = updated_kernel_params
-                db.commit()
-                db.refresh(boot_task)
+            boot_task.kernel_params = _inject_script_url_param(
+                boot_task.kernel_params, base_url, boot_task.id
+            )
+            db.commit()
+            db.refresh(boot_task)
     except HTTPException as exc:
         log_server_activity_failure(
             db,
@@ -3934,7 +3212,7 @@ async def reinstall_os_on_service(
         download_token = download_token_service.generate_token(
             boot_task_id=boot_task.id,
             allowed_files=allowed_files if allowed_files else None,
-            expires_in=900,
+            expires_in=3600,
         )
 
         # Inject token into script and update URLs
@@ -3957,14 +3235,11 @@ async def reinstall_os_on_service(
 
         # Add script URL to kernel params after boot task creation (for debian-live)
         if boot_task.script_content:
-            script_url = f"{base_url}/api/servers/interaction/scripts/{boot_task.id}"
-            from urllib.parse import quote
-            encoded_script_url = quote(script_url, safe=':/?=&')
-            if "script_url=" not in boot_task.kernel_params:
-                updated_kernel_params = f"{boot_task.kernel_params} script_url={encoded_script_url}"
-                boot_task.kernel_params = updated_kernel_params
-                db.commit()
-                db.refresh(boot_task)
+            boot_task.kernel_params = _inject_script_url_param(
+                boot_task.kernel_params, base_url, boot_task.id
+            )
+            db.commit()
+            db.refresh(boot_task)
     except HTTPException as exc:
         log_server_activity_failure(
             db,
@@ -4060,27 +3335,6 @@ def _billing_product_effective_specs(db: Session, product, family) -> dict:
     }
 
 
-def _billing_product_os_profiles(family) -> list[dict]:
-    if family is None or family.service_type == "bare_metal":
-        return []
-    profiles = []
-    for mapping in family.os_mappings or []:
-        profile = mapping.os_profile
-        if profile is None or not profile.enabled:
-            continue
-        profiles.append(
-            {
-                "id": profile.id,
-                "code": profile.code,
-                "name": profile.name,
-                "os_family": profile.os_family,
-                "strategy_name": profile.strategy_name,
-            }
-        )
-    profiles.sort(key=lambda row: (row.get("name") or row.get("code") or "").lower())
-    return profiles
-
-
 def _billing_product_vm_templates(product) -> list[dict]:
     from app.services.ssh_public_keys import os_type_accepts_ssh_key
     from app.services.vm_install_type_strategy import resolve_vm_template_strategy
@@ -4110,13 +3364,11 @@ def _billing_product_vm_templates(product) -> list[dict]:
     return templates
 
 
-def _billing_product_checkout_os_mode(family_type, vm_templates: list, os_profiles: list) -> str:
+def _billing_product_checkout_os_mode(family_type, vm_templates: list) -> str:
     if vm_templates:
         return "vm_template"
     if family_type == "bare_metal":
         return "server_group"
-    if os_profiles:
-        return "os_profile"
     return "none"
 
 
@@ -4125,9 +3377,8 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
     family = product.family
     family_type = family.service_type if family is not None else None
     effective_specs = _billing_product_effective_specs(db, product, family)
-    os_profiles = _billing_product_os_profiles(family)
     vm_templates = _billing_product_vm_templates(product)
-    checkout_os_mode = _billing_product_checkout_os_mode(family_type, vm_templates, os_profiles)
+    checkout_os_mode = _billing_product_checkout_os_mode(family_type, vm_templates)
 
     return {
         "id": product.id,
@@ -4149,7 +3400,6 @@ def _billing_product_catalog_item(db: Session, product) -> dict:
         ),
         "effective_specs": effective_specs or {},
         "overrides": product.overrides or {},
-        "os_profiles": os_profiles,
         "vm_templates": vm_templates,
         "checkout_os_mode": checkout_os_mode,
     }
@@ -4167,10 +3417,10 @@ async def list_products_billing(
     List RackFlow catalog products for billing systems (WHMCS Module Settings).
 
     Optional ``service_type`` filters to ``bare_metal``, ``vm``, or ``http_proxy``.
-    Each item includes effective specs, family OS profiles (VM/legacy), and
-    linked VM templates so the admin UI can preview what a product will
-    provision. Bare-metal products use ``checkout_os_mode=server_group``;
-    installable OS comes from the selected server group, not family OS profiles.
+    Each item includes effective specs and linked VM templates so the admin UI
+    can preview what a product will provision. Bare-metal products use
+    ``checkout_os_mode=server_group``; installable OS comes from the selected
+    server group.
     """
     rows = ProductDAO.get_all(db)
     wanted = (service_type or "").strip().lower() or None

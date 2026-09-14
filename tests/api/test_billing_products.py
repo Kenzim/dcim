@@ -3,11 +3,9 @@ from app.dao.billing_integration_dao import BillingIntegrationDAO
 from app.dao.product_catalog_dao import (
     ProductDAO,
     ProductFamilyDAO,
-    ProductFamilyOSProfileDAO,
     VMTemplateDAO,
 )
 from app.dao.vm_config_dao import FamilyVMConfigDAO, ProductVMConfigDAO
-from app.models.product_catalog import OSProfile
 
 
 def _key(db_session):
@@ -40,18 +38,6 @@ def _seed_vm_product(db_session):
     ProductVMConfigDAO.upsert(
         db_session, product, extends_family=True, config={"ram_mb": 8192}
     )
-    os_profile = OSProfile(
-        code="tahoe",
-        name="macOS Tahoe",
-        os_family="macos",
-        strategy_name="macos_clone",
-        strategy_config={},
-        enabled=True,
-    )
-    db_session.add(os_profile)
-    db_session.commit()
-    db_session.refresh(os_profile)
-    ProductFamilyOSProfileDAO.attach(db_session, family.id, os_profile.id)
     tmpl = VMTemplateDAO.create(
         db_session,
         code="macos-tahoe",
@@ -62,12 +48,12 @@ def _seed_vm_product(db_session):
     )
     ProductDAO.set_vm_templates(db_session, product, [tmpl.id])
     db_session.commit()
-    return product, tmpl, os_profile
+    return product, tmpl
 
 
 def test_list_products_billing_filters_and_preview(client, db_session):
     key = _key(db_session)
-    product, tmpl, os_profile = _seed_vm_product(db_session)
+    product, tmpl = _seed_vm_product(db_session)
     ProductFamilyDAO.create(
         db_session,
         name="BM Family",
@@ -101,13 +87,13 @@ def test_list_products_billing_filters_and_preview(client, db_session):
     assert row["effective_specs"]["ram_mb"] == 8192
     assert row["effective_specs"]["cpu_cores"] == 2
     assert row["checkout_os_mode"] == "vm_template"
-    assert any(p["code"] == os_profile.code for p in row["os_profiles"])
+    assert "os_profiles" not in row
     assert any(t["id"] == tmpl.id for t in row["vm_templates"])
 
 
 def test_get_product_billing_by_code(client, db_session):
     key = _key(db_session)
-    product, _, _ = _seed_vm_product(db_session)
+    product, _ = _seed_vm_product(db_session)
 
     resp = client.get(
         f"/api/billing/products/{product.code}",

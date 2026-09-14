@@ -746,21 +746,21 @@ button.rf-ca__btn--danger:hover {
   if (vnc) {
     vnc.addEventListener('click', function (e) {
       e.preventDefault();
-      window.open(vnc.href, 'rackflow_vnc', 'width=1024,height=768,resizable=yes,scrollbars=yes');
+      window.open(vnc.href, 'rackflow_vnc', 'width=1400,height=960,resizable=yes,scrollbars=yes');
     });
   }
   var kvm = document.getElementById('rackflow-kvm-launch');
   if (kvm) {
     kvm.addEventListener('click', function (e) {
       e.preventDefault();
-      window.open(kvm.href, 'rackflow_kvm', 'width=1024,height=768,resizable=yes,scrollbars=yes');
+      window.open(kvm.href, 'rackflow_kvm', 'width=1400,height=960,resizable=yes,scrollbars=yes');
     });
   }
   var sol = document.getElementById('rackflow-sol-launch');
   if (sol) {
     sol.addEventListener('click', function (e) {
       e.preventDefault();
-      window.open(sol.href, 'rackflow_sol', 'width=1024,height=768,resizable=yes,scrollbars=yes');
+      window.open(sol.href, 'rackflow_sol', 'width=1400,height=960,resizable=yes,scrollbars=yes');
     });
   }
 

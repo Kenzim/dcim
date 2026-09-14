@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import require_admin
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
-from app.dao.product_catalog_dao import ProductFamilyDAO, ProductDAO, OSProfileDAO, ProductFamilyOSProfileDAO, VMTemplateDAO
+from app.dao.product_catalog_dao import ProductFamilyDAO, ProductDAO, VMTemplateDAO
 from app.dao.vm_config_dao import FamilyVMConfigDAO, ProductVMConfigDAO
 from app.dao.permission_set_dao import PermissionSetDAO
 from app.models.service import Service, ServiceStatus
@@ -132,31 +132,18 @@ class VMTemplateUpdate(BaseModel):
     strategy_options: Optional[dict[str, Any]] = None
 
 
-class OSProfileCreate(BaseModel):
-    code: str
-    name: str
-    os_family: str
-    strategy_name: Optional[str] = None
-    strategy_config: dict[str, Any] = Field(default_factory=dict)
-    enabled: bool = True
-
-
-class OSProfileUpdate(BaseModel):
-    name: Optional[str] = None
-    os_family: Optional[str] = None
-    strategy_name: Optional[str] = None
-    strategy_config: Optional[dict[str, Any]] = None
-    enabled: Optional[bool] = None
-
-
 @router.get("/families", responses=COMMON_ERROR_RESPONSES)
 async def list_families(
     auth: AdminDep,
     db: DbDep,
+    service_type: Optional[str] = None,
 ):
     families = ProductFamilyDAO.get_all(db)
+    wanted = (service_type or "").strip().lower() or None
     result = []
     for f in families:
+        if wanted and f.service_type != wanted:
+            continue
         vm_row = FamilyVMConfigDAO.get_by_family_id(db, f.id)
         result.append(
             {
@@ -171,7 +158,6 @@ async def list_families(
                 "enabled": f.enabled,
                 "vm_config": (vm_row.config if vm_row else {}),
                 "products": [{"id": p.id, "code": p.code, "name": p.name, "enabled": p.enabled} for p in f.products],
-                "os_profiles": [{"id": m.os_profile.id, "code": m.os_profile.code, "name": m.os_profile.name} for m in f.os_mappings],
             }
         )
     return result
@@ -347,10 +333,15 @@ async def create_product(
 async def list_products(
     auth: AdminDep,
     db: DbDep,
+    service_type: Optional[str] = None,
 ):
     rows = ProductDAO.get_all(db)
+    wanted = (service_type or "").strip().lower() or None
     result = []
     for p in rows:
+        family_type = p.family.service_type if p.family else None
+        if wanted and family_type != wanted:
+            continue
         vm_row = ProductVMConfigDAO.get_by_product_id(db, p.id)
         result.append(
             {
@@ -650,74 +641,3 @@ async def upsert_product_vm_config(
     )
     db.commit()
     return {"status": "ok"}
-
-
-@router.get("/os-profiles", responses=COMMON_ERROR_RESPONSES)
-async def list_os_profiles(
-    auth: AdminDep,
-    db: DbDep,
-):
-    rows = OSProfileDAO.get_all(db)
-    return [
-        {
-            "id": r.id,
-            "code": r.code,
-            "name": r.name,
-            "os_family": r.os_family,
-            "strategy_name": r.strategy_name,
-            "enabled": r.enabled,
-        }
-        for r in rows
-    ]
-
-
-@router.post("/os-profiles", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
-async def create_os_profile(
-    data: OSProfileCreate,
-    auth: AdminDep,
-    db: DbDep,
-):
-    if OSProfileDAO.get_by_code(db, data.code):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OS profile code already exists")
-    row = OSProfileDAO.create(db, **data.model_dump())
-    return {"id": row.id}
-
-
-@router.put("/os-profiles/{os_profile_id}", responses=COMMON_ERROR_RESPONSES)
-async def update_os_profile(
-    os_profile_id: int,
-    data: OSProfileUpdate,
-    auth: AdminDep,
-    db: DbDep,
-):
-    row = OSProfileDAO.get_by_id(db, os_profile_id)
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OS profile not found")
-    OSProfileDAO.update(db, row, **data.model_dump(exclude_unset=True))
-    return {"status": "ok"}
-
-
-@router.post("/families/{family_id}/os-profiles/{os_profile_id}", responses=COMMON_ERROR_RESPONSES)
-async def attach_os_profile(
-    family_id: int,
-    os_profile_id: int,
-    auth: AdminDep,
-    db: DbDep,
-):
-    family = ProductFamilyDAO.get_by_id(db, family_id)
-    os_profile = OSProfileDAO.get_by_id(db, os_profile_id)
-    if not family or not os_profile:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family or OS profile not found")
-    ProductFamilyOSProfileDAO.attach(db, family_id, os_profile_id)
-    return {"status": "ok"}
-
-
-@router.delete("/families/{family_id}/os-profiles/{os_profile_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
-async def detach_os_profile(
-    family_id: int,
-    os_profile_id: int,
-    auth: AdminDep,
-    db: DbDep,
-):
-    ProductFamilyOSProfileDAO.detach(db, family_id, os_profile_id)
-    return None

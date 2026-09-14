@@ -21,7 +21,7 @@ from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
 from app.plugins.base import PowerState
 from app.schemas.billing import BillingBareMetalServiceCreate, BillingVmServiceCreate
-from app.services.billing_provisioning_service import ProvisioningActor
+from app.services.provisioning import ProvisioningActor
 from app.services.ipmi_ticket_service import IPMIProxyUnavailable
 from app.services.vm_vnc_ticket_service import VmVncUnavailable
 
@@ -248,12 +248,15 @@ async def test_provision_bare_metal_via_server_group(db_session, monkeypatch):
         location_id=loc.id,
     )
     group = ServerGroupDAO.create(db_session, name="bm-pool", description=None)
-    # Attach server to group if API supports it
     if hasattr(group, "servers"):
         group.servers.append(server)
         db_session.commit()
-    monkeypatch.setattr(billing, "_select_free_server_in_group", lambda *_: server)
-    monkeypatch.setattr(billing, "_determine_template_for_group", lambda *_: "debian")
+    monkeypatch.setattr(
+        "app.services.provisioning.bare_metal.select_free_server_in_group", lambda *_: server
+    )
+    monkeypatch.setattr(
+        "app.services.provisioning.bare_metal.determine_template_for_group", lambda *_: "debian"
+    )
     monkeypatch.setattr(
         billing,
         "_queue_template_install_for_service",
@@ -262,7 +265,6 @@ async def test_provision_bare_metal_via_server_group(db_session, monkeypatch):
             SimpleNamespace(id=2, boot_task_id=1),
         ),
     )
-    monkeypatch.setattr(billing, "get_registry", lambda: SimpleNamespace(get_plugin_class=lambda n: object()))
     data = BillingBareMetalServiceCreate(
         name="grp-svc",
         external_user_id="e",
@@ -287,8 +289,12 @@ async def test_provision_bare_metal_group_queue_failure(db_session, monkeypatch)
         location_id=loc.id,
     )
     group = ServerGroupDAO.create(db_session, name="bm-pool-fail", description=None)
-    monkeypatch.setattr(billing, "_select_free_server_in_group", lambda *_: server)
-    monkeypatch.setattr(billing, "_determine_template_for_group", lambda *_: "debian")
+    monkeypatch.setattr(
+        "app.services.provisioning.bare_metal.select_free_server_in_group", lambda *_: server
+    )
+    monkeypatch.setattr(
+        "app.services.provisioning.bare_metal.determine_template_for_group", lambda *_: "debian"
+    )
 
     def boom(**kwargs):
         raise HTTPException(status_code=500, detail="queue failed")
@@ -326,27 +332,25 @@ async def test_provision_vm_with_ip_plan_and_auto_provision(db_session, monkeypa
     )
 
     monkeypatch.setattr(
-        billing,
-        "build_product_snapshot",
+        "app.services.provisioning.service.build_product_snapshot",
         lambda *a, **k: ({"product": {"code": "vm-prod"}}, "ubuntu"),
     )
     monkeypatch.setattr(
-        billing.VMProvisioningService,
-        "plan_provisioning",
+        "app.services.provisioning.vm.VMProvisioningService.plan_provisioning",
         lambda **kwargs: {"strategy_name": "linux_clone", "effective_specs": {"cpu_cores": 2}},
     )
     scheduled = []
 
-    def schedule(db, service, bg):
+    def schedule(db, service):
         scheduled.append(service.id)
 
-    monkeypatch.setattr(billing, "schedule_vm_auto_provision", schedule)
+    monkeypatch.setattr("app.services.provisioning.vm.schedule_vm_auto_provision", schedule)
 
     body = BillingVmServiceCreate(
         name="auto-vm-svc",
         external_user_id="e",
         product_code="vm-prod",
-        os_code="ubuntu",
+        vm_template_id=1,
         proxmox_cluster_id=cluster.id,
         proxmox_node_name="pve",
         auto_provision=True,
@@ -363,8 +367,7 @@ async def test_provision_vm_with_ip_plan_and_auto_provision(db_session, monkeypa
 async def test_provision_vm_conflicts_when_no_free_ip(db_session, monkeypatch):
     owner = UserDAO.create(db_session, username="vm-noip", email="vm-noip@example.test")
     monkeypatch.setattr(
-        billing.VMIPAllocationDAO,
-        "assign_next_free_to_service",
+        "app.services.provisioning.vm.VMIPAllocationDAO.assign_next_free_to_service",
         lambda *a, **k: None,
     )
     body = BillingVmServiceCreate(name="no-ip-vm", external_user_id="e", auto_provision=False)
@@ -636,7 +639,10 @@ def test_create_vm_http_endpoint(client, db_session, monkeypatch):
         cluster_ids=[cluster.id],
         enabled=True,
     )
-    monkeypatch.setattr(billing, "schedule_vm_auto_provision", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.provisioning.vm.schedule_vm_auto_provision",
+        lambda *a, **k: None,
+    )
     resp = client.post(
         "/api/billing/vm/services",
         headers=headers,
@@ -707,62 +713,32 @@ def test_queue_template_missing_script_and_os_disk(db_session, monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_provision_bm_validation_branches(db_session, monkeypatch):
+async def test_provision_bm_validation_branches(db_session):
     owner = UserDAO.create(db_session, username="bm-val", email="bm-val@example.test")
-    loc = LocationDAO.create(db_session, name="bm-val-loc")
-    monkeypatch.setattr(
-        billing, "get_registry", lambda: SimpleNamespace(get_plugin_class=lambda n: object())
-    )
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
 
-    missing_loc = BillingBareMetalServiceCreate(
-        name="missing-loc",
+    missing_group = BillingBareMetalServiceCreate(
+        name="missing-group",
         external_user_id="e",
-        plugin_name="ipmi",
-        location_id=99999,
     )
     with pytest.raises(HTTPException) as exc:
-        billing._provision_bare_metal_service(missing_loc, owner.id, actor, db_session)
-    assert exc.value.status_code == 404
+        billing._provision_bare_metal_service(missing_group, owner.id, actor, db_session)
+    assert exc.value.status_code == 400
 
-    ServerDAO.create(
+    ServiceDAO.create_vm(
         db_session,
         name="taken-name",
-        server_ip="203.0.113.70",
-        plugin_name="ipmi",
-        plugin_config={},
-        location_id=loc.id,
+        owner_user_id=owner.id,
+        status=ServiceStatus.PENDING,
+        provisioning_source=ProvisioningSource.BILLING,
     )
     dup = BillingBareMetalServiceCreate(
         name="taken-name",
         external_user_id="e",
-        plugin_name="ipmi",
-        location_id=loc.id,
+        service_config={"server_group_id": 1},
     )
     with pytest.raises(HTTPException) as exc:
         billing._provision_bare_metal_service(dup, owner.id, actor, db_session)
-    assert exc.value.status_code == 400
-
-    bad_boot = BillingBareMetalServiceCreate(
-        name="bad-boot",
-        external_user_id="e",
-        plugin_name="ipmi",
-        location_id=loc.id,
-        os_boot_mode="legacy",
-    )
-    with pytest.raises(HTTPException) as exc:
-        billing._provision_bare_metal_service(bad_boot, owner.id, actor, db_session)
-    assert exc.value.status_code == 400
-
-    bad_disk = BillingBareMetalServiceCreate(
-        name="bad-disk",
-        external_user_id="e",
-        plugin_name="ipmi",
-        location_id=loc.id,
-        disks=[{"type": "nvme", "capacity_gb": 100, "is_os_disk": True}],
-    )
-    with pytest.raises(HTTPException) as exc:
-        billing._provision_bare_metal_service(bad_disk, owner.id, actor, db_session)
     assert exc.value.status_code == 400
 
 
