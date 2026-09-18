@@ -33,6 +33,12 @@ router = APIRouter(
 _INVALID_TOKEN_MSG = "Invalid or expired token"
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -135,7 +141,7 @@ def verify_email(body: VerifyEmailBody, db: Annotated[Session, Depends(get_db)])
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
-    if row.expires_at < datetime.now(timezone.utc):
+    if _as_utc(row.expires_at) < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     row.consumed_at = datetime.now(timezone.utc)
     db.commit()
@@ -204,7 +210,7 @@ def password_reset_confirm(body: PasswordResetConfirmBody, db: Annotated[Session
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
-    if row.expires_at < datetime.now(timezone.utc):
+    if _as_utc(row.expires_at) < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     user = db.get(User, row.user_id)
     if user is None:
