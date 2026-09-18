@@ -143,17 +143,26 @@ jobs:
           fi
 
           # Scanner 8 tries to download a JRE from SonarQube and hangs on this
-          # runner; use the JDK we just installed.
-          if [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then
+          # runner; pin the system JDK explicitly (do not use the scanner zip JRE).
+          if [ -x /usr/lib/jvm/java-17-openjdk-amd64/bin/java ]; then
             export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
           else
             export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
           fi
+          export PATH="${JAVA_HOME}/bin:${PATH}"
+          JAVA_EXE="$(command -v java)"
 
-          "${SCANNER_BIN}" \
-            -Dsonar.scanner.skipJreProvisioning=true \
-            -Dsonar.host.url="${SONAR_HOST_URL}" \
+          SCANNER_ARGS=(
+            -Dsonar.scanner.skipJreProvisioning=true
+            -Dsonar.scanner.javaExePath="${JAVA_EXE}"
+            -Dsonar.host.url="${SONAR_HOST_URL}"
             -Dsonar.token="${SONAR_TOKEN}"
+          )
+          if [ -s dependency-check-report.json ]; then
+            SCANNER_ARGS+=(-Dsonar.dependencyCheck.jsonReportPath=dependency-check-report.json)
+          fi
+
+          "${SCANNER_BIN}" "${SCANNER_ARGS[@]}"
 
       - name: SonarQube Quality Gate
         if: success()
