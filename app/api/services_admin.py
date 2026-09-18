@@ -39,6 +39,11 @@ from app.services.server_activity_logger import (
 )
 
 _MSG_UNIQUE_SERVICE_NAME = "Unique service name"
+_MSG_CANONICAL_OWNER = (
+    "users.id canonical owner in RackFlow. provisioning_source is "
+    "billing when this user has a linked billing identity, internal otherwise."
+)
+_MSG_EXTERNAL_SERVICE_ID = "Optional external line-item id (e.g. WHMCS service id)"
 _MSG_NOT_A_VM_SERVICE = "Not a VM service"
 _MSG_VM_SERVICE_NOT_FOUND = "VM service not found"
 _MSG_OWNER_USER_NOT_FOUND = "Owner user not found"
@@ -193,14 +198,8 @@ class AdminBareMetalServiceCreate(BaseModel):
     product_code: Optional[str] = None
     description: Optional[str] = None
     service_config: Optional[Dict[str, Any]] = None
-    owner_user_id: Optional[int] = Field(
-        None,
-        description=(
-            "users.id canonical owner in RackFlow. provisioning_source is "
-            "billing when this user has a linked billing identity, internal otherwise."
-        ),
-    )
-    external_service_id: Optional[str] = Field(None, description="Optional external line-item id (e.g. WHMCS service id)")
+    owner_user_id: Optional[int] = Field(None, description=_MSG_CANONICAL_OWNER)
+    external_service_id: Optional[str] = Field(None, description=_MSG_EXTERNAL_SERVICE_ID)
     server_group_id: Optional[int] = Field(None, description="Pick a free server from this group")
     server_id: Optional[int] = Field(None, description="Pin to an existing rack server")
     template_id: Optional[str] = Field(None, description="OS template id from the server group's permitted list")
@@ -218,14 +217,8 @@ class AdminVmServiceCreate(BaseModel):
     vm_template_id: int = Field(..., description="Catalog VM template id linked to product")
     description: Optional[str] = None
     service_config: Optional[Dict[str, Any]] = None
-    owner_user_id: Optional[int] = Field(
-        None,
-        description=(
-            "users.id canonical owner in RackFlow. provisioning_source is "
-            "billing when this user has a linked billing identity, internal otherwise."
-        ),
-    )
-    external_service_id: Optional[str] = Field(None, description="Optional external line-item id (e.g. WHMCS service id)")
+    owner_user_id: Optional[int] = Field(None, description=_MSG_CANONICAL_OWNER)
+    external_service_id: Optional[str] = Field(None, description=_MSG_EXTERNAL_SERVICE_ID)
     proxmox_cluster_id: Optional[int] = None
     proxmox_node_name: Optional[str] = None
     proxmox_vmid: Optional[int] = None
@@ -253,14 +246,8 @@ class AdminHttpProxyServiceCreate(BaseModel):
     product_code: Optional[str] = Field(None, description="Catalog product code (http_proxy family)")
     description: Optional[str] = None
     service_config: Optional[Dict[str, Any]] = None
-    owner_user_id: Optional[int] = Field(
-        None,
-        description=(
-            "users.id canonical owner in RackFlow. provisioning_source is "
-            "billing when this user has a linked billing identity, internal otherwise."
-        ),
-    )
-    external_service_id: Optional[str] = Field(None, description="Optional external line-item id (e.g. WHMCS service id)")
+    owner_user_id: Optional[int] = Field(None, description=_MSG_CANONICAL_OWNER)
+    external_service_id: Optional[str] = Field(None, description=_MSG_EXTERNAL_SERVICE_ID)
     ip_count: Optional[int] = Field(None, description="Override how many IPs to auto-assign (default 1)")
     subnet_id: Optional[int] = Field(None, description="Override which subnet to assign from (wins over subnet_group_id)")
     subnet_group_id: Optional[int] = Field(None, description="Override which proxy subnet group to assign from")

@@ -10,7 +10,7 @@ All routes are generic and work for any integration type (WHMCS, custom, etc.).
 import asyncio
 import re
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, or_
 from sqlalchemy.orm import Session, aliased
@@ -1027,7 +1027,6 @@ def _provision_vm_service(
     body: BillingVmServiceCreate,
     owner_user_id: int,
     actor: ProvisioningActor,
-    background_tasks: BackgroundTasks,
     db: Session,
 ):
     """Create a VM service via ProvisioningService."""
@@ -1044,9 +1043,8 @@ def provision_vm_service(
     body: BillingVmServiceCreate,
     owner_user_id: int,
     actor: ProvisioningActor,
-    background_tasks: BackgroundTasks,
 ):
-    return _provision_vm_service(body, owner_user_id, actor, background_tasks, db)
+    return _provision_vm_service(body, owner_user_id, actor, db)
 
 
 @router.post(
@@ -1056,7 +1054,6 @@ def provision_vm_service(
 )
 async def create_vm_service(
     body: BillingVmServiceCreate,
-    background_tasks: BackgroundTasks,
     integration: BillingIntegrationDep,
     db: DbDep,
 ):
@@ -1077,7 +1074,6 @@ async def create_vm_service(
             name=integration.name,
             source="billing_api",
         ),
-        background_tasks=background_tasks,
     )
     return _billing_service_response(db, service)
 

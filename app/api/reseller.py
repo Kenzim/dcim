@@ -8,7 +8,6 @@ from typing import Annotated, Optional, Union
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     Header,
     HTTPException,
@@ -543,7 +542,7 @@ def _cleanup_failed_service(db, reseller, owner, body, service):
 
 
 def _provision_charged_service(
-    *, db, reseller, owner, body, kind, background_tasks, charge
+    *, db, reseller, owner, body, kind, charge
 ):
     service = None
     actor = ProvisioningActor(
@@ -596,7 +595,6 @@ def _create_service(
     *,
     kind: str,
     body: BillingBareMetalServiceCreate | BillingVmServiceCreate,
-    background_tasks: BackgroundTasks,
     reseller: Reseller,
     db: Session,
     idempotency_key: Optional[str],
@@ -640,7 +638,6 @@ def _create_service(
         owner=owner,
         body=body,
         kind=kind,
-        background_tasks=background_tasks,
         charge=charge,
     )
     return _deploy_payload(
@@ -656,7 +653,6 @@ def _create_service(
 )
 async def create_bare_metal_service(
     body: BillingBareMetalServiceCreate,
-    background_tasks: BackgroundTasks,
     *,
     reseller: ResellerDep,
     db: DbDep,
@@ -667,7 +663,6 @@ async def create_bare_metal_service(
     return _create_service(
         kind=(body.service_type or ServiceType.BARE_METAL.value).lower(),
         body=body,
-        background_tasks=background_tasks,
         reseller=reseller,
         db=db,
         idempotency_key=idempotency_key,
@@ -682,7 +677,6 @@ async def create_bare_metal_service(
 )
 async def create_vm_service(
     body: BillingVmServiceCreate,
-    background_tasks: BackgroundTasks,
     *,
     reseller: ResellerDep,
     db: DbDep,
@@ -693,7 +687,6 @@ async def create_vm_service(
     return _create_service(
         kind=ServiceType.VM.value,
         body=body,
-        background_tasks=background_tasks,
         reseller=reseller,
         db=db,
         idempotency_key=idempotency_key,

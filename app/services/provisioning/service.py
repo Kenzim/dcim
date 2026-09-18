@@ -43,6 +43,21 @@ def _default_vm_template_id(product) -> Optional[int]:
     return int(rows[0].vm_template_id)
 
 
+def _apply_bare_metal_catalog_defaults(req: ProvisionRequest, specs: dict) -> None:
+    if req.server_group_id is not None or req.server_id is not None:
+        return
+    gid = specs.get("server_group_id")
+    if gid not in (None, ""):
+        req.server_group_id = int(gid)
+
+
+def _apply_vm_catalog_defaults(req: ProvisionRequest, product, specs: dict) -> None:
+    if req.vm_template_id is None:
+        req.vm_template_id = _default_vm_template_id(product)
+    if req.proxmox_cluster_id is None and specs.get("proxmox_cluster_id") not in (None, ""):
+        req.proxmox_cluster_id = int(specs["proxmox_cluster_id"])
+
+
 def _apply_catalog_defaults(db: Session, req: ProvisionRequest) -> ProvisionRequest:
     if not req.product_code:
         return req
@@ -57,15 +72,9 @@ def _apply_catalog_defaults(db: Session, req: ProvisionRequest) -> ProvisionRequ
         specs.update(product.overrides)
 
     if req.service_type == ServiceType.BARE_METAL:
-        if req.server_group_id is None and req.server_id is None:
-            gid = specs.get("server_group_id")
-            if gid not in (None, ""):
-                req.server_group_id = int(gid)
+        _apply_bare_metal_catalog_defaults(req, specs)
     elif req.service_type == ServiceType.VM:
-        if req.vm_template_id is None:
-            req.vm_template_id = _default_vm_template_id(product)
-        if req.proxmox_cluster_id is None and specs.get("proxmox_cluster_id") not in (None, ""):
-            req.proxmox_cluster_id = int(specs["proxmox_cluster_id"])
+        _apply_vm_catalog_defaults(req, product, specs)
     return req
 
 
