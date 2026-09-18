@@ -90,10 +90,13 @@ jobs:
           set -eu
           DC_BIN="/dependency-check-cache/tool/dependency-check/bin/dependency-check.sh"
           DC_DATA="/dependency-check-cache/data"
+          mkdir -p "/dependency-check-cache/tool" "${DC_DATA}"
+
+          # Tool zip is cached on the runner; OpenJDK is not. Always install Java.
+          apt-get update -qq
+          apt-get install -y -qq curl unzip ca-certificates openjdk-17-jre-headless
 
           if [ ! -x "${DC_BIN}" ]; then
-            apt-get update -qq
-            apt-get install -y -qq curl unzip openjdk-17-jre-headless
             curl -fsSL "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip" \
               -o "${RUNNER_TEMP}/dependency-check.zip"
             rm -rf "/dependency-check-cache/tool"
@@ -101,18 +104,29 @@ jobs:
             DC_BIN="/dependency-check-cache/tool/dependency-check/bin/dependency-check.sh"
           fi
 
-          if [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then
+          if [ -x /usr/lib/jvm/java-17-openjdk-amd64/bin/java ]; then
             export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          else
+            export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+          fi
+          export PATH="${JAVA_HOME}/bin:${PATH}"
+          test -x "${JAVA_HOME}/bin/java"
+          echo "JAVA_HOME=${JAVA_HOME}" >> "${GITHUB_ENV}"
+          echo "${JAVA_HOME}/bin" >> "${GITHUB_PATH}"
+
+          DC_ARGS=(
+            --project "${GITHUB_REPOSITORY##*/}"
+            --scan .
+            --format JSON
+            --out .
+            --data "${DC_DATA}"
+          )
+          # Empty NVD cache cannot use --noupdate; later runs reuse the volume.
+          if compgen -G "${DC_DATA}/*.mv.db" > /dev/null; then
+            DC_ARGS+=(--noupdate)
           fi
 
-          "${DC_BIN}" \
-            --project "${GITHUB_REPOSITORY##*/}" \
-            --scan . \
-            --format JSON \
-            --out . \
-            --data "${DC_DATA}" \
-            --noupdate
-
+          "${DC_BIN}" "${DC_ARGS[@]}"
           test -s dependency-check-report.json
 
       # Run sonar-scanner in the job container. SonarSource `uses:` actions are
