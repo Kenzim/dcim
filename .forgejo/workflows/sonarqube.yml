@@ -101,7 +101,16 @@ jobs:
             unzip -q "${RUNNER_TEMP}/${SCANNER_ZIP}" -d "${RUNNER_TEMP}"
           fi
 
+          # Scanner 8 tries to download a JRE from SonarQube and hangs on this
+          # runner; use the JDK we just installed.
+          if [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then
+            export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          else
+            export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+          fi
+
           "${SCANNER_BIN}" \
+            -Dsonar.scanner.skipJreProvisioning=true \
             -Dsonar.host.url="${SONAR_HOST_URL}" \
             -Dsonar.token="${SONAR_TOKEN}"
 
