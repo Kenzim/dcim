@@ -80,5 +80,5 @@ async def test_provision_vm_validation_errors(db_session):
         BillingVmServiceCreate(name="vm-template", external_user_id="e", vm_template_id=1),
     ):
         with pytest.raises(HTTPException) as exc:
-            billing._provision_vm_service(body, owner.id, _actor(), SimpleNamespace(), db_session)
+            billing._provision_vm_service(body, owner.id, _actor(), db_session)
         assert exc.value.status_code == 400

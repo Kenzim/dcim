@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import HTTPException
 
 import app.api.billing as billing
 from app.core.client_permissions import PermissionKey
@@ -115,6 +115,10 @@ def _patch_boot_task_create(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(billing.BootTaskDAO, "create", create)
+    monkeypatch.setattr(
+        "app.api.server_interaction.get_download_token_service",
+        lambda: SimpleNamespace(generate_token=lambda **kwargs: "script-tok"),
+    )
 
 
 # --- _queue_template_install_for_service ------------------------------------
@@ -356,7 +360,7 @@ async def test_provision_vm_with_ip_plan_and_auto_provision(db_session, monkeypa
         auto_provision=True,
     )
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
-    service = billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
+    service = billing._provision_vm_service(body, owner.id, actor, db_session)
     assert service.id in scheduled
     assert (service.config or {}).get("vm_ip_address") == "198.51.100.90"
     assert (service.config or {}).get("vm_ip_allocation_id") == alloc.id
@@ -373,7 +377,7 @@ async def test_provision_vm_conflicts_when_no_free_ip(db_session, monkeypatch):
     body = BillingVmServiceCreate(name="no-ip-vm", external_user_id="e", auto_provision=False)
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
     with pytest.raises(HTTPException) as exc:
-        billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
+        billing._provision_vm_service(body, owner.id, actor, db_session)
     assert exc.value.status_code == 409
 
 
@@ -390,7 +394,7 @@ async def test_provision_vm_duplicate_name(db_session):
     body = BillingVmServiceCreate(name="dup-vm", external_user_id="e")
     actor = ProvisioningActor(kind="integration", actor_id=1, name="t", source="test")
     with pytest.raises(HTTPException) as exc:
-        billing._provision_vm_service(body, owner.id, actor, BackgroundTasks(), db_session)
+        billing._provision_vm_service(body, owner.id, actor, db_session)
     assert exc.value.status_code == 400
 
 

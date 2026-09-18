@@ -136,8 +136,9 @@ def _inject_script_url_param(kernel_params: Optional[str], base_url: str, boot_t
     from urllib.parse import quote
 
     encoded = quote(_script_url_with_token(base_url, boot_task_id), safe=":/?=&")
-    params = re.sub(r"\s*script_url=\S+", "", kernel_params or "").strip()
-    return f"{params} script_url={encoded}".strip()
+    parts = [part for part in (kernel_params or "").split() if not part.startswith("script_url=")]
+    parts.append(f"script_url={encoded}")
+    return " ".join(parts)
 
 
 def _normalize_kernel_args(value: Optional[str]) -> str:

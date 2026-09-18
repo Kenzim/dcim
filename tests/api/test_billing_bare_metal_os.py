@@ -42,6 +42,10 @@ def _patch_boot_task_create(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(billing.BootTaskDAO, "create", create)
+    monkeypatch.setattr(
+        "app.api.server_interaction.get_download_token_service",
+        lambda: SimpleNamespace(generate_token=lambda **kwargs: "script-tok"),
+    )
 
 
 def test_billing_server_groups_resolves_os_templates(client, db_session):

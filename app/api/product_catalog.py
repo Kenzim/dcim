@@ -329,40 +329,44 @@ async def create_product(
     return {"id": row.id}
 
 
+def _product_matches_service_type(product, wanted: Optional[str]) -> bool:
+    family_type = product.family.service_type if product.family else None
+    return not wanted or family_type == wanted
+
+
+def _serialize_catalog_product(db: Session, product) -> dict:
+    vm_row = ProductVMConfigDAO.get_by_product_id(db, product.id)
+    return {
+        "id": product.id,
+        "name": product.name,
+        "description": product.description,
+        "code": product.code,
+        "family_id": product.family_id,
+        "family_code": product.family.code if product.family else None,
+        "family_service_type": (product.family.service_type if product.family else None),
+        "vm_template_ids": [m.vm_template_id for m in product.vm_template_mappings],
+        "overrides": product.overrides or {},
+        "enabled": product.enabled,
+        "vm_config": (vm_row.config if vm_row else {}),
+        "extends_group_vm_config": (vm_row.extends_family if vm_row else True),
+        "effective_vm_config": ProductVMConfigDAO.resolve_effective_config(db, product),
+        "permission_set_id": product.permission_set_id,
+        "permission_set_name": product.permission_set.name if product.permission_set else None,
+    }
+
+
 @router.get("/products", responses=COMMON_ERROR_RESPONSES)
 async def list_products(
     auth: AdminDep,
     db: DbDep,
     service_type: Optional[str] = None,
 ):
-    rows = ProductDAO.get_all(db)
     wanted = (service_type or "").strip().lower() or None
-    result = []
-    for p in rows:
-        family_type = p.family.service_type if p.family else None
-        if wanted and family_type != wanted:
-            continue
-        vm_row = ProductVMConfigDAO.get_by_product_id(db, p.id)
-        result.append(
-            {
-                "id": p.id,
-                "name": p.name,
-                "description": p.description,
-                "code": p.code,
-                "family_id": p.family_id,
-                "family_code": p.family.code if p.family else None,
-                "family_service_type": (p.family.service_type if p.family else None),
-                "vm_template_ids": [m.vm_template_id for m in p.vm_template_mappings],
-                "overrides": p.overrides or {},
-                "enabled": p.enabled,
-                "vm_config": (vm_row.config if vm_row else {}),
-                "extends_group_vm_config": (vm_row.extends_family if vm_row else True),
-                "effective_vm_config": ProductVMConfigDAO.resolve_effective_config(db, p),
-                "permission_set_id": p.permission_set_id,
-                "permission_set_name": p.permission_set.name if p.permission_set else None,
-            }
-        )
-    return result
+    return [
+        _serialize_catalog_product(db, product)
+        for product in ProductDAO.get_all(db)
+        if _product_matches_service_type(product, wanted)
+    ]
 
 
 def _validate_product_update_family(db: Session, update_data: dict) -> None:

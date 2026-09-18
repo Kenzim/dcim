@@ -25,6 +25,7 @@ jobs:
       DOCKER_BUILDKIT: "0"
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - image_suffix: app
@@ -81,6 +82,8 @@ jobs:
           set -eu
           command -v docker >/dev/null 2>&1 || { echo "docker CLI missing in job container" >&2; exit 1; }
           docker info
+          docker image prune -f >/dev/null 2>&1 || true
+          df -h / || true
 
       - name: Resolve Forgejo registry image
         run: |
@@ -159,10 +162,14 @@ jobs:
         run: |
           push_tags() {
             NAME="$1"
-            docker push "${NAME}:${SHORT_SHA}" || {
-              echo "Push failed. Ensure token has package write permission for ${NAME}." >&2
-              exit 1
-            }
+            if ! docker push "${NAME}:${SHORT_SHA}"; then
+              echo "First push failed for ${NAME}:${SHORT_SHA}; retrying once." >&2
+              sleep 5
+              docker push "${NAME}:${SHORT_SHA}" || {
+                echo "Push failed. Ensure token has package write permission for ${NAME}." >&2
+                exit 1
+              }
+            fi
             if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
               docker push "${NAME}:branch-${SAFE_REF_NAME}"
             fi
