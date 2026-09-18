@@ -4,6 +4,9 @@
 #   SONAR_HOST_URL  - base URL of your SonarQube server (e.g. https://sonar.example.com)
 #   SONAR_TOKEN     - project or global analysis token from SonarQube
 #
+# Dependency CVEs: OWASP Dependency-Check runs before sonar-scanner; the free
+# dependency-check-sonar-plugin on SonarQube imports dependency-check-report.json.
+#
 # Checkout uses the LAN Forgejo URL. Default https://git.stackken.com hairpins
 # through the public IP and a rootless slirp4netns path, so fetch-depth: 0
 # (full history, ~430MB of old PXE blobs) stalls for 15–50 minutes.
@@ -23,6 +26,8 @@ jobs:
     timeout-minutes: 45
     container:
       image: ghcr.io/catthehacker/ubuntu:act-latest
+      volumes:
+        - /home/runner/.cache/dependency-check:/dependency-check-cache
     steps:
       # Full history from LAN Forgejo. Avoid actions/checkout: data.forgejo.org
       # TLS flakes (gnutls SNI) on this runner, and HTTPS git.stackken.com hairpins WAN.
@@ -73,6 +78,41 @@ jobs:
         continue-on-error: true
         run: |
           python3 -m pytest --cov=app --cov-report=xml:coverage.xml -q -n auto
+
+      # OWASP Dependency-Check: scan lockfiles/deps, emit JSON for the SonarQube plugin.
+      - name: OWASP Dependency-Check
+        if: steps.checkout.outcome == success
+        timeout-minutes: 15
+        env:
+          DC_VERSION: "12.1.0"
+        run: |
+          set -eu
+          DC_BIN="/dependency-check-cache/tool/dependency-check/bin/dependency-check.sh"
+          DC_DATA="/dependency-check-cache/data"
+
+          if [ ! -x "${DC_BIN}" ]; then
+            apt-get update -qq
+            apt-get install -y -qq curl unzip openjdk-17-jre-headless
+            curl -fsSL "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip" \
+              -o "${RUNNER_TEMP}/dependency-check.zip"
+            rm -rf "/dependency-check-cache/tool"
+            unzip -q "${RUNNER_TEMP}/dependency-check.zip" -d "/dependency-check-cache/tool"
+            DC_BIN="/dependency-check-cache/tool/dependency-check/bin/dependency-check.sh"
+          fi
+
+          if [ -d /usr/lib/jvm/java-17-openjdk-amd64 ]; then
+            export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          fi
+
+          "${DC_BIN}" \
+            --project "${GITHUB_REPOSITORY##*/}" \
+            --scan . \
+            --format JSON \
+            --out . \
+            --data "${DC_DATA}" \
+            --noupdate
+
+          test -s dependency-check-report.json
 
       # Run sonar-scanner in the job container. SonarSource `uses:` actions are
       # node24/composite steps; act_runner polls pathcmd.txt via podman archive
