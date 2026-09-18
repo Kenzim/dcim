@@ -124,3 +124,27 @@ def test_cursor_chunking_and_eip681_uri():
         "address=0x3333333333333333333333333333333333333333"
         "&uint256=1500000"
     )
+
+
+def test_crypto_helper_validation_edges():
+    from app.services.payments.usdt_crypto import _path, _secret_value
+
+    with pytest.raises(UsdtDepositError):
+        invoice_cents_to_token_units(0)
+    with pytest.raises(UsdtDepositError):
+        format_token_units(-1)
+    with pytest.raises(UsdtDepositError):
+        format_token_units(1, decimals=-1)
+    assert format_token_units(7, decimals=0) == "7"
+    with pytest.raises(UsdtDepositError):
+        eip681_usdt_uri(CONTRACT, 0, "0x3333333333333333333333333333333333333333", 1)
+    with pytest.raises(UsdtDepositError):
+        eip681_usdt_uri(CONTRACT, 1, "0x3333333333333333333333333333333333333333", 0)
+    with pytest.raises(UsdtDepositError):
+        _path(-1)
+    with pytest.raises(UsdtConfigurationError):
+        _secret_value(None)
+    key = Fernet.generate_key().decode()
+    empty = Fernet(key.encode()).encrypt(b"").decode()
+    with pytest.raises(UsdtConfigurationError, match="empty"):
+        decrypt_secret(empty, key)

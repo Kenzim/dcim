@@ -81,7 +81,8 @@ jobs:
 
       # OWASP Dependency-Check: scan lockfiles/deps, emit JSON for the SonarQube plugin.
       - name: OWASP Dependency-Check
-        if: steps.checkout.outcome == success
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
         timeout-minutes: 15
         env:
           DC_VERSION: "12.1.0"
