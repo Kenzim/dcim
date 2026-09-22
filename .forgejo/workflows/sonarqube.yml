@@ -4,9 +4,8 @@
 #   SONAR_HOST_URL  - base URL of your SonarQube server (e.g. https://sonar.example.com)
 #   SONAR_TOKEN     - project or global analysis token from SonarQube
 #
-# Dependency CVEs: OWASP Dependency-Check still emits JSON on the runner.
-# Do not import it into SonarQube: the plugin opens CVEs as new_violations
-# and this project's quality gate requires that metric to stay 0.
+# Dependency CVEs: OWASP Dependency-Check runs in this job before sonar-scanner.
+# JSON+HTML are imported by sonar-dependency-check-plugin (More → Dependency-Check).
 #
 # Checkout uses the LAN Forgejo URL. Default https://git.stackken.com hairpins
 # through the public IP and a rootless slirp4netns path, so fetch-depth: 0
@@ -24,11 +23,14 @@ on:
 jobs:
   sonarqube:
     runs-on: docker
-    timeout-minutes: 45
+    timeout-minutes: 60
     container:
       image: ghcr.io/catthehacker/ubuntu:act-latest
       volumes:
         - /home/runner/.cache/dependency-check:/dependency-check-cache
+        # Persist scanner engine + plugin JARs. Fresh containers otherwise
+        # re-download ~50MB over HTTP/2 and hang on this slirp4netns runner.
+        - /home/runner/.cache/sonar:/root/.sonar
     steps:
       # Full history from LAN Forgejo. Avoid actions/checkout: data.forgejo.org
       # TLS flakes (gnutls SNI) on this runner, and HTTPS git.stackken.com hairpins WAN.
@@ -80,11 +82,10 @@ jobs:
         run: |
           python3 -m pytest --cov=app --cov-report=xml:coverage.xml -q -n auto
 
-      # OWASP Dependency-Check: emit JSON on the runner. Do not import it into
-      # Sonar — frontend lockfile CVEs fail new_violations=0.
+      # OWASP Dependency-Check: JSON+HTML for sonar-dependency-check-plugin.
       - name: OWASP Dependency-Check
+        id: dependency-check
         if: steps.checkout.outcome == 'success'
-        continue-on-error: true
         timeout-minutes: 15
         env:
           DC_VERSION: "12.1.0"
@@ -120,9 +121,14 @@ jobs:
             --project "${GITHUB_REPOSITORY##*/}"
             --scan .
             --format JSON
+            --format HTML
             --out .
             --data "${DC_DATA}"
             --disableOssIndex
+            --exclude "**/tests/**"
+            --exclude "**/node_modules/**"
+            --exclude "**/.venv/**"
+            --exclude "**/.git/**"
           )
           # Empty NVD cache cannot use --noupdate; later runs reuse the volume.
           if compgen -G "${DC_DATA}/*.mv.db" > /dev/null; then
@@ -136,7 +142,7 @@ jobs:
       # node24/composite steps; act_runner polls pathcmd.txt via podman archive
       # and hits "context deadline exceeded" on long scans.
       - name: SonarQube Scan
-        if: steps.checkout.outcome == 'success'
+        if: success() && steps.dependency-check.outcome == 'success'
         timeout-minutes: 25
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -169,12 +175,59 @@ jobs:
           export PATH="${JAVA_HOME}/bin:${PATH}"
           JAVA_EXE="$(command -v java)"
 
+          # Prefetch engine + plugins over HTTP/1.1. Scanner 8's OkHttp HTTP/2
+          # path through slirp4netns + WAN hairpin hangs or dies with PROTOCOL_ERROR.
+          export SONAR_USER_HOME="${HOME}/.sonar"
+          CACHE="${SONAR_USER_HOME}/cache"
+          mkdir -p "${CACHE}"
+          serverUrl="${SONAR_HOST_URL%/}"
+
+          echo "Prefetching scanner engine over HTTP/1.1"
+          engine_json="$(curl --http1.1 --retry 4 --retry-delay 2 --max-time 180 -fsSL \
+            -u "${SONAR_TOKEN}:" "${serverUrl}/api/v2/analysis/engine")"
+          engine_name="$(jq -r '.filename' <<< "${engine_json}")"
+          engine_sha="$(jq -r '.sha256' <<< "${engine_json}")"
+          engine_dir="${CACHE}/${engine_sha}"
+          mkdir -p "${engine_dir}"
+          if [ ! -f "${engine_dir}/${engine_name}" ]; then
+            curl --http1.1 --retry 8 --retry-all-errors --retry-delay 3 \
+              --max-time 300 --speed-limit 1000 --speed-time 45 -fL -C - \
+              -u "${SONAR_TOKEN}:" -H "Accept: application/octet-stream" \
+              "${serverUrl}/api/v2/analysis/engine" -o "${engine_dir}/${engine_name}.part"
+            mv "${engine_dir}/${engine_name}.part" "${engine_dir}/${engine_name}"
+          fi
+          echo "Engine cached: ${engine_name}"
+
+          plugins_tsv="$(curl --http1.1 --retry 4 --retry-delay 2 --max-time 60 -fsSL \
+            -u "${SONAR_TOKEN}:" "${serverUrl}/api/plugins/installed" \
+            | jq -r '.plugins[] | [.hash, .key] | @tsv')"
+          while IFS=$'\t' read -r hash key; do
+            dest="${CACHE}/${hash}/sonar-${key}-plugin.jar"
+            mkdir -p "${CACHE}/${hash}"
+            if [ ! -f "${dest}" ]; then
+              echo "Prefetching plugin ${key}"
+              curl --http1.1 --retry 8 --retry-all-errors --retry-delay 3 \
+                --max-time 300 --speed-limit 1000 --speed-time 45 -fL -C - \
+                -u "${SONAR_TOKEN}:" \
+                "${serverUrl}/api/plugins/download?plugin=${key}" -o "${dest}.part" \
+                || exit 1
+              mv "${dest}.part" "${dest}"
+            fi
+          done <<< "${plugins_tsv}"
+          echo "Plugin cache ready"
+
           SCANNER_ARGS=(
             -Dsonar.scanner.skipJreProvisioning=true
             -Dsonar.scanner.javaExePath="${JAVA_EXE}"
+            -Dsonar.userHome="${SONAR_USER_HOME}"
             -Dsonar.host.url="${SONAR_HOST_URL}"
             -Dsonar.token="${SONAR_TOKEN}"
           )
+          test -s dependency-check-report.json
+          SCANNER_ARGS+=(-Dsonar.dependencyCheck.jsonReportPath=dependency-check-report.json)
+          if [ -s dependency-check-report.html ]; then
+            SCANNER_ARGS+=(-Dsonar.dependencyCheck.htmlReportPath=dependency-check-report.html)
+          fi
 
           "${SCANNER_BIN}" "${SCANNER_ARGS[@]}"
 

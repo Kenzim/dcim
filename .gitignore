@@ -136,3 +136,7 @@ tftp/pxe/boot.ipxe
 tftp/pxe/initrd/
 tftp/pxe/kernel/
 proxy_runner.env
+
+# OWASP Dependency-Check reports (generated in CI; do not commit)
+dependency-check-report.*
+
