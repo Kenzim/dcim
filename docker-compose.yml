@@ -93,30 +93,32 @@ services:
 
   dhcp-runner:
     build:
-      context: dhcp_runner
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: dhcp_runner/Dockerfile
     environment:
       DHCP_CONFIG_PATH: /shared/dhcp/dhcpd.conf
       DHCP_LEASE_PATH: /shared/dhcp/dhcpd.leases
       DHCP_INTERFACES: ${DHCP_INTERFACES:-eth0}
-      # Required: shared secret the app must present (per-instance API key).
       API_KEY: ${DHCP_RUNNER_API_KEY:?set DHCP_RUNNER_API_KEY in .env}
+      RACKFLOW_URL: ${RACKFLOW_URL:-http://app:8000}
     volumes:
       - dhcp_tftp_shared:/shared
     ports:
       - "10.16.251.240:9080:9080"
       - "192.168.10.171:9080:9080"
     restart: unless-stopped
+    depends_on:
+      - app
 
   tftp-runner:
     build:
-      context: tftp_runner
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: tftp_runner/Dockerfile
     environment:
       TFTP_ROOT: /shared/tftp
       TFTP_BIND: 0.0.0.0:69
-      # Required: shared secret the app must present (per-instance API key).
       API_KEY: ${TFTP_RUNNER_API_KEY:?set TFTP_RUNNER_API_KEY in .env}
+      RACKFLOW_URL: ${RACKFLOW_URL:-http://app:8000}
     volumes:
       - dhcp_tftp_shared:/shared
     ports:
@@ -125,6 +127,29 @@ services:
       - "10.16.251.240:69:69/udp"
       - "192.168.10.171:69:69/udp"
     restart: unless-stopped
+    depends_on:
+      - app
+
+  media-runner:
+    build:
+      context: .
+      dockerfile: media_runner/Dockerfile
+    environment:
+      API_KEY: ${MEDIA_RUNNER_API_KEY:?set MEDIA_RUNNER_API_KEY in .env}
+      RACKFLOW_URL: ${RACKFLOW_URL:-http://app:8000}
+      MEDIA_ROOT: /data/isos
+      PUBLIC_HTTP_BASE: ${MEDIA_PUBLIC_HTTP_BASE:-}
+      SMB_ADVERTISE_HOST: ${MEDIA_SMB_ADVERTISE_HOST:-}
+    volumes:
+      - media_isos:/data/isos
+    ports:
+      - "10.16.251.240:9083:9083"
+      - "192.168.10.171:9083:9083"
+      - "10.16.251.240:445:445"
+      - "192.168.10.171:445:445"
+    restart: unless-stopped
+    depends_on:
+      - app
 
   # Customer HTTP/SOCKS5 proxy forwarder. Host networking so customer bind IPs
   # on the host are connection LocalAddr (IPAM assignment identity).
@@ -314,3 +339,4 @@ services:
 volumes:
   mysql_data:
   dhcp_tftp_shared:
+  media_isos:

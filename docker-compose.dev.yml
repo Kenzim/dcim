@@ -47,6 +47,7 @@ services:
     volumes:
       # Backend code + migrations for hot reload
       - ./app:/app/app
+      - ./runner_common:/app/runner_common
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
@@ -75,6 +76,7 @@ services:
       DEPLOYMENT_WORKER_LEASE_TTL_SECONDS: ${DEPLOYMENT_WORKER_LEASE_TTL_SECONDS:-60}
     volumes:
       - ./app:/app/app
+      - ./runner_common:/app/runner_common
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
@@ -94,6 +96,7 @@ services:
       RUN_RECURRING_BILLING_WORKER: "false"
     volumes:
       - ./app:/app/app
+      - ./runner_common:/app/runner_common
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
@@ -113,6 +116,7 @@ services:
       RUN_NOTIFICATION_OUTBOX_WORKER: "false"
     volumes:
       - ./app:/app/app
+      - ./runner_common:/app/runner_common
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
@@ -132,6 +136,7 @@ services:
       RUN_USDT_WATCHER: "false"
     volumes:
       - ./app:/app/app
+      - ./runner_common:/app/runner_common
       - ./scripts:/app/scripts
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
@@ -172,6 +177,12 @@ services:
 # Note: to serve DHCP on a real LAN, add `network_mode: host` and
 # `DHCP_INTERFACES=<iface>` to the app service (bridge networking is fine for
 # config generation and general testing).
+#
+# SuperMicro X9 ATEN BMCs ignore TCP MSS and emit 1500-byte HTTP segments. On
+# this host eth0 MTU is 1280, so JNLP GET from the app container hangs unless
+# the host clamps MSS, e.g.:
+#   iptables -t mangle -A POSTROUTING -s 172.22.0.0/16 -p tcp \
+#     --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 # ---------------------------------------------------------------------------
 
 volumes:

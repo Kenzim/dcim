@@ -1071,7 +1071,7 @@ async def admin_get_virtual_media(
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
-    return await perform_status(service_linked_server(db, service))
+    return await perform_status(service_linked_server(db, service), db=db)
 
 
 @router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse, responses=COMMON_ERROR_RESPONSES)

@@ -1,12 +1,13 @@
 # Rackflow / DCIM – build Docker images
 # Use: make help
 
-.PHONY: help frontend docker-app docker-poller docker-dhcp-runner docker-tftp-runner build clean
+.PHONY: help frontend docker-app docker-poller docker-dhcp-runner docker-tftp-runner docker-media-runner build clean
 
 APP_IMAGE = dcim-app
 POLLER_IMAGE = dcim-bandwidth-poller
 DHCP_RUNNER_IMAGE = dcim-dhcp-runner
 TFTP_RUNNER_IMAGE = dcim-tftp-runner
+MEDIA_RUNNER_IMAGE = dcim-media-runner
 
 help:
 	@echo "Targets:"
@@ -15,6 +16,7 @@ help:
 	@echo "  docker-poller    Build bandwidth-poller image"
 	@echo "  docker-dhcp-runner  Build dhcp-runner image"
 	@echo "  docker-tftp-runner  Build tftp-runner image"
+	@echo "  docker-media-runner Build media-runner image (HTTP + SMB ISOs)"
 	@echo "  build            Build all images"
 	@echo "  clean            Remove frontend dist and Python caches"
 
@@ -30,12 +32,15 @@ docker-poller:
 	docker build --target bandwidth-poller -t $(POLLER_IMAGE) .
 
 docker-dhcp-runner:
-	docker build -t $(DHCP_RUNNER_IMAGE) dhcp_runner
+	docker build -f dhcp_runner/Dockerfile -t $(DHCP_RUNNER_IMAGE) .
 
 docker-tftp-runner:
-	docker build -t $(TFTP_RUNNER_IMAGE) tftp_runner
+	docker build -f tftp_runner/Dockerfile -t $(TFTP_RUNNER_IMAGE) .
 
-build: docker-app docker-poller docker-dhcp-runner docker-tftp-runner
+docker-media-runner:
+	docker build -f media_runner/Dockerfile -t $(MEDIA_RUNNER_IMAGE) .
+
+build: docker-app docker-poller docker-dhcp-runner docker-tftp-runner docker-media-runner
 
 # --- Clean ---
 clean:

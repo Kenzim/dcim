@@ -19,6 +19,7 @@ from app.dao.script_dao import ScriptDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
 from app.dao.service_instance_dao import ServiceInstanceDAO
+from app.dao.runner_dao import RunnerDAO
 from app.dao.proxy_runner_dao import ProxyRunnerDAO
 from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
 from app.dao.asset_dao import AssetDAO
@@ -34,6 +35,6 @@ from app.dao.vmid_reservation_dao import VMIDReservationDAO
 from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.dao.reseller_dao import EffectiveProductPrice, ResellerDAO
 
-__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ServiceDAO", "BillingIntegrationDAO", "McpApiKeyDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "ProxyRunnerDAO", "ProxySubnetGroupDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "VMDeploymentJobDAO"]
+__all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ServiceDAO", "BillingIntegrationDAO", "McpApiKeyDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "RunnerDAO", "ProxyRunnerDAO", "ProxySubnetGroupDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "VMDeploymentJobDAO"]
 __all__ += ["EffectiveProductPrice", "ResellerDAO"]
 

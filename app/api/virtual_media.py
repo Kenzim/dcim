@@ -56,10 +56,10 @@ def require_server(server: Server | None) -> Server:
     return server
 
 
-async def perform_status(server: Server | None) -> dict:
+async def perform_status(server: Server | None, db: Session | None = None) -> dict:
     server = require_server(server)
     try:
-        return await get_status(server)
+        return await get_status(server, db=db)
     except VirtualMediaUnavailable as exc:
         raise virtual_media_http_error(exc) from exc
 
@@ -191,7 +191,7 @@ async def admin_get_virtual_media(
     db: DbDep,
 ):
     del auth
-    return await perform_status(ServerDAO.get_by_id(db, server_id))
+    return await perform_status(ServerDAO.get_by_id(db, server_id), db=db)
 
 
 @servers_router.post("/{server_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse)

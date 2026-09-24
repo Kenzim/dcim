@@ -14,6 +14,9 @@ def tftp_client(tmp_path, monkeypatch):
     root.mkdir()
     monkeypatch.setenv("TFTP_ROOT", str(root))
     monkeypatch.setenv("ALLOW_UNAUTHENTICATED", "true")
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("RACKFLOW_URL", raising=False)
+    monkeypatch.delenv("RACKFLOW_WS_URL", raising=False)
     # Reload the module so it picks up the patched environment.
     import tftp_runner.main as tftp_main
     tftp_main = importlib.reload(tftp_main)

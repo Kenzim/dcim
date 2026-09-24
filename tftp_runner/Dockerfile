@@ -9,6 +9,7 @@ COPY tftp_runner/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tftp_runner/main.py ./main.py
+COPY runner_common ./runner_common
 
 # Bake PXE/TFTP tree into the runner image.
 # This should contain pxelinux/ipxe loaders and temp OS TFTP files.

@@ -21,6 +21,7 @@ from app.models.switch_bandwidth_sample import SwitchBandwidthSample
 from app.models.dhcp_config import DHCPConfigModel
 from app.models.tftp_config import TFTPConfigModel
 from app.models.service_instance import ServiceInstance
+from app.models.runner import Runner
 from app.models.proxy_runner import ProxyRunner
 from app.models.proxy_subnet_group import ProxySubnetGroup, ProxySubnetGroupMember
 from app.models.asset import Asset, AssetLabel
@@ -145,7 +146,7 @@ from app.models.commerce_webhook import (
     WebhookEndpoint,
 )
 
-__all__ = ["User", "Server", "Category", "Location", "Rack", "NetworkSwitch", "Disk", "DiskType", "BootTask", "BootType", "BootTaskStatus", "InstallationTask", "InstallationStatus", "BillingIntegration", "McpApiKey", "Service", "ServiceBareMetal", "ServiceVm", "ServiceStatus", "ServiceType", "ProvisioningSource", "Script", "NetworkPort", "SwitchPort", "CableRun", "ServerGroup", "server_group_association", "SwitchBandwidthSample", "DHCPConfigModel", "TFTPConfigModel", "ServiceInstance", "ProxyRunner", "ProxySubnetGroup", "ProxySubnetGroupMember", "Asset", "AssetLabel", "ServerActivity", "ServerActivityEventType", "ServerActivityStatus", "HardwareDetectionReport", "HardwareDetectionReportStatus", "ServerCapability", "ProductFamily", "Product", "VMTemplate", "ProductVMTemplate", "ProxmoxCluster", "ProxmoxNode", "ProxmoxStorage", "ProxmoxTemplate", "ProxmoxCapacitySnapshot", "IPSubnet", "IPAddress", "ServiceIPAssignment", "ServiceIPAssignmentHistory", "FamilyVMConfig", "ProductVMConfig", "VMIPAllocation", "vm_ip_allocation_cluster_association", "VMIDReservation", "PermissionSet", "VMDeploymentJob", "VMDeploymentJobStep", "DeploymentJobStatus", "DeploymentStepStatus"]
+__all__ = ["User", "Server", "Category", "Location", "Rack", "NetworkSwitch", "Disk", "DiskType", "BootTask", "BootType", "BootTaskStatus", "InstallationTask", "InstallationStatus", "BillingIntegration", "McpApiKey", "Service", "ServiceBareMetal", "ServiceVm", "ServiceStatus", "ServiceType", "ProvisioningSource", "Script", "NetworkPort", "SwitchPort", "CableRun", "ServerGroup", "server_group_association", "SwitchBandwidthSample", "DHCPConfigModel", "TFTPConfigModel", "ServiceInstance", "Runner", "ProxyRunner", "ProxySubnetGroup", "ProxySubnetGroupMember", "Asset", "AssetLabel", "ServerActivity", "ServerActivityEventType", "ServerActivityStatus", "HardwareDetectionReport", "HardwareDetectionReportStatus", "ServerCapability", "ProductFamily", "Product", "VMTemplate", "ProductVMTemplate", "ProxmoxCluster", "ProxmoxNode", "ProxmoxStorage", "ProxmoxTemplate", "ProxmoxCapacitySnapshot", "IPSubnet", "IPAddress", "ServiceIPAssignment", "ServiceIPAssignmentHistory", "FamilyVMConfig", "ProductVMConfig", "VMIPAllocation", "vm_ip_allocation_cluster_association", "VMIDReservation", "PermissionSet", "VMDeploymentJob", "VMDeploymentJobStep", "DeploymentJobStatus", "DeploymentStepStatus"]
 __all__ += [
     "ResellerGroup",
     "Reseller",

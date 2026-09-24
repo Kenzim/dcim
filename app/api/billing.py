@@ -2719,7 +2719,7 @@ async def billing_get_virtual_media(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
-    return await perform_status(service_linked_server(db, service))
+    return await perform_status(service_linked_server(db, service), db=db)
 
 
 @router.post("/services/{service_id}/virtual-media/insert", status_code=status.HTTP_200_OK, response_model=VirtualMediaStatusResponse, responses=COMMON_ERROR_RESPONSES)

@@ -602,7 +602,7 @@ async def client_get_virtual_media(
     if not service or service.owner_user_id != int(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
-    return await perform_status(service_linked_server(db, service))
+    return await perform_status(service_linked_server(db, service), db=db)
 
 
 @router.post("/{service_id}/virtual-media/insert", response_model=VirtualMediaStatusResponse, responses=COMMON_ERROR_RESPONSES)

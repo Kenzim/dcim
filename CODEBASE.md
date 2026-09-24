@@ -2,7 +2,7 @@
 
 **Read this file first in every new chat.** Use it to jump straight to the right layer and files. Prefer editing the mapped paths below over broad repo searches.
 
-Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy + MySQL + Redis** backend, **Svelte 4 + Vite + Bootstrap** SPA frontend, optional **Docker runners** (DHCP/TFTP/proxy), **WHMCS** PHP module, **Alembic** migrations.
+Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy + MySQL + Redis** backend, **Svelte 4 + Vite + Bootstrap** SPA frontend, optional **Docker runners** (DHCP/TFTP/media/proxy), **WHMCS** PHP module, **Alembic** migrations.
 
 ---
 
@@ -26,7 +26,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | OS install templates | `os_templates/<name>/` (`template.json` + `install.sh`); bare-metal WHMCS OS list is the server group’s permitted templates |
 | PXE / cloud-init / boot scripts served to bare metal | `app/api/server_interaction.py` |
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
-| DHCP/TFTP runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, services in `app/services/dhcp_*.py` / `tftp_*.py` |
+| DHCP/TFTP/media runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, `media_runner/main.py`, uplink in `runner_common/`, hub in `app/services/runners/` |
 | Proxy runner (IPAM sync) | `proxy_runner/main.py`, API `app/api/runner_proxy.py` |
 | Tests | Mirror path under `tests/` (`tests/api/`, `tests/dao/`, `tests/services/`, …) |
 | Install / Docker ops | `INSTALL.md`, `docker-compose.yml`, `Makefile`, `Dockerfile` |
@@ -50,7 +50,7 @@ MySQL (Alembic migrations)
 
 Plugins (app/plugins/)              ← BMC/hypervisor/switch adapters (loaded from disk)
 Integrations (app/integrations/)    ← billing adapters (e.g. WHMCS)
-Runners (dhcp_runner/, tftp_runner/, proxy_runner/)  ← optional sidecars
+Runners (dhcp_runner/, tftp_runner/, media_runner/, proxy_runner/)  ← optional sidecars
 ```
 
 **Conventions**
@@ -72,11 +72,13 @@ Runners (dhcp_runner/, tftp_runner/, proxy_runner/)  ← optional sidecars
 | `alembic/` | DB migrations (`alembic/versions/`) |
 | `tests/` | Pytest suite mirroring `app/` |
 | `scripts/` | Ops helpers (admin user, SNMP poller, PXE finalize, `dev.sh`) |
-| `dhcp_runner/` | Container API that runs `dhcpd` |
-| `tftp_runner/` | Container API that runs `in.tftpd` |
+| `dhcp_runner/` | Container API that runs `dhcpd` + WebSocket uplink |
+| `tftp_runner/` | Container API that runs `in.tftpd` + WebSocket uplink |
+| `media_runner/` | Per-location ISO library (HTTP range + SMB) + WebSocket uplink |
+| `runner_common/` | Shared protocol/agent used by Python runners |
 | `proxy_runner/` | Sidecar that syncs proxy/IPAM config from Rackflow |
 | `os_templates/` | Disk-based OS install templates |
-| `isos/`, `disk_images/`, `tftp/` | Boot media / PXE assets |
+| `isos/`, `disk_images/`, `tftp/` | Central boot media (ISO catalog fallback); per-location libraries live on media runners |
 | `whmcs/` | WHMCS provisioning module + hooks |
 | `systemd/` | Host unit for SNMP bandwidth poller |
 | `docker-compose*.yml`, `Dockerfile`, `Makefile` | Build & deploy |
@@ -117,7 +119,9 @@ All included from `app/main.py` under `/api`.
 | `location.py` | `/api/locations` | Locations CRUD |
 | `location_dhcp.py` | `/api/locations/{id}/dhcp/...` | Per-location DHCP status/settings/start/stop |
 | `location_tftp.py` | `/api/locations/{id}/tftp/...` | Per-location TFTP controls |
-| `service_instance.py` | `/api/service-instances` | DHCP/TFTP runner registration per location |
+| `service_instance.py` | `/api/service-instances` | Legacy DHCP/TFTP HTTP runner registration per location |
+| `runners_admin.py` | `/api/admin/runners` | Unified runner enroll / rotate key / ISO library |
+| `runner_ws.py` | `WS /api/runner/ws` | Runner-initiated uplink |
 | `proxy_runners.py` | `/api/admin/proxy-runners` | Standalone proxy runners (generated key, phone-home health) |
 | `proxy_subnet_groups.py` | `/api/admin/proxy-subnet-groups` | Named IPAM subnet pools for proxy catalog auto-assign |
 | `rack.py` | `/api/racks` | Racks + servers-in-rack |
@@ -207,7 +211,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
 | `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC) |
 | `sol/` | Bare-metal SOL profiles (`ipmi_sol` via ipmitool), shared hub, REST send |
-| `virtual_media/` | BMC virtual CD (ASRockRack/Gigabyte MegaRAC Redfish, SuperMicro Redfish), shared `isos/` catalog, path-token fetch URL, insert/eject orchestrator |
+| `virtual_media/` | BMC virtual CD (ASRockRack/Gigabyte MegaRAC Redfish, SuperMicro Redfish), shared `isos/` catalog or per-location media runner |
 
 ---
 
@@ -284,7 +288,8 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/racks/:id` | `RackView.svelte` |
 | `/admin/racks/rows/:locationId/:row` | `RowView.svelte` |
 | `/admin/locations` | `Locations.svelte` |
-| `/admin/locations/:id` | `LocationDetail.svelte` (DHCP/TFTP runners) |
+| `/admin/locations/:id` | `LocationDetail.svelte` (DHCP/TFTP/ISO library) |
+| `/admin/runners` | `Runners.svelte` (unified location runners) |
 | `/admin/server-groups` | `ServerGroups.svelte` |
 | `/admin/server-groups/:id` | `ServerGroupDetail.svelte` |
 | `/admin/bare-metal-services` | `BareMetalServices.svelte` → `ServicesList` mode `bare_metal` |
@@ -341,12 +346,14 @@ Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelt
 
 | Component | Path | Notes |
 |---|---|---|
-| DHCP runner | `dhcp_runner/main.py` | FastAPI control plane for `dhcpd`; shared volume for conf/leases |
-| TFTP runner | `tftp_runner/main.py` | Control plane for `in.tftpd`; shared TFTP root |
+| Protocol / hub | `runner_common/`, `app/services/runners/` | Runner-initiated WebSocket; state is pushed; admin reads are cache-only |
+| DHCP runner | `dhcp_runner/main.py` | FastAPI control plane for `dhcpd` + uplink (`RACKFLOW_URL` + `API_KEY`) |
+| TFTP runner | `tftp_runner/main.py` | Control plane for `in.tftpd` + uplink |
+| Media runner | `media_runner/main.py` | HTTP ISO library + `smbd` share `isos`; enroll via Admin → Runners |
 | Proxy runner | `proxy_runner/cmd/proxy-runner/` | Polls `/api/runner/proxy/config` every 30s (phone-home); register via Admin → Proxy Runners |
 | Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit |
 
-App selects remote runners when `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` (or legacy `DHCP_TFTP_SERVICE_URL`) are set — see `app/core/config.py` and `INSTALL.md`.
+Python runners dial `WS /api/runner/ws` when `RACKFLOW_URL` and `API_KEY` are set. Legacy HTTP `ServiceInstance.base_url` still works if no uplink is connected. App env `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` remains for in-cluster HTTP control — see `INSTALL.md`.
 
 ---
 
@@ -461,7 +468,7 @@ Non-VM security controls that are now enforced (see `tests/SECURITY_TESTS.md`):
 | Secret-bearing scripts/media | Require a valid **download token** bound to the boot task (no optional/no-token fallback). Tokens are scoped to concrete file patterns and single-use media tokens are consumed atomically. | `app/api/server_interaction.py`, `app/api/installation_tasks.py`, `app/services/download_token_service.py` |
 | Temp-OS / TFTP paths | Path-traversal jail via `resolve()` + `is_relative_to()` | `app/services/temp_os_service.py`, `tftp_runner/main.py` |
 | Cloud-init identity | Trust `X-Forwarded-For` only when `TRUST_X_FORWARDED_FOR=true`; context limited to active installs | `app/api/server_interaction.py`, `app/core/config.py` |
-| DHCP/TFTP runners | **Fail-closed**: `503` on protected routes unless `API_KEY` set (`DHCP_RUNNER_API_KEY` / `TFTP_RUNNER_API_KEY`) | `dhcp_runner/main.py`, `tftp_runner/main.py`, compose |
+| DHCP/TFTP/media runners | **Fail-closed** HTTP API plus outbound WebSocket uplink (`RACKFLOW_URL` + `API_KEY`) | `dhcp_runner/main.py`, `tftp_runner/main.py`, `media_runner/main.py`, `runner_common/` |
 | Service-instance keys | Fernet-encrypted at rest when `SERVICE_INSTANCE_ENCRYPTION_KEY` set; legacy plaintext re-encrypted on verify | `app/dao/service_instance_dao.py`, `app/core/service_instance_crypto.py` |
 | Billing integration keys | Stored as SHA-256 hash; plaintext revealed once on create/rotate, masked elsewhere | `app/core/billing_auth.py`, `app/api/billing_admin.py` |
 | MCP admin keys | Prefix `rfmcp_`; SHA-256 at rest; plaintext once on create/rotate. Rejected by `get_current_user`. `/mcp` off unless `MCP_ENABLED=true`. Scope ladder `read` ⊂ `write` ⊂ `destructive`; destructive tools need `confirm=true`. | `app/core/mcp_auth.py`, `app/api/mcp_keys_admin.py`, `app/mcp/` |
@@ -484,7 +491,8 @@ MCP tools live in `app/mcp/tools/` and call DAOs/services/plugins directly (not 
 |---|---|
 | **Server** | Bare-metal (or managed) host with a management plugin (IPMI/Proxmox) |
 | **Service** | Customer-facing instance (bare-metal or VM), often linked from WHMCS |
-| **Service instance** | Per-location DHCP/TFTP **runner** registration (not a customer service) |
+| **Service instance** | Legacy per-location DHCP/TFTP HTTP **runner** registration (not a customer service) |
+| **Runner** | Unified location agent (dhcp/tftp/media) that phones home over WebSocket |
 | **Boot task** | One-shot PXE/boot instruction for a server |
 | **Installation task** | Long-running OS install progress/log |
 | **Product / family** | Sellable catalog SKUs; drive VM/bare-metal defaults |

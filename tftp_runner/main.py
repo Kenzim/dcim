@@ -47,12 +47,38 @@ ALLOW_UNAUTHENTICATED = os.environ.get("ALLOW_UNAUTHENTICATED", "").lower() in (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Auto-start TFTP daemon on container startup."""
+    global _agent
+    uplink_task = None
     try:
-        await start()
+        await start_tftp()
         logger.info("TFTP auto-started on startup")
     except Exception as e:
         logger.warning("TFTP auto-start on startup skipped: %s", e)
+    try:
+        from runner_common.agent import agent_from_env
+
+        _agent = agent_from_env(["tftp"], _current_state, agent_version="1.0")
+        if _agent:
+            _agent.register("tftp.start", _rpc_start)
+            _agent.register("tftp.stop", _rpc_stop)
+            _agent.register("tftp.restart", _rpc_restart)
+            _agent.register("tftp.status", _rpc_status)
+            _agent.register("tftp.get_config", _rpc_get_config)
+            _agent.register("tftp.put_config", _rpc_put_config)
+            _agent.register("tftp.logs", _rpc_logs)
+            uplink_task = asyncio.create_task(_agent.run_forever())
+            logger.info("TFTP runner uplink enabled")
+    except Exception as e:
+        logger.warning("TFTP runner uplink not started: %s", e)
     yield
+    if _agent is not None:
+        _agent.stop()
+    if uplink_task is not None:
+        uplink_task.cancel()
+        try:
+            await uplink_task
+        except (asyncio.CancelledError, Exception):
+            pass
     if _process is not None and _process.returncode is None:
         _process.terminate()
         try:
@@ -93,6 +119,23 @@ TFTPD_BINARY = "/usr/sbin/in.tftpd"
 
 _process: Optional[asyncio.subprocess.Process] = None
 _lock = asyncio.Lock()
+_agent = None
+
+
+def _current_state() -> dict:
+    running = _process is not None and _process.returncode is None
+    return {
+        "running": running,
+        "status": "running" if running else "stopped",
+        "pid": _process.pid if running else None,
+        "root_directory": TFTP_ROOT,
+        "bind": TFTP_BIND,
+    }
+
+
+async def _publish_state() -> None:
+    if _agent is not None:
+        await _agent.publish_state(_current_state(), force=True)
 
 
 def ensure_bios_ipxe_at_root(root: Optional[str] = None) -> None:
@@ -182,6 +225,10 @@ async def get_logs(limit: int = 100, auth: None = Depends(_require_api_key)):
 
 @app.post("/start")
 async def start(auth: None = Depends(_require_api_key)):
+    return await start_tftp()
+
+
+async def start_tftp():
     global _process
     async with _lock:
         if _process is not None and _process.returncode is None:
@@ -201,6 +248,7 @@ async def start(auth: None = Depends(_require_api_key)):
                 stderr=asyncio.subprocess.PIPE,
             )
             logger.info("TFTP started PID %s", _process.pid)
+            await _publish_state()
             return {"success": True, "status": "running", "message": "TFTP started", "pid": _process.pid}
         except Exception as e:
             logger.exception("TFTP start failed: %s", e)
@@ -209,9 +257,14 @@ async def start(auth: None = Depends(_require_api_key)):
 
 @app.post("/stop")
 async def stop(auth: None = Depends(_require_api_key)):
+    return await stop_tftp()
+
+
+async def stop_tftp():
     global _process
     async with _lock:
         if _process is None or _process.returncode is not None:
+            await _publish_state()
             return {"success": True, "status": "stopped", "message": "TFTP already stopped"}
         _process.terminate()
         try:
@@ -221,14 +274,19 @@ async def stop(auth: None = Depends(_require_api_key)):
             await _process.wait()
         _process = None
         logger.info("TFTP stopped")
+        await _publish_state()
         return {"success": True, "status": "stopped", "message": "TFTP stopped"}
 
 
 @app.post("/restart")
 async def restart(auth: None = Depends(_require_api_key)):
-    await stop()
+    return await restart_tftp()
+
+
+async def restart_tftp():
+    await stop_tftp()
     await asyncio.sleep(1)
-    return await start()
+    return await start_tftp()
 
 
 @app.get("/status")
@@ -246,3 +304,71 @@ async def status(auth: None = Depends(_require_api_key)):
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+async def _rpc_start(params):
+    del params
+    try:
+        return await start_tftp()
+    except HTTPException as exc:
+        raise RuntimeError(str(exc.detail)) from exc
+
+
+async def _rpc_stop(params):
+    del params
+    return await stop_tftp()
+
+
+async def _rpc_restart(params):
+    del params
+    try:
+        return await restart_tftp()
+    except HTTPException as exc:
+        raise RuntimeError(str(exc.detail)) from exc
+
+
+async def _rpc_status(params):
+    del params
+    return _current_state()
+
+
+async def _rpc_get_config(params):
+    del params
+    root = Path(TFTP_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    return {
+        "root": TFTP_ROOT,
+        "bind": TFTP_BIND,
+        "listing": _list_dir_recursive(root, root),
+    }
+
+
+async def _rpc_put_config(params):
+    rel = str(params.get("path") or "")
+    content = params.get("content")
+    root = Path(TFTP_ROOT).resolve()
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        raise RuntimeError("Path escapes TFTP root")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, str):
+        try:
+            data = base64.b64decode(content)
+        except Exception as e:
+            raise RuntimeError(f"Invalid base64 content: {e}") from e
+    elif isinstance(content, (bytes, bytearray)):
+        data = bytes(content)
+    else:
+        raise RuntimeError("content is required")
+    target.write_bytes(data)
+    await _publish_state()
+    return {"success": True, "path": rel}
+
+
+async def _rpc_logs(params):
+    try:
+        limit = int(params.get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    lines = list(LOG_BUFFER)[-limit:]
+    return {"lines": lines, "count": len(lines)}

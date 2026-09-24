@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServiceInstanceDAO, LocationDAO
-from app.services.runner_client import call_dhcp_runner
+from app.services.runner_client import call_dhcp_runner, cached_location_status
 from app.services.dhcp_config_service import (
     get_dhcp_config_service,
     DHCPConfigService,
@@ -24,10 +24,15 @@ AdminDep = Annotated[dict, Depends(require_admin)]
 router = APIRouter()
 
 
-def _get_dhcp_instance(db: Session, location_id: int):
+def _get_location(db: Session, location_id: int):
     loc = LocationDAO.get_by_id(db, location_id)
     if not loc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Location not found")
+    return loc
+
+
+def _get_dhcp_instance(db: Session, location_id: int):
+    _get_location(db, location_id)
     instance = ServiceInstanceDAO.get_by_location_and_type(db, location_id, "dhcp")
     if not instance:
         raise HTTPException(
@@ -57,7 +62,16 @@ async def get_location_dhcp_status(
     db: DbDep,
 ):
     """Get DHCP status for this location's runner."""
-    instance = _get_dhcp_instance(db, location_id)
+    _get_location(db, location_id)
+    cached = cached_location_status(db, location_id, "dhcp")
+    if cached is not None:
+        return cached
+    instance = ServiceInstanceDAO.get_by_location_and_type(db, location_id, "dhcp")
+    if not instance:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No DHCP service instance registered for this location",
+        )
     code, body = await call_dhcp_runner(instance, db, "GET", "/status")
     if code != 200:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=body)

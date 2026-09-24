@@ -17,7 +17,12 @@
     startLocationTFTP,
     stopLocationTFTP,
     restartLocationTFTP,
-    getLocationTFTPLogs
+    getLocationTFTPLogs,
+    listRunners,
+    createRunner,
+    downloadRunnerIso,
+    deleteRunnerIso,
+    uploadRunnerIso,
   } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { onMount } from 'svelte';
@@ -35,7 +40,12 @@
   let tftpStatus = null;
   let dhcpLogs = null;
   let tftpLogs = null;
-  let actionInProgress = { dhcp: false, tftp: false, regenerate: false };
+  let mediaRunner = null;
+  let isoUrl = '';
+  let isoFilename = '';
+  let isoBusy = false;
+  let isoError = null;
+  let actionInProgress = { dhcp: false, tftp: false, regenerate: false, iso: false };
   let dhcpSettings = null;
   let dhcpSettingsSaving = false;
   let dhcpError = null;
@@ -50,7 +60,7 @@
 
   onMount(async () => {
     await loadData();
-    statusRefreshInterval = setInterval(refreshStatus, 8000);
+    statusRefreshInterval = setInterval(refreshStatus, 4000);
     return () => {
       if (statusRefreshInterval) clearInterval(statusRefreshInterval);
     };
@@ -65,6 +75,12 @@
         getLocation(locationId),
         listServiceInstances(locationId)
       ]);
+      try {
+        const mediaRows = await listRunners({ locationId, capability: 'media' });
+        mediaRunner = mediaRows.find((row) => row.enabled) || mediaRows[0] || null;
+      } catch {
+        mediaRunner = null;
+      }
       dhcpInstance = serviceInstances.find(s => s.service_type === 'dhcp');
       tftpInstance = serviceInstances.find(s => s.service_type === 'tftp');
       if (dhcpInstance) {
@@ -90,10 +106,87 @@
     if (loading || actionInProgress.dhcp || actionInProgress.tftp) return;
     try {
       const promises = [];
-      if (dhcpInstance) promises.push(getLocationDHCPStatus(locationId).then(s => { dhcpStatus = s; }).catch(() => { dhcpStatus = { status: 'error', running: false }; }));
-      if (tftpInstance) promises.push(getLocationTFTPStatus(locationId).then(s => { tftpStatus = s; }).catch(() => { tftpStatus = { status: 'error', running: false }; }));
+      if (dhcpInstance) promises.push(getLocationDHCPStatus(locationId).then(s => { dhcpStatus = s; }).catch(() => { dhcpStatus = { status: 'error', running: false, online: false }; }));
+      if (tftpInstance) promises.push(getLocationTFTPStatus(locationId).then(s => { tftpStatus = s; }).catch(() => { tftpStatus = { status: 'error', running: false, online: false }; }));
+      if (!dhcpInstance) {
+        promises.push(getLocationDHCPStatus(locationId).then(s => { dhcpStatus = s; }).catch(() => {}));
+      }
+      if (!tftpInstance) {
+        promises.push(getLocationTFTPStatus(locationId).then(s => { tftpStatus = s; }).catch(() => {}));
+      }
+      promises.push(
+        listRunners({ locationId, capability: 'media' })
+          .then((rows) => { mediaRunner = rows.find((row) => row.enabled) || rows[0] || null; })
+          .catch(() => {})
+      );
       await Promise.all(promises);
     } catch (_) {}
+  }
+
+  async function enrollMediaRunner() {
+    if (!location) return;
+    try {
+      isoBusy = true;
+      isoError = null;
+      const row = await createRunner({
+        name: `${location.name} media`,
+        location_id: location.id,
+        capabilities: ['media'],
+      });
+      mediaRunner = row;
+      alert(`Copy this API key now:\n\nRACKFLOW_URL=https://your-rackflow-host\nAPI_KEY=${row.api_key}`);
+      await refreshStatus();
+    } catch (err) {
+      isoError = err.message || 'Failed to enroll media runner';
+    } finally {
+      isoBusy = false;
+    }
+  }
+
+  async function startIsoDownload() {
+    if (!mediaRunner || !isoUrl.trim()) return;
+    try {
+      isoBusy = true;
+      isoError = null;
+      await downloadRunnerIso(mediaRunner.id, { url: isoUrl.trim(), filename: isoFilename.trim() || undefined });
+      isoUrl = '';
+      isoFilename = '';
+      await refreshStatus();
+    } catch (err) {
+      isoError = err.message || 'Download failed';
+    } finally {
+      isoBusy = false;
+    }
+  }
+
+  async function startIsoUpload(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file || !mediaRunner) return;
+    try {
+      isoBusy = true;
+      isoError = null;
+      await uploadRunnerIso(mediaRunner.id, file);
+      event.target.value = '';
+      await refreshStatus();
+    } catch (err) {
+      isoError = err.message || 'Upload failed';
+    } finally {
+      isoBusy = false;
+    }
+  }
+
+  async function removeIso(filename) {
+    if (!mediaRunner || !confirm(`Delete ${filename}?`)) return;
+    try {
+      isoBusy = true;
+      isoError = null;
+      await deleteRunnerIso(mediaRunner.id, filename);
+      await refreshStatus();
+    } catch (err) {
+      isoError = err.message || 'Delete failed';
+    } finally {
+      isoBusy = false;
+    }
   }
 
   function openAddInstance(type) {
@@ -271,7 +364,8 @@
     {/if}
 
     <p class="field-help" style="margin-bottom: 1.5rem;">
-      Deploy DHCP/TFTP runners at this location with <code>docker-compose.runners-only.yml</code>, then register instances below.
+      Enroll DHCP/TFTP/media runners on the <a href="/admin/runners">Runners</a> page. They phone home over WebSocket.
+      Legacy HTTP <code>base_url</code> instances below still work as a fallback.
     </p>
 
     <div class="cards-grid">
@@ -281,8 +375,11 @@
           <h2>DHCP</h2>
           {#if dhcpInstance}
             <div class="card-actions">
+              <span class="status-badge" class:enabled={dhcpStatus?.online !== false} class:disabled={dhcpStatus?.online === false}>
+                {dhcpStatus?.online === false ? 'offline' : 'online'}
+              </span>
               <span class="status-badge" class:enabled={dhcpStatus?.running} class:disabled={!dhcpStatus?.running}>
-                {dhcpStatus?.status || 'unknown'}
+                {dhcpStatus?.running ? 'running' : 'stopped'}
               </span>
               {#if dhcpStatus?.running}
                 <button class="btn-secondary btn-small" on:click={() => handleDHCPAction('stop')} disabled={actionInProgress.dhcp}>Stop</button>
@@ -370,8 +467,11 @@
           <h2>TFTP</h2>
           {#if tftpInstance}
             <div class="card-actions">
+              <span class="status-badge" class:enabled={tftpStatus?.online !== false} class:disabled={tftpStatus?.online === false}>
+                {tftpStatus?.online === false ? 'offline' : 'online'}
+              </span>
               <span class="status-badge" class:enabled={tftpStatus?.running} class:disabled={!tftpStatus?.running}>
-                {tftpStatus?.status || 'unknown'}
+                {tftpStatus?.running ? 'running' : 'stopped'}
               </span>
               {#if tftpStatus?.running}
                 <button class="btn-secondary btn-small" on:click={() => handleTFTPAction('stop')} disabled={actionInProgress.tftp}>Stop</button>
@@ -393,6 +493,65 @@
               <pre class="logs">{tftpLogs?.lines ? tftpLogs.lines.join('\n') : 'Click Load logs to fetch'}</pre>
               <button class="btn-secondary btn-small" on:click={loadTFTPLogs}>Load logs</button>
             </details>
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 1.5rem;">
+      <div class="card-header">
+        <h2>ISO library</h2>
+        {#if mediaRunner}
+          <div class="card-actions">
+            <span class="status-badge" class:enabled={mediaRunner.online} class:disabled={!mediaRunner.online}>
+              {mediaRunner.online ? (mediaRunner.stale ? 'stale' : 'online') : 'offline'}
+            </span>
+          </div>
+        {:else}
+          <button class="btn-secondary btn-small" on:click={enrollMediaRunner} disabled={isoBusy}>Enroll media runner</button>
+        {/if}
+      </div>
+      <div class="card-body">
+        {#if isoError}
+          <div class="error-banner">{isoError}</div>
+        {/if}
+        {#if !mediaRunner}
+          <p class="field-help">No media runner for this location. Enroll one, then set <code>RACKFLOW_URL</code> and <code>API_KEY</code> on the container. It serves HTTP ISOs and SMB for SuperMicro X9 virtual CD.</p>
+        {:else}
+          <p class="instance-url">{mediaRunner.public_http_base || 'HTTP base pending'} {mediaRunner.smb_host ? `· SMB ${mediaRunner.smb_host}` : ''}</p>
+          <div class="iso-actions">
+            <input type="url" bind:value={isoUrl} placeholder="https://example.com/os.iso" />
+            <input type="text" bind:value={isoFilename} placeholder="optional-name.iso" />
+            <button class="btn-primary btn-small" on:click={startIsoDownload} disabled={isoBusy || !isoUrl.trim()}>Download URL</button>
+            <label class="btn-secondary btn-small iso-upload">
+              Upload
+              <input type="file" accept=".iso" on:change={startIsoUpload} />
+            </label>
+          </div>
+          {#if (mediaRunner.jobs || []).length}
+            <ul class="iso-jobs">
+              {#each mediaRunner.jobs as job}
+                <li>{job.filename || job.id}: {job.status} {job.percent != null ? `${job.percent}%` : ''}</li>
+              {/each}
+            </ul>
+          {/if}
+          <div class="table-scroll">
+            <table class="table dhcp-table">
+              <thead>
+                <tr><th>File</th><th>Size</th><th></th></tr>
+              </thead>
+              <tbody>
+                {#each mediaRunner.isos || [] as iso}
+                  <tr>
+                    <td>{iso.filename}</td>
+                    <td>{iso.size_mb != null ? `${iso.size_mb} MB` : '—'}</td>
+                    <td><button class="btn-secondary btn-small" on:click={() => removeIso(iso.filename)} disabled={isoBusy}>Delete</button></td>
+                  </tr>
+                {:else}
+                  <tr><td colspan="3">No ISOs yet. <code>rackflow-netboot.iso</code> is seeded when the runner starts.</td></tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
         {/if}
       </div>
@@ -724,5 +883,35 @@
     margin-top: 1rem;
     display: flex;
     gap: 0.5rem;
+  }
+
+  .iso-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    align-items: center;
+  }
+
+  .iso-actions input[type="url"],
+  .iso-actions input[type="text"] {
+    flex: 1 1 180px;
+    min-width: 160px;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+  }
+
+  .iso-upload input {
+    display: none;
+  }
+
+  .iso-jobs {
+    margin: 0 0 0.75rem;
+    padding-left: 1.2rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
   }
 </style>

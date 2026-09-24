@@ -173,7 +173,7 @@ async def get_virtual_media(server_id: Optional[int] = None, service_id: Optiona
         if not virtual_media_ready(server):
             raise ValueError("Virtual media is not configured for this server")
         try:
-            status = await get_status(server)
+            status = await get_status(server, db=db)
         except VirtualMediaUnavailable as exc:
             raise ValueError(exc.detail) from exc
         return {"server_id": server.id, **status}

@@ -26,6 +26,7 @@
   $: isServersActive = currentPath.startsWith('/admin/servers');
   $: isSwitchesActive = currentPath.startsWith('/admin/switches');
   $: isLocationsActive = currentPath.startsWith('/admin/locations');
+  $: isRunnersActive = currentPath.startsWith('/admin/runners');
   $: isRacksActive = currentPath.startsWith('/admin/racks');
   $: isPluginsActive = currentPath.startsWith('/admin/plugins');
   $: isOSTemplatesActive = currentPath.startsWith('/admin/os-templates');
@@ -141,6 +142,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
             <span>Locations</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/runners" class="nav-link" class:active={isRunnersActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+            <span>Runners</span>
           </a>
         </li>
         <li class="nav-item">

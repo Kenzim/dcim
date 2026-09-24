@@ -91,18 +91,16 @@ class ServiceInstanceTestResponse(BaseModel):
     connection_ok: bool
 
 
-def _call_runner_health(base_url: str, api_key: str, use_auth: bool) -> tuple[bool, str]:
-    """Call runner /health (no auth) or /status (auth). Returns (ok, message)."""
+async def _call_runner_health(base_url: str, api_key: str, use_auth: bool) -> tuple[bool, str]:
+    """Call runner /status with auth. Returns (ok, message)."""
     base_url = base_url.rstrip("/")
-    # Call /status on the runner. When an API key is configured on the runner
-    # we send it in X-API-Key; otherwise we call without auth.
     url = f"{base_url}/status"
     headers = {}
     if use_auth and api_key:
         headers["X-API-Key"] = api_key
     try:
-        with httpx.Client(timeout=5.0) as client:
-            r = client.get(url, headers=headers)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(url, headers=headers)
             if r.status_code == 200:
                 return True, "Connection successful"
             if r.status_code == 401:
@@ -239,6 +237,6 @@ async def test_service_instance(
                 detail="API key does not match the stored key for this instance",
             )
     api_key = body.api_key or ServiceInstanceDAO.get_api_key(instance) or ""
-    ok, msg = _call_runner_health(instance.base_url, api_key, use_auth=bool(api_key))
+    ok, msg = await _call_runner_health(instance.base_url, api_key, use_auth=bool(api_key))
     ServiceInstanceDAO.update_connection_test(db, instance, ok)
     return ServiceInstanceTestResponse(success=ok, message=msg, connection_ok=ok)

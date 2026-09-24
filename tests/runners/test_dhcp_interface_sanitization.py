@@ -18,6 +18,8 @@ def dhcp_client(tmp_path, monkeypatch):
     monkeypatch.setenv("DHCP_LEASE_PATH", str(tmp_path / "dhcp" / "dhcpd.leases"))
     monkeypatch.setenv("ALLOW_UNAUTHENTICATED", "true")
     monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("RACKFLOW_URL", raising=False)
+    monkeypatch.delenv("RACKFLOW_WS_URL", raising=False)
     import dhcp_runner.main as dhcp_main
     dhcp_main = importlib.reload(dhcp_main)
     with TestClient(dhcp_main.app) as client:

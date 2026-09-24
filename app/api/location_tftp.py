@@ -8,7 +8,7 @@ from typing import Dict, Any
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServiceInstanceDAO, LocationDAO
-from app.services.runner_client import call_tftp_runner
+from app.services.runner_client import call_tftp_runner, cached_location_status
 
 from typing import Annotated
 DbDep = Annotated[Session, Depends(get_db)]
@@ -17,10 +17,15 @@ AdminDep = Annotated[dict, Depends(require_admin)]
 router = APIRouter()
 
 
-def _get_tftp_instance(db: Session, location_id: int):
+def _get_location(db: Session, location_id: int):
     loc = LocationDAO.get_by_id(db, location_id)
     if not loc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Location not found")
+    return loc
+
+
+def _get_tftp_instance(db: Session, location_id: int):
+    _get_location(db, location_id)
     instance = ServiceInstanceDAO.get_by_location_and_type(db, location_id, "tftp")
     if not instance:
         raise HTTPException(
@@ -36,7 +41,16 @@ async def get_location_tftp_status(
     auth: AdminDep,
     db: DbDep,
 ):
-    instance = _get_tftp_instance(db, location_id)
+    _get_location(db, location_id)
+    cached = cached_location_status(db, location_id, "tftp")
+    if cached is not None:
+        return cached
+    instance = ServiceInstanceDAO.get_by_location_and_type(db, location_id, "tftp")
+    if not instance:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No TFTP service instance registered for this location",
+        )
     code, body = await call_tftp_runner(instance, db, "GET", "/status")
     if code != 200:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=body)

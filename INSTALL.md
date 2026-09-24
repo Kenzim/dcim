@@ -53,21 +53,24 @@ This starts:
 
 - **app** – FastAPI on port 8000 (frontend is built and served from `/app/static`)
 - **bandwidth-poller** – SNMP poller (same DB, poll interval 60s)
-- **dhcp-runner** – optional container that runs `dhcpd`; app calls its API (port 9080) to start/stop/restart.
-- **tftp-runner** – optional container that runs `in.tftpd`; app calls its API (port 9081), TFTP on 69/udp. Config is shared via volume `/shared`.
+- **dhcp-runner** – optional container that runs `dhcpd`; phones home to Rackflow over WebSocket (`RACKFLOW_URL` + `API_KEY`) and still exposes HTTP 9080 as a fallback.
+- **tftp-runner** – optional container that runs `in.tftpd`; same uplink; TFTP on 69/udp.
+- **media-runner** – per-location ISO library (HTTP on 9083, SMB on 445). Enroll under Admin → Runners, then set the generated key as `MEDIA_RUNNER_API_KEY`. Set `MEDIA_PUBLIC_HTTP_BASE` / `MEDIA_SMB_ADVERTISE_HOST` to the address BMCs and PXE clients can reach. Build `isos/rackflow-netboot.iso` with `scripts/build-rackflow-netboot-iso.sh` before imaging so the container can seed it; if the file is missing the runner still starts with an empty library.
 - **mysql** – MariaDB 11 (database `dcim`, user `dcim`/`dcim`)
 - **redis** – Redis 7
 
-When `DHCP_RUNNER_URL` and `TFTP_RUNNER_URL` are set, the UI’s DHCP/TFTP controls talk to those containers. The app writes `dhcpd.conf` and TFTP files to the shared volume; the runners read them. For DHCP to serve a real LAN you may need `network_mode: host` and `DHCP_INTERFACES` set (e.g. `eth0`).
+When `RACKFLOW_URL` is set, Python runners open `ws(s)://…/api/runner/ws` and push status every ~10s. The admin UI reads that cache (online vs daemon running) instead of blocking on a live HTTP call. Legacy `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` HTTP control still works for un-migrated installs.
 
 #### Runner authentication (required)
 
-The DHCP and TFTP runner APIs are **fail-closed**: if no `API_KEY` is configured they refuse every request (HTTP 503) except `/health`. The compose files therefore require `DHCP_RUNNER_API_KEY` and `TFTP_RUNNER_API_KEY` to be set (via `.env`), and `docker compose up` will error until they are. Generate strong random keys and set the matching value on each service instance in the UI (Services tab) so the app presents the same `X-API-Key`:
+The DHCP, TFTP, and media runner HTTP APIs are **fail-closed**: if no `API_KEY` is configured they refuse every request (HTTP 503) except `/health`. The same key authenticates the WebSocket uplink. Generate keys (or copy the key shown once in Admin → Runners) and put them in `.env`:
 
 ```bash
 # .env (do not commit real secrets)
 DHCP_RUNNER_API_KEY=$(openssl rand -hex 32)
 TFTP_RUNNER_API_KEY=$(openssl rand -hex 32)
+MEDIA_RUNNER_API_KEY=$(openssl rand -hex 32)
+RACKFLOW_URL=https://rackflow.example.com
 ```
 
 For isolated local development only, you may set `ALLOW_UNAUTHENTICATED=true` on a runner to disable the check; never do this in production.

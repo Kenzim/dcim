@@ -326,6 +326,15 @@ api_router.include_router(ipam_api.router, tags=["ipam"])
 from app.api import runner_proxy as runner_proxy_api
 api_router.include_router(runner_proxy_api.router, tags=["proxy-runner"])
 
+from app.api import runner_ws as runner_ws_api
+api_router.include_router(runner_ws_api.router, tags=["runner-uplink"])
+
+from app.api import runner_media as runner_media_api
+api_router.include_router(runner_media_api.router, tags=["runner-media"])
+
+from app.api import runners_admin as runners_admin_api
+api_router.include_router(runners_admin_api.router, tags=["runners"])
+
 from app.api import proxy_runners as proxy_runners_api
 api_router.include_router(proxy_runners_api.router, tags=["proxy-runners"])
 

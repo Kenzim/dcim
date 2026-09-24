@@ -996,6 +996,120 @@ export async function updateTFTPConfig(config) {
   return await response.json();
 }
 
+// Unified location runners (WebSocket phone-home: dhcp / tftp / media)
+export async function listRunners({ locationId, capability } = {}) {
+  const url = new URL(`${API_BASE}/admin/runners`, window.location.origin);
+  if (locationId) url.searchParams.set('location_id', locationId);
+  if (capability) url.searchParams.set('capability', capability);
+  const response = await fetch(url.pathname + url.search, { credentials: 'include' });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to list runners');
+  }
+  return await response.json();
+}
+
+export async function createRunner(data) {
+  const response = await fetch(`${API_BASE}/admin/runners`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to create runner');
+  }
+  return await response.json();
+}
+
+export async function updateRunner(id, data) {
+  const response = await fetch(`${API_BASE}/admin/runners/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to update runner');
+  }
+  return await response.json();
+}
+
+export async function rotateRunnerKey(id) {
+  const response = await fetch(`${API_BASE}/admin/runners/${id}/rotate-key`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to rotate runner key');
+  }
+  return await response.json();
+}
+
+export async function deleteRunner(id) {
+  const response = await fetch(`${API_BASE}/admin/runners/${id}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete runner');
+  }
+}
+
+export async function listRunnerIsos(id) {
+  const response = await fetch(`${API_BASE}/admin/runners/${id}/isos`, { credentials: 'include' });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to list ISOs');
+  }
+  return await response.json();
+}
+
+export async function downloadRunnerIso(id, { url, filename }) {
+  const response = await fetch(`${API_BASE}/admin/runners/${id}/isos/download`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ url, filename }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to start ISO download');
+  }
+  return await response.json();
+}
+
+export async function deleteRunnerIso(id, filename) {
+  const response = await fetch(`${API_BASE}/admin/runners/${id}/isos/${encodeURIComponent(filename)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete ISO');
+  }
+  return await response.json();
+}
+
+export async function uploadRunnerIso(id, file) {
+  const body = new FormData();
+  body.append('file', file);
+  const response = await fetch(`${API_BASE}/admin/runners/${id}/isos/upload`, {
+    method: 'POST',
+    credentials: 'include',
+    body,
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to upload ISO');
+  }
+  return await response.json();
+}
+
 // Standalone proxy runners (generated API key; phone-home health)
 export async function listProxyRunners() {
   const response = await fetch(`${API_BASE}/admin/proxy-runners`, { credentials: 'include' });

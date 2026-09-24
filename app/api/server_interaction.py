@@ -38,7 +38,12 @@ from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
 )
-from app.services.virtual_media.iso_catalog import list_iso_files, pxe_iso_url
+from app.services.virtual_media.iso_catalog import (
+    list_iso_files,
+    list_iso_files_for_location,
+    location_media_iso_url,
+    pxe_iso_url,
+)
 from app.models.server_activity import ServerActivityEventType
 from app.utils.shell_escape import shell_escape_double_quoted
 import asyncio
@@ -560,15 +565,18 @@ boot
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Invalid ISO URL: no filename in path"
                     )
-                # Generate one-time download token so the client can fetch the ISO (endpoint requires token)
-                download_token_service = get_download_token_service()
-                iso_token = download_token_service.generate_token(
-                    boot_task_id=boot_task.id,
-                    allowed_files=[iso_filename],
-                    expires_in=900,
-                    single_use=False,  # iPXE requests same URL for initrd and again for chain/sanboot
-                )
-                iso_url_to_use = f"{base_url}{_u.path}?token={iso_token}"
+                media_url = location_media_iso_url(db, getattr(server, "location_id", None), iso_filename)
+                if media_url:
+                    iso_url_to_use = media_url
+                else:
+                    download_token_service = get_download_token_service()
+                    iso_token = download_token_service.generate_token(
+                        boot_task_id=boot_task.id,
+                        allowed_files=[iso_filename],
+                        expires_in=900,
+                        single_use=False,
+                    )
+                    iso_url_to_use = f"{base_url}{_u.path}?token={iso_token}"
                 
                 # For ISO boots, mark as completed immediately after serving the boot script
                 # We can't detect when an ISO boot completes, so we mark it done right away
@@ -1946,18 +1954,19 @@ async def get_script_by_id_or_name(
 async def list_isos(
     auth: AdminDep,
     db: DbDep,
+    location_id: Optional[int] = Query(None, description="Use this location's media runner library when enrolled"),
 ):
     """
-    List all available ISO files.
-
-    Returns a list of ISO files available in the isos/ directory.
+    List ISO files from the central catalog, or a location media runner when set.
     """
     del auth
     base_url = _get_base_url_for_pxe_ip(db, None)
-    return [
-        {**row, "url": pxe_iso_url(base_url, row["filename"])}
-        for row in list_iso_files()
-    ]
+    rows = list_iso_files_for_location(db, location_id) if location_id else list_iso_files()
+    result = []
+    for row in rows:
+        media_url = location_media_iso_url(db, location_id, row["filename"]) if location_id else None
+        result.append({**row, "url": media_url or pxe_iso_url(base_url, row["filename"])})
+    return result
 
 
 @router.get("/isos/{filename}", responses=COMMON_ERROR_RESPONSES)

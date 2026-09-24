@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Large/static assets first so they stay cached when app code changes
 # Plugins only; tftp, os_templates, disk_images, isos – mount at runtime
 COPY tftp/ ./tftp/
+COPY runner_common/ ./runner_common/
 COPY app/plugins/ ./app/plugins/
 
 # Application code and migrations (change frequently)
