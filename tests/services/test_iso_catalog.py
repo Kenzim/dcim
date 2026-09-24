@@ -3,8 +3,10 @@ import pytest
 
 from app.dao.location_dao import LocationDAO
 from app.dao.runner_dao import RunnerDAO
+from app.services.runners.media_urls import build_cifs_url
 from app.services.virtual_media.base import VirtualMediaUnavailable
 from app.services.virtual_media.iso_catalog import list_iso_files_for_location, validate_iso_filename
+from app.services.virtual_media.supermicro_x9 import parse_cifs_share
 
 
 def test_validate_iso_filename_accepts_basename():
@@ -15,6 +17,15 @@ def test_validate_iso_filename_accepts_basename():
 def test_validate_iso_filename_rejects_invalid(name):
     with pytest.raises(VirtualMediaUnavailable, match="Invalid ISO filename"):
         validate_iso_filename(name)
+
+
+def test_build_cifs_url_parses_for_x9():
+    url = build_cifs_url("10.0.0.5", "isos", "win.iso", "vmabcd", "s3cret/x")
+    host, path, user, password = parse_cifs_share(url, {})
+    assert host == "10.0.0.5"
+    assert path == r"\isos\win.iso"
+    assert user == "vmabcd"
+    assert password == "s3cret/x"
 
 
 def test_list_iso_files_for_location_falls_back_to_central(db_session, tmp_path, monkeypatch):

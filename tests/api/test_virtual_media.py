@@ -111,7 +111,7 @@ def test_admin_lists_virtual_media_profiles(client, test_admin_user):
     resp = client.get("/api/virtual-media/profiles", headers=headers)
     assert resp.status_code == 200, resp.text
     ids = {row["id"] for row in resp.json()}
-    assert {"asrockrack", "gigabyte", "supermicro"} <= ids
+    assert {"asrockrack", "gigabyte", "supermicro", "supermicro_x9"} <= ids
 
 
 def test_create_server_rejects_unknown_virtual_media_profile(client, test_admin_user, db_session):

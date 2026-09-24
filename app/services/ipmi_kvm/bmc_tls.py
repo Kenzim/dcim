@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 # MegaRAC fw 2.32 may require RSA-only TLS 1.2 ciphers; fw 1.83 still uses TLS 1.3.
 _MEGARAC_CIPHERS = "DEFAULT:@SECLEVEL=0:AES256-GCM-SHA384:AES128-GCM-SHA384"
+# OpenSSL 3 disables RFC 5746-less renegotiation; ATEN 2010 BMCs still need it.
+_LEGACY_RENEG = getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00040000)
 
 
 def bmc_ssl_context(*, megarac: bool = False) -> ssl.SSLContext:
@@ -28,6 +30,10 @@ def bmc_ssl_context(*, megarac: bool = False) -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.options |= _LEGACY_RENEG
+    except ValueError:
+        logger.debug("BMC SSL: legacy renegotiation flag rejected", exc_info=True)
     if megarac:
         try:
             ctx.set_ciphers(_MEGARAC_CIPHERS)

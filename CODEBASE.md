@@ -16,7 +16,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Change DB schema / model | `app/models/<entity>.py` + new file under `alembic/versions/` + matching `app/dao/<entity>_dao.py` |
 | Business logic (provisioning, DHCP gen, VM place) | `app/services/` |
 | Server power / BMC / Proxmox actions | `app/plugins/` (`ipmi.py`, `proxmox.py`, …) |
-| Native HTML5 KVM (AMI MegaRAC / SuperMicro ATEN) | `app/services/ipmi_kvm/` (`asrockrack.py`, `gigabyte.py`, `supermicro.py`) + `app/api/ipmi_kvm.py` |
+| Native HTML5 KVM (AMI MegaRAC / SuperMicro ATEN HTML5 / SuperMicro X9 HERMON) | `app/services/ipmi_kvm/` (`asrockrack.py`, `gigabyte.py`, `supermicro.py`, `supermicro_x9.py`) + `app/api/ipmi_kvm.py` |
 | Bare-metal Serial-over-LAN | `app/services/sol/` (`ipmi_sol.py` + hub/tickets) + `app/api/sol.py` |
 | BMC virtual CD (ISO mount) | `app/services/virtual_media/` + `app/api/virtual_media.py` |
 | Switch SNMP / bandwidth | `app/plugins/snmpv3.py`, poller `scripts/snmp_bandwidth_poller.py` |
@@ -209,9 +209,9 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
-| `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC) |
+| `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC, SuperMicro X9 ATEN HERMON on TCP 5900). X9 JNLP GET from Docker needs host TCPMSS clamp when eth0 MTU < 1500. |
 | `sol/` | Bare-metal SOL profiles (`ipmi_sol` via ipmitool), shared hub, REST send |
-| `virtual_media/` | BMC virtual CD (ASRockRack/Gigabyte MegaRAC Redfish, SuperMicro Redfish), shared `isos/` catalog or per-location media runner |
+| `virtual_media/` | BMC virtual CD (ASRockRack/Gigabyte MegaRAC Redfish, SuperMicro Redfish, SuperMicro X9 ATEN CIFS share), shared `isos/` catalog or per-location media runner |
 
 ---
 

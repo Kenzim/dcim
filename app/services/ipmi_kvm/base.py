@@ -39,6 +39,7 @@ class BmcKvmAuth:
     server_ip: str = ""
     fb_width: int = 0
     fb_height: int = 0
+    kvm_port: int = 5900
 
 
 class IpmiKvmProfile(ABC):

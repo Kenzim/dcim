@@ -8,11 +8,13 @@ from app.services.ipmi_kvm.asrockrack import AsrockRackKvmProfile
 from app.services.ipmi_kvm.base import IpmiKvmProfile, IpmiKvmUnavailable
 from app.services.ipmi_kvm.gigabyte import GigabyteKvmProfile
 from app.services.ipmi_kvm.supermicro import SuperMicroKvmProfile
+from app.services.ipmi_kvm.supermicro_x9 import SuperMicroX9KvmProfile
 
 _PROFILES: dict[str, IpmiKvmProfile] = {
     AsrockRackKvmProfile.id: AsrockRackKvmProfile(),
     GigabyteKvmProfile.id: GigabyteKvmProfile(),
     SuperMicroKvmProfile.id: SuperMicroKvmProfile(),
+    SuperMicroX9KvmProfile.id: SuperMicroX9KvmProfile(),
 }
 
 

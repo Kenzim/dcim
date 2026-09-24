@@ -206,7 +206,7 @@ async def test_list_virtual_media_profiles(mcp_auth_ctx_read, mcp_sessionlocal):
 
     result = await list_virtual_media_profiles()
     ids = {row["id"] for row in result["profiles"]}
-    assert {"asrockrack", "gigabyte", "supermicro"} <= ids
+    assert {"asrockrack", "gigabyte", "supermicro", "supermicro_x9"} <= ids
 
 
 @pytest.mark.asyncio

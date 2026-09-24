@@ -1065,7 +1065,7 @@
                 <option value={profile.id}>{profile.display_name}</option>
               {/each}
             </select>
-            <small class="field-help">Native BMC HTML5 KVM in a popup (separate from Open IPMI). The Rackflow host must reach BMC HTTPS.</small>
+            <small class="field-help">Native BMC KVM in a popup (separate from Open IPMI). The Rackflow host must reach the BMC web UI (HTTP or HTTPS) and, for SuperMicro X9, TCP 5900.</small>
           </div>
           <div class="form-group">
             <label for="sol-profile">Serial-over-LAN profile</label>

@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import AtenKvmViewer from '../components/AtenKvmViewer.svelte';
+  import AtenX9KvmViewer from '../components/AtenX9KvmViewer.svelte';
   import KvmViewer from '../components/KvmViewer.svelte';
   import { redeemIpmiKvmLaunchTicket } from '../lib/api.js';
 
@@ -47,6 +48,8 @@
   {:else if session}
     {#if session.profile === 'supermicro'}
       <AtenKvmViewer {session} />
+    {:else if session.profile === 'supermicro_x9'}
+      <AtenX9KvmViewer {session} />
     {:else}
       <KvmViewer {session} />
     {/if}

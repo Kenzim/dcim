@@ -99,6 +99,17 @@ upstreams: Dict[str, str] = {}
 upstreams_lock = asyncio.Lock()
 
 
+def _upstream_tls_verify():
+    """httpx ``verify=`` for BMC HTTPS. X9 ATEN needs unsafe legacy renegotiation."""
+    if UPSTREAM_VERIFY_TLS:
+        return True
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00040000)
+    return ctx
+
+
 # --------------------------------------------------------------------------- #
 # Session cookie (HMAC-signed, host-only)
 # --------------------------------------------------------------------------- #
@@ -342,7 +353,7 @@ async def proxy_handler(request: Request) -> Response:
     proxy_host = request.headers.get("host") or ""
     client_proto = _client_proto(request)
 
-    client = httpx.AsyncClient(verify=UPSTREAM_VERIFY_TLS, timeout=60.0, follow_redirects=False)
+    client = httpx.AsyncClient(verify=_upstream_tls_verify(), timeout=60.0, follow_redirects=False)
     try:
         upstream_req = client.build_request(
             request.method,
@@ -415,6 +426,8 @@ async def ws_handler(websocket: WebSocket) -> None:
     ssl_ctx = None
     if ws_scheme == "wss":
         ssl_ctx = ssl.create_default_context()
+        # ATEN 2010 BMCs (SuperMicro X9) speak TLS 1.0 without RFC 5746.
+        ssl_ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x00040000)
         if not UPSTREAM_VERIFY_TLS:
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE

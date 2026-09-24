@@ -14,7 +14,7 @@ from app.services.virtual_media.registry import (
 
 def test_list_profiles_includes_first_pass_vendors():
     ids = {row["id"] for row in list_profiles()}
-    assert {"asrockrack", "gigabyte", "supermicro"} <= ids
+    assert {"asrockrack", "gigabyte", "supermicro", "supermicro_x9"} <= ids
 
 
 @pytest.mark.parametrize("value", [None, "", "none", "off", "disabled", "NONE"])

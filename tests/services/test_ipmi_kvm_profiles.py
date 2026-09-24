@@ -78,7 +78,7 @@ def test_hello_frame_attempts_order():
 
 def test_registry_lists_gigabyte():
     ids = {p["id"] for p in list_profiles()}
-    assert ids == {"asrockrack", "gigabyte", "supermicro"}
+    assert ids == {"asrockrack", "gigabyte", "supermicro", "supermicro_x9"}
     assert isinstance(get_profile("gigabyte"), GigabyteKvmProfile)
     assert normalize_profile_id("gigabyte") == "gigabyte"
     assert normalize_profile_id("") is None
