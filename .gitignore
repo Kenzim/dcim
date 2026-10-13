@@ -140,3 +140,9 @@ proxy_runner.env
 # OWASP Dependency-Check reports (generated in CI; do not commit)
 dependency-check-report.*
 
+
+# Coverage / scanner output
+coverage.json
+coverage.xml
+.scannerwork/
+.phpunit.result.cache
