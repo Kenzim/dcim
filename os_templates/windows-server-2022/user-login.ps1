@@ -21,8 +21,14 @@ try {
   $syncTaskCmd = 'cmd.exe /c w32tm /resync /force'
   Write-Host "Configuring recurring time sync task: $syncTaskName"
 
-  schtasks /Delete /TN $syncTaskName /F 2>$null | Out-Null
-  schtasks /Create /TN $syncTaskName /SC MINUTE /MO 2 /RU SYSTEM /RL HIGHEST /TR $syncTaskCmd /F | Out-Null
+  foreach ($svcName in @("TimeBrokerSvc", "Schedule")) {
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne "Running") {
+      try { Start-Service -Name $svcName } catch {}
+    }
+  }
+  schtasks.exe /Delete /S localhost /TN $syncTaskName /F 2>$null | Out-Null
+  schtasks.exe /Create /S localhost /TN $syncTaskName /SC MINUTE /MO 2 /RU SYSTEM /RL HIGHEST /TR $syncTaskCmd /F | Out-Null
 
   if ($LASTEXITCODE -eq 0) {
     Write-Host "Recurring 2-minute time sync task created."

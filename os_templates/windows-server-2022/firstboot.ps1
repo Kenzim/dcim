@@ -172,102 +172,151 @@ try {
 Write-Host ""
 
 # --------------------------------
-# 5. Extend C: partition (diskpart then PowerShell fallback)
+# 5. Extend C: partition, then the NTFS filesystem
 # --------------------------------
+# diskpart stops a script when a command fails. On the system volume, "extend"
+# often errors with "The parameter is incorrect" after the partition has already
+# grown, so "extend filesystem" in the same script never runs. A later boot then
+# fails "extend" (no free space) and skips the filesystem again.
 
-Write-Host "[5/6] Extending C: partition to maximum size..." -ForegroundColor Yellow
+Write-Host "[5/6] Extending C: partition and filesystem..." -ForegroundColor Yellow
 
-# 4a. Use diskpart: select volume C, extend filesystem (and extend partition if free space exists)
-$diskpartScript = @"
-select volume C
-extend
-extend filesystem
-exit
-"@
-$diskpartFile = Join-Path $env:TEMP "dcim_extend_c.diskpart"
+$scriptsDir = "C:\Windows\Setup\Scripts"
+if (!(Test-Path $scriptsDir)) {
+    New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null
+}
+$extendPs1 = Join-Path $scriptsDir "extend-c.ps1"
+$extendSrc = @'
+$ErrorActionPreference = "Continue"
+$dcimTranscript = $false
 try {
-    Set-Content -Path $diskpartFile -Value $diskpartScript -Encoding ASCII -ErrorAction Stop
-    Write-Host "  Running diskpart to extend C: (select volume C, extend, extend filesystem)..." -ForegroundColor Gray
-    $diskpartOut = & diskpart /s $diskpartFile 2>&1
-    $diskpartOut | ForEach-Object { Write-Host "  diskpart: $_" -ForegroundColor Gray }
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  [SUCCESS] diskpart extended C: volume" -ForegroundColor Green
-    } else {
-        Write-Warning "  diskpart exited with code $LASTEXITCODE; trying PowerShell fallback"
+    Start-Transcript -Path "C:\Windows\Temp\extend-c.log" -Append -ErrorAction Stop
+    $dcimTranscript = $true
+} catch {}
+
+function Invoke-DcimDiskpart([string]$body) {
+    $path = Join-Path $env:TEMP ("dcim-diskpart-" + [guid]::NewGuid().ToString("n") + ".txt")
+    [System.IO.File]::WriteAllText($path, $body)
+    try {
+        & diskpart.exe /s $path 2>&1
+    } finally {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
-} catch {
-    Write-Warning "  diskpart failed: $_"
-} finally {
-    if (Test-Path $diskpartFile) { Remove-Item $diskpartFile -Force -ErrorAction SilentlyContinue }
 }
 
-# 4b. PowerShell fallback if diskpart did not extend (e.g. no contiguous space or already max)
+function Get-DcimFilesystemBytes([string]$drive) {
+    return (New-Object System.IO.DriveInfo($drive)).TotalSize
+}
+
+$letter = "C"
 try {
-    $driveLetter = "C"
-    $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
-    $diskNumber = $partition.DiskNumber
+    Write-Host "Extending partition ${letter}:"
+    Invoke-DcimDiskpart "select volume $letter`r`nextend noerr`r`nexit`r`n" | ForEach-Object { Write-Host "  diskpart: $_" }
 
-    $currentSizeGB   = [math]::Round($partition.Size / 1GB, 2)
-    $supported       = Get-PartitionSupportedSize -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -ErrorAction Stop
-    $supportedMaxGB  = [math]::Round($supported.SizeMax / 1GB, 2)
-    $deltaBytes      = $supported.SizeMax - $partition.Size
-
-    Write-Host "  Current C: size: $currentSizeGB GB" -ForegroundColor Gray
-    Write-Host "  Max supported C: size: $supportedMaxGB GB" -ForegroundColor Gray
-
-    if ($deltaBytes -lt 1MB) {
-        Write-Host "  C: partition is already using all available space" -ForegroundColor Green
-    } elseif ($partition.Size -ge $supported.SizeMax) {
-        Write-Host "  C: partition is already at maximum size ($supportedMaxGB GB)" -ForegroundColor Green
-    } else {
-        $targetBytes = [math]::Floor(($supported.SizeMax - 1MB) / 1MB) * 1MB
-        $targetGB    = [math]::Round($targetBytes / 1GB, 2)
-        Write-Host "  Extending via PowerShell to: $targetGB GB..." -ForegroundColor Gray
-        Resize-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -Size $targetBytes -ErrorAction Stop
-        Write-Host "  [SUCCESS] Extended C: to approximately $targetGB GB" -ForegroundColor Green
+    try {
+        $partition = Get-Partition -DriveLetter $letter -ErrorAction Stop
+        $supported = Get-PartitionSupportedSize -DiskNumber $partition.DiskNumber -PartitionNumber $partition.PartitionNumber -ErrorAction Stop
+        $deltaBytes = $supported.SizeMax - $partition.Size
+        if ($deltaBytes -ge 1MB) {
+            $targetBytes = [math]::Floor(($supported.SizeMax - 1MB) / 1MB) * 1MB
+            Write-Host ("  Resize-Partition to {0:N2} GB" -f ($targetBytes / 1GB))
+            Resize-Partition -DiskNumber $partition.DiskNumber -PartitionNumber $partition.PartitionNumber -Size $targetBytes -ErrorAction Stop
+        } else {
+            Write-Host "  Partition is already using the free space"
+        }
+    } catch {
+        $msg = $_.Exception.Message
+        if ($msg -like "*Size Not Supported*" -or $msg -like "*extent is less than the minimum of 1MB*") {
+            Write-Host "  Partition is already at maximum size"
+        } else {
+            Write-Warning "  Partition extend fallback failed: $msg"
+        }
     }
 
-    # Partition can be full while NTFS is still the image size (~20 GB).
-    $vol = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
-    $partNow = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
-    if ($vol.Size -lt ($partNow.Size - 8MB)) {
-        Write-Host "  NTFS is smaller than the partition; running extend filesystem..." -ForegroundColor Gray
-        $fsFile = Join-Path $env:TEMP "dcim_extend_fs.diskpart"
-        Set-Content -Path $fsFile -Value "select volume C`r`nextend filesystem`r`nexit" -Encoding ASCII
-        & diskpart /s $fsFile | ForEach-Object { Write-Host "  diskpart: $_" -ForegroundColor Gray }
-        Remove-Item $fsFile -Force -ErrorAction SilentlyContinue
-        $vol = Get-Volume -DriveLetter $driveLetter -ErrorAction SilentlyContinue
-        Write-Host "  C: filesystem size now $([math]::Round($vol.Size / 1GB, 2)) GB" -ForegroundColor Green
+    Write-Host "  extend filesystem"
+    Invoke-DcimDiskpart "rescan`r`nselect volume $letter`r`nextend filesystem`r`nexit`r`n" | ForEach-Object { Write-Host "  diskpart: $_" }
+
+    $partition = Get-Partition -DriveLetter $letter -ErrorAction Stop
+    $fsBytes = Get-DcimFilesystemBytes $letter
+    Write-Host ("  Partition {0:N2} GB, filesystem {1:N2} GB" -f ($partition.Size / 1GB), ($fsBytes / 1GB))
+    if ($fsBytes -lt ($partition.Size - 16MB)) {
+        Write-Host "  NTFS is still smaller than the partition; FSCTL_EXTEND_VOLUME"
+        if (-not ("DcimVolumeExtend" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class DcimVolumeExtend {
+    const uint GenericRead = 0x80000000;
+    const uint FileShareReadWrite = 0x3;
+    const uint OpenExisting = 3;
+    const uint FileAttributeNormal = 0x80;
+    const uint FsctlExtendVolume = 0x900F0;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle handle, uint code, ref long input, uint inputSize, IntPtr output, uint outputSize, out uint returned, IntPtr overlapped);
+    public static void Extend(string driveLetter, long totalSectors) {
+        string path = "\\\\.\\" + driveLetter + ":";
+        using (SafeFileHandle handle = CreateFile(path, GenericRead, FileShareReadWrite, IntPtr.Zero, OpenExisting, FileAttributeNormal, IntPtr.Zero)) {
+            if (handle.IsInvalid)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            uint returned;
+            long sectors = totalSectors;
+            if (!DeviceIoControl(handle, FsctlExtendVolume, ref sectors, 8, IntPtr.Zero, 0, out returned, IntPtr.Zero))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+}
+"@
+        }
+        $sector = [int](Get-Disk -Number $partition.DiskNumber).LogicalSectorSize
+        if ($sector -lt 512) { $sector = 512 }
+        try {
+            [DcimVolumeExtend]::Extend($letter, [long][math]::Floor($partition.Size / $sector))
+        } catch {
+            Write-Warning "  FSCTL_EXTEND_VOLUME failed: $($_.Exception.Message)"
+            if ($sector -ne 512) {
+                try {
+                    [DcimVolumeExtend]::Extend($letter, [long][math]::Floor($partition.Size / 512))
+                } catch {
+                    Write-Warning "  FSCTL_EXTEND_VOLUME (512-byte sectors) failed: $($_.Exception.Message)"
+                }
+            }
+        }
+        $fsBytes = Get-DcimFilesystemBytes $letter
+    }
+    if ($fsBytes -lt ($partition.Size - 16MB)) {
+        Write-Warning ("  C: filesystem is still {0:N2} GB; partition is {1:N2} GB" -f ($fsBytes / 1GB), ($partition.Size / 1GB))
+    } else {
+        Write-Host ("  [SUCCESS] C: filesystem is {0:N2} GB" -f ($fsBytes / 1GB))
     }
 } catch {
-    $msg = $_.Exception.Message
-    if ($msg -like "*Size Not Supported*" -or $msg -like "*extent is less than the minimum of 1MB*") {
-        Write-Warning "  [SKIP] C: partition cannot be extended further (no free space >= 1 MB)."
-        Write-Host "  Details: $msg" -ForegroundColor Gray
-    } else {
-        Write-Error "  [FAILED] Failed to extend C: partition: $_"
-        Write-Host "  Error details: $msg" -ForegroundColor Red
+    Write-Warning "Extend C: failed: $($_.Exception.Message)"
+} finally {
+    if ($dcimTranscript) {
+        try { Stop-Transcript } catch {}
     }
+}
+'@
+try {
+    Set-Content -Path $extendPs1 -Value $extendSrc -Encoding ASCII -ErrorAction Stop
+    & $extendPs1
+} catch {
+    Write-Warning "  Failed to extend C: $_"
 }
 
 Write-Host ""
 
 # --------------------------------
-# 5b. Persist diskpart + serial admin cmd for every startup
+# 5b. Persist serial admin cmd for every startup
 # --------------------------------
 
 $scriptsDir = "C:\Windows\Setup\Scripts"
 if (!(Test-Path $scriptsDir)) {
     New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null
 }
-
-$extendFile = Join-Path $scriptsDir "extend-c.diskpart"
-Set-Content -Path $extendFile -Value @"
-select volume C
-extend
-extend filesystem
-exit
-"@ -Encoding ASCII
 
 $serialPs1 = Join-Path $scriptsDir "serial-admin-cmd.ps1"
 Set-Content -Path $serialPs1 -Value @'
@@ -389,23 +438,121 @@ foreach ($name in @("COM2", "COM1", "COM3")) {
 L "ps getty end"
 '@ -Encoding UTF8
 
-function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra) {
-    schtasks /Delete /TN $name /F 2>$null | Out-Null
+function Start-DcimTaskScheduler {
+    # schtasks prints "The network address is invalid" when Schedule is not
+    # accepting local RPC. During specialize it is stopped, and it exits
+    # again unless Time Broker is already running.
+    foreach ($name in @("TimeBrokerSvc", "SystemEventsBroker", "Schedule")) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if (-not $svc) { continue }
+        try {
+            if ($svc.StartType -eq "Disabled") {
+                Set-Service -Name $name -StartupType Manual
+            }
+            if ((Get-Service -Name $name).Status -ne "Running") {
+                Start-Service -Name $name
+            }
+        } catch {
+            Write-Warning "  Could not start ${name}: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Split-DcimCommand([string]$command) {
+    $command = $command.Trim()
+    if ($command.StartsWith('"')) {
+        $end = $command.IndexOf('"', 1)
+        if ($end -gt 1) {
+            return @{
+                Execute = $command.Substring(1, $end - 1)
+                Argument = $command.Substring($end + 1).Trim()
+            }
+        }
+    }
+    $space = $command.IndexOf(" ")
+    if ($space -lt 0) {
+        return @{ Execute = $command; Argument = "" }
+    }
+    return @{
+        Execute = $command.Substring(0, $space)
+        Argument = $command.Substring($space + 1).Trim()
+    }
+}
+
+function Register-DcimTaskCom([string]$name, [string]$command, [string]$kind, [string]$delayIso) {
+    $parts = Split-DcimCommand $command
+    $svc = New-Object -ComObject "Schedule.Service"
+    $svc.Connect()
+    $folder = $svc.GetFolder("\")
+    try { $folder.DeleteTask($name, 0) } catch {}
+    $def = $svc.NewTask(0)
+    $def.RegistrationInfo.Description = $name
+    # SID, not "SYSTEM": account-name lookup during specialize fails with
+    # "The network address is invalid" when this host has no resolvable name.
+    $def.Principal.UserId = "S-1-5-18"
+    $def.Principal.LogonType = 5
+    $def.Principal.RunLevel = 1
+    $def.Settings.Enabled = $true
+    $def.Settings.DisallowStartIfOnBatteries = $false
+    $def.Settings.StopIfGoingOnBatteries = $false
+    $action = $def.Actions.Create(0)
+    $action.Path = $parts.Execute
+    if ($parts.Argument) { $action.Arguments = $parts.Argument }
+    if ($kind -eq "logon") {
+        $trigger = $def.Triggers.Create(9)
+    } else {
+        $trigger = $def.Triggers.Create(8)
+        if ($delayIso) { $trigger.Delay = $delayIso }
+    }
+    $trigger.Enabled = $true
+    $null = $folder.RegisterTaskDefinition($name, $def, 6, "SYSTEM", $null, 5)
+}
+
+function Convert-DcimSchtasksDelay([string]$extra) {
+    if ($extra -match '/DELAY\s+(\d+):(\d+)') {
+        $total = ([int]$Matches[1] * 60) + [int]$Matches[2]
+        if ($total -gt 0) { return "PT${total}S" }
+    }
+    return ""
+}
+
+function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra, [string]$kind = "boot") {
+    $delayIso = Convert-DcimSchtasksDelay $extra
+    $delayArg = $null
+    if ($extra -match '/DELAY\s+(\S+)') { $delayArg = $Matches[1] }
     for ($i = 1; $i -le 5; $i++) {
-        cmd.exe /c "schtasks /Create /TN `"$name`" /SC ONSTART /RU SYSTEM /RL HIGHEST $extra /TR `"$tr`" /F"
+        Start-DcimTaskScheduler
+        try {
+            Register-DcimTaskCom -name $name -command $tr -kind $kind -delayIso $delayIso
+            Write-Host "  [SUCCESS] Scheduled task $name registered" -ForegroundColor Green
+            return $true
+        } catch {
+            Write-Warning "  task $name attempt $i failed: $($_.Exception.Message)"
+        }
+        $argList = @("/Create", "/F", "/S", "localhost", "/TN", $name, "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", $tr)
+        if ($kind -eq "logon") {
+            $argList += @("/SC", "ONLOGON")
+        } else {
+            $argList += @("/SC", "ONSTART")
+            if ($delayArg) { $argList += @("/DELAY", $delayArg) }
+        }
+        & schtasks.exe @argList | Out-Null
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "  [SUCCESS] Startup task $name registered" -ForegroundColor Green
-            return
+            Write-Host "  [SUCCESS] Scheduled task $name registered" -ForegroundColor Green
+            return $true
         }
         Write-Warning "  schtasks $name attempt $i failed (exit $LASTEXITCODE); retrying"
         Start-Sleep -Seconds 3
     }
     Write-Warning "  Failed to create $name after retries"
-    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $name -Value $tr -PropertyType String -Force | Out-Null
+    if ($kind -eq "boot") {
+        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $name -Value $tr -PropertyType String -Force | Out-Null
+    }
+    return $false
 }
 
-Invoke-DcimSchtasks -name "DCIM-ExtendC" -tr "diskpart.exe /s $extendFile" -extra ""
-Invoke-DcimSchtasks -name "DCIM-SerialAdminCmd" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $serialPs1" -extra "/DELAY 0000:15"
+$null = Invoke-DcimSchtasks -name "DCIM-ExtendC" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $extendPs1" -extra ""
+$null = Invoke-DcimSchtasks -name "DCIM-SerialAdminCmd" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $serialPs1" -extra "/DELAY 0000:15"
 try {
     $null = ([wmiclass]"Win32_Process").Create("powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$serialPs1`"")
     Write-Host "  Serial admin cmd started in background" -ForegroundColor Gray
@@ -429,9 +576,13 @@ if ($script:AdminPasswordPlain) {
         Set-ItemProperty -Path $winlogon -Name "DefaultUserName" -Value "Administrator" -Type String -ErrorAction Stop
         Set-ItemProperty -Path $winlogon -Name "DefaultPassword" -Value $script:AdminPasswordPlain -Type String -ErrorAction Stop
         Set-ItemProperty -Path $winlogon -Name "DefaultDomainName" -Value $env:COMPUTERNAME -Type String -ErrorAction Stop
-        Set-ItemProperty -Path $winlogon -Name "Shell" -Value "cmd.exe" -Type String -ErrorAction Stop
+        # Keep Explorer as the shell: Winlogon\Shell is machine-wide, so cmd.exe there gave RDP sessions a black screen.
+        Set-ItemProperty -Path $winlogon -Name "Shell" -Value "explorer.exe" -Type String -ErrorAction Stop
+        # Open a command prompt on the KVM/console session only.
+        $runKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        Set-ItemProperty -Path $runKey -Name "DCIMConsoleCmd" -Value 'cmd.exe /c if /i "%SESSIONNAME%"=="Console" start "" cmd.exe' -Type String -ErrorAction Stop
         Remove-ItemProperty -Path $winlogon -Name "AutoLogonCount" -ErrorAction SilentlyContinue
-        Write-Host "  [SUCCESS] AutoAdminLogon enabled for Administrator (shell=cmd.exe)" -ForegroundColor Green
+        Write-Host "  [SUCCESS] AutoAdminLogon enabled for Administrator (console cmd prompt)" -ForegroundColor Green
     } catch {
         Write-Warning "  Failed to enable AutoAdminLogon: $_"
     }
@@ -533,18 +684,12 @@ if (!(Test-Path $script)) {
     Write-Warning "user-login.ps1 missing: $script"
 } else {
     $taskCmd = "cmd.exe /c `"`"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$script`" && schtasks /Delete /TN `"$taskName`" /F`""
-
-    schtasks /Delete /TN $taskName /F 2>$null | Out-Null
-
-    schtasks /Create /TN $taskName /SC ONLOGON /RU SYSTEM /RL HIGHEST /TR $taskCmd /F
-    $code = $LASTEXITCODE
-
-    if ($code -ne 0) {
-        Write-Error "FAILED to create scheduled task ($taskName). schtasks exit code: $code"
+    $created = Invoke-DcimSchtasks -name $taskName -tr $taskCmd -extra "" -kind "logon"
+    if (-not $created) {
+        Write-Error "FAILED to create scheduled task ($taskName)."
     } else {
         Write-Host "OK created scheduled task: $taskName"
-        # Print the stored definition so you can see it in firstboot.log
-        schtasks /Query /TN $taskName /V /FO LIST
+        schtasks.exe /Query /TN $taskName /V /FO LIST
     }
 }
 

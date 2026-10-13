@@ -37,6 +37,8 @@ def test_template_files_serves_firstboot_and_user_login(mock_redis, monkeypatch)
     assert resp_firstboot.status_code == 200
     assert "firstboot" in resp_firstboot.text.lower()
     assert "extend filesystem" in resp_firstboot.text.lower()
+    assert "extend noerr" in resp_firstboot.text.lower()
+    assert "fsctl_extend_volume" in resp_firstboot.text.lower()
     assert "serial-admin-cmd.ps1" in resp_firstboot.text.lower()
     assert "readbyte" in resp_firstboot.text.lower()
     assert "rf>" in resp_firstboot.text.lower()
@@ -45,6 +47,9 @@ def test_template_files_serves_firstboot_and_user_login(mock_redis, monkeypatch)
     assert "[2j" not in resp_firstboot.text.lower()
     assert "autoadminlogon" in resp_firstboot.text.lower()
     assert "enable-psremoting" in resp_firstboot.text.lower()
+    assert "timebrokersvc" in resp_firstboot.text.lower()
+    assert "schedule.service" in resp_firstboot.text.lower()
+    assert "s-1-5-18" in resp_firstboot.text.lower()
 
     # user-login.ps1 should be served from os_templates/{template_id}/user-login.ps1
     token2 = token_service.generate_token(
