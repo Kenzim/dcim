@@ -37,6 +37,7 @@ SWITCH_CAPABILITIES = {
 SERVER_PLUGIN_CAPABILITIES = {
     "proxmox": ["power_control"],
     "ipmi": ["power_control"],
+    "nanokvm": ["power_control"],
 }
 
 SWITCH_PLUGIN_CAPABILITIES = {

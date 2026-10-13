@@ -48,6 +48,7 @@ from app.services.ipmi_kvm.hub_lock import (
     steal_lock,
     try_acquire_lock,
 )
+from app.services.ipmi_kvm.nanokvm_bridge import run_nanokvm_console
 from app.services.ipmi_kvm.registry import get_profile
 from app.services.ipmi_kvm.session import auth_from_ws_session
 
@@ -1011,6 +1012,9 @@ async def attach_kvm_websocket(websocket: WebSocket, session: dict) -> None:
     profile = get_profile(session.get("profile_id") or "")
     if profile is None:
         raise IpmiKvmUnavailable("HTML5 KVM is not configured for this server")
+    if getattr(profile, "packet_mode", "") == "nanokvm":
+        await run_nanokvm_console(websocket, server_id)
+        return
     await ensure_splice_server()
     hub = _alive_hub(server_id) or await _own_or_wait_hub(server_id, profile)
     if hub is not None:

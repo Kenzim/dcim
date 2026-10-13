@@ -26,10 +26,11 @@ def auth_from_ws_session(data: dict) -> BmcKvmAuth:
 def _mint_bridged_session_sync(server: Server) -> dict:
     profile = profile_for_server(server)
     minted = mint_viewer_session(server.id, profile.id)
+    worker = (profile.decode_worker_path or "").lstrip("/")
     return {
         "ws_token": minted["ws_token"],
         "ws_path": "/api/kvm/ws",
-        "decode_worker_path": f"/api/kvm/assets/{profile.decode_worker_path}",
+        "decode_worker_path": f"/api/kvm/assets/{worker}" if worker else "",
         "profile": profile.id,
         "expires_in": minted["expires_in"],
     }
