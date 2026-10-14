@@ -349,6 +349,7 @@ class ServerUpdate(BaseModel):
     port_speed_mbps: int | None = None
     location_id: int | None = None
     rack_id: int | None = None
+    rack_name: str | None = None  # Resolved name for display
     rack_unit: int | None = None
     rack_units: int | None = None  # Number of U the server occupies (height)
     plugin_name: str | None = None

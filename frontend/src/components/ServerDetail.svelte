@@ -11,6 +11,20 @@
   export let onBack;
 
   let server = null;
+  let positionCopied = false;
+
+  async function copyPosition() {
+    if (!server || server.rack_unit == null) return;
+    const position = `U${server.rack_unit}`;
+    const text = server.rack_name ? `${server.rack_name}:${position}` : position;
+    try {
+      await navigator.clipboard.writeText(text);
+      positionCopied = true;
+      setTimeout(() => { positionCopied = false; }, 1500);
+    } catch (e) {
+      console.error('Failed to copy position', e);
+    }
+  }
   let showEditModal = false;
   let activeTab = 'overview'; // overview | networking | disks | credentials
   let plugins = [];
@@ -1718,7 +1732,14 @@
                   </div>
                   <div class="general-detail-row">
                     <dt>Position</dt>
-                    <dd>{server.rack_unit != null ? ((server.rack_units ?? 1) > 1 ? `U${server.rack_unit}–${server.rack_unit + (server.rack_units ?? 1) - 1} (${server.rack_units}U)` : `U${server.rack_unit}`) : '—'}</dd>
+                    <dd>
+                      {server.rack_unit != null ? ((server.rack_units ?? 1) > 1 ? `U${server.rack_unit}–${server.rack_unit + (server.rack_units ?? 1) - 1} (${server.rack_units}U)` : `U${server.rack_unit}`) : '—'}
+                      {#if server.rack_unit != null}
+                        <button type="button" class="copy-position-btn" on:click={copyPosition} title="Copy position to clipboard">
+                          {positionCopied ? 'Copied!' : 'Copy'}
+                        </button>
+                      {/if}
+                    </dd>
                   </div>
                   <div class="general-detail-row">
                     <dt>{server.server_groups?.length === 1 ? 'Group' : 'Groups'}</dt>
@@ -3275,6 +3296,22 @@
     color: var(--text-primary);
     text-align: right;
     word-break: break-word;
+  }
+
+  .copy-position-btn {
+    margin-left: 8px;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .copy-position-btn:hover {
+    color: var(--text-primary);
   }
 
   .rack-hint {
