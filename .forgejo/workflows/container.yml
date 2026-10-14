@@ -1,7 +1,8 @@
 # Build and push every Rackflow runtime image to the Forgejo package registry.
 #
 # Unique images:
-#   app, bandwidth-poller, dhcp-runner, tftp-runner, proxy-runner, ipmi-proxy-runner
+#   app, bandwidth-poller, dhcp-runner, tftp-runner, media-runner, proxy-runner,
+#   ipmi-proxy-runner
 #
 # Worker aliases (same layers as `app`, different repository name for compose):
 #   deployment-worker, usdt-watcher, recurring-billing-worker, notification-worker
@@ -47,6 +48,11 @@ jobs:
           - image_suffix: tftp-runner
             context: .
             dockerfile: tftp_runner/Dockerfile
+            target: ""
+            worker_aliases: ""
+          - image_suffix: media-runner
+            context: .
+            dockerfile: media_runner/Dockerfile
             target: ""
             worker_aliases: ""
           - image_suffix: proxy-runner
