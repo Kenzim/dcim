@@ -40,7 +40,7 @@ jobs:
             target: bandwidth-poller
             worker_aliases: ""
           - image_suffix: dhcp-runner
-            context: dhcp_runner
+            context: .
             dockerfile: dhcp_runner/Dockerfile
             target: ""
             worker_aliases: ""
