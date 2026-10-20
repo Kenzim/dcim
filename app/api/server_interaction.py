@@ -547,8 +547,8 @@ async def get_pxe_boot_file(
             # Nonce is now spent; drop this host's PXE options from dhcpd.
             BootTaskDAO._schedule_dhcp_sync(server.id)
             if boot_task.boot_method == "vmedia":
-                # iPXE is running from RAM; installer assets come over HTTPS from
-                # the public URL, and the per-boot ISO is no longer needed.
+                # iPXE is running from RAM; installer assets come from the vmedia
+                # boot URL, and the per-boot ISO is no longer needed.
                 base_url = boot_base_url()
                 schedule_release(server.id)
 
@@ -702,6 +702,10 @@ exit
                             kernel_params = _inject_script_url_param(
                                 kernel_params, base_url, boot_task.id
                             )
+                        if boot_task.boot_method == "vmedia":
+                            # Install scripts read this from /proc/cmdline: no PXE
+                            # follow-up task runs after a virtual-media install.
+                            kernel_params = f"{kernel_params} rf_boot_method=vmedia"
 
                         # Generate iPXE script for temporary OS
                         if boot_task.status == BootTaskStatus.PENDING:

@@ -77,6 +77,7 @@ def vmedia_env(client, db_session, monkeypatch, tmp_path):
     boot_iso._template_cache.clear()
     monkeypatch.setattr(settings, "public_base_url", "https://rackflow.example.com")
     monkeypatch.setattr(settings, "virtual_media_base_url", "http://bmc-fetch.test")
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", None)
 
     profile = _Profile()
     register_profile(profile)
@@ -162,6 +163,15 @@ def test_launch_without_https_public_url_stays_pxe(vmedia_env, monkeypatch):
     assert asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test")) == "pxe"
 
 
+def test_launch_with_lan_http_boot_url_uses_vmedia(vmedia_env, monkeypatch):
+    env = vmedia_env
+    monkeypatch.setattr(settings, "public_base_url", "http://rackflow.example.com")
+    monkeypatch.setattr(settings, "public_app_url", None)
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", "http://10.0.0.1:8000")
+    task = _task(env.db, env.server.id)
+    assert asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test")) == "vmedia"
+
+
 def test_runner_stage_uses_smb_for_supermicro_x9(vmedia_env, monkeypatch):
     env = vmedia_env
     rpc_calls = []
@@ -244,6 +254,33 @@ def test_pxe_for_vmedia_task_uses_https_and_releases_iso(pxe_get, vmedia_env, bo
     assert "kernel https://rackflow.example.com/" in response.text
     assert "http://" not in response.text
     assert boot_launcher_calls["release"] == [env.server.id]
+
+
+def test_pxe_for_vmedia_task_uses_lan_http_boot_url(pxe_get, vmedia_env, boot_launcher_calls, monkeypatch):
+    env = vmedia_env
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", "http://10.0.0.1:8000")
+    task = _task(env.db, env.server.id)
+    task.boot_method = "vmedia"
+    env.db.commit()
+    response = pxe_get(MAC, task, source_ip=PXE_IP)
+    assert response.status_code == 200, response.text
+    assert "kernel http://10.0.0.1:8000/" in response.text
+    assert "rackflow.example.com" not in response.text
+
+
+@pytest.mark.parametrize("method", ["vmedia", "pxe"])
+def test_pxe_temp_os_flags_vmedia_boot_on_cmdline(pxe_get, vmedia_env, boot_launcher_calls, method):
+    """Install scripts (e.g. Windows EFI entry handling) read rf_boot_method from /proc/cmdline."""
+    env = vmedia_env
+    task = BootTaskDAO.create(
+        db=env.db, server_id=env.server.id, boot_type="temp_os", temp_os_id="debian-live",
+        script_content="#!/bin/bash\necho install\n",
+    )
+    task.boot_method = method
+    env.db.commit()
+    response = pxe_get(MAC, task, source_ip=PXE_IP)
+    assert response.status_code == 200, response.text
+    assert ("rf_boot_method=vmedia" in response.text) == (method == "vmedia")
 
 
 def test_dhcp_reservation_only_for_vmedia_task(vmedia_env):

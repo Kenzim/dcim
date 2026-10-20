@@ -35,11 +35,25 @@ def boot_iso_filename() -> str:
 
 
 def boot_base_url() -> str:
-    """HTTPS origin iPXE chains to. Must present a publicly trusted certificate."""
+    """Origin iPXE chains to.
+
+    ``VMEDIA_BOOT_BASE_URL`` (http or https, typically the app's LAN address)
+    wins. Otherwise the public URL is used and must be https with a publicly
+    trusted certificate.
+    """
+    explicit = (settings.vmedia_boot_base_url or "").strip().rstrip("/")
+    if explicit:
+        parsed = urlparse(explicit)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise VirtualMediaUnavailable(
+                "VMEDIA_BOOT_BASE_URL must be an http:// or https:// URL"
+            )
+        return explicit
     base = ((settings.public_base_url or "").strip() or (settings.public_app_url or "").strip()).rstrip("/")
     if urlparse(base).scheme != "https":
         raise VirtualMediaUnavailable(
-            "Virtual-media boot needs PUBLIC_BASE_URL (or PUBLIC_APP_URL) set to an https:// URL"
+            "Virtual-media boot needs VMEDIA_BOOT_BASE_URL, or PUBLIC_BASE_URL (or PUBLIC_APP_URL) "
+            "set to an https:// URL"
         )
     return base
 

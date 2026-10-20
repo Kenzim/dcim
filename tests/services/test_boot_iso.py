@@ -20,6 +20,7 @@ def fake_template(tmp_path, monkeypatch):
     monkeypatch.setattr(boot_iso, "PLACEHOLDER", boot_iso.PLACEHOLDER)
     boot_iso._template_cache.clear()
     monkeypatch.setattr(settings, "public_base_url", "https://rackflow.example.com/")
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", None)
     return iso_path
 
 
@@ -73,10 +74,33 @@ def test_missing_template_is_reported(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("url", [None, "", "http://rackflow.example.com"])
 def test_boot_base_url_requires_https(monkeypatch, url):
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", None)
     monkeypatch.setattr(settings, "public_base_url", url)
     monkeypatch.setattr(settings, "public_app_url", None)
     with pytest.raises(VirtualMediaUnavailable, match="https"):
         boot_iso.boot_base_url()
+
+
+@pytest.mark.parametrize("public", [None, "https://rackflow.example.com"])
+def test_vmedia_boot_base_url_allows_lan_http_and_wins(monkeypatch, public):
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", " http://10.0.0.1:8000/ ")
+    monkeypatch.setattr(settings, "public_base_url", public)
+    monkeypatch.setattr(settings, "public_app_url", None)
+    assert boot_iso.boot_base_url() == "http://10.0.0.1:8000"
+
+
+@pytest.mark.parametrize("url", ["10.0.0.1:8000", "ftp://10.0.0.1", "http://"])
+def test_vmedia_boot_base_url_rejects_non_http_urls(monkeypatch, url):
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", url)
+    monkeypatch.setattr(settings, "public_base_url", "https://rackflow.example.com")
+    with pytest.raises(VirtualMediaUnavailable, match="VMEDIA_BOOT_BASE_URL"):
+        boot_iso.boot_base_url()
+
+
+def test_stamp_with_lan_http_chain_url(fake_template, monkeypatch):
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", "http://10.0.0.1:8000")
+    stamped = boot_iso.build_boot_iso("N0NCE")
+    assert stamped.count(b"chain http://10.0.0.1:8000/api/servers/interaction/pxe?mac=${netX/mac}&t=N0NCE") == 2
 
 
 def test_boot_iso_filename_is_unguessable():

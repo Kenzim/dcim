@@ -183,13 +183,17 @@ Servers with a Virtual CD profile reinstall without PXE or boot-order changes:
 
 1. RackFlow stamps a small iPXE ISO with the boot task's one-time nonce (`rfboot-<random>.iso`) and stages it on the location's media runner (HTTP; SMB for SuperMicro X9) or serves it itself.
 2. The BMC mounts it, the next boot is set **once** to CD, and the server is power-cycled automatically.
-3. iPXE gets the server's IP from DHCP and fetches `/api/servers/interaction/pxe` over **HTTPS** from `PUBLIC_BASE_URL`. Kernel, initrd and the install script also come over HTTPS; the live OS squashfs is checked against a SHA-256 passed on the kernel command line.
+3. iPXE gets the server's IP from DHCP and fetches `/api/servers/interaction/pxe` from `VMEDIA_BOOT_BASE_URL` (or, if unset, `PUBLIC_BASE_URL` over HTTPS). Kernel, initrd and the install script come from the same origin; the live OS squashfs is checked against a SHA-256 passed on the kernel command line.
 4. The ISO is ejected and deleted as soon as the boot script is served. No post-install boot-order fix runs.
 
 Requirements:
 
-- `PUBLIC_BASE_URL` (or `PUBLIC_APP_URL`) is `https://` with a publicly trusted certificate (iPXE trusts ISRG Root X1/X2; add more with `RACKFLOW_IPXE_EXTRA_TRUST=/path/a.pem,...` at build time). Without it, reinstalls fall back to PXE.
-- If RackFlow sits behind a reverse proxy, set `TRUST_X_FORWARDED_FOR=true` (the boot request must come from the server's reserved IP).
+- A boot origin the servers can reach from their data NIC. Either:
+  - `VMEDIA_BOOT_BASE_URL=http://<app-lan-ip>:8000` (recommended on a trusted provisioning LAN; same exposure as PXE, no certificate or DNS needed), or
+  - leave it unset and make `PUBLIC_BASE_URL` (or `PUBLIC_APP_URL`) `https://` with a publicly trusted certificate (iPXE trusts ISRG Root X1/X2; add more with `RACKFLOW_IPXE_EXTRA_TRUST=/path/a.pem,...` at build time).
+
+  Without either, reinstalls fall back to PXE.
+- If the boot origin is a reverse proxy, set `TRUST_X_FORWARDED_FOR=true` (the boot request must come from the server's reserved IP). Not needed when `VMEDIA_BOOT_BASE_URL` points straight at port 8000.
 - The ISO template (`boot_media/rackflow-vmedia.iso`) is built by the `ipxe` stage of the `Dockerfile` (needs network access during `docker build`; the iPXE compile takes a minute or two and is cached). Outside Docker, run `scripts/build-rackflow-netboot-iso.sh` once and after iPXE updates. Without the template, reinstalls fall back to PXE.
 - Repack the debian-live initrd with the updated overlay so it verifies the squashfs hash: `scripts/debian-live-initrd.sh pack --donor <initrd> --overlay tftp/pxe/temp_os/debian-live/initrd-overlay --output tftp/pxe/temp_os/debian-live/initrd.img`.
 - BIOS boot order: disk first. PXE does not need to be in the persistent order for these servers.

@@ -65,6 +65,13 @@ if [ "$BOOT_MODE" != "uefi" ] && [ "$BOOT_MODE" != "bios" ]; then
 fi
 
 echo "Using boot mode: $BOOT_MODE"
+
+# Set by /pxe when this live OS was started from a per-boot virtual-media ISO.
+BOOT_METHOD="pxe"
+case " $(cat /proc/cmdline 2>/dev/null || true) " in
+    *" rf_boot_method=vmedia "*) BOOT_METHOD="vmedia" ;;
+esac
+echo "Boot method: $BOOT_METHOD"
 echo ""
 
 # Get image file URLs (injected by system from template configuration)
@@ -419,8 +426,66 @@ if [ "$BOOT_MODE" = "uefi" ]; then
     echo ""
 fi
 
-# UEFI: clean up stale boot entries and keep PXE automatic.
-if [ "$BOOT_MODE" = "uefi" ]; then
+# UEFI, virtual-media boot: the BMC's one-time CD override left the persistent
+# boot order alone, no PXE boot-order fix task follows, and the ISO is ejected
+# before the next boot (so BootCurrent is gone). Keep the order as the operator
+# set it; just swap stale Windows Boot Manager entries for one on the new ESP
+# and boot it next.
+if [ "$BOOT_MODE" = "uefi" ] && [ "$BOOT_METHOD" = "vmedia" ]; then
+    echo "=========================================="
+    echo "Registering Windows Boot Manager (virtual media boot)"
+    echo "=========================================="
+
+    mkdir -p /sys/firmware/efi/efivars 2>/dev/null || true
+    mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
+
+    WIN_LOADER='\EFI\Microsoft\Boot\bootmgfw.efi'
+    BOOT_INFO="$(efibootmgr 2>/dev/null || true)"
+    BOOT_CURRENT="$(echo "$BOOT_INFO" | awk -F: '/BootCurrent/ {gsub(/[^0-9A-Fa-f]/, "", $2); print $2; exit}')"
+    ORIG_ORDER="$(echo "$BOOT_INFO" | awk -F: '/^BootOrder/ {gsub(/[^0-9A-Fa-f,]/, "", $2); print $2; exit}')"
+
+    # Every disk was repartitioned above, so existing Windows entries point at ESPs that no longer exist.
+    DELETED=""
+    for bn in $(echo "$BOOT_INFO" | cut -f1 | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\{0,1\} Windows Boot Manager *$/\1/p'); do
+        [ "$bn" = "$BOOT_CURRENT" ] && continue
+        echo "Deleting stale Boot${bn} (Windows Boot Manager)"
+        efibootmgr -b "$bn" -B >/dev/null 2>&1 || true
+        DELETED="$DELETED $bn"
+    done
+
+    BEFORE=" $(efibootmgr 2>/dev/null | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | tr '\n' ' ' || true) "
+    NEW_BN=""
+    if efibootmgr -c -d "$TARGET_DISK" -p 1 -L "Windows Boot Manager" -l "$WIN_LOADER" >/dev/null 2>&1; then
+        for bn in $(efibootmgr 2>/dev/null | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' || true); do
+            case "$BEFORE" in *" $bn "*) ;; *) NEW_BN="$bn"; break ;; esac
+        done
+    fi
+
+    if [ -n "$NEW_BN" ]; then
+        # efibootmgr -c puts the new entry first; restore the original order with
+        # the new entry where the old Windows entry was (or last if there was none).
+        NEW_ORDER=""
+        PLACED=0
+        for bn in ${ORIG_ORDER//,/ }; do
+            if [[ " $DELETED " == *" $bn "* ]] || [ "$bn" = "$NEW_BN" ]; then
+                [ "$PLACED" = 1 ] && continue
+                bn="$NEW_BN"
+                PLACED=1
+            fi
+            NEW_ORDER="${NEW_ORDER:+$NEW_ORDER,}$bn"
+        done
+        [ "$PLACED" = 1 ] || NEW_ORDER="${NEW_ORDER:+$NEW_ORDER,}$NEW_BN"
+        echo "Created Boot${NEW_BN}; BootOrder: $NEW_ORDER"
+        efibootmgr -o "$NEW_ORDER" >/dev/null 2>&1 || echo "WARNING: could not restore BootOrder"
+        efibootmgr -n "$NEW_BN" >/dev/null 2>&1 || echo "WARNING: could not set BootNext"
+    else
+        echo "WARNING: could not create a Windows Boot Manager entry; firmware must find \\EFI\\Boot\\bootx64.efi itself"
+    fi
+
+    efibootmgr -v 2>/dev/null || true
+
+# UEFI, PXE boot: clean up stale boot entries and keep PXE automatic.
+elif [ "$BOOT_MODE" = "uefi" ]; then
     echo "=========================================="
     echo "Removing all non-PXE EFI boot entries"
     echo "=========================================="
