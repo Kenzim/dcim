@@ -36,6 +36,9 @@ class VirtualMediaProfile(ABC):
 
     id: str = ""
     display_name: str = ""
+    # True when the BMC mounts ISOs from a CIFS share (``insert`` gets a
+    # ``cifs://`` URL from the media runner) instead of pulling an HTTP URL.
+    mounts_cifs: bool = False
 
     def describe(self) -> dict[str, str]:
         return {"id": self.id, "display_name": self.display_name}

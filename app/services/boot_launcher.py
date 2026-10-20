@@ -110,7 +110,7 @@ async def _stage_boot_iso(db: Session, server: Server, profile, filename: str) -
         raise BootLaunchError("Media runner did not accept the boot ISO download")
     await _wait_for_runner_job(runner.id, job_id)
 
-    if getattr(profile, "id", "") == "supermicro_x9":
+    if getattr(profile, "mounts_cifs", False):
         creds = await hub.rpc(
             runner.id,
             "media.mint_smb_credentials",
@@ -197,7 +197,9 @@ async def launch_boot_task(
 ) -> str:
     """Start ``boot_task``. Returns the boot method used ("vmedia" or "pxe").
 
-    vmedia failures mark the task failed and raise ``BootLaunchError``.
+    If the vmedia launch fails, the boot media is released and the task stays
+    pending as a PXE task (dhcpd advertises it again), so the install still runs
+    on the server's next network boot.
     """
     if boot_task.status != BootTaskStatus.PENDING or not vmedia_capable(server):
         return "pxe"
@@ -210,10 +212,14 @@ async def launch_boot_task(
         details = await _launch_vmedia(db, server, boot_task)
     except Exception as exc:  # noqa: BLE001
         detail = exc.detail if isinstance(exc, (BootLaunchError, VirtualMediaUnavailable)) else str(exc)
-        logger.warning("Virtual-media boot for task %s on server %s failed: %s", boot_task.id, server.id, detail)
+        logger.warning(
+            "Virtual-media boot for task %s on server %s failed, falling back to PXE: %s",
+            boot_task.id, server.id, detail,
+        )
         await release_boot_media(db, server)
-        BootTaskDAO.mark_failed(db, boot_task.id, f"Virtual-media boot failed: {detail}")
-        BootTaskDAO._schedule_dhcp_sync(server.id)
+        boot_task.boot_method = "pxe"
+        db.commit()
+        BootTaskDAO._schedule_dhcp_sync(server.id)  # re-advertise PXE options for this host
         log_server_activity_failure(
             db,
             server_id=activity_server_id,
@@ -221,11 +227,11 @@ async def launch_boot_task(
             event_type=ServerActivityEventType.INSTALL,
             action="vmedia_boot",
             source=source,
-            message="Virtual-media boot failed",
+            message="Virtual-media boot failed; falling back to PXE on the next network boot",
             error=exc,
-            details={"boot_task_id": boot_task.id},
+            details={"boot_task_id": boot_task.id, "fallback": "pxe", "detail": detail},
         )
-        raise BootLaunchError(detail) from exc
+        return "pxe"
     log_server_activity_success(
         db,
         server_id=activity_server_id,

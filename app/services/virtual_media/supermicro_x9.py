@@ -87,6 +87,7 @@ def parse_cifs_share(image_url: str, cfg: dict) -> tuple[str, str, str, str]:
 class SuperMicroX9VirtualMediaProfile(VirtualMediaProfile):
     id = "supermicro_x9"
     display_name = "SuperMicro X9 (ATEN CIFS virtual CD)"
+    mounts_cifs = True
 
     def https_base(self, server: Server) -> str:
         url = (getattr(server, "ipmi_web_management_url", None) or "").strip().rstrip("/")

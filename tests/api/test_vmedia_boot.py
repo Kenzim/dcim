@@ -156,18 +156,32 @@ def test_launch_powers_on_when_off(vmedia_env):
     assert [e[0] for e in env.profile.events][-1] == "power_on"
 
 
-def test_launch_failure_ejects_and_fails_task(vmedia_env):
+def test_launch_failure_ejects_and_falls_back_to_pxe(vmedia_env, _no_background_dhcp_sync):
     env = vmedia_env
     env.profile.fail_insert = True
     task = _task(env.db, env.server.id)
-    with pytest.raises(boot_launcher.BootLaunchError, match="BMC rejected"):
-        asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test"))
+    _no_background_dhcp_sync.clear()
+    method = asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test"))
+    assert method == "pxe"
     env.db.refresh(task)
-    assert task.status == BootTaskStatus.FAILED
-    assert "BMC rejected" in task.error_message
+    assert task.status == BootTaskStatus.PENDING
+    assert task.boot_method == "pxe"
+    assert task.pxe_nonce_used_at is None
     assert ("eject",) in env.profile.events
     assert mounted_filename(env.server.id) is None
-    assert not any(e[0].startswith("power") for e in env.profile.events)
+    assert not any(e[0] == "bootdev" or e[0].startswith("power") for e in env.profile.events)
+    assert env.server.id in _no_background_dhcp_sync  # PXE options re-advertised
+
+
+def test_launch_failure_is_logged_with_bmc_detail(vmedia_env, monkeypatch):
+    env = vmedia_env
+    env.profile.fail_insert = True
+    logged = []
+    monkeypatch.setattr(boot_launcher, "log_server_activity_failure", lambda db, **kw: logged.append(kw))
+    asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, _task(env.db, env.server.id), source="test"))
+    assert logged and logged[0]["action"] == "vmedia_boot"
+    assert logged[0]["details"]["fallback"] == "pxe"
+    assert "BMC rejected" in logged[0]["details"]["detail"]
 
 
 def test_launch_without_vmedia_profile_stays_pxe(vmedia_env):
@@ -195,7 +209,10 @@ def test_launch_needs_no_public_or_boot_url(vmedia_env, monkeypatch):
     assert asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test")) == "vmedia"
 
 
-def test_runner_stage_uses_smb_for_supermicro_x9(vmedia_env, monkeypatch):
+@pytest.mark.parametrize("profile_id", ["supermicro_x9", "asrockrack"])
+def test_runner_stage_uses_smb_for_cifs_profiles(vmedia_env, monkeypatch, profile_id):
+    from app.services.virtual_media.registry import get_profile
+
     env = vmedia_env
     rpc_calls = []
 
@@ -213,7 +230,7 @@ def test_runner_stage_uses_smb_for_supermicro_x9(vmedia_env, monkeypatch):
         "app.services.runners.cache.cached_state",
         lambda runner_id: {"jobs": [{"id": "job1", "status": "done"}]},
     )
-    profile = SimpleNamespace(id="supermicro_x9")
+    profile = get_profile(profile_id)
     url = asyncio.run(boot_launcher._stage_boot_iso(env.db, env.server, profile, "rfboot-abc.iso"))
     assert url == "cifs://vmu:pw@10.0.0.9/isos/rfboot-abc.iso"
     method, params = rpc_calls[0]

@@ -100,7 +100,7 @@ async def _image_url_for_insert(db: Session, server: Server, profile, name: str)
             runner = None
     hub = get_hub()
     if runner is not None and hub.is_connected(runner.id):
-        if getattr(profile, "id", "") == "supermicro_x9":
+        if getattr(profile, "mounts_cifs", False):
             creds = await hub.rpc(
                 runner.id,
                 "media.mint_smb_credentials",

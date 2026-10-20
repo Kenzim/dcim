@@ -153,6 +153,51 @@ async def test_discover_cd_url_raises_when_no_devices():
         await discover_cd_url(client, origin)
 
 
+def _status_client(status: int) -> httpx.AsyncClient:
+    client = MagicMock(spec=httpx.AsyncClient)
+    resp = MagicMock()
+    resp.status_code = status
+    resp.json = MagicMock(return_value={"error": {"message": "Unauthorized"}})
+    client.get = AsyncMock(return_value=resp)
+    client.post = AsyncMock(return_value=resp)
+    return client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_discover_reports_auth_failure_not_missing_device(status):
+    client = _status_client(status)
+    with pytest.raises(VirtualMediaUnavailable) as err:
+        await discover_cd_url(client, "https://bmc")
+    assert err.value.detail == (
+        f"BMC Redfish rejected the credentials (HTTP {status} on /redfish/v1/Managers)"
+    )
+    assert client.get.await_count == 1  # stops at the first auth failure
+
+
+@pytest.mark.asyncio
+async def test_discover_reports_unreachable_bmc():
+    client = MagicMock(spec=httpx.AsyncClient)
+    client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused", request=MagicMock()))
+    with pytest.raises(VirtualMediaUnavailable, match="Could not reach BMC Redfish at /redfish/v1/Managers"):
+        await discover_cd_url(client, "https://bmc")
+
+
+@pytest.mark.asyncio
+async def test_insert_reports_auth_failure_on_action():
+    origin = "http://bmc"
+    device = f"{origin}/redfish/v1/Managers/1/VirtualMedia/CD1"
+    insert_url = f"{device}/Actions/VirtualMedia.InsertMedia"
+    responses = {
+        f"{origin}/redfish/v1/Managers": {"Members": [{"@odata.id": "/redfish/v1/Managers/1"}]},
+        f"{origin}/redfish/v1/Managers/1/VirtualMedia": {"Members": [{"@odata.id": device}]},
+        device: {"Id": "CD1", "Inserted": False, "Image": ""},
+    }
+    client = _mock_client_with_posts(responses, post_status={insert_url: 401})
+    with pytest.raises(VirtualMediaUnavailable, match=r"rejected the credentials \(HTTP 401 on .*InsertMedia\)"):
+        await insert_image(client, origin, "http://iso/x.iso")
+
+
 @pytest.mark.asyncio
 async def test_insert_image_retries_minimal_payload():
     origin = "http://bmc"
@@ -196,7 +241,7 @@ async def test_insert_image_raises_when_bmc_refuses():
         device: {"Id": "CD1", "Inserted": False, "Image": ""},
     }
     client = _mock_client_with_posts(responses, post_status={insert_url: 500})
-    with pytest.raises(VirtualMediaUnavailable, match="BMC rejected"):
+    with pytest.raises(VirtualMediaUnavailable, match=r"BMC rejected action \(HTTP 500\)"):
         await insert_image(client, origin, "http://iso/fail.iso")
 
 

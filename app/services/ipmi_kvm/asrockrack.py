@@ -134,6 +134,22 @@ async def megarac_web_session(origin: str, username: str, password: str) -> tupl
         return _megarac_session_from_login(login)
 
 
+async def megarac_logout(origin: str, cookie: str, csrf: str) -> None:
+    """End a MegaRAC web session (the BMC allows only a few at once). Never raises."""
+    try:
+        async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=8.0) as client:
+            await client.delete(
+                f"{origin}/api/session",
+                headers={
+                    "Origin": origin,
+                    "X-CSRFTOKEN": csrf,
+                    "Cookie": f"QSESSIONID={cookie}",
+                },
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug("MegaRAC: BMC logout failed", exc_info=True)
+
+
 async def _megarac_kvm_token(
     origin: str, cookie: str, csrf: str
 ) -> tuple[str, str, str]:
@@ -291,15 +307,4 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
         return resp.content, content_type
 
     async def logout(self, auth: BmcKvmAuth) -> None:
-        try:
-            async with httpx.AsyncClient(verify=bmc_httpx_verify(megarac=True), timeout=8.0) as client:
-                await client.delete(
-                    f"{auth.origin}/api/session",
-                    headers={
-                        "Origin": auth.origin,
-                        "X-CSRFTOKEN": auth.csrf,
-                        "Cookie": f"QSESSIONID={auth.cookie}",
-                    },
-                )
-        except Exception:  # noqa: BLE001
-            logger.debug("ASRockRack KVM: BMC logout failed", exc_info=True)
+        await megarac_logout(auth.origin, auth.cookie, auth.csrf)

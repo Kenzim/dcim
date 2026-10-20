@@ -55,13 +55,29 @@ def _looks_like_cd(resource: dict) -> bool:
     return False
 
 
+def _path(url: str) -> str:
+    return urlparse(url).path or url
+
+
+def _raise_if_auth_error(resp: httpx.Response, url: str) -> None:
+    """401/403 mean every other probe will fail too: report it instead of "no device"."""
+    if resp.status_code in (401, 403):
+        raise VirtualMediaUnavailable(
+            f"BMC Redfish rejected the credentials (HTTP {resp.status_code} on {_path(url)})"
+        )
+
+
 async def _get_json(client: httpx.AsyncClient, url: str) -> Optional[dict]:
     try:
         resp = await client.get(url)
     except httpx.RequestError as exc:
-        logger.debug("Redfish GET %s failed: %s", url, exc)
+        raise VirtualMediaUnavailable(f"Could not reach BMC Redfish at {_path(url)}: {exc}") from exc
+    _raise_if_auth_error(resp, url)
+    if resp.status_code == 404:
+        logger.debug("Redfish GET %s: 404", _path(url))
         return None
     if resp.status_code >= 400:
+        logger.warning("Redfish GET %s returned HTTP %s", _path(url), resp.status_code)
         return None
     try:
         body = resp.json()
@@ -163,9 +179,11 @@ def _transfer_protocol(image_url: str) -> str:
 
 async def _post_action(client: httpx.AsyncClient, url: str, payload: dict) -> httpx.Response:
     try:
-        return await client.post(url, json=payload)
+        resp = await client.post(url, json=payload)
     except httpx.RequestError as exc:
         raise VirtualMediaUnavailable(f"Could not reach BMC VirtualMedia: {exc}") from exc
+    _raise_if_auth_error(resp, url)
+    return resp
 
 
 async def insert_image(client: httpx.AsyncClient, origin: str, image_url: str) -> VirtualMediaStatus:
@@ -194,7 +212,7 @@ async def insert_image(client: httpx.AsyncClient, origin: str, image_url: str) -
                 detail = str(message)
         except ValueError:
             pass
-        raise VirtualMediaUnavailable(detail)
+        raise VirtualMediaUnavailable(f"{detail} (HTTP {resp.status_code})")
     return await read_status(client, origin)
 
 
