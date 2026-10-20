@@ -140,7 +140,6 @@ services:
     restart: unless-stopped
 
   deployment-worker:
-    # Same image as app (CI may also push a dcim-deployment-worker alias).
     image: git.stackken.com/kenzim/dcim-app:latest
     command: ["python", "-m", "app.workers.deployment"]
     environment:
