@@ -33,6 +33,8 @@ from app.services.os_template_service import get_template_service
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.dhcp_config_service import get_dhcp_config_service
+from app.services.boot_launcher import schedule_launch, schedule_release, vmedia_capable
+from app.services.virtual_media.boot_iso import boot_base_url
 from app.services.dhcp_config_generator import get_next_server_ip_for_client, get_subnet_info_for_client
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
@@ -47,6 +49,7 @@ from app.services.virtual_media.iso_catalog import (
 from app.models.server_activity import ServerActivityEventType
 from app.utils.shell_escape import shell_escape_double_quoted
 import asyncio
+import hmac
 import logging
 import re
 import os
@@ -389,12 +392,42 @@ def normalize_mac_address(mac: str) -> str:
     return mac.upper()
 
 
+def _authorize_pxe_boot(
+    db: Session, request: Request, port: NetworkPort, boot_task, nonce: Optional[str], mac: Optional[str]
+) -> None:
+    """Require the task's unused PXE nonce from the port's reserved IP, then consume it.
+
+    Raises 403 otherwise. On a shared public segment a MAC can be spoofed, so the
+    MAC only selects the port; the nonce (advertised only in that host's DHCP
+    reservation while the task is pending) and the source IP authorize the boot.
+    """
+    source_ip = _get_request_source_ip(request)
+    reasons = []
+    if boot_task.status != BootTaskStatus.PENDING:
+        reasons.append(f"task status {boot_task.status.value}")
+    if not boot_task.pxe_nonce or boot_task.pxe_nonce_used_at is not None:
+        reasons.append("nonce missing or already used")
+    elif not nonce or not hmac.compare_digest(nonce, boot_task.pxe_nonce):
+        reasons.append("nonce mismatch")
+    if not port.pxe_ip or source_ip != port.pxe_ip.strip():
+        reasons.append(f"source IP {source_ip} != reserved {port.pxe_ip}")
+    if not reasons and not BootTaskDAO.consume_pxe_nonce(db, boot_task.id):
+        reasons.append("nonce already used")
+    if reasons:
+        logger.warning(
+            "Refusing PXE boot for MAC %s task %s: %s", mac, boot_task.id, "; ".join(reasons)
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="PXE boot not authorized")
+
+
 @router.get("/pxe", response_class=PlainTextResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_pxe_boot_file(
     mac: Optional[str] = Query(None, description="MAC address of the network port requesting PXE boot"),
     script: Optional[bool] = Query(False, description="Return script content instead of iPXE script (for initramfs)"),
     token: Optional[str] = Query(None, description="Download token required when script=true"),
+    t: Optional[str] = Query(None, description="Per-boot-task PXE nonce advertised in the DHCP iPXE filename"),
     *,
+    request: Request,
     db: DbDep
 ):
     """
@@ -409,6 +442,9 @@ async def get_pxe_boot_file(
         script: If true, return script content instead of iPXE script (for initramfs)
         token: Download token bound to the active boot task; REQUIRED when
             script=true because the script body may contain injected credentials.
+        t: PXE nonce of the pending boot task. REQUIRED (along with a source IP
+            matching the port's reserved pxe_ip) to receive a boot script; the
+            nonce is consumed on first use. MAC alone only identifies the port.
     
     Returns:
         iPXE boot script as plain text, or script content if script=true
@@ -507,6 +543,15 @@ async def get_pxe_boot_file(
             )
         
         if boot_task:
+            _authorize_pxe_boot(db, request, port, boot_task, t, mac)
+            # Nonce is now spent; drop this host's PXE options from dhcpd.
+            BootTaskDAO._schedule_dhcp_sync(server.id)
+            if boot_task.boot_method == "vmedia":
+                # iPXE is running from RAM; installer assets come over HTTPS from
+                # the public URL, and the per-boot ISO is no longer needed.
+                base_url = boot_base_url()
+                schedule_release(server.id)
+
             if boot_task.boot_type == BootType.LINUX_SCRIPT:
                 # For Linux script boots, mark as in_progress when serving the boot script
                 # The script can report back via API when it completes
@@ -646,6 +691,9 @@ exit
                         squashfs_url = temp_os_service.get_squashfs_url(temp_os_id, base_url)
                         if squashfs_url and "fetch=" not in kernel_params:
                             kernel_params = f"{kernel_params} fetch={squashfs_url}"
+                            squashfs_sha256 = temp_os_service.get_squashfs_sha256(temp_os_id)
+                            if squashfs_sha256:
+                                kernel_params = f"{kernel_params} rf_fetch_sha256={squashfs_sha256}"
                         
                         # Merge with per-server PXE args (network args default to legacy behavior).
                         kernel_params = _merge_server_kernel_args(kernel_params, server, port, db)
@@ -717,6 +765,7 @@ exit
 async def get_pxe_info(
     mac: str = Query(..., description="MAC address of the network port"),
     *,
+    auth: AdminDep,
     db: DbDep
 ):
     """
@@ -1146,6 +1195,9 @@ class BootTaskCreate(BaseModel):
     # Template-based installation (creates InstallationTask)
     template_id: Optional[str] = None  # Template ID to use
     template_parameters: Optional[dict] = None  # Parameters for template
+    # Start the boot now: on virtual-media servers this mounts the boot ISO,
+    # sets a one-time boot to CD and power-cycles. PXE servers are unaffected.
+    launch: bool = True
 
 
 class BootTaskResponse(BaseModel):
@@ -1164,6 +1216,7 @@ class BootTaskResponse(BaseModel):
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    boot_method: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -1631,9 +1684,16 @@ async def create_boot_task(
             message=f"Queued script '{boot_task_data.custom_script}'",
             details={"boot_task_id": boot_task.id},
         )
-    
+
+    boot_method = "pxe"
+    if boot_task_data.launch:
+        schedule_launch(server_id, boot_task.id, source="admin_api")
+        if vmedia_capable(ServerDAO.get_by_id(db, server_id)):
+            boot_method = "vmedia"
+
     return BootTaskResponse(
         id=boot_task.id,
+        boot_method=boot_method,
         server_id=boot_task.server_id,
         boot_type=boot_task.boot_type.value,
         kernel_url=boot_task.kernel_url,
@@ -1701,6 +1761,9 @@ async def cancel_boot_task(
         )
     
     count = BootTaskDAO.cancel_pending_tasks(db, server_id)
+    if count:
+        BootTaskDAO._schedule_dhcp_sync(server_id)
+        schedule_release(server_id)
     logger.info(f"Cancelled {count} boot task(s) for server {server_id}")
     
     return {"cancelled": count}

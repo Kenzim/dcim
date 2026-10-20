@@ -11,6 +11,13 @@ _ISOS_DIR = _REPO_ROOT / "isos"
 _INVALID_ISO_FILENAME_MSG = "Invalid ISO filename"
 
 
+def _is_boot_iso(filename) -> bool:
+    """Per-boot ISOs carry a boot nonce; never list them for mounting."""
+    from app.services.virtual_media.boot_iso import is_boot_iso_name
+
+    return is_boot_iso_name(str(filename or ""))
+
+
 def isos_dir() -> Path:
     return _ISOS_DIR
 
@@ -50,7 +57,7 @@ def list_iso_files() -> list[dict]:
         return []
     rows: list[dict] = []
     for path in directory.iterdir():
-        if not path.is_file() or path.suffix.lower() != ".iso":
+        if not path.is_file() or path.suffix.lower() != ".iso" or _is_boot_iso(path.name):
             continue
         try:
             size = path.stat().st_size
@@ -103,7 +110,7 @@ def list_iso_files_for_location(db, location_id: Optional[int]) -> list[dict]:
     from app.services.runners.hub import get_hub
 
     snap = snapshot(runner, connected=get_hub().is_connected(runner.id))
-    return list(snap.get("isos") or [])
+    return [row for row in (snap.get("isos") or []) if not _is_boot_iso(row.get("filename"))]
 
 
 def location_media_http_base(db, location_id: Optional[int]) -> str:

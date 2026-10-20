@@ -18,6 +18,7 @@ from app.schemas.virtual_media import (
     VirtualMediaStatusResponse,
 )
 from app.services.virtual_media import VirtualMediaUnavailable, list_profiles
+from app.services.virtual_media.boot_iso import is_boot_iso_name
 from app.services.virtual_media.image_token import lookup_image_token
 from app.services.virtual_media.iso_catalog import iso_path, validate_iso_filename
 from app.services.virtual_media.orchestrator import eject_media, get_status, insert_media
@@ -161,6 +162,60 @@ def _range_response(request: Request, path: Path, filename: str) -> Response:
     return Response(content=data, status_code=206, headers=range_headers)
 
 
+def _bytes_range_response(request: Request, data: bytes, filename: str) -> Response:
+    """Range-capable response for an in-memory image (stamped per-boot ISOs)."""
+    size = len(data)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": f'inline; filename="{filename}"',
+    }
+    range_header = (request.headers.get("range") or "").strip()
+    if not range_header:
+        if request.method == "HEAD":
+            return Response(status_code=200, headers={**headers, "Content-Length": str(size)})
+        return Response(content=data, status_code=200, headers=headers)
+    start, end = _parse_byte_range(range_header, size)
+    range_headers = {
+        **headers,
+        "Content-Length": str(end - start + 1),
+        "Content-Range": f"bytes {start}-{end}/{size}",
+    }
+    if request.method == "HEAD":
+        return Response(status_code=206, headers=range_headers)
+    return Response(content=data[start:end + 1], status_code=206, headers=range_headers)
+
+
+def _serve_boot_iso(request: Request, token_data: dict, name: str) -> Response:
+    """Stamp the pending vmedia boot task's nonce into the template ISO."""
+    from app.core.database import SessionLocal
+    from app.dao import BootTaskDAO
+    from app.services.virtual_media.boot_iso import build_boot_iso
+
+    try:
+        server_id = int(token_data.get("server_id") or 0)
+    except (TypeError, ValueError):
+        server_id = 0
+    db = SessionLocal()
+    try:
+        task = BootTaskDAO.get_pending_by_server(db, server_id) if server_id else None
+        if (
+            task is None
+            or task.boot_method != "vmedia"
+            or not task.pxe_nonce
+            or task.pxe_nonce_used_at is not None
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending boot for this image")
+        nonce = task.pxe_nonce
+    finally:
+        db.close()
+    try:
+        data = build_boot_iso(nonce)
+    except VirtualMediaUnavailable as exc:
+        raise virtual_media_http_error(exc) from exc
+    return _bytes_range_response(request, data, name)
+
+
 @profiles_router.get("/profiles", response_model=list[VirtualMediaProfileInfo])
 async def admin_list_virtual_media_profiles(auth: AdminDep):
     """Admin dropdown values for ``servers.virtual_media_profile``."""
@@ -178,6 +233,8 @@ async def serve_virtual_media_image(token: str, filename: str, request: Request)
     token_data = lookup_image_token(token, name)
     if not token_data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired image token")
+    if is_boot_iso_name(name):
+        return _serve_boot_iso(request, token_data, name)
     path = iso_path(name)
     if not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ISO file not found")

@@ -11,7 +11,7 @@ class DHCPConfigModel(Base):
     enabled = Column(Boolean, default=True, nullable=False)
     interfaces = Column(JSON, nullable=False)  # list of {interface, ip, cidr?, netmask?, gateway?}
     dns_servers = Column(JSON, nullable=True)  # list of strings or null
-    hand_out_leases = Column(Boolean, default=True, nullable=False)
+    hand_out_leases = Column(Boolean, default=False, nullable=False)  # reservations-only by default
     default_lease_time = Column(Integer, default=3600, nullable=False)
     max_lease_time = Column(Integer, default=7200, nullable=False)
     config_file_path = Column(String(512), nullable=False)

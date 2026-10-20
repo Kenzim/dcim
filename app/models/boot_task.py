@@ -52,6 +52,14 @@ class BootTask(Base):
     # Script to execute (for LINUX_SCRIPT type)
     script_url = Column(String(512), nullable=True)  # URL to script file (served by API)
     script_content = Column(Text, nullable=True)  # Script content (stored directly)
+
+    # Per-task PXE boot nonce: advertised in the DHCP iPXE filename and required
+    # (together with the reserved source IP) to fetch the iPXE script once.
+    pxe_nonce = Column(String(64), nullable=True)
+    pxe_nonce_used_at = Column(DateTime(timezone=True), nullable=True)
+    # How the server reaches the installer: "pxe" (DHCP next-server/filename) or
+    # "vmedia" (per-boot iPXE ISO mounted through the BMC, HTTPS to the API).
+    boot_method = Column(String(16), nullable=False, default="pxe", server_default="pxe")
     
     # Description/notes
     description = Column(Text, nullable=True)  # Optional description of the boot task

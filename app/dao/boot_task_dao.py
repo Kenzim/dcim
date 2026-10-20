@@ -1,3 +1,4 @@
+import secrets
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.models.boot_task import BootTask, BootTaskStatus, BootType
@@ -45,11 +46,13 @@ class BootTaskDAO:
             iso_url=iso_url,
             temp_os_id=temp_os_id,
             description=description,
-            status=BootTaskStatus.PENDING
+            status=BootTaskStatus.PENDING,
+            pxe_nonce=secrets.token_urlsafe(24),
         )
         db.add(boot_task)
         db.commit()
         db.refresh(boot_task)
+        BootTaskDAO._schedule_dhcp_sync(server_id)
         return boot_task
 
     @staticmethod
@@ -89,6 +92,24 @@ class BootTaskDAO:
         ).update({"status": BootTaskStatus.CANCELLED})
         db.commit()
         return count
+
+    @staticmethod
+    def _schedule_dhcp_sync(server_id: int) -> None:
+        """dhcpd only advertises PXE options for pending tasks; refresh it after changes."""
+        from app.services.dhcp_sync import schedule_dhcp_sync
+        schedule_dhcp_sync(server_id)
+
+    @staticmethod
+    def consume_pxe_nonce(db: Session, task_id: int) -> bool:
+        """Atomically mark a task's PXE nonce as used. Returns False if it was already used."""
+        from datetime import datetime, timezone
+        count = db.query(BootTask).filter(
+            BootTask.id == task_id,
+            BootTask.pxe_nonce.isnot(None),
+            BootTask.pxe_nonce_used_at.is_(None),
+        ).update({"pxe_nonce_used_at": datetime.now(timezone.utc)}, synchronize_session="fetch")
+        db.commit()
+        return count == 1
 
     @staticmethod
     def mark_in_progress(db: Session, task_id: int) -> Optional[BootTask]:

@@ -11,6 +11,29 @@ COPY frontend/ ./
 RUN npm run build
 
 # -----------------------------------------------------------------------------
+# Stage: ipxe – virtual-media boot ISO template (boot_media/rackflow-vmedia.iso)
+# Rebuilt only when the build script, netboot script or placeholder change.
+# -----------------------------------------------------------------------------
+FROM debian:bookworm-slim AS ipxe
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    openssl \
+    perl \
+    liblzma-dev \
+    mtools \
+    genisoimage \
+    isolinux \
+    syslinux-common \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY scripts/build-rackflow-netboot-iso.sh scripts/rackflow-netboot.ipxe ./scripts/
+COPY boot_media/placeholder.ipxe ./boot_media/
+RUN ./scripts/build-rackflow-netboot-iso.sh
+
+# -----------------------------------------------------------------------------
 # Stage: app – FastAPI + static frontend
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim AS app
@@ -33,6 +56,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY tftp/ ./tftp/
 COPY runner_common/ ./runner_common/
 COPY app/plugins/ ./app/plugins/
+COPY boot_media/placeholder.ipxe ./boot_media/
+COPY --from=ipxe /build/boot_media/rackflow-vmedia.iso ./boot_media/
 
 # Application code and migrations (change frequently)
 COPY app/ ./app/

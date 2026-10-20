@@ -301,6 +301,24 @@ rf_fetch_squashfs() {
 	[ -s "$dest" ]
 }
 
+rf_verify_squashfs() {
+	# rf_fetch_sha256= arrives over HTTPS (iPXE); wget here cannot check TLS, so
+	# verify the image instead. No hash on the cmdline means legacy PXE: skip.
+	img="$1"
+	want=$(rf_cmdline_get rf_fetch_sha256) || return 0
+	if ! command -v sha256sum >/dev/null 2>&1; then
+		rf_echo "sha256sum missing; refusing unverified squashfs"
+		return 1
+	fi
+	got=$(sha256sum "$img" | cut -d' ' -f1)
+	if [ "$got" != "$want" ]; then
+		rf_echo "squashfs sha256 mismatch (got ${got})"
+		rm -f "$img"
+		return 1
+	fi
+	rf_echo "squashfs sha256 verified"
+}
+
 rf_mount_live_root() {
 	img="$1"
 	rootmnt="${2:-/root}"
@@ -361,6 +379,9 @@ rf_netboot_prepare() {
 		return 1
 	fi
 	rf_echo "fetched $(wc -c <"$img") bytes"
+	if ! rf_verify_squashfs "$img"; then
+		return 1
+	fi
 
 	rootmnt="${rootmnt:-/root}"
 	if ! rf_mount_live_root "$img" "$rootmnt"; then

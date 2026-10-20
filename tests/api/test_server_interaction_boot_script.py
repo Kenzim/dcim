@@ -66,7 +66,7 @@ def test_boot_script_file_not_found(client, db_session, test_pxe_port):
     assert "exit" in response.text.lower()
 
 
-def test_boot_script_content_served(client, db_session, test_pxe_port, test_server):
+def test_boot_script_content_served(pxe_get, db_session, test_pxe_port, test_server):
     """Test that boot script is correctly served when boot task exists"""
     from app.dao import BootTaskDAO
     
@@ -79,10 +79,7 @@ def test_boot_script_content_served(client, db_session, test_pxe_port, test_serv
         description="Test boot task"
     )
     
-    response = client.get(
-        "/api/servers/interaction/pxe",
-        params={"mac": "00:0e:1e:6f:16:b0"}
-    )
+    response = pxe_get("00:0e:1e:6f:16:b0", boot_task)
     
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/plain; charset=utf-8"

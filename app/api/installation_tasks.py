@@ -8,6 +8,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.auth import require_admin
+from app.services.boot_launcher import schedule_release
 from app.services.download_token_service import get_download_token_service
 from app.services.os_template_service import get_template_service
 from app.dao.installation_task_dao import InstallationTaskDAO
@@ -37,6 +38,11 @@ def _schedule_post_install_boot_order_fix(db: Session, task: InstallationTask) -
     next PXE boot runs the boot-order fix and then reboots into the installed OS.
     """
     if not task.template_id:
+        return
+    install_boot = BootTaskDAO.get_by_id(db, task.boot_task_id) if task.boot_task_id else None
+    if install_boot is not None and install_boot.boot_method == "vmedia":
+        # Booted via a one-time CD override; the persistent boot order was never
+        # touched, so the installed OS boots on its own.
         return
     template_service = get_template_service()
     template = template_service.get_template(task.template_id)
@@ -234,8 +240,10 @@ async def update_installation_logs(
             )
             if task:
                 _schedule_post_install_boot_order_fix(db, task)
+            schedule_release(server_id)
         elif log_data.status == "failed":
             InstallationTaskDAO.mark_failed(db, task_id, log_data.error_message)
+            schedule_release(server_id)
             log_server_activity_failure(
                 db,
                 server_id=server_id,
@@ -321,6 +329,9 @@ async def update_installation_task_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Installation task not found"
         )
+    if status_val != "in_progress":
+        # Safety net: drop any per-boot ISO still mounted for this server.
+        schedule_release(task.server_id)
     if status_val == "failed":
         log_server_activity_failure(
             db,

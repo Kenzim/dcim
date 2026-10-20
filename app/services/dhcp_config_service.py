@@ -62,7 +62,7 @@ class DHCPConfig(BaseModel):
         default_factory=lambda: ["1.1.1.1", "1.0.0.1"],
         description="DNS servers to send via DHCP option domain-name-servers (default: Cloudflare 1.1.1.1, 1.0.0.1)"
     )
-    hand_out_leases: bool = Field(default=True, description="Whether to hand out normal DHCP leases")
+    hand_out_leases: bool = Field(default=False, description="Whether to hand out dynamic DHCP leases (off = reservations only)")
     default_lease_time: int = Field(default=3600, description="Default lease time in seconds")
     max_lease_time: int = Field(default=7200, description="Maximum lease time in seconds")
     config_file_path: str = Field(default="/root/dcim/dhcpd.conf", description="Path to dhcpd.conf")

@@ -171,7 +171,7 @@ def test_get_pxe_script_content_no_script_content(client, db_session, test_pxe_p
     assert response.status_code == 404
 
 
-def test_get_pxe_script_content_normal_pxe_request(client, db_session, test_pxe_port, test_server):
+def test_get_pxe_script_content_normal_pxe_request(pxe_get, db_session, test_pxe_port, test_server):
     """Test that normal PXE request (without script=true) returns iPXE script"""
     # Create boot task
     boot_task = BootTaskDAO.create(
@@ -182,10 +182,7 @@ def test_get_pxe_script_content_normal_pxe_request(client, db_session, test_pxe_
     )
     
     # Get normal PXE boot script (without script=true)
-    response = client.get(
-        "/api/servers/interaction/pxe",
-        params={"mac": "00:0e:1e:6f:16:b0"}
-    )
+    response = pxe_get("00:0e:1e:6f:16:b0", boot_task)
     
     assert response.status_code == 200
     # Should return iPXE script, not the script content
@@ -211,7 +208,7 @@ def test_inject_script_url_param_replaces_existing(monkeypatch):
     assert "old.example" not in out
 
 
-def test_temp_os_pxe_replaces_tokenless_script_url(client, db_session, test_pxe_port, test_server):
+def test_temp_os_pxe_replaces_tokenless_script_url(pxe_get, db_session, test_pxe_port, test_server):
     """Pre-injected tokenless script_url must not win over the PXE token."""
     boot_task = BootTaskDAO.create(
         db=db_session,
@@ -224,10 +221,7 @@ def test_temp_os_pxe_replaces_tokenless_script_url(client, db_session, test_pxe_
         script_content="#!/bin/bash\necho install\n",
         description="tokenless script_url in kernel_params",
     )
-    response = client.get(
-        "/api/servers/interaction/pxe",
-        params={"mac": "00:0e:1e:6f:16:b0"},
-    )
+    response = pxe_get("00:0e:1e:6f:16:b0", boot_task)
     assert response.status_code == 200
     assert "#!ipxe" in response.text
     assert "token=" in response.text

@@ -43,6 +43,34 @@ engine = create_engine(
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+@pytest.fixture(autouse=True)
+def _no_background_dhcp_sync(monkeypatch):
+    """Boot task changes schedule a dhcpd refresh; don't push to real runners in tests."""
+    from app.dao.boot_task_dao import BootTaskDAO
+
+    calls = []
+    monkeypatch.setattr(BootTaskDAO, "_schedule_dhcp_sync", staticmethod(calls.append))
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def boot_launcher_calls(monkeypatch):
+    """Record scheduled vmedia launches/releases instead of talking to BMCs in tests."""
+    import app.services.boot_launcher as boot_launcher
+
+    calls = {"launch": [], "release": []}
+
+    async def fake_launch(server_id, boot_task_id, source, service_id):
+        calls["launch"].append((server_id, boot_task_id, source, service_id))
+
+    async def fake_release(server_id):
+        calls["release"].append(server_id)
+
+    monkeypatch.setattr(boot_launcher, "_launch_in_own_session", fake_launch)
+    monkeypatch.setattr(boot_launcher, "_release_in_own_session", fake_release)
+    return calls
+
+
 @pytest.fixture(scope="function")
 def mock_redis():
     """Mock Redis client for testing - supports HASH and ZSET operations"""
@@ -318,6 +346,28 @@ def client(db_session, mock_redis, monkeypatch):
     mock_redis._ttls.clear()
     mock_redis._counters.clear()
     mock_redis._strings.clear()
+
+
+@pytest.fixture
+def pxe_get(client, monkeypatch):
+    """GET /pxe as the booting host: pass the task's nonce and spoof the source IP.
+
+    TestClient's peer address is not an IP, so tests opt into X-Forwarded-For.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "trust_x_forwarded_for", True)
+
+    def _get(mac, boot_task=None, source_ip="192.168.1.100", nonce=None, **params):
+        query = {"mac": mac, **params}
+        t = nonce if nonce is not None else (boot_task.pxe_nonce if boot_task is not None else None)
+        if t is not None:
+            query["t"] = t
+        return client.get(
+            "/api/servers/interaction/pxe", params=query, headers={"X-Forwarded-For": source_ip}
+        )
+
+    return _get
 
 
 @pytest.fixture

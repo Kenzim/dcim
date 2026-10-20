@@ -4,17 +4,14 @@
 echo
 echo Rackflow netboot ISO
 echo
-autoboot || goto fallback
-
-:fallback
-echo autoboot failed; trying HTTP PXE script
-isset ${next-server} || goto fail
-chain http://${next-server}:8000/api/servers/interaction/pxe?mac=${mac} || goto fail
+# The boot script URL (with its per-task nonce) only comes from this host's
+# DHCP reservation while a boot task is pending, so there is no fallback URL.
+autoboot || goto fail
 goto eof
 
 :fail
 echo
-echo Netboot failed. Check AIC link, DHCP, and next-server.
+echo Netboot failed. Check AIC link, DHCP, and that a boot task is pending.
 shell
 
 :eof

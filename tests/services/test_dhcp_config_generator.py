@@ -143,6 +143,7 @@ def test_generate_dhcpd_conf_returns_content(tmp_path):
     assert "option routers 192.168.1.1;" in content
     assert "option domain-name-servers 1.1.1.1;" in content
     assert "default-lease-time 1800;" in content
+    assert "deny unknown-clients;" not in content
     assert ifaces == ["eth0"]
     # return_content=True skips writing the conf file to disk
 
@@ -155,7 +156,8 @@ def test_generate_dhcpd_conf_disables_leases(tmp_path):
     )
     with patch("app.services.dhcp_config_generator.ServerDAO.get_all", return_value=[]):
         content, _ = generate_dhcpd_conf(cfg, MagicMock(), return_content=True)
-    assert "only serving PXE boot" in content
+    assert "reservations only" in content
+    assert "deny unknown-clients;" in content
     assert "range " not in content
 
 
@@ -169,6 +171,54 @@ def test_generate_dhcpd_conf_filters_by_location(tmp_path):
     ) as get_loc:
         generate_dhcpd_conf(cfg, MagicMock(), location_id=7, return_content=True)
     get_loc.assert_called_once()
+
+
+def _pending_task(nonce="n0nce-abc_123", used_at=None, present=True):
+    task = SimpleNamespace(pxe_nonce=nonce, pxe_nonce_used_at=used_at) if present else None
+    return patch(
+        "app.services.dhcp_config_generator.BootTaskDAO.get_pending_by_server",
+        return_value=task,
+    )
+
+
+def _generate_for_one_server(tmp_path, task_patch):
+    uefi = SimpleNamespace(value="uefi")
+    server = SimpleNamespace(id=1, name="srv1", pxe_boot_mode=uefi, boot_mode=uefi)
+    port = SimpleNamespace(mac_address="aa:bb:cc:dd:ee:ff", pxe_ip="192.168.1.50")
+    cfg = _config(
+        [{"interface": "eth0", "ip": "192.168.1.10", "cidr": 24}],
+        config_file_path=str(tmp_path / "dhcpd.conf"),
+    )
+    with patch("app.services.dhcp_config_generator.ServerDAO.get_all", return_value=[server]), patch(
+        "app.services.dhcp_config_generator.NetworkPortDAO.get_pxe_boot_port", return_value=port
+    ), task_patch:
+        content, _ = generate_dhcpd_conf(cfg, MagicMock(), return_content=True)
+    return content
+
+
+def test_generate_reservation_without_pxe_options_when_no_task(tmp_path):
+    content = _generate_for_one_server(tmp_path, _pending_task(present=False))
+    assert "hardware ethernet AA:BB:CC:DD:EE:FF;" in content
+    assert "fixed-address 192.168.1.50;" in content
+    assert "next-server" not in content
+    assert "filename" not in content
+
+
+def test_generate_pxe_options_carry_task_nonce(tmp_path):
+    content = _generate_for_one_server(tmp_path, _pending_task(nonce="n0nce-abc_123"))
+    assert "next-server 192.168.1.10;" in content
+    assert (
+        'filename "http://192.168.1.10:8000/api/servers/interaction/pxe?mac=${mac}&t=n0nce-abc_123";'
+        in content
+    )
+
+
+def test_generate_omits_pxe_options_once_nonce_used(tmp_path):
+    from datetime import datetime, timezone
+
+    content = _generate_for_one_server(tmp_path, _pending_task(used_at=datetime.now(timezone.utc)))
+    assert "fixed-address 192.168.1.50;" in content
+    assert "filename" not in content
 
 
 def test_generate_includes_pxe_host_reservation(tmp_path):
@@ -192,7 +242,7 @@ def test_generate_includes_pxe_host_reservation(tmp_path):
         with patch(
             "app.services.dhcp_config_generator.NetworkPortDAO.get_pxe_boot_port",
             return_value=port,
-        ):
+        ), _pending_task():
             content, _ = generate_dhcpd_conf(cfg, MagicMock(), return_content=True)
     assert "AA:BB:CC:DD:EE:FF" in content
     assert "192.168.1.50" in content
@@ -222,7 +272,7 @@ def test_generate_bios_pxe_uses_root_undionly(tmp_path):
         with patch(
             "app.services.dhcp_config_generator.NetworkPortDAO.get_pxe_boot_port",
             return_value=port,
-        ):
+        ), _pending_task():
             content, _ = generate_dhcpd_conf(cfg, MagicMock(), return_content=True)
     assert 'filename "undionly.kpxe"' in content
     assert "pxe/undionly.kpxe" not in content

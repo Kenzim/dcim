@@ -16,6 +16,7 @@ from app.services.server_activity_logger import (
     log_server_activity_success,
 )
 from app.services.virtual_media.base import VirtualMediaStatus, VirtualMediaUnavailable
+from app.services.virtual_media.boot_iso import is_boot_iso_name
 from app.services.virtual_media.image_token import (
     image_url_for_token,
     mint_image_token,
@@ -138,6 +139,8 @@ async def insert_media(
     if not virtual_media_ready(server):
         raise VirtualMediaUnavailable(_NOT_CONFIGURED)
     name = validate_iso_filename(filename)
+    if is_boot_iso_name(name):
+        raise VirtualMediaUnavailable("Invalid ISO filename")
     profile = profile_for_server(server)
     image_url = await _image_url_for_insert(db, server, profile, name)
     try:

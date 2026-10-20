@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.services.dhcp_config_service import DHCPConfig
-from app.dao import NetworkPortDAO, ServerDAO
+from app.dao import BootTaskDAO, NetworkPortDAO, ServerDAO
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,12 @@ def generate_dhcpd_conf(
         "authoritative;",
         "",
     ]
+    if not config.hand_out_leases:
+        lines.extend([
+            "# Reservations only: ignore clients without a host declaration",
+            "deny unknown-clients;",
+            "",
+        ])
     
     # Group interfaces by subnet
     subnets = {}
@@ -296,7 +302,7 @@ def generate_dhcpd_conf(
                             f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.200;"
                         )
         else:
-            lines.append("    # DHCP leases disabled - only serving PXE boot")
+            lines.append("    # Dynamic leases disabled - reservations only")
         
         lines.append("    ")
         lines.append("    # Subnet mask")
@@ -382,15 +388,29 @@ def generate_dhcpd_conf(
         lines.append(f"host reserved-host{host_num} {{")
         lines.append(f"    hardware ethernet {mac};")
         lines.append(f"    fixed-address {pxe_ip};")
-        lines.append(f"    next-server {api_ip};")
-        lines.append(f"    ")
-        lines.append(f"    # First boot: Load iPXE loader via TFTP")
-        lines.append(f"    filename \"{ipxe_filename}\";")
-        lines.append(f"    ")
-        lines.append(f"    # When iPXE is already loaded, serve boot script from API")
-        lines.append(f"    if exists user-class and option user-class = \"iPXE\" {{")
-        lines.append(f"        filename \"http://{api_ip}:8000/api/servers/interaction/pxe?mac=${{mac}}\";")
-        lines.append(f"    }}")
+
+        # Only advertise a boot path while a boot task is waiting for this host;
+        # the nonce in the iPXE URL is what authorizes /pxe to serve it.
+        boot_task = BootTaskDAO.get_pending_by_server(db, server.id)
+        # vmedia tasks boot from a BMC-mounted ISO; their nonce never goes over DHCP.
+        if (
+            boot_task
+            and boot_task.pxe_nonce
+            and boot_task.pxe_nonce_used_at is None
+            and getattr(boot_task, "boot_method", "pxe") == "pxe"
+        ):
+            lines.append(f"    next-server {api_ip};")
+            lines.append(f"    ")
+            lines.append(f"    # First boot: Load iPXE loader via TFTP")
+            lines.append(f"    filename \"{ipxe_filename}\";")
+            lines.append(f"    ")
+            lines.append(f"    # When iPXE is already loaded, serve boot script from API")
+            lines.append(f"    if exists user-class and option user-class = \"iPXE\" {{")
+            lines.append(
+                f"        filename \"http://{api_ip}:8000/api/servers/interaction/pxe"
+                f"?mac=${{mac}}&t={boot_task.pxe_nonce}\";"
+            )
+            lines.append(f"    }}")
         lines.append(f"}}")
         lines.append("")
         

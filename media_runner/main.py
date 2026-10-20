@@ -81,7 +81,8 @@ def list_iso_files() -> list[dict[str, Any]]:
     MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for path in MEDIA_ROOT.iterdir():
-        if not path.is_file() or path.suffix.lower() != ".iso":
+        # rfboot-*.iso are per-boot ISOs holding a boot nonce; never advertise them.
+        if not path.is_file() or path.suffix.lower() != ".iso" or path.name.startswith("rfboot-"):
             continue
         try:
             size = path.stat().st_size

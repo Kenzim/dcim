@@ -172,3 +172,29 @@ def test_select_iface_skips_usb_even_when_up_first(tmp_path):
     assert proc.returncode == 0, proc.stderr + proc.stdout
     assert proc.stdout.strip().splitlines()[-1] == "eth2"
     assert "DEVICE=usb0" not in proc.stdout
+
+
+def _verify(tmp_path: Path, cmdline: str, content: bytes = b"squash") -> subprocess.CompletedProcess[str]:
+    img = tmp_path / "filesystem.squashfs"
+    img.write_bytes(content)
+    return _sourced(f"rf_verify_squashfs '{img}'", env={"RF_CMDLINE": cmdline})
+
+
+def test_verify_squashfs_skips_without_hash(tmp_path):
+    assert _verify(tmp_path, "boot=live").returncode == 0
+
+
+def test_verify_squashfs_accepts_matching_hash(tmp_path):
+    import hashlib
+
+    digest = hashlib.sha256(b"squash").hexdigest()
+    result = _verify(tmp_path, f"boot=live rf_fetch_sha256={digest}")
+    assert result.returncode == 0
+    assert "verified" in result.stderr
+
+
+def test_verify_squashfs_rejects_and_deletes_on_mismatch(tmp_path):
+    result = _verify(tmp_path, "boot=live rf_fetch_sha256=" + "0" * 64)
+    assert result.returncode != 0
+    assert "mismatch" in result.stderr
+    assert not (tmp_path / "filesystem.squashfs").exists()

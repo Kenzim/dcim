@@ -9,6 +9,7 @@ In production the app container only bakes config.json (binaries are excluded
 from the image). The live files live on the DHCP/TFTP shared volume at
 ``$TFTP_ROOT_DIRECTORY/pxe/temp_os`` (typically ``/shared/tftp/pxe/temp_os``).
 """
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 logger = logging.getLogger(__name__)
 
 # Repo-relative fallback (dev / tests without a TFTP volume)
+_SQUASHFS_SHA256_CACHE: dict = {}
 _REPO_TEMP_OS_DIR = Path(__file__).resolve().parent.parent.parent / "tftp" / "pxe" / "temp_os"
 
 
@@ -142,6 +144,28 @@ class TempOSService:
             return None
         return f"{base_url}/api/servers/interaction/temp-os/{os_id}/files/{config.squashfs_file}"
     
+    def get_squashfs_sha256(self, os_id: str) -> Optional[str]:
+        """SHA-256 of the squashfs (cached by size+mtime) so the initramfs can verify its fetch."""
+        config = self.get_os_config(os_id)
+        os_dir = self.get_os_dir(os_id)
+        if not config or not config.squashfs_file or os_dir is None:
+            return None
+        path = os_dir / config.squashfs_file
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        cached = _SQUASHFS_SHA256_CACHE.get(key)
+        if cached:
+            return cached
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        _SQUASHFS_SHA256_CACHE[key] = digest.hexdigest()
+        return _SQUASHFS_SHA256_CACHE[key]
+
     def get_kernel_params(self, os_id: str, additional_params: Optional[str] = None) -> str:
         """Get kernel parameters for a temporary OS"""
         config = self.get_os_config(os_id)

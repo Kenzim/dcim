@@ -236,7 +236,7 @@ def test_get_boot_task_temp_os(admin_client, test_server, temp_os_dir, db_sessio
     assert data["temp_os_id"] == "alpine"
 
 
-def test_pxe_boot_script_temp_os(client, test_server, temp_os_dir, db_session, test_location):
+def test_pxe_boot_script_temp_os(client, pxe_get, test_server, temp_os_dir, db_session, test_location):
     """Test PXE boot script generation for temp_os boot task"""
     from app.dao import NetworkPortDAO
     
@@ -247,7 +247,8 @@ def test_pxe_boot_script_temp_os(client, test_server, temp_os_dir, db_session, t
         name="eth0",
         mac_address="00:0E:1E:6F:16:B0",
         speed_mbps=1000,
-        pxe_boot=True
+        pxe_boot=True,
+        pxe_ip="192.168.1.100",
     )
     
     # Create boot task
@@ -260,10 +261,7 @@ def test_pxe_boot_script_temp_os(client, test_server, temp_os_dir, db_session, t
     )
     
     # Get PXE boot script
-    response = client.get(
-        "/api/servers/interaction/pxe",
-        params={"mac": "00:0E:1E:6F:16:B0"}
-    )
+    response = pxe_get("00:0E:1E:6F:16:B0", boot_task)
     
     assert response.status_code == 200
     script = response.text

@@ -412,8 +412,13 @@
                 </p>
                 <label class="toggle-available" style="margin-bottom: 0.5rem;">
                   <input type="checkbox" bind:checked={dhcpSettings.hand_out_leases} />
-                  <span>Hand out dynamic leases (add a <code>range</code> block). When unchecked, only static reservations from servers are used.</span>
+                  <span>Hand out dynamic leases (add a <code>range</code> block). When unchecked, only static reservations from servers are used and unknown clients are ignored.</span>
                 </label>
+                {#if dhcpSettings.hand_out_leases}
+                  <p class="field-help small">
+                    Warning: on a public or shared VLAN, dynamic leases let any device on the segment obtain an address. Leave this off unless the subnet is a private provisioning network.
+                  </p>
+                {/if}
                 <div class="table-scroll">
                 <table class="table dhcp-table">
                   <thead>

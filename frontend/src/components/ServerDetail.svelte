@@ -1924,6 +1924,16 @@
                   {/if}
                 </div>
                 <div class="boot-op-card">
+                  <span class="boot-op-label">Reinstall boot</span>
+                  <span class="boot-op-hint">
+                    {#if server.reinstall_boot_method === 'vmedia'}
+                      Virtual media (ISO): mounts a per-boot ISO, boots once from CD and power-cycles. No boot-order changes.
+                    {:else}
+                      PXE: the server must try network boot before disk; reboot it after queueing.
+                    {/if}
+                  </span>
+                </div>
+                <div class="boot-op-card">
                   <span class="boot-op-label">BMC virtual CD</span>
                   {#if !server.virtual_media_profile}
                     <span class="boot-op-hint">Set a Virtual CD profile on the server to mount ISOs via the BMC</span>

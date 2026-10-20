@@ -21,6 +21,8 @@ from app.models.boot_task import BootType, BootTaskStatus
 from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
 from app.dao import ServiceInstanceDAO
+from app.services.boot_launcher import schedule_launch, vmedia_capable
+from app.services.dhcp_sync import regenerate_location_dhcp
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
@@ -109,30 +111,7 @@ def _rack_placement_overlaps(
 
 async def _regenerate_location_dhcp_if_present(db: Session, location_id: int) -> None:
     """Regenerate and push DHCP config for this location if it has a DHCP service instance."""
-    try:
-        instance = ServiceInstanceDAO.get_by_location_and_type(db, location_id, "dhcp")
-        if not instance:
-            return
-        from app.services.dhcp_config_generator import generate_dhcpd_conf
-        from app.services.dhcp_config_service import get_dhcp_config_service
-        from app.services.runner_client import call_dhcp_runner
-
-        config_svc = get_dhcp_config_service()
-        config = config_svc.get_config_by_service_instance(db, instance.id)
-        if not config:
-            config = config_svc.get_or_create_config_for_service_instance(
-                db, instance.id, "/shared/dhcp/dhcpd.conf", "/shared/dhcp/dhcpd.leases"
-            )
-        result = generate_dhcpd_conf(config, db, location_id=location_id, return_content=True)
-        if not result:
-            return
-        content, interface_names = result
-        headers = {"X-Runner-Interfaces": ",".join(interface_names)} if interface_names else None
-        code, _ = await call_dhcp_runner(instance, db, "PUT", "/config", raw_body=content.encode(), extra_headers=headers)
-        if code in (200, 201):
-            logger.info(f"Regenerated DHCP config for location {location_id} after server change")
-    except Exception as e:
-        logger.warning(f"Failed to regenerate DHCP for location {location_id}: {e}")
+    await regenerate_location_dhcp(db, location_id)
 
 
 def convert_network_ports_to_response(db: Session, server_id: int, network_ports: List[Any]) -> List[Dict[str, Any]]:
@@ -415,6 +394,8 @@ class ServerResponse(BaseModel):
     sol_profile: str | None = None
     virtual_media_profile: str | None = None
     preview_asset_id: int | None = None
+    # "vmedia" when reinstalls boot a per-boot ISO through the BMC, else "pxe".
+    reinstall_boot_method: str | None = None
 
     class Config:
         from_attributes = True
@@ -1480,7 +1461,8 @@ async def get_server(
         "network_ports": network_ports_with_cables,
         "plugin_categories": plugin_categories,
         "effective_capabilities": effective,
-        "server_groups": server_groups
+        "server_groups": server_groups,
+        "reinstall_boot_method": "vmedia" if vmedia_capable(server) else "pxe",
     }
 
 
@@ -1570,6 +1552,7 @@ async def run_hardware_detection(
         message="Hardware detection boot task queued",
         details={"report_id": report.id, "boot_task_id": boot_task.id},
     )
+    schedule_launch(server.id, boot_task.id, source="admin_api")
 
     return HardwareDetectionRunResponse(
         report_id=report.id,
