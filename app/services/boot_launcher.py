@@ -3,8 +3,9 @@
 Virtual-media flow (no persistent boot-order changes):
   stamp per-boot iPXE ISO -> stage on the location media runner (HTTP, or SMB for
   Supermicro X9) or serve from the app -> BMC mounts it -> one-time boot to CD ->
-  power cycle. iPXE then gets its IP from DHCP and fetches /pxe over HTTPS with the
-  task nonce. The ISO is ejected and deleted once /pxe has served the script.
+  power cycle. iPXE then gets its IP from DHCP and fetches /pxe with the task nonce
+  from the same per-subnet origin PXE uses (or VMEDIA_BOOT_BASE_URL). The ISO is
+  ejected and deleted once /pxe has served the script.
 
 PXE flow: nothing to do here; dhcpd advertises the boot path for pending PXE tasks
 (see app/services/dhcp_sync.py) and the operator/customer reboots the server.

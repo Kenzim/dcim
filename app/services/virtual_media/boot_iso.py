@@ -14,6 +14,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from app.core.config import settings
+from app.services.pxe_boot_urls import lan_boot_base_url
 from app.services.virtual_media.base import VirtualMediaUnavailable
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -34,33 +35,28 @@ def boot_iso_filename() -> str:
     return f"{BOOT_ISO_PREFIX}{secrets.token_hex(16)}.iso"
 
 
-def boot_base_url() -> str:
-    """Origin iPXE chains to.
-
-    ``VMEDIA_BOOT_BASE_URL`` (http or https, typically the app's LAN address)
-    wins. Otherwise the public URL is used and must be https with a publicly
-    trusted certificate.
-    """
+def _explicit_boot_base_url() -> Optional[str]:
     explicit = (settings.vmedia_boot_base_url or "").strip().rstrip("/")
-    if explicit:
-        parsed = urlparse(explicit)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise VirtualMediaUnavailable(
-                "VMEDIA_BOOT_BASE_URL must be an http:// or https:// URL"
-            )
-        return explicit
-    base = ((settings.public_base_url or "").strip() or (settings.public_app_url or "").strip()).rstrip("/")
-    if urlparse(base).scheme != "https":
-        raise VirtualMediaUnavailable(
-            "Virtual-media boot needs VMEDIA_BOOT_BASE_URL, or PUBLIC_BASE_URL (or PUBLIC_APP_URL) "
-            "set to an https:// URL"
-        )
-    return base
+    if not explicit:
+        return None
+    parsed = urlparse(explicit)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise VirtualMediaUnavailable("VMEDIA_BOOT_BASE_URL must be an http:// or https:// URL")
+    return explicit
+
+
+def boot_base_url(db, pxe_ip: Optional[str]) -> str:
+    """Origin iPXE chains to for the server whose PXE IP is ``pxe_ip``.
+
+    ``VMEDIA_BOOT_BASE_URL`` overrides it for every server. Otherwise it is the
+    same per-subnet ``http://{next-server}:8000`` that dhcpd hands PXE clients.
+    """
+    return _explicit_boot_base_url() or lan_boot_base_url(db, pxe_ip)
 
 
 def vmedia_boot_available() -> bool:
     try:
-        boot_base_url()
+        _explicit_boot_base_url()
     except VirtualMediaUnavailable:
         return False
     return TEMPLATE_ISO.is_file() and PLACEHOLDER.is_file()
@@ -114,5 +110,5 @@ def stamp_boot_iso(script: str) -> bytes:
     return iso.replace(placeholder, payload)
 
 
-def build_boot_iso(nonce: str) -> bytes:
-    return stamp_boot_iso(render_boot_script(boot_base_url(), nonce))
+def build_boot_iso(base_url: str, nonce: str) -> bytes:
+    return stamp_boot_iso(render_boot_script(base_url, nonce))

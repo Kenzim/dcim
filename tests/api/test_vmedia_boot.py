@@ -20,6 +20,11 @@ from app.services.virtual_media.registry import register_profile, unregister_pro
 PROFILE_ID = "test_vmedia_boot"
 MAC = "00:0e:1e:6f:16:b0"
 PXE_IP = "203.0.113.10"
+# DHCP interface IPs (next-server) of the two subnets in the fake DHCP config.
+NEXT_SERVER_A = "203.0.113.2"
+NEXT_SERVER_B = "198.51.100.2"
+MAC_B = "00:0e:1e:6f:16:b1"
+PXE_IP_B = "198.51.100.20"
 
 
 class _Profile(VirtualMediaProfile):
@@ -67,9 +72,28 @@ def _plugin(events, power=PowerState.ON, boot_ok=True):
     )
 
 
+def _vmedia_server(db, location_id, name, ip, mac):
+    server = ServerDAO.create(
+        db,
+        name=name,
+        server_ip=ip,
+        plugin_name="ipmi",
+        plugin_config={"hostname": "10.0.0.5", "username": "admin", "password": "secret"},
+        location_id=location_id,
+        virtual_media_profile=PROFILE_ID,
+    )
+    NetworkPortDAO.create(
+        db, server_id=server.id, name="eth0", mac_address=mac,
+        speed_mbps=1000, pxe_boot=True, pxe_ip=ip,
+    )
+    return server
+
+
 @pytest.fixture
 def vmedia_env(client, db_session, monkeypatch, tmp_path):
-    """Server with a vmedia profile, an https public URL and a fake ISO template."""
+    """Server with a vmedia profile, a two-subnet DHCP config and a fake ISO template."""
+    from app.services.dhcp_config_service import DHCPConfig, DHCPInterfaceConfig
+
     placeholder = boot_iso.PLACEHOLDER.read_bytes()
     template = tmp_path / "rackflow-vmedia.iso"
     template.write_bytes(b"ISO" + placeholder + b"--" + placeholder + b"END")
@@ -78,29 +102,30 @@ def vmedia_env(client, db_session, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "public_base_url", "https://rackflow.example.com")
     monkeypatch.setattr(settings, "virtual_media_base_url", "http://bmc-fetch.test")
     monkeypatch.setattr(settings, "vmedia_boot_base_url", None)
+    dhcp = DHCPConfig(
+        enabled=True,
+        interfaces=[
+            DHCPInterfaceConfig(interface="eth0", ip=NEXT_SERVER_A, cidr=24),
+            DHCPInterfaceConfig(interface="eth1", ip=NEXT_SERVER_B, cidr=24),
+        ],
+        config_file_path="/dev/null",
+        lease_file_path="/dev/null",
+    )
+    monkeypatch.setattr(
+        "app.services.dhcp_config_service.get_dhcp_config_service",
+        lambda: SimpleNamespace(get_config=lambda _db: dhcp, get_config_by_service_instance=lambda _db, _i: dhcp),
+    )
 
     profile = _Profile()
     register_profile(profile)
     location = LocationDAO.create(db_session, name="loc-vmedia")
-    server = ServerDAO.create(
-        db_session,
-        name="vmedia-srv",
-        server_ip=PXE_IP,
-        plugin_name="ipmi",
-        plugin_config={"hostname": "10.0.0.5", "username": "admin", "password": "secret"},
-        location_id=location.id,
-        virtual_media_profile=PROFILE_ID,
-    )
-    NetworkPortDAO.create(
-        db_session, server_id=server.id, name="eth0", mac_address=MAC,
-        speed_mbps=1000, pxe_boot=True, pxe_ip=PXE_IP,
-    )
+    server = _vmedia_server(db_session, location.id, "vmedia-srv", PXE_IP, MAC)
     plugin = _plugin(profile.events)
     monkeypatch.setattr(
         "app.plugins.registry.get_registry",
         lambda: SimpleNamespace(get_plugin=lambda *_a, **_k: plugin),
     )
-    yield SimpleNamespace(server=server, profile=profile, plugin=plugin, db=db_session)
+    yield SimpleNamespace(server=server, profile=profile, plugin=plugin, db=db_session, location=location)
     unregister_profile(PROFILE_ID)
 
 
@@ -155,19 +180,17 @@ def test_launch_without_vmedia_profile_stays_pxe(vmedia_env):
     assert env.profile.events == []
 
 
-def test_launch_without_https_public_url_stays_pxe(vmedia_env, monkeypatch):
+def test_launch_with_invalid_boot_url_override_stays_pxe(vmedia_env, monkeypatch):
     env = vmedia_env
-    monkeypatch.setattr(settings, "public_base_url", "http://rackflow.example.com")
-    monkeypatch.setattr(settings, "public_app_url", None)
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", "10.0.0.1:8000")
     task = _task(env.db, env.server.id)
     assert asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test")) == "pxe"
 
 
-def test_launch_with_lan_http_boot_url_uses_vmedia(vmedia_env, monkeypatch):
+def test_launch_needs_no_public_or_boot_url(vmedia_env, monkeypatch):
     env = vmedia_env
-    monkeypatch.setattr(settings, "public_base_url", "http://rackflow.example.com")
+    monkeypatch.setattr(settings, "public_base_url", None)
     monkeypatch.setattr(settings, "public_app_url", None)
-    monkeypatch.setattr(settings, "vmedia_boot_base_url", "http://10.0.0.1:8000")
     task = _task(env.db, env.server.id)
     assert asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test")) == "vmedia"
 
@@ -226,6 +249,7 @@ def test_image_route_serves_stamped_iso_with_range(client, vmedia_env):
     full = client.get(f"/api/virtual-media/images/{token}/{name}")
     assert full.status_code == 200, full.text
     assert full.content.count(f"&t={task.pxe_nonce}".encode()) == 2
+    assert full.content.count(f"chain http://{NEXT_SERVER_A}:8000/api/servers/interaction/pxe".encode()) == 2
     assert boot_iso.PLACEHOLDER.read_bytes() not in full.content
 
     part = client.get(f"/api/virtual-media/images/{token}/{name}", headers={"Range": "bytes=0-2"})
@@ -244,19 +268,39 @@ def test_image_route_404_once_nonce_used(client, vmedia_env):
     assert client.get(f"/api/virtual-media/images/{token}/{name}").status_code == 404
 
 
-def test_pxe_for_vmedia_task_uses_https_and_releases_iso(pxe_get, vmedia_env, boot_launcher_calls):
+def test_pxe_for_vmedia_task_uses_subnet_next_server_and_releases_iso(pxe_get, vmedia_env, boot_launcher_calls):
     env = vmedia_env
     task = _task(env.db, env.server.id)
     task.boot_method = "vmedia"
     env.db.commit()
     response = pxe_get(MAC, task, source_ip=PXE_IP)
     assert response.status_code == 200, response.text
-    assert "kernel https://rackflow.example.com/" in response.text
-    assert "http://" not in response.text
+    assert f"kernel http://{NEXT_SERVER_A}:8000/" in response.text
+    assert "rackflow.example.com" not in response.text
     assert boot_launcher_calls["release"] == [env.server.id]
 
 
-def test_pxe_for_vmedia_task_uses_lan_http_boot_url(pxe_get, vmedia_env, boot_launcher_calls, monkeypatch):
+def test_vmedia_boot_origin_follows_each_servers_subnet(client, pxe_get, vmedia_env, boot_launcher_calls):
+    """Two DHCP subnets in one location: each server chains to its own next-server."""
+    env = vmedia_env
+    server_b = _vmedia_server(env.db, env.location.id, "vmedia-srv-b", PXE_IP_B, MAC_B)
+    task = _task(env.db, server_b.id)
+    task.boot_method = "vmedia"
+    env.db.commit()
+
+    name = "rfboot-0123456789abcdef0123456789abcdef.iso"
+    iso = client.get(f"/api/virtual-media/images/{mint_image_token(server_b.id, name)}/{name}")
+    assert iso.status_code == 200, iso.text
+    assert iso.content.count(f"chain http://{NEXT_SERVER_B}:8000/api/servers/interaction/pxe".encode()) == 2
+    assert NEXT_SERVER_A.encode() not in iso.content
+
+    response = pxe_get(MAC_B, task, source_ip=PXE_IP_B)
+    assert response.status_code == 200, response.text
+    assert f"kernel http://{NEXT_SERVER_B}:8000/" in response.text
+    assert NEXT_SERVER_A not in response.text
+
+
+def test_pxe_for_vmedia_task_boot_url_override_wins(pxe_get, vmedia_env, boot_launcher_calls, monkeypatch):
     env = vmedia_env
     monkeypatch.setattr(settings, "vmedia_boot_base_url", "http://10.0.0.1:8000")
     task = _task(env.db, env.server.id)
@@ -265,7 +309,7 @@ def test_pxe_for_vmedia_task_uses_lan_http_boot_url(pxe_get, vmedia_env, boot_la
     response = pxe_get(MAC, task, source_ip=PXE_IP)
     assert response.status_code == 200, response.text
     assert "kernel http://10.0.0.1:8000/" in response.text
-    assert "rackflow.example.com" not in response.text
+    assert NEXT_SERVER_A not in response.text
 
 
 @pytest.mark.parametrize("method", ["vmedia", "pxe"])

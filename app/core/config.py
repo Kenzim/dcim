@@ -414,10 +414,10 @@ class Settings(BaseSettings):
     # the management network). Falls back to public_base_url then public_app_url.
     # Prefer HTTP; many BMCs reject HTTPS with a private CA.
     virtual_media_base_url: Optional[str] = None
-    # Origin iPXE on a virtual-media boot ISO chains to for /pxe, kernel, initrd
-    # and the live OS (e.g. "http://10.0.0.1:8000" on the provisioning LAN).
-    # http:// is allowed, like PXE. Unset: public_base_url / public_app_url,
-    # which must then be https:// with a publicly trusted certificate.
+    # Optional override for the origin iPXE on a virtual-media boot ISO chains to
+    # for /pxe, kernel, initrd and the live OS. Unset (recommended): each server
+    # uses http://{next-server}:8000 for its DHCP subnet, exactly like PXE.
+    # Set it only to force one origin for every server (http:// or https://).
     vmedia_boot_base_url: Optional[str] = None
     # Reusable ISO image-token lifetime (seconds). VirtualMedia downloads can
     # take a long time for multi-GB images (HEAD + Range + GET).

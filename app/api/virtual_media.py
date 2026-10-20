@@ -189,8 +189,8 @@ def _bytes_range_response(request: Request, data: bytes, filename: str) -> Respo
 def _serve_boot_iso(request: Request, token_data: dict, name: str) -> Response:
     """Stamp the pending vmedia boot task's nonce into the template ISO."""
     from app.core.database import SessionLocal
-    from app.dao import BootTaskDAO
-    from app.services.virtual_media.boot_iso import build_boot_iso
+    from app.dao import BootTaskDAO, NetworkPortDAO
+    from app.services.virtual_media.boot_iso import boot_base_url, build_boot_iso
 
     try:
         server_id = int(token_data.get("server_id") or 0)
@@ -207,10 +207,14 @@ def _serve_boot_iso(request: Request, token_data: dict, name: str) -> Response:
         ):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending boot for this image")
         nonce = task.pxe_nonce
+        pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+        base_url = boot_base_url(db, pxe_port.pxe_ip if pxe_port else None)
+    except VirtualMediaUnavailable as exc:
+        raise virtual_media_http_error(exc) from exc
     finally:
         db.close()
     try:
-        data = build_boot_iso(nonce)
+        data = build_boot_iso(base_url, nonce)
     except VirtualMediaUnavailable as exc:
         raise virtual_media_http_error(exc) from exc
     return _bytes_range_response(request, data, name)

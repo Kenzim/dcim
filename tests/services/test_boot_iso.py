@@ -41,7 +41,7 @@ def test_render_boot_script_chains_https_pxe_with_nonce():
 
 def test_stamp_replaces_both_copies_and_keeps_size(fake_template):
     original = fake_template.read_bytes()
-    stamped = boot_iso.build_boot_iso("N0NCE_abc-123")
+    stamped = boot_iso.build_boot_iso("https://rackflow.example.com", "N0NCE_abc-123")
     assert len(stamped) == len(original)
     assert REAL_PLACEHOLDER not in stamped
     assert stamped.count(b"&t=N0NCE_abc-123") == 2
@@ -55,7 +55,7 @@ def test_stamp_requires_both_placeholders(fake_template):
     fake_template.write_bytes(b"HEAD" + REAL_PLACEHOLDER + b"TAIL")
     boot_iso._template_cache.clear()
     with pytest.raises(VirtualMediaUnavailable, match="placeholders"):
-        boot_iso.build_boot_iso("n")
+        boot_iso.build_boot_iso("http://10.0.0.1:8000", "n")
 
 
 def test_stamp_rejects_oversized_script(fake_template):
@@ -66,40 +66,40 @@ def test_stamp_rejects_oversized_script(fake_template):
 def test_missing_template_is_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(boot_iso, "TEMPLATE_ISO", tmp_path / "missing.iso")
     boot_iso._template_cache.clear()
-    monkeypatch.setattr(settings, "public_base_url", "https://rackflow.example.com")
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", None)
     with pytest.raises(VirtualMediaUnavailable, match="build-rackflow-netboot-iso"):
-        boot_iso.build_boot_iso("n")
+        boot_iso.build_boot_iso("http://10.0.0.1:8000", "n")
     assert boot_iso.vmedia_boot_available() is False
 
 
-@pytest.mark.parametrize("url", [None, "", "http://rackflow.example.com"])
-def test_boot_base_url_requires_https(monkeypatch, url):
-    monkeypatch.setattr(settings, "vmedia_boot_base_url", None)
-    monkeypatch.setattr(settings, "public_base_url", url)
-    monkeypatch.setattr(settings, "public_app_url", None)
-    with pytest.raises(VirtualMediaUnavailable, match="https"):
-        boot_iso.boot_base_url()
-
-
-@pytest.mark.parametrize("public", [None, "https://rackflow.example.com"])
-def test_vmedia_boot_base_url_allows_lan_http_and_wins(monkeypatch, public):
-    monkeypatch.setattr(settings, "vmedia_boot_base_url", " http://10.0.0.1:8000/ ")
+@pytest.mark.parametrize("public", [None, "http://rackflow.example.com", "https://rackflow.example.com"])
+def test_boot_base_url_defaults_to_servers_pxe_origin(fake_template, monkeypatch, public):
+    """Unset override: the per-subnet next-server PXE uses; the public URL plays no part."""
+    calls = []
+    monkeypatch.setattr(boot_iso, "lan_boot_base_url", lambda db, ip: calls.append((db, ip)) or "http://203.0.113.2:8000")
     monkeypatch.setattr(settings, "public_base_url", public)
     monkeypatch.setattr(settings, "public_app_url", None)
-    assert boot_iso.boot_base_url() == "http://10.0.0.1:8000"
+    assert boot_iso.boot_base_url("DB", "203.0.113.10") == "http://203.0.113.2:8000"
+    assert calls == [("DB", "203.0.113.10")]
+    assert boot_iso.vmedia_boot_available() is True
+
+
+def test_vmedia_boot_base_url_override_wins(monkeypatch):
+    monkeypatch.setattr(settings, "vmedia_boot_base_url", " http://10.0.0.1:8000/ ")
+    monkeypatch.setattr(boot_iso, "lan_boot_base_url", lambda *_: pytest.fail("override must win"))
+    assert boot_iso.boot_base_url("DB", "203.0.113.10") == "http://10.0.0.1:8000"
 
 
 @pytest.mark.parametrize("url", ["10.0.0.1:8000", "ftp://10.0.0.1", "http://"])
-def test_vmedia_boot_base_url_rejects_non_http_urls(monkeypatch, url):
+def test_vmedia_boot_base_url_rejects_non_http_urls(fake_template, monkeypatch, url):
     monkeypatch.setattr(settings, "vmedia_boot_base_url", url)
-    monkeypatch.setattr(settings, "public_base_url", "https://rackflow.example.com")
     with pytest.raises(VirtualMediaUnavailable, match="VMEDIA_BOOT_BASE_URL"):
-        boot_iso.boot_base_url()
+        boot_iso.boot_base_url("DB", "203.0.113.10")
+    assert boot_iso.vmedia_boot_available() is False
 
 
-def test_stamp_with_lan_http_chain_url(fake_template, monkeypatch):
-    monkeypatch.setattr(settings, "vmedia_boot_base_url", "http://10.0.0.1:8000")
-    stamped = boot_iso.build_boot_iso("N0NCE")
+def test_stamp_with_lan_http_chain_url(fake_template):
+    stamped = boot_iso.build_boot_iso("http://10.0.0.1:8000", "N0NCE")
     assert stamped.count(b"chain http://10.0.0.1:8000/api/servers/interaction/pxe?mac=${netX/mac}&t=N0NCE") == 2
 
 

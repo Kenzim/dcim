@@ -35,6 +35,7 @@ from app.services.download_token_service import get_download_token_service, temp
 from app.services.dhcp_config_service import get_dhcp_config_service
 from app.services.boot_launcher import schedule_launch, schedule_release, vmedia_capable
 from app.services.virtual_media.boot_iso import boot_base_url
+from app.services.pxe_boot_urls import lan_boot_base_url
 from app.services.dhcp_config_generator import get_next_server_ip_for_client, get_subnet_info_for_client
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
@@ -334,32 +335,7 @@ def _get_base_url_for_pxe_ip(db, pxe_ip: Optional[str]) -> str:
     Falls back to the legacy global DHCP config when no per-location config
     can be resolved.
     """
-    dhcp_svc = get_dhcp_config_service()
-    config = None
-
-    # When we know the PXE IP, try to find the server and its location so we
-    # can use that location's DHCP service instance config.
-    if pxe_ip:
-        try:
-            port = db.query(NetworkPort).filter(NetworkPort.pxe_ip == pxe_ip).first()
-        except Exception:
-            port = None
-        if port and port.server_id:
-            server = ServerDAO.get_by_id(db, port.server_id)
-            location_id = getattr(server, "location_id", None) if server else None
-            if location_id:
-                instance = ServiceInstanceDAO.get_by_location_and_type(
-                    db, location_id, "dhcp"
-                )
-                if instance:
-                    config = dhcp_svc.get_config_by_service_instance(db, instance.id)
-
-    # Fallback to global config when no per-location config is available
-    if config is None:
-        config = dhcp_svc.get_config(db)
-
-    ip = get_next_server_ip_for_client(config, pxe_ip)
-    return f"http://{ip}:8000"
+    return lan_boot_base_url(db, pxe_ip)
 
 
 def normalize_mac_address(mac: str) -> str:
@@ -549,7 +525,7 @@ async def get_pxe_boot_file(
             if boot_task.boot_method == "vmedia":
                 # iPXE is running from RAM; installer assets come from the vmedia
                 # boot URL, and the per-boot ISO is no longer needed.
-                base_url = boot_base_url()
+                base_url = boot_base_url(db, port.pxe_ip)
                 schedule_release(server.id)
 
             if boot_task.boot_type == BootType.LINUX_SCRIPT:
