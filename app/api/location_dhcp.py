@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import ServiceInstanceDAO, LocationDAO
 from app.services.runner_client import call_dhcp_runner, cached_location_status
+from app.services.dhcp_sync import push_location_dhcp_config
 from app.services.dhcp_config_service import (
     get_dhcp_config_service,
     DHCPConfigService,
@@ -130,10 +131,7 @@ async def update_location_dhcp_settings(
             detail="Failed to generate DHCP configuration",
         )
     content, interface_names = result
-    headers = {"X-Runner-Interfaces": ",".join(interface_names)} if interface_names else None
-    code, body = await call_dhcp_runner(
-        instance, db, "PUT", "/config", raw_body=content.encode(), extra_headers=headers
-    )
+    code, body = await push_location_dhcp_config(db, instance, content, interface_names)
     if code not in (200, 201):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=body)
 
@@ -230,8 +228,7 @@ async def regenerate_location_dhcp_config(
     if not result:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate config")
     content, interface_names = result
-    headers = {"X-Runner-Interfaces": ",".join(interface_names)} if interface_names else None
-    code, body = await call_dhcp_runner(instance, db, "PUT", "/config", raw_body=content.encode(), extra_headers=headers)
+    code, body = await push_location_dhcp_config(db, instance, content, interface_names)
     if code not in (200, 201):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=body)
     return {"success": True, "message": "DHCP config regenerated and pushed to runner"}

@@ -15,6 +15,29 @@ from app.dao import ServerDAO, ServiceInstanceDAO
 logger = logging.getLogger(__name__)
 
 
+async def push_location_dhcp_config(db: Session, instance, content: str, interface_names) -> tuple[int, object]:
+    """Write dhcpd.conf to the location's runner and make dhcpd load it.
+
+    The runner only writes the file; dhcpd runs in the foreground and never
+    re-reads it, so a running dhcpd is restarted. A stopped dhcpd is left
+    stopped. Returns the (status, body) of the config push.
+    """
+    from app.services.runner_client import call_dhcp_runner
+
+    headers = {"X-Runner-Interfaces": ",".join(interface_names)} if interface_names else None
+    code, body = await call_dhcp_runner(instance, db, "PUT", "/config", raw_body=content.encode(), extra_headers=headers)
+    if code not in (200, 201):
+        return code, body
+    status_code, status_body = await call_dhcp_runner(instance, db, "GET", "/status")
+    if status_code != 200 or not isinstance(status_body, dict) or not status_body.get("running"):
+        logger.info(f"DHCP config written for service instance {instance.id}; dhcpd not running, not restarted")
+        return code, body
+    restart_code, restart_body = await call_dhcp_runner(instance, db, "POST", "/restart")
+    if restart_code not in (200, 201):
+        logger.warning(f"DHCP restart after config push failed for service instance {instance.id}: {restart_code} {restart_body}")
+    return code, body
+
+
 async def regenerate_location_dhcp(db: Session, location_id: int) -> bool:
     """Regenerate and push DHCP config for this location if it has a DHCP service instance.
 
@@ -26,7 +49,6 @@ async def regenerate_location_dhcp(db: Session, location_id: int) -> bool:
     try:
         from app.services.dhcp_config_generator import generate_dhcpd_conf
         from app.services.dhcp_config_service import get_dhcp_config_service
-        from app.services.runner_client import call_dhcp_runner
 
         config_svc = get_dhcp_config_service()
         config = config_svc.get_config_by_service_instance(db, instance.id)
@@ -38,8 +60,7 @@ async def regenerate_location_dhcp(db: Session, location_id: int) -> bool:
         if not result:
             return True
         content, interface_names = result
-        headers = {"X-Runner-Interfaces": ",".join(interface_names)} if interface_names else None
-        code, _ = await call_dhcp_runner(instance, db, "PUT", "/config", raw_body=content.encode(), extra_headers=headers)
+        code, _ = await push_location_dhcp_config(db, instance, content, interface_names)
         if code in (200, 201):
             logger.info(f"Regenerated DHCP config for location {location_id}")
         else:

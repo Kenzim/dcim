@@ -27,11 +27,48 @@ def test_sync_pushes_location_config_to_runner():
 
     gen.assert_called_once()
     assert gen.call_args.kwargs["location_id"] == 3
-    args, kwargs = runner.call_args
+    args, kwargs = runner.call_args_list[0]
     assert args[2:4] == ("PUT", "/config")
     assert kwargs["raw_body"] == b"conf-body"
     assert kwargs["extra_headers"] == {"X-Runner-Interfaces": "eth0"}
     global_regen.assert_not_called()
+
+
+def _runner_responses(status_body):
+    async def fake(instance, db, method, path, **kwargs):
+        if (method, path) == ("GET", "/status"):
+            return 200, status_body
+        return 200, {"success": True}
+
+    return AsyncMock(side_effect=fake)
+
+
+def test_push_restarts_running_dhcpd_so_it_loads_the_new_config():
+    runner = _runner_responses({"running": True})
+    with patch("app.services.runner_client.call_dhcp_runner", runner):
+        code, _ = _run(dhcp_sync.push_location_dhcp_config(MagicMock(), SimpleNamespace(id=5), "conf", ["eth0"]))
+
+    assert code == 200
+    calls = [c.args[2:4] for c in runner.call_args_list]
+    assert calls == [("PUT", "/config"), ("GET", "/status"), ("POST", "/restart")]
+
+
+def test_push_leaves_stopped_dhcpd_stopped():
+    runner = _runner_responses({"running": False})
+    with patch("app.services.runner_client.call_dhcp_runner", runner):
+        _run(dhcp_sync.push_location_dhcp_config(MagicMock(), SimpleNamespace(id=5), "conf", None))
+
+    calls = [c.args[2:4] for c in runner.call_args_list]
+    assert ("POST", "/restart") not in calls
+
+
+def test_push_does_not_restart_when_config_write_fails():
+    runner = AsyncMock(return_value=(502, {"detail": "disk full"}))
+    with patch("app.services.runner_client.call_dhcp_runner", runner):
+        code, body = _run(dhcp_sync.push_location_dhcp_config(MagicMock(), SimpleNamespace(id=5), "conf", None))
+
+    assert (code, body) == (502, {"detail": "disk full"})
+    assert runner.await_count == 1
 
 
 def test_sync_falls_back_to_global_config_without_location_instance():

@@ -9,6 +9,7 @@ from app.api.location_tftp import _get_tftp_instance
 from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 from app.services.dhcp_config_service import get_dhcp_config_service
+from app.services.dhcp_sync import push_location_dhcp_config
 from app.services.runner_client import call_dhcp_runner, call_tftp_runner
 
 _MSG_KIND_DHCP_OR_TFTP = "kind must be dhcp or tftp"
@@ -41,10 +42,7 @@ async def _dhcp_tftp_regen_config(db, location_id: int) -> dict:
     if not result:
         raise ValueError("Failed to generate DHCP config")
     content, interface_names = result
-    headers = {"X-Runner-Interfaces": ",".join(interface_names)} if interface_names else None
-    code, body = await call_dhcp_runner(
-        instance, db, "PUT", "/config", raw_body=content.encode(), extra_headers=headers
-    )
+    code, body = await push_location_dhcp_config(db, instance, content, interface_names)
     if code not in (200, 201):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=body)
     return {"success": True, "kind": "dhcp", "action": "regen"}
