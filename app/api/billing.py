@@ -840,6 +840,7 @@ def _queue_template_install_for_service(
         allowed_files=allowed_files if allowed_files else None,
         allowed_patterns=["logs-*"],
         expires_in=3600,
+        deferred=True,
     )
 
     # Inject token-based URLs and all variables into script
@@ -3209,6 +3210,7 @@ async def reinstall_os_on_service(
             boot_task_id=boot_task.id,
             allowed_files=allowed_files if allowed_files else None,
             expires_in=3600,
+            deferred=True,
         )
 
         # Inject token into script and update URLs

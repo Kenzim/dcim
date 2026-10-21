@@ -20,6 +20,14 @@ TOKEN_EXPIRATION_SECONDS = 900
 # Token key prefix in Redis
 TOKEN_KEY_PREFIX = "download_token:"
 
+# Deferred tokens (baked into a boot task script when the task is queued) wait
+# at most this long for the server to fetch its script before Redis drops them.
+DEFERRED_TOKEN_MAX_WAIT_SECONDS = 7 * 24 * 3600
+
+# Per-boot-task hash of deferred token ids, so they can be activated when the
+# script is served without knowing the raw token.
+TASK_DEFERRED_KEY_PREFIX = "download_token_deferred:"
+
 
 def _derive_token_id(token: str) -> str:
     """Derive token_id from token using SHA256"""
@@ -48,6 +56,7 @@ class DownloadTokenService:
         allowed_patterns: Optional[List[str]] = None,
         expires_in: int = TOKEN_EXPIRATION_SECONDS,
         single_use: bool = True,
+        deferred: bool = False,
     ) -> str:
         """
         Generate a download token.
@@ -58,6 +67,10 @@ class DownloadTokenService:
             allowed_patterns: List of filename patterns this token can access (e.g., ["*.iso", "*.wim"])
             expires_in: Token expiration time in seconds (default: 24 hours)
             single_use: If True, token is invalidated after first use. If False, valid until expiry (e.g. for ISO boot where iPXE requests the same URL multiple times).
+            deferred: If True, the token is inactive until activate_tokens_for_boot_task()
+                runs (when the boot task's script is served); expires_in then counts
+                from activation, not from now. Use for tokens baked into a script at
+                queue time, since the server may only boot much later.
         
         Returns:
             The generated token string
@@ -69,7 +82,8 @@ class DownloadTokenService:
         
         # Store token metadata in Redis
         now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(seconds=expires_in)
+        lifetime = DEFERRED_TOKEN_MAX_WAIT_SECONDS if deferred else expires_in
+        expires_at = now + timedelta(seconds=lifetime)
         
         token_data = {
             "boot_task_id": str(boot_task_id),
@@ -80,13 +94,59 @@ class DownloadTokenService:
             "allowed_files": json.dumps(allowed_files or []),
             "allowed_patterns": json.dumps(allowed_patterns or []),
         }
+        if deferred:
+            token_data["active"] = "false"
+            token_data["active_ttl"] = str(expires_in)
         
         redis_client.hset(token_key, mapping=token_data)
-        redis_client.expire(token_key, expires_in)
+        redis_client.expire(token_key, lifetime)
         
-        logger.info(f"Generated download token for boot_task {boot_task_id} (expires in {expires_in}s)")
+        if deferred:
+            task_key = f"{TASK_DEFERRED_KEY_PREFIX}{boot_task_id}"
+            redis_client.hset(task_key, token_id, "1")
+            redis_client.expire(task_key, lifetime)
+            logger.info(
+                f"Generated deferred download token for boot_task {boot_task_id} "
+                f"(valid {expires_in}s from script fetch)"
+            )
+        else:
+            logger.info(f"Generated download token for boot_task {boot_task_id} (expires in {expires_in}s)")
         
         return token
+
+    @staticmethod
+    def activate_tokens_for_boot_task(boot_task_id: int) -> int:
+        """Start the clock on a boot task's deferred tokens.
+
+        Called when the boot task's script is served. Tokens already active are
+        left alone, so refetching the script does not extend them. Returns the
+        number of tokens activated.
+        """
+        task_key = f"{TASK_DEFERRED_KEY_PREFIX}{boot_task_id}"
+        token_ids = redis_client.hgetall(task_key) or {}
+        activated = 0
+        now = datetime.now(timezone.utc)
+        for token_id in token_ids:
+            token_key = f"{TOKEN_KEY_PREFIX}{token_id}"
+            token_data = redis_client.hgetall(token_key)
+            if not token_data or token_data.get("active") != "false":
+                continue
+            try:
+                ttl = int(token_data.get("active_ttl") or TOKEN_EXPIRATION_SECONDS)
+            except ValueError:
+                ttl = TOKEN_EXPIRATION_SECONDS
+            redis_client.hset(
+                token_key,
+                mapping={
+                    "active": "true",
+                    "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
+                },
+            )
+            redis_client.expire(token_key, ttl)
+            activated += 1
+        if activated:
+            logger.info(f"Activated {activated} deferred download token(s) for boot_task {boot_task_id}")
+        return activated
     
     @staticmethod
     def validate_token(token: str, filename: str) -> Optional[Dict[str, Any]]:
@@ -113,6 +173,12 @@ class DownloadTokenService:
         # Check if already used
         if token_data.get("used", "false").lower() == "true":
             logger.warning(f"Download token already used: {token_id[:8]}...")
+            return None
+
+        if token_data.get("active") == "false":
+            logger.warning(
+                f"Download token not active yet (boot task script not fetched): {token_id[:8]}..."
+            )
             return None
         
         # Check expiration

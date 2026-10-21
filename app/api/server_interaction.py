@@ -502,6 +502,7 @@ async def get_pxe_boot_file(
                 # Mark as in_progress when serving script content
                 if boot_task.status == BootTaskStatus.PENDING:
                     BootTaskDAO.mark_in_progress(db, boot_task.id)
+                get_download_token_service().activate_tokens_for_boot_task(boot_task.id)
                 logger.info(f"Serving script content for boot task {boot_task.id} (MAC: {mac})")
                 return PlainTextResponse(
                     content=boot_task.script_content,
@@ -1498,7 +1499,8 @@ async def create_boot_task(
         boot_task_id=boot_task.id,
         allowed_files=allowed_files if allowed_files else None,
         allowed_patterns=allowed_patterns if allowed_patterns else None,
-        expires_in=900  # 15 minutes for image downloads
+        expires_in=3600,
+        deferred=True,
     )
     
     # Inject token and do variable replacement (single pass for all variables)
@@ -1794,6 +1796,7 @@ async def get_script(
 
     # Token is intentionally multi-use for the duration of the boot (single_use=False),
     # so it is not marked used here; it expires on its own short TTL.
+    download_token_service.activate_tokens_for_boot_task(task_id)
     logger.info(f"Serving script for boot task {task_id}")
     
     return PlainTextResponse(

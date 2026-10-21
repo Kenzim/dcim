@@ -245,3 +245,55 @@ def test_token_single_use_enforcement(token_service, mock_redis):
     # Second attempt should fail
     token_data = token_service.validate_token(token, "install.wim")
     assert token_data is None
+
+
+def _token_key(token):
+    from app.services.download_token_service import _derive_token_id
+    return f"download_token:{_derive_token_id(token)}"
+
+
+def test_deferred_token_inactive_until_activated(token_service, mock_redis):
+    """A token baked into a queued script only starts its lifetime at script fetch."""
+    from app.services.download_token_service import DEFERRED_TOKEN_MAX_WAIT_SECONDS
+
+    token = token_service.generate_token(
+        boot_task_id=1010, allowed_files=["deploy/windows.img"], expires_in=3600, deferred=True
+    )
+    key = _token_key(token)
+    assert mock_redis._ttls[key] == DEFERRED_TOKEN_MAX_WAIT_SECONDS
+    assert token_service.validate_token(token, "deploy/windows.img") is None
+
+    assert token_service.activate_tokens_for_boot_task(1010) == 1
+
+    assert mock_redis._ttls[key] == 3600
+    expires_at = datetime.fromisoformat(mock_redis.hgetall(key)["expires_at"])
+    remaining = (expires_at - datetime.now(expires_at.tzinfo)).total_seconds()
+    assert 3500 < remaining <= 3600
+    assert token_service.validate_token(token, "deploy/windows.img") is not None
+
+
+def test_deferred_token_activation_does_not_extend(token_service, mock_redis):
+    """Refetching the script must not restart an already-active token's clock."""
+    token = token_service.generate_token(boot_task_id=1011, expires_in=600, deferred=True)
+    assert token_service.activate_tokens_for_boot_task(1011) == 1
+    first_expiry = mock_redis.hgetall(_token_key(token))["expires_at"]
+
+    assert token_service.activate_tokens_for_boot_task(1011) == 0
+    assert mock_redis.hgetall(_token_key(token))["expires_at"] == first_expiry
+
+
+def test_activation_ignores_other_tasks_and_normal_tokens(token_service, mock_redis):
+    normal = token_service.generate_token(boot_task_id=1012, expires_in=900)
+    other = token_service.generate_token(boot_task_id=1013, deferred=True)
+
+    assert token_service.activate_tokens_for_boot_task(1012) == 0
+    assert token_service.validate_token(normal, "anyfile") is not None
+    assert token_service.validate_token(other, "anyfile") is None
+
+
+def test_activation_skips_revoked_deferred_token(token_service, mock_redis):
+    token = token_service.generate_token(boot_task_id=1014, deferred=True)
+    token_service.revoke_token(token)
+
+    assert token_service.activate_tokens_for_boot_task(1014) == 0
+    assert token_service.validate_token(token, "anyfile") is None

@@ -21,19 +21,34 @@ report_installation_status() {
     local url="${API_BASE}/api/servers/${SERVER_ID}/installation-tasks/${INSTALLATION_TASK_ID}/logs"
     [ -n "${DOWNLOAD_TOKEN:-}" ] && url="${url}?token=${DOWNLOAD_TOKEN}"
 
-    # Read tail of log file (up to ~50KB) so failures show context in the UI
-    local logs=""
-    if [ -f "$LOG_FILE" ]; then
-        logs="$(tail -c 50000 "$LOG_FILE" 2>/dev/null | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g; :a;N;$!ba;s/\n/\\n/g')"
+    # Read tail of log file (up to ~50KB) so failures show context in the UI.
+    # The log holds dd/curl progress output (\r and other control bytes) and the
+    # tail may cut a UTF-8 sequence, so encode with python3 when available.
+    local payload=""
+    if command -v python3 >/dev/null 2>&1; then
+        payload=$( { [ -f "$LOG_FILE" ] && tail -c 50000 "$LOG_FILE"; } 2>/dev/null | \
+            RF_STATUS="$status" RF_ERROR="$error_msg" python3 -c '
+import json, os, sys
+p = {"logs": sys.stdin.buffer.read().decode("utf-8", "replace"), "status": os.environ["RF_STATUS"]}
+if os.environ["RF_STATUS"] == "failed" and os.environ.get("RF_ERROR"):
+    p["error_message"] = os.environ["RF_ERROR"]
+print(json.dumps(p))
+' 2>/dev/null) || payload=""
     fi
 
-    local payload
-    if [ "$status" = "failed" ] && [ -n "$error_msg" ]; then
-        local escaped_error
-        escaped_error="$(echo "$error_msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g')"
-        payload=$(printf '{"logs":"%s","status":"failed","error_message":"%s"}' "$logs" "$escaped_error")
-    else
-        payload=$(printf '{"logs":"%s","status":"%s"}' "$logs" "$status")
+    if [ -z "$payload" ]; then
+        # Fallback without python3: keep printable ASCII, \t and \n only, then escape.
+        local logs=""
+        if [ -f "$LOG_FILE" ]; then
+            logs="$(tail -c 50000 "$LOG_FILE" 2>/dev/null | LC_ALL=C tr -d '\000-\010\013-\037\177-\377' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g; :a;N;$!ba;s/\n/\\n/g')"
+        fi
+        if [ "$status" = "failed" ] && [ -n "$error_msg" ]; then
+            local escaped_error
+            escaped_error="$(echo "$error_msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g')"
+            payload=$(printf '{"logs":"%s","status":"failed","error_message":"%s"}' "$logs" "$escaped_error")
+        else
+            payload=$(printf '{"logs":"%s","status":"%s"}' "$logs" "$status")
+        fi
     fi
 
     curl -X POST "$url" -H "Content-Type: application/json" -d "$payload" -f -s >/dev/null 2>&1 || true

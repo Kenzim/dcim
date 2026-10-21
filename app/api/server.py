@@ -1538,6 +1538,7 @@ async def run_hardware_detection(
         allowed_patterns=["hardware-detection-report-*"],
         expires_in=3600,
         single_use=False,
+        deferred=True,
     )
     boot_task.script_content = _build_hardware_detection_script(base_url, report_token)
     db.commit()
