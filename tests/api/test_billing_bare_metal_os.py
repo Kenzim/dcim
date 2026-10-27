@@ -7,6 +7,7 @@ from fastapi import HTTPException
 import app.api.billing as billing
 from app.dao.billing_integration_dao import BillingIntegrationDAO
 from app.dao.location_dao import LocationDAO
+from app.dao.network_port_dao import NetworkPortDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.dao.service_dao import ServiceDAO
@@ -258,6 +259,13 @@ def test_queue_template_fills_params_without_unsubstituted_placeholders(
     assert service.config["template_parameters"]["username"] == "rackflow"
 
 
+def _pxe_port(db, server, n):
+    NetworkPortDAO.create(
+        db, server_id=server.id, name="eth0", mac_address=f"02:00:00:00:02:{n:02x}",
+        speed_mbps=1000, pxe_boot=True, pxe_ip=f"198.51.100.{n}",
+    )
+
+
 @pytest.mark.asyncio
 async def test_provision_bare_metal_rejects_unpermitted_template(db_session, monkeypatch):
     owner = UserDAO.create(db_session, username="bm-os-owner", email="bm-os-owner@example.test")
@@ -270,6 +278,7 @@ async def test_provision_bare_metal_rejects_unpermitted_template(db_session, mon
         plugin_config={},
         location_id=loc.id,
     )
+    _pxe_port(db_session, server, 80)
     group = ServerGroupDAO.create(
         db_session,
         name="bm-os-rej",
@@ -305,6 +314,7 @@ async def test_provision_bare_metal_queues_permitted_template(db_session, monkey
         plugin_config={},
         location_id=loc.id,
     )
+    _pxe_port(db_session, server, 81)
     group = ServerGroupDAO.create(
         db_session,
         name="bm-os-ok",

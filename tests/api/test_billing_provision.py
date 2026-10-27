@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 import app.api.billing as billing
 from app.dao.location_dao import LocationDAO
+from app.dao.network_port_dao import NetworkPortDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.dao.user_dao import UserDAO
@@ -29,6 +30,10 @@ async def test_provision_bare_metal_creates_server_and_service(db_session, monke
         plugin_name="ipmi",
         plugin_config={},
         location_id=location.id,
+    )
+    NetworkPortDAO.create(
+        db_session, server_id=server.id, name="eth0", mac_address="02:00:00:00:03:01",
+        speed_mbps=1000, pxe_boot=True, pxe_ip="198.51.100.20",
     )
     group = ServerGroupDAO.create(
         db_session,

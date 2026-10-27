@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.dao.boot_task_dao import BootTaskDAO
+from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.location_dao import LocationDAO
+from app.dao.network_port_dao import NetworkPortDAO
 from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO, VMTemplateDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
@@ -26,16 +29,28 @@ def _owner(db):
     return UserDAO.create(db, username="prov-owner", email="prov-owner@example.test")
 
 
-def _server(db, name="prov-srv"):
-    loc = LocationDAO.create(db, name=f"loc-{name}")
-    return ServerDAO.create(
+_port_seq = iter(range(1, 250))
+
+
+def _server(db, name="prov-srv", *, pxe_port=True, location_id=None, **fields):
+    if location_id is None:
+        location_id = LocationDAO.create(db, name=f"loc-{name}").id
+    server = ServerDAO.create(
         db,
         name=name,
         server_ip="203.0.113.40",
         plugin_name="ipmi",
         plugin_config={},
-        location_id=loc.id,
+        location_id=location_id,
+        **fields,
     )
+    if pxe_port:
+        n = next(_port_seq)
+        NetworkPortDAO.create(
+            db, server_id=server.id, name="eth0", mac_address=f"02:00:00:00:01:{n:02x}",
+            speed_mbps=1000, pxe_boot=True, pxe_ip=f"198.51.100.{n}",
+        )
+    return server
 
 
 def test_bare_metal_from_group(db_session, monkeypatch):
@@ -75,6 +90,156 @@ def test_bare_metal_from_group(db_session, monkeypatch):
     assert service.service_type == ServiceType.BARE_METAL
     assert service.bare_metal.server_id == server.id
     assert queued["template_id"] == "ubuntu-cloud-image"
+
+
+def _group(db, name, *servers):
+    group = ServerGroupDAO.create(
+        db,
+        name=name,
+        enable_os_templates=True,
+        permitted_os_templates=["ubuntu-cloud-image"],
+    )
+    group.servers.extend(servers)
+    db.commit()
+    return group
+
+
+def _group_req(name, owner, group, external_id=None):
+    return ProvisionRequest(
+        name=name,
+        service_type=ServiceType.BARE_METAL,
+        owner_user_id=owner.id,
+        server_group_id=group.id,
+        template_id="ubuntu-cloud-image",
+        external_service_id=external_id,
+        provisioning_source=ProvisioningSource.INTERNAL,
+    )
+
+
+def _fake_queue(calls):
+    def queue(**kwargs):
+        calls.append(kwargs["service"].id)
+        return SimpleNamespace(id=1), SimpleNamespace(id=2, boot_task_id=1)
+
+    return queue
+
+
+def test_group_selection_skips_servers_that_are_not_ready(db_session, monkeypatch):
+    owner = _owner(db_session)
+    loc = LocationDAO.create(db_session, name="loc-ready")
+    no_port = _server(db_session, "nr-no-port", pxe_port=False, location_id=loc.id)
+    open_install = _server(db_session, "nr-open-install", location_id=loc.id)
+    open_boot = _server(db_session, "nr-open-boot", location_id=loc.id)
+    disabled = _server(db_session, "nr-disabled", location_id=loc.id, enabled=False)
+    ready = _server(db_session, "nr-ready", location_id=loc.id)
+    boot = BootTaskDAO.create(db_session, server_id=open_install.id, boot_type="temp_os")
+    InstallationTaskDAO.create(
+        db_session, server_id=open_install.id, boot_task_id=boot.id,
+        template_id="ubuntu-cloud-image", template_parameters={}, os_name="Ubuntu",
+    )
+    BootTaskDAO.create(db_session, server_id=open_boot.id, boot_type="temp_os")
+    group = _group(db_session, "ready-pool", no_port, open_install, open_boot, disabled, ready)
+    monkeypatch.setattr("app.api.billing._queue_template_install_for_service", _fake_queue([]))
+
+    service = ProvisioningService.create(db_session, _group_req("bm-ready", owner, group), _actor())
+    assert service.bare_metal.server_id == ready.id
+
+
+def test_group_selection_prefers_virtual_media_servers(db_session, monkeypatch):
+    owner = _owner(db_session)
+    loc = LocationDAO.create(db_session, name="loc-pref")
+    pxe_only = _server(db_session, "pref-pxe", location_id=loc.id)
+    vmedia = _server(db_session, "pref-vmedia", location_id=loc.id)
+    group = _group(db_session, "pref-pool", pxe_only, vmedia)
+    monkeypatch.setattr(
+        "app.services.boot_launcher.vmedia_capable", lambda s: s is not None and s.id == vmedia.id
+    )
+    monkeypatch.setattr("app.api.billing._queue_template_install_for_service", _fake_queue([]))
+
+    service = ProvisioningService.create(db_session, _group_req("bm-pref", owner, group), _actor())
+    assert service.bare_metal.server_id == vmedia.id
+
+
+def test_no_ready_server_in_group(db_session, monkeypatch):
+    owner = _owner(db_session)
+    group = _group(db_session, "empty-pool", _server(db_session, "only-no-port", pxe_port=False))
+    with pytest.raises(ProvisioningError) as exc:
+        ProvisioningService.create(db_session, _group_req("bm-none", owner, group), _actor())
+    assert exc.value.code == "no_free_server"
+
+
+def test_failed_install_queue_releases_server_and_allows_retry(db_session, monkeypatch):
+    owner = _owner(db_session)
+    server = _server(db_session, "fail-srv")
+    group = _group(db_session, "fail-pool", server)
+
+    def queue_then_fail(**kwargs):
+        boot = BootTaskDAO.create(db_session, server_id=server.id, boot_type="temp_os")
+        InstallationTaskDAO.create(
+            db_session, server_id=server.id, boot_task_id=boot.id,
+            template_id="ubuntu-cloud-image", template_parameters={}, os_name="Ubuntu",
+        )
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr("app.api.billing._queue_template_install_for_service", queue_then_fail)
+    req = _group_req("service-901", owner, group, external_id="901")
+    with pytest.raises(RuntimeError):
+        ProvisioningService.create(db_session, req, _actor())
+
+    assert ServiceDAO.get_by_name(db_session, "service-901") is None
+    assert InstallationTaskDAO.get_active_by_server(db_session, server.id) is None
+    assert BootTaskDAO.get_active_by_server(db_session, server.id) is None
+
+    calls = []
+    monkeypatch.setattr("app.api.billing._queue_template_install_for_service", _fake_queue(calls))
+    service = ProvisioningService.create(
+        db_session, _group_req("service-901", owner, group, external_id="901"), _actor()
+    )
+    assert service.bare_metal.server_id == server.id
+    assert calls == [service.id]
+
+
+def test_retried_order_requeues_pending_service_without_install(db_session, monkeypatch):
+    owner = _owner(db_session)
+    server = _server(db_session, "retry-srv")
+    group = _group(db_session, "retry-pool", server)
+    calls = []
+    monkeypatch.setattr("app.api.billing._queue_template_install_for_service", _fake_queue(calls))
+    first = ProvisioningService.create(
+        db_session, _group_req("service-902", owner, group, external_id="902"), _actor()
+    )
+
+    # The fake queue left no install task, so a retry re-queues on the same service.
+    again = ProvisioningService.create(
+        db_session, _group_req("service-902", owner, group, external_id="902"), _actor()
+    )
+    assert again.id == first.id
+    assert calls == [first.id, first.id]
+
+    boot = BootTaskDAO.create(db_session, server_id=server.id, boot_type="temp_os")
+    InstallationTaskDAO.create(
+        db_session, server_id=server.id, boot_task_id=boot.id,
+        template_id="ubuntu-cloud-image", template_parameters={}, os_name="Ubuntu",
+    )
+    third = ProvisioningService.create(
+        db_session, _group_req("service-902", owner, group, external_id="902"), _actor()
+    )
+    assert third.id == first.id
+    assert calls == [first.id, first.id]  # install already open: nothing queued
+
+
+def test_same_name_different_order_is_still_name_taken(db_session, monkeypatch):
+    owner = _owner(db_session)
+    group = _group(db_session, "taken-pool", _server(db_session, "taken-a"), _server(db_session, "taken-b"))
+    monkeypatch.setattr("app.api.billing._queue_template_install_for_service", _fake_queue([]))
+    ProvisioningService.create(
+        db_session, _group_req("service-903", owner, group, external_id="903"), _actor()
+    )
+    with pytest.raises(ProvisioningError) as exc:
+        ProvisioningService.create(
+            db_session, _group_req("service-903", owner, group, external_id="999"), _actor()
+        )
+    assert exc.value.code == "name_taken"
 
 
 def test_bare_metal_server_id_pin(db_session, monkeypatch):

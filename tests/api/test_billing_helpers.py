@@ -44,19 +44,22 @@ def test_group_selection_and_template_rules(monkeypatch):
     disabled = SimpleNamespace(id=1, enabled=False)
     occupied = SimpleNamespace(id=2, enabled=True)
     free = SimpleNamespace(id=3, enabled=True)
-    monkeypatch.setattr(
-        bm.ServerGroupDAO, "get_by_id",
-        lambda _db, ident: None if ident == 0 else SimpleNamespace(
+
+    def group(_db, ident):
+        return None if ident == 0 else SimpleNamespace(
             name="pool",
             enable_os_templates=True,
             servers=[] if ident == 1 else [disabled, occupied, free],
             permitted_os_templates=["debian"],
-        ),
-    )
+        )
+
+    monkeypatch.setattr(bm.ServerGroupDAO, "get_by_id", group)
+    monkeypatch.setattr(bm, "_lock_for_allocation", lambda db, _model, ident: group(db, ident))
     monkeypatch.setattr(
-        bm.ServiceDAO, "get_by_server",
-        lambda _db, ident: [SimpleNamespace(status=ServiceStatus.ACTIVE)] if ident == 2 else [],
+        bm, "server_not_ready_reason",
+        lambda _db, s: {1: "disabled", 2: "assigned to a service"}.get(s.id),
     )
+    monkeypatch.setattr("app.services.boot_launcher.vmedia_capable", lambda _s: False)
     assert billing._select_free_server_in_group(None, 2) is free
     assert billing._determine_template_for_group(None, 2, None) == "debian"
     assert billing._determine_template_for_group(None, 2, "debian") == "debian"

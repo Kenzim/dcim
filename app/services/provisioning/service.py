@@ -9,8 +9,11 @@ from sqlalchemy.orm import Session
 from app.dao.product_catalog_dao import ProductDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
-from app.models.service import ProvisioningSource, Service, ServiceType
-from app.services.provisioning.bare_metal import create_bare_metal_service
+from app.models.service import ProvisioningSource, Service, ServiceStatus, ServiceType
+from app.services.provisioning.bare_metal import (
+    create_bare_metal_service,
+    resume_bare_metal_order,
+)
 from app.services.provisioning.errors import ProvisioningError
 from app.services.provisioning.http_proxy import create_http_proxy_service
 from app.services.provisioning.request import ProvisionRequest, ProvisioningActor
@@ -98,10 +101,26 @@ def _build_snapshot(
     return snapshot, os_code
 
 
+def _is_retry_of(existing: Service, req: ProvisionRequest) -> bool:
+    """Same live bare-metal order sent again (e.g. WHMCS "Create" re-run)."""
+    return (
+        req.service_type == ServiceType.BARE_METAL
+        and existing.service_type == ServiceType.BARE_METAL
+        and existing.status != ServiceStatus.TERMINATED
+        and bool(req.external_service_id)
+        and existing.external_service_id == req.external_service_id
+        and existing.owner_user_id == req.owner_user_id
+    )
+
+
 class ProvisioningService:
     @staticmethod
     def create(db: Session, req: ProvisionRequest, actor: ProvisioningActor) -> Service:
-        if ServiceDAO.get_by_name(db, req.name):
+        existing = ServiceDAO.get_by_name(db, req.name)
+        if existing:
+            if _is_retry_of(existing, req):
+                logger.info("Retried order for existing service %s ('%s')", existing.id, existing.name)
+                return resume_bare_metal_order(db, existing, req, actor)
             raise ProvisioningError("name_taken", "Service with this name already exists")
 
         req = _apply_catalog_defaults(db, req)
