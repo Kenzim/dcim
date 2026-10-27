@@ -8,8 +8,10 @@ from app.dao.script_dao import ScriptDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
+from app.models.boot_task import BootTaskStatus
+from app.models.installation_task import InstallationStatus
 from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
-from app.api.billing import BootTaskDAO
+from app.api.billing import BootTaskDAO, InstallationTaskDAO
 
 
 def _bare_metal(db):
@@ -73,14 +75,16 @@ def test_run_script_queues_templated_boot_task(client, db_session, monkeypatch):
     assert response.json()["boot_task_id"]
 
 
-def test_reinstall_queues_template_with_scoped_token(client, db_session, monkeypatch, tmp_path):
-    service, headers = _bare_metal(db_session)
-    _patch_boot_task_create(monkeypatch)
+def _reinstall_fakes(monkeypatch, tmp_path, *, user_reinstallable=True, os_type="linux"):
+    """Fake template/temp-OS/token services; returns the recorded launch and release calls."""
     script = tmp_path / "install.sh"
-    script.write_text('echo "${PARAM_PASSWORD}" ${DOWNLOAD_TOKEN}', encoding="utf-8")
+    script.write_text(
+        'P="${PARAM_PASSWORD}" T=${DOWNLOAD_TOKEN} INSTALLATION_TASK_ID="${INSTALLATION_TASK_ID}"',
+        encoding="utf-8",
+    )
     template = SimpleNamespace(
-        id="debian", name="Debian", os_type="linux", disk_image="/images/debian.img",
-        template_dir=tmp_path, user_reinstallable=True,
+        id="debian", name="Debian", os_type=os_type, disk_image="/images/debian.img",
+        template_dir=tmp_path, user_reinstallable=user_reinstallable,
     )
     template_service = SimpleNamespace(
         get_template=lambda ident: template if ident == "debian" else None,
@@ -88,14 +92,107 @@ def test_reinstall_queues_template_with_scoped_token(client, db_session, monkeyp
         enumerate_relative_files=lambda ident: ["install.sh"],
     )
     tokens = SimpleNamespace(generate_token=lambda **kwargs: "scoped-token")
+    calls = {"launch": [], "release": []}
+
+    async def release(_db, server):
+        calls["release"].append(server.id)
+
     monkeypatch.setattr("app.api.billing.get_template_service", lambda: template_service)
     monkeypatch.setattr("app.api.billing.get_temp_os_service", _temp_os)
     monkeypatch.setattr("app.api.billing.get_download_token_service", lambda: tokens)
     monkeypatch.setattr("app.api.billing._get_base_url_for_pxe_ip", lambda *_: "https://pxe.test")
+    monkeypatch.setattr(
+        "app.api.billing.schedule_launch",
+        lambda server_id, boot_task_id, **kw: calls["launch"].append((server_id, boot_task_id, kw)),
+    )
+    monkeypatch.setattr("app.api.billing.release_boot_media", release)
+    return calls
+
+
+def test_reinstall_queues_template_with_scoped_token(client, db_session, monkeypatch, tmp_path):
+    service, headers = _bare_metal(db_session)
+    _reinstall_fakes(monkeypatch, tmp_path)
 
     response = client.post(
         f"/api/billing/services/{service.id}/actions/reinstall-os", headers=headers,
         json={"template_id": "debian", "template_parameters": {"password": 'a"$b'}},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["boot_task_id"]
+    boot_task = BootTaskDAO.get_by_id(db_session, response.json()["boot_task_id"])
+    assert "scoped-token" in boot_task.script_content
+    assert 'P="a\\"\\$b"' in boot_task.script_content
+
+
+def test_reinstall_creates_installation_task_and_launches(client, db_session, monkeypatch, tmp_path):
+    service, headers = _bare_metal(db_session)
+    calls = _reinstall_fakes(monkeypatch, tmp_path)
+
+    response = client.post(
+        f"/api/billing/services/{service.id}/actions/reinstall-os", headers=headers,
+        json={"template_id": "debian", "template_parameters": {"admin_password": "s3cret", "username": "rackflow"}},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    server_id = service.bare_metal.server_id
+
+    install = InstallationTaskDAO.get_active_by_server(db_session, server_id)
+    assert install is not None
+    assert body["installation_task_id"] == install.id
+    assert install.boot_task_id == body["boot_task_id"]
+    assert install.template_id == "debian"
+    boot_task = BootTaskDAO.get_by_id(db_session, body["boot_task_id"])
+    assert f'INSTALLATION_TASK_ID="{install.id}"' in boot_task.script_content
+    assert calls["launch"] == [(server_id, boot_task.id, {"source": "billing_api", "service_id": service.id})]
+    assert calls["release"] == [server_id]
+
+    # Login fields for the billing module; the password is not echoed back.
+    assert body["server_ip"] == "198.51.100.80"
+    assert body["credentials"] == {"os_type": "linux"}
+    assert body["config"]["template_parameters"] == {"username": "rackflow"}
+    db_session.refresh(service)
+    assert service.status == ServiceStatus.ACTIVE
+    assert service.config["template_parameters"]["admin_password"] == "s3cret"
+
+
+def test_reinstall_cancels_open_tasks(client, db_session, monkeypatch, tmp_path):
+    service, headers = _bare_metal(db_session)
+    calls = _reinstall_fakes(monkeypatch, tmp_path)
+    server_id = service.bare_metal.server_id
+    stuck_boot = BootTaskDAO.create(db_session, server_id=server_id, boot_type="temp_os")
+    stuck_boot.status = BootTaskStatus.IN_PROGRESS
+    db_session.commit()
+    stuck_install = InstallationTaskDAO.create(
+        db_session, server_id=server_id, boot_task_id=stuck_boot.id, template_id="debian",
+        template_parameters={}, os_name="Debian",
+    )
+    InstallationTaskDAO.mark_in_progress(db_session, stuck_install.id)
+
+    response = client.post(
+        f"/api/billing/services/{service.id}/actions/reinstall-os", headers=headers,
+        json={"template_id": "debian"},
+    )
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    assert BootTaskDAO.get_by_id(db_session, stuck_boot.id).status == BootTaskStatus.CANCELLED
+    assert InstallationTaskDAO.get_by_id(db_session, stuck_install.id).status == InstallationStatus.CANCELLED
+    new_install = InstallationTaskDAO.get_active_by_server(db_session, server_id)
+    assert new_install.id == response.json()["installation_task_id"]
+    assert BootTaskDAO.get_active_by_server(db_session, server_id).id == response.json()["boot_task_id"]
+    assert len(calls["launch"]) == 1
+
+
+def test_reinstall_rejects_template_not_allowed(client, db_session, monkeypatch, tmp_path):
+    service, headers = _bare_metal(db_session)
+    calls = _reinstall_fakes(monkeypatch, tmp_path, user_reinstallable=False)
+    server_id = service.bare_metal.server_id
+    open_boot = BootTaskDAO.create(db_session, server_id=server_id, boot_type="temp_os")
+
+    response = client.post(
+        f"/api/billing/services/{service.id}/actions/reinstall-os", headers=headers,
+        json={"template_id": "debian"},
+    )
+    assert response.status_code == 403, response.text
+    db_session.expire_all()
+    assert BootTaskDAO.get_by_id(db_session, open_boot.id).status == BootTaskStatus.PENDING
+    assert InstallationTaskDAO.get_active_by_server(db_session, server_id) is None
+    assert calls == {"launch": [], "release": []}

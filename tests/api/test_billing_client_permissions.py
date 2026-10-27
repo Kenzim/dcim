@@ -137,6 +137,19 @@ def test_reinstall_denied_by_default(client, db_session):
     assert resp.status_code == 403, resp.text
 
 
+def test_reinstall_admin_audience_skips_client_permission(client, db_session):
+    integration, key = _integration(db_session)
+    service = _bare_metal_service_for_billing(db_session, integration)
+
+    resp = client.post(
+        f"/api/billing/services/{service.id}/actions/reinstall-os?audience=admin",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"template_id": "unknown-template"},
+    )
+    # Not blocked by bms.reinstall (403); fails downstream on the unknown template.
+    assert resp.status_code == 404, resp.text
+
+
 def test_reinstall_allowed_with_preset(client, db_session):
     integration, key = _integration(db_session)
     preset = PermissionSetDAO.create(
