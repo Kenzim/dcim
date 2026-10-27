@@ -42,7 +42,7 @@ from app.schemas.billing import (
 from app.models.user import User
 from app.models.service_bare_metal import ServiceBareMetal
 from app.models.service_vm import ServiceVm
-from app.services.boot_launcher import schedule_launch, vmedia_capable
+from app.services.boot_launcher import release_boot_media, schedule_launch, vmedia_capable
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
@@ -690,6 +690,25 @@ def _persist_resolved_template_params(service: Service, template_id: str, templa
     cfg["template_parameters"] = template_parameters
     service.config = cfg
     flag_modified(service, "config")
+
+
+def _cancel_open_server_tasks(db: Session, server_id: int) -> tuple[int, int]:
+    """Cancel a server's open installation and boot tasks; returns (installs, boots)."""
+    installs = 0
+    task = InstallationTaskDAO.get_active_by_server(db, server_id)
+    while task is not None:
+        InstallationTaskDAO.cancel(db, task.id)
+        installs += 1
+        task = InstallationTaskDAO.get_active_by_server(db, server_id)
+    boots = BootTaskDAO.cancel_open_tasks(db, server_id)
+    if boots:
+        BootTaskDAO._schedule_dhcp_sync(server_id)
+    if installs or boots:
+        logger.info(
+            "Cancelled %s installation task(s) and %s boot task(s) on server %s",
+            installs, boots, server_id,
+        )
+    return installs, boots
 
 
 def _queue_template_install_for_service(
@@ -3118,132 +3137,16 @@ async def reinstall_os_on_service(
                 detail=f"OS template '{action.template_id}' is not available for user reinstallation"
             )
 
-        template_parameters = resolve_template_parameters(template, action.template_parameters)
-        _persist_resolved_template_params(service, action.template_id, template_parameters)
+        # A reinstall replaces whatever is open on the server (a stuck install,
+        # a stale boot task) instead of being refused, and drops a staged boot ISO.
+        cancelled_installs, cancelled_boots = _cancel_open_server_tasks(db, server.id)
+        await release_boot_media(db, server)
 
-        # Get template script
-        script_path = template_service.get_template_script_path(action.template_id)
-        if not script_path or not script_path.exists():
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Template '{action.template_id}' missing installation script"
-            )
-
-        # Read script content
-        script_content = await asyncio.to_thread(script_path.read_text, encoding="utf-8")
-
-        # Get server's PXE boot port MAC address
-        pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server.id)
-        server_mac = pxe_port.mac_address if pxe_port else None
-
-        # Get OS disk for installation
-        os_disk = DiskDAO.get_os_disk(db, server.id)
-
-        # Build replacements
-        replacements = {
-            "SERVER_IP": server.server_ip or "",
-            "SERVER_MAC": server_mac or "",
-            "SERVER_ID": str(server.id),
-        }
-
-        # Add disk information
-        if os_disk:
-            replacements["OS_DISK_SERIAL"] = os_disk.serial_number or ""
-            replacements["OS_DISK_SIZE_GB"] = str(os_disk.capacity_gb)
-            replacements["OS_DISK_TYPE"] = os_disk.type.value.lower() if hasattr(os_disk.type, 'value') else str(os_disk.type).lower()
-        else:
-            replacements["OS_DISK_SERIAL"] = ""
-            replacements["OS_DISK_SIZE_GB"] = ""
-            replacements["OS_DISK_TYPE"] = ""
-
-        # Disk image filename will be set after token generation
-        disk_image_filename = None
-        if template.disk_image:
-            disk_image_filename = template.disk_image.split("/")[-1]
-
-        # Scope the eventual download token to this template's own files,
-        # bound to this specific template_id (never a global "*"), so it
-        # can't be replayed to read arbitrary scripts/templates/ISOs
-        # elsewhere in the system, or against a same-named file in a
-        # different template.
-        template_allowed_files: list[str] = []
-        if template.template_dir:
-            for rel_path in template_service.enumerate_relative_files(action.template_id):
-                template_allowed_files.append(template_file_scope(action.template_id, rel_path))
-
-        # Add template parameters. Escape for double-quoted shell-string
-        # context (see _queue_template_install_for_service) since these are
-        # customer-supplied values embedded via literal text substitution
-        # into a root-executed install script.
-        if template_parameters:
-            for param_name, param_value in template_parameters.items():
-                replacements[f"PARAM_{param_name.upper()}"] = shell_escape_double_quoted(param_value)
-
-        # Template installations use debian-live
-        temp_os_service = get_temp_os_service()
-        # Use DHCP-configured next-server IP for this server's PXE subnet
-        base_url = _get_base_url_for_pxe_ip(db, pxe_port.pxe_ip if pxe_port else None)
-        kernel_url = temp_os_service.get_kernel_url("debian-live", base_url)
-        initrd_url = temp_os_service.get_initrd_url("debian-live", base_url)
-        kernel_params = temp_os_service.get_kernel_params("debian-live")
-
-        # Add squashfs fetch URL
-        squashfs_url = temp_os_service.get_squashfs_url("debian-live", base_url)
-        if squashfs_url and "fetch=" not in kernel_params:
-            kernel_params = f"{kernel_params} fetch={squashfs_url}"
-
-        # Create boot task
-        boot_task = BootTaskDAO.create(
-            db,
-            server_id=server.id,
-            boot_type=BootType.TEMP_OS,
-            temp_os_id="debian-live",
-            kernel_url=kernel_url,
-            initrd_url=initrd_url,
-            kernel_params=kernel_params,
-            script_content=script_content,
-            description=f"Reinstall OS '{template.name}' via billing API",
-            status=BootTaskStatus.PENDING
+        # Same path as create: InstallationTask (logs, completion, reboot) and
+        # schedule_launch (virtual media when available, PXE otherwise).
+        boot_task, installation_task = _queue_template_install_for_service(
+            db, service, action.template_id, action.template_parameters
         )
-
-        # Generate download token scoped to this template's own files (never
-        # a global "*").
-        allowed_files = list(template_allowed_files)
-        if disk_image_filename:
-            allowed_files.append(disk_image_filename)
-        download_token_service = get_download_token_service()
-        download_token = download_token_service.generate_token(
-            boot_task_id=boot_task.id,
-            allowed_files=allowed_files if allowed_files else None,
-            expires_in=3600,
-            deferred=True,
-        )
-
-        # Inject token into script and update URLs
-        if download_token:
-            replacements["DOWNLOAD_TOKEN"] = download_token
-            replacements["API_BASE_URL"] = base_url
-            replacements["TEMPLATE_ID"] = action.template_id
-            if disk_image_filename:
-                disk_image_url = f"{base_url}/api/servers/interaction/disk-images/{disk_image_filename}?token={download_token}"
-                replacements["DISK_IMAGE_URL"] = disk_image_url
-
-            # Re-apply replacements including DOWNLOAD_TOKEN
-            for var_name, var_value in replacements.items():
-                script_content = script_content.replace(f"${{{var_name}}}", var_value)
-                script_content = script_content.replace(f"${var_name}", var_value)
-
-            boot_task.script_content = script_content
-            db.commit()
-            db.refresh(boot_task)
-
-        # Add script URL to kernel params after boot task creation (for debian-live)
-        if boot_task.script_content:
-            boot_task.kernel_params = _inject_script_url_param(
-                boot_task.kernel_params, base_url, boot_task.id
-            )
-            db.commit()
-            db.refresh(boot_task)
     except HTTPException as exc:
         log_server_activity_failure(
             db,
@@ -3289,16 +3192,33 @@ async def reinstall_os_on_service(
             "integration_id": integration.id,
             "template_id": action.template_id,
             "boot_task_id": boot_task.id,
+            "installation_task_id": installation_task.id,
+            "cancelled_installation_tasks": cancelled_installs,
+            "cancelled_boot_tasks": cancelled_boots,
         },
     )
-    logger.info(f"Billing API: Created boot task {boot_task.id} for OS reinstall '{template.name}' on service {service_id}")
-    schedule_launch(server.id, boot_task.id, source="billing_api", service_id=service.id)
+    logger.info(
+        "Billing API: queued OS reinstall '%s' on service %s (boot task %s, installation task %s)",
+        template.name, service_id, boot_task.id, installation_task.id,
+    )
 
+    # Same login fields as bare-metal create so billing can update IP and username;
+    # passwords are not echoed back (the billing system sent them).
+    template_parameters = (service.config or {}).get("template_parameters") or {}
     return {
         "status": "success",
         "message": f"OS reinstallation '{template.name}' queued",
         "boot_task_id": boot_task.id,
+        "installation_task_id": installation_task.id,
         "boot_method": "vmedia" if vmedia_capable(server) else "pxe",
+        "server_ip": server.server_ip,
+        "config": {
+            "template_id": action.template_id,
+            "template_parameters": {
+                k: v for k, v in template_parameters.items() if "password" not in k.lower()
+            },
+        },
+        "credentials": {"os_type": template.os_type},
     }
 
 

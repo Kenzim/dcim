@@ -94,6 +94,16 @@ class BootTaskDAO:
         return count
 
     @staticmethod
+    def cancel_open_tasks(db: Session, server_id: int) -> int:
+        """Cancel all pending and in-progress tasks for a server"""
+        count = db.query(BootTask).filter(
+            BootTask.server_id == server_id,
+            BootTask.status.in_([BootTaskStatus.PENDING, BootTaskStatus.IN_PROGRESS])
+        ).update({"status": BootTaskStatus.CANCELLED}, synchronize_session=False)
+        db.commit()
+        return count
+
+    @staticmethod
     def _schedule_dhcp_sync(server_id: int) -> None:
         """dhcpd only advertises PXE options for pending tasks; refresh it after changes."""
         from app.services.dhcp_sync import schedule_dhcp_sync
