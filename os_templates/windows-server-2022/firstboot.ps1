@@ -516,11 +516,30 @@ function Convert-DcimSchtasksDelay([string]$extra) {
     return ""
 }
 
+function Test-DcimTaskSchedulerUsable {
+    # In the specialize pass Schedule cannot be started: the COM API returns
+    # 0x80041315 and schtasks /S localhost says "network path was not found".
+    # Check once so each task does not retry five times for nothing.
+    if ($null -ne $script:DcimTaskSchedulerUsable) { return $script:DcimTaskSchedulerUsable }
+    $setup = Get-ItemProperty -Path "HKLM:\SYSTEM\Setup" -Name "SystemSetupInProgress" -ErrorAction SilentlyContinue
+    if (-not ($setup -and $setup.SystemSetupInProgress -eq 1)) {
+        Start-DcimTaskScheduler
+    }
+    $svc = Get-Service -Name "Schedule" -ErrorAction SilentlyContinue
+    $script:DcimTaskSchedulerUsable = [bool]($svc -and $svc.Status -eq "Running")
+    if (-not $script:DcimTaskSchedulerUsable) {
+        Write-Host "  Task Scheduler not running (Windows Setup in progress); using Run key instead" -ForegroundColor Gray
+    }
+    return $script:DcimTaskSchedulerUsable
+}
+
 function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra, [string]$kind = "boot") {
     $delayIso = Convert-DcimSchtasksDelay $extra
     $delayArg = $null
     if ($extra -match '/DELAY\s+(\S+)') { $delayArg = $Matches[1] }
-    for ($i = 1; $i -le 5; $i++) {
+    $attempts = 5
+    if (-not (Test-DcimTaskSchedulerUsable)) { $attempts = 0 }
+    for ($i = 1; $i -le $attempts; $i++) {
         Start-DcimTaskScheduler
         try {
             Register-DcimTaskCom -name $name -command $tr -kind $kind -delayIso $delayIso
@@ -544,8 +563,9 @@ function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra, [string
         Write-Warning "  schtasks $name attempt $i failed (exit $LASTEXITCODE); retrying"
         Start-Sleep -Seconds 3
     }
-    Write-Warning "  Failed to create $name after retries"
+    if ($attempts -gt 0) { Write-Warning "  Failed to create $name after retries" }
     if ($kind -eq "boot") {
+        Write-Host "  $name added to HKLM Run key" -ForegroundColor Gray
         New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $name -Value $tr -PropertyType String -Force | Out-Null
     }
     return $false
@@ -577,7 +597,7 @@ if ($script:AdminPasswordPlain) {
         Set-ItemProperty -Path $winlogon -Name "DefaultPassword" -Value $script:AdminPasswordPlain -Type String -ErrorAction Stop
         Set-ItemProperty -Path $winlogon -Name "DefaultDomainName" -Value $env:COMPUTERNAME -Type String -ErrorAction Stop
         Set-ItemProperty -Path $winlogon -Name "Shell" -Value "explorer.exe" -Type String -ErrorAction Stop
-        # Log on once so the RunOnce-UserLoginScript logon task runs; Windows then turns
+        # Log on once so the image's first-logon user-login.ps1 runs; Windows then turns
         # auto-logon off and deletes DefaultPassword, leaving the normal login screen.
         Set-ItemProperty -Path $winlogon -Name "AutoLogonCount" -Value 1 -Type DWord -ErrorAction Stop
         Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "DCIMConsoleCmd" -ErrorAction SilentlyContinue
@@ -675,22 +695,7 @@ try {
 
 
 
-$taskName = "RunOnce-UserLoginScript"
-$script   = "C:\Windows\Setup\Scripts\user-login.ps1"
-$ps       = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-
-if (!(Test-Path $script)) {
-    Write-Warning "user-login.ps1 missing: $script"
-} else {
-    $taskCmd = "cmd.exe /c `"`"$ps`" -NoProfile -ExecutionPolicy Bypass -File `"$script`" && schtasks /Delete /TN `"$taskName`" /F`""
-    $created = Invoke-DcimSchtasks -name $taskName -tr $taskCmd -extra "" -kind "logon"
-    if (-not $created) {
-        Write-Error "FAILED to create scheduled task ($taskName)."
-    } else {
-        Write-Host "OK created scheduled task: $taskName"
-        schtasks.exe /Query /TN $taskName /V /FO LIST
-    }
-}
-
+# No RunOnce-UserLoginScript task: the unattend in windows.img already runs
+# user-login.ps1 at first logon (FirstLogonCommands), so a task would run it twice.
 
 Stop-Transcript
