@@ -425,7 +425,7 @@ foreach ($name in @("COM2", "COM1", "COM3")) {
         Write-Prompt $sp
         continue
       }
-      L "exec $line"
+      if ($line -match '^net\s+user\s') { L "exec net user (arguments hidden)" } else { L "exec $line" }
       $tmpo = "$env:TEMP\rf-ser.out"; $tmpe = "$env:TEMP\rf-ser.err"
       cmd.exe /c $line > $tmpo 2>$tmpe
       Write-CmdOutput $sp $tmpo

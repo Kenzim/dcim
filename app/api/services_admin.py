@@ -70,9 +70,14 @@ from app.services.vm_vnc_ticket_service import (
 )
 from app.api.ipmi_kvm import kvm_popup_redirect
 from app.services.ipmi_kvm_ticket_service import build_relative_error_url as kvm_error_url
-from app.api.sol import perform_sol_send, sol_popup_redirect
+from app.api.sol import perform_sol_send, perform_windows_password_reset, sol_popup_redirect
 from app.services.sol.ticket_service import build_relative_error_url as sol_error_url
-from app.schemas.sol import SolSendRequest, SolSendResponse
+from app.schemas.sol import (
+    SolSendRequest,
+    SolSendResponse,
+    WindowsPasswordResetRequest,
+    WindowsPasswordResetResponse,
+)
 from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
 from app.api.virtual_media import perform_eject, perform_insert, perform_status
 from app.schemas.vm_vnc import VmConsoleTypesResponse, VmVncSessionResponse
@@ -1131,6 +1136,25 @@ async def admin_sol_send(
         source="admin.service",
         service_id=service.id,
     )
+
+
+@router.post(
+    "/{service_id}/windows-password-reset",
+    response_model=WindowsPasswordResetResponse,
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def admin_windows_password_reset(
+    service_id: int,
+    body: WindowsPasswordResetRequest,
+    auth: AdminDep,
+    db: DbDep,
+):
+    """Set the Windows Administrator password over the serial console."""
+    del auth
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    return await perform_windows_password_reset(db, service, body, source="admin.service")
 
 
 @router.post("/{service_id}/vm/destroy", response_model=ServiceResponse, responses=COMMON_ERROR_RESPONSES)

@@ -1,6 +1,6 @@
 <script>
   import { Alert, Button } from '../ui/index.js';
-  import { createClientIpmiTicket, getClientVirtualMedia, insertClientVirtualMedia, ejectClientVirtualMedia } from '../../lib/api.js';
+  import { createClientIpmiTicket, getClientVirtualMedia, insertClientVirtualMedia, ejectClientVirtualMedia, resetClientWindowsPassword } from '../../lib/api.js';
 
   /** Bare-metal service detail payload. */
   export let service;
@@ -46,6 +46,26 @@
       `rackflow_sol_${service.id}`,
       'width=1400,height=960,resizable=yes,scrollbars=yes'
     );
+  }
+
+  let pwBusy = false;
+  let pwError = '';
+  let newPassword = '';
+
+  async function resetWindowsPassword() {
+    if (pwBusy || !service?.id) return;
+    if (!confirm('Set a new random password for the Windows Administrator account?')) return;
+    pwBusy = true;
+    pwError = '';
+    newPassword = '';
+    try {
+      const res = await resetClientWindowsPassword(service.id);
+      newPassword = res.password || '';
+    } catch (e) {
+      pwError = e.message || String(e);
+    } finally {
+      pwBusy = false;
+    }
   }
 
   let mediaLoadedKey = '';
@@ -192,7 +212,23 @@
         Open Serial
       </Button>
       {/if}
+      {#if service.windows_password_reset_available}
+      <Button variant="secondary" disabled={pwBusy} on:click={resetWindowsPassword}>
+        {pwBusy ? 'Resetting…' : 'Reset Windows password'}
+      </Button>
+      {/if}
     </div>
+    {#if pwError}
+      <Alert type="error">{pwError}</Alert>
+    {/if}
+    {#if newPassword}
+      <dl class="facts creds">
+        <div class="fact">
+          <dt>New Administrator password (shown once)</dt>
+          <dd><code>{newPassword}</code></dd>
+        </div>
+      </dl>
+    {/if}
     {#if service.ipmi_viewer_username || service.ipmi_viewer_password}
       <dl class="facts creds">
         {#if service.ipmi_viewer_username}

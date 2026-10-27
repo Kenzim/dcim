@@ -153,6 +153,10 @@ function rackflow_AdminCustomButtonArray(array $params = array())
             $buttons
         );
     }
+    // Windows only; RackFlow refuses non-Windows installs with a clear error.
+    if (rackflow_getConfiguredServiceType($params) === 'bare_metal') {
+        $buttons['Reset Windows Password'] = 'ResetWindowsPassword';
+    }
 
     return $buttons;
 }
@@ -334,6 +338,10 @@ function rackflow_ClientArea(array $vars)
             // Meaningless for a server-less http_proxy (there is no root/guest
             // password to change), so hide it there.
             $changePasswordAllowed = !$isProxyService;
+            if ($serviceType === 'bare_metal') {
+                // Bare metal: Windows Administrator password over the serial console only.
+                $changePasswordAllowed = $solAvailable && !empty($statusData['windows_password_reset_available']);
+            }
             $proxyCredentialsAvailable = !empty($statusData['proxy_credentials_available']);
             $proxyRotateAvailable = !empty($statusData['proxy_rotate_available']);
             if ($proxyCredentialsAvailable && isset($statusData['proxy_assignments']) && is_array($statusData['proxy_assignments'])) {
@@ -3272,7 +3280,91 @@ function rackflow_ChangePassword(array $params)
     if (!empty($params['clientsdetails'])) {
         $audience = 'client';
     }
+    if (rackflow_getConfiguredServiceType($params) === 'bare_metal') {
+        // Bare metal has no guest agent: set the Windows Administrator password
+        // over the serial console. WHMCS saves the password only on "success".
+        $result = rackflow_windowsPasswordReset($params, $password, $audience);
+        return $result['success'] ? 'success' : $result['error'];
+    }
     return rackflow_runStrategyAction($params, 'change_password', array('password' => $password), $audience);
+}
+
+/**
+ * Set the Windows Administrator password of a bare-metal service over SOL.
+ * Pass an empty $password to have RackFlow generate one (returned once).
+ * Never logs the password.
+ *
+ * @return array success (bool), error (string), password (string, generated only)
+ */
+function rackflow_windowsPasswordReset(array $params, $password, $audience = 'admin')
+{
+    $rackflowServiceId = rackflow_getRackflowServiceId($params);
+    if (empty($rackflowServiceId)) {
+        return array('success' => false, 'error' => 'This service is not linked to RackFlow.');
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return array('success' => false, 'error' => 'API URL and API key must be configured (Setup > Servers).');
+    }
+    $body = array();
+    if ((string)$password !== '') {
+        $body['password'] = (string)$password;
+    }
+    // Prompt detection + net user + log scrub can take ~35s on the serial line.
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'POST',
+        '/api/billing/services/' . (int)$rackflowServiceId . '/windows-password-reset?audience=' . urlencode($audience),
+        $body,
+        60
+    );
+    if (!$result['success']) {
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        $message = is_string($detail) ? $detail : (is_string($err) ? $err : 'Request rejected by RackFlow');
+        rackflow_log('Windows password reset failed', array(
+            'serviceid' => isset($params['serviceid']) ? (int)$params['serviceid'] : 0,
+            'rackflow_service_id' => (int)$rackflowServiceId,
+            'error' => $message,
+        ));
+        return array('success' => false, 'error' => 'Windows password reset failed: ' . $message);
+    }
+    $data = is_array($result['data']) ? $result['data'] : array();
+    return array(
+        'success' => true,
+        'error' => '',
+        'password' => isset($data['password']) ? (string)$data['password'] : (string)$password,
+    );
+}
+
+/**
+ * Admin module command: generate a new Windows Administrator password, apply
+ * it over the serial console and save it as the WHMCS service password.
+ * (Change Guest Password applies the password already in the WHMCS field.)
+ */
+function rackflow_ResetWindowsPassword(array $params)
+{
+    if (rackflow_getConfiguredServiceType($params) !== 'bare_metal') {
+        return 'Windows password reset is only available for bare-metal services.';
+    }
+    $result = rackflow_windowsPasswordReset($params, '', 'admin');
+    if (!$result['success']) {
+        return $result['error'];
+    }
+    $update = localAPI('UpdateClientProduct', array(
+        'serviceid' => (int)$params['serviceid'],
+        'servicepassword' => $result['password'],
+    ));
+    if (!is_array($update) || (isset($update['result']) && $update['result'] !== 'success')) {
+        rackflow_log('Windows password reset: saving WHMCS service password failed', array(
+            'serviceid' => (int)$params['serviceid'],
+            'error' => is_array($update) && isset($update['message']) ? $update['message'] : 'unknown',
+        ));
+        return 'Password was changed on the server but could not be saved in WHMCS. '
+            . 'Use Change Guest Password with a new password to resynchronise.';
+    }
+    return 'success';
 }
 
 function rackflow_ResetNetwork(array $params)

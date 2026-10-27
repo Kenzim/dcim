@@ -19,16 +19,24 @@ from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.server_dao import ServerDAO
 from app.models.server import Server
 from app.models.server_activity import ServerActivityEventType
+from app.models.service import Service
 from app.schemas.sol import (
     SolProfileInfo,
     SolRedeemRequest,
     SolSendRequest,
     SolSendResponse,
     SolSessionResponse,
+    WindowsPasswordResetRequest,
+    WindowsPasswordResetResponse,
 )
 from app.services.server_activity_logger import (
     log_server_activity_failure,
     log_server_activity_success,
+)
+from app.services.service_resource import service_linked_server
+from app.services.sol.windows_password import (
+    WindowsPasswordResetError,
+    reset_windows_admin_password,
 )
 from app.services.sol import SolUnavailable, list_profiles, mint_bridged_session, sol_ready
 from app.services.sol.hub import attach_sol_websocket, inject_bytes
@@ -59,7 +67,7 @@ def sol_http_error(exc: SolUnavailable) -> HTTPException:
         code = status.HTTP_409_CONFLICT
     elif "empty" in lower or "exceeds" in lower or "base64" in lower or "encoding" in lower:
         code = status.HTTP_400_BAD_REQUEST
-    elif "another rackflow worker" in lower:
+    elif "another rackflow worker" in lower or "busy" in lower:
         code = status.HTTP_409_CONFLICT
     else:
         code = status.HTTP_502_BAD_GATEWAY
@@ -122,6 +130,27 @@ async def perform_sol_send(
         output=output.decode("utf-8", "replace"),
         encoding="utf-8",
     )
+
+
+async def perform_windows_password_reset(
+    db: Session,
+    service: Service,
+    body: WindowsPasswordResetRequest,
+    *,
+    source: str,
+) -> WindowsPasswordResetResponse:
+    """Reset the Windows Administrator password over SOL; map errors to HTTP."""
+    try:
+        result = await reset_windows_admin_password(
+            db,
+            service,
+            service_linked_server(db, service),
+            body.password or None,
+            source=source,
+        )
+    except WindowsPasswordResetError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    return WindowsPasswordResetResponse(**result)
 
 
 @router.get("/profiles", response_model=List[SolProfileInfo], responses=COMMON_ERROR_RESPONSES)

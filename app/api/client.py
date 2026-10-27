@@ -43,6 +43,7 @@ from app.api.services_client import (
     kvm_popup_redirect_handler as _kvm_popup_redirect,
     sol_popup_redirect_handler as _sol_popup_redirect,
     client_sol_send as _client_sol_send,
+    client_windows_password_reset as _client_windows_password_reset,
     client_get_virtual_media as _client_get_virtual_media,
     client_insert_virtual_media as _client_insert_virtual_media,
     client_eject_virtual_media as _client_eject_virtual_media,
@@ -61,7 +62,12 @@ from app.api.services_client import (
 from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody
 from app.schemas.billing import PowerAction
 from app.schemas.vm_vnc import VmConsoleTypesResponse, VmVncSessionResponse
-from app.schemas.sol import SolSendRequest, SolSendResponse
+from app.schemas.sol import (
+    SolSendRequest,
+    SolSendResponse,
+    WindowsPasswordResetRequest,
+    WindowsPasswordResetResponse,
+)
 from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
 from app.services.client_portal_service import redeem_sso_ticket
 from app.services.user_session_service import mint_user_session
@@ -189,6 +195,17 @@ async def client_sol_send(
 ):
     _require_non_admin_client(auth)
     return await _client_sol_send(service_id=service_id, body=body, auth=auth, db=db)
+
+
+@router.post("/services/{service_id}/windows-password-reset", response_model=WindowsPasswordResetResponse)
+async def client_windows_password_reset(
+    service_id: int,
+    body: WindowsPasswordResetRequest,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    _require_non_admin_client(auth)
+    return await _client_windows_password_reset(service_id=service_id, body=body, auth=auth, db=db)
 
 
 @router.get("/services/{service_id}/virtual-media", response_model=VirtualMediaStatusResponse)

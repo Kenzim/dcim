@@ -88,6 +88,9 @@ from app.services.sol.ticket_service import (
     mint_launch_ticket as mint_sol_launch_ticket,
 )
 from app.schemas.sol import SolSendRequest, SolSendResponse, SolTicketResponse
+from app.api.sol import perform_windows_password_reset
+from app.schemas.sol import WindowsPasswordResetRequest, WindowsPasswordResetResponse
+from app.services.sol.windows_password import windows_password_reset_ready
 from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
 from app.services.vm_vnc_ticket_service import mint_launch_ticket, build_launch_url, VmVncUnavailable
 from app.schemas.vm_vnc import VmVncTicketResponse
@@ -2149,6 +2152,8 @@ async def get_service_status(
         ),
         "kvm_console_available": kvm_console_available,
         "sol_console_available": sol_console_available,
+        # Bare metal + Windows + SOL configured; client UIs also need sol_console_available.
+        "windows_password_reset_available": windows_password_reset_ready(db, service, server),
         "virtual_media_available": virtual_media_available,
         "vnc_console_available": vnc_console_available,
         "backups_available": backups_available,
@@ -2728,6 +2733,34 @@ async def billing_sol_send(
         body,
         source=_BILLING_SERVICE_LITERAL,
         service_id=service.id,
+    )
+
+
+@router.post("/services/{service_id}/windows-password-reset", status_code=status.HTTP_200_OK, response_model=WindowsPasswordResetResponse, responses=COMMON_ERROR_RESPONSES)
+async def billing_windows_password_reset(
+    service_id: int,
+    body: WindowsPasswordResetRequest,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+    audience: str = "client",
+):
+    """Set the Windows Administrator password over SOL (bare metal, Windows only).
+
+    Omit ``password`` to have RackFlow generate one; it is then returned once in
+    the response. Client audience needs ``bms.sol`` and an active service.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
+    _assert_billing_owned_service(service, integration)
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
+    if audience == "client":
+        if service.status in (ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Service is not active")
+        require_client_permission(db, service, PermissionKey.BMS_SOL)
+    return await perform_windows_password_reset(
+        db, service, body, source=f"{_BILLING_SERVICE_LITERAL}.{audience}"
     )
 
 

@@ -1,5 +1,5 @@
 """Pydantic schemas for Serial-over-LAN tickets, send, and profiles."""
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -35,3 +35,17 @@ class SolSendResponse(BaseModel):
     written: int
     output: str = ""
     encoding: str = "utf-8"
+
+
+class WindowsPasswordResetRequest(BaseModel):
+    """Omit ``password`` to let RackFlow generate a cmd-safe one."""
+
+    password: Optional[str] = Field(default=None, max_length=127)
+
+
+class WindowsPasswordResetResponse(BaseModel):
+    status: str = "ok"
+    username: str
+    generated: bool
+    # Only set when RackFlow generated the password.
+    password: Optional[str] = None
