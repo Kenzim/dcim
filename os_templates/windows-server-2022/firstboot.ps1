@@ -438,6 +438,11 @@ foreach ($name in @("COM2", "COM1", "COM3")) {
 L "ps getty end"
 '@ -Encoding UTF8
 
+# Boot-task registration lives in its own script so it can run again once Task
+# Scheduler is up (user-login.ps1 and the Run key call it); in specialize it
+# cannot start, so tasks fall back to the Run key until then.
+$bootTasksPs1 = Join-Path $scriptsDir "dcim-boot-tasks.ps1"
+Set-Content -Path $bootTasksPs1 -Value @'
 function Start-DcimTaskScheduler {
     # schtasks prints "The network address is invalid" when Schedule is not
     # accepting local RPC. During specialize it is stopped, and it exits
@@ -528,7 +533,7 @@ function Test-DcimTaskSchedulerUsable {
     $svc = Get-Service -Name "Schedule" -ErrorAction SilentlyContinue
     $script:DcimTaskSchedulerUsable = [bool]($svc -and $svc.Status -eq "Running")
     if (-not $script:DcimTaskSchedulerUsable) {
-        Write-Host "  Task Scheduler not running (Windows Setup in progress); using Run key instead" -ForegroundColor Gray
+        Write-Host "  Task Scheduler not running; using Run key instead" -ForegroundColor Gray
     }
     return $script:DcimTaskSchedulerUsable
 }
@@ -544,6 +549,7 @@ function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra, [string
         try {
             Register-DcimTaskCom -name $name -command $tr -kind $kind -delayIso $delayIso
             Write-Host "  [SUCCESS] Scheduled task $name registered" -ForegroundColor Green
+            Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $name -ErrorAction SilentlyContinue
             return $true
         } catch {
             Write-Warning "  task $name attempt $i failed: $($_.Exception.Message)"
@@ -558,6 +564,7 @@ function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra, [string
         & schtasks.exe @argList | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [SUCCESS] Scheduled task $name registered" -ForegroundColor Green
+            Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name $name -ErrorAction SilentlyContinue
             return $true
         }
         Write-Warning "  schtasks $name attempt $i failed (exit $LASTEXITCODE); retrying"
@@ -571,8 +578,32 @@ function Invoke-DcimSchtasks([string]$name, [string]$tr, [string]$extra, [string
     return $false
 }
 
-$null = Invoke-DcimSchtasks -name "DCIM-ExtendC" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $extendPs1" -extra ""
-$null = Invoke-DcimSchtasks -name "DCIM-SerialAdminCmd" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $serialPs1" -extra "/DELAY 0000:15"
+function Register-DcimBootTasks {
+    # ONSTART tasks as SYSTEM, so the serial Administrator prompt is up on
+    # every boot with nobody logged on. Until both register, this script stays
+    # in the Run key and tries again at each logon.
+    $dir = "C:\Windows\Setup\Scripts"
+    $ok = Invoke-DcimSchtasks -name "DCIM-ExtendC" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $dir\extend-c.ps1" -extra ""
+    $ok = (Invoke-DcimSchtasks -name "DCIM-SerialAdminCmd" -tr "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $dir\serial-admin-cmd.ps1" -extra "/DELAY 0000:15") -and $ok
+    $run = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    if ($ok) {
+        Remove-ItemProperty -Path $run -Name "DCIM-RegisterBootTasks" -ErrorAction SilentlyContinue
+    } else {
+        New-ItemProperty -Path $run -Name "DCIM-RegisterBootTasks" -Value "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $dir\dcim-boot-tasks.ps1" -PropertyType String -Force | Out-Null
+    }
+    return $ok
+}
+
+if ($MyInvocation.InvocationName -ne ".") {
+    # Run directly (Run key or user-login.ps1). HKLM Run also fires for
+    # non-admin users, who cannot register SYSTEM tasks.
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($admin) { $null = Register-DcimBootTasks }
+}
+'@ -Encoding UTF8
+
+. $bootTasksPs1
+$null = Register-DcimBootTasks
 try {
     $null = ([wmiclass]"Win32_Process").Create("powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$serialPs1`"")
     Write-Host "  Serial admin cmd started in background" -ForegroundColor Gray
