@@ -84,3 +84,8 @@ class VirtualMediaProfile(ABC):
     @abstractmethod
     async def eject(self, server: Server) -> VirtualMediaStatus:
         """Eject virtual media. Idempotent if nothing is inserted."""
+
+    async def set_boot_once(self, server: Server, uefi: bool) -> Optional[bool]:
+        """Boot the virtual CD on the next start. None means "not supported here":
+        the launcher then uses the IPMI ``chassis bootdev cdrom`` override."""
+        return None

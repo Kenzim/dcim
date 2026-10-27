@@ -73,9 +73,19 @@ def _raise_if_auth_error(resp: httpx.Response, url: str) -> None:
         )
 
 
+async def _send(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    """Some BMCs (Supermicro X11) silently drop the keep-alive connection after a 4xx;
+    the next request on it then fails with no response line. Retry that once on a new connection."""
+    call = client.post if method == "POST" else client.get
+    try:
+        return await call(url, **kwargs)
+    except httpx.RemoteProtocolError:
+        return await call(url, **kwargs)
+
+
 async def _get_json(client: httpx.AsyncClient, url: str) -> Optional[dict]:
     try:
-        resp = await client.get(url)
+        resp = await _send(client, "GET", url)
     except httpx.RequestError as exc:
         raise VirtualMediaUnavailable(f"Could not reach BMC Redfish at {_path(url)}: {exc}") from exc
     _raise_if_auth_error(resp, url)
@@ -185,7 +195,7 @@ def _transfer_protocol(image_url: str) -> str:
 
 async def _post_action(client: httpx.AsyncClient, url: str, payload: dict) -> httpx.Response:
     try:
-        resp = await client.post(url, json=payload)
+        resp = await _send(client, "POST", url, json=payload)
     except httpx.RequestError as exc:
         raise VirtualMediaUnavailable(f"Could not reach BMC VirtualMedia: {exc}") from exc
     _raise_if_auth_error(resp, url)
@@ -218,7 +228,8 @@ async def insert_image(client: httpx.AsyncClient, origin: str, image_url: str) -
                 detail = str(message)
         except ValueError:
             pass
-        raise VirtualMediaUnavailable(f"{detail} (HTTP {resp.status_code})")
+        host = urlparse(image_url).hostname or "?"
+        raise VirtualMediaUnavailable(f"{detail} (HTTP {resp.status_code}, image host {host})")
     return await _wait_until_inserted(client, origin)
 
 
@@ -244,6 +255,9 @@ def require_inserted(status: VirtualMediaStatus) -> VirtualMediaStatus:
 
 async def eject_image(client: httpx.AsyncClient, origin: str) -> VirtualMediaStatus:
     url = await discover_cd_url(client, origin)
+    resource = await _get_json(client, url) or {}
+    if resource and not resource.get("Inserted"):
+        return _status_from_resource(resource, url)
     eject_url = _join(url, "Actions/VirtualMedia.EjectMedia")
     resp = await _post_action(client, eject_url, {})
     if resp.status_code >= 400:

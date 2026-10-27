@@ -72,6 +72,18 @@ def _media_runner(db: Session, server: Server):
     return runner
 
 
+def _location_has_media_runner(db: Session, server: Server) -> bool:
+    from app.dao.runner_dao import RunnerDAO
+
+    location_id = getattr(server, "location_id", None)
+    if not location_id:
+        return False
+    try:
+        return RunnerDAO.get_by_location_and_capability(db, int(location_id), "media") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _wait_for_runner_job(runner_id: int, job_id: str) -> None:
     from app.services.runners.cache import cached_state
 
@@ -101,6 +113,10 @@ async def _stage_boot_iso(db: Session, server: Server, profile, filename: str) -
     app_url = image_url_for_token(mint_image_token(server.id, filename), filename)
     runner = _media_runner(db, server)
     if runner is None:
+        if _location_has_media_runner(db, server):
+            # BMCs cannot fetch the public (often proxied) app URL; never hand it over
+            # when the location has a runner that is just not connected to this process.
+            raise BootLaunchError("Media runner for this location is not connected; cannot stage the boot ISO")
         return app_url
 
     hub = get_hub()
@@ -183,7 +199,11 @@ async def _launch_vmedia(db: Session, server: Server, boot_task: BootTask) -> di
 
     plugin = get_registry().get_plugin(server.plugin_name, server.plugin_config)
     uefi = getattr(server, "pxe_boot_mode", None) == BootMode.UEFI
-    if not await plugin.set_next_boot_device("cdrom", persistent=False, uefi=uefi):
+    set_boot_once = getattr(profile, "set_boot_once", None)
+    boot_set = await set_boot_once(server, uefi) if set_boot_once else None
+    if boot_set is None:
+        boot_set = await plugin.set_next_boot_device("cdrom", persistent=False, uefi=uefi)
+    if not boot_set:
         raise BootLaunchError("BMC refused the one-time boot-to-CD override")
     action = await _power_cycle(plugin)
     return {"filename": filename, "uefi": uefi, "power_action": action}

@@ -784,11 +784,31 @@ print(json.dumps({{
 }}))
 PY
 
-curl -f -sS -X POST "$API_BASE/api/servers/interaction/hardware-detection/report?token=$REPORT_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  --data-binary "@$tmp_report"
+uploaded=0
+for attempt in 1 2 3; do
+  if curl -f -sS -X POST "$API_BASE/api/servers/interaction/hardware-detection/report?token=$REPORT_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    --data-binary "@$tmp_report"; then
+    uploaded=1
+    break
+  fi
+  echo "Report upload attempt $attempt failed; retrying in 10 seconds"
+  sleep 10
+done
+if [ "$uploaded" != "1" ]; then
+  echo "ERROR: could not upload the hardware detection report; leaving the live OS running for inspection"
+  exit 1
+fi
 
 echo "Hardware detection report uploaded"
+echo "Rebooting in 5 seconds..."
+sleep 5
+sync
+reboot || systemctl reboot --force || true
+# Force it if the system is still up a minute later (e.g. a hung unit).
+sleep 60
+echo 1 >/proc/sys/kernel/sysrq 2>/dev/null || true
+echo b >/proc/sysrq-trigger 2>/dev/null || true
 """
 
 

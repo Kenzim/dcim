@@ -42,6 +42,7 @@ from app.schemas.billing import (
 from app.models.user import User
 from app.models.service_bare_metal import ServiceBareMetal
 from app.models.service_vm import ServiceVm
+from app.services.boot_launcher import schedule_launch, vmedia_capable
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
@@ -945,6 +946,9 @@ def _queue_template_install_for_service(
         server.id,
         template_id,
     )
+
+    # Virtual-media servers: mount the boot ISO, boot-once to CD and power-cycle.
+    schedule_launch(server.id, boot_task.id, source="billing_api", service_id=service.id)
 
     return boot_task, installation_task
 
@@ -3039,11 +3043,13 @@ async def run_script_on_service(
         },
     )
     logger.info(f"Billing API: Created boot task {boot_task.id} for script '{script.name}' on service {service_id}")
+    schedule_launch(server.id, boot_task.id, source="billing_api", service_id=service.id)
 
     return {
         "status": "success",
         "message": f"Script '{script.name}' queued for execution",
-        "boot_task_id": boot_task.id
+        "boot_task_id": boot_task.id,
+        "boot_method": "vmedia" if vmedia_capable(server) else "pxe",
     }
 
 
@@ -3286,11 +3292,13 @@ async def reinstall_os_on_service(
         },
     )
     logger.info(f"Billing API: Created boot task {boot_task.id} for OS reinstall '{template.name}' on service {service_id}")
+    schedule_launch(server.id, boot_task.id, source="billing_api", service_id=service.id)
 
     return {
         "status": "success",
         "message": f"OS reinstallation '{template.name}' queued",
-        "boot_task_id": boot_task.id
+        "boot_task_id": boot_task.id,
+        "boot_method": "vmedia" if vmedia_capable(server) else "pxe",
     }
 
 

@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum as SQLEnum, JSON
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
@@ -42,7 +43,7 @@ class InstallationTask(Base):
     progress_percent = Column(Integer, nullable=True)  # Installation progress (0-100)
     
     # Logs and messages
-    logs = Column(Text, nullable=True)  # Installation logs/output
+    logs = Column(Text().with_variant(mysql.MEDIUMTEXT(), "mysql"), nullable=True)  # Installation logs/output
     error_message = Column(Text, nullable=True)  # Error message if installation failed
     
     # Timestamps

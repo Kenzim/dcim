@@ -1076,6 +1076,30 @@ function rackflow_CreateAccount(array $params)
             }
         }
 
+        // Bare metal: replace any stale dedicated IP with the allocated server's IP and
+        // record the OS login username. The password is already the WHMCS one (sent above).
+        if (strtolower($serviceType) === 'bare_metal' && !empty($params['serviceid']) && function_exists('localAPI')) {
+            $update = array();
+            if (!empty($service['server_ip'])) {
+                $update['dedicatedip'] = (string)$service['server_ip'];
+            }
+            $loginUser = rackflow_bareMetalLoginUsername($service);
+            if ($loginUser !== '') {
+                $update['serviceusername'] = $loginUser;
+            }
+            if (!empty($update)) {
+                try {
+                    $update['serviceid'] = (int)$params['serviceid'];
+                    $updateResult = localAPI('UpdateClientProduct', $update);
+                    if (is_array($updateResult) && isset($updateResult['result']) && $updateResult['result'] !== 'success') {
+                        logModuleCall('rackflow', __FUNCTION__ . '_bm_details', $update, $updateResult, '');
+                    }
+                } catch (Exception $bmEx) {
+                    logModuleCall('rackflow', __FUNCTION__ . '_bm_details', $update, $bmEx->getMessage(), '');
+                }
+            }
+        }
+
         return 'success';
         
     } catch (Exception $e) {
@@ -1088,6 +1112,34 @@ function rackflow_CreateAccount(array $params)
         );
         return 'Error: ' . $e->getMessage();
     }
+}
+
+/**
+ * OS login username for a bare-metal create response.
+ *
+ * Uses the resolved template ``username`` parameter (Linux templates, e.g. Ubuntu's
+ * default "rackflow"); Windows templates have none, so their login is Administrator.
+ * The server's stored credentials may hold a username from an older install, so only
+ * ``os_type`` (refreshed by this install) is read from them.
+ *
+ * @param array $service RackFlow billing service response
+ * @return string Empty when unknown (leave the WHMCS field alone)
+ */
+function rackflow_bareMetalLoginUsername(array $service)
+{
+    $config = isset($service['config']) && is_array($service['config']) ? $service['config'] : array();
+    $tpl = isset($config['template_parameters']) && is_array($config['template_parameters'])
+        ? $config['template_parameters']
+        : array();
+    if (isset($tpl['username']) && is_string($tpl['username']) && trim($tpl['username']) !== '') {
+        return trim($tpl['username']);
+    }
+    $creds = isset($service['credentials']) && is_array($service['credentials']) ? $service['credentials'] : array();
+    $osType = isset($creds['os_type']) ? strtolower((string)$creds['os_type']) : '';
+    if ($osType === 'windows') {
+        return 'Administrator';
+    }
+    return '';
 }
 
 /**

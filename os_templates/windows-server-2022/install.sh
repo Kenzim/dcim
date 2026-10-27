@@ -55,6 +55,20 @@ print(json.dumps(p))
 }
 trap 'e=$?; if [ "$DCIM_STATUS_REPORTED" = 0 ] && [ "$e" -ne 0 ]; then report_installation_status failed "Installation script failed"; fi' EXIT
 
+# Print the main log, then every other text file under /tmp with a header.
+# Skips binaries, empty files, shell scripts and anything over 5 MB.
+collect_install_logs() {
+    [ -f "$LOG_FILE" ] && cat "$LOG_FILE"
+    find /tmp -xdev -maxdepth 3 -type f -size -5M ! -name '*.sh' 2>/dev/null | sort | while IFS= read -r f; do
+        [ "$f" = "$LOG_FILE" ] && continue
+        [ "$(head -c 2 "$f" 2>/dev/null | tr -d '\000')" = "#!" ] && continue
+        grep -Iq . "$f" 2>/dev/null || continue
+        printf '\n\n===== %s =====\n' "$f"
+        cat "$f" 2>/dev/null
+    done
+    return 0
+}
+
 echo "=== Windows Server 2022 Installation ==="
 echo "Server IP: ${SERVER_IP}"
 echo "Server MAC: ${SERVER_MAC}"
@@ -700,30 +714,38 @@ if [ -n "${INSTALLATION_TASK_ID:-}" ] && [ -n "${SERVER_ID:-}" ] && [ -n "${API_
     DCIM_STATUS_REPORTED=1
     echo "Uploading installation logs and reporting success to API..."
 
-    # Read log file content (or empty if file missing)
-    LOG_CONTENT=""
-    [ -f "$LOG_FILE" ] && LOG_CONTENT=$(cat "$LOG_FILE" 2>/dev/null || echo "")
-
     UPLOAD_URL="${API_BASE}/api/servers/${SERVER_ID}/installation-tasks/${INSTALLATION_TASK_ID}/logs"
     [ -n "${DOWNLOAD_TOKEN:-}" ] && UPLOAD_URL="${UPLOAD_URL}?token=${DOWNLOAD_TOKEN}"
 
+    # The payload goes in /run, not /tmp, so it is not collected, and is sent
+    # from a file: a single argv string is capped at 128 KB on Linux.
+    PAYLOAD_FILE="/run/rackflow-install-logs.json"
     if command -v python3 >/dev/null 2>&1; then
-        JSON_PAYLOAD=$(python3 -c "
-import json
-import sys
-logs = sys.stdin.read()
-payload = {'logs': logs, 'status': 'completed'}
-print(json.dumps(payload))
-" <<< "$LOG_CONTENT" 2>/dev/null || echo '{"logs": "", "status": "completed"}')
+        # Main log plus every other text file under /tmp, for later review.
+        # Scripts are skipped (the fetched install script holds secrets) and the
+        # admin password and download token are redacted from what is sent.
+        if ! collect_install_logs | RF_REDACT_1="$ADMIN_PASSWORD" RF_REDACT_2="${DOWNLOAD_TOKEN:-}" python3 -c '
+import json, os, sys
+logs = sys.stdin.buffer.read()[:8000000].decode("utf-8", "replace")
+for key in ("RF_REDACT_1", "RF_REDACT_2"):
+    value = os.environ.get(key)
+    if value:
+        logs = logs.replace(value, "[redacted]")
+print(json.dumps({"logs": logs, "status": "completed"}))
+' >"$PAYLOAD_FILE" 2>/dev/null; then
+            echo '{"logs": "", "status": "completed"}' >"$PAYLOAD_FILE"
+        fi
     else
-        ESCAPED_LOGS=$(echo "$LOG_CONTENT" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-        JSON_PAYLOAD="{\"logs\": \"${ESCAPED_LOGS}\", \"status\": \"completed\"}"
+        # Without python3, send only the main log (printable ASCII, escaped).
+        ESCAPED_LOGS=$(LC_ALL=C tr -d '\000-\010\013-\037\177-\377' <"$LOG_FILE" 2>/dev/null | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g; :a;N;$!ba;s/\n/\\n/g')
+        printf '{"logs": "%s", "status": "completed"}\n' "$ESCAPED_LOGS" >"$PAYLOAD_FILE"
     fi
+    echo "Log payload: $(wc -c <"$PAYLOAD_FILE") bytes"
 
     if command -v curl >/dev/null 2>&1; then
-        HTTP_RESP=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" \
+        HTTP_RESP=$(curl -s -w "\n%{http_code}" --retry 3 --retry-delay 5 -X POST "$UPLOAD_URL" \
             -H "Content-Type: application/json" \
-            -d "$JSON_PAYLOAD" 2>/dev/null) || true
+            --data-binary "@$PAYLOAD_FILE" 2>/dev/null) || true
         HTTP_CODE=$(echo "$HTTP_RESP" | tail -n1)
         if [ "$HTTP_CODE" = "200" ]; then
             echo "Logs uploaded and installation marked complete (HTTP 200)"
@@ -731,14 +753,14 @@ print(json.dumps(payload))
             echo "WARNING: Log upload returned HTTP $HTTP_CODE (response: $(echo "$HTTP_RESP" | head -n-1 | head -c200))"
         fi
     elif command -v wget >/dev/null 2>&1; then
-        if echo "$JSON_PAYLOAD" | wget --method=POST \
+        if wget --tries=3 --method=POST \
             --header="Content-Type: application/json" \
-            --body-data="$JSON_PAYLOAD" \
+            --body-file="$PAYLOAD_FILE" \
             "$UPLOAD_URL" \
-            -O /tmp/upload_response.txt 2>/dev/null; then
+            -O /run/rackflow-upload-response.txt 2>/dev/null; then
             echo "Logs uploaded and installation marked complete"
         else
-            echo "WARNING: Failed to upload logs (check /tmp/upload_response.txt)"
+            echo "WARNING: Failed to upload logs (check /run/rackflow-upload-response.txt)"
         fi
     else
         echo "WARNING: curl or wget not available, cannot upload logs"
@@ -756,6 +778,11 @@ if [ -n "${DOWNLOAD_TOKEN:-}" ] && [ -n "${API_BASE:-}" ]; then
     }
 fi
 
-echo "Rebooting in 5 seconds..."
+echo "Rebooting into Windows in 5 seconds..."
 sleep 5
-#reboot
+sync
+reboot || systemctl reboot --force || true
+# Force it if the system is still up a minute later (e.g. a hung unit).
+sleep 60
+echo 1 >/proc/sys/kernel/sysrq 2>/dev/null || true
+echo b >/proc/sysrq-trigger 2>/dev/null || true

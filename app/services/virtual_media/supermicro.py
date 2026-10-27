@@ -213,6 +213,34 @@ class SuperMicroVirtualMediaProfile(VirtualMediaProfile):
                 )
             return VirtualMediaStatus(inserted=True, device="CD", image_name=filename)
 
+    async def set_boot_once(self, server: Server, uefi: bool) -> Optional[bool]:
+        """X11 firmware lists the virtual CD as a USB CD-ROM: the IPMI ``cdrom``
+        override (Redfish ``Cd``) boots the disk instead, ``UsbCd`` boots the ISO."""
+        async with self._session(server) as (client, origin, _web_login):
+            try:
+                systems = await client.get(f"{origin}/redfish/v1/Systems")
+                members = (systems.json() or {}).get("Members") or [] if systems.status_code < 400 else []
+                path = (members[0] or {}).get("@odata.id") if members else "/redfish/v1/Systems/1"
+                system = await client.get(f"{origin}{path}")
+                boot = (system.json() or {}).get("Boot") or {} if system.status_code < 400 else {}
+            except (httpx.RequestError, ValueError):
+                return None
+            targets = boot.get("BootSourceOverrideTarget@Redfish.AllowableValues") or []
+            if "UsbCd" not in targets:
+                return None
+            payload = {
+                "Boot": {
+                    "BootSourceOverrideEnabled": "Once",
+                    "BootSourceOverrideTarget": "UsbCd",
+                    "BootSourceOverrideMode": "UEFI" if uefi else "Legacy",
+                }
+            }
+            try:
+                resp = await client.patch(f"{origin}{path}", json=payload)
+            except httpx.RequestError:
+                return False
+            return resp.status_code < 400
+
     async def eject(self, server: Server) -> VirtualMediaStatus:
         async with self._session(server) as (client, origin, web_login):
             status = await eject_image(client, origin)
