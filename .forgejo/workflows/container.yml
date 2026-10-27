@@ -80,11 +80,7 @@ jobs:
           set -eu
           command -v docker >/dev/null 2>&1 || { echo "docker CLI missing in job container" >&2; exit 1; }
           docker info
-          # Only prune old images: jobs share this daemon (max-parallel), and a
-          # legacy-builder multi-stage build keeps its finished stages as
-          # untagged images until `COPY --from` reads them. A bare prune here
-          # deletes them from under a concurrent app build.
-          docker image prune -f --filter "until=24h" >/dev/null 2>&1 || true
+          docker image prune -f >/dev/null 2>&1 || true
           df -h / || true
 
       - name: Resolve Forgejo registry image
