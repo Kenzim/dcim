@@ -1,10 +1,8 @@
 <script>
   import { onMount } from 'svelte';
-  import { Alert, Button, Modal, Spinner, Tabs } from '../ui/index.js';
+  import { Alert, Button, Spinner, Tabs } from '../ui/index.js';
+  import TwoFactorPanel from '../TwoFactorPanel.svelte';
   import {
-    clientCommerce2faConfirm,
-    clientCommerce2faDisable,
-    clientCommerce2faSetup,
     clientCommerceDiscordAuthorizeUrl,
     clientCommerceDiscordUnlink,
     clientCommerceGetProfile,
@@ -23,9 +21,6 @@
   let working = false;
   let error = '';
   let success = '';
-  let totpSetup = null;
-  let totpCode = '';
-  let disableModal = { open: false, code: '' };
 
   onMount(load);
 
@@ -101,47 +96,6 @@
     }
   }
 
-  async function start2fa() {
-    working = true;
-    error = '';
-    try {
-      totpSetup = await clientCommerce2faSetup();
-      totpCode = '';
-    } catch (err) {
-      error = err.message || '2FA setup failed';
-    } finally {
-      working = false;
-    }
-  }
-
-  async function confirm2fa() {
-    working = true;
-    error = '';
-    try {
-      await clientCommerce2faConfirm(totpCode.trim());
-      totpSetup = null;
-      totpCode = '';
-      success = 'Two-factor authentication enabled.';
-    } catch (err) {
-      error = err.message || 'Invalid code';
-    } finally {
-      working = false;
-    }
-  }
-
-  async function disable2fa() {
-    working = true;
-    error = '';
-    try {
-      await clientCommerce2faDisable(disableModal.code.trim());
-      disableModal = { open: false, code: '' };
-      success = 'Two-factor authentication disabled.';
-    } catch (err) {
-      error = err.message || 'Failed to disable 2FA';
-    } finally {
-      working = false;
-    }
-  }
 </script>
 
 <section aria-labelledby="account-title">
@@ -220,28 +174,15 @@
       </div>
 
       <h2>Two-factor authentication</h2>
-      {#if totpSetup}
-        <p>Scan this secret in your authenticator app: <code>{totpSetup.secret}</code></p>
-        <p class="muted"><a href={totpSetup.otpauth_uri}>Open in authenticator</a></p>
-        <label>Verification code <input bind:value={totpCode} inputmode="numeric" maxlength="8" /></label>
-        <Button on:click={confirm2fa} disabled={working || totpCode.length < 6}>Confirm 2FA</Button>
+      {#if impersonating}
+        <p class="muted">Two-factor settings can't be changed while signed in on the client's behalf.</p>
       {:else}
-        <Button on:click={start2fa} disabled={working}>Set up 2FA</Button>
-        <Button variant="secondary" on:click={() => (disableModal = { open: true, code: '' })} disabled={working}>Disable 2FA</Button>
+        <TwoFactorPanel />
       {/if}
     </div>
   {/if}
 </section>
 
-{#if disableModal.open}
-  <Modal title="Disable 2FA" onClose={() => (disableModal = { open: false, code: '' })}>
-    <label>Enter your current TOTP code <input bind:value={disableModal.code} inputmode="numeric" maxlength="8" /></label>
-    <svelte:fragment slot="footer">
-      <Button variant="secondary" on:click={() => (disableModal = { open: false, code: '' })}>Cancel</Button>
-      <Button variant="danger" on:click={disable2fa} disabled={working}>Disable</Button>
-    </svelte:fragment>
-  </Modal>
-{/if}
 
 <style>
   .page-head {

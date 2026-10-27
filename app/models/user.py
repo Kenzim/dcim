@@ -61,6 +61,9 @@ class User(Base):
     password = Column(String(255), nullable=True)
     is_admin = Column(Boolean, default=False, nullable=False)
     is_reseller = Column(Boolean, default=False, server_default="0", nullable=False)
+    # Admin-enforced second factor. An account with this set and no enrolled
+    # TOTP gets a session restricted to 2FA enrolment until it sets one up.
+    require_2fa = Column(Boolean, default=False, server_default="0", nullable=False)
     # A reseller account itself is linked through Reseller.user_id. This FK
     # instead identifies ordinary client users managed by that reseller.
     reseller_id = Column(

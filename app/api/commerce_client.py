@@ -109,14 +109,6 @@ class TicketMessageCreate(RequestModel):
     body_text: str = Field(min_length=1, max_length=65535)
 
 
-class TotpConfirmBody(RequestModel):
-    code: str = Field(min_length=6, max_length=8)
-
-
-class TotpDisableBody(RequestModel):
-    code: str = Field(min_length=6, max_length=8)
-
-
 class ServiceCancelBody(RequestModel):
     when: str = Field(default="end_of_cycle", pattern="^(end_of_cycle|immediate)$")
     reason: Optional[str] = Field(default=None, max_length=2000)
@@ -845,90 +837,3 @@ def add_ticket_message(
         "body_text": message.body_text,
         "created_at": message.created_at,
     }
-
-
-# --- TOTP 2FA stubs ---
-
-
-@router.post("/2fa/setup", responses=COMMON_ERROR_RESPONSES)
-def totp_setup(
-    auth: ClientSessionDep,
-    db: DbDep,
-):
-    import pyotp
-
-    from app.core.service_instance_crypto import encrypt_api_key
-    from app.models.commerce_auth_extra import UserTotpSecret
-    from app.models.user import User
-
-    user = db.get(User, int(auth["user_id"]))
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    secret = pyotp.random_base32()
-    encrypted = encrypt_api_key(secret) or secret
-    row = db.get(UserTotpSecret, user.id)
-    if row is None:
-        row = UserTotpSecret(
-            user_id=user.id,
-            secret_encrypted=encrypted,
-            enabled=False,
-            recovery_codes_hash=[],
-        )
-        db.add(row)
-    else:
-        row.secret_encrypted = encrypted
-        row.enabled = False
-        row.confirmed_at = None
-    db.commit()
-    uri = pyotp.totp.TOTP(secret).provisioning_uri(
-        name=user.email,
-        issuer_name=settings.company_name or "Rackflow",
-    )
-    return {"secret": secret, "otpauth_uri": uri}
-
-
-@router.post("/2fa/confirm", responses=COMMON_ERROR_RESPONSES)
-def totp_confirm(
-    body: TotpConfirmBody,
-    auth: ClientSessionDep,
-    db: DbDep,
-):
-    import pyotp
-
-    from app.core.service_instance_crypto import decrypt_api_key
-    from app.models.commerce_auth_extra import UserTotpSecret
-
-    row = db.get(UserTotpSecret, int(auth["user_id"]))
-    if row is None:
-        raise HTTPException(status_code=400, detail="TOTP is not set up")
-    secret = decrypt_api_key(row.secret_encrypted) or row.secret_encrypted
-    if not pyotp.TOTP(secret).verify(body.code, valid_window=1):
-        raise HTTPException(status_code=400, detail="Invalid TOTP code")
-    from datetime import datetime, timezone
-
-    row.enabled = True
-    row.confirmed_at = datetime.now(timezone.utc)
-    db.commit()
-    return {"enabled": True}
-
-
-@router.post("/2fa/disable", responses=COMMON_ERROR_RESPONSES)
-def totp_disable(
-    body: TotpDisableBody,
-    auth: ClientSessionDep,
-    db: DbDep,
-):
-    import pyotp
-
-    from app.core.service_instance_crypto import decrypt_api_key
-    from app.models.commerce_auth_extra import UserTotpSecret
-
-    row = db.get(UserTotpSecret, int(auth["user_id"]))
-    if row is None or not row.enabled:
-        raise HTTPException(status_code=400, detail="TOTP is not enabled")
-    secret = decrypt_api_key(row.secret_encrypted) or row.secret_encrypted
-    if not pyotp.TOTP(secret).verify(body.code, valid_window=1):
-        raise HTTPException(status_code=400, detail="Invalid TOTP code")
-    db.delete(row)
-    db.commit()
-    return {"enabled": False}

@@ -3,7 +3,7 @@
   import { currentRoute, initRouter, getRouteComponent, navigate } from './lib/router.js';
   import routes from './routes/index.js';
   import { theme } from './stores/theme.js';
-  import { installFetchAuthInterceptor, setUnauthorizedHandler } from './lib/api.js';
+  import { installFetchAuthInterceptor, setUnauthorizedHandler, TWO_FACTOR_ENROLLMENT_EVENT } from './lib/api.js';
   import { user, isAuthenticated } from './stores/auth.js';
   
   // Global styles (theme store applies data-theme)
@@ -25,6 +25,16 @@
     });
     installFetchAuthInterceptor();
     router = initRouter(routes);
+
+    // A restricted session (admin-mandated 2FA not yet set up) can't use the
+    // app; send it to the security page wherever a request was refused.
+    const onEnrollmentRequired = () => {
+      if (window.location.pathname !== '/account/security') {
+        navigate('/account/security');
+      }
+    };
+    window.addEventListener(TWO_FACTOR_ENROLLMENT_EVENT, onEnrollmentRequired);
+    return () => window.removeEventListener(TWO_FACTOR_ENROLLMENT_EVENT, onEnrollmentRequired);
   });
 </script>
 

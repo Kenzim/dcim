@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import { navigate } from '../lib/router.js';
-  import { getClientProfile, setClientPassword, impersonateClient, listPermissionSets, updateClientPermissionSet } from '../lib/api.js';
+  import { getClientProfile, setClientPassword, impersonateClient, listPermissionSets, updateClientPermissionSet, setRequireTwoFactor } from '../lib/api.js';
 
   /** Route param: numeric user id */
   export let userId;
@@ -60,6 +60,24 @@
 
   function formatServiceStatus(s) {
     return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  async function toggleRequire2fa(event) {
+    actionError = null;
+    actionMessage = null;
+    busy = true;
+    try {
+      await setRequireTwoFactor('client', profile.user_id, event.currentTarget.checked);
+      actionMessage = event.currentTarget.checked
+        ? 'Two-factor authentication is now required for this client.'
+        : 'Two-factor requirement removed.';
+      await load();
+    } catch (e) {
+      actionError = e.message || String(e);
+      event.currentTarget.checked = !event.currentTarget.checked;
+    } finally {
+      busy = false;
+    }
   }
 
   async function submitSetPassword() {
@@ -200,6 +218,18 @@
             <button type="button" class="btn-link-danger" disabled={busy} on:click={clearPassword}>Clear password</button>
           {/if}
         </div>
+      </div>
+
+      <div class="subpanel">
+        <h4>Two-factor authentication</h4>
+        <p class="hint">
+          {profile.two_factor_enabled ? 'The client has two-factor authentication turned on.' : 'The client has not set up two-factor authentication.'}
+          Requiring it makes the client set it up before they can use the portal.
+        </p>
+        <label class="require-2fa">
+          <input type="checkbox" checked={profile.require_2fa} disabled={busy} on:change={toggleRequire2fa} />
+          Require two-factor authentication
+        </label>
       </div>
     </section>
 

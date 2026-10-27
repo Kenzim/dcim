@@ -10,7 +10,19 @@ export function setUnauthorizedHandler(fn) {
   _onUnauthorized = fn;
 }
 
-const _UNAUTH_EXCLUDED = ['/client/login', '/client/logout', '/client/me'];
+// Login steps and reset requests answer 401 for "wrong code" / "wrong token"
+// without meaning the session has expired, so they must not trigger logout.
+const _UNAUTH_EXCLUDED = [
+  '/client/login',
+  '/client/logout',
+  '/client/me',
+  '/users/login/2fa',
+  '/users/password-reset/',
+];
+
+// Fired when a restricted session (admin-mandated 2FA not yet enrolled) hits a
+// route it isn't allowed to use. App.svelte turns it into a redirect.
+export const TWO_FACTOR_ENROLLMENT_EVENT = 'rf:2fa-enrollment-required';
 
 // Admin "sign in as" impersonation: when an admin opens a client profile's
 // "Sign in as" link, the new tab lands on /client?impersonate=<token>. That
@@ -57,6 +69,12 @@ export function installFetchAuthInterceptor() {
       const excluded = _UNAUTH_EXCLUDED.some((p) => url.includes(p));
       if (response.status === 401 && isApi && !excluded && typeof _onUnauthorized === 'function') {
         _onUnauthorized();
+      }
+      if (response.status === 403 && isApi) {
+        const body = await response.clone().json().catch(() => null);
+        if (body?.detail?.code === '2fa_enrollment_required') {
+          window.dispatchEvent(new CustomEvent(TWO_FACTOR_ENROLLMENT_EVENT));
+        }
       }
     } catch (_) {
       // Never let interceptor bookkeeping break the actual request.
@@ -4370,12 +4388,6 @@ export const clientCommerceDiscordCallback = (data) =>
 export const clientCommerceDiscordUnlink = () =>
   clientCommerceRequest('/discord', { method: 'DELETE', errorMessage: 'Failed to unlink Discord' });
 
-export const clientCommerce2faSetup = () =>
-  clientCommerceRequest('/2fa/setup', { method: 'POST', errorMessage: 'Failed to start 2FA setup' });
-export const clientCommerce2faConfirm = (code) =>
-  clientCommerceRequest('/2fa/confirm', { method: 'POST', body: JSON.stringify({ code }), errorMessage: 'Failed to confirm 2FA' });
-export const clientCommerce2faDisable = (code) =>
-  clientCommerceRequest('/2fa/disable', { method: 'POST', body: JSON.stringify({ code }), errorMessage: 'Failed to disable 2FA' });
 
 /** Trigger browser download of a PDF blob returned by commerce PDF helpers. */
 export function downloadPdfBlob(blob, filename) {
@@ -4387,5 +4399,77 @@ export function downloadPdfBlob(blob, filename) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+// --- Account security: two-factor authentication and password reset (all user types) ---
+
+async function _jsonOrThrow(response, fallbackMessage) {
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    // 403 with {code} is structured; surface its message rather than the raw object.
+    const detail = err.detail?.message || err.detail;
+    throw Object.assign(new Error(typeof detail === 'string' ? detail : fallbackMessage), {
+      status: response.status,
+      code: err.detail?.code,
+    });
+  }
+  return response.json();
+}
+
+function _postJson(path, body) {
+  return fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function loginSecondFactor(pendingToken, code) {
+  const response = await _postJson('/users/login/2fa', { pending_token: pendingToken, code });
+  return _jsonOrThrow(response, 'Invalid verification code');
+}
+
+export async function requestPasswordReset(email) {
+  const response = await _postJson('/users/password-reset/request', { email });
+  return _jsonOrThrow(response, 'Could not send reset email');
+}
+
+export async function confirmPasswordReset(token, password) {
+  const response = await _postJson('/users/password-reset/confirm', { token, password });
+  return _jsonOrThrow(response, 'Could not reset password');
+}
+
+export async function getTwoFactorStatus() {
+  const response = await fetch(`${API_BASE}/users/2fa/status`, { credentials: 'include' });
+  return _jsonOrThrow(response, 'Failed to load two-factor status');
+}
+
+export async function twoFactorSetup(password) {
+  return _jsonOrThrow(await _postJson('/users/2fa/setup', { password }), 'Failed to start two-factor setup');
+}
+
+export async function twoFactorConfirm(code) {
+  return _jsonOrThrow(await _postJson('/users/2fa/confirm', { code }), 'Failed to confirm two-factor setup');
+}
+
+export async function twoFactorRegenerateRecoveryCodes(code) {
+  return _jsonOrThrow(await _postJson('/users/2fa/recovery-codes', { code }), 'Failed to regenerate recovery codes');
+}
+
+export async function twoFactorDisable(code) {
+  return _jsonOrThrow(await _postJson('/users/2fa/disable', { code }), 'Failed to disable two-factor authentication');
+}
+
+// Admin: mandate (or stop mandating) 2FA for a client or staff account.
+export async function setRequireTwoFactor(kind, id, requireTwoFactor) {
+  const path = kind === 'admin' ? `/admin/admins/${id}/require-2fa` : `/admin/clients/${id}/require-2fa`;
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ require_2fa: requireTwoFactor }),
+  });
+  return _jsonOrThrow(response, 'Failed to update two-factor requirement');
 }
 

@@ -1,5 +1,5 @@
 <script>
-  import { login } from '../lib/api.js';
+  import { login, loginSecondFactor } from '../lib/api.js';
   import { user, isAuthenticated } from '../stores/auth.js';
   import { navigate } from '../lib/router.js';
   import { theme, toggleTheme } from '../stores/theme.js';
@@ -10,30 +10,62 @@
   let error = '';
   let loading = false;
 
+  // 'password' is the first step; 'twofactor' appears when the account has 2FA.
+  let step = 'password';
+  let pendingToken = '';
+  let code = '';
+
+  function completeLogin(result) {
+    // Cookie is set automatically by the server
+    // Update store directly from login response
+    user.set({
+      id: result.user_id,
+      username: result.username,
+      email: '', // Will be fetched from /me endpoint when needed
+      is_admin: result.is_admin,
+      is_reseller: result.is_reseller
+    });
+    isAuthenticated.set(true);
+    loading = false;
+    if (result.requires_2fa_enrollment) {
+      // Admin-mandated 2FA: the session can only reach the security page until enrolled.
+      navigate('/account/security');
+      return;
+    }
+    navigate(result.is_admin ? '/admin' : (result.is_reseller ? '/reseller' : '/client'));
+  }
+
   async function handleLogin() {
     error = '';
     loading = true;
 
     try {
+      if (step === 'twofactor') {
+        completeLogin(await loginSecondFactor(pendingToken, code.trim()));
+        return;
+      }
       const result = await login(username, password);
-      
-      // Cookie is set automatically by the server
-      // Update store directly from login response
-      user.set({
-        id: result.user_id,
-        username: result.username,
-        email: '', // Will be fetched from /me endpoint when needed
-        is_admin: result.is_admin,
-        is_reseller: result.is_reseller
-      });
-      isAuthenticated.set(true);
-      loading = false;
-      navigate(result.is_admin ? '/admin' : (result.is_reseller ? '/reseller' : '/client'));
+      if (result.requires_2fa) {
+        pendingToken = result.pending_token;
+        password = '';
+        code = '';
+        step = 'twofactor';
+        loading = false;
+        return;
+      }
+      completeLogin(result);
     } catch (err) {
       error = err.message || 'Login failed';
       console.error('Login error:', err);
       loading = false;
     }
+  }
+
+  function backToPassword() {
+    step = 'password';
+    pendingToken = '';
+    code = '';
+    error = '';
   }
 
   function handleKeyPress(event) {
@@ -69,6 +101,7 @@
         {/if}
 
         <form on:submit|preventDefault={handleLogin} class="login-form">
+          {#if step === 'password'}
           <div class="form-group">
             <label for="username" class="form-label">
               <svg xmlns="http://www.w3.org/2000/svg" class="input-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -106,6 +139,25 @@
               placeholder="Enter your password"
             />
           </div>
+          {:else}
+          <div class="form-group">
+            <label for="totp-code" class="form-label">Verification code</label>
+            <!-- svelte-ignore a11y-autofocus -->
+            <input
+              type="text"
+              id="totp-code"
+              bind:value={code}
+              on:keypress={handleKeyPress}
+              disabled={loading}
+              required
+              autofocus
+              autocomplete="one-time-code"
+              inputmode="text"
+              placeholder="6-digit code or recovery code"
+            />
+            <p class="step-hint">Enter the code from your authenticator app, or one of your saved recovery codes.</p>
+          </div>
+          {/if}
 
           <button
             type="submit"
@@ -114,7 +166,9 @@
           >
             {#if loading}
               <Spinner size="small" />
-              Logging in...
+              {step === 'twofactor' ? 'Verifying...' : 'Logging in...'}
+            {:else if step === 'twofactor'}
+              Verify
             {:else}
               <svg xmlns="http://www.w3.org/2000/svg" class="btn-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
@@ -123,6 +177,14 @@
             {/if}
           </button>
         </form>
+
+        <div class="login-links">
+          {#if step === 'twofactor'}
+            <button type="button" class="auth-link" on:click={backToPassword} disabled={loading}>Back to sign in</button>
+          {:else}
+            <a href="/forgot-password" class="auth-link">Forgot password?</a>
+          {/if}
+        </div>
       </div>
     </div>
   </div>
@@ -305,6 +367,27 @@
   .btn-icon {
     width: 20px;
     height: 20px;
+  }
+
+  .step-hint {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  .login-links {
+    margin-top: 20px;
+    text-align: center;
+  }
+
+  .auth-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--portal-accent, var(--accent-color));
+    font-size: 14px;
+    cursor: pointer;
+    text-decoration: underline;
   }
 </style>
 

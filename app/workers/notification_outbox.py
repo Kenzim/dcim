@@ -10,6 +10,7 @@ import uuid
 
 from app.core.config import Settings, settings
 from app.core.database import SessionLocal
+from app.services.email_sender import send_queued_batch
 from app.services.notification_service import NotificationOutboxSender
 
 
@@ -31,6 +32,18 @@ def run_notification_iteration(
         return (sender or NotificationOutboxSender(config=config)).send_batch(
             db, owner=owner
         )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def run_email_iteration(*, config: Settings = settings) -> int:
+    """Drain queued account emails (password reset, verification, ...)."""
+    db = SessionLocal()
+    try:
+        return send_queued_batch(db, config=config)
     except Exception:
         db.rollback()
         raise
@@ -62,6 +75,13 @@ async def run_notification_outbox_worker(
             raise
         except Exception:
             logger.exception("Notification outbox worker cycle failed")
+        try:
+            await asyncio.to_thread(run_email_iteration, config=config)
+        except asyncio.CancelledError:
+            logger.info("Notification outbox worker %s stopping", owner)
+            raise
+        except Exception:
+            logger.exception("Account email delivery cycle failed")
         await asyncio.sleep(config.notification_worker_interval_seconds)
 
 

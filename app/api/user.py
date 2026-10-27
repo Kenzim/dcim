@@ -2,14 +2,24 @@ from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from typing import List
+import hashlib
+import secrets
 from app.core.database import get_db
 from app.core.redis import redis_client
 from app.core.config import settings
-from app.core.auth import get_current_user, _derive_token_id
+from app.core.auth import get_current_user, _derive_token_id, security
+from app.core.commerce_auth import _impersonated_by_from_token, _token_from_request
 from app.core.rate_limit import enforce_rate_limit, reset_rate_limit
 from app.dao import UserDAO
-from app.models.user import verify_password_timing_safe_dummy
-from app.services.user_session_service import mint_user_session, revoke_all_sessions
+from app.models.user import User, verify_password_timing_safe_dummy
+from app.services import password_reset_service, totp_service
+from app.services.audit_service import AuditService
+from app.services.user_session_service import (
+    RESTRICTION_2FA_ENROLLMENT,
+    lift_session_restrictions,
+    mint_user_session,
+    revoke_all_sessions,
+)
 from app.schemas.user import (
     UserLogin,
     UserLoginResponse,
@@ -17,12 +27,73 @@ from app.schemas.user import (
     SessionResponse,
     DeleteSessionRequest,
     ChangePasswordRequest,
+    TwoFactorLoginRequest,
+    TwoFactorSetupRequest,
+    TwoFactorCodeRequest,
+    TwoFactorStatusResponse,
+    PasswordResetRequest,
+    PasswordResetConfirm,
 )
 
 from typing import Annotated
 DbDep = Annotated[Session, Depends(get_db)]
 
 router = APIRouter()
+
+# How long a password-verified login waits for its second factor.
+_PENDING_2FA_TTL_SECONDS = 300
+_PENDING_2FA_MAX_ATTEMPTS = 5
+
+
+def _client_ip(request: Request) -> str | None:
+    client_ip = request.client.host if request.client else None
+    if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
+        client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+    return client_ip
+
+
+def _pending_2fa_digest(pending_token: str) -> str:
+    return hashlib.sha256(pending_token.encode()).hexdigest()
+
+
+def _set_auth_cookie(request: Request, response: Response, token: str) -> None:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    is_secure_cookie = request.url.scheme == "https" or forwarded_proto.split(",")[0].strip().lower() == "https"
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        max_age=settings.auth_token_expire_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=is_secure_cookie,
+    )
+
+
+def _audit(db: Session, action: str, *, user: User | None = None, ip: str | None = None, **metadata) -> None:
+    """Record an account security event and commit it on its own.
+
+    Used on failure paths that raise right after logging, where nothing else
+    would commit the row.
+    """
+    AuditService.log(
+        db,
+        actor_user_id=user.id if user else None,
+        subject_user_id=user.id if user else None,
+        action=action,
+        ip=ip,
+        metadata=metadata or None,
+    )
+    db.commit()
+
+
+def _session_response(user: User, token: str) -> UserLoginResponse:
+    return UserLoginResponse(
+        token=token,
+        user_id=user.id,
+        username=user.username,
+        is_admin=user.is_admin,
+        is_reseller=user.is_reseller,
+    )
 
 
 @router.post("/login", response_model=UserLoginResponse)
@@ -32,12 +103,14 @@ async def login(
     response: Response,
     db: DbDep
 ):
-    """Login endpoint - returns API token and sets auth_token cookie"""
+    """Login endpoint - returns API token and sets auth_token cookie.
+
+    If the account has 2FA enabled, returns a pending token instead and no
+    session; the client completes sign-in at ``/login/2fa``.
+    """
     # Get client IP (resolved before any auth work so it can be used for
     # rate limiting regardless of whether the credentials turn out valid).
-    client_ip = request.client.host if request.client else None
-    if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
-        client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+    client_ip = _client_ip(request)
 
     # Brute-force protection: cap attempts per source IP and per targeted
     # username/email independently so an attacker can't dodge one limit by
@@ -67,6 +140,7 @@ async def login(
         # Burn roughly the same amount of time as a real password check so the
         # response timing doesn't reveal whether the username/email exists.
         verify_password_timing_safe_dummy(login_data.password)
+        _audit(db, "login_failed", ip=client_ip, reason="unknown_account")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username/email or password"
@@ -74,6 +148,7 @@ async def login(
     
     # Verify password
     if not user.verify_password(login_data.password):
+        _audit(db, "login_failed", user=user, ip=client_ip, reason="bad_password")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username/email or password"
@@ -86,28 +161,95 @@ async def login(
         reset_rate_limit(f"login:user:{identifier}")
     reset_rate_limit(f"login:ip:{client_ip or 'unknown'}")
 
+    # Password is correct but 2FA is enrolled: hand back a single-use
+    # challenge. No session exists until the second factor is verified.
+    if totp_service.is_enabled(db, user.id):
+        pending_token = secrets.token_urlsafe(32)
+        redis_client.setex(
+            f"login2fa:{_pending_2fa_digest(pending_token)}",
+            _PENDING_2FA_TTL_SECONDS,
+            str(user.id),
+        )
+        return UserLoginResponse(requires_2fa=True, pending_token=pending_token)
+
+    # Admin-mandated 2FA that isn't enrolled yet: the session can only reach
+    # the enrolment endpoints until the account has a second factor.
+    if user.require_2fa:
+        token = mint_user_session(
+            user,
+            client_ip=client_ip,
+            extra_fields={"restricted": RESTRICTION_2FA_ENROLLMENT},
+        )
+        _set_auth_cookie(request, response, token)
+        _audit(db, "login_success", user=user, ip=client_ip, restricted="2fa_enrollment")
+        response_body = _session_response(user, token)
+        response_body.requires_2fa_enrollment = True
+        return response_body
+
     # Generate token (client receives this) and store the session in Redis.
     token = mint_user_session(user, client_ip=client_ip)
-    
-    # Set cookie with same expiration as Redis token
-    forwarded_proto = request.headers.get("x-forwarded-proto", "")
-    is_secure_cookie = request.url.scheme == "https" or forwarded_proto.split(",")[0].strip().lower() == "https"
-    response.set_cookie(
-        key="auth_token",
-        value=token,
-        max_age=settings.auth_token_expire_seconds,
-        httponly=True,
-        samesite="lax",
-        secure=is_secure_cookie,
+    _set_auth_cookie(request, response, token)
+    _audit(db, "login_success", user=user, ip=client_ip)
+    return _session_response(user, token)
+
+
+@router.post("/login/2fa", response_model=UserLoginResponse)
+async def login_2fa(
+    body: TwoFactorLoginRequest,
+    request: Request,
+    response: Response,
+    db: DbDep,
+):
+    """Second login step: exchange a pending token and a TOTP or recovery code."""
+    client_ip = _client_ip(request)
+    enforce_rate_limit(
+        f"login2fa:ip:{client_ip or 'unknown'}",
+        settings.login_rate_limit_per_ip,
+        settings.login_rate_limit_per_ip_window_seconds,
     )
-    
-    return UserLoginResponse(
-        token=token,
-        user_id=user.id,
-        username=user.username,
-        is_admin=user.is_admin,
-        is_reseller=user.is_reseller,
+
+    digest = _pending_2fa_digest(body.pending_token)
+    pending_key = f"login2fa:{digest}"
+    raw_user_id = redis_client.get(pending_key)
+    if raw_user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Verification expired; sign in again")
+
+    # Each challenge gets a few guesses before it's unusable; the challenge
+    # also expires on its own TTL, which bounds the total attempts.
+    enforce_rate_limit(
+        f"login2fa:challenge:{digest}",
+        _PENDING_2FA_MAX_ATTEMPTS,
+        _PENDING_2FA_TTL_SECONDS,
     )
+
+    user = UserDAO.get_by_id(db, int(raw_user_id))
+    factor = totp_service.verify_second_factor(db, user, body.code) if user else None
+    if factor is None:
+        _audit(db, "login_2fa_failed", user=user, ip=client_ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code")
+
+    redis_client.delete(pending_key)
+    reset_rate_limit(f"login2fa:challenge:{digest}")
+    token = mint_user_session(user, client_ip=client_ip)
+    _set_auth_cookie(request, response, token)
+    AuditService.log(
+        db,
+        actor_user_id=user.id,
+        subject_user_id=user.id,
+        action="login_success",
+        ip=client_ip,
+        metadata={"factor": factor},
+    )
+    if factor == totp_service.FACTOR_RECOVERY:
+        AuditService.log(
+            db,
+            actor_user_id=user.id,
+            subject_user_id=user.id,
+            action="recovery_code_used",
+            ip=client_ip,
+        )
+    db.commit()
+    return _session_response(user, token)
 
 
 @router.post("/logout")
@@ -196,6 +338,7 @@ async def change_password(
         current_token = request.cookies["auth_token"]
     current_token_id = _derive_token_id(current_token) if current_token else None
     revoke_all_sessions(user.id, except_token_id=current_token_id)
+    _audit(db, "password_changed", user=user, ip=request.client.host if request.client else None)
     return {"message": "Password changed successfully"}
 
 
@@ -354,6 +497,136 @@ async def delete_session(
     # Remove from user's ZSET
     user_toks_key = f"user_toks:{user_id}"
     redis_client.zrem(user_toks_key, token_id)
-    
+
     return {"message": "Session deleted successfully"}
+
+
+# --- Account two-factor authentication (all user types) ---
+
+
+def _require_own_password_session(
+    request: Request,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: DbDep,
+    credentials=Depends(security),
+) -> User:
+    """Resolve the caller's account for 2FA management.
+
+    Rejects API keys and impersonation sessions: an admin impersonating a
+    client must not be able to enrol or remove that client's second factor.
+    """
+    if auth.get("type") == "api_key":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API keys cannot manage two-factor authentication")
+    token = _token_from_request(request, credentials)
+    if _impersonated_by_from_token(token):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Two-factor settings cannot be changed while impersonating")
+    user = UserDAO.get_by_id(db, int(auth.get("user_id") or 0))
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return user
+
+
+@router.get("/2fa/status", response_model=TwoFactorStatusResponse)
+async def two_factor_status(
+    user: Annotated[User, Depends(_require_own_password_session)],
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: DbDep,
+):
+    from app.models.commerce_auth_extra import UserTotpSecret
+
+    row = db.get(UserTotpSecret, user.id)
+    enabled = bool(row and row.enabled)
+    return TwoFactorStatusResponse(
+        enabled=enabled,
+        recovery_codes_remaining=len(row.recovery_codes_hash or []) if enabled else 0,
+        enrollment_required=bool(auth.get("restricted")) and not enabled,
+    )
+
+
+@router.post("/2fa/setup")
+async def two_factor_setup(
+    body: TwoFactorSetupRequest,
+    user: Annotated[User, Depends(_require_own_password_session)],
+    db: DbDep,
+):
+    if not user.verify_password(body.password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Password is incorrect")
+    secret, uri = totp_service.begin_enrollment(db, user)
+    return {"secret": secret, "otpauth_uri": uri}
+
+
+@router.post("/2fa/confirm")
+async def two_factor_confirm(
+    body: TwoFactorCodeRequest,
+    user: Annotated[User, Depends(_require_own_password_session)],
+    db: DbDep,
+):
+    recovery_codes = totp_service.confirm_enrollment(db, user, body.code)
+    AuditService.log(db, actor_user_id=user.id, subject_user_id=user.id, action="2fa_enabled")
+    db.commit()
+    lift_session_restrictions(user.id)
+    return {"enabled": True, "recovery_codes": recovery_codes}
+
+
+@router.post("/2fa/recovery-codes")
+async def two_factor_regenerate_recovery_codes(
+    body: TwoFactorCodeRequest,
+    user: Annotated[User, Depends(_require_own_password_session)],
+    db: DbDep,
+):
+    """Replace the recovery set. Authorised by a TOTP or existing recovery code."""
+    factor = totp_service.verify_second_factor(db, user, body.code)
+    if factor is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code")
+    codes = totp_service.regenerate_recovery_codes(db, user)
+    AuditService.log(
+        db,
+        actor_user_id=user.id,
+        subject_user_id=user.id,
+        action="recovery_codes_regenerated",
+        metadata={"verified_with": factor},
+    )
+    db.commit()
+    return {"recovery_codes": codes}
+
+
+@router.post("/2fa/disable")
+async def two_factor_disable(
+    body: TwoFactorCodeRequest,
+    user: Annotated[User, Depends(_require_own_password_session)],
+    db: DbDep,
+):
+    totp_service.disable(db, user, body.code)
+    AuditService.log(db, actor_user_id=user.id, subject_user_id=user.id, action="2fa_disabled")
+    db.commit()
+    return {"enabled": False}
+
+
+# --- Password reset (any account with a password) ---
+
+
+@router.post("/password-reset/request")
+async def password_reset_request(
+    body: PasswordResetRequest,
+    request: Request,
+    db: DbDep,
+):
+    """Email a reset link. Answers the same whether or not the address exists."""
+    client_ip = _client_ip(request) or "unknown"
+    password_reset_service.request_password_reset(db, email=str(body.email).strip().lower(), client_ip=client_ip)
+    return {"ok": True}
+
+
+@router.post("/password-reset/confirm")
+async def password_reset_confirm(
+    body: PasswordResetConfirm,
+    request: Request,
+    db: DbDep,
+):
+    client_ip = _client_ip(request) or "unknown"
+    enforce_rate_limit(f"pwdreset:confirm:ip:{client_ip}", max_attempts=30, window_seconds=3600)
+    password_reset_service.confirm_password_reset(
+        db, token=body.token, password=body.password, client_ip=client_ip
+    )
+    return {"ok": True}
 

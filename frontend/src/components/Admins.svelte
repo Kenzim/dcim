@@ -7,6 +7,7 @@
     createAdminAccount,
     updateAdminAccount,
     deleteAdminAccount,
+    setRequireTwoFactor,
   } from '../lib/api.js';
 
   let admins = [];
@@ -19,7 +20,7 @@
   let createForm = { username: '', email: '', password: '' };
 
   let editingId = null;
-  let editForm = { email: '', password: '' };
+  let editForm = { email: '', password: '', currentPassword: '' };
   let editBusy = false;
   let editError = null;
 
@@ -61,7 +62,7 @@
 
   function startEdit(admin) {
     editingId = admin.id;
-    editForm = { email: admin.email, password: '' };
+    editForm = { email: admin.email, password: '', currentPassword: '' };
     editError = null;
   }
 
@@ -76,7 +77,11 @@
     try {
       const body = {};
       if (editForm.email && editForm.email !== admin.email) body.email = editForm.email;
-      if (editForm.password) body.password = editForm.password;
+      if (editForm.password) {
+        body.password = editForm.password;
+        // The acting admin re-confirms their own password for any password change.
+        body.current_password = editForm.currentPassword;
+      }
       await updateAdminAccount(admin.id, body);
       editingId = null;
       await load();
@@ -84,6 +89,16 @@
       editError = e.message || String(e);
     } finally {
       editBusy = false;
+    }
+  }
+
+  async function toggleRequire2fa(admin) {
+    error = null;
+    try {
+      await setRequireTwoFactor('admin', admin.id, !admin.require_2fa);
+      await load();
+    } catch (e) {
+      error = e.message || String(e);
     }
   }
 
@@ -136,6 +151,7 @@
           <tr>
             <th>Username</th>
             <th>Email</th>
+            <th>Two-factor</th>
             <th></th>
           </tr>
         </thead>
@@ -153,9 +169,19 @@
                   {admin.email}
                 {/if}
               </td>
+              <td>
+                <span class="badge">{admin.two_factor_enabled ? '2FA on' : '2FA off'}</span>
+                <label class="require-2fa">
+                  <input type="checkbox" checked={admin.require_2fa} on:change={() => toggleRequire2fa(admin)} />
+                  Require
+                </label>
+              </td>
               <td class="actions-cell table-actions">
                 {#if editingId === admin.id}
                   <input class="inline-input" type="password" placeholder="New password (optional)" bind:value={editForm.password} />
+                  {#if editForm.password}
+                    <input class="inline-input" type="password" placeholder="Your current password" bind:value={editForm.currentPassword} />
+                  {/if}
                   {#if editError}<div class="error inline-error">{editError}</div>{/if}
                   <button class="btn-secondary btn-small" disabled={editBusy} on:click={() => submitEdit(admin)}>Save</button>
                   <button class="btn-link" disabled={editBusy} on:click={cancelEdit}>Cancel</button>

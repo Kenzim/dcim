@@ -16,12 +16,12 @@ from app.core.commerce_auth import require_commerce_enabled
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
-from app.core.rate_limit import enforce_rate_limit
 from app.dao import UserDAO
-from app.models.commerce_auth_extra import EmailVerificationToken, PasswordResetToken
+from app.models.commerce_auth_extra import EmailVerificationToken
 from app.models.user import MIN_PASSWORD_LENGTH, User
 from app.services.billing_account_service import BillingAccountService
 from app.services.email_message_service import EmailEvent, EmailMessageService
+from app.services import password_reset_service
 
 router = APIRouter(
     prefix="/commerce/auth",
@@ -68,7 +68,7 @@ def _hash_token(token: str) -> str:
 
 
 def _public_app_url() -> str:
-    return (settings.commerce_public_app_url or "").rstrip("/") or ""
+    return settings.auth_link_base_url or ""
 
 
 def _enqueue_verify_email(db: Session, *, user: User, raw_token: str) -> None:
@@ -157,65 +157,22 @@ def password_reset_request(
     client_ip = request.client.host if request.client else "unknown"
     if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
         client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
-    enforce_rate_limit(
-        f"commerce:pwdreset:ip:{client_ip}",
-        max_attempts=10,
-        window_seconds=3600,
+    password_reset_service.request_password_reset(
+        db, email=body.email.strip().lower(), client_ip=client_ip
     )
-    enforce_rate_limit(
-        f"commerce:pwdreset:email:{body.email.strip().lower()}",
-        max_attempts=5,
-        window_seconds=3600,
-    )
-
-    user = UserDAO.get_by_email(db, body.email.strip().lower())
-    if user is not None and user.has_password:
-        raw_token = secrets.token_urlsafe(32)
-        db.add(
-            PasswordResetToken(
-                user_id=user.id,
-                token_hash=_hash_token(raw_token),
-                expires_at=datetime.now(timezone.utc) + timedelta(hours=2),
-            )
-        )
-        reset_url = (
-            f"{_public_app_url()}/reset-password?token={raw_token}"
-            if _public_app_url()
-            else None
-        )
-        try:
-            EmailMessageService.enqueue(
-                db,
-                to_address=user.email,
-                event=EmailEvent.PASSWORD_RESET,
-                idempotency_key=f"pwdreset:{user.id}:{raw_token[:16]}",
-                data={"reset_url": reset_url},
-                user_id=user.id,
-            )
-        except ValueError:
-            pass
-        db.commit()
-
     return {"ok": True}
 
 
 @router.post("/password-reset/confirm", responses=COMMON_ERROR_RESPONSES)
-def password_reset_confirm(body: PasswordResetConfirmBody, db: Annotated[Session, Depends(get_db)]):
-    token_hash = _hash_token(body.token.strip())
-    row = db.execute(
-        select(PasswordResetToken).where(
-            PasswordResetToken.token_hash == token_hash,
-            PasswordResetToken.consumed_at.is_(None),
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
-    if _as_utc(row.expires_at) < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
-    user = db.get(User, row.user_id)
-    if user is None:
-        raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
-    user.set_password(body.password)
-    row.consumed_at = datetime.now(timezone.utc)
-    db.commit()
+def password_reset_confirm(
+    body: PasswordResetConfirmBody,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+):
+    client_ip = request.client.host if request.client else "unknown"
+    if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
+        client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
+    password_reset_service.confirm_password_reset(
+        db, token=body.token, password=body.password, client_ip=client_ip
+    )
     return {"ok": True}

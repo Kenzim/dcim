@@ -310,7 +310,17 @@ class Settings(BaseSettings):
             raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be configured together")
         if self.smtp_enabled and not (self.smtp_host and self.smtp_from):
             raise ValueError("SMTP_ENABLED requires SMTP_HOST and SMTP_FROM")
+        # Reset and verification emails carry a link back into the app; without
+        # a base URL they'd be sent with no usable link.
+        if self.smtp_enabled and not self.auth_link_base_url:
+            raise ValueError("SMTP_ENABLED requires PUBLIC_APP_URL for account email links")
         return self
+
+    @property
+    def auth_link_base_url(self) -> Optional[str]:
+        """Base URL for links in account emails (password reset, email verification)."""
+        base = (self.commerce_public_app_url or self.public_app_url or "").strip().rstrip("/")
+        return base or None
 
     @property
     def recurring_billing_retry_day_offsets(self) -> tuple[int, ...]:

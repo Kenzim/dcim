@@ -13,6 +13,16 @@ security = HTTPBearer(auto_error=False)
 
 _INVALID_TOKEN_MSG = "Invalid or expired token"
 
+# Mirrors app.services.user_session_service.RESTRICTION_2FA_ENROLLMENT (kept
+# here to avoid a circular import: that module already imports this one).
+_RESTRICTION_2FA_ENROLLMENT = "2fa_enrollment"
+_ENROLLING_PREFIXES = ("/api/users/2fa/",)
+_ENROLLING_PATHS = frozenset({"/api/users/me", "/api/users/logout", "/api/client/me", "/api/client/logout"})
+
+
+def _allowed_while_enrolling(path: str) -> bool:
+    return path in _ENROLLING_PATHS or path.startswith(_ENROLLING_PREFIXES)
+
 
 def _derive_token_id(token: str) -> str:
     """Derive token_id from token using SHA256"""
@@ -44,7 +54,8 @@ def _get_user_from_token(token: str, client_ip: Optional[str] = None) -> Optiona
         "is_reseller": user_data.get("is_reseller", "false").lower() == "true",
         "created_at": user_data.get("created_at", ""),
         "last_seen_at": user_data.get("last_seen_at", ""),
-        "last_seen_ip": user_data.get("last_seen_ip", "")
+        "last_seen_ip": user_data.get("last_seen_ip", ""),
+        "restricted": user_data.get("restricted", ""),
     }
     
     # Update last seen IP and timestamp if provided
@@ -104,8 +115,13 @@ def get_current_user(
     
     # First try Redis token authentication (user session)
     user_info = _get_user_from_token(token, client_ip=client_ip)
-    
+
     if user_info:
+        if user_info.get("restricted") == _RESTRICTION_2FA_ENROLLMENT and not _allowed_while_enrolling(request.url.path):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "2fa_enrollment_required", "message": "Set up two-factor authentication to continue"},
+            )
         return user_info
 
     # Reseller keys have a dedicated authentication dependency and must never

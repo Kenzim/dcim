@@ -87,3 +87,39 @@ def revoke_all_sessions(user_id: int, except_token_id: Optional[str] = None) -> 
         redis_client.zrem(user_toks_key, token_id)
         revoked += 1
     return revoked
+
+
+# Session restriction marker. A restricted session can only reach the 2FA
+# enrolment endpoints and its own identity/logout routes until it enrols.
+RESTRICTION_2FA_ENROLLMENT = "2fa_enrollment"
+
+
+def restrict_sessions_for_2fa_enrollment(user_id: int) -> int:
+    """Mark every live session for ``user_id`` as needing 2FA enrolment.
+
+    Used when an admin turns on a mandatory second factor, so sessions that
+    were opened before the change lose access to everything but enrolment.
+    Returns the number of sessions marked.
+    """
+    marked = 0
+    for token_id in redis_client.zrevrange(f"user_toks:{user_id}", 0, -1):
+        token_key = f"tok:{token_id}"
+        if redis_client.exists(token_key):
+            redis_client.hset(token_key, "restricted", RESTRICTION_2FA_ENROLLMENT)
+            marked += 1
+    return marked
+
+
+def lift_session_restrictions(user_id: int) -> int:
+    """Lift the enrolment restriction from every session of ``user_id``.
+
+    Called once the account has a working second factor: the restriction only
+    existed because that factor was missing, so it no longer applies.
+    """
+    lifted = 0
+    for token_id in redis_client.zrevrange(f"user_toks:{user_id}", 0, -1):
+        token_key = f"tok:{token_id}"
+        if redis_client.exists(token_key) and redis_client.hget(token_key, "restricted"):
+            redis_client.hset(token_key, "restricted", "")
+            lifted += 1
+    return lifted

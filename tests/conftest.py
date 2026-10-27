@@ -130,6 +130,9 @@ def mock_redis():
     def mock_delete(*keys):
         count = 0
         for key in keys:
+            if key in mock_redis_client._strings:
+                del mock_redis_client._strings[key]
+                count += 1
             if key in mock_redis_client._hashes:
                 del mock_redis_client._hashes[key]
                 count += 1
@@ -254,6 +257,12 @@ def mock_redis():
     def mock_get(key):
         return mock_redis_client._strings.get(key)
 
+    def mock_setex(key, ttl, value):
+        mock_redis_client._strings[key] = value
+        mock_redis_client._ttls[key] = int(ttl)
+        return True
+
+    mock_redis_client.setex = mock_setex
     mock_redis_client.hset = mock_hset
     mock_redis_client.hget = mock_hget
     mock_redis_client.hgetall = mock_hgetall

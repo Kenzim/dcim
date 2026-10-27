@@ -121,6 +121,9 @@ class UserTotpSecret(Base):
     secret_encrypted = Column(Text, nullable=False)
     enabled = Column(Boolean, nullable=False, default=False, server_default="0")
     recovery_codes_hash = Column(JSON, nullable=False, default=list)
+    # Last accepted TOTP time step; a code for this step or earlier is rejected
+    # so an intercepted code can't be replayed within its validity window.
+    last_used_step = Column(BigInteger, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
 

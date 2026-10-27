@@ -3,6 +3,7 @@
   import { user, logout } from '../stores/auth.js';
   import { getCurrentUser, getSessions, deleteSession, changePassword } from '../lib/api.js';
   import PageHeader from './PageHeader.svelte';
+  import TwoFactorPanel from './TwoFactorPanel.svelte';
   import { navigate } from '../lib/router.js';
 
   let userData = null;
@@ -316,6 +317,11 @@
           </button>
         </form>
       {/if}
+    </section>
+
+    <section class="panel">
+      <h2>Two-factor authentication</h2>
+      <TwoFactorPanel />
     </section>
 
     <section class="panel panel-sessions">

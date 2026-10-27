@@ -28,7 +28,13 @@ from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
 from app.core.config import settings
 from app.models.user import User
-from app.services.user_session_service import mint_user_session
+from app.services.audit_service import AuditService
+from app.services.user_session_service import (
+    lift_session_restrictions,
+    mint_user_session,
+    restrict_sessions_for_2fa_enrollment,
+    revoke_all_sessions,
+)
 
 _MSG_CLIENT_NOT_FOUND = "Client not found"
 _MSG_EMAIL_ALREADY_IN_USE = "Email already in use"
@@ -39,6 +45,28 @@ clients_router = APIRouter(prefix="/admin/clients", tags=["admin-clients"])
 admins_router = APIRouter(prefix="/admin/admins", tags=["admin-admins"])
 
 DbDep = Annotated[Session, Depends(get_db)]
+
+
+def _two_factor_enabled(db: Session, user_id: int) -> bool:
+    from app.services.totp_service import is_enabled
+
+    return is_enabled(db, user_id)
+
+
+def _admin_list_item(db: Session, admin: User) -> "AdminListItem":
+    return AdminListItem(
+        id=admin.id,
+        username=admin.username,
+        email=admin.email,
+        require_2fa=bool(admin.require_2fa),
+        two_factor_enabled=_two_factor_enabled(db, admin.id),
+    )
+
+
+def _request_ip(request: Request) -> str | None:
+    if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
+        return request.headers["x-forwarded-for"].split(",")[0].strip()
+    return request.client.host if request.client else None
 AdminDep = Annotated[dict, Depends(require_admin)]
 
 
@@ -93,6 +121,8 @@ class ClientProfile(BaseModel):
     services: List[ClientServiceSummary] = []
     permission_set_id: Optional[int] = None
     permission_set_name: Optional[str] = None
+    require_2fa: bool = False
+    two_factor_enabled: bool = False
 
 
 class ClientPermissionSetAssignBody(BaseModel):
@@ -125,6 +155,8 @@ class AdminListItem(BaseModel):
     id: int
     username: str
     email: str
+    require_2fa: bool = False
+    two_factor_enabled: bool = False
 
 
 class AdminCreate(BaseModel):
@@ -136,6 +168,13 @@ class AdminCreate(BaseModel):
 class AdminUpdate(BaseModel):
     email: Optional[EmailStr] = None
     password: Optional[str] = None
+    # Required whenever ``password`` is set: the acting admin re-confirms their
+    # own password, so a stolen admin session can't quietly take over another admin.
+    current_password: Optional[str] = None
+
+
+class RequireTwoFactorBody(BaseModel):
+    require_2fa: bool
 
 
 def _services_for(db: Session, *, owner_user_id: Optional[int] = None) -> List[ClientServiceSummary]:
@@ -260,6 +299,8 @@ async def get_client_profile(
         services=_services_for(db, owner_user_id=user.id),
         permission_set_id=user.permission_set_id,
         permission_set_name=user.permission_set.name if user.permission_set else None,
+        require_2fa=bool(user.require_2fa),
+        two_factor_enabled=_two_factor_enabled(db, user.id),
     )
 
 
@@ -301,6 +342,16 @@ async def set_client_password(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     UserDAO.update(db, user)
+    # A password reset by staff must also end any session the old password
+    # (or whoever knew it) had open.
+    revoke_all_sessions(user.id)
+    AuditService.log(
+        db,
+        actor_user_id=int(auth["user_id"]),
+        subject_user_id=user.id,
+        action="password_set_by_admin",
+    )
+    db.commit()
     return {"message": "Password updated" if user.has_password else "Password cleared — password login disabled"}
 
 
@@ -323,6 +374,60 @@ async def set_client_permission_set(
     user.permission_set_id = body.permission_set_id
     UserDAO.update(db, user)
     return await get_client_profile(user.id, auth=auth, db=db)
+
+
+def _set_require_2fa(db: Session, *, target: User, actor_id: int, require_2fa: bool, ip: str | None) -> None:
+    from app.models.commerce_auth_extra import UserTotpSecret
+
+    target.require_2fa = require_2fa
+    UserDAO.update(db, target)
+    if require_2fa:
+        row = db.get(UserTotpSecret, target.id)
+        if not (row and row.enabled):
+            # Sessions opened before the mandate also need enrolment, not
+            # just the next login.
+            restrict_sessions_for_2fa_enrollment(target.id)
+    else:
+        lift_session_restrictions(target.id)
+    AuditService.log(
+        db,
+        actor_user_id=actor_id,
+        subject_user_id=target.id,
+        action="require_2fa_changed",
+        ip=ip,
+        metadata={"require_2fa": require_2fa},
+    )
+    db.commit()
+
+
+@clients_router.put("/{user_id}/require-2fa")
+async def set_client_require_2fa(
+    user_id: int,
+    body: RequireTwoFactorBody,
+    request: Request,
+    auth: AdminDep,
+    db: DbDep,
+):
+    user = UserDAO.get_by_id(db, user_id)
+    if not user or user.is_admin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_CLIENT_NOT_FOUND)
+    _set_require_2fa(db, target=user, actor_id=int(auth["user_id"]), require_2fa=body.require_2fa, ip=_request_ip(request))
+    return {"require_2fa": user.require_2fa}
+
+
+@admins_router.put("/{admin_id}/require-2fa")
+async def set_admin_require_2fa(
+    admin_id: int,
+    body: RequireTwoFactorBody,
+    request: Request,
+    auth: AdminDep,
+    db: DbDep,
+):
+    admin = UserDAO.get_by_id(db, admin_id)
+    if not admin or not admin.is_admin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Admin not found")
+    _set_require_2fa(db, target=admin, actor_id=int(auth["user_id"]), require_2fa=body.require_2fa, ip=_request_ip(request))
+    return {"require_2fa": admin.require_2fa}
 
 
 @clients_router.post("/{user_id}/impersonate", response_model=ClientImpersonateResponse)
@@ -371,6 +476,14 @@ async def impersonate_client(
         user.username,
         client_ip,
     )
+    AuditService.log(
+        db,
+        actor_user_id=int(auth["user_id"]),
+        subject_user_id=user.id,
+        action="impersonation_started",
+        ip=client_ip,
+    )
+    db.commit()
     return ClientImpersonateResponse(token=token, expires_in=ttl, user_id=user.id, username=user.username)
 
 
@@ -385,7 +498,7 @@ async def list_admins(
     db: DbDep,
 ):
     admins = db.query(User).filter(User.is_admin == True).order_by(User.username).all()  # noqa: E712
-    return [AdminListItem(id=a.id, username=a.username, email=a.email) for a in admins]
+    return [_admin_list_item(db, a) for a in admins]
 
 
 @admins_router.post("", response_model=AdminListItem, status_code=status.HTTP_201_CREATED)
@@ -402,7 +515,7 @@ async def create_admin(
         admin = UserDAO.create(db, username=body.username, email=body.email, password=body.password, is_admin=True)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return AdminListItem(id=admin.id, username=admin.username, email=admin.email)
+    return _admin_list_item(db, admin)
 
 
 @admins_router.put("/{admin_id}", response_model=AdminListItem)
@@ -419,13 +532,29 @@ async def update_admin(
         if UserDAO.get_by_email(db, body.email):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_MSG_EMAIL_ALREADY_IN_USE)
         admin.email = body.email
-    if body.password:
+    password_changed = bool(body.password)
+    if password_changed:
+        actor = UserDAO.get_by_id(db, int(auth["user_id"]))
+        if not body.current_password or actor is None or not actor.verify_password(body.current_password):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Enter your own current password to change an admin's password",
+            )
         try:
             admin.set_password(body.password)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     UserDAO.update(db, admin)
-    return AdminListItem(id=admin.id, username=admin.username, email=admin.email)
+    if password_changed:
+        revoke_all_sessions(admin.id)
+        AuditService.log(
+            db,
+            actor_user_id=int(auth["user_id"]),
+            subject_user_id=admin.id,
+            action="password_set_by_admin",
+        )
+        db.commit()
+    return _admin_list_item(db, admin)
 
 
 @admins_router.delete("/{admin_id}", status_code=status.HTTP_204_NO_CONTENT)
