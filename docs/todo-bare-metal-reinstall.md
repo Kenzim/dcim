@@ -1,6 +1,22 @@
 # TODO: bare-metal reinstall from WHMCS
 
-Status: planned, not started (2026-10-27).
+Status: steps 1 and 2 done on branch `task/bare-metal-reinstall-from-whmc-d038dd`
+(2026-10-27), not deployed. Open: admin-panel bare-metal template picker (step 2,
+optional), terminate cleanup (step 3), live verification on a free test server.
+
+Decisions:
+- Service status is left unchanged during a reinstall (an active service stays
+  active), like VM reinstall and the MCP reinstall. Create's pending-then-active flow
+  is not reused: the service already exists and is Active in WHMCS, a pending
+  RackFlow status would change status-gated behaviour for the whole install, and
+  `mark_completed` sets every pending service on the server to active, so it must
+  never be applied to a suspended one. Progress is tracked on the `InstallationTask`.
+- `reinstall-os` cancels all pending and in-progress installation and boot tasks on
+  the server and releases a staged boot ISO (awaited before the new launch, so the
+  release cannot revoke the new ISO token).
+- `reinstall-os?audience=admin` skips the client's `bms.reinstall` permission (the
+  default `client` keeps it), matching the VM reinstall endpoint. The module sends
+  `admin` when `ADMINAREA` is defined.
 
 ## Problem
 
