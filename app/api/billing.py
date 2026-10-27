@@ -3142,6 +3142,15 @@ async def reinstall_os_on_service(
                 detail=f"OS template '{action.template_id}' is not available for user reinstallation"
             )
 
+        # Validate before touching open tasks so a bad request leaves them alone.
+        template_parameters = resolve_template_parameters(template, action.template_parameters)
+        script_path = template_service.get_template_script_path(action.template_id)
+        if not script_path or not script_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Template '{action.template_id}' missing installation script"
+            )
+
         # A reinstall replaces whatever is open on the server (a stuck install,
         # a stale boot task) instead of being refused, and drops a staged boot ISO.
         cancelled_installs, cancelled_boots = _cancel_open_server_tasks(db, server.id)
@@ -3150,7 +3159,7 @@ async def reinstall_os_on_service(
         # Same path as create: InstallationTask (logs, completion, reboot) and
         # schedule_launch (virtual media when available, PXE otherwise).
         boot_task, installation_task = _queue_template_install_for_service(
-            db, service, action.template_id, action.template_parameters
+            db, service, action.template_id, template_parameters
         )
     except HTTPException as exc:
         log_server_activity_failure(

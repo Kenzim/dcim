@@ -3639,8 +3639,9 @@ function rackflow_reinstallBareMetal(array $params)
         $body['template_parameters'] = $templateParameters;
     }
 
-    // Admin Module Commands skip the client's bms.reinstall permission (template rules still apply).
-    $audience = defined('ADMINAREA') ? 'admin' : (!empty($params['clientsdetails']) ? 'client' : 'admin');
+    // Admin-area Module Commands skip the client's bms.reinstall permission (template
+    // rules still apply); anything else is treated as the client.
+    $audience = defined('ADMINAREA') ? 'admin' : 'client';
     $result = rackflow_apiCall(
         $apiConfig['url'],
         $apiConfig['key'],
