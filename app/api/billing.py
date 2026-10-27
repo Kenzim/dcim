@@ -3077,17 +3077,21 @@ async def reinstall_os_on_service(
     service_id: int,
     action: ServiceActionReinstallOS,
     integration: BillingIntegrationDep,
-    db: DbDep
+    db: DbDep,
+    audience: str = "client",
 ):
     """
     Reinstall OS on a service's server.
 
     When the service was provisioned from a server group, the template must be
     in that group's permitted OS list. Otherwise only ``user_reinstallable``
-    templates are allowed.
+    templates are allowed. ``audience=client`` (default) also requires the
+    client's ``bms.reinstall`` permission; billing admin actions pass ``admin``.
     """
     logger.info(f"Billing API: Reinstalling OS '{action.template_id}' on service {service_id} via integration '{integration.name}'")
-    
+
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     service = ServiceDAO.get_by_id(db, service_id)
     if not service:
         raise HTTPException(
@@ -3096,7 +3100,8 @@ async def reinstall_os_on_service(
         )
     
     _assert_billing_owned_service(service, integration)
-    require_client_permission(db, service, PermissionKey.BMS_REINSTALL)
+    if audience == "client":
+        require_client_permission(db, service, PermissionKey.BMS_REINSTALL)
 
     server = service_linked_server(db, service)
     if not server:

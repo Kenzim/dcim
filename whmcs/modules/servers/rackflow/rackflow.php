@@ -1078,26 +1078,8 @@ function rackflow_CreateAccount(array $params)
 
         // Bare metal: replace any stale dedicated IP with the allocated server's IP and
         // record the OS login username. The password is already the WHMCS one (sent above).
-        if (strtolower($serviceType) === 'bare_metal' && !empty($params['serviceid']) && function_exists('localAPI')) {
-            $update = array();
-            if (!empty($service['server_ip'])) {
-                $update['dedicatedip'] = (string)$service['server_ip'];
-            }
-            $loginUser = rackflow_bareMetalLoginUsername($service);
-            if ($loginUser !== '') {
-                $update['serviceusername'] = $loginUser;
-            }
-            if (!empty($update)) {
-                try {
-                    $update['serviceid'] = (int)$params['serviceid'];
-                    $updateResult = localAPI('UpdateClientProduct', $update);
-                    if (is_array($updateResult) && isset($updateResult['result']) && $updateResult['result'] !== 'success') {
-                        logModuleCall('rackflow', __FUNCTION__ . '_bm_details', $update, $updateResult, '');
-                    }
-                } catch (Exception $bmEx) {
-                    logModuleCall('rackflow', __FUNCTION__ . '_bm_details', $update, $bmEx->getMessage(), '');
-                }
-            }
+        if (strtolower($serviceType) === 'bare_metal') {
+            rackflow_syncBareMetalLoginFields($params, is_array($service) ? $service : array(), __FUNCTION__);
         }
 
         return 'success';
@@ -1140,6 +1122,43 @@ function rackflow_bareMetalLoginUsername(array $service)
         return 'Administrator';
     }
     return '';
+}
+
+/**
+ * Write a bare-metal service's server IP and OS login username back to WHMCS.
+ *
+ * Used after create and reinstall. Fields RackFlow did not report are left alone.
+ *
+ * @param array  $params     WHMCS module parameters
+ * @param array  $service    RackFlow create/reinstall response
+ * @param string $logContext Calling function name for the module log
+ * @return void
+ */
+function rackflow_syncBareMetalLoginFields(array $params, array $service, $logContext)
+{
+    if (empty($params['serviceid']) || !function_exists('localAPI')) {
+        return;
+    }
+    $update = array();
+    if (!empty($service['server_ip'])) {
+        $update['dedicatedip'] = (string)$service['server_ip'];
+    }
+    $loginUser = rackflow_bareMetalLoginUsername($service);
+    if ($loginUser !== '') {
+        $update['serviceusername'] = $loginUser;
+    }
+    if (empty($update)) {
+        return;
+    }
+    try {
+        $update['serviceid'] = (int)$params['serviceid'];
+        $updateResult = localAPI('UpdateClientProduct', $update);
+        if (is_array($updateResult) && isset($updateResult['result']) && $updateResult['result'] !== 'success') {
+            logModuleCall('rackflow', $logContext . '_bm_details', $update, $updateResult, '');
+        }
+    } catch (Exception $bmEx) {
+        logModuleCall('rackflow', $logContext . '_bm_details', $update, $bmEx->getMessage(), '');
+    }
 }
 
 /**
@@ -3537,18 +3556,127 @@ function rackflow_RestoreBackup(array $params)
 }
 
 /**
- * Reinstall VM guest at the reserved VMID (optional template / SSH keys).
+ * Bare-metal OS template for a reinstall, resolved the same way Create does.
  *
- * Prefer the admin status-card Reinstall panel (template picker). Module Commands
- * use the current Operating System config option when present.
+ * Order: os_template configurable option, then the checkout Operating System
+ * option (rfot: tokens, ids or labels), then the Module Settings default OS
+ * (configoption3). A checkout VM template choice (rfvt:) yields no template.
+ *
+ * @param array $params
+ * @return string Template id, or '' when none is set
+ */
+function rackflow_bareMetalTemplateIdFromParams(array $params)
+{
+    if (isset($params['configoptions']['os_template']) && $params['configoptions']['os_template'] !== '') {
+        return (string)$params['configoptions']['os_template'];
+    }
+    $productCode = isset($params['configoption2']) && $params['configoption2'] !== ''
+        ? (string)$params['configoption2']
+        : null;
+    if (isset($params['configoptions']['product_code']) && $params['configoptions']['product_code'] !== '') {
+        $productCode = (string)$params['configoptions']['product_code'];
+    }
+    if (!$productCode) {
+        $productCode = 'whmcs-product-' . (isset($params['packageid']) ? (int)$params['packageid'] : 0);
+    }
+    $checkoutOs = rackflow_configOptionValue($params, array(
+        'Operating System',
+        'os_code',
+        'OS',
+        'os',
+        'vm_template_id',
+    ));
+    if ($checkoutOs !== null && $checkoutOs !== '') {
+        $resolved = rackflow_resolveCheckoutOsSelection($params, $productCode, $checkoutOs);
+        if (!empty($resolved['template_id'])) {
+            return (string)$resolved['template_id'];
+        }
+        if (!empty($resolved['vm_template_id'])) {
+            return '';
+        }
+    }
+    $osCode = isset($params['configoption3']) ? (string)$params['configoption3'] : '';
+    return rackflow_bareMetalTemplateIdFromOsSetting($osCode);
+}
+
+/**
+ * Reinstall a bare-metal service's OS via RackFlow's reinstall-os action.
+ *
+ * Uses the service's chosen OS and the WHMCS service password, then writes the
+ * server IP and login username back like Create.
+ *
+ * @param array $params
+ * @return string "success" or error message
+ */
+function rackflow_reinstallBareMetal(array $params)
+{
+    $apiConfig = rackflow_getApiConfig($params);
+    $rackflowSvcId = rackflow_getRackflowServiceId($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key']) || empty($rackflowSvcId)) {
+        return 'Missing API URL, API key, or RackFlow Service ID.';
+    }
+    $templateId = rackflow_bareMetalTemplateIdFromParams($params);
+    if ($templateId === '') {
+        return 'No operating system is set for this service (Operating System option or Module Settings default OS).';
+    }
+
+    $templateParameters = array();
+    if (!empty($params['password'])) {
+        $templateParameters['admin_password'] = (string)$params['password'];
+    }
+    $sshText = rackflow_sshKeysFromParams($params);
+    if ($sshText !== '') {
+        $parsedKeys = rackflow_parseSshPublicKeys($sshText);
+        if (!$parsedKeys['ok']) {
+            return $parsedKeys['error'] ?: 'Invalid SSH public keys';
+        }
+        if (!empty($parsedKeys['keys'])) {
+            $templateParameters['ssh_public_keys'] = $parsedKeys['keys'];
+        }
+    }
+    $body = array('template_id' => $templateId);
+    if (!empty($templateParameters)) {
+        $body['template_parameters'] = $templateParameters;
+    }
+
+    // Admin Module Commands skip the client's bms.reinstall permission (template rules still apply).
+    $audience = defined('ADMINAREA') ? 'admin' : (!empty($params['clientsdetails']) ? 'client' : 'admin');
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'POST',
+        '/api/billing/services/' . (int)$rackflowSvcId . '/actions/reinstall-os?audience=' . urlencode($audience),
+        $body,
+        120
+    );
+    if (!$result['success']) {
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        return is_string($detail) ? $detail : $err;
+    }
+    $data = isset($result['data']) && is_array($result['data']) ? $result['data'] : array();
+    rackflow_syncBareMetalLoginFields($params, $data, __FUNCTION__);
+    return 'success';
+}
+
+/**
+ * Reinstall: VM guest at the reserved VMID (optional template / SSH keys), or a
+ * bare-metal server's OS (see rackflow_reinstallBareMetal).
+ *
+ * Prefer the admin status-card Reinstall panel (template picker) for VMs. Module
+ * Commands use the current Operating System config option when present.
  *
  * @param array $params
  * @return string "success" or error message
  */
 function rackflow_Reinstall(array $params)
 {
-    if (rackflow_getConfiguredServiceType($params) !== 'vm') {
-        return 'Reinstall is only available for VM products.';
+    $serviceType = rackflow_getConfiguredServiceType($params);
+    if ($serviceType === 'bare_metal') {
+        return rackflow_reinstallBareMetal($params);
+    }
+    if ($serviceType !== 'vm') {
+        return 'Reinstall is only available for VM and bare-metal products.';
     }
     $apiConfig = rackflow_getApiConfig($params);
     $rackflowSvcId = rackflow_getRackflowServiceId($params);
