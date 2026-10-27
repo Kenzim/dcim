@@ -210,7 +210,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
 | `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC, SuperMicro X9 ATEN HERMON on TCP 5900). X9 JNLP GET from Docker needs host TCPMSS clamp when eth0 MTU < 1500. |
-| `sol/` | Bare-metal SOL profiles (`ipmi_sol` via ipmitool), shared hub, REST send |
+| `sol/` | Bare-metal SOL profiles (`ipmi_sol` via ipmitool), shared hub, REST send; `windows_password.py` resets the Windows Administrator password through the serial-admin-cmd.ps1 prompt (`POST .../windows-password-reset` on admin service, client and billing routes) |
 | `virtual_media/` | BMC virtual CD (ASRockRack/Gigabyte MegaRAC Redfish, SuperMicro Redfish, SuperMicro X9 ATEN CIFS share), shared `isos/` catalog or per-location media runner |
 
 ---

@@ -6,7 +6,8 @@ import json
 import logging
 import time
 import uuid
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 INSTANCE_ID = uuid.uuid4().hex
 LOCK_KEY_PREFIX = "sol:hub:"
 _CAPTURE_MAX = 65536
+_REDACTED = b"********"
 _WS_DISCONNECT = "websocket.disconnect"
 _WS_RECEIVE = "websocket.receive"
 
@@ -97,14 +99,64 @@ class SolHub:
         self._idle_task: Optional[asyncio.Task] = None
         self._lock_task: Optional[asyncio.Task] = None
         self._closed = False
+        self.total_read = 0
+        # Set while an automated exchange (e.g. password reset) owns the line;
+        # other writers are refused and these byte strings are masked in output.
+        self._exclusive_owner: Optional[object] = None
+        self._secrets: list[bytes] = []
+        # Unmasked output for the exclusive owner only (masking could hide the
+        # prompt or success text when a secret overlaps it). Never fanned out.
+        self._raw = bytearray()
 
     def touch(self) -> None:
         self._last_activity = time.monotonic()
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _scrub(self, data: bytes) -> bytes:
+        for secret in self._secrets:
+            data = data.replace(secret, _REDACTED)
+        return data
+
     def _append_capture(self, data: bytes) -> None:
         self.capture.extend(data)
+        self.total_read += len(data)
         if len(self.capture) > _CAPTURE_MAX:
             del self.capture[: len(self.capture) - _CAPTURE_MAX]
+
+    def output_since(self, mark: int) -> bytes:
+        """Bytes read since ``total_read`` was ``mark`` (still held in capture)."""
+        new = self.total_read - mark
+        if new <= 0:
+            return b""
+        return bytes(self.capture[-new:]) if new <= len(self.capture) else bytes(self.capture)
+
+    def raw_mark(self) -> int:
+        """Position in the exclusive owner's unmasked output."""
+        return len(self._raw)
+
+    def raw_since(self, mark: int) -> bytes:
+        return bytes(self._raw[mark:])
+
+    @asynccontextmanager
+    async def exclusive(self, secrets: list[bytes]) -> AsyncIterator[object]:
+        """Own the serial line: refuse other writers and mask ``secrets`` in output."""
+        if self._exclusive_owner is not None:
+            raise SolUnavailable("Serial console is busy with another automated action")
+        owner = object()
+        self._exclusive_owner = owner
+        self._secrets = [s for s in secrets if s]
+        self._raw = bytearray()
+        try:
+            yield owner
+        finally:
+            scrubbed = self._scrub(bytes(self.capture))
+            self.capture[:] = scrubbed
+            self._secrets = []
+            self._raw = bytearray()
+            self._exclusive_owner = None
 
     def start(self) -> None:
         self._reader_task = asyncio.create_task(self._reader_loop(), name=f"sol-read-{self.server_id}")
@@ -123,7 +175,7 @@ class SolHub:
     async def _idle_loop(self) -> None:
         while not self._closed:
             await asyncio.sleep(2)
-            if self.viewers:
+            if self.viewers or self._exclusive_owner is not None:
                 self.touch()
                 continue
             if time.monotonic() - self._last_activity >= idle_seconds():
@@ -137,6 +189,10 @@ class SolHub:
                 data = await self.session.read()
                 if not data:
                     break
+                if self._exclusive_owner is not None and len(self._raw) < _CAPTURE_MAX:
+                    self._raw.extend(data)
+                if self._secrets:
+                    data = self._scrub(data)
                 self._append_capture(data)
                 await self._fanout(data)
         except Exception:  # noqa: BLE001
@@ -176,6 +232,9 @@ class SolHub:
                     break
                 if msg_type != _WS_RECEIVE:
                     continue
+                if self._exclusive_owner is not None:
+                    # Viewer keystrokes would corrupt an automated exchange.
+                    continue
                 raw = message.get("bytes")
                 if raw is not None:
                     await self.inject(data=bytes(raw), wait_ms=0)
@@ -198,10 +257,12 @@ class SolHub:
             return
         await self.inject(data=text.encode("utf-8"), wait_ms=0)
 
-    async def inject(self, data: bytes, wait_ms: int = 0) -> bytes:
+    async def inject(self, data: bytes, wait_ms: int = 0, *, owner: Optional[object] = None) -> bytes:
         if self._closed:
             raise SolUnavailable("Serial-over-LAN session has closed")
-        mark = len(self.capture)
+        if self._exclusive_owner is not None and owner is not self._exclusive_owner:
+            raise SolUnavailable("Serial console is busy with another automated action")
+        mark = self.total_read
         await self.session.write(data)
         self.touch()
         if wait_ms <= 0:
@@ -209,7 +270,7 @@ class SolHub:
         deadline = time.monotonic() + (wait_ms / 1000.0)
         while time.monotonic() < deadline and not self._closed:
             await asyncio.sleep(0.02)
-        return bytes(self.capture[mark:])
+        return self.output_since(mark)
 
     async def close(self) -> None:
         if self._closed:

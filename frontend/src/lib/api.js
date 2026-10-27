@@ -731,6 +731,21 @@ export async function ejectClientVirtualMedia(serviceId) {
   return virtualMediaRequest(`/client/services/${serviceId}/virtual-media/eject`, { method: 'POST' });
 }
 
+/** Generate and set a new Windows Administrator password over the serial console. */
+export async function resetClientWindowsPassword(serviceId) {
+  const response = await fetch(`${API_BASE}/client/services/${serviceId}/windows-password-reset`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { ..._impersonationHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(typeof error.detail === 'string' ? error.detail : 'Windows password reset failed');
+  }
+  return await response.json();
+}
+
 export async function getServerCapabilities(serverId) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/capabilities`, {
     method: 'GET',

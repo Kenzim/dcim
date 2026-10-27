@@ -15,11 +15,17 @@ from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnav
 from app.services.ipmi_kvm import kvm_ready
 from app.api.ipmi_kvm import kvm_popup_redirect
 from app.services.ipmi_kvm_ticket_service import build_relative_error_url as kvm_error_url
-from app.api.sol import perform_sol_send, sol_popup_redirect
+from app.api.sol import perform_sol_send, perform_windows_password_reset, sol_popup_redirect
 from app.services.sol import sol_ready
+from app.services.sol.windows_password import windows_password_reset_ready
 from app.services.virtual_media import virtual_media_ready
 from app.services.sol.ticket_service import build_relative_error_url as sol_error_url
-from app.schemas.sol import SolSendRequest, SolSendResponse
+from app.schemas.sol import (
+    SolSendRequest,
+    SolSendResponse,
+    WindowsPasswordResetRequest,
+    WindowsPasswordResetResponse,
+)
 from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
 from app.api.virtual_media import perform_eject, perform_insert, perform_status
 from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
@@ -380,6 +386,9 @@ async def client_get_service(
     availability = _client_service_availability(
         service, server, permissions, cid=cid, node=node, vmid=vmid
     )
+    availability["windows_password_reset_available"] = bool(
+        availability["sol_console_available"] and windows_password_reset_ready(db, service, server)
+    )
 
     detail = _service_to_client_response(service, db).model_dump()
     detail.update(
@@ -672,6 +681,30 @@ async def client_sol_send(
         source="client.service",
         service_id=service.id,
     )
+
+
+@router.post(
+    "/{service_id}/windows-password-reset",
+    response_model=WindowsPasswordResetResponse,
+    responses=COMMON_ERROR_RESPONSES,
+)
+async def client_windows_password_reset(
+    service_id: int,
+    body: WindowsPasswordResetRequest,
+    auth: Annotated[dict, Depends(get_current_user)],
+    db: DbDep,
+):
+    """Set the Windows Administrator password over SOL for a service the caller owns."""
+    user_id = auth.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_MSG_USER_SESSION_REQUIRED)
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service or service.owner_user_id != int(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
+    if service.status in (ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Service is not active")
+    require_client_permission(db, service, PermissionKey.BMS_SOL)
+    return await perform_windows_password_reset(db, service, body, source="client.service")
 
 
 def _client_owned_proxy_service(db: Session, service_id: int, user_id, permission: str):
