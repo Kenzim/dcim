@@ -34,6 +34,7 @@ class _Profile(VirtualMediaProfile):
     def __init__(self, fail_insert=False):
         self.events = []
         self.fail_insert = fail_insert
+        self.report_inserted = True
 
     async def status(self, server):
         return VirtualMediaStatus(inserted=False)
@@ -44,7 +45,7 @@ class _Profile(VirtualMediaProfile):
             from app.services.virtual_media.base import VirtualMediaUnavailable
 
             raise VirtualMediaUnavailable("BMC rejected the image")
-        return VirtualMediaStatus(inserted=True, image_name=image_url)
+        return VirtualMediaStatus(inserted=self.report_inserted, image_name=image_url)
 
     async def eject(self, server):
         self.events.append(("eject",))
@@ -171,6 +172,19 @@ def test_launch_failure_ejects_and_falls_back_to_pxe(vmedia_env, _no_background_
     assert mounted_filename(env.server.id) is None
     assert not any(e[0] == "bootdev" or e[0].startswith("power") for e in env.profile.events)
     assert env.server.id in _no_background_dhcp_sync  # PXE options re-advertised
+
+
+def test_launch_does_not_power_cycle_into_empty_cd(vmedia_env, _no_background_dhcp_sync):
+    env = vmedia_env
+    env.profile.report_inserted = False
+    task = _task(env.db, env.server.id)
+    method = asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test"))
+    assert method == "pxe"
+    env.db.refresh(task)
+    assert task.status == BootTaskStatus.PENDING
+    assert task.boot_method == "pxe"
+    assert ("eject",) in env.profile.events
+    assert not any(e[0] == "bootdev" or e[0].startswith("power") for e in env.profile.events)
 
 
 def test_launch_failure_is_logged_with_bmc_detail(vmedia_env, monkeypatch):

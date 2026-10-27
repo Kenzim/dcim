@@ -177,7 +177,9 @@ async def _launch_vmedia(db: Session, server: Server, boot_task: BootTask) -> di
     profile = profile_for_server(server)
     filename = boot_iso_filename()
     url = await _stage_boot_iso(db, server, profile, filename)
-    await profile.insert(server, url)
+    mounted = await profile.insert(server, url)
+    if not mounted.inserted:
+        raise BootLaunchError("BMC did not report the boot ISO as mounted; not power-cycling")
 
     plugin = get_registry().get_plugin(server.plugin_name, server.plugin_config)
     uefi = getattr(server, "pxe_boot_mode", None) == BootMode.UEFI

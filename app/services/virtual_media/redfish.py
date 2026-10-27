@@ -1,6 +1,7 @@
 """Redfish VirtualMedia CD insert/eject/status (URL-insert only)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -18,6 +19,11 @@ _KNOWN_COLLECTIONS = (
     "/redfish/v1/Managers/1/VirtualMedia",
     "/redfish/v1/Managers/BMC/VirtualMedia",
 )
+
+# A 2xx from InsertMedia does not mean the BMC mounted anything (SuperMicro X11
+# answers 202 and never fetches the ISO), so the insert polls ``Inserted``.
+INSERT_WAIT_SECONDS = 10.0
+INSERT_POLL_SECONDS = 2.0
 
 
 def _join(origin: str, path: str) -> str:
@@ -213,7 +219,27 @@ async def insert_image(client: httpx.AsyncClient, origin: str, image_url: str) -
         except ValueError:
             pass
         raise VirtualMediaUnavailable(f"{detail} (HTTP {resp.status_code})")
-    return await read_status(client, origin)
+    return await _wait_until_inserted(client, origin)
+
+
+async def _wait_until_inserted(client: httpx.AsyncClient, origin: str) -> VirtualMediaStatus:
+    """Poll the CD until the BMC reports ``Inserted``; return the last status either way."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + INSERT_WAIT_SECONDS
+    while True:
+        status = await read_status(client, origin)
+        if status.inserted or loop.time() >= deadline:
+            return status
+        await asyncio.sleep(INSERT_POLL_SECONDS)
+
+
+def require_inserted(status: VirtualMediaStatus) -> VirtualMediaStatus:
+    if not status.inserted:
+        raise VirtualMediaUnavailable(
+            "BMC accepted the Redfish insert but did not mount the ISO "
+            f"(still not inserted after {INSERT_WAIT_SECONDS:g}s)"
+        )
+    return status
 
 
 async def eject_image(client: httpx.AsyncClient, origin: str) -> VirtualMediaStatus:

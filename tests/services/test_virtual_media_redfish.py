@@ -18,6 +18,14 @@ from app.services.virtual_media.redfish import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fast_insert_wait(monkeypatch):
+    from app.services.virtual_media import redfish
+
+    monkeypatch.setattr(redfish, "INSERT_POLL_SECONDS", 0)
+    monkeypatch.setattr(redfish, "INSERT_WAIT_SECONDS", 0.2)
+
+
 def test_join_absolute_url_passthrough():
     assert _join("http://bmc", "https://other/path") == "https://other/path"
     assert _join("http://bmc", "http://other/path") == "http://other/path"
@@ -102,6 +110,47 @@ async def test_read_status_and_insert_eject():
     responses[device] = {"Id": "CD1", "Inserted": False, "Image": ""}
     ejected = await eject_image(client, origin)
     assert ejected.inserted is False
+
+
+@pytest.mark.asyncio
+async def test_insert_waits_until_inserted():
+    origin = "http://bmc"
+    device = f"{origin}/redfish/v1/Managers/1/VirtualMedia/CD1"
+    reads = {"n": 0}
+    responses = {
+        f"{origin}/redfish/v1/Managers": {"Members": [{"@odata.id": "/redfish/v1/Managers/1"}]},
+        f"{origin}/redfish/v1/Managers/1/VirtualMedia": {"Members": [{"@odata.id": device}]},
+    }
+    client = _mock_client(responses)
+    base_get = client.get.side_effect
+
+    async def _get(url, *a, **k):
+        if url == device:
+            reads["n"] += 1
+            responses[device] = {"Id": "CD1", "Inserted": reads["n"] >= 3, "Image": "http://iso/x.iso"}
+        return await base_get(url, *a, **k)
+
+    client.get.side_effect = _get
+    status = await insert_image(client, origin, "http://iso/x.iso")
+    assert status.inserted is True
+    assert reads["n"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_insert_accepted_but_never_mounted_is_reported():
+    from app.services.virtual_media import redfish
+
+    origin = "http://bmc"
+    device = f"{origin}/redfish/v1/Managers/1/VirtualMedia/CD1"
+    responses = {
+        f"{origin}/redfish/v1/Managers": {"Members": [{"@odata.id": "/redfish/v1/Managers/1"}]},
+        f"{origin}/redfish/v1/Managers/1/VirtualMedia": {"Members": [{"@odata.id": device}]},
+        device: {"Id": "CD1", "Inserted": False, "Image": ""},
+    }
+    status = await insert_image(_mock_client(responses), origin, "http://iso/x.iso")
+    assert status.inserted is False
+    with pytest.raises(VirtualMediaUnavailable, match="did not mount"):
+        redfish.require_inserted(status)
 
 
 def _mock_client_with_posts(
