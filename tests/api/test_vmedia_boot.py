@@ -269,6 +269,14 @@ def test_runner_stage_job_error_raises(vmedia_env, monkeypatch):
         asyncio.run(boot_launcher._stage_boot_iso(env.db, env.server, SimpleNamespace(id="x"), "rfboot-a.iso"))
 
 
+def test_runner_stage_refuses_public_url_when_location_runner_disconnected(vmedia_env, monkeypatch):
+    env = vmedia_env
+    monkeypatch.setattr(boot_launcher, "_media_runner", lambda db, server: None)
+    monkeypatch.setattr(boot_launcher, "_location_has_media_runner", lambda db, server: True)
+    with pytest.raises(boot_launcher.BootLaunchError, match="not connected"):
+        asyncio.run(boot_launcher._stage_boot_iso(env.db, env.server, SimpleNamespace(id="x"), "rfboot-a.iso"))
+
+
 def test_image_route_serves_stamped_iso_with_range(client, vmedia_env):
     env = vmedia_env
     task = _task(env.db, env.server.id)

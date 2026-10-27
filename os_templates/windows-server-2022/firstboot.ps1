@@ -576,13 +576,12 @@ if ($script:AdminPasswordPlain) {
         Set-ItemProperty -Path $winlogon -Name "DefaultUserName" -Value "Administrator" -Type String -ErrorAction Stop
         Set-ItemProperty -Path $winlogon -Name "DefaultPassword" -Value $script:AdminPasswordPlain -Type String -ErrorAction Stop
         Set-ItemProperty -Path $winlogon -Name "DefaultDomainName" -Value $env:COMPUTERNAME -Type String -ErrorAction Stop
-        # Keep Explorer as the shell: Winlogon\Shell is machine-wide, so cmd.exe there gave RDP sessions a black screen.
         Set-ItemProperty -Path $winlogon -Name "Shell" -Value "explorer.exe" -Type String -ErrorAction Stop
-        # Open a command prompt on the KVM/console session only.
-        $runKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-        Set-ItemProperty -Path $runKey -Name "DCIMConsoleCmd" -Value 'cmd.exe /c if /i "%SESSIONNAME%"=="Console" start "" cmd.exe' -Type String -ErrorAction Stop
-        Remove-ItemProperty -Path $winlogon -Name "AutoLogonCount" -ErrorAction SilentlyContinue
-        Write-Host "  [SUCCESS] AutoAdminLogon enabled for Administrator (console cmd prompt)" -ForegroundColor Green
+        # Log on once so the RunOnce-UserLoginScript logon task runs; Windows then turns
+        # auto-logon off and deletes DefaultPassword, leaving the normal login screen.
+        Set-ItemProperty -Path $winlogon -Name "AutoLogonCount" -Value 1 -Type DWord -ErrorAction Stop
+        Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "DCIMConsoleCmd" -ErrorAction SilentlyContinue
+        Write-Host "  [SUCCESS] One-time AutoAdminLogon enabled for Administrator (desktop)" -ForegroundColor Green
     } catch {
         Write-Warning "  Failed to enable AutoAdminLogon: $_"
     }

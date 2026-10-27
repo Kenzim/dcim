@@ -290,7 +290,7 @@ async def test_insert_image_raises_when_bmc_refuses():
         device: {"Id": "CD1", "Inserted": False, "Image": ""},
     }
     client = _mock_client_with_posts(responses, post_status={insert_url: 500})
-    with pytest.raises(VirtualMediaUnavailable, match=r"BMC rejected action \(HTTP 500\)"):
+    with pytest.raises(VirtualMediaUnavailable, match=r"BMC rejected action \(HTTP 500, image host iso\)"):
         await insert_image(client, origin, "http://iso/fail.iso")
 
 
