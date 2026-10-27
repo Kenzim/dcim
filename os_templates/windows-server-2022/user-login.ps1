@@ -39,6 +39,17 @@ try {
   Write-Warning "Failed to configure recurring time sync task: $_"
 }
 
+# firstboot.ps1 runs in specialize, where Task Scheduler is down; register the
+# ONSTART boot tasks (serial admin cmd, C: extend) now that it is up.
+$bootTasksPs1 = "C:\Windows\Setup\Scripts\dcim-boot-tasks.ps1"
+if (Test-Path $bootTasksPs1) {
+  try {
+    & $bootTasksPs1
+  } catch {
+    Write-Warning "Failed to register boot tasks: $_"
+  }
+}
+
 $serialPs1 = "C:\Windows\Setup\Scripts\serial-admin-cmd.ps1"
 if (Test-Path $serialPs1) {
   try {
@@ -50,8 +61,6 @@ if (Test-Path $serialPs1) {
 }
 
 Start-Process cmd.exe -ArgumentList "/c C:\Windows\Setup\Scripts\MAS_AIO.cmd /Z-Windows" -Wait
-
-schtasks /Delete /TN "RunOnce-UserLoginScript" /F | Out-Null
 
 
 netsh int ipv4 set dynamicport tcp start=1025 num=64511
