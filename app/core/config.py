@@ -432,6 +432,10 @@ class Settings(BaseSettings):
     # Reusable ISO image-token lifetime (seconds). VirtualMedia downloads can
     # take a long time for multi-GB images (HEAD + Range + GET).
     virtual_media_token_ttl_seconds: int = 14400
+    # Host path of the media runner's ISO folder as exported over NFS (read-only) for
+    # BMCs that only mount NFS, e.g. ASRock Rack MegaRAC. Used when the runner does
+    # not advertise ``nfs_export`` itself.
+    virtual_media_nfs_export: str = ""
 
     class Config:
         env_file = ".env"

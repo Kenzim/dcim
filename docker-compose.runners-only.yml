@@ -42,6 +42,8 @@ services:
       HTTP_PORT: ${MEDIA_HTTP_PORT:-9083}
       PUBLIC_HTTP_BASE: ${MEDIA_PUBLIC_HTTP_BASE:-}
       SMB_ADVERTISE_HOST: ${MEDIA_SMB_ADVERTISE_HOST:-}
+      # Host path the host's NFS server exports this ISO volume under (ASRock BMCs).
+      NFS_EXPORT: ${MEDIA_NFS_EXPORT:-}
     volumes:
       - media_isos:/data/isos
     restart: unless-stopped

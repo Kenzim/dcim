@@ -39,6 +39,8 @@ class VirtualMediaProfile(ABC):
     # True when the BMC mounts ISOs from a CIFS share (``insert`` gets a
     # ``cifs://`` URL from the media runner) instead of pulling an HTTP URL.
     mounts_cifs: bool = False
+    # Profile mounts ISOs from the media runner's NFS export (nfs://host/export/file.iso).
+    mounts_nfs: bool = False
 
     def describe(self) -> dict[str, str]:
         return {"id": self.id, "display_name": self.display_name}

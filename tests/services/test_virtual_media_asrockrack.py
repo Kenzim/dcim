@@ -18,6 +18,7 @@ from app.services.virtual_media.registry import get_profile
 
 ISO = "rfboot-abc.iso"
 CIFS_URL = f"cifs://vm1234:tok-en_9@10.0.0.9/isos/{ISO}"
+NFS_URL = f"nfs://10.0.0.9/srv/isos/{ISO}"
 
 GENERAL = {
     "id": 1,
@@ -113,9 +114,38 @@ def fake_bmc(monkeypatch):
 
 
 def test_profile_flags():
-    assert get_profile("asrockrack").mounts_cifs is True
+    assert get_profile("asrockrack").mounts_nfs is True
+    assert get_profile("asrockrack").mounts_cifs is False
     assert get_profile("gigabyte").mounts_cifs is False
+    assert get_profile("gigabyte").mounts_nfs is False
     assert get_profile("supermicro_x9").mounts_cifs is True
+
+
+def test_share_target_parses_nfs_url():
+    assert asrockrack.share_target(NFS_URL) == ("nfs", "10.0.0.9", "/srv/isos", ISO, "", "")
+
+
+def test_share_target_rejects_nfs_url_without_export():
+    with pytest.raises(VirtualMediaUnavailable, match="export"):
+        asrockrack.share_target(f"nfs://10.0.0.9/{ISO}")
+
+
+@pytest.mark.asyncio
+async def test_insert_nfs_points_cd_at_export(session_calls, fake_bmc):
+    status = await asrockrack.AsrockRackVirtualMediaProfile().insert(_server(), NFS_URL)
+
+    assert status == VirtualMediaStatus(inserted=True, device="CD", image_name=ISO)
+    (put,) = fake_bmc.calls("PUT", "/api/settings/media/general")
+    assert put["mount_cd"] == 1
+    assert put["same_settings"] == 0
+    assert put["cd_remote_share_type"] == "nfs"
+    assert put["cd_remote_server_address"] == "10.0.0.9"
+    assert put["cd_remote_source_path"] == "/srv/isos"
+    assert put["cd_remote_user_name"] == ""
+    assert fake_bmc.calls("POST", "/api/settings/media/remote/start-media") == [
+        {"image_name": ISO, "image_type": 1, "image_index": 0}
+    ]
+    assert session_calls[-1][0] == "logout"
 
 
 def test_cifs_target_splits_share_and_file():
@@ -144,7 +174,7 @@ async def test_insert_points_cd_at_share_then_starts_redirection(session_calls, 
     assert put["cd_remote_source_path"] == "/isos"
     assert put["cd_remote_user_name"] == "vm1234"
     assert put["cd_remote_password"] == "tok-en_9"
-    assert put["same_settings"] == 1  # untouched fields are sent back as read
+    assert put["same_settings"] == 0  # CD settings only; FD/HD keep their own
     assert fake_bmc.calls("POST", "/api/settings/media/remote/rmediarefreshlist")[0] == {"appType": 1, "mediaType": 1}
     assert fake_bmc.calls("POST", "/api/settings/media/remote/start-media") == [
         {"image_name": ISO, "image_type": 1, "image_index": 0}
@@ -177,7 +207,7 @@ async def test_insert_reports_share_error_when_image_never_listed(session_calls,
     with pytest.raises(VirtualMediaUnavailable) as err:
         await asrockrack.AsrockRackVirtualMediaProfile().insert(_server(), CIFS_URL)
     assert err.value.detail == (
-        f"BMC did not list {ISO} on the CIFS share: Could not mount any of the remote path (code 1077)"
+        f"BMC did not list {ISO} on the remote share: Could not mount any of the remote path (code 1077)"
     )
     assert not fake_bmc.calls("POST", "/api/settings/media/remote/start-media")
     assert session_calls[-1][0] == "logout"

@@ -223,7 +223,52 @@ def test_launch_needs_no_public_or_boot_url(vmedia_env, monkeypatch):
     assert asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test")) == "vmedia"
 
 
-@pytest.mark.parametrize("profile_id", ["supermicro_x9", "asrockrack"])
+@pytest.mark.parametrize("nfs_export_in_state", [True, False])
+def test_runner_stage_uses_nfs_for_nfs_profiles(vmedia_env, monkeypatch, nfs_export_in_state):
+    from app.services.virtual_media.registry import get_profile
+
+    env = vmedia_env
+    rpc_calls = []
+
+    async def rpc(runner_id, method, params, timeout=None):
+        rpc_calls.append((method, params))
+        return {"job_id": "job1"} if method == "media.download" else {}
+
+    state = {"smb_host": "10.0.0.9", "jobs": [{"id": "job1", "status": "done"}]}
+    if nfs_export_in_state:
+        state["nfs_export"] = "/srv/isos"
+    else:
+        monkeypatch.setattr(settings, "virtual_media_nfs_export", "/srv/isos")
+    monkeypatch.setattr(boot_launcher, "_media_runner", lambda db, server: SimpleNamespace(id=7, state={}))
+    monkeypatch.setattr("app.services.runners.hub.get_hub", lambda: SimpleNamespace(rpc=rpc))
+    monkeypatch.setattr("app.services.runners.cache.cached_state", lambda runner_id: state)
+    url = asyncio.run(
+        boot_launcher._stage_boot_iso(env.db, env.server, get_profile("asrockrack"), "rfboot-abc.iso")
+    )
+    assert url == "nfs://10.0.0.9/srv/isos/rfboot-abc.iso"
+    assert [m for m, _ in rpc_calls] == ["media.download"]
+
+
+def test_runner_stage_nfs_without_export_raises(vmedia_env, monkeypatch):
+    from app.services.virtual_media.registry import get_profile
+
+    async def rpc(runner_id, method, params, timeout=None):
+        return {"job_id": "job1"}
+
+    monkeypatch.setattr(settings, "virtual_media_nfs_export", "")
+    monkeypatch.setattr(boot_launcher, "_media_runner", lambda db, server: SimpleNamespace(id=7, state={}))
+    monkeypatch.setattr("app.services.runners.hub.get_hub", lambda: SimpleNamespace(rpc=rpc))
+    monkeypatch.setattr(
+        "app.services.runners.cache.cached_state",
+        lambda runner_id: {"smb_host": "10.0.0.9", "jobs": [{"id": "job1", "status": "done"}]},
+    )
+    with pytest.raises(boot_launcher.BootLaunchError, match="no NFS export"):
+        asyncio.run(
+            boot_launcher._stage_boot_iso(vmedia_env.db, vmedia_env.server, get_profile("asrockrack"), "rfboot-a.iso")
+        )
+
+
+@pytest.mark.parametrize("profile_id", ["supermicro_x9"])
 def test_runner_stage_uses_smb_for_cifs_profiles(vmedia_env, monkeypatch, profile_id):
     from app.services.virtual_media.registry import get_profile
 

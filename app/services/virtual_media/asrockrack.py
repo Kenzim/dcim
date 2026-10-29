@@ -3,9 +3,13 @@
 Redfish cannot mount an ISO on this firmware (for example 1.83 on X470D4U2):
 Redfish keeps its own account store, so the BMC user that works for IPMI and
 the web UI gets 401, and its ``VirtualMedia`` resource has no ``InsertMedia``
-action anyway. The web API can: point the CD at a CIFS share, refresh the
-share's image list, then start redirection of one image. ISOs therefore come
-from the media runner's SMB share (``mounts_cifs``), not an HTTP URL.
+action anyway. The web API can: point the CD at a remote share, refresh the
+share's image list, then start redirection of one image.
+
+On tested firmware (X470D4U 2.32, X570D4U-2L2T 1.20) the BMC refuses CIFS and
+HTTP shares (code 1066, never contacts the server) but mounts NFSv3. ISOs
+therefore come from the media runner's NFS export (``mounts_nfs``); ``cifs://``
+URLs are still accepted for firmware that can use them.
 """
 from __future__ import annotations
 
@@ -42,6 +46,19 @@ _BAD_PASSWORD_CHARS = set(",'\"")
 
 IMAGE_WAIT_SECONDS = 60.0
 IMAGE_POLL_SECONDS = 3.0
+
+
+def share_target(image_url: str) -> tuple[str, str, str, str, str, str]:
+    """Split an ``nfs://`` or ``cifs://`` ISO URL into ``(type, host, path, file, user, password)``."""
+    scheme = (urlparse(image_url or "").scheme or "").lower()
+    if scheme == "nfs":
+        parsed = urlparse(image_url)
+        host = (parsed.hostname or "").strip()
+        parts = [part for part in unquote(parsed.path or "").split("/") if part]
+        if not host or len(parts) < 2 or not parts[-1].lower().endswith(".iso"):
+            raise VirtualMediaUnavailable("nfs:// URL must be host, export and an .iso file")
+        return "nfs", host, "/" + "/".join(parts[:-1]), parts[-1], "", ""
+    return ("cifs", *cifs_target(image_url))
 
 
 def cifs_target(image_url: str) -> tuple[str, str, str, str, str]:
@@ -104,7 +121,7 @@ def _cd_redirections(configurations: Any) -> list[dict]:
 class AsrockRackVirtualMediaProfile(VirtualMediaProfile):
     id = "asrockrack"
     display_name = "ASRockRack (AMI MegaRAC virtual media)"
-    mounts_cifs = True
+    mounts_nfs = True
 
     def _headers(self, origin: str, cookie: str, csrf: str) -> dict[str, str]:
         return {
@@ -181,7 +198,14 @@ class AsrockRackVirtualMediaProfile(VirtualMediaProfile):
             )
 
     async def _point_cd_at_share(
-        self, client: httpx.AsyncClient, origin: str, host: str, path: str, user: str, password: str
+        self,
+        client: httpx.AsyncClient,
+        origin: str,
+        host: str,
+        path: str,
+        user: str,
+        password: str,
+        share_type: str = "cifs",
     ) -> None:
         general = await self._call(client, "GET", f"{origin}{_GENERAL}")
         if not isinstance(general, dict):
@@ -191,9 +215,10 @@ class AsrockRackVirtualMediaProfile(VirtualMediaProfile):
         general.update(
             {
                 "mount_cd": 1,
+                "same_settings": 0,
                 "cd_remote_server_address": host,
                 "cd_remote_source_path": path,
-                "cd_remote_share_type": "cifs",
+                "cd_remote_share_type": share_type,
                 "cd_remote_domain_name": "",
                 "cd_remote_user_name": user,
                 "cd_remote_password": password,
@@ -243,7 +268,7 @@ class AsrockRackVirtualMediaProfile(VirtualMediaProfile):
             if loop.time() >= deadline:
                 suffix = f": {last_error}" if last_error else ""
                 raise VirtualMediaUnavailable(
-                    f"BMC did not list {filename} on the CIFS share{suffix}"
+                    f"BMC did not list {filename} on the remote share{suffix}"
                 )
 
     async def status(self, server: Server) -> VirtualMediaStatus:
@@ -251,11 +276,11 @@ class AsrockRackVirtualMediaProfile(VirtualMediaProfile):
             return await self._status(client, origin)
 
     async def insert(self, server: Server, image_url: str) -> VirtualMediaStatus:
-        host, path, filename, user, password = cifs_target(image_url)
+        share_type, host, path, filename, user, password = share_target(image_url)
         host_ip = await _ipv4(host)
         async with self._session(server) as (client, origin):
             await self._stop_all(client, origin)
-            await self._point_cd_at_share(client, origin, host_ip, path, user, password)
+            await self._point_cd_at_share(client, origin, host_ip, path, user, password, share_type)
             image = await self._wait_for_image(client, origin, filename)
             await self._call(
                 client,

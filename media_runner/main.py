@@ -27,6 +27,9 @@ ALLOW_UNAUTHENTICATED = os.environ.get("ALLOW_UNAUTHENTICATED", "").lower() in (
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", "/data/isos"))
 SMB_SHARE = os.environ.get("SMB_SHARE", "isos")
 SMB_ADVERTISE_HOST = os.environ.get("SMB_ADVERTISE_HOST", "").strip()
+# Host path under which the host's NFS server exports this runner's ISO folder
+# (read-only). Optional; used by BMCs that only mount NFS (ASRock Rack MegaRAC).
+NFS_EXPORT = os.environ.get("NFS_EXPORT", "").strip()
 PUBLIC_HTTP_BASE = os.environ.get("PUBLIC_HTTP_BASE", "").strip().rstrip("/")
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "9083"))
 SEED_ISO = Path(os.environ.get("SEED_ISO", "/opt/seed/rackflow-netboot.iso"))
@@ -122,6 +125,7 @@ def current_state() -> dict[str, Any]:
         "public_http_base": advertised_http_base(),
         "smb_host": advertised_smb_host(),
         "smb_share": SMB_SHARE,
+        "nfs_export": NFS_EXPORT,
         "smb_running": smb_running(),
         "isos": list_iso_files(),
         "jobs": jobs,
@@ -250,6 +254,7 @@ async def lifespan(app: FastAPI):
             "public_http_base": advertised_http_base(),
             "smb_host": advertised_smb_host(),
             "smb_share": SMB_SHARE,
+            "nfs_export": NFS_EXPORT,
         }
         _agent = agent_from_env(["media"], current_state, agent_version="1.0", hello_extra=extra)
         if _agent:

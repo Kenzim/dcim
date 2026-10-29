@@ -108,6 +108,7 @@ async def _stage_boot_iso(db: Session, server: Server, profile, filename: str) -
         build_cifs_url,
         media_http_iso_url,
         public_http_base_from_state,
+        runner_nfs_iso_url,
     )
 
     app_url = image_url_for_token(mint_image_token(server.id, filename), filename)
@@ -126,6 +127,15 @@ async def _stage_boot_iso(db: Session, server: Server, profile, filename: str) -
         raise BootLaunchError("Media runner did not accept the boot ISO download")
     await _wait_for_runner_job(runner.id, job_id)
 
+    if getattr(profile, "mounts_nfs", False):
+        try:
+            return runner_nfs_iso_url(
+                cached_state(runner.id) or runner.state,
+                filename,
+                settings.virtual_media_nfs_export,
+            )
+        except ValueError as exc:
+            raise BootLaunchError(f"Cannot stage boot ISO over NFS: {exc}") from exc
     if getattr(profile, "mounts_cifs", False):
         creds = await hub.rpc(
             runner.id,

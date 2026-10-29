@@ -15,6 +15,7 @@ class GigabyteVirtualMediaProfile(AsrockRackVirtualMediaProfile):
     id = "gigabyte"
     display_name = "Gigabyte (AMI MegaRAC virtual media)"
     mounts_cifs = False
+    mounts_nfs = False
 
     async def status(self, server: Server) -> VirtualMediaStatus:
         async with self._session(server) as (client, origin):
