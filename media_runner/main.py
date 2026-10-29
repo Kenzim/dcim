@@ -122,6 +122,7 @@ def current_state() -> dict[str, Any]:
         "public_http_base": advertised_http_base(),
         "smb_host": advertised_smb_host(),
         "smb_share": SMB_SHARE,
+        "smb_running": smb_running(),
         "isos": list_iso_files(),
         "jobs": jobs,
         "disk": disk_usage(),
@@ -145,27 +146,46 @@ def seed_netboot() -> None:
         logger.warning("Could not seed netboot ISO: %s", exc)
 
 
+SMBD_ARGS = ("smbd", "--foreground", "--no-process-group", "--debug-stdout", "--debuglevel=1")
+
+
+def smb_running() -> bool:
+    return _smb_process is not None and _smb_process.returncode is None
+
+
 async def start_smbd() -> None:
+    """Start smbd with its output in the container log (Samba >= 4.15 has no -S)."""
     global _smb_process
     if not SMB_ENABLE:
         return
     MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
-    if _smb_process is not None and _smb_process.returncode is None:
+    if smb_running():
         return
     try:
-        _smb_process = await asyncio.create_subprocess_exec(
-            "smbd",
-            "-F",
-            "-S",
-            "--no-process-group",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        logger.info("smbd started PID %s", _smb_process.pid)
+        _smb_process = await asyncio.create_subprocess_exec(*SMBD_ARGS, stdin=asyncio.subprocess.DEVNULL)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("smbd failed to start: %s", exc)
+        logger.error("smbd failed to start: %s", exc)
         _smb_process = None
+        return
+    await asyncio.sleep(1)
+    if _smb_process.returncode is not None:
+        logger.error("smbd exited immediately with code %s", _smb_process.returncode)
+    else:
+        logger.info("smbd started PID %s", _smb_process.pid)
+
+
+async def supervise_smbd_loop() -> None:
+    """Restart smbd if it dies; BMC CIFS mounts depend on it."""
+    backoff = 5
+    while True:
+        await asyncio.sleep(backoff)
+        if not SMB_ENABLE or smb_running():
+            backoff = 5
+            continue
+        if _smb_process is not None:
+            logger.error("smbd is not running (exit code %s); restarting", _smb_process.returncode)
+        await start_smbd()
+        backoff = 5 if smb_running() else min(backoff * 2, 300)
 
 
 async def _add_samba_user(username: str, password: str) -> None:
@@ -220,6 +240,7 @@ async def lifespan(app: FastAPI):
     global _agent
     seed_netboot()
     await start_smbd()
+    smbd_task = asyncio.create_task(supervise_smbd_loop())
     expire_task = asyncio.create_task(expire_smb_loop())
     uplink_task = None
     try:
@@ -246,6 +267,7 @@ async def lifespan(app: FastAPI):
     if _agent is not None:
         _agent.stop()
     expire_task.cancel()
+    smbd_task.cancel()
     if uplink_task is not None:
         uplink_task.cancel()
     if _smb_process is not None and _smb_process.returncode is None:
@@ -432,8 +454,11 @@ async def rpc_mint_smb(params):
         ttl = max(60, int(params.get("ttl") or 14400))
     except (TypeError, ValueError):
         ttl = 14400
+    if SMB_ENABLE and not smb_running():
+        raise RuntimeError("SMB server (smbd) is not running on this media runner")
     username = f"vm{secrets.token_hex(4)}"
-    password = secrets.token_urlsafe(18)
+    # Hex only: BMC web UIs (ASRock MegaRAC) reject CIFS passwords with '-' and other symbols.
+    password = secrets.token_hex(16)
     async with _lock:
         await _add_samba_user(username, password)
         _smb_creds[username] = {"expires_at": time.time() + ttl, "filename": name}
