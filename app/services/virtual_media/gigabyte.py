@@ -6,7 +6,7 @@ Shares the MegaRAC web-session login with ASRockRack but keeps the Redfish
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 import httpx
 
@@ -46,3 +46,55 @@ class GigabyteVirtualMediaProfile(AsrockRackVirtualMediaProfile):
     async def eject(self, server: Server) -> VirtualMediaStatus:
         async with self._session(server) as (client, origin):
             return await eject_image(client, origin)
+
+    async def set_boot_once(self, server: Server, uefi: bool) -> Optional[bool]:
+        """The BIOS consumes the IPMI ``cdrom`` override but still follows its boot
+        order (PXE, then disk). Redfish ``BootNext`` on the "AMI Virtual CDROM" UEFI
+        entry boots the ISO; ``Cd`` is the fallback when that entry is not listed yet."""
+        async with self._session(server) as (client, origin):
+            try:
+                systems = await client.get(f"{origin}/redfish/v1/Systems")
+                members = (systems.json() or {}).get("Members") or [] if systems.status_code < 400 else []
+                path = (members[0] or {}).get("@odata.id") if members else "/redfish/v1/Systems/Self"
+                system = await client.get(f"{origin}{path}")
+                if system.status_code >= 400:
+                    return None
+                etag = system.headers.get("etag")
+                boot = (system.json() or {}).get("Boot") or {}
+                virtual_cd = await self._virtual_cd_boot_option(client, origin, boot) if uefi else None
+            except (httpx.RequestError, ValueError):
+                return None
+            targets = boot.get("BootSourceOverrideTarget@Redfish.AllowableValues") or []
+            override: dict = {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideMode": "UEFI" if uefi else "Legacy"}
+            if virtual_cd and "UefiBootNext" in targets:
+                override.update(BootSourceOverrideTarget="UefiBootNext", BootNext=virtual_cd)
+            elif "Cd" in targets:
+                override["BootSourceOverrideTarget"] = "Cd"
+            else:
+                return None
+            try:
+                resp = await client.patch(
+                    f"{origin}{path}",
+                    json={"Boot": override},
+                    headers={"If-Match": etag} if etag else None,
+                )
+            except httpx.RequestError:
+                return False
+            return resp.status_code < 400
+
+    @staticmethod
+    async def _virtual_cd_boot_option(client: httpx.AsyncClient, origin: str, boot: dict) -> Optional[str]:
+        collection = (boot.get("BootOptions") or {}).get("@odata.id")
+        if not collection:
+            return None
+        resp = await client.get(f"{origin}{collection}")
+        if resp.status_code >= 400:
+            return None
+        for member in (resp.json() or {}).get("Members") or []:
+            option = await client.get(f"{origin}{member.get('@odata.id')}")
+            if option.status_code >= 400:
+                continue
+            data = option.json() or {}
+            if "virtual cdrom" in (data.get("DisplayName") or "").lower():
+                return data.get("BootOptionReference") or None
+        return None

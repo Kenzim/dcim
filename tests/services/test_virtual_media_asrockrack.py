@@ -275,3 +275,59 @@ async def test_gigabyte_uses_redfish_basic_auth_without_web_session(session_call
         await gigabyte.GigabyteVirtualMediaProfile().insert(_server(), "nfs://10.0.0.9/srv/isos/x.iso")
     assert isinstance(seen["auth"], httpx.BasicAuth)
     assert session_calls == []
+
+
+def _gigabyte_redfish(options: list[dict], patches: list):
+    boot = {
+        "BootOptions": {"@odata.id": "/redfish/v1/Systems/Self/BootOptions"},
+        "BootSourceOverrideTarget@Redfish.AllowableValues": ["None", "Pxe", "Cd", "Hdd", "UefiBootNext"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "PATCH":
+            patches.append((path, json.loads(request.content), request.headers.get("if-match")))
+            return httpx.Response(204)
+        if path == "/redfish/v1/Systems":
+            return httpx.Response(200, json={"Members": [{"@odata.id": "/redfish/v1/Systems/Self"}]})
+        if path == "/redfish/v1/Systems/Self":
+            return httpx.Response(200, json={"Boot": boot}, headers={"ETag": 'W/"1"'})
+        if path == "/redfish/v1/Systems/Self/BootOptions":
+            return httpx.Response(200, json={"Members": [{"@odata.id": f"{path}/{o['Id']}"} for o in options]})
+        for option in options:
+            if path.endswith("/" + option["Id"]):
+                return httpx.Response(200, json=option)
+        return httpx.Response(404)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def session(_server):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            yield client, "https://bmc.example"
+
+    return session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options,expected",
+    [
+        (
+            [
+                {"Id": "0014", "BootOptionReference": "Boot0014", "DisplayName": "UEFI: PXE IPv4 Intel(R) I350"},
+                {"Id": "0017", "BootOptionReference": "Boot0017", "DisplayName": "UEFI: AMI Virtual CDROM0 1.00, Partition 1"},
+            ],
+            {"BootSourceOverrideTarget": "UefiBootNext", "BootNext": "Boot0017"},
+        ),
+        ([{"Id": "0014", "BootOptionReference": "Boot0014", "DisplayName": "UEFI: PXE IPv4"}], {"BootSourceOverrideTarget": "Cd"}),
+    ],
+)
+async def test_gigabyte_boot_once_targets_the_virtual_cdrom_entry(monkeypatch, options, expected):
+    patches: list = []
+    profile = gigabyte.GigabyteVirtualMediaProfile()
+    monkeypatch.setattr(profile, "_session", _gigabyte_redfish(options, patches))
+    assert await profile.set_boot_once(_server(), uefi=True) is True
+    (path, body, if_match), = patches
+    assert path == "/redfish/v1/Systems/Self" and if_match == 'W/"1"'
+    assert body["Boot"] == {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideMode": "UEFI", **expected}
