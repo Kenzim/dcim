@@ -117,7 +117,7 @@ def test_profile_flags():
     assert get_profile("asrockrack").mounts_nfs is True
     assert get_profile("asrockrack").mounts_cifs is False
     assert get_profile("gigabyte").mounts_cifs is False
-    assert get_profile("gigabyte").mounts_nfs is False
+    assert get_profile("gigabyte").mounts_nfs is True
     assert get_profile("supermicro_x9").mounts_cifs is True
 
 
@@ -263,11 +263,15 @@ async def test_eject_with_nothing_mounted_is_a_no_op(session_calls, fake_bmc):
 
 
 @pytest.mark.asyncio
-async def test_gigabyte_keeps_redfish_and_logs_out_on_failure(session_calls, monkeypatch):
+async def test_gigabyte_uses_redfish_basic_auth_without_web_session(session_calls, monkeypatch):
+    seen = {}
+
     async def failing_insert(client, origin, image_url):
+        seen["auth"] = client.auth
         raise VirtualMediaUnavailable("BMC Redfish rejected the credentials (HTTP 401 on /redfish/v1/Managers)")
 
     monkeypatch.setattr(gigabyte, "insert_image", failing_insert)
     with pytest.raises(VirtualMediaUnavailable, match="HTTP 401"):
-        await gigabyte.GigabyteVirtualMediaProfile().insert(_server(), "http://iso/x.iso")
-    assert session_calls[-1][0] == "logout"
+        await gigabyte.GigabyteVirtualMediaProfile().insert(_server(), "nfs://10.0.0.9/srv/isos/x.iso")
+    assert isinstance(seen["auth"], httpx.BasicAuth)
+    assert session_calls == []

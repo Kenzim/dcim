@@ -22,7 +22,7 @@ _KNOWN_COLLECTIONS = (
 
 # A 2xx from InsertMedia does not mean the BMC mounted anything (SuperMicro X11
 # answers 202 and never fetches the ISO), so the insert polls ``Inserted``.
-INSERT_WAIT_SECONDS = 10.0
+INSERT_WAIT_SECONDS = 30.0
 INSERT_POLL_SECONDS = 2.0
 
 
@@ -188,8 +188,8 @@ async def read_status(client: httpx.AsyncClient, origin: str) -> VirtualMediaSta
 
 def _transfer_protocol(image_url: str) -> str:
     scheme = (urlparse(image_url).scheme or "http").upper()
-    if scheme == "HTTPS":
-        return "HTTPS"
+    if scheme in ("HTTPS", "NFS"):
+        return scheme
     return "HTTP"
 
 
