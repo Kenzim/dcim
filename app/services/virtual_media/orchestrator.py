@@ -24,6 +24,7 @@ from app.services.virtual_media.image_token import (
     revoke_server_tokens,
 )
 from app.services.virtual_media.iso_catalog import (
+    iso_path,
     list_iso_files,
     list_iso_files_for_location,
     require_iso_file,
@@ -100,6 +101,16 @@ async def _image_url_for_insert(db: Session, server: Server, profile, name: str)
         except Exception:  # noqa: BLE001
             runner = None
     hub = get_hub()
+    if getattr(profile, "streams_iso", False):
+        # Rackflow reads the image itself: from its own catalog when it has the
+        # file, else over HTTP from the location's media runner library.
+        if iso_path(name).is_file():
+            return iso_path(name).as_uri()
+        if runner is not None and hub.is_connected(runner.id):
+            base = public_http_base_from_state(cached_state(runner.id) or runner.state)
+            if base:
+                return media_http_iso_url(base, name)
+        return require_iso_file(name).as_uri()
     if runner is not None and hub.is_connected(runner.id):
         if getattr(profile, "mounts_nfs", False):
             try:

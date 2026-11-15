@@ -68,6 +68,11 @@ def mint_image_token(server_id: int, filename: str) -> str:
     return token
 
 
+def record_mount(server_id: int, filename: str) -> None:
+    """Remember which image is mounted for a server when no fetch token exists (streamed media)."""
+    redis_client.set(f"{MOUNT_KEY_PREFIX}{server_id}", json.dumps({"token": "", "filename": filename}), ex=_token_ttl())
+
+
 def lookup_image_token(token: str, filename: str) -> Optional[dict]:
     token_key = f"{TOKEN_KEY_PREFIX}{_token_id(token)}"
     data = redis_client.hgetall(token_key)

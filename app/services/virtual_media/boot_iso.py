@@ -54,6 +54,22 @@ def boot_base_url(db, pxe_ip: Optional[str]) -> str:
     return _explicit_boot_base_url() or lan_boot_base_url(db, pxe_ip)
 
 
+def pending_boot_args(db, server_id: int) -> Optional[tuple[str, str]]:
+    """``(base_url, nonce)`` for the server's pending virtual-media boot task, else None."""
+    from app.dao import BootTaskDAO, NetworkPortDAO
+
+    task = BootTaskDAO.get_pending_by_server(db, server_id) if server_id else None
+    if (
+        task is None
+        or task.boot_method != "vmedia"
+        or not task.pxe_nonce
+        or task.pxe_nonce_used_at is not None
+    ):
+        return None
+    pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
+    return boot_base_url(db, pxe_port.pxe_ip if pxe_port else None), task.pxe_nonce
+
+
 def vmedia_boot_available() -> bool:
     try:
         _explicit_boot_base_url()

@@ -116,6 +116,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.warning("KVM hub splice server failed to bind: %s", exc)
 
+    from app.services.virtual_media.megarac_stream import resume_streams, stop_all_streams
+
+    resume_task = asyncio.create_task(resume_streams())
+
     async with AsyncExitStack() as stack:
         if settings.mcp_enabled:
             from app.mcp.server import mcp_session_lifespan
@@ -124,6 +128,11 @@ async def lifespan(app: FastAPI):
         yield
 
     logger.info("Shutting down...")
+    resume_task.cancel()
+    try:
+        await stop_all_streams()
+    except Exception:  # noqa: BLE001
+        logger.debug("Virtual CD stream stop failed", exc_info=True)
     try:
         await shutdown_kvm_hubs()
     except Exception:  # noqa: BLE001

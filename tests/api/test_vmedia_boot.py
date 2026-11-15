@@ -479,3 +479,55 @@ def test_boot_order_fix_skipped_for_vmedia_installs(vmedia_env, monkeypatch):
     install.boot_task_id = pxe_task.id
     installation_tasks._schedule_post_install_boot_order_fix(env.db, install)
     assert len(created) == 1
+
+
+class _StreamProfile(_Profile):
+    id = "test_vmedia_stream"
+    streams_iso = True
+
+
+def test_launch_with_streaming_profile_stamps_in_memory_and_stages_nothing(vmedia_env, monkeypatch):
+    env = vmedia_env
+    stream_profile = _StreamProfile()
+    register_profile(stream_profile)
+    env.server.virtual_media_profile = _StreamProfile.id
+    env.db.commit()
+    staged = []
+
+    async def no_stage(*args, **kwargs):
+        staged.append(args)
+        raise AssertionError("a streamed boot ISO must not be staged")
+
+    monkeypatch.setattr(boot_launcher, "_stage_boot_iso", no_stage)
+    plugin = _plugin(stream_profile.events)
+    monkeypatch.setattr(
+        "app.plugins.registry.get_registry", lambda: SimpleNamespace(get_plugin=lambda *_a, **_k: plugin)
+    )
+    try:
+        task = _task(env.db, env.server.id)
+        method = asyncio.run(boot_launcher.launch_boot_task(env.db, env.server, task, source="test"))
+        assert method == "vmedia" and not staged
+        kinds = [e[0] for e in stream_profile.events]
+        assert kinds == ["insert", "bootdev", "power_reset"]
+        url = stream_profile.events[0][1]
+        assert url.startswith("rfboot://") and boot_iso.is_boot_iso_name(url.removeprefix("rfboot://"))
+        assert boot_iso.is_boot_iso_name(mounted_filename(env.server.id))
+
+        asyncio.run(boot_launcher.release_boot_media(env.db, env.server))
+        assert ("eject",) in stream_profile.events
+        assert mounted_filename(env.server.id) is None
+    finally:
+        unregister_profile(_StreamProfile.id)
+
+
+def test_stamped_boot_iso_args_follow_the_pending_vmedia_task(vmedia_env):
+    env = vmedia_env
+    assert boot_iso.pending_boot_args(env.db, env.server.id) is None
+    task = _task(env.db, env.server.id)
+    assert boot_iso.pending_boot_args(env.db, env.server.id) is None  # not a vmedia task yet
+    task.boot_method = "vmedia"
+    env.db.commit()
+    base_url, nonce = boot_iso.pending_boot_args(env.db, env.server.id)
+    assert nonce == task.pxe_nonce and base_url.startswith(f"http://{NEXT_SERVER_A}")
+    BootTaskDAO.consume_pxe_nonce(env.db, task.id)
+    assert boot_iso.pending_boot_args(env.db, env.server.id) is None
