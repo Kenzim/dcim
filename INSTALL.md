@@ -184,7 +184,7 @@ Servers with a Virtual CD profile reinstall without PXE or boot-order changes:
 1. RackFlow stamps a small iPXE ISO with the boot task's one-time nonce (`rfboot-<random>.iso`) and stages it on the location's media runner (HTTP; SMB for SuperMicro X9) or serves it itself.
 2. The BMC mounts it, the next boot is set **once** to CD, and the server is power-cycled automatically.
 3. iPXE gets the server's IP from DHCP and fetches `/api/servers/interaction/pxe` from the same `http://<next-server>:8000` that DHCP hands PXE clients in that server's subnet (or from `VMEDIA_BOOT_BASE_URL` if set). Kernel, initrd and the install script come from the same origin; the live OS squashfs is checked against a SHA-256 passed on the kernel command line.
-4. The ISO is ejected and deleted as soon as the boot script is served. No post-install boot-order fix runs.
+4. The ISO is ejected and deleted as soon as the boot script is served.
 
 Requirements:
 

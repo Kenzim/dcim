@@ -456,7 +456,7 @@ if [ "$BOOT_MODE" = "uefi" ]; then
 fi
 
 # UEFI, virtual-media boot: the BMC's one-time CD override left the persistent
-# boot order alone, no PXE boot-order fix task follows, and the ISO is ejected
+# boot order alone, and the ISO is ejected
 # before the next boot (so BootCurrent is gone). Keep the order as the operator
 # set it; just swap stale Windows Boot Manager entries for one on the new ESP
 # and boot it next.

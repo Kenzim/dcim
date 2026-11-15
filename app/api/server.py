@@ -46,7 +46,6 @@ from app.services.server_activity_logger import (
     log_server_activity_failure,
 )
 import logging
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -810,9 +809,6 @@ sleep 60
 echo 1 >/proc/sys/kernel/sysrq 2>/dev/null || true
 echo b >/proc/sysrq-trigger 2>/dev/null || true
 """
-
-
-_BOOT_ORDER_FIX_SCRIPT_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "finalize-pxe-bootorder.sh"
 
 
 def _apply_hardware_detection_report(
@@ -1580,102 +1576,6 @@ async def run_hardware_detection(
         boot_task_id=boot_task.id,
         status=report.status.value,
     )
-
-
-@router.post("/{server_id}/boot/fix-boot-order", response_model=dict, responses=COMMON_ERROR_RESPONSES)
-async def queue_boot_order_fix(
-    server_id: int,
-    auth: AdminDep,
-    db: DbDep,
-):
-    """
-    Queue a one-time boot-order correction task.
-
-    This boots Debian Live with the finalize-pxe-bootorder.sh script so the
-    next PXE boot can reorder UEFI BootOrder and set BootNext appropriately.
-    """
-    server = ServerDAO.get_by_id(db, server_id)
-    if not server:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
-
-    if not _BOOT_ORDER_FIX_SCRIPT_PATH.exists():
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Boot order fix script not found on server",
-        )
-
-    pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
-    if not pxe_port:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Server has no PXE boot port configured",
-        )
-
-    from app.api.server_interaction import _get_base_url_for_pxe_ip
-
-    base_url = _get_base_url_for_pxe_ip(db, pxe_port.pxe_ip if pxe_port else None)
-    temp_os_service = get_temp_os_service()
-    os_config = temp_os_service.get_os_config("debian-live")
-    if not os_config:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="debian-live temporary OS not found",
-        )
-
-    kernel_url = temp_os_service.get_kernel_url("debian-live", base_url)
-    initrd_url = temp_os_service.get_initrd_url("debian-live", base_url)
-    kernel_params = temp_os_service.get_kernel_params("debian-live")
-    squashfs_url = temp_os_service.get_squashfs_url("debian-live", base_url)
-    if squashfs_url and "fetch=" not in kernel_params:
-        kernel_params = f"{kernel_params} fetch={squashfs_url}"
-
-    try:
-        script_content = _BOOT_ORDER_FIX_SCRIPT_PATH.read_text()
-        script_content = "export AUTO_REBOOT=0\n" + script_content
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to read boot order fix script: {exc}",
-        )
-
-    log_server_activity_attempt(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.INSTALL,
-        action="boot_order_fix",
-        source="admin_api",
-        message="Boot order correction requested",
-        details={"requested_by_user_id": auth.get("user_id")},
-    )
-
-    boot_task = BootTaskDAO.create(
-        db=db,
-        server_id=server.id,
-        boot_type=BootType.TEMP_OS,
-        temp_os_id="debian-live",
-        kernel_url=kernel_url,
-        initrd_url=initrd_url,
-        kernel_params=kernel_params,
-        iso_url=None,
-        script_url=None,
-        script_content=script_content,
-        description="Boot order correction (Debian Live)",
-    )
-
-    log_server_activity_success(
-        db,
-        server_id=server.id,
-        event_type=ServerActivityEventType.INSTALL,
-        action="boot_order_fix",
-        source="admin_api",
-        message="Boot order correction queued",
-        details={"boot_task_id": boot_task.id},
-    )
-
-    return {
-        "status": "queued",
-        "boot_task_id": boot_task.id,
-    }
 
 
 @router.get("/{server_id}/hardware-detection/reports", response_model=List[HardwareDetectionReportResponse], responses=COMMON_ERROR_RESPONSES)

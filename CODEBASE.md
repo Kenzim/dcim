@@ -419,7 +419,6 @@ Run: `pytest` (see `pytest.ini`).
 | `scripts/dev.sh` | Local dev helper |
 | `scripts/create_admin_user.py` | Create admin user |
 | `scripts/snmp_bandwidth_poller.py` | Bandwidth sampler |
-| `scripts/finalize-pxe-bootorder.sh` | PXE boot-order finalize |
 | `hash_password.py` | Password hash utility |
 | `systemd/dcim-snmp-bandwidth-poller.service` | Host systemd unit |
 | `Makefile` | `frontend`, `docker-app`, runners, `build`, `clean` |

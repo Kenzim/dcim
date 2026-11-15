@@ -3,7 +3,7 @@
   import ServerControlsPanel from './ServerControlsPanel.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
-  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, runBootOrderFix, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
+  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
 
@@ -69,7 +69,6 @@
   let applyingHardwareDetection = false;
   let rejectingHardwareDetection = false;
   let deletingHardwareDetectionReport = false;
-  let queueingBootOrderFix = false;
   let installationHistoryExpanded = false;
   let serverGroups = [];
   let allServerGroups = [];
@@ -1262,19 +1261,6 @@
     }
   }
 
-  async function handleBootOrderFix() {
-    if (!serverId || queueingBootOrderFix) return;
-    queueingBootOrderFix = true;
-    try {
-      await runBootOrderFix(serverId);
-      await Promise.all([loadBootTask(), loadServerActivity()]);
-    } catch (err) {
-      alert('Failed to queue boot order correction: ' + (err.message || err));
-    } finally {
-      queueingBootOrderFix = false;
-    }
-  }
-
   async function loadScripts() {
     try {
       loadingScripts = true;
@@ -1973,9 +1959,6 @@
                   <span class="boot-op-hint">Debian Live for manual ops and maintenance</span>
                   <div class="boot-op-row boot-op-row-stack">
                     <button type="button" class="btn-primary btn-sm" on:click={handleBootTempOS} disabled={creatingBootTask}>{creatingBootTask ? '…' : 'Boot'}</button>
-                    <button type="button" class="btn-secondary btn-sm" on:click={handleBootOrderFix} disabled={queueingBootOrderFix || creatingBootTask}>
-                      {queueingBootOrderFix ? 'Queuing…' : 'Boot order correction'}
-                    </button>
                   </div>
                 </div>
                 <div class="boot-op-card">

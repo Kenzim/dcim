@@ -1706,18 +1706,6 @@ export async function setServerBootOption(serverId, payload) {
   return await response.json();
 }
 
-export async function runBootOrderFix(serverId) {
-  const response = await fetch(`${API_BASE}/servers/${serverId}/boot/fix-boot-order`, {
-    method: 'POST',
-    credentials: 'include',
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || 'Failed to queue boot order correction');
-  }
-  return await response.json();
-}
-
 export async function previewServerKernelArgs(serverId, payload = {}) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/boot/kernel-args-preview`, {
     method: 'POST',

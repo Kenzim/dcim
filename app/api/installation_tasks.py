@@ -1,7 +1,6 @@
 """
 API endpoints for installation task management
 """
-from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -10,10 +9,8 @@ from app.core.database import get_db
 from app.core.auth import require_admin
 from app.services.boot_launcher import schedule_release
 from app.services.download_token_service import get_download_token_service
-from app.services.os_template_service import get_template_service
 from app.dao.installation_task_dao import InstallationTaskDAO
-from app.dao.boot_task_dao import BootTaskDAO
-from app.models.installation_task import InstallationTask, InstallationStatus
+from app.models.installation_task import InstallationStatus
 from app.models.server_activity import ServerActivityEventType
 from app.dao.server_dao import ServerDAO
 from app.services.server_activity_logger import log_server_activity_success, log_server_activity_failure
@@ -26,53 +23,6 @@ AdminDep = Annotated[dict, Depends(require_admin)]
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/servers/{server_id}/installation-tasks", tags=["installation-tasks"])
-
-# Path to shared post-install boot-order finalize script (works in dev and Docker)
-_FINALIZE_SCRIPT_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "finalize-pxe-bootorder.sh"
-
-
-def _schedule_post_install_boot_order_fix(db: Session, task: InstallationTask) -> None:
-    """
-    If the installation task's template has post_install_fix_boot_order enabled,
-    create a one-time follow-up BootTask (debian-live + finalize script) so the
-    next PXE boot runs the boot-order fix and then reboots into the installed OS.
-    """
-    if not task.template_id:
-        return
-    install_boot = BootTaskDAO.get_by_id(db, task.boot_task_id) if task.boot_task_id else None
-    if install_boot is not None and install_boot.boot_method == "vmedia":
-        # Booted via a one-time CD override; the persistent boot order was never
-        # touched, so the installed OS boots on its own.
-        return
-    template_service = get_template_service()
-    template = template_service.get_template(task.template_id)
-    if not template or not getattr(template, "post_install_fix_boot_order", False):
-        return
-    if not _FINALIZE_SCRIPT_PATH.exists():
-        logger.warning("Post-install boot order fix requested but script not found: %s", _FINALIZE_SCRIPT_PATH)
-        return
-    try:
-        script_content = _FINALIZE_SCRIPT_PATH.read_text()
-    except Exception as e:
-        logger.warning("Failed to read finalize script %s: %s", _FINALIZE_SCRIPT_PATH, e)
-        return
-    script_content = 'export AUTO_REBOOT=0\n' + script_content
-    if template.efi_boot_loader:
-        # Inject so the script can set BootNext to the installed OS entry
-        script_content = f'export EFI_BOOT_LOADER="{template.efi_boot_loader}"\n' + script_content
-    BootTaskDAO.create(
-        db,
-        server_id=task.server_id,
-        boot_type="temp_os",
-        temp_os_id="debian-live",
-        script_content=script_content,
-        description="Post-install boot order fix",
-    )
-    logger.info(
-        "Scheduled post-install boot order fix for server %s (template %s)",
-        task.server_id,
-        task.template_id,
-    )
 
 
 class InstallationTaskLogUpdate(BaseModel):
@@ -179,8 +129,7 @@ async def update_installation_logs(
     Update installation task logs.
     
     This endpoint is called by the installation script to upload logs and
-    report install status (including "completed", which can schedule a
-    privileged boot-order fix). A valid download token bound to the task's
+    report install status. A valid download token bound to the task's
     boot task is REQUIRED.
     """
     # Verify server exists
@@ -238,8 +187,6 @@ async def update_installation_logs(
                 message=f"Installation task {task_id} completed",
                 details={"installation_task_id": task_id, "boot_task_id": task.boot_task_id},
             )
-            if task:
-                _schedule_post_install_boot_order_fix(db, task)
             schedule_release(server_id)
         elif log_data.status == "failed":
             InstallationTaskDAO.mark_failed(db, task_id, log_data.error_message)
@@ -316,8 +263,6 @@ async def update_installation_task_status(
     elif status_val == "completed":
         task = InstallationTaskDAO.mark_completed(db, task_id)
         activity_action = "installation_completed"
-        if task:
-            _schedule_post_install_boot_order_fix(db, task)
     elif status_val == "failed":
         task = InstallationTaskDAO.mark_failed(db, task_id, body.error_message)
         activity_action = "installation_failed"

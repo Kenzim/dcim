@@ -453,29 +453,3 @@ def test_admin_boot_task_schedules_launch(client, test_admin_user, vmedia_env, b
     )
     assert no_launch.json()["boot_method"] == "pxe"
     assert len(boot_launcher_calls["launch"]) == 1
-
-
-def test_boot_order_fix_skipped_for_vmedia_installs(vmedia_env, monkeypatch):
-    from app.api import installation_tasks
-
-    env = vmedia_env
-    vmedia_task = _task(env.db, env.server.id)
-    vmedia_task.boot_method = "vmedia"
-    env.db.commit()
-    pxe_task = _task(env.db, env.server.id)
-
-    created = []
-    monkeypatch.setattr(installation_tasks.BootTaskDAO, "create", lambda *a, **k: created.append(k))
-    template = SimpleNamespace(post_install_fix_boot_order=True, efi_boot_loader=None)
-    monkeypatch.setattr(
-        installation_tasks, "get_template_service",
-        lambda: SimpleNamespace(get_template=lambda _id: template),
-    )
-
-    install = SimpleNamespace(template_id="windows-server-2022", server_id=env.server.id, boot_task_id=vmedia_task.id)
-    installation_tasks._schedule_post_install_boot_order_fix(env.db, install)
-    assert created == []
-
-    install.boot_task_id = pxe_task.id
-    installation_tasks._schedule_post_install_boot_order_fix(env.db, install)
-    assert len(created) == 1
