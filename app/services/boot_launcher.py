@@ -2,8 +2,9 @@
 
 Virtual-media flow (no persistent boot-order changes):
   stamp per-boot iPXE ISO -> stage on the location media runner (HTTP, or SMB for
-  Supermicro X9) or serve from the app -> BMC mounts it -> one-time boot to CD ->
-  power cycle. iPXE then gets its IP from DHCP and fetches /pxe with the task nonce
+  Supermicro X9) or serve from the app -> BMC mounts it (streaming profiles skip
+  staging: the app stamps the ISO in memory and serves it to the BMC over a
+  websocket) -> one-time boot to CD -> power cycle. iPXE then gets its IP from DHCP and fetches /pxe with the task nonce
   from the same per-subnet origin PXE uses (or VMEDIA_BOOT_BASE_URL). The ISO is
   ejected and deleted once /pxe has served the script.
 
@@ -34,6 +35,7 @@ from app.services.virtual_media.image_token import (
     image_url_for_token,
     mint_image_token,
     mounted_filename,
+    record_mount,
     revoke_server_tokens,
 )
 from app.services.virtual_media.registry import profile_for_server, virtual_media_ready
@@ -158,6 +160,13 @@ async def _stage_boot_iso(db: Session, server: Server, profile, filename: str) -
     return media_http_iso_url(base, filename)
 
 
+def _streams_iso(server: Server) -> bool:
+    try:
+        return bool(getattr(profile_for_server(server), "streams_iso", False))
+    except VirtualMediaUnavailable:
+        return False
+
+
 async def release_boot_media(db: Session, server: Server) -> None:
     """Eject and delete this server's per-boot ISO, if one is mounted. Never raises."""
     filename = mounted_filename(server.id)
@@ -167,7 +176,8 @@ async def release_boot_media(db: Session, server: Server) -> None:
         await profile_for_server(server).eject(server)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Ejecting boot ISO for server %s failed: %s", server.id, exc)
-    runner = _media_runner(db, server)
+    # A streamed boot ISO is stamped in memory and never staged on a runner.
+    runner = None if _streams_iso(server) else _media_runner(db, server)
     if runner is not None:
         from app.services.runners.hub import get_hub
 
@@ -202,7 +212,13 @@ async def _launch_vmedia(db: Session, server: Server, boot_task: BootTask) -> di
 
     profile = profile_for_server(server)
     filename = boot_iso_filename()
-    url = await _stage_boot_iso(db, server, profile, filename)
+    if getattr(profile, "streams_iso", False):
+        from app.services.ipmi_kvm.cd_stream import boot_image_url
+
+        url = boot_image_url(filename)
+        record_mount(server.id, filename)
+    else:
+        url = await _stage_boot_iso(db, server, profile, filename)
     mounted = await profile.insert(server, url)
     if not mounted.inserted:
         raise BootLaunchError("BMC did not report the boot ISO as mounted; not power-cycling")

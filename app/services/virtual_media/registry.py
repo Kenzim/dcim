@@ -7,12 +7,14 @@ from app.models.server import Server
 from app.services.virtual_media.asrockrack import AsrockRackVirtualMediaProfile
 from app.services.virtual_media.base import VirtualMediaProfile, VirtualMediaUnavailable
 from app.services.virtual_media.gigabyte import GigabyteVirtualMediaProfile
+from app.services.virtual_media.megarac_stream import MegaracStreamVirtualMediaProfile
 from app.services.virtual_media.supermicro import SuperMicroVirtualMediaProfile
 from app.services.virtual_media.supermicro_x9 import SuperMicroX9VirtualMediaProfile
 
 _PROFILES: dict[str, VirtualMediaProfile] = {
     AsrockRackVirtualMediaProfile.id: AsrockRackVirtualMediaProfile(),
     GigabyteVirtualMediaProfile.id: GigabyteVirtualMediaProfile(),
+    MegaracStreamVirtualMediaProfile.id: MegaracStreamVirtualMediaProfile(),
     SuperMicroVirtualMediaProfile.id: SuperMicroVirtualMediaProfile(),
     SuperMicroX9VirtualMediaProfile.id: SuperMicroX9VirtualMediaProfile(),
 }

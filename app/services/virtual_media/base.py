@@ -41,6 +41,10 @@ class VirtualMediaProfile(ABC):
     mounts_cifs: bool = False
     # Profile mounts ISOs from the media runner's NFS export (nfs://host/export/file.iso).
     mounts_nfs: bool = False
+    # Rackflow itself serves the ISO to the BMC over a long-lived connection:
+    # ``insert`` gets a ``file://``, ``http(s)://`` or ``rfboot://`` source URL and
+    # nothing is staged on a media runner.
+    streams_iso: bool = False
 
     def describe(self) -> dict[str, str]:
         return {"id": self.id, "display_name": self.display_name}
