@@ -1829,6 +1829,43 @@ add_hook('ClientAreaFooterOutput', 1, function (array $vars) {
 HTML;
 });
 
+/**
+ * Admin service page: ask for confirmation before the Power On / Power Off /
+ * Reboot module command buttons run (WHMCS fires them without a prompt).
+ */
+add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
+    $filename = isset($vars['filename']) ? (string)$vars['filename'] : '';
+    $uri = isset($_SERVER['REQUEST_URI']) ? (string)$_SERVER['REQUEST_URI'] : '';
+    if ($filename !== 'clientsservices' && strpos($uri, 'clientsservices.php') === false) {
+        return '';
+    }
+
+    return <<<'HTML'
+<script id="rackflow-admin-power-confirm">
+(function () {
+  var labels = { PowerOn: 'Power on', PowerOff: 'Power off', Reboot: 'Reboot' };
+  document.addEventListener('click', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('button, input[type=button], input[type=submit], a') : null;
+    if (!el) { return; }
+    var probe = (el.getAttribute('onclick') || '') + ' ' + (el.getAttribute('href') || '') + ' ' + (el.getAttribute('data-command') || '');
+    var key = null;
+    for (var k in labels) {
+      if (probe.indexOf("'" + k + "'") !== -1 || probe.indexOf('"' + k + '"') !== -1 || probe.indexOf('ac=' + k) !== -1) { key = k; break; }
+    }
+    if (!key) { return; }
+    var nameEl = document.querySelector('input[name="domain"]');
+    var target = nameEl && nameEl.value ? 'service "' + nameEl.value + '"' : 'this service';
+    if (!window.confirm(labels[key] + ' ' + target + '?')) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }
+  }, true);
+})();
+</script>
+HTML;
+});
+
 add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
     $filename = isset($vars['filename']) ? (string)$vars['filename'] : '';
     $uri = isset($_SERVER['REQUEST_URI']) ? (string)$_SERVER['REQUEST_URI'] : '';

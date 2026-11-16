@@ -34,6 +34,7 @@ from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.dhcp_config_service import get_dhcp_config_service
 from app.services.boot_launcher import schedule_launch, schedule_release, vmedia_capable
+from app.services.server_lock import ensure_server_unlocked
 from app.services.virtual_media.boot_iso import boot_base_url
 from app.services.pxe_boot_urls import lan_boot_base_url
 from app.services.dhcp_config_generator import get_next_server_ip_for_client, get_subnet_info_for_client
@@ -467,6 +468,15 @@ async def get_pxe_boot_file(
         
         # Check if there's an active boot task for this server (pending or in_progress)
         boot_task = BootTaskDAO.get_active_by_server(db, server.id)
+        if boot_task and server.locked:
+            # Locked servers never receive install/boot payloads, even from tasks queued before the lock.
+            logger.warning("Server %s is locked; cancelling open boot task %s instead of serving it", server.id, boot_task.id)
+            from app.dao.installation_task_dao import InstallationTaskDAO as _ITDAO
+            while (open_install := _ITDAO.get_active_by_server(db, server.id)) is not None:
+                _ITDAO.cancel(db, open_install.id)
+            BootTaskDAO.cancel_open_tasks(db, server.id)
+            BootTaskDAO._schedule_dhcp_sync(server.id)
+            boot_task = None
         
         # If script=true parameter, return script content directly (for custom initramfs)
         # If script=true but no boot task or wrong type, return 404
@@ -1223,6 +1233,7 @@ async def create_boot_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Server {server_id} not found"
         )
+    ensure_server_unlocked(server)
     activity_action = "queue_boot_task"
     activity_message = "Boot task requested"
     activity_details = {"boot_type": boot_task_data.boot_type.lower()}

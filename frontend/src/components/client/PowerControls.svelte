@@ -28,6 +28,7 @@
 
   async function run(action) {
     if (busy) return;
+    if (action === 'on' && !confirm(`Power on ${service.name}?`)) return;
     if (action === 'off' && !confirm(`Power off ${service.name}? The guest OS is not shut down cleanly.`)) return;
     if (action === 'reboot' && !confirm(`Reboot ${service.name}?`)) return;
     if (action === 'reset' && !confirm(`Force-reset ${service.name}? Unsaved data in the guest may be lost.`)) return;

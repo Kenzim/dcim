@@ -1046,8 +1046,33 @@
     }
   }
 
+  let lockReasonDraft = '';
+  let lockSaving = false;
+  $: serverLocked = !!server?.locked;
+  $: lockTitle = serverLocked ? `Server is locked: ${server?.lock_reason || 'no reason given'}` : undefined;
+  $: if (server && !lockSaving) lockReasonDraft = server.lock_reason || '';
+
+  async function toggleServerLock() {
+    if (!serverId || lockSaving) return;
+    const locking = !serverLocked;
+    const prompt = locking
+      ? `Lock server "${server.name}"? OS installs, reinstalls and wipes will be refused until it is unlocked.`
+      : `Unlock server "${server.name}"? OS installs and reinstalls will be allowed again.`;
+    if (!confirm(prompt)) return;
+    lockSaving = true;
+    try {
+      await updateServer(serverId, { locked: locking, lock_reason: locking ? lockReasonDraft.trim() || null : null });
+      await loadServer();
+    } catch (err) {
+      alert(err.message || 'Failed to change server lock');
+    } finally {
+      lockSaving = false;
+    }
+  }
+
   async function handlePowerOn() {
     if (!serverId || powerActionInProgress) return;
+    if (!confirm(`Power on server "${server?.name || serverId}"?`)) return;
     powerActionInProgress = 'on';
     try {
       await powerOnServer(serverId);
@@ -1061,7 +1086,7 @@
   }
   async function handlePowerOff() {
     if (!serverId || powerActionInProgress) return;
-    if (!confirm('Power off this server?')) return;
+    if (!confirm(`Power off server "${server?.name || serverId}"?`)) return;
     powerActionInProgress = 'off';
     try {
       await powerOffServer(serverId);
@@ -1075,7 +1100,7 @@
   }
   async function handlePowerReset() {
     if (!serverId || powerActionInProgress) return;
-    if (!confirm('Reboot this server?')) return;
+    if (!confirm(`Reboot server "${server?.name || serverId}"?`)) return;
     powerActionInProgress = 'reset';
     try {
       await powerResetServer(serverId);
@@ -1743,7 +1768,25 @@
                     <dt>Status</dt>
                     <dd>{server.enabled !== false ? 'Enabled' : 'Disabled'}</dd>
                   </div>
+                  <div class="general-detail-row">
+                    <dt>Lock</dt>
+                    <dd>
+                      {#if serverLocked}<span class="locked-badge">Locked</span> {server.lock_reason || ''}{:else}Unlocked{/if}
+                    </dd>
+                  </div>
                 </dl>
+                <div class="server-lock-controls">
+                  <input
+                    type="text"
+                    class="server-lock-reason"
+                    placeholder="Lock reason (shown when an install is refused)"
+                    bind:value={lockReasonDraft}
+                    disabled={lockSaving}
+                  />
+                  <button type="button" class="btn-secondary btn-sm" on:click={toggleServerLock} disabled={lockSaving}>
+                    {lockSaving ? '…' : serverLocked ? 'Unlock server' : 'Lock server'}
+                  </button>
+                </div>
               </section>
               <section class="general-notes">
                 <label class="general-notes-label" for="general-notes-input">Notes</label>
@@ -1905,7 +1948,7 @@
                           <option value={iso}>{iso.filename}</option>
                         {/each}
                       </select>
-                      <button type="button" class="btn-primary btn-sm" on:click={handleBootISO} disabled={!selectedISO || creatingBootTask}>{creatingBootTask ? '…' : 'Boot'}</button>
+                      <button type="button" class="btn-primary btn-sm" on:click={handleBootISO} disabled={!selectedISO || creatingBootTask || serverLocked} title={lockTitle}>{creatingBootTask ? '…' : 'Boot'}</button>
                     </div>
                   {/if}
                 </div>
@@ -1958,7 +2001,7 @@
                   <span class="boot-op-label">Temporary OS</span>
                   <span class="boot-op-hint">Debian Live for manual ops and maintenance</span>
                   <div class="boot-op-row boot-op-row-stack">
-                    <button type="button" class="btn-primary btn-sm" on:click={handleBootTempOS} disabled={creatingBootTask}>{creatingBootTask ? '…' : 'Boot'}</button>
+                    <button type="button" class="btn-primary btn-sm" on:click={handleBootTempOS} disabled={creatingBootTask || serverLocked} title={lockTitle}>{creatingBootTask ? '…' : 'Boot'}</button>
                   </div>
                 </div>
                 <div class="boot-op-card">
@@ -1975,7 +2018,7 @@
                           <option value={script.name}>{script.name}</option>
                         {/each}
                       </select>
-                      <button type="button" class="btn-primary btn-sm" on:click={handleRunScript} disabled={creatingBootTask || !selectedScript}>{creatingBootTask ? '…' : 'Run'}</button>
+                      <button type="button" class="btn-primary btn-sm" on:click={handleRunScript} disabled={creatingBootTask || !selectedScript || serverLocked} title={lockTitle}>{creatingBootTask ? '…' : 'Run'}</button>
                     </div>
                   {/if}
                 </div>
@@ -1993,7 +2036,7 @@
                           <option value={template.id}>{template.name}</option>
                         {/each}
                       </select>
-                      <button type="button" class="btn-primary btn-sm" on:click={handleStartInstallation} disabled={creatingBootTask || !selectedTemplate || loadingTemplates}>{creatingBootTask ? '…' : 'Start'}</button>
+                      <button type="button" class="btn-primary btn-sm" on:click={handleStartInstallation} disabled={creatingBootTask || !selectedTemplate || loadingTemplates || serverLocked} title={lockTitle}>{creatingBootTask ? '…' : 'Start'}</button>
                     </div>
                     <!-- Fixed-height slot so layout doesn't shift when params load -->
                     <div class="boot-op-params-slot">
@@ -2056,7 +2099,7 @@
                   <h3>Hardware Detection</h3>
                   <p class="text-muted">Boots built-in detection workflow and lets you review/apply inventory diffs.</p>
                 </div>
-                <button type="button" class="btn-secondary btn-sm" on:click={handleRunHardwareDetection} disabled={runningHardwareDetection || creatingBootTask}>
+                <button type="button" class="btn-secondary btn-sm" on:click={handleRunHardwareDetection} disabled={runningHardwareDetection || creatingBootTask || serverLocked} title={lockTitle}>
                   {runningHardwareDetection ? 'Queuing…' : 'Run detection'}
                 </button>
               </div>
@@ -3261,6 +3304,24 @@
     list-style: none;
   }
 
+  .locked-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--danger-bg);
+    color: var(--danger-text);
+  }
+  .server-lock-controls {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .server-lock-reason {
+    flex: 1;
+    min-width: 0;
+  }
   .general-detail-row {
     display: flex;
     justify-content: space-between;

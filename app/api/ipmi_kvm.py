@@ -282,6 +282,7 @@ async def kvm_power_state(
             ],
             success=False,
             message="Power control is not enabled for this server",
+            server_name=server.name,
         )
     plugin = _kvm_power_plugin(server)
     state, err = await _read_chassis_power_state(plugin)
@@ -290,6 +291,7 @@ async def kvm_power_state(
         actions=_chassis_action_catalog(plugin, state),
         success=not err,
         message=err,
+        server_name=server.name,
     )
 
 

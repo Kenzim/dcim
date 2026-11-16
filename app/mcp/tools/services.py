@@ -232,9 +232,12 @@ async def provision_bare_metal(
 
 
 async def service_power(service_id: int, action: str, confirm: bool = False) -> dict:
-    """Power a VM service (off/reset need confirm=true) or its linked BM server."""
+    """Power a VM service or its linked BM server (on, off, reset or cycle; all need confirm=true)."""
     action_norm = (action or "").strip().lower()
-    destructive = action_norm in {"off", "reset", "reboot"}
+    if action_norm == "cycle":
+        action_norm = "reset"
+    destructive = True
+    scope = "destructive" if action_norm in {"off", "reset", "reboot"} else "write"
 
     async def work(db, ctx):
         service = ServiceDAO.get_by_id(db, service_id)
@@ -255,7 +258,7 @@ async def service_power(service_id: int, action: str, confirm: bool = False) -> 
 
     return await run_tool(
         "service_power",
-        "destructive" if destructive else "write",
+        scope,
         work,
         destructive=destructive,
         confirm=confirm,

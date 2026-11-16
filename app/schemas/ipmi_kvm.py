@@ -42,6 +42,7 @@ class IpmiKvmPowerStateResponse(BaseModel):
     actions: List[IpmiKvmPowerAction]
     success: bool = True
     message: str = ""
+    server_name: Optional[str] = None
 
 
 class IpmiKvmPowerRequest(BaseModel):

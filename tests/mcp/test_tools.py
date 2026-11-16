@@ -85,7 +85,7 @@ async def test_server_power_on(
 
     from app.mcp.tools.power import server_power
 
-    result = await server_power(server.id, "on")
+    result = await server_power(server.id, "on", confirm=True)
     assert result["success"] is True
     assert result["action"] == "on"
     plugin.power_on.assert_awaited()

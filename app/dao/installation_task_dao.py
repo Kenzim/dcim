@@ -19,7 +19,9 @@ class InstallationTaskDAO:
         os_name: Optional[str] = None,
         os_version: Optional[str] = None
     ) -> InstallationTask:
-        """Create a new installation task"""
+        """Create a new installation task (refused while the server is locked)"""
+        from app.services.server_lock import ensure_server_id_unlocked
+        ensure_server_id_unlocked(db, server_id)
         installation_task = InstallationTask(
             server_id=server_id,
             boot_task_id=boot_task_id,

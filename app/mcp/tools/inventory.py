@@ -11,6 +11,7 @@ from app.dao.server_activity_dao import ServerActivityDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.mcp.instance import mcp
+from app.mcp.scopes import scope_allows
 from app.mcp.runtime import run_tool
 from app.mcp.serialize import location_row, rack_row, server_row
 from app.plugins.registry import get_registry
@@ -33,6 +34,8 @@ def _apply_server_field_updates(
     cpu_count=None,
     cpu_model=None,
     ram_gb=None,
+    locked=None,
+    lock_reason=None,
 ):
     if cpu_count is not None:
         if cpu_count < 1:
@@ -52,6 +55,12 @@ def _apply_server_field_updates(
         row.description = description
     if enabled is not None:
         row.enabled = enabled
+    if locked is not None:
+        row.locked = locked
+        if not locked and lock_reason is None:
+            row.lock_reason = None
+    if lock_reason is not None:
+        row.lock_reason = lock_reason.strip() or None
     if rack_id is not None:
         row.rack_id = rack_id
     if rack_unit is not None:
@@ -60,6 +69,27 @@ def _apply_server_field_updates(
         if not LocationDAO.get_by_id(db, location_id):
             raise ValueError(_MSG_LOCATION_NOT_FOUND)
         row.location_id = location_id
+
+
+def _log_lock_change(db, row, was_locked: bool, ctx) -> None:
+    from app.dao.boot_task_dao import BootTaskDAO
+    from app.dao.installation_task_dao import InstallationTaskDAO
+    from app.models.server_activity import ServerActivityEventType
+    from app.services.server_activity_logger import log_server_activity_success
+
+    if row.locked and not was_locked:
+        InstallationTaskDAO.delete_pending_by_server(db, row.id)
+        BootTaskDAO.cancel_pending_tasks(db, row.id)
+    action = "lock" if row.locked else ("unlock" if was_locked else "lock_reason")
+    log_server_activity_success(
+        db,
+        server_id=row.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action=action,
+        source="mcp",
+        message=f"Server locked: {row.lock_reason or 'no reason given'}" if row.locked else f"Server {action}",
+        details={"mcp_key_id": ctx.key_id, "locked": bool(row.locked), "lock_reason": row.lock_reason},
+    )
 
 
 def _bandwidth_sample_for_cable_run(db, cr):
@@ -334,6 +364,8 @@ async def update_server(
     cpu_count: Optional[int] = None,
     cpu_model: Optional[str] = None,
     ram_gb: Optional[int] = None,
+    locked: Optional[bool] = None,
+    lock_reason: Optional[str] = None,
 ) -> dict:
     """Update non-secret server fields."""
 
@@ -341,9 +373,14 @@ async def update_server(
         row = ServerDAO.get_by_id(db, server_id)
         if not row:
             raise ValueError(_MSG_SERVER_NOT_FOUND)
+        lock_before = (bool(getattr(row, "locked", False)), getattr(row, "lock_reason", None))
+        if lock_before[0] and locked is False and not scope_allows(ctx.scopes, "destructive"):
+            raise ValueError("Unlocking a server needs a key with destructive scope")
         _apply_server_field_updates(
             db,
             row,
+            locked=locked,
+            lock_reason=lock_reason,
             name=name,
             server_ip=server_ip,
             description=description,
@@ -355,7 +392,10 @@ async def update_server(
             cpu_model=cpu_model,
             ram_gb=ram_gb,
         )
-        return server_row(ServerDAO.update(db, row))
+        row = ServerDAO.update(db, row)
+        if lock_before != (bool(getattr(row, "locked", False)), getattr(row, "lock_reason", None)):
+            _log_lock_change(db, row, lock_before[0], ctx)
+        return server_row(row)
 
     return await run_tool(
         "update_server",
@@ -368,6 +408,8 @@ async def update_server(
             "enabled": enabled,
             "rack_id": rack_id,
             "location_id": location_id,
+            "locked": locked,
+            "lock_reason": lock_reason,
         },
     )
 

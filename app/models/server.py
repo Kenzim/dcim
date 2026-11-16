@@ -1,4 +1,5 @@
 import uuid
+import sqlalchemy as sa
 from sqlalchemy import Column, Integer, String, JSON, Boolean, DateTime, ForeignKey, Text, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -38,6 +39,8 @@ class Server(Base):
     plugin_name = Column(String(255), nullable=False, index=True)  # Plugin name (folder name on disk)
     plugin_config = Column(JSON, nullable=False)  # Plugin-specific configuration (IPMI IP, credentials, etc.)
     enabled = Column(Boolean, default=True, nullable=False)
+    locked = Column(Boolean, default=False, nullable=False, server_default=sa.false())  # While true, no OS install or wipe may be queued
+    lock_reason = Column(Text, nullable=True)
     boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # Boot mode: UEFI or BIOS (deprecated - use pxe_boot_mode and os_boot_mode)
     pxe_boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # PXE boot mode: controls what DHCP serves initially (UEFI or BIOS)
     os_boot_mode = Column(SQLEnum(BootMode, native_enum=False, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BootMode.UEFI)  # OS boot mode: controls how the server boots the installed OS (UEFI or BIOS)

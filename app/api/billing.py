@@ -140,6 +140,7 @@ from app.services.strategy_actions import (
 )
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 import logging
+from app.services.server_lock import ensure_server_unlocked
 import os
 
 logger = logging.getLogger(__name__)
@@ -732,6 +733,8 @@ def _queue_template_install_for_service(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Service has no associated server",
         )
+
+    ensure_server_unlocked(server)
 
     # Prevent parallel installs on the same server
     active_task = InstallationTaskDAO.get_active_by_server(db, server.id)
@@ -3183,6 +3186,8 @@ async def reinstall_os_on_service(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Template '{action.template_id}' missing installation script"
             )
+
+        ensure_server_unlocked(server)
 
         # A reinstall replaces whatever is open on the server (a stuck install,
         # a stale boot task) instead of being refused, and drops a staged boot ISO.

@@ -113,10 +113,12 @@ async def list_install_tasks(server_id: int) -> dict:
 
 
 async def server_power(server_id: int, action: str, force: bool = False, confirm: bool = False) -> dict:
-    """Power a server: on (write), off/reset (destructive, needs confirm=true)."""
+    """Power a server: on, off, reset or cycle. Every action needs confirm=true."""
     action_norm = (action or "").strip().lower()
-    destructive = action_norm in {"off", "reset", "reboot"}
-    min_scope = "destructive" if destructive else "write"
+    if action_norm == "cycle":
+        action_norm = "reset"
+    destructive = True
+    min_scope = "destructive" if action_norm in {"off", "reset", "reboot"} else "write"
 
     async def work(db, ctx):
         if action_norm not in {"on", "off", "reset", "reboot"}:

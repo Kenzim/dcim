@@ -647,9 +647,9 @@ button.rf-ca__btn--danger:hover {
         <button type="button" class="rf-ca__btn rf-ca__btn--ghost" id="rackflow-password-open">Change password</button>
         {/if}
         {if $rackflow_power_controls_allowed}
-        <a href="{$rackflow_power_on_url|escape}" class="rf-ca__btn rf-ca__btn--ghost" id="rackflow-power-on">Power on</a>
-        <a href="{$rackflow_power_off_url|escape}" class="rf-ca__btn rf-ca__btn--danger" id="rackflow-power-off" data-rf-confirm="Power off this server?">Power off</a>
-        <a href="{$rackflow_reboot_url|escape}" class="rf-ca__btn rf-ca__btn--danger" id="rackflow-reboot" data-rf-confirm="Reboot this server?">Reboot</a>
+        <a href="{$rackflow_power_on_url|escape}" class="rf-ca__btn rf-ca__btn--ghost" id="rackflow-power-on" data-rf-confirm="Power on {if $rackflow_server_name}{$rackflow_server_name|escape}{else}this server{/if}?">Power on</a>
+        <a href="{$rackflow_power_off_url|escape}" class="rf-ca__btn rf-ca__btn--danger" id="rackflow-power-off" data-rf-confirm="Power off {if $rackflow_server_name}{$rackflow_server_name|escape}{else}this server{/if}?">Power off</a>
+        <a href="{$rackflow_reboot_url|escape}" class="rf-ca__btn rf-ca__btn--danger" id="rackflow-reboot" data-rf-confirm="Reboot {if $rackflow_server_name}{$rackflow_server_name|escape}{else}this server{/if}?">Reboot</a>
         {/if}
       </div>
       {/if}
