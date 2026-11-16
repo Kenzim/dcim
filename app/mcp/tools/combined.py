@@ -12,6 +12,7 @@ from typing import Literal, Optional
 from mcp.server.fastmcp.exceptions import ToolError
 
 from app.mcp.instance import mcp
+from app.mcp.tools import cabling as cabling_tools
 from app.mcp.tools import catalog as catalog_tools
 from app.mcp.tools import console as console_tools
 from app.mcp.tools import dhcp_tftp as dhcp_tools
@@ -157,10 +158,11 @@ async def save_server(
 @mcp.tool()
 async def server_info(
     server_id: int,
-    view: Literal["detail", "activity", "bandwidth", "power_state", "boot_options", "install_tasks"] = "detail",
+    view: Literal["detail", "activity", "bandwidth", "power_state", "boot_options", "install_tasks", "ports"] = "detail",
     limit: int = 50,
 ) -> dict:
-    """Server detail (with capabilities), activity log, port bandwidth, BMC power state, boot options or install tasks."""
+    """Server detail (with capabilities), activity log, port bandwidth, BMC power state, boot options,
+    install tasks, or ports (NICs with the far end of each cable)."""
     if view == "activity":
         return await inventory_tools.get_server_activity(server_id, limit=limit)
     handlers = {
@@ -169,6 +171,7 @@ async def server_info(
         "power_state": power_tools.get_server_power_state,
         "boot_options": power_tools.get_server_boot_options,
         "install_tasks": power_tools.list_install_tasks,
+        "ports": cabling_tools.list_server_ports,
     }
     return await handlers[view](server_id)
 

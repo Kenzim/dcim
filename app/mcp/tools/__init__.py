@@ -11,6 +11,7 @@ from app.mcp.tools import power as _power  # noqa: F401
 from app.mcp.tools import proxmox as _proxmox  # noqa: F401
 from app.mcp.tools import services as _services  # noqa: F401
 from app.mcp.tools import users as _users  # noqa: F401
+from app.mcp.tools import cabling as _cabling  # noqa: F401
 from app.mcp.tools import combined as _combined  # noqa: F401  (after the modules it dispatches to)
 
 
