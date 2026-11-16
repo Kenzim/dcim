@@ -12,6 +12,11 @@ export default defineConfig({
         // Required for /api/vnc/ws and /api/kvm/ws: without this, Vite's
         // dev proxy never upgrades the WebSocket handshake.
         ws: true
+      },
+      // Staff and client MCP endpoints live on the backend, not the SPA.
+      '^/(mcp|client-mcp)(/|$)': {
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
+        changeOrigin: true
       }
     },
     // Handle SPA routing - serve index.html for all routes
