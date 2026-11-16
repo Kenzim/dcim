@@ -139,7 +139,9 @@ def get_current_user(
     # fall through to billing-integration SHA-256 lookup.
     from app.core.mcp_auth import is_mcp_api_key
 
-    if is_mcp_api_key(token):
+    from app.core.client_mcp_auth import is_client_mcp_api_key
+
+    if is_mcp_api_key(token) or is_client_mcp_api_key(token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=_INVALID_TOKEN_MSG,

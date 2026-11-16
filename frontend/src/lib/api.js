@@ -4476,3 +4476,33 @@ export async function setRequireTwoFactor(kind, id, requireTwoFactor) {
   return _jsonOrThrow(response, 'Failed to update two-factor requirement');
 }
 
+
+// Client MCP keys (customers' own AI assistant keys). Client portal routes use the
+// impersonation header when present so the server can refuse changes during it.
+async function clientMcpKeysRequest(path, options = {}) {
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  Object.entries(_impersonationHeaders()).forEach(([key, value]) => headers.set(key, value));
+  const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
+  if (response.status === 204) return null;
+  return _jsonOrThrow(response, options.errorMessage || 'MCP key request failed');
+}
+
+export const clientMcpListKeys = () =>
+  clientMcpKeysRequest('/client/mcp-keys', { errorMessage: 'Failed to load MCP keys' });
+export const clientMcpCreateKey = (data) =>
+  clientMcpKeysRequest('/client/mcp-keys', { method: 'POST', body: JSON.stringify(data), errorMessage: 'Failed to create MCP key' });
+export const clientMcpUpdateKey = (id, data) =>
+  clientMcpKeysRequest(`/client/mcp-keys/${id}`, { method: 'PATCH', body: JSON.stringify(data), errorMessage: 'Failed to update MCP key' });
+export const clientMcpDeleteKey = (id) =>
+  clientMcpKeysRequest(`/client/mcp-keys/${id}`, { method: 'DELETE', errorMessage: 'Failed to delete MCP key' });
+
+// Staff: view and revoke a client's MCP keys.
+export const adminListClientMcpKeys = (userId) =>
+  clientMcpKeysRequest(`/admin/clients/${userId}/mcp-keys`, { errorMessage: 'Failed to load MCP keys' });
+export const adminUpdateClientMcpKey = (userId, keyId, data) =>
+  clientMcpKeysRequest(`/admin/clients/${userId}/mcp-keys/${keyId}`, { method: 'PATCH', body: JSON.stringify(data), errorMessage: 'Failed to update MCP key' });
+export const adminDeleteClientMcpKey = (userId, keyId) =>
+  clientMcpKeysRequest(`/admin/clients/${userId}/mcp-keys/${keyId}`, { method: 'DELETE', errorMessage: 'Failed to delete MCP key' });

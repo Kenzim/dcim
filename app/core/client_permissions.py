@@ -42,6 +42,9 @@ class PermissionKey:
     PROXY_VIEW_CREDENTIALS = "proxy.view_credentials"
     PROXY_ROTATE_CREDENTIALS = "proxy.rotate_credentials"
 
+    # Account-level (not per service): may the client create and use MCP API keys.
+    ACCOUNT_MCP = "account.mcp"
+
 
 # Human-readable catalog entry: label + which service type(s) the key is
 # meaningful for. Used by the admin UI to group checkboxes and by callers
@@ -137,9 +140,27 @@ PERMISSION_CATALOG: List[Dict] = [
         "label": "Rotate proxy credentials",
         "service_types": ["http_proxy"],
     },
+    {
+        # Account-level: "account" is not a real service type, so per-service
+        # permission panels and reseller product ceilings (which filter on
+        # service type) skip it; only the preset editor shows it.
+        "key": PermissionKey.ACCOUNT_MCP,
+        "label": "Create and use MCP API keys (AI assistants)",
+        "service_types": ["account"],
+    },
 ]
 
 ALL_PERMISSION_KEYS = {entry["key"] for entry in PERMISSION_CATALOG}
+
+# Defaults for account-level keys, resolved from the client's own preset only
+# (see ``resolve_account_permission``). MCP access is on by default: an MCP key
+# can only ever do what the portal already allows (every tool call goes through
+# the same per-service checks), so this is a kill switch for a single client,
+# not the security boundary. An admin denies it with ``"account.mcp": false`` in
+# the client's preset.
+ACCOUNT_DEFAULT_PERMISSIONS: Dict[str, bool] = {
+    PermissionKey.ACCOUNT_MCP: True,
+}
 
 # Built-in defaults per service type — the base layer of the resolution
 # hierarchy, chosen to match current (pre-permission-system) behavior so

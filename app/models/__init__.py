@@ -9,6 +9,7 @@ from app.models.boot_task import BootTask, BootType, BootTaskStatus
 from app.models.installation_task import InstallationTask, InstallationStatus
 from app.models.billing_integration import BillingIntegration
 from app.models.mcp_api_key import McpApiKey
+from app.models.client_mcp_api_key import ClientMcpApiKey
 from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
 from app.models.service_bare_metal import ServiceBareMetal
 from app.models.service_vm import ServiceVm

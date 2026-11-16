@@ -19,6 +19,8 @@ os.environ["DISABLE_PUBLIC_API_DOCS"] = "false"
 # Keep /mcp unmounted unless a test explicitly remounts it. A developer .env
 # with MCP_ENABLED=true would otherwise import FastMCP during app import.
 os.environ["MCP_ENABLED"] = "false"
+# Same for the client MCP at /client-mcp.
+os.environ["CLIENT_MCP_ENABLED"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient

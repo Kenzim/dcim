@@ -22,6 +22,7 @@
     bare_metal: 'Bare Metal',
     vm: 'VM',
     http_proxy: 'HTTP Proxy',
+    account: 'Account',
   };
 
   async function loadAll() {
@@ -46,7 +47,7 @@
   // shared across types (e.g. service.view) only renders once, under the
   // most relevant group heading.
   $: groupedCatalog = (() => {
-    const groups = { bare_metal: [], vm: [], http_proxy: [] };
+    const groups = { bare_metal: [], vm: [], http_proxy: [], account: [] };
     for (const entry of catalog) {
       const primary = entry.service_types?.[0];
       if (groups[primary]) groups[primary].push(entry);

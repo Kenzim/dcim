@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     mcp_rate_limit_per_ip: int = 240
     mcp_rate_limit_per_ip_window_seconds: int = 60
 
+    # Client MCP (customers' own AI assistants) at /mcp/client. Separate from the
+    # admin MCP above: its own flag, key table and ``rfcmcp_`` key prefix. Off by
+    # default; rate limits reuse the mcp_rate_limit_* settings.
+    client_mcp_enabled: bool = False
+    client_mcp_max_keys_per_user: int = 10
+
     # Trust the X-Forwarded-For header when determining the caller's source IP.
     # This must ONLY be enabled when the app sits behind a trusted reverse proxy
     # that sets/overwrites the header; otherwise clients can spoof their identity

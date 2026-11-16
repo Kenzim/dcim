@@ -23,7 +23,10 @@ from typing import Dict, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.client_permissions import DEFAULT_PERMISSIONS_BY_SERVICE_TYPE
+from app.core.client_permissions import (
+    ACCOUNT_DEFAULT_PERMISSIONS,
+    DEFAULT_PERMISSIONS_BY_SERVICE_TYPE,
+)
 from app.models.service import Service
 from app.models.permission_set import PermissionSet
 
@@ -83,6 +86,24 @@ def resolve_client_permissions(db: Session, service: Service) -> Dict[str, bool]
     permissions = _merge(permissions, service.permission_overrides)
 
     return permissions
+
+
+def resolve_account_permission(db: Session, user, key: str) -> bool:
+    """Account-level permission (not tied to a service) for ``user``.
+
+    Starts from ``ACCOUNT_DEFAULT_PERMISSIONS`` and applies the user's own
+    preset when it sets the key.
+    """
+    allowed = bool(ACCOUNT_DEFAULT_PERMISSIONS.get(key, False))
+    if user is not None and user.permission_set_id:
+        preset = (
+            db.query(PermissionSet)
+            .filter(PermissionSet.id == user.permission_set_id)
+            .first()
+        )
+        if preset and key in (preset.permissions or {}):
+            allowed = bool(preset.permissions[key])
+    return allowed
 
 
 def has_client_permission(db: Session, service: Service, key: str) -> bool:
