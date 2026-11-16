@@ -19,7 +19,7 @@ def _run_migrations() -> None:
     from alembic import command
     base = Path(__file__).resolve().parent.parent
     alembic_cfg = Config(str(base / "alembic.ini"))
-    command.upgrade(alembic_cfg, "head")
+    command.upgrade(alembic_cfg, "heads")
 
 
 def _start_background_workers() -> list[asyncio.Task]:
