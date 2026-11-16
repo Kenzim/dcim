@@ -365,13 +365,22 @@ async def update_server(
     ram_gb: Optional[int] = None,
     locked: Optional[bool] = None,
     lock_reason: Optional[str] = None,
+    ipmi_kvm_profile: Optional[str] = None,
+    sol_profile: Optional[str] = None,
+    virtual_media_profile: Optional[str] = None,
 ) -> dict:
-    """Update non-secret server fields."""
+    """Update non-secret server fields. An empty string clears a profile."""
 
     def work(db, ctx):
         row = ServerDAO.get_by_id(db, server_id)
         if not row:
             raise ValueError(_MSG_SERVER_NOT_FOUND)
+        _apply_profile_updates(
+            row,
+            ipmi_kvm_profile=ipmi_kvm_profile,
+            sol_profile=sol_profile,
+            virtual_media_profile=virtual_media_profile,
+        )
         lock_before = (bool(getattr(row, "locked", False)), getattr(row, "lock_reason", None))
         if lock_before[0] and locked is False:
             raise ValueError("Servers cannot be unlocked over MCP; unlock it in the admin UI")
@@ -409,8 +418,35 @@ async def update_server(
             "location_id": location_id,
             "locked": locked,
             "lock_reason": lock_reason,
+            "ipmi_kvm_profile": ipmi_kvm_profile,
+            "sol_profile": sol_profile,
+            "virtual_media_profile": virtual_media_profile,
         },
     )
+
+
+def _apply_profile_updates(row, **profiles: Optional[str]) -> None:
+    """Validate and set KVM/SOL/virtual-media profile ids; '' clears one."""
+    from app.services.ipmi_kvm import IpmiKvmUnavailable, normalize_profile_id as kvm_id
+    from app.services.sol import SolUnavailable, normalize_profile_id as sol_id
+    from app.services.virtual_media import VirtualMediaUnavailable, normalize_profile_id as vmedia_id
+
+    normalisers = {
+        "ipmi_kvm_profile": (kvm_id, IpmiKvmUnavailable),
+        "sol_profile": (sol_id, SolUnavailable),
+        "virtual_media_profile": (vmedia_id, VirtualMediaUnavailable),
+    }
+    for field, value in profiles.items():
+        if value is None:
+            continue
+        normalise, error = normalisers[field]
+        if not value.strip():
+            setattr(row, field, None)
+            continue
+        try:
+            setattr(row, field, normalise(value.strip()))
+        except error as exc:
+            raise ValueError(f"{field}: {getattr(exc, 'detail', exc)}") from exc
 
 
 @mcp.tool()

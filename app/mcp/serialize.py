@@ -52,6 +52,9 @@ def server_row(row: Server, *, caps: Optional[list] = None) -> dict[str, Any]:
         "cpu_model": row.cpu_model,
         "ram_gb": row.ram_gb,
         "ipmi_proxy_enabled": bool(row.ipmi_proxy_enabled),
+        "ipmi_kvm_profile": getattr(row, "ipmi_kvm_profile", None),
+        "sol_profile": getattr(row, "sol_profile", None),
+        "virtual_media_profile": getattr(row, "virtual_media_profile", None),
     }
     if caps is not None:
         payload["capabilities"] = caps

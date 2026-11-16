@@ -88,3 +88,25 @@ async def test_service_power_needs_confirm_for_on_and_cycle(
 ):
     with pytest.raises(ToolError, match="confirm"):
         await combined.power(action, service_id=1)
+
+
+@pytest.mark.asyncio
+async def test_mcp_sets_and_clears_profiles(db_session, mcp_sessionlocal, mcp_auth_ctx_write, locked_server):
+    kinds = {k: await combined.lookup(kind=k) for k in ("kvm_profiles", "sol_profiles", "virtual_media_profiles")}
+    assert all(r["profiles"] for r in kinds.values())
+    row = await combined.save_server(
+        server_id=locked_server.id,
+        ipmi_kvm_profile="gigabyte",
+        sol_profile="ipmi_sol",
+        virtual_media_profile="megarac_stream",
+    )
+    assert (row["ipmi_kvm_profile"], row["sol_profile"], row["virtual_media_profile"]) == (
+        "gigabyte",
+        "ipmi_sol",
+        "megarac_stream",
+    )
+    assert row["locked"] is True
+    with pytest.raises(ToolError, match="virtual_media_profile"):
+        await combined.save_server(server_id=locked_server.id, virtual_media_profile="no-such-profile")
+    row = await combined.save_server(server_id=locked_server.id, sol_profile="")
+    assert row["sol_profile"] is None and row["ipmi_kvm_profile"] == "gigabyte"

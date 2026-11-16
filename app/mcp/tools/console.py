@@ -149,6 +149,20 @@ async def sol_send(
     )
 
 
+async def list_kvm_profiles() -> dict:
+    """List native BMC KVM profiles for ``servers.ipmi_kvm_profile``."""
+    from app.services.ipmi_kvm import list_profiles
+
+    return await run_tool("list_kvm_profiles", "read", lambda db, ctx: {"profiles": list_profiles()})
+
+
+async def list_sol_profiles() -> dict:
+    """List serial-over-LAN profiles for ``servers.sol_profile``."""
+    from app.services.sol import list_profiles
+
+    return await run_tool("list_sol_profiles", "read", lambda db, ctx: {"profiles": list_profiles()})
+
+
 async def list_virtual_media_profiles() -> dict:
     """List BMC virtual CD profiles for ``servers.virtual_media_profile``."""
 

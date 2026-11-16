@@ -50,6 +50,8 @@ async def lookup(
         "vm_templates",
         "proxmox_clusters",
         "virtual_media_profiles",
+        "kvm_profiles",
+        "sol_profiles",
         "switch_plugins",
         "subnet_groups",
     ],
@@ -68,6 +70,8 @@ async def lookup(
         "vm_templates": catalog_tools.list_vm_templates,
         "proxmox_clusters": proxmox_tools.list_proxmox_clusters,
         "virtual_media_profiles": console_tools.list_virtual_media_profiles,
+        "kvm_profiles": console_tools.list_kvm_profiles,
+        "sol_profiles": console_tools.list_sol_profiles,
         "switch_plugins": network_tools.list_switch_plugins,
         "subnet_groups": catalog_admin_tools.list_subnet_groups,
     }
@@ -124,12 +128,26 @@ async def save_server(
     enabled: Optional[bool] = None,
     locked: Optional[bool] = None,
     lock_reason: Optional[str] = None,
+    ipmi_kvm_profile: Optional[str] = None,
+    sol_profile: Optional[str] = None,
+    virtual_media_profile: Optional[str] = None,
 ) -> dict:
     """Create a server (no server_id; needs name, server_ip, plugin_name, location_id) or update one.
 
     plugin_name and plugin_config are set on create only; plugin_config is never returned.
     locked=true blocks any OS install or wipe (lock_reason is shown in the refusal); unlocking is admin-UI only.
+    Profiles: ids from lookup(kind="kvm_profiles"|"sol_profiles"|"virtual_media_profiles"); "" clears.
     """
+    profiles = {
+        k: v
+        for k, v in {
+            "ipmi_kvm_profile": ipmi_kvm_profile,
+            "sol_profile": sol_profile,
+            "virtual_media_profile": virtual_media_profile,
+        }.items()
+        if v is not None
+    }
+    has_profiles = bool(profiles)
     if server_id is None:
         _require("Creating a server", name=name, server_ip=server_ip, plugin_name=plugin_name, location_id=location_id)
         row = await inventory_tools.create_server(
@@ -144,9 +162,11 @@ async def save_server(
             cpu_count=cpu_count or 1,
             ram_gb=ram_gb,
         )
-        if enabled is not None or cpu_model is not None or locked is not None:
+        if enabled is not None or cpu_model is not None or locked is not None or has_profiles:
             lock_args = {} if locked is None else {"locked": locked, "lock_reason": lock_reason}
-            row = await inventory_tools.update_server(row["id"], enabled=enabled, cpu_model=cpu_model, **lock_args)
+            row = await inventory_tools.update_server(
+                row["id"], enabled=enabled, cpu_model=cpu_model, **lock_args, **profiles
+            )
         return row
     _reject("Updating a server", plugin_name=plugin_name, plugin_config=plugin_config)
     return await inventory_tools.update_server(
@@ -163,6 +183,7 @@ async def save_server(
         location_id=location_id,
         locked=locked,
         lock_reason=lock_reason,
+        **profiles,
     )
 
 
