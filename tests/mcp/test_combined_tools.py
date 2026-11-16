@@ -11,6 +11,7 @@ from app.mcp.tools import combined
 
 EXPECTED_TOOLS = {
     "cable", "delete_server_port", "save_server_ports",
+    "save_product", "save_product_family", "save_subnet_group",
     "console_ticket", "delete_server", "delete_subnet", "delete_switch", "dhcp_tftp", "dhcp_tftp_control",
     "get_aggregate_bandwidth", "ip_assignment", "list_clients", "list_ips", "list_servers", "list_services",
     "list_switches", "lookup", "plan_vm", "power", "provision", "proxmox_inventory", "rackflow_status",

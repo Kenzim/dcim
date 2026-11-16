@@ -14,6 +14,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from app.mcp.instance import mcp
 from app.mcp.tools import cabling as cabling_tools
 from app.mcp.tools import catalog as catalog_tools
+from app.mcp.tools import catalog_admin as catalog_admin_tools
 from app.mcp.tools import console as console_tools
 from app.mcp.tools import dhcp_tftp as dhcp_tools
 from app.mcp.tools import inventory as inventory_tools
@@ -50,6 +51,7 @@ async def lookup(
         "proxmox_clusters",
         "virtual_media_profiles",
         "switch_plugins",
+        "subnet_groups",
     ],
     location_id: Optional[int] = None,
 ) -> dict:
@@ -67,6 +69,7 @@ async def lookup(
         "proxmox_clusters": proxmox_tools.list_proxmox_clusters,
         "virtual_media_profiles": console_tools.list_virtual_media_profiles,
         "switch_plugins": network_tools.list_switch_plugins,
+        "subnet_groups": catalog_admin_tools.list_subnet_groups,
     }
     return await handlers[kind]()
 
