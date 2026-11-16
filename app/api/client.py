@@ -126,7 +126,7 @@ async def client_list_my_services(
     db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
-    return await _list_my_services(service_type, auth, db)
+    return await _list_my_services(service_type, auth=auth, db=db)
 
 
 @router.get("/services/{service_id}")
@@ -374,7 +374,7 @@ async def client_portal_reinstall_vm(
     db: Annotated[Session, Depends(get_db)],
 ):
     _require_non_admin_client(auth)
-    return await _client_reinstall_vm(service_id, body, auth, db)
+    return await _client_reinstall_vm(service_id, body, auth=auth, db=db)
 
 
 @router.get("/services/{service_id}/proxy/credentials")
