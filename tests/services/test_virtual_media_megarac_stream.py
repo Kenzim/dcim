@@ -246,3 +246,44 @@ async def test_resume_forgets_a_boot_iso_whose_task_has_finished(monkeypatch):
     _patch_server_lookup(monkeypatch, _server())
     await megarac_stream.resume_streams()
     assert fake.forgotten == [4] and fake.released == [4]
+
+
+def _redfish_session(handler):
+    import contextlib
+
+    import httpx
+
+    @contextlib.asynccontextmanager
+    async def session(self, server):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            yield client, "https://bmc.example"
+
+    return session
+
+
+@pytest.mark.asyncio
+async def test_boot_once_falls_back_to_ipmi_when_redfish_denies_basic_auth(monkeypatch):
+    """ASUS/MSI MegaRAC builds may answer Redfish with 401 or list no override targets."""
+    import httpx
+
+    monkeypatch.setattr(GigabyteVirtualMediaProfile, "_session", _redfish_session(lambda request: httpx.Response(401, json={})))
+    assert await MegaracStreamVirtualMediaProfile().set_boot_once(_server("gigabyte"), uefi=True) is None
+
+
+@pytest.mark.asyncio
+async def test_boot_once_falls_back_to_ipmi_when_redfish_lists_no_override_targets(monkeypatch):
+    import httpx
+
+    patches = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH":
+            patches.append(request)
+            return httpx.Response(200)
+        if request.url.path == "/redfish/v1/Systems":
+            return httpx.Response(200, json={"Members": [{"@odata.id": "/redfish/v1/Systems/Self"}]})
+        return httpx.Response(200, json={"Boot": {"BootSourceOverrideTarget": "None"}})
+
+    monkeypatch.setattr(GigabyteVirtualMediaProfile, "_session", _redfish_session(handler))
+    assert await MegaracStreamVirtualMediaProfile().set_boot_once(_server("gigabyte"), uefi=False) is None
+    assert patches == []
