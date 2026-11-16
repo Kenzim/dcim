@@ -61,7 +61,6 @@ async def _dhcp_tftp_runner_action(db, location_id: int, kind_norm: str, action_
     return {"success": True, "kind": kind_norm, "action": action_norm, "result": body}
 
 
-@mcp.tool()
 async def dhcp_tftp_status(location_id: int, kind: str = "dhcp") -> dict:
     """DHCP or TFTP runner status for a location."""
 
@@ -84,7 +83,6 @@ async def dhcp_tftp_status(location_id: int, kind: str = "dhcp") -> dict:
     )
 
 
-@mcp.tool()
 async def dhcp_tftp_settings(location_id: int, kind: str = "dhcp") -> dict:
     """DHCP settings or TFTP runner config for a location."""
 
@@ -112,7 +110,6 @@ async def dhcp_tftp_settings(location_id: int, kind: str = "dhcp") -> dict:
     )
 
 
-@mcp.tool()
 async def dhcp_tftp_logs(location_id: int, kind: str = "dhcp", limit: int = 100) -> dict:
     """Recent DHCP or TFTP runner logs."""
 

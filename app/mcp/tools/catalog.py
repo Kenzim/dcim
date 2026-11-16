@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO, VMTemplateDAO
-from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 
 
-@mcp.tool()
 async def list_families() -> dict:
     """List product families."""
 
@@ -28,7 +26,6 @@ async def list_families() -> dict:
     return await run_tool("list_families", "read", work)
 
 
-@mcp.tool()
 async def list_products() -> dict:
     """List catalog products."""
 
@@ -49,7 +46,6 @@ async def list_products() -> dict:
     return await run_tool("list_products", "read", work)
 
 
-@mcp.tool()
 async def list_vm_templates() -> dict:
     """List catalog VM templates."""
 

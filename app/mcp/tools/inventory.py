@@ -60,7 +60,6 @@ def _bandwidth_sample_for_cable_run(db, cr):
     }
 
 
-@mcp.tool()
 async def list_locations() -> dict:
     """List datacenter locations."""
 
@@ -70,7 +69,6 @@ async def list_locations() -> dict:
     return await run_tool("list_locations", "read", work)
 
 
-@mcp.tool()
 async def get_location(location_id: int) -> dict:
     """Get a location by id."""
 
@@ -83,7 +81,6 @@ async def get_location(location_id: int) -> dict:
     return await run_tool("get_location", "read", work, args={"location_id": location_id})
 
 
-@mcp.tool()
 async def create_location(name: str, description: Optional[str] = None) -> dict:
     """Create a location."""
 
@@ -97,7 +94,6 @@ async def create_location(name: str, description: Optional[str] = None) -> dict:
     )
 
 
-@mcp.tool()
 async def update_location(
     location_id: int, name: Optional[str] = None, description: Optional[str] = None
 ) -> dict:
@@ -121,7 +117,6 @@ async def update_location(
     )
 
 
-@mcp.tool()
 async def list_racks(location_id: Optional[int] = None) -> dict:
     """List racks, optionally filtered by location."""
 
@@ -132,7 +127,6 @@ async def list_racks(location_id: Optional[int] = None) -> dict:
     return await run_tool("list_racks", "read", work, args={"location_id": location_id})
 
 
-@mcp.tool()
 async def create_rack(
     location_id: int,
     name: str,
@@ -175,7 +169,6 @@ async def create_rack(
     )
 
 
-@mcp.tool()
 async def update_rack(
     rack_id: int,
     name: Optional[str] = None,
@@ -241,7 +234,6 @@ async def list_servers(
     )
 
 
-@mcp.tool()
 async def get_server(server_id: int) -> dict:
     """Get a server including effective capabilities (no secrets)."""
 
@@ -254,7 +246,6 @@ async def get_server(server_id: int) -> dict:
     return await run_tool("get_server", "read", work, args={"server_id": server_id})
 
 
-@mcp.tool()
 async def create_server(
     name: str,
     server_ip: str,
@@ -307,7 +298,6 @@ async def create_server(
     )
 
 
-@mcp.tool()
 async def update_server(
     server_id: int,
     name: Optional[str] = None,
@@ -372,7 +362,6 @@ async def delete_server(server_id: int, confirm: bool = False) -> dict:
     )
 
 
-@mcp.tool()
 async def list_server_groups() -> dict:
     """List server groups."""
 
@@ -387,7 +376,6 @@ async def list_server_groups() -> dict:
     return await run_tool("list_server_groups", "read", work)
 
 
-@mcp.tool()
 async def get_server_activity(server_id: int, limit: int = 50) -> dict:
     """Recent activity log for a server."""
 
@@ -416,7 +404,6 @@ async def get_server_activity(server_id: int, limit: int = 50) -> dict:
     )
 
 
-@mcp.tool()
 async def get_server_bandwidth(server_id: int) -> dict:
     """Latest bandwidth sample per cabled switch port for a server."""
 

@@ -820,7 +820,7 @@ async def regenerate_switch_ports(
         
         # Create ports that don't exist yet (physical Ethernet only)
         ports_to_create = []
-        existing_port_names = {p.name for p in existing_ports}
+        existing_port_names = {p.name for p in existing_ports if p.id not in ports_to_delete}
         for port_name, port_data in name_to_port_data.items():
             if port_name not in existing_port_names:
                 ports_to_create.append({

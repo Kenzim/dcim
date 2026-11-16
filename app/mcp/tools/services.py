@@ -69,7 +69,6 @@ async def list_services(
     )
 
 
-@mcp.tool()
 async def get_service(service_id: int) -> dict:
     """Get a service (no guest passwords or proxy credentials)."""
 
@@ -82,7 +81,6 @@ async def get_service(service_id: int) -> dict:
     return await run_tool("get_service", "read", work, args={"service_id": service_id})
 
 
-@mcp.tool()
 async def list_service_backups(service_id: int) -> dict:
     """List VM backups and in-flight backup jobs."""
 
@@ -96,7 +94,6 @@ async def list_service_backups(service_id: int) -> dict:
     return await run_tool("list_service_backups", "read", work, args={"service_id": service_id})
 
 
-@mcp.tool()
 async def list_deployment_jobs(service_id: int, limit: int = 20) -> dict:
     """List VM deployment jobs for a service."""
 
@@ -124,7 +121,6 @@ async def list_deployment_jobs(service_id: int, limit: int = 20) -> dict:
     )
 
 
-@mcp.tool()
 async def provision_vm(
     name: str,
     product_code: str,
@@ -169,7 +165,6 @@ async def provision_vm(
     )
 
 
-@mcp.tool()
 async def provision_http_proxy(
     name: str,
     product_code: Optional[str] = None,
@@ -202,7 +197,6 @@ async def provision_http_proxy(
     )
 
 
-@mcp.tool()
 async def provision_bare_metal(
     name: str,
     server_id: Optional[int] = None,
@@ -237,7 +231,6 @@ async def provision_bare_metal(
     )
 
 
-@mcp.tool()
 async def service_power(service_id: int, action: str, confirm: bool = False) -> dict:
     """Power a VM service (off/reset need confirm=true) or its linked BM server."""
     action_norm = (action or "").strip().lower()

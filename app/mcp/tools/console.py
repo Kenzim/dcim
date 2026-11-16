@@ -38,7 +38,6 @@ def _resolve_server(db, server_id: Optional[int], service_id: Optional[int]):
     return server
 
 
-@mcp.tool()
 async def mint_ipmi_ticket(server_id: Optional[int] = None, service_id: Optional[int] = None, confirm: bool = False) -> dict:
     """Mint a short-lived IPMI proxy launch URL (no viewer passwords)."""
 
@@ -64,7 +63,6 @@ async def mint_ipmi_ticket(server_id: Optional[int] = None, service_id: Optional
     )
 
 
-@mcp.tool()
 async def mint_vnc_ticket(service_id: int, console_type: Optional[str] = None, confirm: bool = False) -> dict:
     """Mint a short-lived VM console launch URL (no Proxmox tickets)."""
 
@@ -91,7 +89,6 @@ async def mint_vnc_ticket(service_id: int, console_type: Optional[str] = None, c
     )
 
 
-@mcp.tool()
 async def mint_sol_ticket(server_id: Optional[int] = None, service_id: Optional[int] = None, confirm: bool = False) -> dict:
     """Mint a short-lived Serial-over-LAN launch URL (no BMC credentials)."""
 
@@ -152,7 +149,6 @@ async def sol_send(
     )
 
 
-@mcp.tool()
 async def list_virtual_media_profiles() -> dict:
     """List BMC virtual CD profiles for ``servers.virtual_media_profile``."""
 
@@ -163,7 +159,6 @@ async def list_virtual_media_profiles() -> dict:
     return await run_tool("list_virtual_media_profiles", "read", work)
 
 
-@mcp.tool()
 async def get_virtual_media(server_id: Optional[int] = None, service_id: Optional[int] = None) -> dict:
     """BMC virtual CD status and ISO catalog for a server or linked service."""
 
@@ -186,7 +181,6 @@ async def get_virtual_media(server_id: Optional[int] = None, service_id: Optiona
     )
 
 
-@mcp.tool()
 async def insert_virtual_media(
     filename: str,
     server_id: Optional[int] = None,
@@ -228,7 +222,6 @@ async def insert_virtual_media(
     )
 
 
-@mcp.tool()
 async def eject_virtual_media(
     server_id: Optional[int] = None,
     service_id: Optional[int] = None,

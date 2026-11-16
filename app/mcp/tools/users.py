@@ -15,8 +15,10 @@ from app.models.user import User
 
 
 @mcp.tool()
-async def list_clients(query: Optional[str] = None, limit: int = 50) -> dict:
-    """List non-admin client accounts."""
+async def list_clients(query: Optional[str] = None, limit: int = 50, user_id: Optional[int] = None) -> dict:
+    """List non-admin client accounts. With user_id: that client's profile (no password hash)."""
+    if user_id is not None:
+        return await get_client(user_id)
 
     def work(db, ctx):
         cap = max(1, min(int(limit or 50), 200))
@@ -31,7 +33,6 @@ async def list_clients(query: Optional[str] = None, limit: int = 50) -> dict:
     return await run_tool("list_clients", "read", work, args={"query": query, "limit": limit})
 
 
-@mcp.tool()
 async def get_client(user_id: int) -> dict:
     """Get a client profile (no password hash)."""
 
@@ -44,7 +45,6 @@ async def get_client(user_id: int) -> dict:
     return await run_tool("get_client", "read", work, args={"user_id": user_id})
 
 
-@mcp.tool()
 async def create_client(
     username: str, email: str, permission_set_id: Optional[int] = None
 ) -> dict:
@@ -71,7 +71,6 @@ async def create_client(
     )
 
 
-@mcp.tool()
 async def set_client_permission_set(user_id: int, permission_set_id: Optional[int] = None) -> dict:
     """Assign or clear a client's default permission preset."""
 

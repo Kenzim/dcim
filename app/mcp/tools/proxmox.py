@@ -11,7 +11,6 @@ from app.mcp.runtime import run_tool
 from app.services.vm_provisioning_service import VMProvisioningService
 
 
-@mcp.tool()
 async def list_proxmox_clusters() -> dict:
     """List Proxmox clusters with capacity summary (no API passwords)."""
 
@@ -21,7 +20,6 @@ async def list_proxmox_clusters() -> dict:
     return await run_tool("list_proxmox_clusters", "read", work)
 
 
-@mcp.tool()
 async def get_proxmox_inventory(cluster_id: int) -> dict:
     """Nodes, storages, and templates for a cluster (no credentials)."""
 
@@ -65,7 +63,6 @@ async def plan_vm(
     )
 
 
-@mcp.tool()
 async def sync_proxmox(cluster_id: int) -> dict:
     """Sync Proxmox cluster inventory from the live API."""
 

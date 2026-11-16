@@ -48,7 +48,6 @@ def _log_mcp_power_result(db, server_id: int, mapped: str, *, key_id, success: b
     )
 
 
-@mcp.tool()
 async def get_server_power_state(server_id: int) -> dict:
     """Read BMC/hypervisor power state for a server."""
 
@@ -69,7 +68,6 @@ async def get_server_power_state(server_id: int) -> dict:
     return await run_tool("get_server_power_state", "read", work, args={"server_id": server_id})
 
 
-@mcp.tool()
 async def get_server_boot_options(server_id: int) -> dict:
     """List BMC boot devices and the current boot order."""
 
@@ -90,7 +88,6 @@ async def get_server_boot_options(server_id: int) -> dict:
     return await run_tool("get_server_boot_options", "read", work, args={"server_id": server_id})
 
 
-@mcp.tool()
 async def list_install_tasks(server_id: int) -> dict:
     """OS installation task history for a server."""
 
@@ -115,7 +112,6 @@ async def list_install_tasks(server_id: int) -> dict:
     return await run_tool("list_install_tasks", "read", work, args={"server_id": server_id})
 
 
-@mcp.tool()
 async def server_power(server_id: int, action: str, force: bool = False, confirm: bool = False) -> dict:
     """Power a server: on (write), off/reset (destructive, needs confirm=true)."""
     action_norm = (action or "").strip().lower()

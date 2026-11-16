@@ -14,7 +14,6 @@ from app.models.service import ServiceType
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
 
 
-@mcp.tool()
 async def list_subnets() -> dict:
     """List IPAM subnets."""
 
@@ -24,7 +23,6 @@ async def list_subnets() -> dict:
     return await run_tool("list_subnets", "read", work)
 
 
-@mcp.tool()
 async def list_ip_assignments(service_id: Optional[int] = None) -> dict:
     """List IP assignments (credentials redacted)."""
 
@@ -50,7 +48,6 @@ async def list_ip_assignments(service_id: Optional[int] = None) -> dict:
     return await run_tool("list_ip_assignments", "read", work, args={"service_id": service_id})
 
 
-@mcp.tool()
 async def list_vm_ips(
     assigned: Optional[bool] = None, cluster_id: Optional[int] = None, q: Optional[str] = None
 ) -> dict:
@@ -82,7 +79,6 @@ async def list_vm_ips(
     )
 
 
-@mcp.tool()
 async def assign_ip(
     service_id: int,
     subnet_id: Optional[int] = None,
@@ -118,7 +114,6 @@ async def assign_ip(
     )
 
 
-@mcp.tool()
 async def release_ip(assignment_id: int) -> dict:
     """Release an IPAM assignment."""
 
