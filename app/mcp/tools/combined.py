@@ -279,6 +279,62 @@ async def ip_assignment(
 
 
 @mcp.tool()
+async def save_subnet(
+    subnet_id: Optional[int] = None,
+    name: Optional[str] = None,
+    cidr: Optional[str] = None,
+    location_id: Optional[int] = None,
+    clear_location: bool = False,
+    range_start: Optional[str] = None,
+    range_end: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    allocation_strategy: Optional[Literal["first_free", "least_recently_used", "spread_subnets"]] = None,
+    max_resale_count: Optional[int] = None,
+    enabled: Optional[bool] = None,
+) -> dict:
+    """Create an IPAM subnet (no subnet_id; needs name, cidr) or update one.
+
+    Create seeds every host address (max 4096), or only range_start..range_end, and refuses CIDRs that
+    overlap an existing subnet. cidr, range_start, range_end and tags are set on create only.
+    max_resale_count > 1 lets one IP be sold to that many different owners at once.
+    """
+    if subnet_id is None:
+        _require("Creating a subnet", name=name, cidr=cidr)
+        _reject("Creating a subnet", clear_location=clear_location or None)
+        return await ipam_tools.create_subnet(
+            name,
+            cidr,
+            location_id=location_id,
+            range_start=range_start,
+            range_end=range_end,
+            tags=tags,
+            allocation_strategy=allocation_strategy or "first_free",
+            max_resale_count=1 if max_resale_count is None else max_resale_count,
+            enabled=True if enabled is None else enabled,
+        )
+    _reject("Updating a subnet", cidr=cidr, range_start=range_start, range_end=range_end, tags=tags)
+    return await ipam_tools.update_subnet(
+        subnet_id,
+        name=name,
+        enabled=enabled,
+        allocation_strategy=allocation_strategy,
+        location_id=location_id,
+        clear_location=clear_location,
+        max_resale_count=max_resale_count,
+    )
+
+
+@mcp.tool()
+async def subnet_info(
+    subnet_id: int,
+    state: Optional[Literal["free", "assigned"]] = None,
+    limit: int = 256,
+) -> dict:
+    """One IPAM subnet with usage counts and its addresses (state, assignment count, service ids), sorted by IP."""
+    return await ipam_tools.get_subnet(subnet_id, state=state, limit=limit)
+
+
+@mcp.tool()
 async def save_switch(
     switch_id: Optional[int] = None,
     name: Optional[str] = None,

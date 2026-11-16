@@ -15,8 +15,9 @@ EXPECTED_TOOLS = {
     "get_aggregate_bandwidth", "ip_assignment", "list_clients", "list_ips", "list_servers", "list_services",
     "list_switches", "lookup", "plan_vm", "power", "provision", "proxmox_inventory", "rackflow_status",
     "reinstall_vm", "restore_backup", "rotate_ip_credentials", "save_client", "save_location", "save_rack",
-    "save_server", "save_switch", "search", "server_info", "server_reinstall_os", "server_set_boot",
-    "service_info", "service_set_status", "sol_send", "switch_action", "terminate_service", "virtual_media",
+    "save_server", "save_subnet", "save_switch", "search", "server_info", "server_reinstall_os", "server_set_boot",
+    "service_info", "service_set_status", "sol_send", "subnet_info", "switch_action", "terminate_service",
+    "virtual_media",
 }
 
 
@@ -148,6 +149,28 @@ async def test_provision_kinds(monkeypatch):
     await combined.provision("bare_metal", "b1", server_id=5, template_id="windows-server-2022")
     assert vm[0][0] == ("v1", "vps-1", 2) and vm[0][1]["owner_user_id"] == 7
     assert bm[0][1]["server_id"] == 5 and bm[0][1]["template_id"] == "windows-server-2022"
+
+
+@pytest.mark.asyncio
+async def test_save_subnet_routes_and_validation(monkeypatch):
+    from app.mcp.tools import ipam
+
+    create = _recorder(monkeypatch, ipam, "create_subnet")
+    update = _recorder(monkeypatch, ipam, "update_subnet")
+    with pytest.raises(ToolError, match="needs: cidr"):
+        await combined.save_subnet(name="proxy-2")
+    with pytest.raises(ToolError, match="does not accept: clear_location"):
+        await combined.save_subnet(name="proxy-2", cidr="10.9.0.0/29", clear_location=True)
+    await combined.save_subnet(name="proxy-2", cidr="10.9.0.0/29", location_id=1)
+    assert create[0][0] == ("proxy-2", "10.9.0.0/29")
+    assert create[0][1]["allocation_strategy"] == "first_free"
+    assert create[0][1]["max_resale_count"] == 1 and create[0][1]["enabled"] is True
+
+    with pytest.raises(ToolError, match="does not accept: cidr"):
+        await combined.save_subnet(subnet_id=4, cidr="10.9.1.0/29")
+    await combined.save_subnet(subnet_id=4, enabled=False, clear_location=True)
+    assert update[0][0] == (4,)
+    assert update[0][1]["enabled"] is False and update[0][1]["clear_location"] is True
 
 
 @pytest.mark.asyncio
