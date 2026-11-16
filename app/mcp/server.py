@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Optional
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -17,12 +17,53 @@ from app.mcp.context import mcp_auth_ctx
 from app.mcp.instance import mcp
 
 
+def _slim_schema(node: Any) -> Any:
+    """Drop Pydantic titles and collapse ``anyOf [T, null]`` (and its null default) to ``T``.
+
+    Only the advertised schema changes; arguments are still validated by each tool's
+    Pydantic model, so optional parameters keep accepting null.
+    """
+    if isinstance(node, list):
+        return [_slim_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "title" and isinstance(value, str):
+            continue
+        if key == "properties" and isinstance(value, dict):
+            out[key] = {name: _slim_schema(prop) for name, prop in value.items()}
+        else:
+            out[key] = _slim_schema(value)
+    variants = out.get("anyOf")
+    if isinstance(variants, list):
+        non_null = [v for v in variants if v != {"type": "null"}]
+        if len(non_null) < len(variants):
+            del out["anyOf"]
+            if len(non_null) == 1 and isinstance(non_null[0], dict):
+                out = {**non_null[0], **out}
+            elif non_null:
+                out["anyOf"] = non_null
+            if "default" in out and out["default"] is None:
+                del out["default"]
+    return out
+
+
+def _slim_tool_schemas() -> None:
+    manager = getattr(mcp, "_tool_manager", None)
+    if manager is None:
+        return
+    for tool in manager.list_tools():
+        tool.parameters = _slim_schema(tool.parameters)
+
+
 def _register_mcp_surface() -> None:
     from app.mcp import prompts as _prompts  # noqa: F401
     from app.mcp import resources as _resources  # noqa: F401
     from app.mcp.tools import register_tools
 
     register_tools()
+    _slim_tool_schemas()
 
 
 _register_mcp_surface()
