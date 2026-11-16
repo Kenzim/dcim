@@ -24,6 +24,8 @@ from app.services.server_activity_logger import (
     log_server_activity_success,
 )
 
+from app.services.server_lock import locked_message
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,8 @@ def server_not_ready_reason(db: Session, server: Server) -> Optional[str]:
     """Why ``server`` can't take a new order right now, or None if it can."""
     if not server.enabled:
         return "disabled"
+    if getattr(server, "locked", False):
+        return "locked"
     if any(s.status != ServiceStatus.TERMINATED for s in ServiceDAO.get_by_server(db, server.id)):
         return "assigned to a service"
     if InstallationTaskDAO.get_active_by_server(db, server.id):
@@ -241,6 +245,8 @@ def _pin_existing_server(db: Session, server_id: int) -> Server:
     server = _lock_for_allocation(db, Server, server_id)
     if not server:
         raise ProvisioningError("not_found", "Server not found")
+    if server.locked:
+        raise ProvisioningError("conflict", locked_message(server))
     existing = ServiceDAO.get_by_server(db, server_id)
     if any(s.status != ServiceStatus.TERMINATED for s in existing):
         raise ProvisioningError("conflict", "Server is already assigned to a service")

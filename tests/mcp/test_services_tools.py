@@ -141,10 +141,10 @@ async def test_list_filter_provision_and_lifecycle_errors(
     assert (await provision_bare_metal(name="bm", server_id=1))["id"] == service_row.id
 
     with pytest.raises(ToolError, match="Service not found"):
-        await service_power(999999, action="on")
+        await service_power(999999, action="on", confirm=True)
 
     monkeypatch.setattr("app.mcp.tools.services.admin_vm_power_action", AsyncMock(return_value=None))
-    powered = await service_power(service_row.id, action="on")
+    powered = await service_power(service_row.id, action="on", confirm=True)
     assert powered["id"] == service_row.id
 
     with pytest.raises(ToolError, match="confirm"):
@@ -183,7 +183,7 @@ async def test_list_filter_provision_and_lifecycle_errors(
     db_session.commit()
     monkeypatch.setattr("app.services.service_resource.service_linked_server", lambda db, s: None)
     with pytest.raises(ToolError, match="no linked server"):
-        await service_power(service_row.id, action="on")
+        await service_power(service_row.id, action="on", confirm=True)
     monkeypatch.setattr(
         "app.services.service_resource.service_linked_server",
         lambda db, s: SimpleNamespace(id=99),
@@ -192,6 +192,6 @@ async def test_list_filter_provision_and_lifecycle_errors(
         "app.mcp.tools.power.server_power",
         AsyncMock(return_value={"power": "on"}),
     )
-    bm_power = await service_power(service_row.id, action="on")
+    bm_power = await service_power(service_row.id, action="on", confirm=True)
     assert bm_power["power"] == "on"
 

@@ -21,7 +21,9 @@ class BootTaskDAO:
         temp_os_id: Optional[str] = None,
         description: Optional[str] = None
     ) -> BootTask:
-        """Create a new boot task"""
+        """Create a new boot task (refused while the server is locked)"""
+        from app.services.server_lock import ensure_server_id_unlocked
+        ensure_server_id_unlocked(db, server_id)
         # Cancel any existing pending tasks for this server
         BootTaskDAO.cancel_pending_tasks(db, server_id)
         

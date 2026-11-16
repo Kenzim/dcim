@@ -249,6 +249,15 @@ async def launch_boot_task(
     pending as a PXE task (dhcpd advertises it again), so the install still runs
     on the server's next network boot.
     """
+    if getattr(server, "locked", False) and boot_task.status in (
+        BootTaskStatus.PENDING,
+        BootTaskStatus.IN_PROGRESS,
+    ):
+        boot_task.status = BootTaskStatus.CANCELLED
+        db.commit()
+        BootTaskDAO._schedule_dhcp_sync(server.id)
+        logger.warning("Server %s is locked; cancelled boot task %s", server.id, boot_task.id)
+        return "blocked"
     if boot_task.status != BootTaskStatus.PENDING or not vmedia_capable(server):
         return "pxe"
 

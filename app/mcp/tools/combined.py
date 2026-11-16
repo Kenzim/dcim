@@ -117,10 +117,13 @@ async def save_server(
     cpu_count: Optional[int] = None,
     ram_gb: Optional[int] = None,
     enabled: Optional[bool] = None,
+    locked: Optional[bool] = None,
+    lock_reason: Optional[str] = None,
 ) -> dict:
     """Create a server (no server_id; needs name, server_ip, plugin_name, location_id) or update one.
 
     plugin_name, plugin_config, cpu_count and ram_gb are set on create only; plugin_config is never returned.
+    locked=true blocks any OS install or wipe (lock_reason is shown in the refusal).
     """
     if server_id is None:
         _require("Creating a server", name=name, server_ip=server_ip, plugin_name=plugin_name, location_id=location_id)
@@ -136,8 +139,9 @@ async def save_server(
             cpu_count=cpu_count or 1,
             ram_gb=ram_gb,
         )
-        if enabled is not None:
-            row = await inventory_tools.update_server(row["id"], enabled=enabled)
+        if enabled is not None or locked is not None:
+            lock_args = {} if locked is None else {"locked": locked, "lock_reason": lock_reason}
+            row = await inventory_tools.update_server(row["id"], enabled=enabled, **lock_args)
         return row
     _reject(
         "Updating a server", plugin_name=plugin_name, plugin_config=plugin_config, cpu_count=cpu_count, ram_gb=ram_gb
@@ -151,6 +155,8 @@ async def save_server(
         rack_id=rack_id,
         rack_unit=rack_unit,
         location_id=location_id,
+        locked=locked,
+        lock_reason=lock_reason,
     )
 
 
@@ -181,7 +187,7 @@ async def power(
     force: bool = False,
     confirm: bool = False,
 ) -> dict:
-    """Power a server or service: on, off, reset (off/reset need confirm=true). force applies to servers."""
+    """Power a server or service: on, off, reset, cycle (all need confirm=true). force applies to servers."""
     if (server_id is None) == (service_id is None):
         raise ToolError("Pass exactly one of server_id or service_id")
     if server_id is not None:

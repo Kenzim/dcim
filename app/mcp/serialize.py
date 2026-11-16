@@ -46,6 +46,8 @@ def server_row(row: Server, *, caps: Optional[list] = None) -> dict[str, Any]:
         "rack_units": row.rack_units,
         "plugin_name": row.plugin_name,
         "enabled": row.enabled,
+        "locked": bool(getattr(row, "locked", False)),
+        "lock_reason": getattr(row, "lock_reason", None),
         "cpu_count": row.cpu_count,
         "cpu_model": row.cpu_model,
         "ram_gb": row.ram_gb,

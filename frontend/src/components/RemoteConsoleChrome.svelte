@@ -32,6 +32,7 @@
   let powerState = '';
   let powerActions = [];
   let powerError = '';
+  let powerTarget = '';
   let powerPoll = null;
   let watchedToken = '';
 
@@ -48,6 +49,7 @@
       const data = await getKvmPower(powerToken);
       powerState = data.power_state || '';
       powerActions = data.actions || [];
+      powerTarget = data.server_name || powerTarget;
       powerError = data.success === false ? data.message || 'Power status unavailable' : '';
     } catch (e) {
       powerError = e.message || String(e);
@@ -85,7 +87,9 @@
 
   async function runPower(action) {
     if (!powerToken || powerBusy || !action?.id || action.enabled === false) return;
-    if (action.confirm && !window.confirm(action.confirm)) return;
+    const target = powerTarget ? `"${powerTarget}"` : 'this server';
+    const prompt = action.confirm ? `${action.label} ${target}? ${action.confirm}` : `${action.label} ${target}?`;
+    if (!window.confirm(prompt)) return;
     powerBusy = true;
     powerOpen = false;
     powerError = '';

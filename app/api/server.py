@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.auth import require_admin
 from app.dao import ServerDAO, LocationDAO, RackDAO, DiskDAO, NetworkPortDAO, ServerGroupDAO, CableRunDAO, SwitchPortDAO, SwitchBandwidthSampleDAO, NetworkSwitchDAO, ServerCapabilityDAO
+from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.boot_task_dao import BootTaskDAO
 from app.dao.hardware_detection_report_dao import HardwareDetectionReportDAO
 from app.dao.server_activity_dao import ServerActivityDAO
@@ -22,6 +23,7 @@ from app.plugins.registry import get_registry
 from app.plugins.base import PowerState
 from app.dao import ServiceInstanceDAO
 from app.services.boot_launcher import schedule_launch, vmedia_capable
+from app.services.server_lock import ensure_server_unlocked
 from app.services.dhcp_sync import regenerate_location_dhcp
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service
@@ -333,6 +335,8 @@ class ServerUpdate(BaseModel):
     plugin_name: str | None = None
     plugin_config: dict | None = None
     enabled: bool | None = None
+    locked: bool | None = None  # Admin lock: blocks any OS install or wipe
+    lock_reason: str | None = None
     boot_mode: str | None = None  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
     pxe_boot_mode: str | None = None  # "uefi" or "bios" - controls what DHCP serves initially
     os_boot_mode: str | None = None  # "uefi" or "bios" - controls how the server boots the installed OS
@@ -371,6 +375,8 @@ class ServerResponse(BaseModel):
     plugin_name: str
     plugin_config: dict
     enabled: bool
+    locked: bool = False
+    lock_reason: str | None = None
     boot_mode: str  # "uefi" or "bios" (deprecated - use pxe_boot_mode and os_boot_mode)
     pxe_boot_mode: str  # "uefi" or "bios" - controls what DHCP serves initially
     os_boot_mode: str  # "uefi" or "bios" - controls how the server boots the installed OS
@@ -1492,6 +1498,7 @@ async def run_hardware_detection(
     server = ServerDAO.get_by_id(db, server_id)
     if not server:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    ensure_server_unlocked(server)
 
     pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
     if not pxe_port:
@@ -1849,6 +1856,15 @@ async def update_server(
             detail="Server not found"
         )
     
+    lock_before = (bool(server.locked), server.lock_reason)
+    if server_data.locked is not None:
+        server.locked = server_data.locked
+        if not server_data.locked and "lock_reason" not in server_data.model_fields_set:
+            server.lock_reason = None
+    if "lock_reason" in server_data.model_fields_set:
+        reason = (server_data.lock_reason or "").strip()
+        server.lock_reason = reason or None
+
     # Update fields if provided
     if server_data.name is not None:
         # Check if name is being changed and if new name already exists
@@ -2074,6 +2090,31 @@ async def update_server(
                 server.server_groups.append(group)
     
     ServerDAO.update(db, server)
+
+    if lock_before != (bool(server.locked), server.lock_reason):
+        now_locked = bool(server.locked)
+        if now_locked and not lock_before[0]:
+            # Drop installs queued before the lock; the PXE and launch paths also refuse them.
+            InstallationTaskDAO.delete_pending_by_server(db, server.id)
+            BootTaskDAO.cancel_pending_tasks(db, server.id)
+        reason_text = server.lock_reason or ""
+        log_server_activity_success(
+            db,
+            server_id=server.id,
+            event_type=ServerActivityEventType.SERVICE,
+            action="lock" if now_locked else ("unlock" if lock_before[0] else "lock_reason"),
+            source="admin_api",
+            message=(
+                f"Server locked: {reason_text or 'no reason given'}" if now_locked
+                else ("Server unlocked" if lock_before[0] else "Lock reason cleared")
+            ),
+            details={
+                "requested_by_user_id": auth.get("user_id"),
+                "was_locked": lock_before[0],
+                "locked": now_locked,
+                "lock_reason": reason_text,
+            },
+        )
     
     # Refresh to get disks and network ports (with cable_run info for "Connected To")
     disks = DiskDAO.get_by_server(db, server.id)

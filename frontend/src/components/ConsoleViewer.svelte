@@ -28,6 +28,8 @@
 
   async function power(action) {
     if (powerBusy || !session?.ws_token) return;
+    const verb = action === 'on' ? 'Power on' : action === 'off' ? 'Power off' : 'Reboot';
+    if (!confirm(`${verb} this VM${session?.name ? ` "${session.name}"` : ''}?`)) return;
     powerBusy = true;
     chromeMessage = '';
     try {

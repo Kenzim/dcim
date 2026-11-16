@@ -249,6 +249,11 @@
     }
   }
 
+  function confirmPower(action) {
+    const verb = action === 'on' ? 'Power on' : action === 'off' ? 'Power off' : 'Reboot';
+    return confirm(`${verb} ${service.name}?`);
+  }
+
   async function act(fn) {
     if (!service?.id) return;
     busy = true;
@@ -713,9 +718,9 @@
             <p>Controls the Proxmox guest. Guest state refreshes from the hypervisor on load and after each action.</p>
           </div>
           <div class="actions">
-            <button class="btn-primary" disabled={busy} on:click={() => act((id) => vmPowerAction(id, 'on'))}>Power On</button>
-            <button class="btn-secondary" disabled={busy} on:click={() => act((id) => vmPowerAction(id, 'off'))}>Power Off</button>
-            <button class="btn-secondary" disabled={busy} on:click={() => act((id) => vmPowerAction(id, 'reboot'))}>Reboot</button>
+            <button class="btn-primary" disabled={busy} on:click={() => confirmPower('on') && act((id) => vmPowerAction(id, 'on'))}>Power On</button>
+            <button class="btn-secondary" disabled={busy} on:click={() => confirmPower('off') && act((id) => vmPowerAction(id, 'off'))}>Power Off</button>
+            <button class="btn-secondary" disabled={busy} on:click={() => confirmPower('reboot') && act((id) => vmPowerAction(id, 'reboot'))}>Reboot</button>
             {#if bothConsoleTypesAvailable}
               <button
                 class="btn-secondary"

@@ -681,6 +681,9 @@
                 <a href="/admin/servers/{server.id}" class="server-name-link">
                   <strong>{server.name}</strong>
                 </a>
+                {#if server.locked}
+                  <span class="locked-badge" title={server.lock_reason ? `Locked: ${server.lock_reason}` : 'Locked'}>Locked</span>
+                {/if}
               </td>
               <td>{server.server_ip}</td>
               <td>{server.cpu_count}x {server.cpu_model || 'N/A'}</td>
@@ -1324,6 +1327,16 @@
     min-width: 720px;
   }
 
+  .locked-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--danger-bg);
+    color: var(--danger-text);
+  }
   .server-name-link {
     color: var(--accent-color);
     text-decoration: none;

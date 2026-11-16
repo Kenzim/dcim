@@ -279,9 +279,9 @@ a.rfr-ca__btn--ghost:focus {
 
         {if $rackflow_reseller_power_available}
         <div class="rfr-ca__controls">
-          <a class="rfr-ca__btn rfr-ca__btn--ghost" href="{$rackflow_reseller_power_on_url|escape}">Power on</a>
-          <a class="rfr-ca__btn rfr-ca__btn--ghost" href="{$rackflow_reseller_power_off_url|escape}">Power off</a>
-          <a class="rfr-ca__btn rfr-ca__btn--ghost" href="{$rackflow_reseller_reboot_url|escape}">Reboot</a>
+          <a class="rfr-ca__btn rfr-ca__btn--ghost" href="{$rackflow_reseller_power_on_url|escape}" onclick="return window.confirm('Power on this service?');">Power on</a>
+          <a class="rfr-ca__btn rfr-ca__btn--ghost" href="{$rackflow_reseller_power_off_url|escape}" onclick="return window.confirm('Power off this service?');">Power off</a>
+          <a class="rfr-ca__btn rfr-ca__btn--ghost" href="{$rackflow_reseller_reboot_url|escape}" onclick="return window.confirm('Reboot this service?');">Reboot</a>
         </div>
         {elseif !$rackflow_reseller_error}
         <p class="rfr-ca__note">Power controls are not available for this service type.</p>
