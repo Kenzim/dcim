@@ -1,4 +1,4 @@
-"""AMI MegaRAC virtual CD streamed by Rackflow (ASRock Rack and Gigabyte).
+"""AMI MegaRAC virtual CD streamed by Rackflow (ASRock Rack, Gigabyte, ASUS and MSI).
 
 Instead of asking the BMC to mount an NFS/CIFS share, Rackflow acts as the HTML5
 viewer's CD drive over ``wss://<bmc>/cd-server`` and answers the host's reads from
@@ -43,7 +43,7 @@ def image_filename(image_url: str) -> str:
 
 class MegaracStreamVirtualMediaProfile(GigabyteVirtualMediaProfile):
     id = "megarac_stream"
-    display_name = "AMI MegaRAC virtual CD streamed by Rackflow (ASRock Rack / Gigabyte)"
+    display_name = "AMI MegaRAC virtual CD streamed by Rackflow (ASRock Rack / Gigabyte / ASUS / MSI)"
     mounts_cifs = False
     mounts_nfs = False
     streams_iso = True

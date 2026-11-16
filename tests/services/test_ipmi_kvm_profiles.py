@@ -92,3 +92,10 @@ def test_ssl_ctx_includes_rsa_aes_gcm():
     assert "AES256-GCM-SHA384" in names
     client = __import__("httpx").AsyncClient(verify=ctx, timeout=1.0)
     assert client is not None
+
+
+def test_gigabyte_profile_serves_asus_and_msi_megarac_bmcs():
+    profile = get_profile("gigabyte")
+    assert isinstance(profile, GigabyteKvmProfile)
+    assert "ASUS" in profile.display_name and "MSI" in profile.display_name
+    assert profile.hello_frame_attempts(_auth())[0] == profile.hello_frame(_auth())
