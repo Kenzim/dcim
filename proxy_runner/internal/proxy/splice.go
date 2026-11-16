@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -83,10 +84,12 @@ func splice(a, b net.Conn, idle time.Duration) {
 // domain name is checked using the actual IP it resolved to -- closing the
 // TOCTOU window a naive "resolve, check, dial separately" approach would
 // leave open to DNS-rebinding.
+//
+// Hostnames are resolved through the shared outbound DNS cache, for the bind
+// IP's address family only, and each resolved address is tried in turn.
 func dialTCP(addr, bindIP string, timeout time.Duration) (net.Conn, error) {
 	allowPrivate := allowPrivateDestinations()
 	d := net.Dialer{
-		Timeout: timeout,
 		Control: func(_, address string, c syscall.RawConn) error {
 			if allowPrivate {
 				return nil
@@ -107,7 +110,38 @@ func dialTCP(addr, bindIP string, timeout time.Duration) (net.Conn, error) {
 			d.LocalAddr = &net.TCPAddr{IP: ip}
 		}
 	}
-	return d.Dial("tcp", addr)
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	lookupNet, dialNet := ipFamily(bindIP)
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	if net.ParseIP(host) != nil {
+		return d.DialContext(ctx, dialNet, addr)
+	}
+	ips, err := outboundDNS().lookup(ctx, lookupNet, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, ip := range ips {
+		conn, err := d.DialContext(ctx, dialNet, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
 }
 
 // discard closes and drains a bit so the peer sees FIN promptly.

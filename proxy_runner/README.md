@@ -18,6 +18,12 @@ Go dual-protocol forwarder for customer HTTP proxy / SOCKS5 services.
 | `HEALTH_LISTEN` | `:8081` | Health HTTP listen address |
 | `DIAL_TIMEOUT` | `15s` | Upstream dial timeout |
 | `IDLE_TIMEOUT` | `5m` | Idle splice timeout |
+| `PROXY_DNS_SERVER` | (system resolver) | DNS server for outbound lookups, e.g. `1.1.1.1` or `1.1.1.1:53` |
+| `PROXY_DNS_CACHE_TTL` | `60s` | How long a resolved hostname is reused; `0` disables the cache |
+| `PROXY_DNS_NEGATIVE_TTL` | `5s` | How long a failed lookup is remembered |
+| `PROXY_DNS_CACHE_SIZE` | `10000` | Maximum cached hostnames |
+
+Outbound lookups follow the bind IP's family: an IPv4 proxy IP only queries A records.
 
 ## Deploy
 
