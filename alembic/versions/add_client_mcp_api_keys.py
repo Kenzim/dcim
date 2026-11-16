@@ -1,7 +1,7 @@
 """Add client_mcp_api_keys table for the client MCP endpoint (/mcp/client).
 
 Revision ID: add_client_mcp_api_keys
-Revises: add_server_lock
+Revises: add_user_invite_tokens
 Create Date: 2026-11-16
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 
 revision: str = "add_client_mcp_api_keys"
-down_revision: Union[str, Sequence[str], None] = "add_server_lock"
+down_revision: Union[str, Sequence[str], None] = "add_user_invite_tokens"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
