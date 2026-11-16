@@ -110,6 +110,37 @@ class PasswordResetToken(Base):
     user = relationship("User", foreign_keys=[user_id])
 
 
+class UserInviteToken(Base):
+    """Single-use invitation link for an account created before its owner responds."""
+
+    __tablename__ = "user_invite_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey(_FK_USERS, ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash = Column(String(128), nullable=False, unique=True, index=True)
+    invited_by_user_id = Column(
+        Integer,
+        ForeignKey(_FK_USERS, ondelete="SET NULL"),
+        nullable=True,
+    )
+    # True when staff chose the username (offered to the invitee as a default);
+    # False when the account carries a generated placeholder.
+    username_prefilled = Column(Boolean, nullable=False, default=False, server_default="0")
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    # Set when the token is used, retired by a resend or revoked.
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    # Set only when the invitee completed the invitation.
+    accepted = Column(Boolean, nullable=False, default=False, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
 class UserTotpSecret(Base):
     __tablename__ = "user_totp_secrets"
 

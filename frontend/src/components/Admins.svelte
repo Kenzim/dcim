@@ -8,6 +8,9 @@
     updateAdminAccount,
     deleteAdminAccount,
     setRequireTwoFactor,
+    inviteUser,
+    resendInvite,
+    revokeInvite,
   } from '../lib/api.js';
 
   let admins = [];
@@ -18,6 +21,12 @@
   let createBusy = false;
   let createError = null;
   let createForm = { username: '', email: '', password: '' };
+
+  let showInviteForm = false;
+  let inviteBusy = false;
+  let inviteError = null;
+  let inviteNotice = null;
+  let inviteForm = { email: '', username: '' };
 
   let editingId = null;
   let editForm = { email: '', password: '', currentPassword: '' };
@@ -57,6 +66,46 @@
       createError = e.message || String(e);
     } finally {
       createBusy = false;
+    }
+  }
+
+  async function submitInvite() {
+    inviteError = null;
+    inviteNotice = null;
+    inviteBusy = true;
+    try {
+      if (!inviteForm.email.trim()) throw new Error('Email is required');
+      const created = await inviteUser({
+        email: inviteForm.email.trim(),
+        kind: 'staff',
+        username: inviteForm.username.trim() || undefined,
+      });
+      inviteNotice = `Invitation sent to ${created.email}.`;
+      showInviteForm = false;
+      inviteForm = { email: '', username: '' };
+      await load();
+    } catch (e) {
+      inviteError = e.message || String(e);
+    } finally {
+      inviteBusy = false;
+    }
+  }
+
+  async function inviteAction(admin, action) {
+    error = null;
+    inviteNotice = null;
+    try {
+      if (action === 'revoke') {
+        if (!confirm(`Revoke the invitation for ${admin.email}? The account is kept.`)) return;
+        await revokeInvite(admin.id);
+        inviteNotice = `Invitation for ${admin.email} revoked.`;
+      } else {
+        await resendInvite(admin.id);
+        inviteNotice = `Invitation resent to ${admin.email}.`;
+      }
+      await load();
+    } catch (e) {
+      error = e.message || String(e);
     }
   }
 
@@ -116,6 +165,9 @@
 
 <PageHeader title="Admins">
   <svelte:fragment slot="actions">
+    <button type="button" class="btn-secondary" on:click={() => (showInviteForm = !showInviteForm)}>
+      {showInviteForm ? 'Cancel' : 'Invite admin'}
+    </button>
     <button type="button" class="btn-primary" on:click={() => (showCreateForm = !showCreateForm)}>
       {showCreateForm ? 'Cancel' : '+ New admin'}
     </button>
@@ -124,6 +176,21 @@
 
 <div class="admin-page container">
   <p class="admin-page-lead">Staff accounts with full admin access. Admins have no client portal.</p>
+
+  {#if inviteNotice}<div class="notice">{inviteNotice}</div>{/if}
+  {#if showInviteForm}
+    <div class="panel">
+      <h4>Invite admin</h4>
+      {#if inviteError}<div class="error">{inviteError}</div>{/if}
+      <div class="form-row">
+        <label>Email <input type="email" bind:value={inviteForm.email} /></label>
+        <label>Username (optional) <input bind:value={inviteForm.username} /></label>
+        <button type="button" class="btn-primary" disabled={inviteBusy} on:click={submitInvite}>
+          {inviteBusy ? 'Sending…' : 'Send invitation'}
+        </button>
+      </div>
+    </div>
+  {/if}
 
   {#if showCreateForm}
     <div class="panel">
@@ -161,6 +228,7 @@
               <td class="name-cell">
                 {admin.username}
                 {#if $currentUser?.id === admin.id}<span class="you-badge">you</span>{/if}
+                {#if admin.invited}<span class="you-badge">Invited</span>{/if}
               </td>
               <td>
                 {#if editingId === admin.id}
@@ -186,6 +254,10 @@
                   <button class="btn-secondary btn-small" disabled={editBusy} on:click={() => submitEdit(admin)}>Save</button>
                   <button class="btn-link" disabled={editBusy} on:click={cancelEdit}>Cancel</button>
                 {:else}
+                  {#if admin.invited}
+                    <button class="btn-secondary btn-small" on:click={() => inviteAction(admin, 'resend')}>Resend</button>
+                    <button class="btn-secondary btn-small" on:click={() => inviteAction(admin, 'revoke')}>Revoke</button>
+                  {/if}
                   <button class="btn-secondary btn-small" on:click={() => startEdit(admin)}>Edit</button>
                   <button class="btn-danger btn-small" on:click={() => removeAdmin(admin)}>Delete</button>
                 {/if}
@@ -227,6 +299,7 @@
     color: var(--info-text);
     vertical-align: middle;
   }
+  .notice { margin-bottom: 16px; padding: 10px 14px; border-radius: 8px; background: var(--success-bg); color: var(--success-text); }
   .actions-cell { justify-content: flex-end; }
   .btn-link {
     background: none;

@@ -514,10 +514,42 @@ async def save_client(
     username: Optional[str] = None,
     email: Optional[str] = None,
     permission_set_id: Optional[int] = None,
+    kind: Literal["client", "staff"] = "client",
+    invite: bool = False,
+    require_2fa: Optional[bool] = None,
 ) -> dict:
-    """Create a client without a password (no user_id; needs username, email), or set/clear a client's permission preset."""
+    """Create or update an account (no passwords over MCP).
+    No user_id: invite=true emails an invitation (kind client or staff; optional username, permission_set_id for clients; needs email);
+    without invite only a passwordless client is created (needs username, email).
+    With user_id: set/clear a client's permission_set_id, set require_2fa (client or staff), or change a staff member's email.
+    """
     if user_id is None:
+        _reject("Creating an account", require_2fa=require_2fa)
+        if invite:
+            _require("Inviting", email=email)
+            return await user_tools.invite_user(email, kind, username=username, permission_set_id=permission_set_id)
+        if kind == "staff":
+            raise ToolError("Staff accounts are created by invitation: pass invite=true")
         _require("Creating a client", username=username, email=email)
         return await user_tools.create_client(username, email, permission_set_id=permission_set_id)
-    _reject("Updating a client", username=username, email=email)
-    return await user_tools.set_client_permission_set(user_id, permission_set_id=permission_set_id)
+    _reject("Updating an account", username=username, invite=invite or None)
+    result: Optional[dict] = None
+    if kind == "staff":
+        _reject("Updating a staff member", permission_set_id=permission_set_id)
+        if email is None and require_2fa is None:
+            raise ToolError("Updating a staff member needs: email or require_2fa")
+        if email is not None:
+            result = await user_tools.update_staff(user_id, email)
+    else:
+        _reject("Updating a client", email=email)
+        if permission_set_id is not None or require_2fa is None:
+            result = await user_tools.set_client_permission_set(user_id, permission_set_id=permission_set_id)
+    if require_2fa is not None:
+        result = await user_tools.set_require_2fa(user_id, kind, require_2fa)
+    return result
+
+
+@mcp.tool()
+async def invite_action(user_id: int, action: Literal["resend", "revoke"]) -> dict:
+    """resend: email a fresh invitation link (older ones stop working). revoke: kill the link but keep the account."""
+    return await user_tools.invite_action(user_id, action)

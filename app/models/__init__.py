@@ -138,6 +138,7 @@ from app.models.commerce_auth_extra import (
     ExternalIdentityProvider,
     PasswordResetToken,
     UserExternalIdentity,
+    UserInviteToken,
     UserTotpSecret,
 )
 from app.models.commerce_webhook import (
@@ -226,6 +227,7 @@ __all__ += [
     "ExternalIdentityProvider",
     "PasswordResetToken",
     "UserExternalIdentity",
+    "UserInviteToken",
     "UserTotpSecret",
     "WebhookEndpoint",
     "WebhookDelivery",

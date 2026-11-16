@@ -366,6 +366,7 @@ api_router.include_router(services_admin_api.router, tags=["admin-services"])
 from app.api import admin_users as admin_users_api
 api_router.include_router(admin_users_api.clients_router, tags=["admin-clients"])
 api_router.include_router(admin_users_api.admins_router, tags=["admin-admins"])
+api_router.include_router(admin_users_api.invites_router, tags=["admin-invites"])
 
 # Include client services routes
 from app.api import services_client as services_client_api

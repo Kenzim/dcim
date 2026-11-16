@@ -18,6 +18,7 @@ class EmailEvent:
     WELCOME = "welcome"
     VERIFY_EMAIL = "verify_email"
     PASSWORD_RESET = "password_reset"
+    USER_INVITE = "user_invite"
     ORDER_CONFIRMATION = "order_confirmation"
     INVOICE_CREATED = "invoice_created"
     INVOICE_PAID = "invoice_paid"
@@ -32,6 +33,7 @@ _SUBJECTS = {
     EmailEvent.WELCOME: "Welcome to Rackflow",
     EmailEvent.VERIFY_EMAIL: "Verify your Rackflow email address",
     EmailEvent.PASSWORD_RESET: "Reset your Rackflow password",
+    EmailEvent.USER_INVITE: "You have been invited to Rackflow",
     EmailEvent.ORDER_CONFIRMATION: "Your Rackflow order confirmation",
     EmailEvent.INVOICE_CREATED: "New Rackflow invoice",
     EmailEvent.INVOICE_PAID: "Rackflow invoice paid",
@@ -73,6 +75,7 @@ def render_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
     amount = _money(data)
     verify_url = str(data.get("verify_url") or "")
     reset_url = str(data.get("reset_url") or "")
+    invite_url = str(data.get("invite_url") or "")
 
     bodies = {
         EmailEvent.WELCOME: (
@@ -86,6 +89,11 @@ def render_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
         EmailEvent.PASSWORD_RESET: (
             "We received a request to reset your password."
             + (f" Use this link: {reset_url}" if reset_url else "")
+        ),
+        EmailEvent.USER_INVITE: (
+            "You have been invited to join Rackflow. Accept the invitation to choose your username and password."
+            + (f" Open this link: {invite_url}" if invite_url else "")
+            + " The link expires in 7 days."
         ),
         EmailEvent.ORDER_CONFIRMATION: (
             f"Thank you for your order {order}. We received your request and "
@@ -123,6 +131,17 @@ def render_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
             action_url=reset_url or None,
             action_label="Reset password",
             footnote="If you didn't ask for this, you can ignore this email; your password won't change.",
+        )
+    elif event == EmailEvent.USER_INVITE:
+        html = render_email_html(
+            heading="You have been invited to Rackflow",
+            paragraphs=[
+                "An account has been created for you. Accept the invitation to choose your username and password.",
+                "The link expires in 7 days.",
+            ],
+            action_url=invite_url or None,
+            action_label="Accept invitation",
+            footnote="If you weren't expecting this invitation, you can ignore this email.",
         )
     elif event == EmailEvent.VERIFY_EMAIL:
         html = render_email_html(
