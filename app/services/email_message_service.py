@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models.commerce_email import EmailMessage, EmailMessageStatus
 from app.models.reseller import Reseller
+from app.services.email_layout import render_email_html
 from app.services.notification_service import NotificationEvent, render_notification
 
 
@@ -61,7 +62,8 @@ def render_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
         NotificationEvent.USDT_DETECTED,
     }:
         subject, body = render_notification(event, data)
-        return subject, body, None
+        html = render_email_html(heading=subject, paragraphs=body.split("\n\n"))
+        return subject, body, html
 
     subject = _SUBJECTS.get(event, "Rackflow notification")
     order = str(data.get("order_number") or data.get("order_id") or "")
@@ -113,7 +115,24 @@ def render_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
         ),
     }
     body = bodies.get(event, "There is an update to your Rackflow account.")
-    html = f"<p>{body}</p>" if body else None
+
+    if event == EmailEvent.PASSWORD_RESET:
+        html = render_email_html(
+            heading="Reset your password",
+            paragraphs=["We received a request to reset your password. Choose a new one with the button below."],
+            action_url=reset_url or None,
+            action_label="Reset password",
+            footnote="If you didn't ask for this, you can ignore this email; your password won't change.",
+        )
+    elif event == EmailEvent.VERIFY_EMAIL:
+        html = render_email_html(
+            heading="Verify your email address",
+            paragraphs=["Please verify your email address to activate your account."],
+            action_url=verify_url or None,
+            action_label="Verify email",
+        )
+    else:
+        html = render_email_html(heading=subject, paragraphs=[body])
     return subject, body, html
 
 

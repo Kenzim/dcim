@@ -51,12 +51,14 @@
     {:else}
       {#if error}<Alert type="danger">{error}</Alert>{/if}
       <form on:submit|preventDefault={submit} class="auth-form">
-        <label>New password
-          <input type="password" bind:value={password} required minlength="8" autocomplete="new-password" disabled={busy} />
-        </label>
-        <label>Confirm new password
-          <input type="password" bind:value={confirmPassword} required minlength="8" autocomplete="new-password" disabled={busy} />
-        </label>
+        <div class="form-group">
+          <label for="new-password">New password</label>
+          <input id="new-password" type="password" bind:value={password} required minlength="8" autocomplete="new-password" placeholder="At least 8 characters" disabled={busy} />
+        </div>
+        <div class="form-group">
+          <label for="confirm-password">Confirm new password</label>
+          <input id="confirm-password" type="password" bind:value={confirmPassword} required minlength="8" autocomplete="new-password" disabled={busy} />
+        </div>
         <Button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Set new password'}</Button>
       </form>
     {/if}
@@ -92,11 +94,17 @@
     flex-direction: column;
     gap: 14px;
   }
-  .auth-form label {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    font-weight: 500;
+  .auth-form .form-group {
+    margin-bottom: 0;
+  }
+  .auth-form .form-group input {
+    padding: 12px 14px;
+    font-size: 15px;
+  }
+  .auth-form :global(button[type='submit']) {
+    width: 100%;
+    justify-content: center;
+    margin-top: 4px;
   }
   .auth-link {
     color: var(--accent-color);

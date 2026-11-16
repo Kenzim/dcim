@@ -33,9 +33,10 @@
       {#if error}<Alert type="danger">{error}</Alert>{/if}
       <p class="hint">Enter the email address on your account and we'll send you a link to choose a new password.</p>
       <form on:submit|preventDefault={submit} class="auth-form">
-        <label>Email
-          <input type="email" bind:value={email} required autocomplete="email" disabled={busy} />
-        </label>
+        <div class="form-group">
+          <label for="reset-email">Email</label>
+          <input id="reset-email" type="email" bind:value={email} required autocomplete="email" placeholder="you@example.com" disabled={busy} />
+        </div>
         <Button type="submit" disabled={busy || !email.trim()}>{busy ? 'Sending…' : 'Send reset link'}</Button>
       </form>
       <a href="/login" class="auth-link">Back to sign in</a>
@@ -72,11 +73,17 @@
     flex-direction: column;
     gap: 14px;
   }
-  .auth-form label {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    font-weight: 500;
+  .auth-form .form-group {
+    margin-bottom: 0;
+  }
+  .auth-form .form-group input {
+    padding: 12px 14px;
+    font-size: 15px;
+  }
+  .auth-form :global(button[type='submit']) {
+    width: 100%;
+    justify-content: center;
+    margin-top: 4px;
   }
   .hint {
     margin: 0;
