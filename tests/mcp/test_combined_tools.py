@@ -71,12 +71,15 @@ async def test_save_server_create_update_and_validation(monkeypatch):
     await combined.save_server(name="r1", server_ip="10.0.0.1", plugin_name="ipmi", location_id=1, enabled=False)
     assert creates[0][0] == ("r1", "10.0.0.1", "ipmi", 1)
     assert creates[0][1]["cpu_count"] == 1
-    assert updates == [((9,), {"enabled": False})]
+    assert updates == [((9,), {"enabled": False, "cpu_model": None})]
 
     with pytest.raises(ToolError, match="does not accept: plugin_config"):
         await combined.save_server(server_id=9, plugin_config={"x": 1})
     await combined.save_server(server_id=9, name="r1b")
     assert updates[-1][0] == (9,) and updates[-1][1]["name"] == "r1b"
+    await combined.save_server(server_id=9, cpu_count=2, ram_gb=768, cpu_model="EPYC 9654")
+    assert updates[-1][1]["cpu_count"] == 2 and updates[-1][1]["ram_gb"] == 768
+    assert updates[-1][1]["cpu_model"] == "EPYC 9654"
 
 
 @pytest.mark.asyncio

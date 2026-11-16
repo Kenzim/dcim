@@ -19,7 +19,31 @@ _MSG_LOCATION_NOT_FOUND = "Location not found"
 _MSG_SERVER_NOT_FOUND = "Server not found"
 
 
-def _apply_server_field_updates(db, row, *, name, server_ip, description, enabled, rack_id, rack_unit, location_id):
+def _apply_server_field_updates(
+    db,
+    row,
+    *,
+    name,
+    server_ip,
+    description,
+    enabled,
+    rack_id,
+    rack_unit,
+    location_id,
+    cpu_count=None,
+    cpu_model=None,
+    ram_gb=None,
+):
+    if cpu_count is not None:
+        if cpu_count < 1:
+            raise ValueError("cpu_count must be at least 1")
+        row.cpu_count = cpu_count
+    if cpu_model is not None:
+        row.cpu_model = cpu_model
+    if ram_gb is not None:
+        if ram_gb < 0:
+            raise ValueError("ram_gb cannot be negative")
+        row.ram_gb = ram_gb
     if name is not None:
         row.name = name
     if server_ip is not None:
@@ -307,6 +331,9 @@ async def update_server(
     rack_id: Optional[int] = None,
     rack_unit: Optional[int] = None,
     location_id: Optional[int] = None,
+    cpu_count: Optional[int] = None,
+    cpu_model: Optional[str] = None,
+    ram_gb: Optional[int] = None,
 ) -> dict:
     """Update non-secret server fields."""
 
@@ -324,6 +351,9 @@ async def update_server(
             rack_id=rack_id,
             rack_unit=rack_unit,
             location_id=location_id,
+            cpu_count=cpu_count,
+            cpu_model=cpu_model,
+            ram_gb=ram_gb,
         )
         return server_row(ServerDAO.update(db, row))
 

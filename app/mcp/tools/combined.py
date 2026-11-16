@@ -116,12 +116,13 @@ async def save_server(
     rack_id: Optional[int] = None,
     rack_unit: Optional[int] = None,
     cpu_count: Optional[int] = None,
+    cpu_model: Optional[str] = None,
     ram_gb: Optional[int] = None,
     enabled: Optional[bool] = None,
 ) -> dict:
     """Create a server (no server_id; needs name, server_ip, plugin_name, location_id) or update one.
 
-    plugin_name, plugin_config, cpu_count and ram_gb are set on create only; plugin_config is never returned.
+    plugin_name and plugin_config are set on create only; plugin_config is never returned.
     """
     if server_id is None:
         _require("Creating a server", name=name, server_ip=server_ip, plugin_name=plugin_name, location_id=location_id)
@@ -137,14 +138,15 @@ async def save_server(
             cpu_count=cpu_count or 1,
             ram_gb=ram_gb,
         )
-        if enabled is not None:
-            row = await inventory_tools.update_server(row["id"], enabled=enabled)
+        if enabled is not None or cpu_model is not None:
+            row = await inventory_tools.update_server(row["id"], enabled=enabled, cpu_model=cpu_model)
         return row
-    _reject(
-        "Updating a server", plugin_name=plugin_name, plugin_config=plugin_config, cpu_count=cpu_count, ram_gb=ram_gb
-    )
+    _reject("Updating a server", plugin_name=plugin_name, plugin_config=plugin_config)
     return await inventory_tools.update_server(
         server_id,
+        cpu_count=cpu_count,
+        cpu_model=cpu_model,
+        ram_gb=ram_gb,
         name=name,
         server_ip=server_ip,
         description=description,
