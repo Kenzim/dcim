@@ -128,7 +128,7 @@ async def save_server(
     """Create a server (no server_id; needs name, server_ip, plugin_name, location_id) or update one.
 
     plugin_name and plugin_config are set on create only; plugin_config is never returned.
-    locked=true blocks any OS install or wipe (lock_reason is shown in the refusal).
+    locked=true blocks any OS install or wipe (lock_reason is shown in the refusal); unlocking is admin-UI only.
     """
     if server_id is None:
         _require("Creating a server", name=name, server_ip=server_ip, plugin_name=plugin_name, location_id=location_id)

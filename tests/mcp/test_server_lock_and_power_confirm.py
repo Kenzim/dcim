@@ -46,21 +46,30 @@ async def test_mcp_reinstall_refused(db_session, mcp_sessionlocal, mcp_auth_ctx_
 
 
 @pytest.mark.asyncio
-async def test_mcp_unlock_needs_destructive_scope(db_session, mcp_sessionlocal, mcp_auth_ctx_write, locked_server):
-    with pytest.raises(ToolError, match="destructive"):
+async def test_mcp_cannot_unlock_with_write_scope(db_session, mcp_sessionlocal, mcp_auth_ctx_write, locked_server):
+    with pytest.raises(ToolError, match="cannot be unlocked"):
         await combined.save_server(server_id=locked_server.id, locked=False)
     row = await combined.save_server(server_id=locked_server.id, lock_reason="new reason")
     assert row["locked"] is True and row["lock_reason"] == "new reason"
 
 
 @pytest.mark.asyncio
-async def test_mcp_lock_and_unlock_with_destructive_scope(
+async def test_mcp_cannot_unlock_even_with_destructive_scope(
     db_session, mcp_sessionlocal, mcp_auth_ctx_destructive, locked_server
 ):
-    row = await combined.save_server(server_id=locked_server.id, locked=False)
-    assert row["locked"] is False and row["lock_reason"] is None
-    row = await combined.save_server(server_id=locked_server.id, locked=True, lock_reason="again")
-    assert row["locked"] is True and row["lock_reason"] == "again"
+    with pytest.raises(ToolError, match="cannot be unlocked"):
+        await combined.save_server(server_id=locked_server.id, locked=False)
+    db_session.refresh(locked_server)
+    assert locked_server.locked is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_can_lock_unlocked_server(db_session, mcp_sessionlocal, mcp_auth_ctx_write, locked_server):
+    locked_server.locked = False
+    locked_server.lock_reason = None
+    db_session.commit()
+    row = await combined.save_server(server_id=locked_server.id, locked=True, lock_reason="hypervisor")
+    assert row["locked"] is True and row["lock_reason"] == "hypervisor"
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,6 @@ from app.dao.server_activity_dao import ServerActivityDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.mcp.instance import mcp
-from app.mcp.scopes import scope_allows
 from app.mcp.runtime import run_tool
 from app.mcp.serialize import location_row, rack_row, server_row
 from app.plugins.registry import get_registry
@@ -374,8 +373,8 @@ async def update_server(
         if not row:
             raise ValueError(_MSG_SERVER_NOT_FOUND)
         lock_before = (bool(getattr(row, "locked", False)), getattr(row, "lock_reason", None))
-        if lock_before[0] and locked is False and not scope_allows(ctx.scopes, "destructive"):
-            raise ValueError("Unlocking a server needs a key with destructive scope")
+        if lock_before[0] and locked is False:
+            raise ValueError("Servers cannot be unlocked over MCP; unlock it in the admin UI")
         _apply_server_field_updates(
             db,
             row,
