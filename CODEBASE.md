@@ -23,6 +23,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
+| Client MCP (customers' own assistants) | `app/mcp/client/` (tools call client-portal handlers), `app/core/client_mcp_auth.py`, keys API `app/api/client_mcp_keys.py`; UI `ClientMcpKeys.svelte` |
 | OS install templates | `os_templates/<name>/` (`template.json` + `install.sh`); bare-metal WHMCS OS list is the server group’s permitted templates |
 | PXE / cloud-init / boot scripts served to bare metal | `app/api/server_interaction.py` |
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
@@ -479,6 +480,8 @@ Non-VM security controls that are now enforced (see `tests/SECURITY_TESTS.md`):
 | Frontend auth | Role-based routing (admin→`/admin`, else `/client`); global fetch 401 → clear auth + `/login`; secret template params masked | `frontend/src/lib/api.js`, `frontend/src/routes/`, `frontend/src/components/ServerDetail.svelte` |
 
 Relevant settings live in `app/core/config.py`: `TRUST_X_FORWARDED_FOR`, `SERVICE_INSTANCE_ENCRYPTION_KEY`, `REQUIRE_SERVICE_INSTANCE_ENCRYPTION`, `MCP_ENABLED`, `MCP_RATE_LIMIT_PER_KEY`, `MCP_RATE_LIMIT_PER_IP`. Runner keys and encryption keys are wired through `docker-compose.yml`; see `INSTALL.md`.
+
+Client MCP (`/client-mcp`, off unless `CLIENT_MCP_ENABLED=true`): keys use prefix `rfcmcp_` in table `client_mcp_api_keys` (SHA-256 at rest), belong to a client user, are rejected by `get_current_user` and the staff `/mcp`, and are re-checked against the live user and the `account.mcp` preset permission (default on) on every call. Tools (`account`, `services`, `service_action`, `billing`, `tickets`) call `app/api/services_client.py` / `commerce_client.py` handlers with the owner's auth dict, so ownership, presets and audit match the portal. Impersonation sessions cannot create or change keys.
 
 MCP tools live in `app/mcp/tools/` and call DAOs/services/plugins directly (not a REST proxy). Resources: `rackflow://server/{id}`, `rackflow://service/{id}`, `rackflow://location/{id}`.
 

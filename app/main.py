@@ -125,6 +125,10 @@ async def lifespan(app: FastAPI):
             from app.mcp.server import mcp_session_lifespan
 
             await stack.enter_async_context(mcp_session_lifespan())
+        if settings.client_mcp_enabled:
+            from app.mcp.client.server import client_mcp_session_lifespan
+
+            await stack.enter_async_context(client_mcp_session_lifespan())
         yield
 
     logger.info("Shutting down...")
@@ -319,6 +323,11 @@ api_router.include_router(billing_admin_api.router, tags=["billing-admin"])
 from app.api import mcp_keys_admin as mcp_keys_admin_api
 api_router.include_router(mcp_keys_admin_api.router, tags=["mcp-admin"])
 
+# Client MCP keys: client portal (own keys) and staff view/revoke
+from app.api import client_mcp_keys as client_mcp_keys_api
+api_router.include_router(client_mcp_keys_api.router, tags=["client-mcp-keys"])
+api_router.include_router(client_mcp_keys_api.admin_router, tags=["client-mcp-keys-admin"])
+
 # Include product catalog admin routes
 from app.api import product_catalog as product_catalog_api
 api_router.include_router(product_catalog_api.router, tags=["product-catalog"])
@@ -448,6 +457,32 @@ else:
         include_in_schema=False,
     )
 
+# Client MCP at /client-mcp (customers' own keys). A top-level path rather than
+# /mcp/client so the staff /mcp mount and its disabled-404 catch-all can never
+# shadow or swallow it.
+if settings.client_mcp_enabled:
+    from app.mcp.client.server import get_client_mcp_asgi_app
+
+    app.mount("/client-mcp", get_client_mcp_asgi_app())
+else:
+
+    async def _client_mcp_disabled(full_path: str = ""):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    _client_mcp_off_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    app.add_api_route(
+        "/client-mcp",
+        _client_mcp_disabled,
+        methods=_client_mcp_off_methods,
+        include_in_schema=False,
+    )
+    app.add_api_route(
+        "/client-mcp/{full_path:path}",
+        _client_mcp_disabled,
+        methods=_client_mcp_off_methods,
+        include_in_schema=False,
+    )
+
 # SPA fallback: serve static files when they exist, else index.html so client-side routing works (e.g. refresh on /admin)
 static_path = Path(settings.static_files_path)
 
@@ -459,6 +494,8 @@ async def serve_spa(full_path: str):
         or full_path == "api"
         or full_path.startswith("mcp/")
         or full_path == "mcp"
+        or full_path.startswith("client-mcp/")
+        or full_path == "client-mcp"
     ):
         raise HTTPException(status_code=404, detail="Not found")
     if not static_path.exists():

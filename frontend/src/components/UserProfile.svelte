@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import { navigate } from '../lib/router.js';
-  import { getClientProfile, setClientPassword, impersonateClient, listPermissionSets, updateClientPermissionSet, setRequireTwoFactor } from '../lib/api.js';
+  import { getClientProfile, setClientPassword, impersonateClient, listPermissionSets, updateClientPermissionSet, setRequireTwoFactor, adminListClientMcpKeys, adminUpdateClientMcpKey, adminDeleteClientMcpKey } from '../lib/api.js';
 
   /** Route param: numeric user id */
   export let userId;
@@ -16,6 +16,36 @@
   let permissionSets = [];
   let selectedPermissionSetId = '';
   let permissionBusy = false;
+  let mcpKeys = [];
+
+  async function loadMcpKeys() {
+    try {
+      mcpKeys = await adminListClientMcpKeys(userId);
+    } catch (_) {
+      mcpKeys = [];
+    }
+  }
+
+  async function toggleMcpKey(key) {
+    actionError = null;
+    try {
+      await adminUpdateClientMcpKey(profile.user_id, key.id, { enabled: !key.enabled });
+      await loadMcpKeys();
+    } catch (e) {
+      actionError = e.message || String(e);
+    }
+  }
+
+  async function deleteMcpKey(key) {
+    if (!confirm(`Delete MCP key "${key.name}"? It stops working immediately.`)) return;
+    actionError = null;
+    try {
+      await adminDeleteClientMcpKey(profile.user_id, key.id);
+      await loadMcpKeys();
+    } catch (e) {
+      actionError = e.message || String(e);
+    }
+  }
 
   let passwordForm = { password: '' };
 
@@ -32,6 +62,7 @@
       profile = profileData;
       permissionSets = permissionSetRows;
       selectedPermissionSetId = profile.permission_set_id ? String(profile.permission_set_id) : '';
+      await loadMcpKeys();
     } catch (e) {
       error = e.message || String(e);
     } finally {
@@ -231,6 +262,34 @@
           Require two-factor authentication
         </label>
       </div>
+    </section>
+
+    <section class="panel">
+      <h3>MCP keys ({mcpKeys.length})</h3>
+      <p class="hint">Keys this client created for their AI assistants. Disable or delete to revoke access at once.</p>
+      {#if mcpKeys.length === 0}
+        <p class="muted">No MCP keys.</p>
+      {:else}
+        <table class="kv-table services-table">
+          <thead>
+            <tr><th>Name</th><th>Scopes</th><th>Status</th><th>Last used</th><th></th></tr>
+          </thead>
+          <tbody>
+            {#each mcpKeys as k (k.id)}
+              <tr>
+                <td>{k.name} <span class="muted">{k.key_prefix}</span></td>
+                <td>{k.scopes.join(', ')}</td>
+                <td>{k.enabled ? 'Enabled' : 'Disabled'}</td>
+                <td>{k.last_used_at ? new Date(k.last_used_at).toLocaleString() : 'Never'}{k.last_used_ip ? ` (${k.last_used_ip})` : ''}</td>
+                <td>
+                  <button type="button" class="btn-secondary" on:click={() => toggleMcpKey(k)}>{k.enabled ? 'Disable' : 'Enable'}</button>
+                  <button type="button" class="btn-link-danger" on:click={() => deleteMcpKey(k)}>Delete</button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
     </section>
 
     <section class="panel">
