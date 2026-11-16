@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import { navigate } from '../lib/router.js';
-  import { listClients, createClient } from '../lib/api.js';
+  import { listClients, createClient, inviteUser, resendInvite, revokeInvite } from '../lib/api.js';
 
   let clients = [];
   let loading = true;
@@ -16,6 +16,12 @@
   let createBusy = false;
   let createError = null;
   let createForm = { username: '', email: '', password: '' };
+
+  let showInviteForm = false;
+  let inviteBusy = false;
+  let inviteError = null;
+  let inviteNotice = null;
+  let inviteForm = { email: '', username: '' };
 
   onMount(load);
 
@@ -43,6 +49,46 @@
     navigate(`/admin/users/${c.user_id}`);
   }
 
+  async function submitInvite() {
+    inviteError = null;
+    inviteNotice = null;
+    inviteBusy = true;
+    try {
+      if (!inviteForm.email.trim()) throw new Error('Email is required');
+      const created = await inviteUser({
+        email: inviteForm.email.trim(),
+        kind: 'client',
+        username: inviteForm.username.trim() || undefined,
+      });
+      inviteNotice = `Invitation sent to ${created.email}.`;
+      showInviteForm = false;
+      inviteForm = { email: '', username: '' };
+      await load();
+    } catch (e) {
+      inviteError = e.message || String(e);
+    } finally {
+      inviteBusy = false;
+    }
+  }
+
+  async function inviteAction(c, action) {
+    error = null;
+    inviteNotice = null;
+    try {
+      if (action === 'revoke') {
+        if (!confirm(`Revoke the invitation for ${c.email}? The account is kept.`)) return;
+        await revokeInvite(c.user_id);
+        inviteNotice = `Invitation for ${c.email} revoked.`;
+      } else {
+        await resendInvite(c.user_id);
+        inviteNotice = `Invitation resent to ${c.email}.`;
+      }
+      await load();
+    } catch (e) {
+      error = e.message || String(e);
+    }
+  }
+
   async function submitCreate() {
     createError = null;
     createBusy = true;
@@ -68,6 +114,9 @@
 
 <PageHeader title="Users">
   <svelte:fragment slot="actions">
+    <button type="button" class="btn-secondary" on:click={() => (showInviteForm = !showInviteForm)}>
+      {showInviteForm ? 'Cancel' : 'Invite client'}
+    </button>
     <button type="button" class="btn-primary" on:click={() => (showCreateForm = !showCreateForm)}>
       {showCreateForm ? 'Cancel' : '+ New client'}
     </button>
@@ -93,6 +142,22 @@
       </select>
     </div>
   </div>
+
+  {#if inviteNotice}<div class="notice">{inviteNotice}</div>{/if}
+  {#if showInviteForm}
+    <div class="panel">
+      <h4>Invite client</h4>
+      {#if inviteError}<div class="error">{inviteError}</div>{/if}
+      <div class="form-row">
+        <label>Email <input type="email" bind:value={inviteForm.email} /></label>
+        <label>Username (optional) <input bind:value={inviteForm.username} /></label>
+        <button type="button" class="btn-primary" disabled={inviteBusy} on:click={submitInvite}>
+          {inviteBusy ? 'Sending…' : 'Send invitation'}
+        </button>
+      </div>
+      <p class="hint">The account is created now so you can assign services before they respond. They choose their username and password from the emailed link, which expires in 7 days.</p>
+    </div>
+  {/if}
 
   {#if showCreateForm}
     <div class="panel">
@@ -126,6 +191,7 @@
             <th>Password login</th>
             <th>Integration</th>
             <th>Services</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -134,12 +200,22 @@
               <td class="name-cell">{c.username}</td>
               <td>{c.email}</td>
               <td>
-                <span class="status-badge" class:status-active={c.has_password}>
-                  {c.has_password ? 'Password set' : 'Disabled'}
-                </span>
+                {#if c.invited}
+                  <span class="status-badge status-invited">Invited</span>
+                {:else}
+                  <span class="status-badge" class:status-active={c.has_password}>
+                    {c.has_password ? 'Password set' : 'Disabled'}
+                  </span>
+                {/if}
               </td>
               <td>{c.integration_name || '—'}</td>
               <td>{c.service_count}</td>
+              <td class="table-actions" on:click|stopPropagation>
+                {#if c.invited}
+                  <button type="button" class="btn-secondary btn-small" on:click={() => inviteAction(c, 'resend')}>Resend</button>
+                  <button type="button" class="btn-danger btn-small" on:click={() => inviteAction(c, 'revoke')}>Revoke</button>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -193,5 +269,7 @@
   .clickable-row { cursor: pointer; }
   .name-cell { font-weight: 600; color: var(--text-primary); }
   .status-badge { background: var(--bg-tertiary); color: var(--text-secondary); }
+  .status-badge.status-invited { background: var(--info-bg); color: var(--info-text); }
+  .notice { margin-bottom: 16px; padding: 10px 14px; border-radius: 8px; background: var(--success-bg); color: var(--success-text); }
   .status-badge.status-active { background: var(--success-bg); color: var(--success-text); }
 </style>

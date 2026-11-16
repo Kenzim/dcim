@@ -4443,6 +4443,31 @@ export async function confirmPasswordReset(token, password) {
   return _jsonOrThrow(response, 'Could not reset password');
 }
 
+export async function lookupInvite(token) {
+  const response = await _postJson('/users/invite/lookup', { token });
+  return _jsonOrThrow(response, 'This invitation is invalid or has expired');
+}
+
+export async function acceptInvite(token, username, password) {
+  const response = await _postJson('/users/invite/accept', { token, username, password });
+  return _jsonOrThrow(response, 'Could not accept the invitation');
+}
+
+export async function inviteUser(payload) {
+  const response = await _postJson('/admin/invites', payload);
+  return _jsonOrThrow(response, 'Failed to send invitation');
+}
+
+export async function resendInvite(userId) {
+  const response = await fetch(`${API_BASE}/admin/invites/${userId}/resend`, { method: 'POST', credentials: 'include' });
+  return _jsonOrThrow(response, 'Failed to resend invitation');
+}
+
+export async function revokeInvite(userId) {
+  const response = await fetch(`${API_BASE}/admin/invites/${userId}`, { method: 'DELETE', credentials: 'include' });
+  return _jsonOrThrow(response, 'Failed to revoke invitation');
+}
+
 export async function getTwoFactorStatus() {
   const response = await fetch(`${API_BASE}/users/2fa/status`, { credentials: 'include' });
   return _jsonOrThrow(response, 'Failed to load two-factor status');

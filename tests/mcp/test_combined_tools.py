@@ -12,8 +12,8 @@ from app.mcp.tools import combined
 EXPECTED_TOOLS = {
     "cable", "delete_server_port", "save_server_ports",
     "save_product", "save_product_family", "save_subnet_group",
-    "console_ticket", "delete_server", "delete_subnet", "delete_switch", "dhcp_tftp", "dhcp_tftp_control",
-    "get_aggregate_bandwidth", "ip_assignment", "list_clients", "list_ips", "list_servers", "list_services",
+    "console_ticket", "delete_server", "delete_staff", "delete_subnet", "delete_switch", "dhcp_tftp", "dhcp_tftp_control",
+    "get_aggregate_bandwidth", "invite_action", "ip_assignment", "list_clients", "list_ips", "list_servers", "list_services",
     "list_switches", "lookup", "plan_vm", "power", "provision", "proxmox_inventory", "rackflow_status",
     "reinstall_vm", "restore_backup", "rotate_ip_credentials", "save_client", "save_location", "save_rack",
     "save_server", "save_subnet", "save_switch", "search", "server_info", "server_reinstall_os", "server_set_boot",

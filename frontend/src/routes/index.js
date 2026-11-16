@@ -7,6 +7,7 @@ import Login from '../components/Login.svelte';
 import AccountSecurity from '../components/AccountSecurity.svelte';
 import ForgotPassword from '../components/ForgotPassword.svelte';
 import ResetPassword from '../components/ResetPassword.svelte';
+import AcceptInvite from '../components/AcceptInvite.svelte';
 import VncLaunch from './VncLaunch.svelte';
 import KvmLaunch from './KvmLaunch.svelte';
 import SolLaunch from './SolLaunch.svelte';
@@ -24,6 +25,7 @@ export default {
   '/account/security': AccountSecurity,
   '/forgot-password': ForgotPassword,
   '/reset-password': ResetPassword,
+  '/accept-invite': AcceptInvite,
   // Standalone popup page for one-click VNC console launches (WHMCS, or a
   // direct link); redeems a ?t= launch ticket and renders the viewer
   // full-viewport with no admin/client chrome.

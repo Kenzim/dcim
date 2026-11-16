@@ -12,7 +12,7 @@ from app.core.commerce_auth import _impersonated_by_from_token, _token_from_requ
 from app.core.rate_limit import enforce_rate_limit, reset_rate_limit
 from app.dao import UserDAO
 from app.models.user import User, verify_password_timing_safe_dummy
-from app.services import password_reset_service, totp_service
+from app.services import password_reset_service, totp_service, user_invite_service
 from app.services.audit_service import AuditService
 from app.services.user_session_service import (
     RESTRICTION_2FA_ENROLLMENT,
@@ -33,6 +33,8 @@ from app.schemas.user import (
     TwoFactorStatusResponse,
     PasswordResetRequest,
     PasswordResetConfirm,
+    InviteLookupRequest,
+    InviteAcceptRequest,
 )
 
 from typing import Annotated
@@ -630,3 +632,24 @@ async def password_reset_confirm(
     )
     return {"ok": True}
 
+
+
+# --- Invitations (public; the token is the credential) ---
+
+
+@router.post("/invite/lookup")
+async def invite_lookup(body: InviteLookupRequest, request: Request, db: DbDep):
+    """What the accept page needs: email, prefilled username and kind."""
+    client_ip = _client_ip(request) or "unknown"
+    enforce_rate_limit(f"invite:lookup:ip:{client_ip}", max_attempts=30, window_seconds=3600)
+    return user_invite_service.lookup_invite(db, token=body.token)
+
+
+@router.post("/invite/accept")
+async def invite_accept(body: InviteAcceptRequest, request: Request, db: DbDep):
+    client_ip = _client_ip(request) or "unknown"
+    enforce_rate_limit(f"invite:accept:ip:{client_ip}", max_attempts=30, window_seconds=3600)
+    user_invite_service.accept_invite(
+        db, token=body.token, username=body.username, password=body.password, client_ip=client_ip
+    )
+    return {"ok": True}

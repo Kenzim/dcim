@@ -14,7 +14,7 @@ Two routers:
   accounts. Staff accounts have no client portal / owned-services concept.
 """
 import logging
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr
@@ -28,6 +28,7 @@ from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
 from app.core.config import settings
 from app.models.user import User
+from app.services import user_invite_service
 from app.services.audit_service import AuditService
 from app.services.user_session_service import (
     lift_session_restrictions,
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 clients_router = APIRouter(prefix="/admin/clients", tags=["admin-clients"])
 admins_router = APIRouter(prefix="/admin/admins", tags=["admin-admins"])
+invites_router = APIRouter(prefix="/admin/invites", tags=["admin-invites"])
 
 DbDep = Annotated[Session, Depends(get_db)]
 
@@ -53,8 +55,11 @@ def _two_factor_enabled(db: Session, user_id: int) -> bool:
     return is_enabled(db, user_id)
 
 
-def _admin_list_item(db: Session, admin: User) -> "AdminListItem":
+def _admin_list_item(db: Session, admin: User, pending: Optional[set[int]] = None) -> "AdminListItem":
+    if pending is None:
+        pending = user_invite_service.pending_user_ids(db, [admin.id])
     return AdminListItem(
+        invited=admin.id in pending,
         id=admin.id,
         username=admin.username,
         email=admin.email,
@@ -89,6 +94,7 @@ class ClientListItem(BaseModel):
     integration_id: Optional[int] = None
     integration_name: Optional[str] = None
     has_password: bool = False
+    invited: bool = False
     service_count: int = 0
 
 
@@ -112,6 +118,7 @@ class ClientProfile(BaseModel):
     username: str
     email: str
     has_password: bool = False
+    invited: bool = False
     external_user_id: Optional[int] = None
     external_username: Optional[str] = None
     external_email: Optional[str] = None
@@ -157,6 +164,7 @@ class AdminListItem(BaseModel):
     email: str
     require_2fa: bool = False
     two_factor_enabled: bool = False
+    invited: bool = False
 
 
 class AdminCreate(BaseModel):
@@ -213,6 +221,7 @@ async def list_clients(
     "clients".
     """
     results: List[ClientListItem] = []
+    pending = user_invite_service.pending_user_ids(db)
     for user in db.query(User).filter(User.is_admin == False).order_by(User.username).all():  # noqa: E712
         if integration_id is not None and user.billing_integration_id != integration_id:
             continue
@@ -227,6 +236,7 @@ async def list_clients(
                 integration_id=user.billing_integration_id,
                 integration_name=user.billing_integration.name if user.billing_integration else None,
                 has_password=user.has_password,
+                invited=user.id in pending,
                 service_count=len(ServiceDAO.get_by_owner_user(db, user.id)),
             )
         )
@@ -290,6 +300,7 @@ async def get_client_profile(
         username=user.username,
         email=user.email,
         has_password=user.has_password,
+        invited=user_invite_service.is_pending(db, user),
         external_user_id=user.id if user.billing_integration_id else None,
         external_username=user.external_username,
         external_email=user.external_email,
@@ -498,7 +509,8 @@ async def list_admins(
     db: DbDep,
 ):
     admins = db.query(User).filter(User.is_admin == True).order_by(User.username).all()  # noqa: E712
-    return [_admin_list_item(db, a) for a in admins]
+    pending = user_invite_service.pending_user_ids(db)
+    return [_admin_list_item(db, a, pending) for a in admins]
 
 
 @admins_router.post("", response_model=AdminListItem, status_code=status.HTTP_201_CREATED)
@@ -573,3 +585,68 @@ async def delete_admin(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete the last remaining admin")
     UserDAO.delete(db, admin_id)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Invitations
+# ---------------------------------------------------------------------------
+
+
+class InviteCreate(BaseModel):
+    email: EmailStr
+    kind: Literal["staff", "client"]
+    # Optional: without one the account gets a placeholder the invitee replaces.
+    username: Optional[str] = None
+    # Client invitations only; staff invitations always create an admin.
+    permission_set_id: Optional[int] = None
+
+
+class InviteResponse(BaseModel):
+    user_id: int
+    username: str
+    email: str
+    kind: str
+    invited: bool = True
+
+
+def _invite_response(user: User, *, invited: bool = True) -> InviteResponse:
+    return InviteResponse(
+        user_id=user.id,
+        username=user.username,
+        email=user.email,
+        kind=user_invite_service.kind_of(user),
+        invited=invited,
+    )
+
+
+@invites_router.post("", response_model=InviteResponse, status_code=status.HTTP_201_CREATED)
+async def invite_user(body: InviteCreate, request: Request, auth: AdminDep, db: DbDep):
+    """Create a passwordless staff or client account and email its invitation link."""
+    user = user_invite_service.invite_user(
+        db,
+        email=str(body.email),
+        kind=body.kind,
+        invited_by=int(auth["user_id"]),
+        username=body.username,
+        permission_set_id=body.permission_set_id,
+        ip=_request_ip(request),
+    )
+    return _invite_response(user)
+
+
+@invites_router.post("/{user_id}/resend", response_model=InviteResponse)
+async def resend_invite(user_id: int, request: Request, auth: AdminDep, db: DbDep):
+    """Retire older links and email a fresh one."""
+    user = user_invite_service.resend_invite(
+        db, user_id=user_id, invited_by=int(auth["user_id"]), ip=_request_ip(request)
+    )
+    return _invite_response(user)
+
+
+@invites_router.delete("/{user_id}", response_model=InviteResponse)
+async def revoke_invite(user_id: int, request: Request, auth: AdminDep, db: DbDep):
+    """Kill the outstanding link. The account stays and can be invited again."""
+    user = user_invite_service.revoke_invite(
+        db, user_id=user_id, actor_id=int(auth["user_id"]), ip=_request_ip(request)
+    )
+    return _invite_response(user)

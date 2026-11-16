@@ -75,6 +75,23 @@ class PasswordResetConfirm(BaseModel):
         return v
 
 
+class InviteLookupRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=128)
+
+
+class InviteAcceptRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=128)
+    username: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=8, max_length=255)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_bytes(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password cannot be longer than 72 bytes")
+        return v
+
+
 class UserResponse(BaseModel):
     """User response schema"""
     id: int
