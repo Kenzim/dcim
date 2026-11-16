@@ -580,8 +580,12 @@ async def delete_admin(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Admin not found")
     if admin.id == auth.get("user_id"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete your own admin account")
-    admin_count = db.query(User).filter(User.is_admin == True).count()  # noqa: E712
-    if admin_count <= 1:
+    other_active_admins = (
+        db.query(User)
+        .filter(User.is_admin == True, User.id != admin.id, User.password.isnot(None))  # noqa: E712
+        .count()
+    )
+    if other_active_admins < 1:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete the last remaining admin")
     UserDAO.delete(db, admin_id)
     return None

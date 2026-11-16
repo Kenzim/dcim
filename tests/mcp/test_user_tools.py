@@ -94,7 +94,7 @@ async def test_delete_staff_needs_confirm_and_destructive_scope(
 
 @pytest.mark.asyncio
 async def test_delete_staff(db_session, mcp_sessionlocal, mcp_auth_ctx_destructive, public_url):
-    owner = User(username="owner", email="owner@example.com", is_admin=True)
+    owner = User(username="owner", email="owner@example.com", is_admin=True, password="x")
     other = User(username="other", email="other@example.com", is_admin=True)
     db_session.add_all([owner, other])
     db_session.commit()
