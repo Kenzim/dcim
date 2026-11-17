@@ -20,6 +20,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Bare-metal Serial-over-LAN | `app/services/sol/` (`ipmi_sol.py` + hub/tickets) + `app/api/sol.py` |
 | BMC virtual CD (ISO mount) | `app/services/virtual_media/` + `app/api/virtual_media.py` |
 | Switch SNMP / bandwidth | `app/plugins/snmpv3.py`, poller `scripts/snmp_bandwidth_poller.py` |
+| PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
@@ -132,6 +133,9 @@ All included from `app/main.py` under `/api`.
 | `server_group.py` | `/api/server-groups` | Server groups |
 | `network_switch.py` | `/api/network-switches` | Switches, ports, bandwidth |
 | `cable_run.py` | `/api/cable-runs` | Cable runs / cabling |
+| `pdu.py` | `/api/pdus` | PDUs, inlets, outlets, poll, outlet on/off/cycle (guarded) |
+| `power_feed.py` | `/api/power-feeds` | Rack power feeds with live usage |
+| `server_power.py` | `/api/servers/{id}/power-inputs` | Server PSUs, outlet links, draw, outlet action |
 | `os_templates.py` | `/api/os-templates` | Scan/list OS templates from disk |
 | `billing.py` | `/api/billing` | External billing API (register/suspend/power/reinstall/…) |
 | `billing_admin.py` | (billing-admin tags) | Admin management of billing integrations |
@@ -172,6 +176,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 | Identity | `user.py`, `external_user.py`, `user_external_identity_link.py` |
 | Datacenter layout | `location.py`, `rack.py`, `server.py`, `server_group.py`, `network_port.py`, `disk.py` |
 | Networking gear | `network_switch.py`, `switch_port.py`, `cable_run.py`, `switch_bandwidth_sample.py` |
+| Power | `power_feed.py` (rack feeds), `pdu.py` (`Pdu`, `PduInlet`, `PduOutlet`), `server_power_input.py` (PSUs; new servers get `PSU1`) |
 | Boot / install | `boot_task.py`, `installation_task.py`, `server_capability.py`, `hardware_detection_report.py`, `server_activity.py` |
 | DHCP/TFTP | `dhcp_config.py`, `tftp_config.py`, `service_instance.py` |
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
@@ -201,6 +206,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `os_template_service.py` | Scan/load `os_templates/` |
 | `download_token_service.py` | One-time download tokens for boot media |
 | `server_activity_logger.py` | Server activity log writes |
+| `power_service.py` | PDU inlet/outlet generation (`sync_pdu_ports`), readings (`poll_pdu`, `apply_readings`), feed/rack/server aggregation, outlet-control guards |
 | `vm_provisioning_service.py` / `vm_strategy_executor.py` / `vm_os_strategy.py` / `vm_install_type_strategy.py` | VM provision strategies |
 | `provisioning/` | Unified service create (`ProvisioningService.create` + `ProvisionRequest`); used by billing, admin, MCP, reseller, and commerce checkout |
 | `checkout_service.py` | Retail checkout quote/place + fulfillment via `ProvisioningService` |
@@ -229,6 +235,9 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `proxmox.py` | Proxmox VM provisioning / power |
 | `snmpv3.py` | SNMPv3 switch plugin (ports, bandwidth) |
 | `switch_base.py` / `switch_registry.py` | Switch plugin ABC + registry |
+| `pdu/` | PDU plugins: `base.py` (`PduPlugin`, capabilities metering / outlet_metering / outlet_control), `registry.py` (auto-discovers modules in `pdu/`), `snmp.py` (shared SNMP v1/v2c/v3 client), `manual.py` (unmanaged PDU) |
+
+**Power model:** rack `PowerFeed` (entered by hand) ← `PduInlet` (1, or 2 on an ATS) of a `Pdu` → `PduOutlet` ← `ServerPowerInput` (a PSU). Latest readings are stored on the PDU, inlets and outlets by the bandwidth poller (`run_pdu_cycle`) or `POST /api/pdus/{id}/poll`. Outlet switching needs a plugin with `outlet_control`, the PDU's `outlet_control_enabled` opt-in (off by default), an unlocked outlet and `confirm=true`; actions are logged to the linked server's activity.
 
 **Add a server plugin:** new module in `app/plugins/` implementing `ServerPlugin`, register via registry discovery, expose `CAPABILITIES` for UI.
 
@@ -285,6 +294,8 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/servers/:id` | `ServerDetail.svelte` (**largest UI file**) |
 | `/admin/switches` | `Switches.svelte` |
 | `/admin/switches/:id` | `SwitchDetail.svelte` |
+| `/admin/pdus` | `Pdus.svelte` |
+| `/admin/pdus/:id` | `PduDetail.svelte` (rack power: `RackPowerPanel.svelte` in `RackView`; server PSUs: `ServerPowerCard.svelte` in `ServerDetail`) |
 | `/admin/racks` | `Racks.svelte` |
 | `/admin/racks/:id` | `RackView.svelte` |
 | `/admin/racks/rows/:locationId/:row` | `RowView.svelte` |
