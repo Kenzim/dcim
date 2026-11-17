@@ -19,6 +19,8 @@ EXPECTED_TOOLS = {
     "save_server", "save_subnet", "save_switch", "search", "server_info", "server_reinstall_os", "server_set_boot",
     "service_info", "service_set_status", "sol_send", "subnet_info", "switch_action", "terminate_service",
     "virtual_media",
+    "outlet_power", "pdu_action", "pdus", "power_feeds", "rack_power_summary", "save_pdu",
+    "server_power_inputs", "server_power_summary",
 }
 
 
