@@ -262,6 +262,15 @@
         <Switches />
       {:else if routeName.startsWith('switches/') && switchId}
         <SwitchDetail switchId={switchId} onBack={() => navigate('/admin/switches')} />
+      {:else if routeName === 'cabling'}
+        {#await import('../components/Cabling.svelte')}
+          <div class="loading-container"><p>Loading…</p></div>
+        {:then module}
+          <svelte:component this={module.default} />
+        {:catch err}
+          <PageHeader title="Cabling" />
+          <div class="content-body"><p>Could not load the Cabling page: {err.message}</p></div>
+        {/await}
       {:else if routeName === 'locations'}
         <Locations />
       {:else if routeName.startsWith('locations/') && locationId}

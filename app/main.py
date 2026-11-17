@@ -270,6 +270,10 @@ api_router.include_router(network_switch_api.router, prefix="/network-switches",
 from app.api import cable_run as cable_run_api
 api_router.include_router(cable_run_api.router, prefix="/cable-runs", tags=["cable-runs"])
 
+# Include admin cabling graph (read-only)
+from app.api import cabling as cabling_api
+api_router.include_router(cabling_api.router, tags=["cabling"])
+
 # Include switch plugin routes
 from app.api import switch_plugin as switch_plugin_api
 api_router.include_router(switch_plugin_api.router, prefix="/switch-plugins", tags=["switch-plugins"])

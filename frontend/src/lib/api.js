@@ -1951,6 +1951,22 @@ export async function deleteCableRun(cableRunId) {
   }
 }
 
+export async function getCablingGraph({ locationId = null, rackId = null } = {}) {
+  const params = new URLSearchParams();
+  if (locationId) params.append('location_id', locationId);
+  if (rackId) params.append('rack_id', rackId);
+  const qs = params.toString();
+  const response = await fetch(`${API_BASE}/admin/cabling/graph${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load cabling graph');
+  }
+  return await response.json();
+}
+
 export async function testSwitchConnection(pluginName, pluginConfig) {
   const response = await fetch(`${API_BASE}/network-switches/test`, {
     method: 'POST',
