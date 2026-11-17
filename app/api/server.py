@@ -107,7 +107,8 @@ def _rack_placement_overlaps(
         sw_end = sw.rack_unit + (getattr(sw, "rack_units", 1) or 1) - 1
         if start <= sw_end and sw.rack_unit <= end:
             return True
-    return False
+    from app.dao.patch_panel_dao import PatchPanelDAO
+    return PatchPanelDAO.overlaps(db, rack_id, rack_unit, rack_units)
 
 
 async def _regenerate_location_dhcp_if_present(db: Session, location_id: int) -> None:
@@ -117,18 +118,14 @@ async def _regenerate_location_dhcp_if_present(db: Session, location_id: int) ->
 
 def convert_network_ports_to_response(db: Session, server_id: int, network_ports: List[Any]) -> List[Dict[str, Any]]:
     """Convert network ports to response dicts with cable_run (other end) when connected."""
+    from app.services.cable_trace_service import other_end_summary
+
     cable_runs = CableRunDAO.get_by_server(db, server_id)
-    # Map: server_port_id -> (cable_run, other_type, other_port_id)
     port_to_cable = {}
     for cr in cable_runs:
         for server_port_id in (cr.end_a_server_port_id, cr.end_b_server_port_id):
-            if server_port_id is None:
-                continue
-            other = cr.get_other_end(server_port_id=server_port_id)
-            if other:
-                other_type, other_port_id = other
-                port_to_cable[server_port_id] = (cr, other_type, other_port_id)
-                break
+            if server_port_id is not None:
+                port_to_cable[server_port_id] = cr
 
     result = []
     for port in network_ports:
@@ -151,30 +148,10 @@ def convert_network_ports_to_response(db: Session, server_id: int, network_ports
             "cable_run": None,
         }
         if port.id in port_to_cable:
-            cr, other_type, other_port_id = port_to_cable[port.id]
-            port_name = None
-            device_id = None
-            device_name = None
-            if other_type == "switch":
-                other_port = SwitchPortDAO.get_by_id(db, other_port_id)
-                if other_port and other_port.switch:
-                    port_name = other_port.name
-                    device_id = other_port.switch_id
-                    device_name = other_port.switch.name
-            else:
-                other_port = NetworkPortDAO.get_by_id(db, other_port_id)
-                if other_port and other_port.server:
-                    port_name = other_port.name
-                    device_id = other_port.server_id
-                    device_name = other_port.server.name
-            port_dict["cable_run"] = {
-                "other_end_type": other_type,
-                "other_end_port_id": other_port_id,
-                "other_end_port_name": port_name,
-                "other_end_device_id": device_id,
-                "other_end_device_name": device_name,
-                "cable_run_id": cr.id,
-            }
+            cr = port_to_cable[port.id]
+            summary = other_end_summary(db, cr, ("server", port.id, None))
+            if summary:
+                port_dict["cable_run"] = {**summary, "cable_run_id": cr.id}
         result.append(port_dict)
     return result
 
@@ -258,14 +235,32 @@ class NetworkPortCreate(BaseModel):
     description: str | None = None
 
 
+class CablePatchHop(BaseModel):
+    patch_panel_id: int | None = None
+    patch_panel_name: str | None = None
+    port_id: int
+    port_name: str | None = None
+    in_side: str | None = None
+
+
 class CableRunOtherEnd(BaseModel):
-    """Other end of a cable run (for display on server/switch detail)."""
-    other_end_type: str  # "switch" | "server"
+    """Other end of a cable run (for display on server/switch detail). other_end_* is the directly
+    connected port (possibly a patch panel port); reaches_* is the server or switch port at the end
+    of the path when it passes through patch panels (listed in via)."""
+    other_end_type: str  # "switch" | "server" | "patch"
     other_end_port_id: int
+    other_end_side: str | None = None
     other_end_port_name: str | None
     other_end_device_id: int | None
     other_end_device_name: str | None
     cable_run_id: int
+    via: List[CablePatchHop] = []
+    reaches_type: str | None = None
+    reaches_port_id: int | None = None
+    reaches_port_name: str | None = None
+    reaches_device_id: int | None = None
+    reaches_device_name: str | None = None
+    path_complete: bool = True
 
 
 class NetworkPortResponse(BaseModel):
@@ -1797,18 +1792,25 @@ async def get_server_bandwidth(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Server not found",
         )
-    cable_runs = CableRunDAO.get_by_server(db, server_id)
+    from app.services.cable_trace_service import switch_port_for_server_port
+
+    cabled_port_ids = set()
+    for cr in CableRunDAO.get_by_server(db, server_id):
+        for pid in (cr.end_a_server_port_id, cr.end_b_server_port_id):
+            if pid is not None:
+                cabled_port_ids.add(pid)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     result = []
-    for cr in cable_runs:
-        server_port_id = cr.end_a_server_port_id or cr.end_b_server_port_id
-        switch_port_id = cr.end_a_switch_port_id or cr.end_b_switch_port_id
-        if not server_port_id or not switch_port_id:
+    for server_port_id in sorted(cabled_port_ids):
+        server_port = NetworkPortDAO.get_by_id(db, server_port_id)
+        if not server_port or server_port.server_id != server_id:
+            continue
+        switch_port_id, _cable = switch_port_for_server_port(db, server_port_id)
+        if not switch_port_id:
             continue
         switch_port = SwitchPortDAO.get_by_id(db, switch_port_id)
         if not switch_port or not switch_port.switch_id:
             continue
-        server_port = NetworkPortDAO.get_by_id(db, server_port_id)
         switch = NetworkSwitchDAO.get_by_id(db, switch_port.switch_id)
         raw = SwitchBandwidthSampleDAO.get_history(
             db,

@@ -91,11 +91,12 @@ def _log_lock_change(db, row, was_locked: bool, ctx) -> None:
     )
 
 
-def _bandwidth_sample_for_cable_run(db, cr):
+def _bandwidth_sample_for_server_port(db, server_port_id):
     from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
     from app.dao.switch_port_dao import SwitchPortDAO
+    from app.services.cable_trace_service import switch_port_for_server_port
 
-    switch_port_id = cr.end_a_switch_port_id or cr.end_b_switch_port_id
+    switch_port_id, _first = switch_port_for_server_port(db, server_port_id)
     if not switch_port_id:
         return None
     switch_port = SwitchPortDAO.get_by_id(db, switch_port_id)
@@ -542,9 +543,14 @@ async def get_server_bandwidth(server_id: int) -> dict:
 
         if not ServerDAO.get_by_id(db, server_id):
             raise ValueError(_MSG_SERVER_NOT_FOUND)
-        ports = []
+        server_port_ids = set()
         for cr in CableRunDAO.get_by_server(db, server_id):
-            entry = _bandwidth_sample_for_cable_run(db, cr)
+            for pid in (cr.end_a_server_port_id, cr.end_b_server_port_id):
+                if pid is not None:
+                    server_port_ids.add(pid)
+        ports = []
+        for pid in sorted(server_port_ids):
+            entry = _bandwidth_sample_for_server_port(db, pid)
             if entry is not None:
                 ports.append(entry)
         return {"server_id": server_id, "ports": ports}

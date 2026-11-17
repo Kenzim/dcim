@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Literal
 from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import CableRunDAO, SwitchPortDAO, NetworkPortDAO
+from app.dao.patch_panel_dao import PatchPanelDAO
 from app.models.cable_run import CableRun
+from app.services.cable_trace_service import describe_path, describe_ref, trace_from_port
 import logging
 
 from typing import Annotated
@@ -18,8 +20,9 @@ router = APIRouter()
 
 
 class PortRef(BaseModel):
-    type: str  # "server" | "switch"
-    id: int  # port id (network_ports.id or switch_ports.id)
+    type: str  # "server" | "switch" | "patch"
+    id: int  # port id (network_ports.id, switch_ports.id or patch_panel_ports.id)
+    side: Literal["front", "rear"] | None = None  # required for patch panel ports
 
 
 class CableRunCreate(BaseModel):
@@ -37,8 +40,9 @@ class CableRunUpdate(BaseModel):
 
 
 class CableRunEnd(BaseModel):
-    type: str  # "server" | "switch"
+    type: str  # "server" | "switch" | "patch"
     id: int  # port id
+    side: str | None = None  # "front" | "rear" for patch panel ports
     port_name: str | None = None
     device_id: int | None = None
     device_name: str | None = None
@@ -58,28 +62,9 @@ class CableRunResponse(BaseModel):
 
 def _end_from_cable_run(db: Session, cable_run: CableRun, is_end_a: bool) -> CableRunEnd:
     """Build CableRunEnd for end_a (is_end_a=True) or end_b (is_end_a=False)."""
-    if is_end_a:
-        port_id = cable_run.end_a_switch_port_id or cable_run.end_a_server_port_id
-        port_type = "switch" if cable_run.end_a_switch_port_id else "server"
-    else:
-        port_id = cable_run.end_b_switch_port_id or cable_run.end_b_server_port_id
-        port_type = "switch" if cable_run.end_b_switch_port_id else "server"
-    port_name = None
-    device_id = None
-    device_name = None
-    if port_type == "switch":
-        port = SwitchPortDAO.get_by_id(db, port_id) if port_id else None
-        if port:
-            port_name = port.name
-            device_id = port.switch_id
-            device_name = port.switch.name if port.switch else None
-    else:
-        port = NetworkPortDAO.get_by_id(db, port_id) if port_id else None
-        if port:
-            port_name = port.name
-            device_id = port.server_id
-            device_name = port.server.name if port.server else None
-    return CableRunEnd(type=port_type, id=port_id or 0, port_name=port_name, device_id=device_id, device_name=device_name)
+    ref = cable_run.end("a" if is_end_a else "b")
+    info = describe_ref(db, ref) or {"type": ref[0], "id": ref[1] or 0, "side": ref[2]}
+    return CableRunEnd(**info)
 
 
 def _cable_run_to_response(db: Session, cable_run: CableRun) -> CableRunResponse:
@@ -100,32 +85,24 @@ async def create_cable_run(
     db: DbDep
 ):
     """Create a cable run between two ports (each can be a switch port or server port)."""
+    lookups = {"switch": SwitchPortDAO.get_by_id, "server": NetworkPortDAO.get_by_id, "patch": PatchPanelDAO.get_port}
     for ref in (cable_data.port_a, cable_data.port_b):
-        if ref.type not in ("server", "switch"):
+        if ref.type not in lookups:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"port type must be 'server' or 'switch', got '{ref.type}'"
+                detail=f"port type must be 'server', 'switch' or 'patch', got '{ref.type}'"
             )
-    # Validate port_a exists
-    if cable_data.port_a.type == "switch":
-        port_a = SwitchPortDAO.get_by_id(db, cable_data.port_a.id)
-    else:
-        port_a = NetworkPortDAO.get_by_id(db, cable_data.port_a.id)
-    if not port_a:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"{cable_data.port_a.type.capitalize()} port {cable_data.port_a.id} not found"
-        )
-    # Validate port_b exists
-    if cable_data.port_b.type == "switch":
-        port_b = SwitchPortDAO.get_by_id(db, cable_data.port_b.id)
-    else:
-        port_b = NetworkPortDAO.get_by_id(db, cable_data.port_b.id)
-    if not port_b:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"{cable_data.port_b.type.capitalize()} port {cable_data.port_b.id} not found"
-        )
+        if ref.type == "patch" and ref.side is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="patch panel ports need side 'front' or 'rear'"
+            )
+        if not lookups[ref.type](db, ref.id):
+            label = "Patch panel" if ref.type == "patch" else ref.type.capitalize()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"{label} port {ref.id} not found"
+            )
     try:
         cable_run = CableRunDAO.create(
             db,
@@ -136,6 +113,8 @@ async def create_cable_run(
             cable_type=cable_data.cable_type,
             speed_mbps=cable_data.speed_mbps,
             description=cable_data.description,
+            port_a_side=cable_data.port_a.side,
+            port_b_side=cable_data.port_b.side,
         )
     except ValueError as e:
         raise HTTPException(
@@ -166,6 +145,21 @@ async def list_cable_runs(
     else:
         cable_runs = CableRunDAO.get_all(db, skip=skip, limit=limit)
     return [_cable_run_to_response(db, cr) for cr in cable_runs]
+
+
+@router.get("/trace")
+async def trace_cable_path(
+    auth: AdminDep,
+    db: DbDep,
+    port_type: Literal["server", "switch", "patch"] = Query(..., alias="type"),
+    port_id: int = Query(..., alias="id"),
+    side: Literal["front", "rear"] | None = None,
+):
+    """Follow the cable on a port through any patch panels to the device at the far end.
+    For a patch panel port, side is the side to start from (the path leaves through that side)."""
+    if port_type == "patch" and side is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="side is required for patch panel ports")
+    return describe_path(db, trace_from_port(db, port_type, port_id, side if port_type == "patch" else None))
 
 
 @router.get("/{cable_run_id}", response_model=CableRunResponse)

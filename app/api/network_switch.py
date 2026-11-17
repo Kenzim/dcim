@@ -7,7 +7,8 @@ from datetime import datetime, timezone, timedelta
 from app.core.database import get_db, SessionLocal
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.auth import require_admin
-from app.dao import NetworkSwitchDAO, LocationDAO, RackDAO, SwitchPortDAO, CableRunDAO, NetworkPortDAO, SwitchBandwidthSampleDAO
+from app.dao import NetworkSwitchDAO, LocationDAO, RackDAO, SwitchPortDAO, CableRunDAO, SwitchBandwidthSampleDAO
+from app.services.cable_trace_service import other_end_summary
 from app.models.network_switch import NetworkSwitch
 from app.models.server import Server
 from app.plugins.switch_registry import get_switch_registry
@@ -55,7 +56,8 @@ def _rack_placement_overlaps_switch(
         sw_end = sw.rack_unit + (getattr(sw, "rack_units", 1) or 1) - 1
         if start <= sw_end and sw.rack_unit <= end:
             return True
-    return False
+    from app.dao.patch_panel_dao import PatchPanelDAO
+    return PatchPanelDAO.overlaps(db, rack_id, rack_unit, rack_units)
 
 
 class NetworkSwitchCreate(BaseModel):
@@ -538,31 +540,11 @@ async def get_switch_ports_db(
 
         if port.id in cable_run_map:
             cr = cable_run_map[port.id]
-            other = cr.get_other_end(switch_port_id=port.id)
-            if other:
-                other_type, other_port_id = other
-                port_name = None
-                device_id = None
-                device_name = None
-                if other_type == "switch":
-                    other_port = SwitchPortDAO.get_by_id(db, other_port_id)
-                    if other_port and other_port.switch:
-                        port_name = other_port.name
-                        device_id = other_port.switch_id
-                        device_name = other_port.switch.name
-                else:
-                    other_port = NetworkPortDAO.get_by_id(db, other_port_id)
-                    if other_port and other_port.server:
-                        port_name = other_port.name
-                        device_id = other_port.server_id
-                        device_name = other_port.server.name
+            summary = other_end_summary(db, cr, ("switch", port.id, None))
+            if summary:
                 port_dict["cable_run"] = {
                     "id": cr.id,
-                    "other_end_type": other_type,
-                    "other_end_port_id": other_port_id,
-                    "other_end_port_name": port_name,
-                    "other_end_device_id": device_id,
-                    "other_end_device_name": device_name,
+                    **summary,
                     "cable_type": cr.cable_type,
                     "speed_mbps": cr.speed_mbps,
                     "description": cr.description

@@ -274,6 +274,9 @@ api_router.include_router(cable_run_api.router, prefix="/cable-runs", tags=["cab
 from app.api import cabling as cabling_api
 api_router.include_router(cabling_api.router, tags=["cabling"])
 
+from app.api import patch_panel as patch_panel_api
+api_router.include_router(patch_panel_api.router, tags=["patch-panels"])
+
 # Include switch plugin routes
 from app.api import switch_plugin as switch_plugin_api
 api_router.include_router(switch_plugin_api.router, prefix="/switch-plugins", tags=["switch-plugins"])
