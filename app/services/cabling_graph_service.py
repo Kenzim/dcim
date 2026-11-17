@@ -3,6 +3,7 @@
 Devices matching the location/rack filter are "in scope". A device outside the filter that is
 cabled to an in-scope device is still returned (in_scope=False) so every cable has both ends.
 """
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -11,6 +12,10 @@ from app.dao.cabling_graph_dao import CablingGraphDAO
 
 OPER_STATUS_UP = 1
 OPER_STATUS_DOWN = 2
+OPER_STATUS_LOWER_LAYER_DOWN = 7
+
+# Switch port status older than this (the poller runs every minute) is reported as stale.
+STATUS_STALE_AFTER = timedelta(minutes=15)
 
 
 def server_node_id(server_id: int) -> str:
@@ -32,21 +37,39 @@ def switch_port_node_id(port_id: int) -> str:
 def _status_name(value: Optional[int]) -> Optional[str]:
     if value == OPER_STATUS_UP:
         return "up"
-    if value == OPER_STATUS_DOWN:
+    if value in (OPER_STATUS_DOWN, OPER_STATUS_LOWER_LAYER_DOWN):
         return "down"
     if value is None:
         return None
     return "other"
 
 
-def _link_status(switch_ports: List[Any]) -> str:
-    """Link state of a cable from the oper status of its switch end(s); 'unknown' when not polled."""
-    statuses = [p.oper_status for p in switch_ports if p is not None and p.oper_status is not None]
-    if not statuses:
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _is_fresh(port: Any, now: datetime) -> bool:
+    checked = _as_utc(port.status_updated_at)
+    return checked is not None and now - checked <= STATUS_STALE_AFTER
+
+
+def _link_status(switch_ports: List[Any], now: datetime) -> str:
+    """Link state of a cable from its switch end(s).
+
+    'up'/'down' only from status polled within STATUS_STALE_AFTER; 'stale' when the only status
+    is older; 'unknown' when the switch end has never been polled (or the cable has no switch end).
+    """
+    ends = [p for p in switch_ports if p is not None]
+    fresh = [p.oper_status for p in ends if _is_fresh(p, now) and p.oper_status is not None]
+    if not fresh:
+        if any(p.status_updated_at is not None for p in ends):
+            return "stale"
         return "unknown"
-    if any(s == OPER_STATUS_DOWN for s in statuses):
+    if any(_status_name(s) == "down" for s in fresh):
         return "down"
-    if all(s == OPER_STATUS_UP for s in statuses):
+    if all(s == OPER_STATUS_UP for s in fresh):
         return "up"
     return "unknown"
 
@@ -111,12 +134,16 @@ def _server_port(row) -> Dict[str, Any]:
         "if_index": None,
         "admin_status": None,
         "oper_status": None,
+        "status_updated_at": None,
+        "status_fresh": False,
+        "link_up": row.link_up,
+        "link_checked_at": _as_utc(row.link_checked_at),
         "description": None,
         "cable_id": None,
     }
 
 
-def _switch_port(row) -> Dict[str, Any]:
+def _switch_port(row, now: datetime) -> Dict[str, Any]:
     return {
         "id": switch_port_node_id(row.id),
         "kind": "switch",
@@ -131,6 +158,10 @@ def _switch_port(row) -> Dict[str, Any]:
         "if_index": row.if_index,
         "admin_status": _status_name(row.admin_status),
         "oper_status": _status_name(row.oper_status),
+        "status_updated_at": _as_utc(row.status_updated_at),
+        "status_fresh": _is_fresh(row, now),
+        "link_up": None,
+        "link_checked_at": None,
         "description": row.description,
         "cable_id": None,
     }
@@ -140,8 +171,10 @@ def build_cabling_graph(
     db: Session,
     location_id: Optional[int] = None,
     rack_id: Optional[int] = None,
+    now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     dao = CablingGraphDAO
+    now = now or datetime.now(timezone.utc)
     servers = dao.list_servers(db, location_id=location_id, rack_id=rack_id)
     switches = dao.list_switches(db, location_id=location_id, rack_id=rack_id)
     scope_server_ids = {s.id for s in servers}
@@ -192,7 +225,7 @@ def build_cabling_graph(
             ports[port["id"]] = port
             nodes[port["device"]]["port_count"] += 1
     for row in switch_port_rows.values():
-        port = _switch_port(row)
+        port = _switch_port(row, now)
         if port["device"] in nodes:
             ports[port["id"]] = port
 
@@ -230,7 +263,7 @@ def build_cabling_graph(
             "cable_type": c.cable_type,
             "speed_mbps": c.speed_mbps,
             "effective_speed_mbps": _effective_speed(c.speed_mbps, end_rows),
-            "link_status": _link_status(end_switch_rows),
+            "link_status": _link_status(end_switch_rows, now),
             "description": c.description,
         })
 
@@ -256,6 +289,8 @@ def build_cabling_graph(
 
     return {
         "filters": {"location_id": location_id, "rack_id": rack_id},
+        "generated_at": now,
+        "status_stale_after_seconds": int(STATUS_STALE_AFTER.total_seconds()),
         "locations": locations,
         "racks": racks,
         "nodes": list(nodes.values()),

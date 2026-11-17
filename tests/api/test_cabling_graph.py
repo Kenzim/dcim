@@ -1,5 +1,6 @@
 """Tests for the admin cabling graph endpoint (GET /api/admin/cabling/graph)."""
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import event
@@ -66,8 +67,13 @@ def _switch(db, name, location, rack=None, unit=None):
     return sw
 
 
-def _swport(db, switch, name, speed=10000, oper=None, admin=None):
-    p = SwitchPort(switch_id=switch.id, name=name, speed_mbps=speed, oper_status=oper, admin_status=admin)
+def _swport(db, switch, name, speed=10000, oper=None, admin=None, polled_at="now"):
+    if polled_at == "now":
+        polled_at = datetime.now(timezone.utc) if (oper is not None or admin is not None) else None
+    p = SwitchPort(
+        switch_id=switch.id, name=name, speed_mbps=speed, oper_status=oper, admin_status=admin,
+        status_updated_at=polled_at,
+    )
     db.add(p)
     db.flush()
     return p
@@ -134,7 +140,10 @@ def test_requires_admin(client, test_user):
 def test_empty_graph(client, admin_headers):
     r = client.get(URL, headers=admin_headers)
     assert r.status_code == 200
-    assert r.json() == {
+    data = r.json()
+    assert data.pop("generated_at")
+    assert data.pop("status_stale_after_seconds") == 900
+    assert data == {
         "filters": {"location_id": None, "rack_id": None},
         "locations": [],
         "racks": [],
@@ -206,6 +215,45 @@ def test_full_graph_shape(client, admin_headers, topology):
 
     assert {loc["name"] for loc in data["locations"]} == {"DC1", "DC2"}
     assert {rk["name"] for rk in data["racks"]} == {"A01", "B01", "C01"}
+
+
+def test_link_status_fresh_stale_and_never_polled(db_session, topology):
+    from app.services.cabling_graph_service import build_cabling_graph
+
+    edges = lambda g: {e["cable_id"]: e for e in g["edges"]}  # noqa: E731
+    ports = lambda g: {p["id"]: p for p in g["ports"]}  # noqa: E731
+
+    graph = build_cabling_graph(db_session)
+    e1 = edges(graph)[topology["c1"].id]
+    assert e1["link_status"] == "up"
+    assert ports(graph)[e1["target_port"]]["status_fresh"] is True
+    assert ports(graph)[e1["target_port"]]["status_updated_at"] is not None
+    assert edges(graph)[topology["c3"].id]["link_status"] == "unknown"
+
+    later = datetime.now(timezone.utc) + timedelta(minutes=16)
+    graph = build_cabling_graph(db_session, now=later)
+    assert edges(graph)[topology["c1"].id]["link_status"] == "stale"
+    assert edges(graph)[topology["c2"].id]["link_status"] == "stale"
+    assert ports(graph)[e1["target_port"]]["status_fresh"] is False
+    assert edges(graph)[topology["c3"].id]["link_status"] == "unknown"
+
+
+def test_server_port_link_state_exposed(db_session, topology):
+    from app.services.cabling_graph_service import build_cabling_graph
+
+    checked = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+    port = db_session.query(NetworkPort).filter_by(server_id=topology["web"].id, name="eno1").one()
+    port.link_up = True
+    port.link_checked_at = checked
+    db_session.commit()
+
+    graph = build_cabling_graph(db_session)
+    by_id = {p["id"]: p for p in graph["ports"]}
+    eno1 = by_id[f"server-port:{port.id}"]
+    assert eno1["link_up"] is True
+    assert eno1["link_checked_at"] == checked
+    eno2 = next(p for p in graph["ports"] if p["device"] == f"server:{topology['web'].id}" and p["name"] == "eno2")
+    assert eno2["link_up"] is None
 
 
 def test_filter_by_location(client, admin_headers, topology):

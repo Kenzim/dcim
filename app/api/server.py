@@ -146,6 +146,8 @@ def convert_network_ports_to_response(db: Session, server_id: int, network_ports
             "pxe_boot": port.pxe_boot,
             "pxe_ip": port.pxe_ip,
             "description": port.description,
+            "link_up": getattr(port, "link_up", None),
+            "link_checked_at": getattr(port, "link_checked_at", None),
             "cable_run": None,
         }
         if port.id in port_to_cable:
@@ -280,6 +282,8 @@ class NetworkPortResponse(BaseModel):
     pxe_boot: bool
     pxe_ip: str | None
     description: str | None
+    link_up: bool | None = None
+    link_checked_at: datetime | None = None
     cable_run: CableRunOtherEnd | None = None
 
     class Config:
@@ -635,6 +639,15 @@ def read(path, default=None):
     except Exception:
         return default
 
+def link_state(iface):
+    carrier = read(iface / "carrier")
+    if carrier in ("0", "1"):
+        return carrier == "1"
+    operstate = read(iface / "operstate")
+    if operstate in ("up", "down"):
+        return operstate == "up"
+    return None
+
 cpu_count = None
 cpu_model = None
 cpuinfo = read("/proc/cpuinfo", "") or ""
@@ -759,7 +772,8 @@ for iface in sorted(Path("/sys/class/net").glob("*")):
         "speed_mbps": speed_mbps,
         "model": model.splitlines()[0] if model else None,
         "pci_address": pci_address,
-        "is_physical": True
+        "is_physical": True,
+        "link_up": link_state(iface),
     }})
 
 def speed_tier(mbps):
@@ -828,6 +842,7 @@ def _apply_hardware_detection_report(
     detected_ram_gb = detected.get("ram_gb")
     detected_nics = [n for n in (detected.get("nics") or []) if n.get("is_physical", True) and n.get("pci_address")]
     detected_disks = detected.get("disks") or []
+    link_checked_at = report.submitted_at or report.created_at or datetime.now(timezone.utc)
 
     if detected_cpu.get("count"):
         server.cpu_count = int(detected_cpu["count"])
@@ -856,6 +871,9 @@ def _apply_hardware_detection_report(
             matched.model = nic.get("model")
             matched.pci_address = pci or None
             matched.is_physical = True
+            if nic.get("link_up") is not None:
+                matched.link_up = bool(nic["link_up"])
+                matched.link_checked_at = link_checked_at
             target = matched
         else:
             target = NetworkPort(
@@ -868,6 +886,8 @@ def _apply_hardware_detection_report(
                 is_physical=True,
                 monitor_bandwidth=True,
                 pxe_boot=False,
+                link_up=nic.get("link_up"),
+                link_checked_at=link_checked_at if nic.get("link_up") is not None else None,
             )
             db.add(target)
             db.flush()

@@ -48,6 +48,8 @@ _SERVER_PORT_COLUMNS = (
     NetworkPort.is_physical,
     NetworkPort.lag_group,
     NetworkPort.pxe_boot,
+    NetworkPort.link_up,
+    NetworkPort.link_checked_at,
 )
 
 _SWITCH_PORT_COLUMNS = (
@@ -58,6 +60,7 @@ _SWITCH_PORT_COLUMNS = (
     SwitchPort.speed_mbps,
     SwitchPort.admin_status,
     SwitchPort.oper_status,
+    SwitchPort.status_updated_at,
     SwitchPort.description,
 )
 

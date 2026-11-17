@@ -972,6 +972,7 @@ class HardwareNicEntry(BaseModel):
     model: Optional[str] = None
     pci_address: Optional[str] = None
     is_physical: bool = True
+    link_up: Optional[bool] = None
 
     @field_validator("mac_address")
     @classmethod
@@ -1026,6 +1027,7 @@ def _normalize_hardware_report_payload(payload: HardwareDetectionReportIngest) -
                 "model": (nic.model or "").strip() or None,
                 "pci_address": (nic.pci_address or "").strip().lower() or None,
                 "is_physical": True,
+                "link_up": nic.link_up,
             }
         )
 

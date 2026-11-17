@@ -1,5 +1,5 @@
 """Network port model for server network interfaces"""
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, Boolean, DateTime
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -21,6 +21,8 @@ class NetworkPort(Base):
     pxe_boot = Column(Boolean, default=False, nullable=False)  # Whether this port is used for PXE boot (max 1 per server)
     pxe_ip = Column(String(45), nullable=True)  # IP address for PXE boot (IPv4 or IPv6)
     description = Column(Text, nullable=True)
+    link_up = Column(Boolean, nullable=True)  # NIC carrier state at the last hardware detection (None = never reported)
+    link_checked_at = Column(DateTime(timezone=True), nullable=True)  # When link_up was reported
     
     # Relationship
     server = relationship("Server", backref="network_ports")

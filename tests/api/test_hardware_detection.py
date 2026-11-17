@@ -289,6 +289,88 @@ def test_hardware_detection_diff_apply_and_reject_flow(client, db_session, test_
     assert reject_response.json()["status"] == "rejected"
 
 
+def _submit_report(db_session, server, nics):
+    report = HardwareDetectionReportDAO.create(
+        db_session, server_id=server.id, status=HardwareDetectionReportStatus.PENDING
+    )
+    HardwareDetectionReportDAO.mark_submitted(
+        db_session,
+        report=report,
+        source_ip="10.50.0.41",
+        detected_inventory={"cpu": {}, "ram_gb": None, "nics": nics, "disks": []},
+    )
+    return report
+
+
+def test_apply_records_nic_link_state(client, db_session, test_admin_user):
+    from app.models.network_port import NetworkPort
+
+    headers = _admin_headers(client, test_admin_user)
+    server, _, _ = _create_server_with_pxe_port(db_session, name="link-state-server", ip="10.50.0.41")
+    nic = {"speed_mbps": 10000, "model": "Intel X710", "is_physical": True}
+    report = _submit_report(db_session, server, [
+        {**nic, "name": "ens1f0", "mac_address": "aa:bb:cc:00:01:01", "pci_address": "0000:01:00.0", "link_up": True},
+        {**nic, "name": "ens1f1", "mac_address": "aa:bb:cc:00:01:02", "pci_address": "0000:01:00.1", "link_up": False},
+        {**nic, "name": "ens1f2", "mac_address": "aa:bb:cc:00:01:03", "pci_address": "0000:01:00.2"},
+    ])
+    r = client.post(
+        f"/api/servers/{server.id}/hardware-detection/reports/{report.id}/apply",
+        headers=headers,
+        json={"nic_remap": {}},
+    )
+    assert r.status_code == 200, r.text
+
+    def ports():
+        db_session.expire_all()
+        return {p.name: p for p in db_session.query(NetworkPort).filter_by(server_id=server.id)}
+
+    p = ports()
+    assert p["ens1f0"].link_up is True and p["ens1f0"].link_checked_at is not None
+    assert p["ens1f1"].link_up is False and p["ens1f1"].link_checked_at is not None
+    assert p["ens1f2"].link_up is None and p["ens1f2"].link_checked_at is None
+
+    report2 = _submit_report(db_session, server, [
+        {**nic, "name": "ens1f0", "mac_address": "aa:bb:cc:00:01:01", "pci_address": "0000:01:00.0"},
+        {**nic, "name": "ens1f1", "mac_address": "aa:bb:cc:00:01:02", "pci_address": "0000:01:00.1", "link_up": True},
+        {**nic, "name": "ens1f2", "mac_address": "aa:bb:cc:00:01:03", "pci_address": "0000:01:00.2"},
+    ])
+    r = client.post(
+        f"/api/servers/{server.id}/hardware-detection/reports/{report2.id}/apply",
+        headers=headers,
+        json={"nic_remap": {}},
+    )
+    assert r.status_code == 200, r.text
+    p = ports()
+    assert p["ens1f0"].link_up is True
+    assert p["ens1f1"].link_up is True
+
+    detail = client.get(f"/api/servers/{server.id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    by_name = {np["name"]: np for np in detail.json()["network_ports"]}
+    assert by_name["ens1f1"]["link_up"] is True
+    assert by_name["ens1f1"]["link_checked_at"]
+
+
+def test_normalize_hardware_report_keeps_link_up():
+    from app.api.server_interaction import HardwareDetectionReportIngest, _normalize_hardware_report_payload
+
+    payload = HardwareDetectionReportIngest(nics=[
+        {"name": "eno1", "mac_address": "aa:bb:cc:dd:ee:01", "pci_address": "0000:02:00.0", "link_up": False},
+        {"name": "eno2", "mac_address": "aa:bb:cc:dd:ee:02", "pci_address": "0000:02:00.1"},
+    ])
+    nics = _normalize_hardware_report_payload(payload)["nics"]
+    assert [n["link_up"] for n in nics] == [False, None]
+
+
+def test_detection_script_reports_link_state():
+    from app.api import server as server_api
+
+    import inspect
+    source = inspect.getsource(server_api)
+    assert "def link_state(iface):" in source
+    assert '"link_up": link_state(iface)' in source
+
+
 def test_apply_requires_remap_for_connected_stale_nic_and_preserves_cable(client, db_session, test_admin_user):
     headers = _admin_headers(client, test_admin_user)
     server, location, old_port = _create_server_with_pxe_port(db_session, name="remap-server", ip="10.50.0.50")

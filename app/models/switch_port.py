@@ -16,6 +16,7 @@ class SwitchPort(Base):
     speed_mbps = Column(Integer, nullable=True)  # Port speed in Mbps (e.g., 1000 for 1Gbps, 10000 for 10Gbps)
     admin_status = Column(Integer, nullable=True)  # Administrative status (1=up, 2=down, 3=testing)
     oper_status = Column(Integer, nullable=True)  # Operational status (1=up, 2=down, 3=testing, etc.)
+    status_updated_at = Column(DateTime(timezone=True), nullable=True)  # When admin/oper status were last polled
     description = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

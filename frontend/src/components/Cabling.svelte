@@ -12,7 +12,8 @@
     { key: '100g', label: '100G and above', colour: '#db2777', test: () => true },
   ];
   const UNKNOWN_SPEED_COLOUR = '#a8a29e';
-  const LINK_COLOURS = { up: '#059669', down: '#dc2626', unknown: '#94a3b8' };
+  const LINK_COLOURS = { up: '#059669', down: '#dc2626', stale: '#d97706', unknown: '#94a3b8' };
+  const LINK_LABELS = { up: 'up', down: 'down', stale: 'status stale', unknown: 'not polled' };
 
   let cyContainer;
   let cy = null;
@@ -100,8 +101,30 @@
     return `#${mixed.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
   }
 
+  function timeAgo(value) {
+    if (!value) return null;
+    const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
+    if (seconds < 90) return 'just now';
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 90) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 36) return `${hours} h ago`;
+    return new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  function portStatusText(port) {
+    if (port.kind === 'switch') {
+      if (!port.status_updated_at) return port.oper_status ? `link ${port.oper_status}` : null;
+      const when = timeAgo(port.status_updated_at);
+      if (port.status_fresh) return `link ${port.oper_status || 'unknown'}, polled ${when}`;
+      return `status stale: link ${port.oper_status || 'unknown'} when last polled ${when}`;
+    }
+    if (port.link_up === null || port.link_up === undefined) return null;
+    return `link ${port.link_up ? 'up' : 'down'} at last hardware detection (${timeAgo(port.link_checked_at) || 'date unknown'})`;
+  }
+
   function summarise(g) {
-    const counts = { up: 0, down: 0, unknown: 0 };
+    const counts = { up: 0, down: 0, stale: 0, unknown: 0 };
     for (const e of g.edges) counts[e.link_status] = (counts[e.link_status] || 0) + 1;
     return {
       servers: g.nodes.filter((n) => n.kind === 'server' && n.in_scope).length,
@@ -216,7 +239,7 @@
       const [src, dst, srcPort, dstPort] = flip ? [e.target, e.source, b, a] : [e.source, e.target, a, b];
       elements.push({
         group: 'edges',
-        classes: e.link_status === 'down' ? 'down' : e.link_status === 'unknown' ? 'unknown' : 'up',
+        classes: LINK_COLOURS[e.link_status] ? e.link_status : 'unknown',
         data: {
           id: e.id,
           cableId: e.cable_id,
@@ -309,7 +332,7 @@
       },
       { selector: 'edge.proxy', style: { display: 'none' } },
       { selector: 'edge.down', style: { 'line-style': 'dashed', 'line-dash-pattern': [6, 4] } },
-      { selector: 'edge.unknown', style: { 'line-style': 'dotted' } },
+      { selector: 'edge.unknown, edge.stale', style: { 'line-style': 'dotted' } },
       {
         selector: 'edge.ports, edge.highlighted',
         style: { 'source-label': 'data(sourceLabel)', 'target-label': 'data(targetLabel)' },
@@ -706,12 +729,13 @@
           <div class="legend-title">Link status</div>
           <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.up}"></span>Up</div>
           <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.down}"></span>Down</div>
+          <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.stale}"></span>Stale (not polled recently)</div>
           <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.unknown}"></span>Not polled</div>
         {/if}
         <div class="legend-title legend-gap">Line style</div>
         <div class="legend-row"><span class="line solid"></span>Link up</div>
         <div class="legend-row"><span class="line dashed"></span>Link down</div>
-        <div class="legend-row"><span class="line dotted"></span>Status unknown</div>
+        <div class="legend-row"><span class="line dotted"></span>Status stale or not polled</div>
         <div class="legend-title legend-gap">Devices</div>
         <div class="legend-row"><span class="box switch"></span>Switch</div>
         <div class="legend-row"><span class="box"></span>Server</div>
@@ -786,7 +810,7 @@
               <div class="step-meta">
                 <span>{formatSpeed(end.port.speed_mbps)}</span>
                 {#if end.port.mac_address}<span class="mono">{end.port.mac_address}</span>{/if}
-                {#if end.port.oper_status}<span>link {end.port.oper_status}</span>{/if}
+                {#if portStatusText(end.port)}<span class:stale-text={end.port.kind === 'switch' && !end.port.status_fresh}>{portStatusText(end.port)}</span>{/if}
                 {#if end.port.lag_group}<span>LAG {end.port.lag_group}</span>{/if}
                 {#if end.port.description}<span>{end.port.description}</span>{/if}
               </div>
@@ -797,7 +821,7 @@
                 <div class="step-meta">
                   <span>{path.edge.cable_type || 'type not set'}</span>
                   <span>{formatSpeed(path.edge.effective_speed_mbps)}</span>
-                  <span class="link-{path.edge.link_status}">link {path.edge.link_status === 'unknown' ? 'not polled' : path.edge.link_status}</span>
+                  <span class="link-{path.edge.link_status}">link {LINK_LABELS[path.edge.link_status] || path.edge.link_status}</span>
                 </div>
                 {#if path.edge.description}<div class="step-desc">{path.edge.description}</div>{/if}
               </li>
@@ -820,6 +844,7 @@
             <dt>Cables</dt><dd>{stats.cables}</dd>
             <dt>Links up</dt><dd>{stats.up}</dd>
             <dt>Links down</dt><dd>{stats.down}</dd>
+            {#if stats.stale}<dt>Stale status</dt><dd>{stats.stale}</dd>{/if}
             <dt>Not polled</dt><dd>{stats.unknown}</dd>
             {#if stats.external}<dt>Outside filter</dt><dd>{stats.external}</dd>{/if}
           </dl>
@@ -1215,6 +1240,11 @@
 
   .link-up {
     color: var(--success-text);
+  }
+
+  .link-stale,
+  .stale-text {
+    color: var(--warning-text);
   }
 
   .link-down {

@@ -4,6 +4,7 @@ Standalone SNMP bandwidth poller.
 
 Polls all enabled network switches that support MONITORING (e.g. SNMPv3 plugin),
 collects IF-MIB octet counters per port, and stores them in switch_bandwidth_samples.
+The same poll stores each port's admin/oper status on switch_ports (status_updated_at).
 
 Run as a long-lived process (e.g. systemd service) or from cron at a fixed interval.
 Uses the same DATABASE_URL and app plugins as the main DCIM app.
@@ -23,7 +24,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.database import SessionLocal
 from app.dao.network_switch_dao import NetworkSwitchDAO
 from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
+from app.dao.switch_port_dao import SwitchPortDAO
 from app.plugins.switch_base import SwitchPluginCategory
 from app.plugins.switch_registry import get_switch_registry
 
@@ -49,22 +51,25 @@ def _switches_with_monitoring(db) -> List[Any]:
     return [sw for sw in all_switches if registry.supports_monitoring(sw.plugin_name)]
 
 
-async def _poll_switch(switch: Any) -> List[Dict[str, Any]]:
-    """Poll one switch via its plugin; return list of sample dicts for DAO.create_many."""
+async def _poll_switch(switch: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Poll one switch via its plugin; return get_all_port_statistics() output, or None on failure."""
     registry = get_switch_registry()
     try:
         plugin = registry.get_plugin(switch.plugin_name, switch.plugin_config or {})
     except KeyError:
         logger.warning("Plugin not found for switch %s: %s", switch.name, switch.plugin_name)
-        return []
+        return None
     if SwitchPluginCategory.MONITORING not in plugin.SUPPORTED_CATEGORIES:
-        return []
+        return None
     try:
-        stats = await plugin.get_all_port_statistics()
+        return await plugin.get_all_port_statistics()
     except Exception as e:
         logger.warning("Failed to get port statistics for switch %s (%s): %s", switch.name, switch.plugin_name, e)
-        return []
-    now = datetime.now(timezone.utc)
+        return None
+
+
+def _samples_from_stats(switch: Any, stats: Dict[str, Dict[str, Any]], now: datetime) -> List[Dict[str, Any]]:
+    """Bandwidth sample dicts for SwitchBandwidthSampleDAO.create_many."""
     samples = []
     for port_key, data in stats.items():
         samples.append({
@@ -82,23 +87,40 @@ async def _poll_switch(switch: Any) -> List[Dict[str, Any]]:
     return samples
 
 
-async def poll_all_switches(switches: List[Any]) -> List[Dict[str, Any]]:
-    """Poll all switches concurrently and return combined list of samples."""
+async def poll_all_switches(switches: List[Any]) -> List[Tuple[Any, Dict[str, Dict[str, Any]]]]:
+    """Poll all switches concurrently; return (switch, stats) for each switch that answered."""
     if not switches:
         return []
     tasks = [_poll_switch(sw) for sw in switches]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    all_samples = []
+    polled = []
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             logger.warning("Poll failed for switch %s: %s", switches[i].name, r)
             continue
-        all_samples.extend(r)
-    return all_samples
+        if r:
+            polled.append((switches[i], r))
+    return polled
+
+
+def store_poll_results(db, polled: List[Tuple[Any, Dict[str, Dict[str, Any]]]], now: datetime) -> Tuple[int, int]:
+    """Insert bandwidth samples and store port status. Returns (samples stored, ports updated)."""
+    samples: List[Dict[str, Any]] = []
+    ports_updated = 0
+    for switch, stats in polled:
+        samples.extend(_samples_from_stats(switch, stats, now))
+        try:
+            ports_updated += SwitchPortDAO.apply_status(db, switch.id, stats, polled_at=now)
+        except Exception as e:
+            db.rollback()
+            logger.warning("Failed to store port status for switch %s: %s", switch.name, e)
+    if samples:
+        SwitchBandwidthSampleDAO.create_many(db, samples)
+    return len(samples), ports_updated
 
 
 def run_one_cycle() -> int:
-    """Load switches, poll via async, insert samples. Returns number of samples stored."""
+    """Load switches, poll via async, insert samples and port status. Returns number of samples stored."""
     db = SessionLocal()
     try:
         switches = _switches_with_monitoring(db)
@@ -106,13 +128,13 @@ def run_one_cycle() -> int:
             logger.info("No switches with monitoring support enabled; skipping cycle.")
             return 0
         logger.info("Polling %d switch(es) for bandwidth data.", len(switches))
-        samples = asyncio.run(poll_all_switches(switches))
-        if not samples:
+        polled = asyncio.run(poll_all_switches(switches))
+        if not polled:
             logger.info("No samples collected this cycle.")
             return 0
-        SwitchBandwidthSampleDAO.create_many(db, samples)
-        logger.info("Stored %d bandwidth samples.", len(samples))
-        return len(samples)
+        stored, ports_updated = store_poll_results(db, polled, datetime.now(timezone.utc))
+        logger.info("Stored %d bandwidth samples; updated status on %d ports.", stored, ports_updated)
+        return stored
     finally:
         db.close()
 

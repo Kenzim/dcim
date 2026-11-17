@@ -1,5 +1,6 @@
 """Admin API: read-only cabling graph for the Cabling visualisation page."""
-from typing import Annotated, List, Optional
+from datetime import datetime
+from typing import Annotated, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -65,6 +66,10 @@ class CablingPort(BaseModel):
     if_index: Optional[int] = None
     admin_status: Optional[str] = None
     oper_status: Optional[str] = None
+    status_updated_at: Optional[datetime] = None
+    status_fresh: bool = False
+    link_up: Optional[bool] = None
+    link_checked_at: Optional[datetime] = None
     description: Optional[str] = None
     cable_id: Optional[int] = None
 
@@ -79,12 +84,14 @@ class CablingEdge(BaseModel):
     cable_type: Optional[str] = None
     speed_mbps: Optional[int] = None
     effective_speed_mbps: Optional[int] = None
-    link_status: str
+    link_status: Literal["up", "down", "stale", "unknown"]
     description: Optional[str] = None
 
 
 class CablingGraphResponse(BaseModel):
     filters: CablingFilters
+    generated_at: datetime
+    status_stale_after_seconds: int
     locations: List[CablingLocation]
     racks: List[CablingRack]
     nodes: List[CablingNode]

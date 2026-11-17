@@ -837,6 +837,8 @@ async def regenerate_switch_ports(
             created_count = len(ports_to_create)
         else:
             print("Regenerate ports: no new ports to create")
+
+        SwitchPortDAO.apply_status(db, switch.id, name_to_port_data)
         
         print(f"Regenerate ports: done for '{switch.name}' — created={created_count}, updated={updated_count}, deleted={len(ports_to_delete)}")
         return {

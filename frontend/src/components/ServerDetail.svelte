@@ -2282,6 +2282,14 @@
                     {@const trace = portTrace(port, cableRunsForServer)}
                     <li class="trace-row" class:uncabled={!trace}>
                       <span class="trace-end trace-local">
+                        {#if port.link_up !== null && port.link_up !== undefined}
+                          <span
+                            class="trace-link"
+                            class:up={port.link_up}
+                            title="Link {port.link_up ? 'up' : 'down'} at the last hardware detection{port.link_checked_at ? ` (${new Date(port.link_checked_at).toLocaleString('en-GB')})` : ''}"
+                            aria-label="Link {port.link_up ? 'up' : 'down'} at the last hardware detection"
+                          ></span>
+                        {/if}
                         <span class="trace-port mono">{port.name}</span>
                         {#if port.mac_address}<span class="trace-sub mono">{port.mac_address}</span>{/if}
                       </span>
@@ -3666,6 +3674,18 @@
 
   .trace-port {
     font-weight: 600;
+  }
+
+  .trace-link {
+    align-self: center;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--danger-color, #dc2626);
+  }
+
+  .trace-link.up {
+    background: var(--success-color, #059669);
   }
 
   .trace-sub {
