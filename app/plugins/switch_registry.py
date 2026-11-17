@@ -144,6 +144,12 @@ class SwitchPluginRegistry:
             return False
         return SwitchPluginCategory.MONITORING in self._plugins[plugin_name].SUPPORTED_CATEGORIES
 
+    def supports_lldp(self, plugin_name: str) -> bool:
+        """Return True if the plugin supports LLDP_DISCOVERY (get_lldp_neighbors)."""
+        if plugin_name not in self._plugins:
+            return False
+        return SwitchPluginCategory.LLDP_DISCOVERY in self._plugins[plugin_name].SUPPORTED_CATEGORIES
+
 
 # Global registry instance
 _switch_registry: Optional[SwitchPluginRegistry] = None

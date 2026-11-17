@@ -6,10 +6,10 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from sqlalchemy.orm import Session
 
-from app.dao.cable_run_dao import CableRunDAO
 from app.dao.network_port_dao import NetworkPortDAO
 from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
 from app.dao.switch_port_dao import SwitchPortDAO
+from app.services.cable_trace_service import switch_port_for_server_port
 
 
 def bucket_span_ms(hours: int, target_points: int = 96) -> int:
@@ -83,13 +83,10 @@ def resolve_monitored_switch_ports(db: Session) -> List[Tuple[int, str]]:
     seen = set()
     resolved: List[Tuple[int, str]] = []
     for port in NetworkPortDAO.get_monitored(db):
-        cable = CableRunDAO.get_by_server_port(db, port.id)
-        if not cable:
+        switch_port_id, _cable = switch_port_for_server_port(db, port.id)
+        if switch_port_id is None:
             continue
-        other = cable.get_other_end(server_port_id=port.id)
-        if not other or other[0] != "switch":
-            continue
-        switch_port = SwitchPortDAO.get_by_id(db, other[1])
+        switch_port = SwitchPortDAO.get_by_id(db, switch_port_id)
         if not switch_port or not switch_port.switch_id or not switch_port.name:
             continue
         key = (switch_port.switch_id, switch_port.name)

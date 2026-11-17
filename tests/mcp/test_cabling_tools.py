@@ -95,6 +95,55 @@ async def test_cable_connect_list_disconnect_by_name(db_session, mcp_sessionloca
 
 
 @pytest.mark.asyncio
+async def test_cable_through_patch_panel_and_trace(db_session, mcp_sessionlocal, mcp_auth_ctx_write, rig):
+    from app.mcp.tools.cabling import cable, save_server_ports
+    from app.models.patch_panel import PatchPanel, PatchPanelPort
+
+    sid, swid = rig["server"], rig["switch"]
+    await save_server_ports(sid, [{"name": "eno1", "speed_mbps": 10000}])
+    server = db_session.get(Server, sid)
+    panel = PatchPanel(name="PP-1", location_id=server.location_id, port_count=4)
+    panel.ports = [PatchPanelPort(number=n) for n in range(1, 5)]
+    panel.ports[1].label = "B2"
+    db_session.add(panel)
+    db_session.commit()
+    p2 = panel.ports[1].id
+
+    made = await cable(
+        "connect",
+        runs=[
+            {"a": f"server:{sid}/eno1", "b": f"patch:{panel.id}/B2/front"},
+            {"a": f"patch:{p2}/rear", "b": f"switch:{swid}/Ethernet1/1"},
+        ],
+    )
+    assert made["created"][0]["b"]["side"] == "front"
+    assert made["created"][1]["a"]["device"] == "PP-1"
+
+    with pytest.raises(ToolError, match="already cabled"):
+        await cable("connect", a=f"patch:{panel.id}/2/front", b=f"switch:{swid}/Ethernet1/2")
+    with pytest.raises(ToolError, match="need a side"):
+        await cable("connect", a=f"patch:{p2}", b=f"switch:{swid}/Ethernet1/2")
+
+    path = await cable("trace", a=f"server:{sid}/eno1")
+    assert path["complete"] is True
+    assert path["far_end"]["port_name"] == "Ethernet1/1"
+    assert [h["to"]["device_name"] for h in path["hops"]] == ["PP-1", "cab-sw"]
+
+    listed = await cable("list", patch_panel_id=panel.id)
+    assert len(listed["cables"]) == 2
+
+    from app.mcp.tools.combined import server_info
+
+    ports = (await server_info(sid, view="ports"))["ports"]
+    eno1 = ports[0]["cable_run"]
+    assert eno1["other_end_type"] == "patch"
+    assert eno1["reaches_port_name"] == "Ethernet1/1"
+
+    gone = await cable("disconnect", a=f"patch:{p2}/rear")
+    assert gone["deleted"]["b"]["port"] == "Ethernet1/1"
+
+
+@pytest.mark.asyncio
 async def test_cable_connect_is_all_or_nothing(db_session, mcp_sessionlocal, mcp_auth_ctx_write, rig):
     from app.mcp.tools.cabling import cable, save_server_ports
 

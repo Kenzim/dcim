@@ -1,7 +1,17 @@
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import case
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from app.models.switch_port import SwitchPort
+
+
+def _snmp_status(value: Any) -> Optional[int]:
+    """IF-MIB status as stored: positive integers only; 0/None/garbage mean 'not reported'."""
+    try:
+        status = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status if status > 0 else None
 
 
 class SwitchPortDAO:
@@ -55,8 +65,8 @@ class SwitchPortDAO:
                 name=port_data.get("name", ""),
                 if_index=port_data.get("ifIndex"),
                 speed_mbps=speed_mbps,
-                admin_status=None,  # Ephemeral — not stored
-                oper_status=None,   # Ephemeral — not stored
+                admin_status=None,  # Written by apply_status() when the switch is polled
+                oper_status=None,
                 description=port_data.get("description")
             )
             port_objects.append(port)
@@ -66,6 +76,50 @@ class SwitchPortDAO:
         for port in port_objects:
             db.refresh(port)
         return port_objects
+
+    @staticmethod
+    def apply_status(
+        db: Session,
+        switch_id: int,
+        port_stats: Dict[str, Dict[str, Any]],
+        polled_at: Optional[datetime] = None,
+    ) -> int:
+        """Store ifAdminStatus/ifOperStatus from get_all_port_statistics() on the switch's ports.
+
+        Ports are matched by ifIndex, then by name. updated_at is written back unchanged so
+        routine status polling does not look like an edit. Returns the number of ports updated.
+        """
+        polled_at = polled_at or datetime.now(timezone.utc)
+        by_index: Dict[int, Dict[str, Any]] = {}
+        by_name: Dict[str, Dict[str, Any]] = {}
+        for key, data in port_stats.items():
+            if data.get("ifIndex") is not None:
+                by_index[data["ifIndex"]] = data
+            by_name[data.get("name") or key] = data
+
+        rows = (
+            db.query(SwitchPort.id, SwitchPort.if_index, SwitchPort.name, SwitchPort.updated_at)
+            .filter(SwitchPort.switch_id == switch_id)
+            .all()
+        )
+        mappings = []
+        for row in rows:
+            data = by_index.get(row.if_index) if row.if_index is not None else None
+            if data is None:
+                data = by_name.get(row.name)
+            if data is None:
+                continue
+            mappings.append({
+                "id": row.id,
+                "admin_status": _snmp_status(data.get("ifAdminStatus")),
+                "oper_status": _snmp_status(data.get("ifOperStatus")),
+                "status_updated_at": polled_at,
+                "updated_at": row.updated_at,
+            })
+        if mappings:
+            db.bulk_update_mappings(SwitchPort, mappings)
+            db.commit()
+        return len(mappings)
 
     @staticmethod
     def get_by_id(db: Session, port_id: int) -> Optional[SwitchPort]:

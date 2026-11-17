@@ -1977,6 +1977,49 @@ export async function deleteCableRun(cableRunId) {
   }
 }
 
+async function patchPanelRequest(path, { method = 'GET', body, fallback }) {
+  const response = await fetch(`${API_BASE}/patch-panels/${path}`, {
+    method,
+    credentials: 'include',
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = typeof error.detail === 'string' ? error.detail : null;
+    throw new Error(detail || fallback);
+  }
+  return response.status === 204 ? null : await response.json();
+}
+
+export function listPatchPanels({ locationId = null, rackId = null } = {}) {
+  const params = new URLSearchParams();
+  if (locationId) params.append('location_id', locationId);
+  if (rackId) params.append('rack_id', rackId);
+  const qs = params.toString();
+  return patchPanelRequest(qs ? `?${qs}` : '', { fallback: 'Failed to load patch panels' });
+}
+
+export function getPatchPanel(id) {
+  return patchPanelRequest(String(id), { fallback: 'Failed to load patch panel' });
+}
+
+export function createPatchPanel(data) {
+  return patchPanelRequest('', { method: 'POST', body: data, fallback: 'Failed to create patch panel' });
+}
+
+export function updatePatchPanel(id, data) {
+  return patchPanelRequest(String(id), { method: 'PUT', body: data, fallback: 'Failed to update patch panel' });
+}
+
+export function updatePatchPanelPort(id, number, label) {
+  return patchPanelRequest(`${id}/ports/${number}`, { method: 'PUT', body: { label }, fallback: 'Failed to rename port' });
+}
+
+export function deletePatchPanel(id, { force = false } = {}) {
+  return patchPanelRequest(`${id}${force ? '?force=true' : ''}`, { method: 'DELETE', fallback: 'Failed to delete patch panel' });
+}
+
 export async function getCablingGraph({ locationId = null, rackId = null } = {}) {
   const params = new URLSearchParams();
   if (locationId) params.append('location_id', locationId);
@@ -1989,6 +2032,34 @@ export async function getCablingGraph({ locationId = null, rackId = null } = {})
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(error.detail || 'Failed to load cabling graph');
+  }
+  return await response.json();
+}
+
+export async function getCablingLldp({ locationId = null, rackId = null } = {}) {
+  const params = new URLSearchParams();
+  if (locationId) params.append('location_id', locationId);
+  if (rackId) params.append('rack_id', rackId);
+  const qs = params.toString();
+  const response = await fetch(`${API_BASE}/admin/cabling/lldp${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load the LLDP check');
+  }
+  return await response.json();
+}
+
+export async function refreshSwitchLldp(switchId) {
+  const response = await fetch(`${API_BASE}/admin/cabling/lldp/switches/${switchId}/refresh`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'LLDP collection failed');
   }
   return await response.json();
 }

@@ -13,6 +13,7 @@ class SwitchPluginCategory(str, Enum):
     """Categories of capabilities that switch plugins can support"""
     MONITORING = "monitoring"  # Port statistics, bandwidth monitoring
     PORT_CONTROL = "port_control"  # Enable/disable ports, configure port settings
+    LLDP_DISCOVERY = "lldp_discovery"  # Read LLDP neighbour tables
 
 
 class SwitchPlugin(ABC):
@@ -111,7 +112,11 @@ class SwitchPlugin(ABC):
     # Optional methods for LLDP_DISCOVERY category
     
     async def get_lldp_neighbors(self) -> List[Dict[str, Any]]:
-        """Get LLDP neighbor information"""
+        """Get LLDP neighbour information.
+
+        Returns one dict per neighbour with: local_port_num, local_port_id, local_port_desc,
+        chassis_id_subtype, chassis_id, port_id_subtype, port_id, port_desc, sys_name, sys_desc.
+        """
         raise NotImplementedError("LLDP discovery not supported by this plugin")
     
     # Optional methods for MONITORING category

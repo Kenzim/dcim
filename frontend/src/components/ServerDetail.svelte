@@ -6,6 +6,7 @@
   import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, getServerIdentify, setServerIdentify, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
+  import { cablePathParts, deviceKindLabel, deviceUrl as cablePathUrl } from '../lib/cablePath.js';
 
   export let serverId;
   export let onBack;
@@ -415,18 +416,30 @@
 
   function portTrace(port, runs) {
     const cr = (runs || []).find((r) => otherEnd(r, port.id)) || null;
+    const cable = { cableType: cr?.cable_type || null, speed: formatLinkSpeed(cr?.speed_mbps || port.speed_mbps) };
+    const parts = cablePathParts(port.cable_run);
+    if (parts) {
+      const end = parts.far || parts.direct;
+      return {
+        ...cable,
+        deviceName: end.deviceName,
+        portName: parts.far ? end.portName : `${end.portName}${end.side ? ` (${end.side})` : ''}`,
+        url: end.url,
+        kind: deviceKindLabel(end.type),
+        via: parts.via,
+        complete: parts.complete,
+      };
+    }
     const oe = cr ? otherEnd(cr, port.id) : null;
-    const embedded = port.cable_run;
-    if (!oe && !embedded) return null;
-    const type = oe?.type || embedded?.other_end_type;
-    const deviceId = oe?.device_id ?? embedded?.other_end_device_id;
+    if (!oe) return null;
     return {
-      deviceName: oe?.device_name || embedded?.other_end_device_name || type,
-      portName: oe?.port_name || embedded?.other_end_port_name || `Port #${oe?.id ?? embedded?.other_end_port_id}`,
-      url: deviceId != null ? (type === 'switch' ? `/admin/switches/${deviceId}` : `/admin/servers/${deviceId}`) : null,
-      kind: type === 'switch' ? 'Switch' : 'Server',
-      cableType: cr?.cable_type || null,
-      speed: formatLinkSpeed(cr?.speed_mbps || port.speed_mbps),
+      ...cable,
+      deviceName: oe.device_name || deviceKindLabel(oe.type),
+      portName: oe.port_name || `Port #${oe.id}`,
+      url: cablePathUrl(oe.type, oe.device_id),
+      kind: deviceKindLabel(oe.type),
+      via: [],
+      complete: oe.type !== 'patch',
     };
   }
 
@@ -2325,6 +2338,14 @@
                     {@const trace = portTrace(port, cableRunsForServer)}
                     <li class="trace-row" class:uncabled={!trace}>
                       <span class="trace-end trace-local">
+                        {#if port.link_up !== null && port.link_up !== undefined}
+                          <span
+                            class="trace-link"
+                            class:up={port.link_up}
+                            title="Link {port.link_up ? 'up' : 'down'} at the last hardware detection{port.link_checked_at ? ` (${new Date(port.link_checked_at).toLocaleString('en-GB')})` : ''}"
+                            aria-label="Link {port.link_up ? 'up' : 'down'} at the last hardware detection"
+                          ></span>
+                        {/if}
                         <span class="trace-port mono">{port.name}</span>
                         {#if port.mac_address}<span class="trace-sub mono">{port.mac_address}</span>{/if}
                       </span>
@@ -2332,6 +2353,9 @@
                         <span class="trace-wire-label">
                           {#if trace}
                             {[trace.cableType, trace.speed].filter(Boolean).join(' · ') || 'cable'}
+                            {#if trace.via.length}
+                              <span class="trace-via">via {#each trace.via as hop, i}{#if i}, {/if}<span class="trace-hop">{#if hop.url}<a href={hop.url} class="link">{hop.deviceName}</a>{:else}{hop.deviceName}{/if} {hop.portName}</span>{/each}</span>
+                            {/if}
                           {:else}
                             not cabled
                           {/if}
@@ -2345,7 +2369,7 @@
                             {trace.deviceName}
                           {/if}
                           <span class="trace-port mono">{trace.portName}</span>
-                          <span class="trace-sub">{trace.kind}</span>
+                          <span class="trace-sub">{trace.kind}{trace.complete ? '' : ', path ends here'}</span>
                         </span>
                       {:else}
                         <span class="trace-end trace-peer trace-empty">&nbsp;</span>
@@ -2375,11 +2399,15 @@
                           <td>{port.speed_mbps ? port.speed_mbps + ' Mbps' : '—'}</td>
                           <td>
                             {#if port.cable_run}
-                              <a href={port.cable_run.other_end_type === 'switch' ? `/admin/switches/${port.cable_run.other_end_device_id}` : `/admin/servers/${port.cable_run.other_end_device_id}`} class="link">
-                                {port.cable_run.other_end_device_name || port.cable_run.other_end_type} – {port.cable_run.other_end_port_name || ('Port #' + port.cable_run.other_end_port_id)}
-                              </a>
+                              {@const parts = cablePathParts(port.cable_run)}
+                              <a href={parts.direct.url} class="link">{parts.direct.deviceName} – {parts.direct.portName}</a>
+                              {#if parts.direct.type === 'patch'}
+                                <div class="trace-sub">
+                                  {parts.far ? `reaches ${parts.far.deviceName} ${parts.far.portName}` : 'path ends at a patch panel'}
+                                </div>
+                              {/if}
                             {:else if oe}
-                              <a href={oe.type === 'switch' ? `/admin/switches/${oe.device_id}` : `/admin/servers/${oe.device_id}`} class="link">
+                              <a href={cablePathUrl(oe.type, oe.device_id)} class="link">
                                 {oe.device_name || oe.type} – {oe.port_name || oe.id}
                               </a>
                             {:else}
@@ -3743,6 +3771,18 @@
     font-weight: 600;
   }
 
+  .trace-link {
+    align-self: center;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--danger-color, #dc2626);
+  }
+
+  .trace-link.up {
+    background: var(--success-color, #059669);
+  }
+
   .trace-sub {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -3773,6 +3813,15 @@
     text-align: center;
     color: var(--text-secondary);
     background: var(--bg-secondary);
+  }
+
+  .trace-via {
+    display: block;
+    color: var(--text-tertiary);
+  }
+
+  .trace-hop {
+    white-space: nowrap;
   }
 
   .trace-row.uncabled .trace-wire::before {

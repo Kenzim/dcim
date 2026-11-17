@@ -3,6 +3,8 @@
 Cable ends are written as ``server:<port_id>``, ``switch:<port_id>``, or by device and
 port name: ``server:<server_id>/<port name>``, ``switch:<switch_id>/<port name>``
 (port names may themselves contain ``/``, e.g. ``switch:1/Ethernet1/23``).
+Patch panel ends name a side: ``patch:<patch_port_id>/front`` or
+``patch:<panel_id>/<port number or label>/rear``.
 """
 
 from __future__ import annotations
@@ -16,7 +18,9 @@ from app.dao import CableRunDAO, NetworkPortDAO, ServerDAO, SwitchPortDAO
 from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 from app.models.network_port import NetworkPort
+from app.models.patch_panel import PatchPanelPort
 from app.models.switch_port import SwitchPort
+from app.services.cable_trace_service import describe_path, describe_ref, trace_from_port
 
 _PORT_FIELDS = (
     "mac_address",
@@ -32,12 +36,41 @@ _PORT_FIELDS = (
 )
 
 
-def _resolve_end(db, ref: str) -> tuple[str, int, object]:
-    """Turn an end reference into (type, port_id, port row)."""
+def _resolve_patch_end(db, ref: str, rest: str) -> tuple[str, int, object, str]:
+    body, _, side = rest.rpartition("/")
+    side = side.strip().lower()
+    if side not in ("front", "rear") or not body:
+        raise ValueError(f"Bad cable end {ref!r}: patch ends need a side, e.g. patch:<port_id>/front or patch:<panel_id>/<port>/rear")
+    device, slash, port_name = body.partition("/")
+    try:
+        number = int(device)
+    except ValueError:
+        raise ValueError(f"Bad cable end {ref!r}: expected a numeric id after 'patch:'") from None
+    if slash:
+        q = db.query(PatchPanelPort).filter(PatchPanelPort.patch_panel_id == number)
+        port = q.filter(PatchPanelPort.label == port_name).first()
+        if port is None and port_name.isdigit():
+            port = q.filter(PatchPanelPort.number == int(port_name)).first()
+        if not port:
+            raise ValueError(f"No port {port_name!r} on patch panel {number}")
+    else:
+        port = db.get(PatchPanelPort, number)
+        if not port:
+            raise ValueError(f"Patch panel port {number} not found")
+    return "patch", port.id, port, side
+
+
+def _resolve_end(db, ref: str) -> tuple[str, int, object, Optional[str]]:
+    """Turn an end reference into (type, port_id, port row, side); side is set only for patch ports."""
     kind, sep, rest = (ref or "").strip().partition(":")
     kind = kind.strip().lower()
+    if sep and kind == "patch" and rest:
+        return _resolve_patch_end(db, ref, rest)
     if not sep or kind not in ("server", "switch") or not rest:
-        raise ValueError(f"Bad cable end {ref!r}: use server:<port_id>, switch:<port_id>, or <type>:<device_id>/<port name>")
+        raise ValueError(
+            f"Bad cable end {ref!r}: use server:<port_id>, switch:<port_id>, <type>:<device_id>/<port name>, "
+            "or patch:<port_id>/<front|rear>"
+        )
     device, slash, port_name = rest.partition("/")
     try:
         number = int(device)
@@ -52,34 +85,29 @@ def _resolve_end(db, ref: str) -> tuple[str, int, object]:
         port = (NetworkPortDAO if kind == "server" else SwitchPortDAO).get_by_id(db, number)
         if not port:
             raise ValueError(f"{kind.capitalize()} port {number} not found")
-    return kind, port.id, port
+    return kind, port.id, port, None
 
 
-def _end_label(db, port_type: str, port_id: Optional[int]) -> dict:
-    if port_type == "switch":
-        port = SwitchPortDAO.get_by_id(db, port_id) if port_id else None
-        device = port.switch if port else None
-        device_id = port.switch_id if port else None
-    else:
-        port = NetworkPortDAO.get_by_id(db, port_id) if port_id else None
-        device = port.server if port else None
-        device_id = port.server_id if port else None
-    return {
-        "type": port_type,
-        "port_id": port_id,
-        "port": port.name if port else None,
-        "device_id": device_id,
-        "device": device.name if device else None,
+def _end_label(db, ref) -> dict:
+    info = describe_ref(db, ref) or {}
+    label = {
+        "type": ref[0],
+        "port_id": ref[1],
+        "port": info.get("port_name"),
+        "device_id": info.get("device_id"),
+        "device": info.get("device_name"),
     }
+    if ref[0] == "patch":
+        label["side"] = ref[2]
+    return label
 
 
 def _cable_row(db, run) -> dict:
-    a_type = "switch" if run.end_a_switch_port_id else "server"
-    b_type = "switch" if run.end_b_switch_port_id else "server"
+    end_a, end_b = run.ends()
     return {
         "id": run.id,
-        "a": _end_label(db, a_type, run.end_a_switch_port_id or run.end_a_server_port_id),
-        "b": _end_label(db, b_type, run.end_b_switch_port_id or run.end_b_server_port_id),
+        "a": _end_label(db, end_a),
+        "b": _end_label(db, end_b),
         "cable_type": run.cable_type,
         "speed_mbps": run.speed_mbps,
         "description": run.description,
@@ -183,9 +211,10 @@ async def delete_server_port(server_id: int, port_id: int, confirm: bool = False
 
 @mcp.tool()
 async def cable(
-    action: Literal["list", "connect", "update", "disconnect"],
+    action: Literal["list", "connect", "update", "disconnect", "trace"],
     server_id: Optional[int] = None,
     switch_id: Optional[int] = None,
+    patch_panel_id: Optional[int] = None,
     cable_id: Optional[int] = None,
     a: Optional[str] = None,
     b: Optional[str] = None,
@@ -194,10 +223,22 @@ async def cable(
     speed_mbps: Optional[int] = None,
     description: Optional[str] = None,
 ) -> dict:
-    """Cable runs. Ends: server:<port_id> | switch:<port_id> | server:<server_id>/<name> | switch:<switch_id>/<name>.
-    list: by server_id, switch_id or cable_id (else all). connect: a + b, or runs=[{a,b,cable_type,speed_mbps,description}]
-    (all-or-nothing). update: cable_id, metadata only. disconnect: cable_id or a (one end).
+    """Cable runs. Ends: server:<port_id> | switch:<port_id> | server:<server_id>/<name> | switch:<switch_id>/<name>
+    | patch:<patch_port_id>/<front|rear> | patch:<panel_id>/<port number or label>/<front|rear>.
+    list: by server_id, switch_id, patch_panel_id or cable_id (else all). connect: a + b, or
+    runs=[{a,b,cable_type,speed_mbps,description}] (all-or-nothing). update: cable_id, metadata only.
+    disconnect: cable_id or a (one end). trace: a; follows the cable through patch panels to the far device.
     """
+    if action == "trace":
+        if not a:
+            raise ToolError("trace needs a")
+
+        def trace(db, ctx):
+            end_type, end_id, _, side = _resolve_end(db, a)
+            return describe_path(db, trace_from_port(db, end_type, end_id, side))
+
+        return await run_tool("cable", "read", trace, args={"action": action, "a": a})
+
     if action == "list":
         def read(db, ctx):
             if cable_id is not None:
@@ -209,6 +250,8 @@ async def cable(
                 found = CableRunDAO.get_by_server(db, server_id)
             elif switch_id is not None:
                 found = CableRunDAO.get_by_switch(db, switch_id)
+            elif patch_panel_id is not None:
+                found = CableRunDAO.get_by_patch_panel(db, patch_panel_id)
             else:
                 found = CableRunDAO.get_all(db, limit=1000)
             return {"cables": [_cable_row(db, r) for r in found]}
@@ -230,30 +273,33 @@ async def cable(
                 if not item.get("a") or not item.get("b"):
                     raise ValueError(f"Run {i}: needs a and b")
                 try:
-                    a_type, a_id, _ = _resolve_end(db, item["a"])
-                    b_type, b_id, _ = _resolve_end(db, item["b"])
+                    a_type, a_id, _, a_side = _resolve_end(db, item["a"])
+                    b_type, b_id, _, b_side = _resolve_end(db, item["b"])
                 except ValueError as exc:
                     raise ValueError(f"Run {i}: {exc}") from None
-                for end in ((a_type, a_id), (b_type, b_id)):
+                end_a, end_b = (a_type, a_id, a_side), (b_type, b_id, b_side)
+                if end_a == end_b:
+                    raise ValueError(f"Run {i}: cannot connect a port to itself")
+                for end, ref in ((end_a, item["a"]), (end_b, item["b"])):
                     if end in used:
-                        raise ValueError(f"Run {i}: {end[0]} port {end[1]} is used twice in this request")
+                        raise ValueError(f"Run {i}: {ref} is used twice in this request")
                     used.add(end)
                     if CableRunDAO.get_by_port(db, *end):
-                        raise ValueError(f"Run {i}: {item['a' if end == (a_type, a_id) else 'b']} is already cabled")
-                if (a_type, a_id) == (b_type, b_id):
-                    raise ValueError(f"Run {i}: cannot connect a port to itself")
-                planned.append((a_type, a_id, b_type, b_id, item))
+                        raise ValueError(f"Run {i}: {ref} is already cabled")
+                planned.append((end_a, end_b, item))
             made = []
-            for a_type, a_id, b_type, b_id, item in planned:
+            for end_a, end_b, item in planned:
                 run = CableRunDAO.create(
                     db,
-                    port_a_type=a_type,
-                    port_a_id=a_id,
-                    port_b_type=b_type,
-                    port_b_id=b_id,
+                    port_a_type=end_a[0],
+                    port_a_id=end_a[1],
+                    port_b_type=end_b[0],
+                    port_b_id=end_b[1],
                     cable_type=item.get("cable_type"),
                     speed_mbps=item.get("speed_mbps"),
                     description=item.get("description"),
+                    port_a_side=end_a[2],
+                    port_b_side=end_b[2],
                 )
                 made.append(_cable_row(db, run))
             return {"created": made}
@@ -287,8 +333,8 @@ async def cable(
         if cable_id is not None:
             run = CableRunDAO.get_by_id(db, cable_id)
         else:
-            end_type, end_id, _ = _resolve_end(db, a)
-            run = CableRunDAO.get_by_port(db, end_type, end_id)
+            end_type, end_id, _, side = _resolve_end(db, a)
+            run = CableRunDAO.get_by_port(db, end_type, end_id, side)
         if not run:
             raise ValueError("Cable run not found")
         row = _cable_row(db, run)

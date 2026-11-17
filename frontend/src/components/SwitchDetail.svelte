@@ -1,5 +1,6 @@
 <script>
   import PageHeader from './PageHeader.svelte';
+  import { cablePathParts, viaText } from '../lib/cablePath.js';
   import { getSwitch, getSwitchPorts, updateSwitchPorts, getLocations, getRacks, getServers, getServer, regenerateSwitchPorts, listCableRuns, createCableRun, deleteCableRun, getSwitchBandwidth } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { onMount } from 'svelte';
@@ -542,13 +543,16 @@
                     <td>{formatSpeed(port.speed_mbps)}</td>
                     <td>
                       {#if port.cable_run}
-                        {#if port.cable_run.other_end_device_id != null}
-                          <a href={port.cable_run.other_end_type === 'server' ? `/admin/servers/${port.cable_run.other_end_device_id}` : `/admin/switches/${port.cable_run.other_end_device_id}`} class="link">
-                            {port.cable_run.other_end_device_name || port.cable_run.other_end_type} – {port.cable_run.other_end_port_name || port.cable_run.other_end_port_id}
-                          </a>
+                        {@const parts = cablePathParts(port.cable_run)}
+                        {#if parts.far?.url}
+                          <a href={parts.far.url} class="link">{parts.far.deviceName} – {parts.far.portName}</a>
+                        {:else if parts.far}
+                          <span class="text-muted">{parts.far.portName}</span>
                         {:else}
-                          <span class="text-muted">{port.cable_run.other_end_port_name || `Port #${port.cable_run.other_end_port_id}`}</span>
+                          <a href={parts.direct.url} class="link">{parts.direct.deviceName} – {parts.direct.portName}</a>
+                          <span class="text-muted">(path ends at the patch panel)</span>
                         {/if}
+                        {#if parts.via.length}<div class="via-note">via {viaText(parts.via)}</div>{/if}
                       {:else}
                         <span class="text-muted">Not connected</span>
                       {/if}
@@ -949,6 +953,12 @@
 
   .btn-small.btn-danger:hover {
     filter: brightness(1.1);
+  }
+
+  .via-note {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
   }
 
   .connect-modal-backdrop {

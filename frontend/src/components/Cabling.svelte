@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import PageHeader from './PageHeader.svelte';
-  import { getCablingGraph, getLocations, getRacks } from '../lib/api.js';
+  import { getCablingGraph, getCablingLldp, getLocations, getRacks, refreshSwitchLldp } from '../lib/api.js';
   import { theme } from '../stores/theme.js';
 
   const SPEED_BANDS = [
@@ -12,13 +12,30 @@
     { key: '100g', label: '100G and above', colour: '#db2777', test: () => true },
   ];
   const UNKNOWN_SPEED_COLOUR = '#a8a29e';
-  const LINK_COLOURS = { up: '#059669', down: '#dc2626', unknown: '#94a3b8' };
+  const LINK_COLOURS = { up: '#059669', down: '#dc2626', stale: '#d97706', unknown: '#94a3b8' };
+  const LINK_LABELS = { up: 'up', down: 'down', stale: 'status stale', unknown: 'not polled' };
+  const LLDP_OVERLAY_COLOUR = '#2563eb';
+  const LLDP_MISMATCH_COLOUR = '#dc2626';
+  const LLDP_LABELS = {
+    match: 'Matches',
+    mismatch: 'Mismatch',
+    missing_cable: 'Not recorded',
+    unknown_neighbour: 'Unknown neighbour',
+    no_lldp: 'No LLDP seen',
+    unmapped_local_port: 'Unmapped local port',
+  };
+  const LLDP_PROBLEMS = ['mismatch', 'missing_cable', 'unknown_neighbour', 'unmapped_local_port'];
+  const RESOLVED_BY_LABELS = { port_mac: 'port MAC address', chassis_mac: 'chassis MAC address', system_name: 'system name' };
 
   let cyContainer;
   let cy = null;
   let cytoscapeLib = null;
+  let computeElkPositions = null;
+  let stopElkWorker = null;
   let loadingLib = true;
   let loading = false;
+  let layingOut = false;
+  let layoutSeq = 0;
   let error = null;
 
   let locations = [];
@@ -32,6 +49,7 @@
   let portsById = new Map();
   let edgesByCable = new Map();
   let portsByDevice = new Map();
+  let pathsById = new Map();
 
   let colourMode = 'speed';
   let showPortLabels = false;
@@ -44,6 +62,19 @@
   let loadSeq = 0;
   let destroyed = false;
 
+  let lldpOn = false;
+  let lldp = null;
+  let lldpLoading = false;
+  let lldpError = null;
+  let lldpSeq = 0;
+  let lldpRefreshing = null;
+  let lldpRefreshMessage = '';
+  let showMatched = false;
+
+  $: lldpByPort = new Map((lldp?.results || []).filter((r) => r.switch_port).map((r) => [r.switch_port, r]));
+  $: lldpProblems = (lldp?.results || []).filter((r) => LLDP_PROBLEMS.includes(r.status));
+  $: lldpQuiet = (lldp?.results || []).filter((r) => !LLDP_PROBLEMS.includes(r.status));
+
   $: racksForLocation = locationId
     ? allRacks.filter((r) => String(r.location_id) === String(locationId))
     : allRacks;
@@ -55,6 +86,7 @@
     locationId = params.get('location') || '';
     rackId = params.get('rack') || '';
     focusId = params.get('focus') || null;
+    lldpOn = params.get('lldp') === '1';
   }
 
   function writeParams() {
@@ -62,6 +94,7 @@
     if (locationId) params.set('location', locationId);
     if (rackId) params.set('rack', rackId);
     if (selection?.type === 'device') params.set('focus', selection.id);
+    if (lldpOn) params.set('lldp', '1');
     const qs = params.toString();
     const url = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
     if (url !== `${window.location.pathname}${window.location.search}`) {
@@ -100,20 +133,54 @@
     return `#${mixed.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
   }
 
+  function timeAgo(value) {
+    if (!value) return null;
+    const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
+    if (seconds < 90) return 'just now';
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 90) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 36) return `${hours} h ago`;
+    return new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  function portStatusText(port) {
+    if (port.kind === 'switch') {
+      if (!port.status_updated_at) return port.oper_status ? `link ${port.oper_status}` : null;
+      const when = timeAgo(port.status_updated_at);
+      if (port.status_fresh) return `link ${port.oper_status || 'unknown'}, polled ${when}`;
+      return `status stale: link ${port.oper_status || 'unknown'} when last polled ${when}`;
+    }
+    if (port.link_up === null || port.link_up === undefined) return null;
+    return `link ${port.link_up ? 'up' : 'down'} at last hardware detection (${timeAgo(port.link_checked_at) || 'date unknown'})`;
+  }
+
   function summarise(g) {
-    const counts = { up: 0, down: 0, unknown: 0 };
-    for (const e of g.edges) counts[e.link_status] = (counts[e.link_status] || 0) + 1;
+    const counts = { up: 0, down: 0, stale: 0, unknown: 0 };
+    for (const p of g.paths) counts[p.link_status] = (counts[p.link_status] || 0) + 1;
     return {
       servers: g.nodes.filter((n) => n.kind === 'server' && n.in_scope).length,
       switches: g.nodes.filter((n) => n.kind === 'switch' && n.in_scope).length,
+      panels: g.nodes.filter((n) => n.kind === 'patch_panel' && n.in_scope).length,
       external: g.nodes.filter((n) => !n.in_scope).length,
       cables: g.edges.length,
+      links: g.paths.length,
+      incomplete: g.paths.filter((p) => !p.complete).length,
       ...counts,
     };
   }
 
+  const KIND_LABELS = { server: 'Server', switch: 'Switch', patch_panel: 'Patch panel' };
+  const KIND_RANK = { switch: 0, patch_panel: 1, server: 2 };
+
   function deviceUrl(node) {
-    return node.kind === 'server' ? `/admin/servers/${node.device_id}` : `/admin/switches/${node.device_id}`;
+    if (node.kind === 'server') return `/admin/servers/${node.device_id}`;
+    if (node.kind === 'switch') return `/admin/switches/${node.device_id}`;
+    return `/admin/patch-panels/${node.device_id}`;
+  }
+
+  function portLabel(port, side) {
+    return side ? `${port.name} (${side})` : port.name;
   }
 
   function rackLabel(rid) {
@@ -141,6 +208,7 @@
     nodesById = new Map(g.nodes.map((n) => [n.id, n]));
     portsById = new Map(g.ports.map((p) => [p.id, p]));
     edgesByCable = new Map(g.edges.map((e) => [e.cable_id, e]));
+    pathsById = new Map(g.paths.map((p) => [p.id, p]));
     portsByDevice = new Map();
     for (const p of g.ports) {
       if (!portsByDevice.has(p.device)) portsByDevice.set(p.device, []);
@@ -182,7 +250,9 @@
       if (!n.in_scope) classes.push('external');
       if (!n.enabled) classes.push('disabled');
       if (n.locked) classes.push('locked');
-      const sub = n.kind === 'switch' ? placement(n) || n.model || '' : unitLabel(n);
+      let sub = unitLabel(n);
+      if (n.kind === 'switch') sub = placement(n) || n.model || '';
+      if (n.kind === 'patch_panel') sub = placement(n) || (n.medium === 'fibre' ? 'fibre panel' : 'patch panel');
       const data = {
         id: n.id,
         kind: n.kind,
@@ -193,13 +263,14 @@
       elements.push({ group: 'nodes', classes: classes.join(' '), data });
     }
 
-    const groupOf = (node) => (node.kind === 'server' ? (node.rack_id ? `rack:${node.rack_id}` : `norack:${node.location_id}`) : null);
+    const groupOf = (node) => (node.kind === 'server' ? (node.rack_id ? `rack:${node.rack_id}` : `norack:${node.location_id}`) : node.id);
+    const oriented = orientEdges(g);
     const proxies = new Set();
-    for (const e of g.edges) {
-      const ends = [nodesById.get(e.source), nodesById.get(e.target)];
-      const sw = ends.find((n) => n.kind === 'switch');
-      const srv = ends.find((n) => n.kind === 'server');
-      if (sw && srv) proxies.add(`${sw.id}|${groupOf(srv)}`);
+    for (const { src, dst } of oriented.values()) {
+      const from = nodesById.get(src);
+      const to = nodesById.get(dst);
+      if (from.kind === 'server' && to.kind === 'server') continue;
+      if (from.kind === 'server' || to.kind === 'server') proxies.add(`${groupOf(from)}|${groupOf(to)}`);
     }
     for (const key of proxies) {
       const [source, target] = key.split('|');
@@ -207,29 +278,67 @@
     }
 
     for (const e of g.edges) {
-      const a = portsById.get(e.source_port);
-      const b = portsById.get(e.target_port);
-      const aNode = nodesById.get(e.source);
-      const bNode = nodesById.get(e.target);
-      let flip = aNode.kind === 'server' && bNode.kind === 'switch';
-      if (aNode.kind === bNode.kind) flip = aNode.name.localeCompare(bNode.name) > 0;
-      const [src, dst, srcPort, dstPort] = flip ? [e.target, e.source, b, a] : [e.source, e.target, a, b];
+      const { src, dst, srcPort, dstPort, srcSide, dstSide, srcDangling, dstDangling } = oriented.get(e.cable_id);
+      const classes = [LINK_COLOURS[e.link_status] ? e.link_status : 'unknown'];
+      if (srcDangling) classes.push('dangling-source');
+      if (dstDangling) classes.push('dangling-target');
       elements.push({
         group: 'edges',
-        classes: e.link_status === 'down' ? 'down' : e.link_status === 'unknown' ? 'unknown' : 'up',
+        classes: classes.join(' '),
         data: {
           id: e.id,
           cableId: e.cable_id,
+          pathId: e.path_id,
           source: src,
           target: dst,
-          sourceLabel: srcPort.name,
-          targetLabel: dstPort.name,
+          sourceLabel: portLabel(srcPort, srcSide),
+          targetLabel: portLabel(dstPort, dstSide),
           speedColour: speedColour(e.effective_speed_mbps),
           statusColour: LINK_COLOURS[e.link_status] || LINK_COLOURS.unknown,
         },
       });
     }
     return elements;
+  }
+
+  // Direction of each cable for the layered layout: along its path from the switch end towards the
+  // server end, so switches sit above patch panels and patch panels above servers.
+  function orientEdges(g) {
+    const out = new Map();
+    const rankOfPort = (portId) => KIND_RANK[nodesById.get(portsById.get(portId)?.device)?.kind] ?? 1;
+    for (const path of g.paths) {
+      const startRank = rankOfPort(path.start_port);
+      const endRank = rankOfPort(path.end_port);
+      let reverse = startRank > endRank;
+      if (startRank === endRank && path.hops.length === 1) {
+        const a = nodesById.get(portsById.get(path.start_port)?.device);
+        const b = nodesById.get(portsById.get(path.end_port)?.device);
+        reverse = !!a && !!b && a.name.localeCompare(b.name) > 0;
+      }
+      const dangling = new Set();
+      if (!path.complete) {
+        if (portsById.get(path.start_port)?.kind === 'patch') dangling.add(`${path.start_port}|${path.start_side}`);
+        if (portsById.get(path.end_port)?.kind === 'patch') dangling.add(`${path.end_port}|${path.end_side}`);
+      }
+      for (const hop of path.hops) {
+        const [fromPort, fromSide, toPort, toSide] = reverse
+          ? [hop.to_port, hop.to_side, hop.from_port, hop.from_side]
+          : [hop.from_port, hop.from_side, hop.to_port, hop.to_side];
+        const srcPort = portsById.get(fromPort);
+        const dstPort = portsById.get(toPort);
+        out.set(hop.cable_id, {
+          src: srcPort.device,
+          dst: dstPort.device,
+          srcPort,
+          dstPort,
+          srcSide: fromSide,
+          dstSide: toSide,
+          srcDangling: dangling.has(`${fromPort}|${fromSide}`),
+          dstDangling: dangling.has(`${toPort}|${toSide}`),
+        });
+      }
+    }
+    return out;
   }
 
   function stylesheet() {
@@ -271,6 +380,18 @@
         },
       },
       {
+        selector: 'node.patch_panel',
+        style: {
+          shape: 'cut-rectangle',
+          width: 152,
+          height: 34,
+          'font-size': 10.5,
+          'background-color': mixHex(muted, surface, 0.12),
+          'border-color': muted,
+          'border-width': 1.5,
+        },
+      },
+      {
         selector: 'node.group',
         style: {
           shape: 'round-rectangle',
@@ -289,7 +410,7 @@
         },
       },
       { selector: 'node.disabled', style: { color: muted, 'background-color': surfaceAlt, 'border-style': 'dotted' } },
-      { selector: 'node.server, node.switch', style: { 'z-compound-depth': 'top' } },
+      { selector: 'node.server, node.switch, node.patch_panel', style: { 'z-compound-depth': 'top' } },
       { selector: 'node.locked', style: { 'border-color': warning, 'border-width': 2.5 } },
       { selector: 'node.external', style: { opacity: 0.6, 'border-style': 'dashed' } },
       {
@@ -308,8 +429,43 @@
         },
       },
       { selector: 'edge.proxy', style: { display: 'none' } },
+      {
+        selector: 'edge.lldp-overlay',
+        style: {
+          width: 2,
+          'line-color': LLDP_OVERLAY_COLOUR,
+          'line-style': 'dashed',
+          'line-dash-pattern': [3, 3],
+          'curve-style': 'unbundled-bezier',
+          'control-point-distances': 40,
+          label: 'LLDP',
+          'font-size': 9,
+          color: LLDP_OVERLAY_COLOUR,
+          'text-background-color': surface,
+          'text-background-opacity': 0.9,
+          'text-background-padding': 2,
+        },
+      },
+      { selector: 'edge.lldp-overlay.mismatch', style: { 'line-color': LLDP_MISMATCH_COLOUR, color: LLDP_MISMATCH_COLOUR } },
+      {
+        selector: 'edge.lldp-mismatch',
+        style: {
+          label: 'LLDP mismatch',
+          'font-size': 9,
+          'font-weight': 700,
+          color: LLDP_MISMATCH_COLOUR,
+          'text-background-color': surface,
+          'text-background-opacity': 0.95,
+          'text-background-padding': 2,
+          'underlay-color': LLDP_MISMATCH_COLOUR,
+          'underlay-opacity': 0.25,
+          'underlay-padding': 4,
+        },
+      },
       { selector: 'edge.down', style: { 'line-style': 'dashed', 'line-dash-pattern': [6, 4] } },
-      { selector: 'edge.unknown', style: { 'line-style': 'dotted' } },
+      { selector: 'edge.unknown, edge.stale', style: { 'line-style': 'dotted' } },
+      { selector: 'edge.dangling-target', style: { 'target-arrow-shape': 'tee', 'target-arrow-color': warning } },
+      { selector: 'edge.dangling-source', style: { 'source-arrow-shape': 'tee', 'source-arrow-color': warning } },
       {
         selector: 'edge.ports, edge.highlighted',
         style: { 'source-label': 'data(sourceLabel)', 'target-label': 'data(targetLabel)' },
@@ -325,10 +481,6 @@
 
   function layoutOptions() {
     return {
-      name: 'elk',
-      fit: true,
-      padding: 30,
-      animate: false,
       nodeLayoutOptions: (n) => {
         if (n.isParent()) {
           return {
@@ -339,33 +491,52 @@
           };
         }
         if (n.data('kind') === 'switch') {
-          const incoming = n.incomers('edge').not('.proxy').length;
+          const incoming = n.incomers('edge').not('.proxy, .lldp-overlay').length;
           return incoming === 0 ? { 'elk.layered.layering.layerConstraint': 'FIRST' } : {};
         }
         return { 'elk.priority': String(n.data('rackUnit') ?? 0) };
       },
-      elk: {
+      layoutOptions: {
         algorithm: 'layered',
+        'elk.aspectRatio': String(cy.width() / Math.max(cy.height(), 1)),
         'elk.direction': 'DOWN',
         'elk.hierarchyHandling': 'SEPARATE_CHILDREN',
         'elk.layered.layering.strategy': 'LONGEST_PATH',
         'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
-        'elk.spacing.nodeNode': 36,
-        'elk.layered.spacing.nodeNodeBetweenLayers': 90,
-        'elk.spacing.componentComponent': 48,
+        'elk.spacing.nodeNode': '36',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '90',
+        'elk.spacing.componentComponent': '48',
       },
     };
   }
 
-  async function loadLibrary() {
-    const [{ default: cytoscape }, { default: elk }] = await Promise.all([
-      import('cytoscape'),
-      import('cytoscape-elk'),
-    ]);
-    if (!cytoscape.__rackflowElk) {
-      cytoscape.use(elk);
-      cytoscape.__rackflowElk = true;
+  // Runs ELK in its worker and applies the positions; `after` runs once they are applied.
+  // A newer layout request, a new graph or leaving the page discards an older result.
+  async function runLayout(after) {
+    if (!cy) return;
+    const seq = ++layoutSeq;
+    const target = cy;
+    layingOut = true;
+    try {
+      const positions = await computeElkPositions(target.elements().not('.lldp-overlay'), layoutOptions());
+      if (seq !== layoutSeq || destroyed || cy !== target) return;
+      target
+        .nodes()
+        .filter((n) => !n.isParent())
+        .layout({ name: 'preset', positions: (n) => positions[n.id()] || null, fit: false, animate: false })
+        .run();
+      after?.();
+    } catch (err) {
+      if (seq === layoutSeq && !destroyed) error = `Could not lay out the graph: ${err.message}`;
+    } finally {
+      if (seq === layoutSeq) layingOut = false;
     }
+  }
+
+  async function loadLibrary() {
+    const [{ default: cytoscape }, elkModule] = await Promise.all([import('cytoscape'), import('../lib/elkLayout.js')]);
+    computeElkPositions = elkModule.computeElkPositions;
+    stopElkWorker = elkModule.stopElkWorker;
     cytoscapeLib = cytoscape;
   }
 
@@ -391,11 +562,111 @@
       await tick();
       if (seq !== loadSeq || destroyed) return;
       renderGraph();
+      if (lldpOn) loadLldp();
     } catch (err) {
       if (seq === loadSeq) error = err.message;
     } finally {
       if (seq === loadSeq) loading = false;
     }
+  }
+
+  async function loadLldp() {
+    const seq = ++lldpSeq;
+    lldpLoading = true;
+    lldpError = null;
+    try {
+      const result = await getCablingLldp({ locationId: locationId || null, rackId: rackId || null });
+      if (seq !== lldpSeq || destroyed) return;
+      if (selection?.type === 'lldp') clearSelection();
+      lldp = result;
+      applyLldp();
+    } catch (err) {
+      if (seq === lldpSeq) lldpError = err.message;
+    } finally {
+      if (seq === lldpSeq) lldpLoading = false;
+    }
+  }
+
+  function clearLldp() {
+    if (!cy) return;
+    cy.edges('.lldp-overlay').remove();
+    cy.edges().removeClass('lldp-mismatch');
+  }
+
+  function applyLldp() {
+    if (!cy) return;
+    clearLldp();
+    if (!lldpOn || !lldp) return;
+    const overlays = [];
+    lldp.results.forEach((r, index) => {
+      if (r.status === 'mismatch' && r.cable_id) {
+        const pathId = edgesByCable.get(r.cable_id)?.path_id;
+        if (pathId) pathEdges(new Set([pathId])).addClass('lldp-mismatch');
+      }
+      const seen = r.observed?.resolved?.device;
+      if (!seen || !['mismatch', 'missing_cable'].includes(r.status)) return;
+      if (cy.getElementById(seen).empty() || cy.getElementById(r.switch).empty()) return;
+      overlays.push({
+        group: 'edges',
+        classes: `lldp-overlay ${r.status}`,
+        data: { id: `lldp:${index}`, source: r.switch, target: seen, lldpIndex: index },
+      });
+    });
+    if (overlays.length) cy.add(overlays);
+  }
+
+  function toggleLldp() {
+    writeParams();
+    if (lldpOn) loadLldp();
+    else clearLldp();
+  }
+
+  async function refreshLldp(sw) {
+    lldpRefreshing = sw.id;
+    lldpRefreshMessage = '';
+    try {
+      const result = await refreshSwitchLldp(sw.id);
+      lldpRefreshMessage = `${sw.name}: ${result.neighbours} neighbour${result.neighbours === 1 ? '' : 's'} read.`;
+      await loadLldp();
+    } catch (err) {
+      lldpRefreshMessage = `${sw.name}: ${err.message}`;
+      await loadLldp();
+    } finally {
+      lldpRefreshing = null;
+    }
+  }
+
+  function lldpObservedText(observed) {
+    if (!observed) return 'nothing seen';
+    const r = observed.resolved;
+    if (r) return [r.device_name, r.port_name].filter(Boolean).join(' ');
+    const parts = [observed.sys_name, observed.port_desc || observed.port_id].filter(Boolean);
+    return parts.length ? parts.join(' ') : observed.chassis_id || 'unidentified device';
+  }
+
+  function lldpRecordedText(recorded) {
+    if (!recorded) return 'no cable recorded';
+    return [recorded.device_name, recorded.port_name].filter(Boolean).join(' ');
+  }
+
+  function lldpSwitchName(r) {
+    return nodesById.get(r.switch)?.name || lldp?.switches.find((s) => s.id === r.switch_id)?.name || `Switch ${r.switch_id}`;
+  }
+
+  function selectLldp(r) {
+    if (!cy) return;
+    const index = lldp.results.indexOf(r);
+    const overlay = cy.getElementById(`lldp:${index}`);
+    const pathId = r.cable_id ? edgesByCable.get(r.cable_id)?.path_id : null;
+    const cable = pathId ? pathEdges(new Set([pathId])) : cy.collection();
+    const sw = cy.getElementById(r.switch);
+    const focus = overlay.nonempty() ? overlay : cable.nonempty() ? cable : sw;
+    if (focus.empty()) return;
+    const members = focus.union(cable).union(overlay);
+    highlight(members.union(members.connectedNodes()).union(sw), focus);
+    selection = { type: 'lldp', index };
+    cy.animate({ center: { eles: members.union(sw) } }, { duration: 300 });
+    writeParams();
   }
 
   function renderGraph() {
@@ -420,21 +691,24 @@
       }
       selectDevice(node.id());
     });
-    cy.on('tap', 'edge', (evt) => selectCable(evt.target.data('cableId')));
+    cy.on('tap', 'edge', (evt) => {
+      const index = evt.target.data('lldpIndex');
+      if (index !== undefined && lldp?.results[index]) selectLldp(lldp.results[index]);
+      else selectCable(evt.target.data('cableId'));
+    });
     cy.on('tap', (evt) => {
       if (evt.target === cy) clearSelection();
     });
     if (showPortLabels) cy.edges().addClass('ports');
-    const layout = cy.layout(layoutOptions());
-    layout.one('layoutstop', () => {
+    runLayout(() => {
       cy.resize();
       cy.fit(undefined, 30);
+      applyLldp();
       if (wanted && nodesById.has(wanted)) {
         selectDevice(wanted, true);
       }
       focusId = null;
     });
-    layout.run();
   }
 
   function clearHighlight() {
@@ -457,11 +731,16 @@
     focus.addClass('focus');
   }
 
+  function pathEdges(pathIds) {
+    return cy.edges().filter((e) => pathIds.has(e.data('pathId')));
+  }
+
   function selectDevice(id, centre = false) {
     if (!cy) return;
     const ele = cy.getElementById(id);
     if (ele.empty()) return;
-    const cables = ele.connectedEdges().not('.proxy');
+    const direct = ele.connectedEdges().not('.proxy, .lldp-overlay');
+    const cables = pathEdges(new Set(direct.map((e) => e.data('pathId'))));
     highlight(cables.union(cables.connectedNodes()).union(ele), ele);
     selection = { type: 'device', id };
     if (centre) cy.animate({ center: { eles: ele }, zoom: Math.max(cy.zoom(), 1) }, { duration: 300 });
@@ -473,34 +752,74 @@
     const edge = edgesByCable.get(cableId);
     if (!edge) return;
     const ele = cy.getElementById(edge.id);
-    highlight(ele.union(ele.connectedNodes()), ele);
+    const cables = pathEdges(new Set([edge.path_id]));
+    highlight(cables.union(cables.connectedNodes()), ele);
     selection = { type: 'path', cableId, fromPortId };
     writeParams();
   }
 
-  function pathSteps(sel) {
-    const edge = edgesByCable.get(sel.cableId);
-    if (!edge) return null;
-    let first = portsById.get(edge.source_port);
-    let second = portsById.get(edge.target_port);
-    const startHere = sel.fromPortId
-      ? sel.fromPortId === second.id
-      : nodesById.get(second.device)?.kind === 'server' && nodesById.get(first.device)?.kind !== 'server';
-    if (startHere) [first, second] = [second, first];
-    return {
-      edge,
-      a: { port: first, node: nodesById.get(first.device) },
-      b: { port: second, node: nodesById.get(second.device) },
-    };
+  function endpoint(portId, side) {
+    const port = portsById.get(portId);
+    return port ? { kind: 'end', port, side, node: nodesById.get(port.device) } : null;
   }
 
+  // Ordered steps of the path a cable belongs to: end port, cable, patch panel port (in one side, out
+  // the other), cable, ..., end port. Starts at fromPortId when given, otherwise at the server end.
+  function pathSteps(sel) {
+    const edge = edgesByCable.get(sel.cableId);
+    const path = edge && pathsById.get(edge.path_id);
+    if (!path) return null;
+    let hops = path.hops;
+    if (sel.fromPortId && sel.fromPortId === path.end_port && sel.fromPortId !== path.start_port) {
+      hops = [...hops].reverse().map((h) => ({
+        cable_id: h.cable_id, from_port: h.to_port, from_side: h.to_side, to_port: h.from_port, to_side: h.from_side,
+      }));
+    }
+    const steps = [];
+    hops.forEach((hop, i) => {
+      if (i === 0) steps.push(endpoint(hop.from_port, hop.from_side));
+      steps.push({ kind: 'cable', edge: edgesByCable.get(hop.cable_id), selected: hop.cable_id === sel.cableId });
+      const next = hops[i + 1];
+      if (next && next.from_port === hop.to_port) {
+        const port = portsById.get(hop.to_port);
+        steps.push({ kind: 'through', port, node: nodesById.get(port?.device), inSide: hop.to_side, outSide: next.from_side });
+      } else {
+        steps.push(endpoint(hop.to_port, hop.to_side));
+      }
+    });
+    if (steps.some((s) => !s || (s.kind !== 'cable' && (!s.port || !s.node)))) return null;
+    return { path, steps, first: steps[0], last: steps[steps.length - 1] };
+  }
+
+  // For a server or switch port: the port at the other end of its path, and how many patch panels
+  // the path passes through.
   function peerOf(port) {
     if (!port.cable_id) return null;
     const edge = edgesByCable.get(port.cable_id);
+    const path = edge && pathsById.get(edge.path_id);
+    if (!path) return null;
+    const atStart = path.start_port === port.id;
+    const other = portsById.get(atStart ? path.end_port : path.start_port);
+    if (!other) return null;
+    return {
+      port: other,
+      side: atStart ? path.end_side : path.start_side,
+      node: nodesById.get(other.device),
+      edge,
+      panels: path.hops.length - 1,
+      complete: path.complete,
+    };
+  }
+
+  // For one side of a patch panel port: the directly connected port on the other end of that cable.
+  function patchNeighbour(port, side) {
+    const cableId = port[`${side}_cable_id`];
+    const edge = cableId && edgesByCable.get(cableId);
     if (!edge) return null;
-    const otherId = edge.source_port === port.id ? edge.target_port : edge.source_port;
-    const other = portsById.get(otherId);
-    return other ? { port: other, node: nodesById.get(other.device), edge } : null;
+    const atSource = edge.source_port === port.id && edge.source_side === side;
+    const other = portsById.get(atSource ? edge.target_port : edge.source_port);
+    if (!other) return null;
+    return { port: other, side: atSource ? edge.target_side : edge.source_side, node: nodesById.get(other.device), edge };
   }
 
   function runSearch() {
@@ -526,7 +845,12 @@
   }
 
   function relayout() {
-    cy?.layout(layoutOptions()).run();
+    if (!cy) return;
+    clearLldp();
+    runLayout(() => {
+      cy.fit(undefined, 30);
+      applyLldp();
+    });
   }
 
   function exportPng() {
@@ -620,6 +944,7 @@
     unsubscribeTheme?.();
     cy?.destroy();
     cy = null;
+    stopElkWorker?.();
   });
 </script>
 
@@ -671,6 +996,11 @@
       <input type="checkbox" bind:checked={showPortLabels} on:change={togglePortLabels} />
       Port labels
     </label>
+    <label class="check" title="Compare recorded cables with the LLDP neighbours the switches report">
+      <input type="checkbox" bind:checked={lldpOn} on:change={toggleLldp} />
+      LLDP check
+      {#if lldpOn && lldp && lldpProblems.length}<span class="count-badge">{lldpProblems.length}</span>{/if}
+    </label>
     <div class="tools">
       <button type="button" class="btn-secondary btn-sm" on:click={fit} title="Fit to screen">Fit</button>
       <button type="button" class="btn-secondary btn-sm" on:click={() => zoomBy(1.25)} title="Zoom in" aria-label="Zoom in">+</button>
@@ -686,8 +1016,8 @@
   <div class="workspace">
     <div class="canvas-wrap">
       <div class="canvas" bind:this={cyContainer}></div>
-      {#if loadingLib || loading}
-        <div class="overlay">{loadingLib ? 'Loading graph library…' : 'Loading cabling…'}</div>
+      {#if loadingLib || loading || layingOut}
+        <div class="overlay">{loadingLib ? 'Loading graph library…' : loading ? 'Loading cabling…' : 'Laying out…'}</div>
       {:else if error}
         <div class="overlay error">{error}</div>
       {:else if graph && graph.nodes.length === 0}
@@ -706,17 +1036,26 @@
           <div class="legend-title">Link status</div>
           <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.up}"></span>Up</div>
           <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.down}"></span>Down</div>
+          <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.stale}"></span>Stale (not polled recently)</div>
           <div class="legend-row"><span class="swatch" style="background:{LINK_COLOURS.unknown}"></span>Not polled</div>
         {/if}
         <div class="legend-title legend-gap">Line style</div>
         <div class="legend-row"><span class="line solid"></span>Link up</div>
         <div class="legend-row"><span class="line dashed"></span>Link down</div>
-        <div class="legend-row"><span class="line dotted"></span>Status unknown</div>
+        <div class="legend-row"><span class="line dotted"></span>Status stale or not polled</div>
         <div class="legend-title legend-gap">Devices</div>
         <div class="legend-row"><span class="box switch"></span>Switch</div>
+        <div class="legend-row"><span class="box panel-box"></span>Patch panel</div>
         <div class="legend-row"><span class="box"></span>Server</div>
         <div class="legend-row"><span class="box locked"></span>Locked</div>
         <div class="legend-row"><span class="box external"></span>Outside filter</div>
+        <div class="legend-row"><span class="line dangling"></span>Path ends at a patch panel</div>
+        {#if lldpOn}
+          <div class="legend-title legend-gap">LLDP check</div>
+          <div class="legend-row"><span class="line lldp-mismatch"></span>Cable disagrees with LLDP</div>
+          <div class="legend-row"><span class="line dotted lldp-seen"></span>Seen by LLDP, not recorded</div>
+          <div class="legend-row"><span class="line dotted lldp-seen-bad"></span>What LLDP sees instead</div>
+        {/if}
       </details>
     </div>
 
@@ -725,26 +1064,54 @@
         {@const node = nodesById.get(selection.id)}
         {@const ports = portsByDevice.get(node.id) || []}
         <div class="panel-head">
-          <span class="kind">{node.kind === 'switch' ? 'Switch' : 'Server'}</span>
+          <span class="kind">{KIND_LABELS[node.kind] || node.kind}</span>
           <h3><a href={deviceUrl(node)}>{node.name}</a></h3>
           <div class="meta">
             {#if placement(node)}<span>{placement(node)}</span>{/if}
             {#if locationLabel(node.location_id)}<span>{locationLabel(node.location_id)}</span>{/if}
             {#if node.model}<span>{node.model}</span>{/if}
+            {#if node.medium}<span>{node.medium === 'fibre' ? 'Fibre' : 'Copper'}</span>{/if}
             {#if node.ip}<span class="mono">{node.ip}</span>{/if}
           </div>
           <div class="badges">
-            <span class="badge" class:ok={node.enabled} class:off={!node.enabled}>{node.enabled ? 'Enabled' : 'Disabled'}</span>
+            {#if node.kind !== 'patch_panel'}
+              <span class="badge" class:ok={node.enabled} class:off={!node.enabled}>{node.enabled ? 'Enabled' : 'Disabled'}</span>
+            {/if}
             {#if node.locked}<span class="badge warn">Locked</span>{/if}
             {#if !node.in_scope}<span class="badge">Outside filter</span>{/if}
           </div>
         </div>
         <h4>
-          {node.kind === 'switch' ? 'Cabled ports' : 'Network ports'}
-          {#if node.kind === 'switch'}<span class="muted">({ports.length} of {node.port_count})</span>{/if}
+          {node.kind === 'server' ? 'Network ports' : 'Cabled ports'}
+          {#if node.kind !== 'server'}<span class="muted">({ports.length} of {node.port_count})</span>{/if}
         </h4>
         {#if ports.length === 0}
-          <p class="muted">{node.kind === 'switch' ? 'No cabled ports in this view.' : 'No network ports recorded.'}</p>
+          <p class="muted">{node.kind === 'server' ? 'No network ports recorded.' : 'No cabled ports in this view.'}</p>
+        {:else if node.kind === 'patch_panel'}
+          <ul class="ports">
+            {#each ports as port (port.id)}
+              <li class="patch-port">
+                <span class="port-name mono">{port.name}</span>
+                {#each ['front', 'rear'] as side}
+                  {@const n = patchNeighbour(port, side)}
+                  <button
+                    type="button"
+                    class="port-row patch-side"
+                    disabled={!n}
+                    on:click={() => n && selectCable(n.edge.cable_id, port.id)}
+                  >
+                    <span class="side-label">{side === 'front' ? 'Front' : 'Rear'}</span>
+                    {#if n}
+                      <span class="arrow">&rarr;</span>
+                      <span class="peer">{n.node.name} <span class="mono">{portLabel(n.port, n.side)}</span></span>
+                    {:else}
+                      <span class="muted not-cabled">not cabled</span>
+                    {/if}
+                  </button>
+                {/each}
+              </li>
+            {/each}
+          </ul>
         {:else}
           <ul class="ports">
             {#each ports as port (port.id)}
@@ -758,9 +1125,16 @@
                 >
                   <span class="port-name mono">{port.name}</span>
                   <span class="port-speed">{formatSpeed(port.speed_mbps)}</span>
+                  {#if lldpOn && lldpByPort.get(port.id)}
+                    {@const check = lldpByPort.get(port.id)}
+                    <span class="lldp-badge lldp-{check.status}" title="LLDP sees: {lldpObservedText(check.observed)}">{LLDP_LABELS[check.status]}</span>
+                  {/if}
                   {#if peer}
                     <span class="arrow">&rarr;</span>
-                    <span class="peer">{peer.node.name} <span class="mono">{peer.port.name}</span></span>
+                    <span class="peer" class:incomplete-text={!peer.complete}>
+                      {peer.node.name} <span class="mono">{portLabel(peer.port, peer.side)}</span>
+                      {#if peer.panels}<span class="via-count">via {peer.panels} panel{peer.panels === 1 ? '' : 's'}</span>{/if}
+                    </span>
                   {:else}
                     <span class="muted not-cabled">not cabled</span>
                   {/if}
@@ -774,39 +1148,102 @@
         <div class="panel-head">
           <span class="kind">Cable path</span>
           <h3 class="path-title">
-            {path.a.node.name} <span class="mono">{path.a.port.name}</span>
-            &rarr; cable &rarr;
-            {path.b.node.name} <span class="mono">{path.b.port.name}</span>
+            {#each path.steps as step, i}
+              {#if i}<span class="title-sep">&rarr;</span>{/if}
+              {#if step.kind === 'cable'}
+                cable
+              {:else if step.kind === 'through'}
+                {step.node.name} <span class="mono">{step.port.name}</span>
+              {:else}
+                {step.node.name} <span class="mono">{portLabel(step.port, step.node.kind === 'patch_panel' ? step.side : null)}</span>
+              {/if}
+            {/each}
           </h3>
+          <div class="meta">
+            <span>{path.path.hops.length} cable{path.path.hops.length === 1 ? '' : 's'}</span>
+            <span>{formatSpeed(path.path.effective_speed_mbps)}</span>
+            <span class="link-{path.path.link_status}">link {LINK_LABELS[path.path.link_status] || path.path.link_status}</span>
+          </div>
+          {#if !path.path.complete}
+            <div class="badges"><span class="badge warn">Incomplete: the path stops at a patch panel with nothing cabled behind it</span></div>
+          {/if}
         </div>
         <ol class="path">
-          {#each [path.a, path.b] as end, i}
-            <li class="step">
-              <div class="step-title"><a href={deviceUrl(end.node)}>{end.node.name}</a> <span class="mono">{end.port.name}</span></div>
-              <div class="step-meta">
-                <span>{formatSpeed(end.port.speed_mbps)}</span>
-                {#if end.port.mac_address}<span class="mono">{end.port.mac_address}</span>{/if}
-                {#if end.port.oper_status}<span>link {end.port.oper_status}</span>{/if}
-                {#if end.port.lag_group}<span>LAG {end.port.lag_group}</span>{/if}
-                {#if end.port.description}<span>{end.port.description}</span>{/if}
-              </div>
-            </li>
-            {#if i === 0}
-              <li class="step cable">
-                <div class="step-title">Cable #{path.edge.cable_id}</div>
+          {#each path.steps as step}
+            {#if step.kind === 'cable'}
+              <li class="step cable" class:current={step.selected}>
+                <button type="button" class="step-title step-link" on:click={() => selectCable(step.edge.cable_id, selection.fromPortId)}>Cable #{step.edge.cable_id}</button>
                 <div class="step-meta">
-                  <span>{path.edge.cable_type || 'type not set'}</span>
-                  <span>{formatSpeed(path.edge.effective_speed_mbps)}</span>
-                  <span class="link-{path.edge.link_status}">link {path.edge.link_status === 'unknown' ? 'not polled' : path.edge.link_status}</span>
+                  <span>{step.edge.cable_type || 'type not set'}</span>
+                  <span>{formatSpeed(step.edge.effective_speed_mbps)}</span>
                 </div>
-                {#if path.edge.description}<div class="step-desc">{path.edge.description}</div>{/if}
+                {#if step.edge.description}<div class="step-desc">{step.edge.description}</div>{/if}
+              </li>
+            {:else if step.kind === 'through'}
+              <li class="step through">
+                <div class="step-title"><a href={deviceUrl(step.node)}>{step.node.name}</a> <span class="mono">{step.port.name}</span></div>
+                <div class="step-meta"><span>in {step.inSide}, out {step.outSide}</span></div>
+              </li>
+            {:else}
+              <li class="step" class:dangling={step.node.kind === 'patch_panel'}>
+                <div class="step-title">
+                  <a href={deviceUrl(step.node)}>{step.node.name}</a>
+                  <span class="mono">{portLabel(step.port, step.node.kind === 'patch_panel' ? step.side : null)}</span>
+                </div>
+                <div class="step-meta">
+                  {#if step.node.kind === 'patch_panel'}
+                    <span>nothing cabled on the {step.side === 'front' ? 'rear' : 'front'}</span>
+                  {:else}
+                    <span>{formatSpeed(step.port.speed_mbps)}</span>
+                  {/if}
+                  {#if step.port.mac_address}<span class="mono">{step.port.mac_address}</span>{/if}
+                  {#if portStatusText(step.port)}<span class:stale-text={step.port.kind === 'switch' && !step.port.status_fresh}>{portStatusText(step.port)}</span>{/if}
+                  {#if step.port.lag_group}<span>LAG {step.port.lag_group}</span>{/if}
+                  {#if step.port.description}<span>{step.port.description}</span>{/if}
+                </div>
+                {#if lldpOn && lldpByPort.get(step.port.id)}
+                  {@const check = lldpByPort.get(step.port.id)}
+                  <div class="step-meta">
+                    <span class="lldp-badge lldp-{check.status}">LLDP: {LLDP_LABELS[check.status]}</span>
+                    {#if check.observed}<span>sees {lldpObservedText(check.observed)}</span>{/if}
+                  </div>
+                {/if}
               </li>
             {/if}
           {/each}
         </ol>
         <div class="panel-actions">
-          <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(path.a.node.id, true)}>Show {path.a.node.name}</button>
-          <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(path.b.node.id, true)}>Show {path.b.node.name}</button>
+          <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(path.first.node.id, true)}>Show {path.first.node.name}</button>
+          <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(path.last.node.id, true)}>Show {path.last.node.name}</button>
+        </div>
+      {:else if selection?.type === 'lldp' && lldp?.results[selection.index]}
+        {@const check = lldp.results[selection.index]}
+        <div class="panel-head">
+          <span class="kind">LLDP check</span>
+          <h3>{lldpSwitchName(check)} <span class="mono">{check.switch_port_name || check.local_port_label || 'unknown port'}</span></h3>
+          <div class="badges"><span class="lldp-badge lldp-{check.status}">{LLDP_LABELS[check.status]}</span></div>
+        </div>
+        <dl class="lldp-compare">
+          <dt>Recorded</dt>
+          <dd>{lldpRecordedText(check.recorded)}{#if check.cable_id}{' '}<span class="muted">(cable #{check.cable_id})</span>{/if}</dd>
+          <dt>LLDP sees</dt>
+          <dd>{lldpObservedText(check.observed)}</dd>
+          {#if check.observed}
+            {#if check.observed.sys_name}<dt>System name</dt><dd class="mono">{check.observed.sys_name}</dd>{/if}
+            {#if check.observed.port_id}<dt>Port ID</dt><dd class="mono">{check.observed.port_id}</dd>{/if}
+            {#if check.observed.port_desc}<dt>Port description</dt><dd>{check.observed.port_desc}</dd>{/if}
+            {#if check.observed.chassis_id}<dt>Chassis ID</dt><dd class="mono">{check.observed.chassis_id}</dd>{/if}
+            {#if check.observed.resolved_by}<dt>Matched by</dt><dd>{RESOLVED_BY_LABELS[check.observed.resolved_by]}</dd>{/if}
+          {/if}
+        </dl>
+        <div class="panel-actions">
+          {#if check.cable_id && edgesByCable.has(check.cable_id)}
+            <button type="button" class="btn-secondary btn-sm" on:click={() => selectCable(check.cable_id, check.switch_port)}>Trace recorded cable</button>
+          {/if}
+          {#if check.observed?.resolved && nodesById.has(check.observed.resolved.device)}
+            <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(check.observed.resolved.device, true)}>Show {check.observed.resolved.device_name}</button>
+          {/if}
+          <button type="button" class="btn-secondary btn-sm" on:click={clearSelection}>Back to overview</button>
         </div>
       {:else}
         <div class="panel-head">
@@ -817,9 +1254,13 @@
           <dl class="stats">
             <dt>Servers</dt><dd>{stats.servers}</dd>
             <dt>Switches</dt><dd>{stats.switches}</dd>
+            {#if stats.panels}<dt>Patch panels</dt><dd>{stats.panels}</dd>{/if}
             <dt>Cables</dt><dd>{stats.cables}</dd>
+            {#if stats.links !== stats.cables}<dt>End-to-end links</dt><dd>{stats.links}</dd>{/if}
+            {#if stats.incomplete}<dt>Incomplete paths</dt><dd>{stats.incomplete}</dd>{/if}
             <dt>Links up</dt><dd>{stats.up}</dd>
             <dt>Links down</dt><dd>{stats.down}</dd>
+            {#if stats.stale}<dt>Stale status</dt><dd>{stats.stale}</dd>{/if}
             <dt>Not polled</dt><dd>{stats.unknown}</dd>
             {#if stats.external}<dt>Outside filter</dt><dd>{stats.external}</dd>{/if}
           </dl>
@@ -828,6 +1269,93 @@
           Click a server or switch to highlight its cables and neighbours. Click a cable or a port to trace the
           full path. Devices outside the filter are shown faded when they are cabled to devices inside it.
         </p>
+        {#if lldpOn}
+          <h4>LLDP check</h4>
+          {#if lldpLoading && !lldp}
+            <p class="muted">Loading LLDP data…</p>
+          {:else if lldpError}
+            <p class="error-text">{lldpError}</p>
+          {:else if lldp}
+            {#if lldp.switches.length === 0}
+              <p class="muted">No switches in this view.</p>
+            {:else}
+              <ul class="lldp-switches">
+                {#each lldp.switches as sw (sw.id)}
+                  <li>
+                    <span class="lldp-switch-name">{sw.name}</span>
+                    <span class="muted lldp-switch-state">
+                      {#if !sw.supports_lldp}
+                        plugin cannot read LLDP
+                      {:else if sw.lldp_error}
+                        <span class="error-text" title={sw.lldp_error}>last read failed</span>
+                      {:else if sw.lldp_collected_at}
+                        {sw.neighbour_count} neighbour{sw.neighbour_count === 1 ? '' : 's'}, read {timeAgo(sw.lldp_collected_at)}
+                      {:else}
+                        never read
+                      {/if}
+                    </span>
+                    {#if sw.supports_lldp}
+                      <button
+                        type="button"
+                        class="btn-secondary btn-sm lldp-read"
+                        disabled={lldpRefreshing !== null}
+                        title="Read this switch's LLDP neighbour table now (read-only SNMP)"
+                        on:click={() => refreshLldp(sw)}
+                      >{lldpRefreshing === sw.id ? 'Reading…' : 'Read now'}</button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              {#if lldpRefreshMessage}<p class="muted small">{lldpRefreshMessage}</p>{/if}
+            {/if}
+            <dl class="stats">
+              {#each Object.keys(LLDP_LABELS) as status}
+                {#if lldp.summary[status]}<dt>{LLDP_LABELS[status]}</dt><dd>{lldp.summary[status]}</dd>{/if}
+              {/each}
+            </dl>
+            {#if lldpProblems.length === 0 && lldp.results.length}
+              <p class="muted">No discrepancies found.</p>
+            {/if}
+            {#if lldpProblems.length}
+              <ul class="lldp-list">
+                {#each lldpProblems as check}
+                  <li>
+                    <button type="button" class="port-row" on:click={() => selectLldp(check)}>
+                      <span class="lldp-badge lldp-{check.status}">{LLDP_LABELS[check.status]}</span>
+                      <span>{lldpSwitchName(check)} <span class="mono">{check.switch_port_name || check.local_port_label || '?'}</span></span>
+                      <span class="lldp-detail">
+                        <span class="muted">recorded</span> {lldpRecordedText(check.recorded)};
+                        <span class="muted">LLDP sees</span> {lldpObservedText(check.observed)}
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if lldpQuiet.length}
+              <button type="button" class="link-button" on:click={() => (showMatched = !showMatched)}>
+                {showMatched ? 'Hide' : 'Show'} {lldpQuiet.length} matching or silent port{lldpQuiet.length === 1 ? '' : 's'}
+              </button>
+              {#if showMatched}
+                <ul class="lldp-list">
+                  {#each lldpQuiet as check}
+                    <li>
+                      <button type="button" class="port-row" on:click={() => selectLldp(check)}>
+                        <span class="lldp-badge lldp-{check.status}">{LLDP_LABELS[check.status]}</span>
+                        <span>{lldpSwitchName(check)} <span class="mono">{check.switch_port_name}</span></span>
+                        <span class="lldp-detail">{lldpRecordedText(check.recorded)}</span>
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            {/if}
+            <p class="muted hint">
+              "No LLDP seen" is common for servers that do not run an LLDP agent, so it is listed but not treated
+              as a problem. LLDP data is read by the poller every 10 minutes.
+            </p>
+          {/if}
+        {/if}
       {/if}
     </aside>
   </div>
@@ -1022,6 +1550,25 @@
     background: color-mix(in srgb, var(--accent-color) 14%, var(--bg-primary));
   }
 
+  .box.panel-box {
+    border-color: var(--text-tertiary);
+    background: color-mix(in srgb, var(--text-tertiary) 12%, var(--bg-primary));
+    clip-path: polygon(3px 0, calc(100% - 3px) 0, 100% 3px, 100% calc(100% - 3px), calc(100% - 3px) 100%, 3px 100%, 0 calc(100% - 3px), 0 3px);
+  }
+
+  .line.dangling {
+    position: relative;
+  }
+
+  .line.dangling::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: -5px;
+    height: 8px;
+    border-right: 2px solid var(--warning-color);
+  }
+
   .box.locked {
     border-color: var(--warning-color);
     border-width: 2px;
@@ -1171,6 +1718,39 @@
     font-style: italic;
   }
 
+  .patch-port {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 6px;
+    align-items: baseline;
+    padding: 2px 0;
+  }
+
+  .patch-port .port-name {
+    grid-row: span 2;
+    font-size: 12px;
+    padding-top: 5px;
+  }
+
+  .patch-side {
+    padding: 2px 6px;
+  }
+
+  .side-label {
+    width: 32px;
+    color: var(--text-tertiary);
+  }
+
+  .via-count {
+    margin-left: 4px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .incomplete-text {
+    color: var(--warning-text);
+  }
+
   .path {
     list-style: none;
     margin: 0;
@@ -1202,6 +1782,41 @@
     border-color: var(--text-tertiary);
   }
 
+  .step.cable.current::before {
+    border-color: var(--accent-color);
+    background: var(--accent-color);
+  }
+
+  .step.through::before {
+    border-radius: 2px;
+    transform: rotate(45deg);
+    border-color: var(--text-secondary);
+  }
+
+  .step.dangling::before {
+    border-color: var(--warning-color);
+  }
+
+  .step-link {
+    padding: 0;
+    font: inherit;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+
+  .step-link:hover {
+    color: var(--accent-color);
+  }
+
+  .title-sep {
+    margin: 0 4px;
+    font-weight: 400;
+    color: var(--text-tertiary);
+  }
+
   .step-title {
     font-weight: 600;
     margin-bottom: 2px;
@@ -1215,6 +1830,11 @@
 
   .link-up {
     color: var(--success-text);
+  }
+
+  .link-stale,
+  .stale-text {
+    color: var(--warning-text);
   }
 
   .link-down {
@@ -1248,6 +1868,137 @@
   .hint {
     font-size: 12px;
     line-height: 1.5;
+  }
+
+  .count-badge {
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
+    color: #fff;
+    background: var(--danger-color);
+  }
+
+  .line.lldp-mismatch {
+    border-top: 3px solid var(--danger-color);
+  }
+
+  .line.lldp-seen {
+    border-top-color: #2563eb;
+  }
+
+  .line.lldp-seen-bad {
+    border-top-color: var(--danger-color);
+  }
+
+  .lldp-badge {
+    padding: 0 6px;
+    border-radius: 3px;
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 17px;
+    white-space: nowrap;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+  }
+
+  .lldp-badge.lldp-match {
+    background: var(--success-bg);
+    color: var(--success-text);
+  }
+
+  .lldp-badge.lldp-mismatch,
+  .lldp-badge.lldp-unmapped_local_port {
+    background: var(--danger-bg);
+    color: var(--danger-text);
+  }
+
+  .lldp-badge.lldp-missing_cable,
+  .lldp-badge.lldp-unknown_neighbour {
+    background: var(--warning-bg);
+    color: var(--warning-text);
+  }
+
+  .lldp-switches,
+  .lldp-list {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .lldp-switches li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 8px;
+    font-size: 12px;
+  }
+
+  .lldp-switch-name {
+    font-weight: 600;
+  }
+
+  .lldp-switch-state {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .lldp-read {
+    height: 22px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+
+  .lldp-detail {
+    flex-basis: 100%;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+  }
+
+  .lldp-compare {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 12px;
+    margin: 0;
+    font-size: 12.5px;
+  }
+
+  .lldp-compare dt {
+    color: var(--text-tertiary);
+  }
+
+  .lldp-compare dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .link-button {
+    padding: 0;
+    margin-bottom: 8px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--accent-color);
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+
+  .link-button:hover {
+    text-decoration: underline;
+  }
+
+  .error-text {
+    color: var(--danger-text);
+  }
+
+  .small {
+    font-size: 12px;
   }
 
   .muted {
