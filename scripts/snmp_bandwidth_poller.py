@@ -4,6 +4,8 @@ Standalone SNMP bandwidth poller.
 
 Polls all enabled network switches that support MONITORING (e.g. SNMPv3 plugin),
 collects IF-MIB octet counters per port, and stores them in switch_bandwidth_samples.
+Each cycle also reads every enabled metering PDU and stores its latest readings
+(app/services/power_service.py).
 
 Run as a long-lived process (e.g. systemd service) or from cron at a fixed interval.
 Uses the same DATABASE_URL and app plugins as the main DCIM app.
@@ -117,6 +119,27 @@ def run_one_cycle() -> int:
         db.close()
 
 
+def run_pdu_cycle() -> None:
+    """Read all enabled metering PDUs and store their latest readings."""
+    from app.services.power_service import poll_all_pdus
+
+    db = SessionLocal()
+    try:
+        result = asyncio.run(poll_all_pdus(db))
+        if result["polled"] or result["failed"]:
+            logger.info("PDU readings: %d updated, %d failed.", result["polled"], result["failed"])
+    finally:
+        db.close()
+
+
+def _run_all() -> None:
+    for cycle in (run_one_cycle, run_pdu_cycle):
+        try:
+            cycle()
+        except Exception as e:
+            logger.exception("Poll cycle %s failed: %s", cycle.__name__, e)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Poll SNMP bandwidth data and store in DB")
     parser.add_argument(
@@ -132,14 +155,11 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.once:
-        run_one_cycle()
+        _run_all()
         return
     logger.info("Starting SNMP bandwidth poller (interval=%ds).", args.interval)
     while True:
-        try:
-            run_one_cycle()
-        except Exception as e:
-            logger.exception("Poll cycle failed: %s", e)
+        _run_all()
         try:
             import time
             time.sleep(args.interval)

@@ -17,6 +17,9 @@ from app.models.script import Script
 from app.models.network_port import NetworkPort
 from app.models.switch_port import SwitchPort
 from app.models.cable_run import CableRun
+from app.models.power_feed import PowerFeed
+from app.models.pdu import Pdu, PduInlet, PduOutlet
+from app.models.server_power_input import ServerPowerInput
 from app.models.server_group import ServerGroup, server_group_association
 from app.models.switch_bandwidth_sample import SwitchBandwidthSample
 from app.models.dhcp_config import DHCPConfigModel
@@ -149,6 +152,7 @@ from app.models.commerce_webhook import (
 )
 
 __all__ = ["User", "Server", "Category", "Location", "Rack", "NetworkSwitch", "Disk", "DiskType", "BootTask", "BootType", "BootTaskStatus", "InstallationTask", "InstallationStatus", "BillingIntegration", "McpApiKey", "Service", "ServiceBareMetal", "ServiceVm", "ServiceStatus", "ServiceType", "ProvisioningSource", "Script", "NetworkPort", "SwitchPort", "CableRun", "ServerGroup", "server_group_association", "SwitchBandwidthSample", "DHCPConfigModel", "TFTPConfigModel", "ServiceInstance", "Runner", "ProxyRunner", "ProxySubnetGroup", "ProxySubnetGroupMember", "Asset", "AssetLabel", "ServerActivity", "ServerActivityEventType", "ServerActivityStatus", "HardwareDetectionReport", "HardwareDetectionReportStatus", "ServerCapability", "ProductFamily", "Product", "VMTemplate", "ProductVMTemplate", "ProxmoxCluster", "ProxmoxNode", "ProxmoxStorage", "ProxmoxTemplate", "ProxmoxCapacitySnapshot", "IPSubnet", "IPAddress", "ServiceIPAssignment", "ServiceIPAssignmentHistory", "FamilyVMConfig", "ProductVMConfig", "VMIPAllocation", "vm_ip_allocation_cluster_association", "VMIDReservation", "PermissionSet", "VMDeploymentJob", "VMDeploymentJobStep", "DeploymentJobStatus", "DeploymentStepStatus"]
+__all__ += ["PowerFeed", "Pdu", "PduInlet", "PduOutlet", "ServerPowerInput"]
 __all__ += [
     "ResellerGroup",
     "Reseller",
