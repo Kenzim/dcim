@@ -148,6 +148,52 @@ class CablingGraphDAO:
         return db.query(*_SWITCH_PORT_COLUMNS).filter(SwitchPort.id.in_(ids)).all()
 
     @staticmethod
+    def switch_ports_for_switches(db: Session, switch_ids: Iterable[int]):
+        ids = _ids(switch_ids)
+        if not ids:
+            return []
+        return db.query(*_SWITCH_PORT_COLUMNS).filter(SwitchPort.switch_id.in_(ids)).all()
+
+    @staticmethod
+    def server_ports_by_macs(db: Session, macs: Iterable[str]):
+        values = sorted({m.lower() for m in macs if m})
+        if not values:
+            return []
+        return db.query(*_SERVER_PORT_COLUMNS).filter(func.lower(NetworkPort.mac_address).in_(values)).all()
+
+    @staticmethod
+    def servers_by_names(db: Session, names: Iterable[str]):
+        values = sorted({n.lower() for n in names if n})
+        if not values:
+            return []
+        return db.query(*_SERVER_COLUMNS).filter(func.lower(Server.name).in_(values)).all()
+
+    @staticmethod
+    def switches_by_names(db: Session, names: Iterable[str]):
+        values = sorted({n.lower() for n in names if n})
+        if not values:
+            return []
+        return db.query(*_SWITCH_COLUMNS).filter(func.lower(NetworkSwitch.name).in_(values)).all()
+
+    @staticmethod
+    def lldp_switch_status(db: Session, switch_ids: Iterable[int]):
+        ids = _ids(switch_ids)
+        if not ids:
+            return []
+        return (
+            db.query(
+                NetworkSwitch.id,
+                NetworkSwitch.name,
+                NetworkSwitch.plugin_name,
+                NetworkSwitch.lldp_collected_at,
+                NetworkSwitch.lldp_error,
+            )
+            .filter(NetworkSwitch.id.in_(ids))
+            .order_by(NetworkSwitch.name)
+            .all()
+        )
+
+    @staticmethod
     def switch_port_counts(db: Session, switch_ids: Iterable[int]) -> dict:
         ids = _ids(switch_ids)
         if not ids:

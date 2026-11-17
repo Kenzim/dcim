@@ -1967,6 +1967,34 @@ export async function getCablingGraph({ locationId = null, rackId = null } = {})
   return await response.json();
 }
 
+export async function getCablingLldp({ locationId = null, rackId = null } = {}) {
+  const params = new URLSearchParams();
+  if (locationId) params.append('location_id', locationId);
+  if (rackId) params.append('rack_id', rackId);
+  const qs = params.toString();
+  const response = await fetch(`${API_BASE}/admin/cabling/lldp${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load the LLDP check');
+  }
+  return await response.json();
+}
+
+export async function refreshSwitchLldp(switchId) {
+  const response = await fetch(`${API_BASE}/admin/cabling/lldp/switches/${switchId}/refresh`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'LLDP collection failed');
+  }
+  return await response.json();
+}
+
 export async function testSwitchConnection(pluginName, pluginConfig) {
   const response = await fetch(`${API_BASE}/network-switches/test`, {
     method: 'POST',

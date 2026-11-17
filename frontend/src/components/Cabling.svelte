@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import PageHeader from './PageHeader.svelte';
-  import { getCablingGraph, getLocations, getRacks } from '../lib/api.js';
+  import { getCablingGraph, getCablingLldp, getLocations, getRacks, refreshSwitchLldp } from '../lib/api.js';
   import { theme } from '../stores/theme.js';
 
   const SPEED_BANDS = [
@@ -14,6 +14,18 @@
   const UNKNOWN_SPEED_COLOUR = '#a8a29e';
   const LINK_COLOURS = { up: '#059669', down: '#dc2626', stale: '#d97706', unknown: '#94a3b8' };
   const LINK_LABELS = { up: 'up', down: 'down', stale: 'status stale', unknown: 'not polled' };
+  const LLDP_OVERLAY_COLOUR = '#2563eb';
+  const LLDP_MISMATCH_COLOUR = '#dc2626';
+  const LLDP_LABELS = {
+    match: 'Matches',
+    mismatch: 'Mismatch',
+    missing_cable: 'Not recorded',
+    unknown_neighbour: 'Unknown neighbour',
+    no_lldp: 'No LLDP seen',
+    unmapped_local_port: 'Unmapped local port',
+  };
+  const LLDP_PROBLEMS = ['mismatch', 'missing_cable', 'unknown_neighbour', 'unmapped_local_port'];
+  const RESOLVED_BY_LABELS = { port_mac: 'port MAC address', chassis_mac: 'chassis MAC address', system_name: 'system name' };
 
   let cyContainer;
   let cy = null;
@@ -45,6 +57,19 @@
   let loadSeq = 0;
   let destroyed = false;
 
+  let lldpOn = false;
+  let lldp = null;
+  let lldpLoading = false;
+  let lldpError = null;
+  let lldpSeq = 0;
+  let lldpRefreshing = null;
+  let lldpRefreshMessage = '';
+  let showMatched = false;
+
+  $: lldpByPort = new Map((lldp?.results || []).filter((r) => r.switch_port).map((r) => [r.switch_port, r]));
+  $: lldpProblems = (lldp?.results || []).filter((r) => LLDP_PROBLEMS.includes(r.status));
+  $: lldpQuiet = (lldp?.results || []).filter((r) => !LLDP_PROBLEMS.includes(r.status));
+
   $: racksForLocation = locationId
     ? allRacks.filter((r) => String(r.location_id) === String(locationId))
     : allRacks;
@@ -56,6 +81,7 @@
     locationId = params.get('location') || '';
     rackId = params.get('rack') || '';
     focusId = params.get('focus') || null;
+    lldpOn = params.get('lldp') === '1';
   }
 
   function writeParams() {
@@ -63,6 +89,7 @@
     if (locationId) params.set('location', locationId);
     if (rackId) params.set('rack', rackId);
     if (selection?.type === 'device') params.set('focus', selection.id);
+    if (lldpOn) params.set('lldp', '1');
     const qs = params.toString();
     const url = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
     if (url !== `${window.location.pathname}${window.location.search}`) {
@@ -331,6 +358,39 @@
         },
       },
       { selector: 'edge.proxy', style: { display: 'none' } },
+      {
+        selector: 'edge.lldp-overlay',
+        style: {
+          width: 2,
+          'line-color': LLDP_OVERLAY_COLOUR,
+          'line-style': 'dashed',
+          'line-dash-pattern': [3, 3],
+          'curve-style': 'unbundled-bezier',
+          'control-point-distances': 40,
+          label: 'LLDP',
+          'font-size': 9,
+          color: LLDP_OVERLAY_COLOUR,
+          'text-background-color': surface,
+          'text-background-opacity': 0.9,
+          'text-background-padding': 2,
+        },
+      },
+      { selector: 'edge.lldp-overlay.mismatch', style: { 'line-color': LLDP_MISMATCH_COLOUR, color: LLDP_MISMATCH_COLOUR } },
+      {
+        selector: 'edge.lldp-mismatch',
+        style: {
+          label: 'LLDP mismatch',
+          'font-size': 9,
+          'font-weight': 700,
+          color: LLDP_MISMATCH_COLOUR,
+          'text-background-color': surface,
+          'text-background-opacity': 0.95,
+          'text-background-padding': 2,
+          'underlay-color': LLDP_MISMATCH_COLOUR,
+          'underlay-opacity': 0.25,
+          'underlay-padding': 4,
+        },
+      },
       { selector: 'edge.down', style: { 'line-style': 'dashed', 'line-dash-pattern': [6, 4] } },
       { selector: 'edge.unknown, edge.stale', style: { 'line-style': 'dotted' } },
       {
@@ -362,7 +422,7 @@
           };
         }
         if (n.data('kind') === 'switch') {
-          const incoming = n.incomers('edge').not('.proxy').length;
+          const incoming = n.incomers('edge').not('.proxy, .lldp-overlay').length;
           return incoming === 0 ? { 'elk.layered.layering.layerConstraint': 'FIRST' } : {};
         }
         return { 'elk.priority': String(n.data('rackUnit') ?? 0) };
@@ -414,11 +474,109 @@
       await tick();
       if (seq !== loadSeq || destroyed) return;
       renderGraph();
+      if (lldpOn) loadLldp();
     } catch (err) {
       if (seq === loadSeq) error = err.message;
     } finally {
       if (seq === loadSeq) loading = false;
     }
+  }
+
+  async function loadLldp() {
+    const seq = ++lldpSeq;
+    lldpLoading = true;
+    lldpError = null;
+    try {
+      const result = await getCablingLldp({ locationId: locationId || null, rackId: rackId || null });
+      if (seq !== lldpSeq || destroyed) return;
+      if (selection?.type === 'lldp') clearSelection();
+      lldp = result;
+      applyLldp();
+    } catch (err) {
+      if (seq === lldpSeq) lldpError = err.message;
+    } finally {
+      if (seq === lldpSeq) lldpLoading = false;
+    }
+  }
+
+  function clearLldp() {
+    if (!cy) return;
+    cy.edges('.lldp-overlay').remove();
+    cy.edges().removeClass('lldp-mismatch');
+  }
+
+  function applyLldp() {
+    if (!cy) return;
+    clearLldp();
+    if (!lldpOn || !lldp) return;
+    const overlays = [];
+    lldp.results.forEach((r, index) => {
+      if (r.status === 'mismatch' && r.cable_id) {
+        cy.getElementById(`cable:${r.cable_id}`).addClass('lldp-mismatch');
+      }
+      const seen = r.observed?.resolved?.device;
+      if (!seen || !['mismatch', 'missing_cable'].includes(r.status)) return;
+      if (cy.getElementById(seen).empty() || cy.getElementById(r.switch).empty()) return;
+      overlays.push({
+        group: 'edges',
+        classes: `lldp-overlay ${r.status}`,
+        data: { id: `lldp:${index}`, source: r.switch, target: seen, lldpIndex: index },
+      });
+    });
+    if (overlays.length) cy.add(overlays);
+  }
+
+  function toggleLldp() {
+    writeParams();
+    if (lldpOn) loadLldp();
+    else clearLldp();
+  }
+
+  async function refreshLldp(sw) {
+    lldpRefreshing = sw.id;
+    lldpRefreshMessage = '';
+    try {
+      const result = await refreshSwitchLldp(sw.id);
+      lldpRefreshMessage = `${sw.name}: ${result.neighbours} neighbour${result.neighbours === 1 ? '' : 's'} read.`;
+      await loadLldp();
+    } catch (err) {
+      lldpRefreshMessage = `${sw.name}: ${err.message}`;
+      await loadLldp();
+    } finally {
+      lldpRefreshing = null;
+    }
+  }
+
+  function lldpObservedText(observed) {
+    if (!observed) return 'nothing seen';
+    const r = observed.resolved;
+    if (r) return [r.device_name, r.port_name].filter(Boolean).join(' ');
+    const parts = [observed.sys_name, observed.port_desc || observed.port_id].filter(Boolean);
+    return parts.length ? parts.join(' ') : observed.chassis_id || 'unidentified device';
+  }
+
+  function lldpRecordedText(recorded) {
+    if (!recorded) return 'no cable recorded';
+    return [recorded.device_name, recorded.port_name].filter(Boolean).join(' ');
+  }
+
+  function lldpSwitchName(r) {
+    return nodesById.get(r.switch)?.name || lldp?.switches.find((s) => s.id === r.switch_id)?.name || `Switch ${r.switch_id}`;
+  }
+
+  function selectLldp(r) {
+    if (!cy) return;
+    const index = lldp.results.indexOf(r);
+    const overlay = cy.getElementById(`lldp:${index}`);
+    const cable = r.cable_id ? cy.getElementById(`cable:${r.cable_id}`) : cy.collection();
+    const sw = cy.getElementById(r.switch);
+    const focus = overlay.nonempty() ? overlay : cable.nonempty() ? cable : sw;
+    if (focus.empty()) return;
+    const members = focus.union(cable).union(overlay);
+    highlight(members.union(members.connectedNodes()).union(sw), focus);
+    selection = { type: 'lldp', index };
+    cy.animate({ center: { eles: members.union(sw) } }, { duration: 300 });
+    writeParams();
   }
 
   function renderGraph() {
@@ -443,7 +601,11 @@
       }
       selectDevice(node.id());
     });
-    cy.on('tap', 'edge', (evt) => selectCable(evt.target.data('cableId')));
+    cy.on('tap', 'edge', (evt) => {
+      const index = evt.target.data('lldpIndex');
+      if (index !== undefined && lldp?.results[index]) selectLldp(lldp.results[index]);
+      else selectCable(evt.target.data('cableId'));
+    });
     cy.on('tap', (evt) => {
       if (evt.target === cy) clearSelection();
     });
@@ -452,6 +614,7 @@
     layout.one('layoutstop', () => {
       cy.resize();
       cy.fit(undefined, 30);
+      applyLldp();
       if (wanted && nodesById.has(wanted)) {
         selectDevice(wanted, true);
       }
@@ -484,7 +647,7 @@
     if (!cy) return;
     const ele = cy.getElementById(id);
     if (ele.empty()) return;
-    const cables = ele.connectedEdges().not('.proxy');
+    const cables = ele.connectedEdges().not('.proxy, .lldp-overlay');
     highlight(cables.union(cables.connectedNodes()).union(ele), ele);
     selection = { type: 'device', id };
     if (centre) cy.animate({ center: { eles: ele }, zoom: Math.max(cy.zoom(), 1) }, { duration: 300 });
@@ -549,7 +712,11 @@
   }
 
   function relayout() {
-    cy?.layout(layoutOptions()).run();
+    if (!cy) return;
+    clearLldp();
+    const layout = cy.layout(layoutOptions());
+    layout.one('layoutstop', applyLldp);
+    layout.run();
   }
 
   function exportPng() {
@@ -694,6 +861,11 @@
       <input type="checkbox" bind:checked={showPortLabels} on:change={togglePortLabels} />
       Port labels
     </label>
+    <label class="check" title="Compare recorded cables with the LLDP neighbours the switches report">
+      <input type="checkbox" bind:checked={lldpOn} on:change={toggleLldp} />
+      LLDP check
+      {#if lldpOn && lldp && lldpProblems.length}<span class="count-badge">{lldpProblems.length}</span>{/if}
+    </label>
     <div class="tools">
       <button type="button" class="btn-secondary btn-sm" on:click={fit} title="Fit to screen">Fit</button>
       <button type="button" class="btn-secondary btn-sm" on:click={() => zoomBy(1.25)} title="Zoom in" aria-label="Zoom in">+</button>
@@ -741,6 +913,12 @@
         <div class="legend-row"><span class="box"></span>Server</div>
         <div class="legend-row"><span class="box locked"></span>Locked</div>
         <div class="legend-row"><span class="box external"></span>Outside filter</div>
+        {#if lldpOn}
+          <div class="legend-title legend-gap">LLDP check</div>
+          <div class="legend-row"><span class="line lldp-mismatch"></span>Cable disagrees with LLDP</div>
+          <div class="legend-row"><span class="line dotted lldp-seen"></span>Seen by LLDP, not recorded</div>
+          <div class="legend-row"><span class="line dotted lldp-seen-bad"></span>What LLDP sees instead</div>
+        {/if}
       </details>
     </div>
 
@@ -782,6 +960,10 @@
                 >
                   <span class="port-name mono">{port.name}</span>
                   <span class="port-speed">{formatSpeed(port.speed_mbps)}</span>
+                  {#if lldpOn && lldpByPort.get(port.id)}
+                    {@const check = lldpByPort.get(port.id)}
+                    <span class="lldp-badge lldp-{check.status}" title="LLDP sees: {lldpObservedText(check.observed)}">{LLDP_LABELS[check.status]}</span>
+                  {/if}
                   {#if peer}
                     <span class="arrow">&rarr;</span>
                     <span class="peer">{peer.node.name} <span class="mono">{peer.port.name}</span></span>
@@ -814,6 +996,13 @@
                 {#if end.port.lag_group}<span>LAG {end.port.lag_group}</span>{/if}
                 {#if end.port.description}<span>{end.port.description}</span>{/if}
               </div>
+              {#if lldpOn && lldpByPort.get(end.port.id)}
+                {@const check = lldpByPort.get(end.port.id)}
+                <div class="step-meta">
+                  <span class="lldp-badge lldp-{check.status}">LLDP: {LLDP_LABELS[check.status]}</span>
+                  {#if check.observed}<span>sees {lldpObservedText(check.observed)}</span>{/if}
+                </div>
+              {/if}
             </li>
             {#if i === 0}
               <li class="step cable">
@@ -831,6 +1020,35 @@
         <div class="panel-actions">
           <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(path.a.node.id, true)}>Show {path.a.node.name}</button>
           <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(path.b.node.id, true)}>Show {path.b.node.name}</button>
+        </div>
+      {:else if selection?.type === 'lldp' && lldp?.results[selection.index]}
+        {@const check = lldp.results[selection.index]}
+        <div class="panel-head">
+          <span class="kind">LLDP check</span>
+          <h3>{lldpSwitchName(check)} <span class="mono">{check.switch_port_name || check.local_port_label || 'unknown port'}</span></h3>
+          <div class="badges"><span class="lldp-badge lldp-{check.status}">{LLDP_LABELS[check.status]}</span></div>
+        </div>
+        <dl class="lldp-compare">
+          <dt>Recorded</dt>
+          <dd>{lldpRecordedText(check.recorded)}{#if check.cable_id}{' '}<span class="muted">(cable #{check.cable_id})</span>{/if}</dd>
+          <dt>LLDP sees</dt>
+          <dd>{lldpObservedText(check.observed)}</dd>
+          {#if check.observed}
+            {#if check.observed.sys_name}<dt>System name</dt><dd class="mono">{check.observed.sys_name}</dd>{/if}
+            {#if check.observed.port_id}<dt>Port ID</dt><dd class="mono">{check.observed.port_id}</dd>{/if}
+            {#if check.observed.port_desc}<dt>Port description</dt><dd>{check.observed.port_desc}</dd>{/if}
+            {#if check.observed.chassis_id}<dt>Chassis ID</dt><dd class="mono">{check.observed.chassis_id}</dd>{/if}
+            {#if check.observed.resolved_by}<dt>Matched by</dt><dd>{RESOLVED_BY_LABELS[check.observed.resolved_by]}</dd>{/if}
+          {/if}
+        </dl>
+        <div class="panel-actions">
+          {#if check.cable_id && edgesByCable.has(check.cable_id)}
+            <button type="button" class="btn-secondary btn-sm" on:click={() => selectCable(check.cable_id, check.switch_port)}>Trace recorded cable</button>
+          {/if}
+          {#if check.observed?.resolved && nodesById.has(check.observed.resolved.device)}
+            <button type="button" class="btn-secondary btn-sm" on:click={() => selectDevice(check.observed.resolved.device, true)}>Show {check.observed.resolved.device_name}</button>
+          {/if}
+          <button type="button" class="btn-secondary btn-sm" on:click={clearSelection}>Back to overview</button>
         </div>
       {:else}
         <div class="panel-head">
@@ -853,6 +1071,93 @@
           Click a server or switch to highlight its cables and neighbours. Click a cable or a port to trace the
           full path. Devices outside the filter are shown faded when they are cabled to devices inside it.
         </p>
+        {#if lldpOn}
+          <h4>LLDP check</h4>
+          {#if lldpLoading && !lldp}
+            <p class="muted">Loading LLDP data…</p>
+          {:else if lldpError}
+            <p class="error-text">{lldpError}</p>
+          {:else if lldp}
+            {#if lldp.switches.length === 0}
+              <p class="muted">No switches in this view.</p>
+            {:else}
+              <ul class="lldp-switches">
+                {#each lldp.switches as sw (sw.id)}
+                  <li>
+                    <span class="lldp-switch-name">{sw.name}</span>
+                    <span class="muted lldp-switch-state">
+                      {#if !sw.supports_lldp}
+                        plugin cannot read LLDP
+                      {:else if sw.lldp_error}
+                        <span class="error-text" title={sw.lldp_error}>last read failed</span>
+                      {:else if sw.lldp_collected_at}
+                        {sw.neighbour_count} neighbour{sw.neighbour_count === 1 ? '' : 's'}, read {timeAgo(sw.lldp_collected_at)}
+                      {:else}
+                        never read
+                      {/if}
+                    </span>
+                    {#if sw.supports_lldp}
+                      <button
+                        type="button"
+                        class="btn-secondary btn-sm lldp-read"
+                        disabled={lldpRefreshing !== null}
+                        title="Read this switch's LLDP neighbour table now (read-only SNMP)"
+                        on:click={() => refreshLldp(sw)}
+                      >{lldpRefreshing === sw.id ? 'Reading…' : 'Read now'}</button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              {#if lldpRefreshMessage}<p class="muted small">{lldpRefreshMessage}</p>{/if}
+            {/if}
+            <dl class="stats">
+              {#each Object.keys(LLDP_LABELS) as status}
+                {#if lldp.summary[status]}<dt>{LLDP_LABELS[status]}</dt><dd>{lldp.summary[status]}</dd>{/if}
+              {/each}
+            </dl>
+            {#if lldpProblems.length === 0 && lldp.results.length}
+              <p class="muted">No discrepancies found.</p>
+            {/if}
+            {#if lldpProblems.length}
+              <ul class="lldp-list">
+                {#each lldpProblems as check}
+                  <li>
+                    <button type="button" class="port-row" on:click={() => selectLldp(check)}>
+                      <span class="lldp-badge lldp-{check.status}">{LLDP_LABELS[check.status]}</span>
+                      <span>{lldpSwitchName(check)} <span class="mono">{check.switch_port_name || check.local_port_label || '?'}</span></span>
+                      <span class="lldp-detail">
+                        <span class="muted">recorded</span> {lldpRecordedText(check.recorded)};
+                        <span class="muted">LLDP sees</span> {lldpObservedText(check.observed)}
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if lldpQuiet.length}
+              <button type="button" class="link-button" on:click={() => (showMatched = !showMatched)}>
+                {showMatched ? 'Hide' : 'Show'} {lldpQuiet.length} matching or silent port{lldpQuiet.length === 1 ? '' : 's'}
+              </button>
+              {#if showMatched}
+                <ul class="lldp-list">
+                  {#each lldpQuiet as check}
+                    <li>
+                      <button type="button" class="port-row" on:click={() => selectLldp(check)}>
+                        <span class="lldp-badge lldp-{check.status}">{LLDP_LABELS[check.status]}</span>
+                        <span>{lldpSwitchName(check)} <span class="mono">{check.switch_port_name}</span></span>
+                        <span class="lldp-detail">{lldpRecordedText(check.recorded)}</span>
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            {/if}
+            <p class="muted hint">
+              "No LLDP seen" is common for servers that do not run an LLDP agent, so it is listed but not treated
+              as a problem. LLDP data is read by the poller every 10 minutes.
+            </p>
+          {/if}
+        {/if}
       {/if}
     </aside>
   </div>
@@ -1278,6 +1583,137 @@
   .hint {
     font-size: 12px;
     line-height: 1.5;
+  }
+
+  .count-badge {
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
+    color: #fff;
+    background: var(--danger-color);
+  }
+
+  .line.lldp-mismatch {
+    border-top: 3px solid var(--danger-color);
+  }
+
+  .line.lldp-seen {
+    border-top-color: #2563eb;
+  }
+
+  .line.lldp-seen-bad {
+    border-top-color: var(--danger-color);
+  }
+
+  .lldp-badge {
+    padding: 0 6px;
+    border-radius: 3px;
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 17px;
+    white-space: nowrap;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+  }
+
+  .lldp-badge.lldp-match {
+    background: var(--success-bg);
+    color: var(--success-text);
+  }
+
+  .lldp-badge.lldp-mismatch,
+  .lldp-badge.lldp-unmapped_local_port {
+    background: var(--danger-bg);
+    color: var(--danger-text);
+  }
+
+  .lldp-badge.lldp-missing_cable,
+  .lldp-badge.lldp-unknown_neighbour {
+    background: var(--warning-bg);
+    color: var(--warning-text);
+  }
+
+  .lldp-switches,
+  .lldp-list {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .lldp-switches li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 8px;
+    font-size: 12px;
+  }
+
+  .lldp-switch-name {
+    font-weight: 600;
+  }
+
+  .lldp-switch-state {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .lldp-read {
+    height: 22px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+
+  .lldp-detail {
+    flex-basis: 100%;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+  }
+
+  .lldp-compare {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 12px;
+    margin: 0;
+    font-size: 12.5px;
+  }
+
+  .lldp-compare dt {
+    color: var(--text-tertiary);
+  }
+
+  .lldp-compare dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .link-button {
+    padding: 0;
+    margin-bottom: 8px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--accent-color);
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+
+  .link-button:hover {
+    text-decoration: underline;
+  }
+
+  .error-text {
+    color: var(--danger-text);
+  }
+
+  .small {
+    font-size: 12px;
   }
 
   .muted {

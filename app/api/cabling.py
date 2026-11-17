@@ -1,6 +1,6 @@
 """Admin API: read-only cabling graph for the Cabling visualisation page."""
 from datetime import datetime
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.dao.network_switch_dao import NetworkSwitchDAO
 from app.services.cabling_graph_service import build_cabling_graph
 from app.services.lldp_collection_service import LldpNotSupported, collect_for_switch
+from app.services.lldp_compare_service import compare_lldp
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -133,3 +134,64 @@ async def refresh_switch_lldp(switch_id: int, auth: AdminDep, db: DbDep):
         raise HTTPException(status_code=502, detail=f"LLDP collection failed: {e}")
     db.refresh(switch)
     return {**result, "collected_at": switch.lldp_collected_at}
+
+
+class LldpEndpoint(BaseModel):
+    kind: Literal["server", "switch"]
+    device_id: int
+    device: str
+    device_name: Optional[str] = None
+    port_id: Optional[int] = None
+    port: Optional[str] = None
+    port_name: Optional[str] = None
+
+
+class LldpObserved(BaseModel):
+    chassis_id: Optional[str] = None
+    port_id: Optional[str] = None
+    port_desc: Optional[str] = None
+    sys_name: Optional[str] = None
+    resolved: Optional[LldpEndpoint] = None
+    resolved_by: Optional[Literal["port_mac", "chassis_mac", "system_name"]] = None
+
+
+class LldpResult(BaseModel):
+    switch_id: int
+    switch: str
+    switch_port_id: Optional[int] = None
+    switch_port: Optional[str] = None
+    switch_port_name: Optional[str] = None
+    local_port_label: Optional[str] = None
+    status: Literal["match", "mismatch", "missing_cable", "unknown_neighbour", "no_lldp", "unmapped_local_port"]
+    cable_id: Optional[int] = None
+    recorded: Optional[LldpEndpoint] = None
+    observed: Optional[LldpObserved] = None
+
+
+class LldpSwitchStatus(BaseModel):
+    id: int
+    name: str
+    device: str
+    supports_lldp: bool
+    lldp_collected_at: Optional[datetime] = None
+    lldp_error: Optional[str] = None
+    neighbour_count: int
+
+
+class LldpComparisonResponse(BaseModel):
+    filters: CablingFilters
+    generated_at: datetime
+    switches: List[LldpSwitchStatus]
+    results: List[LldpResult]
+    summary: Dict[str, int]
+
+
+@router.get("/lldp", response_model=LldpComparisonResponse)
+def get_lldp_comparison(
+    auth: AdminDep,
+    db: DbDep,
+    location_id: Optional[int] = Query(None, ge=1),
+    rack_id: Optional[int] = Query(None, ge=1),
+):
+    """Recorded cables compared with the stored LLDP neighbours of the switches in scope."""
+    return compare_lldp(db, location_id=location_id, rack_id=rack_id)
