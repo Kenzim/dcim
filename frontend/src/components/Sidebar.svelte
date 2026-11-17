@@ -25,6 +25,7 @@
   $: isDashboardActive = currentPath === '/admin' || currentPath === '/admin/';
   $: isServersActive = currentPath.startsWith('/admin/servers');
   $: isSwitchesActive = currentPath.startsWith('/admin/switches');
+  $: isPdusActive = currentPath.startsWith('/admin/pdus');
   $: isLocationsActive = currentPath.startsWith('/admin/locations');
   $: isRunnersActive = currentPath.startsWith('/admin/runners');
   $: isRacksActive = currentPath.startsWith('/admin/racks');
@@ -117,6 +118,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
             </svg>
             <span>Switches</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/pdus" class="nav-link" class:active={isPdusActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <span>PDUs</span>
           </a>
         </li>
         <li class="nav-item">

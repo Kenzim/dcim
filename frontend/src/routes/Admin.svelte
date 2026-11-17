@@ -18,6 +18,8 @@
   import ServerDetail from '../components/ServerDetail.svelte';
   import Switches from '../components/Switches.svelte';
   import SwitchDetail from '../components/SwitchDetail.svelte';
+  import Pdus from '../components/Pdus.svelte';
+  import PduDetail from '../components/PduDetail.svelte';
   import OSTemplates from '../components/OSTemplates.svelte';
   import BillingIntegrations from '../components/BillingIntegrations.svelte';
   import McpKeys from '../components/McpKeys.svelte';
@@ -69,6 +71,7 @@
   let routeName = 'dashboard';
   let serverId = null;
   let switchId = null;
+  let pduId = null;
   let rackId = null;
   let rowLocationId = null;
   let rowNumber = null;
@@ -150,6 +153,16 @@
       }
     } else {
       switchId = null;
+    }
+
+    // Extract PDU ID from URL if it's a PDU detail route
+    if (routeName && routeName.startsWith('pdus/')) {
+      const routeParts = routeName.split('/');
+      if (routeParts.length > 1 && routeParts[1]) {
+        pduId = routeParts[1];
+      }
+    } else {
+      pduId = null;
     }
     
     // Extract row location and row number from URL if it's a row view route (check this first)
@@ -262,6 +275,10 @@
         <Switches />
       {:else if routeName.startsWith('switches/') && switchId}
         <SwitchDetail switchId={switchId} onBack={() => navigate('/admin/switches')} />
+      {:else if routeName === 'pdus'}
+        <Pdus />
+      {:else if routeName.startsWith('pdus/') && pduId}
+        <PduDetail pduId={pduId} onBack={() => navigate('/admin/pdus')} />
       {:else if routeName === 'locations'}
         <Locations />
       {:else if routeName.startsWith('locations/') && locationId}
