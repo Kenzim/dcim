@@ -11,7 +11,7 @@ from app.mcp.tools import combined
 
 EXPECTED_TOOLS = {
     "cable", "delete_server_port", "save_server_ports",
-    "save_product", "save_product_family", "save_subnet_group",
+    "save_product", "save_product_family", "save_subnet_group", "save_vm_template", "vm_ip_pool",
     "proxy_runner", "rotate_proxy_runner_key", "delete_proxy_runner",
     "console_ticket", "delete_server", "delete_staff", "delete_subnet", "delete_switch", "dhcp_tftp", "dhcp_tftp_control",
     "get_aggregate_bandwidth", "invite_action", "ip_assignment", "list_clients", "list_ips", "list_servers", "list_services",

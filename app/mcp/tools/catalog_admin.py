@@ -1,7 +1,7 @@
-"""Catalog and proxy-pool writes: product families, products, proxy subnet groups.
+"""Catalog and pool writes: product families, products, VM templates, proxy subnet groups, VM IP pool.
 
 Each tool calls the admin API handler, so the same checks apply as in the admin UI
-(unique codes, known family / templates / permission set, http_proxy defaults such as
+(unique codes, known family / templates / permission set / clusters, http_proxy defaults such as
 ip_count 1..32 and an existing subnet_group_id).
 """
 
@@ -11,7 +11,9 @@ from typing import Any, Literal, Optional
 
 from app.api import product_catalog as catalog_api
 from app.api import proxy_subnet_groups as group_api
-from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO
+from app.api import vm_ip_allocations as vm_ip_api
+from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO, VMTemplateDAO
+from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 
@@ -225,4 +227,207 @@ async def save_subnet_group(
         "write",
         work,
         args={"group_id": group_id, "name": name, "subnet_ids": subnet_ids},
+    )
+
+
+def _template_row(row) -> dict:
+    return {
+        "id": row.id,
+        "code": row.code,
+        "name": row.name,
+        "os_type": row.os_type,
+        "proxmox_template_name": row.proxmox_template_name,
+        "description": row.description,
+        "shared_storage": bool(row.shared_storage),
+        "strategy_options": row.strategy_options or {},
+        "enabled": row.enabled,
+        "product_ids": [m.product_id for m in row.product_mappings],
+    }
+
+
+@mcp.tool()
+async def save_vm_template(
+    template_id: Optional[int] = None,
+    code: Optional[str] = None,
+    name: Optional[str] = None,
+    os_type: Optional[str] = None,
+    proxmox_template_name: Optional[str] = None,
+    description: Optional[str] = None,
+    shared_storage: Optional[bool] = None,
+    strategy_options: Optional[dict[str, Any]] = None,
+    enabled: Optional[bool] = None,
+) -> dict:
+    """Register a VM template (no template_id; needs code, name, os_type, proxmox_template_name) or update one.
+
+    proxmox_template_name is the template VM's name in Proxmox. code is set on create only.
+    Link it to products with save_product(vm_template_ids=...).
+    """
+
+    async def work(db, ctx):
+        if os_type is not None and os_type not in catalog_api.ALLOWED_VM_OS_TYPES:
+            raise ValueError(
+                f"Unsupported os_type '{os_type}'. Allowed: {', '.join(catalog_api.ALLOWED_VM_OS_TYPES)}"
+            )
+        if template_id is None:
+            missing = [
+                key
+                for key, value in (
+                    ("code", code),
+                    ("name", name),
+                    ("os_type", os_type),
+                    ("proxmox_template_name", proxmox_template_name),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(f"Registering a VM template needs: {', '.join(missing)}")
+            created = await catalog_api.create_vm_template(
+                catalog_api.VMTemplateCreate(
+                    code=code,
+                    name=name,
+                    os_type=os_type,
+                    proxmox_template_name=proxmox_template_name,
+                    description=description,
+                    shared_storage=bool(shared_storage),
+                    strategy_options=strategy_options or {},
+                    enabled=True if enabled is None else enabled,
+                ),
+                auth={},
+                db=db,
+            )
+            target = created["id"]
+        else:
+            if code is not None:
+                raise ValueError("Updating a VM template does not accept: code")
+            await catalog_api.update_vm_template(
+                template_id,
+                catalog_api.VMTemplateUpdate(
+                    **_set_only(
+                        name=name,
+                        os_type=os_type,
+                        proxmox_template_name=proxmox_template_name,
+                        description=description,
+                        shared_storage=shared_storage,
+                        strategy_options=strategy_options,
+                        enabled=enabled,
+                    )
+                ),
+                auth={},
+                db=db,
+            )
+            target = template_id
+        db.expire_all()
+        return _template_row(VMTemplateDAO.get_by_id(db, target))
+
+    return await run_tool(
+        "save_vm_template",
+        "write",
+        work,
+        args={"template_id": template_id, "code": code, "proxmox_template_name": proxmox_template_name},
+    )
+
+
+@mcp.tool()
+async def vm_ip_pool(
+    action: Literal["add", "update", "delete"],
+    ip_address: Optional[str] = None,
+    start_ip: Optional[str] = None,
+    end_ip: Optional[str] = None,
+    ids: Optional[list[int]] = None,
+    subnet_mask: Optional[str] = None,
+    gateway: Optional[str] = None,
+    bridge_name: Optional[str] = None,
+    cluster_ids: Optional[list[int]] = None,
+    batch_tag: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    confirm: bool = False,
+) -> dict:
+    """Manage the VM IP pool (list it with list_ips(pool="vm")).
+
+    add: ip_address, or start_ip..end_ip plus batch_tag; needs subnet_mask and gateway. Existing IPs are skipped.
+    update: ids plus the fields to change. delete: ids, destructive, needs confirm; assigned IPs are refused.
+    """
+    if action == "delete":
+
+        async def delete_work(db, ctx):
+            if not ids:
+                raise ValueError("Deleting needs: ids")
+            rows = [VMIPAllocationDAO.get_by_id(db, allocation_id) for allocation_id in ids]
+            missing = [i for i, row in zip(ids, rows) if row is None]
+            if missing:
+                raise ValueError(f"Unknown VM IP ids: {missing}")
+            assigned = [row.ip_address for row in rows if row.assigned_service_id]
+            if assigned:
+                raise ValueError(f"Assigned to a service, release them first: {assigned}")
+            for row in rows:
+                VMIPAllocationDAO.delete(db, row)
+            db.commit()
+            return {"deleted": [row.ip_address for row in rows]}
+
+        return await run_tool(
+            "vm_ip_pool",
+            "destructive",
+            delete_work,
+            destructive=True,
+            confirm=confirm,
+            args={"action": action, "ids": ids, "confirm": confirm},
+        )
+
+    async def work(db, ctx):
+        if action == "add":
+            if not subnet_mask or not gateway:
+                raise ValueError("Adding VM IPs needs: subnet_mask, gateway")
+            if ids:
+                raise ValueError("Adding VM IPs does not accept: ids")
+            common = {
+                "subnet_mask": subnet_mask,
+                "gateway": gateway,
+                "bridge_name": bridge_name,
+                "cluster_ids": cluster_ids or [],
+                "enabled": True if enabled is None else enabled,
+            }
+            if ip_address:
+                if start_ip or end_ip:
+                    raise ValueError("Pass ip_address or start_ip..end_ip, not both")
+                if VMIPAllocationDAO.get_by_ip(db, ip_address):
+                    return {"created": 0, "skipped_existing": 1}
+                await vm_ip_api.create_vm_ip_allocation(
+                    vm_ip_api.VMIPCreate(ip_address=ip_address, batch_tag=batch_tag, **common),
+                    auth={},
+                    db=db,
+                )
+                return {"created": 1, "skipped_existing": 0}
+            if not (start_ip and end_ip and batch_tag):
+                raise ValueError("Adding a range needs: start_ip, end_ip, batch_tag")
+            return await vm_ip_api.create_vm_ip_allocations_bulk(
+                vm_ip_api.VMIPBulkCreate(start_ip=start_ip, end_ip=end_ip, batch_tag=batch_tag, **common),
+                auth={},
+                db=db,
+            )
+        if not ids:
+            raise ValueError("Updating needs: ids")
+        if ip_address or start_ip or end_ip:
+            raise ValueError("An IP address cannot be changed; delete it and add the new one")
+        missing = [i for i in ids if VMIPAllocationDAO.get_by_id(db, i) is None]
+        if missing:
+            raise ValueError(f"Unknown VM IP ids: {missing}")
+        return await vm_ip_api.bulk_update_vm_ip_allocations(
+            vm_ip_api.VMIPBulkUpdate(
+                ids=ids,
+                subnet_mask=subnet_mask,
+                gateway=gateway,
+                bridge_name=bridge_name,
+                cluster_ids=cluster_ids,
+                enabled=enabled,
+                batch_tag=batch_tag,
+            ),
+            auth={},
+            db=db,
+        )
+
+    return await run_tool(
+        "vm_ip_pool",
+        "write",
+        work,
+        args={"action": action, "ip_address": ip_address, "start_ip": start_ip, "end_ip": end_ip, "ids": ids},
     )
