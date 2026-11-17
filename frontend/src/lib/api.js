@@ -1633,6 +1633,32 @@ export async function getServerPowerState(serverId) {
   return await response.json();
 }
 
+export async function getServerIdentify(serverId) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/identify`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to read identify LED');
+  }
+  return await response.json();
+}
+
+export async function setServerIdentify(serverId, on, seconds = null) {
+  const response = await fetch(`${API_BASE}/servers/${serverId}/identify`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(seconds ? { on, seconds } : { on }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to set identify LED');
+  }
+  return await response.json();
+}
+
 export async function powerOnServer(serverId) {
   const response = await fetch(`${API_BASE}/servers/${serverId}/power-on`, {
     method: 'POST',

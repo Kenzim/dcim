@@ -2266,6 +2266,59 @@ async def get_server_power_state(
         )
 
 
+class IdentifyRequest(BaseModel):
+    on: bool
+    seconds: Optional[int] = Field(default=None, ge=1, le=255, description="Light for this long; omit to stay on")
+
+
+def _get_server_or_404(db: Session, server_id: int) -> Server:
+    server = ServerDAO.get_by_id(db, server_id)
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    return server
+
+
+@router.get("/{server_id}/identify", response_model=dict, responses=COMMON_ERROR_RESPONSES)
+async def get_server_identify(server_id: int, auth: AdminDep, db: DbDep):
+    """Read the chassis identify (UID) LED state: on, timed, off or unknown."""
+    from app.services import server_identify
+
+    server = _get_server_or_404(db, server_id)
+    try:
+        return await server_identify.read_identify(db, server)
+    except server_identify.IdentifyUnsupported as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read identify LED: {exc}",
+        )
+
+
+@router.post("/{server_id}/identify", response_model=dict, responses=COMMON_ERROR_RESPONSES)
+async def set_server_identify(server_id: int, body: IdentifyRequest, auth: AdminDep, db: DbDep):
+    """Turn the chassis identify (UID) LED on or off. It does not affect power, so locked servers are allowed."""
+    from app.services import server_identify
+
+    server = _get_server_or_404(db, server_id)
+    try:
+        return await server_identify.set_identify(
+            db,
+            server,
+            on=body.on,
+            seconds=body.seconds,
+            source="admin_api",
+            details={"requested_by_user_id": auth.get("user_id")},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to set identify LED: {exc}",
+        )
+
+
 @router.post("/{server_id}/power-on", response_model=dict, responses=COMMON_ERROR_RESPONSES)
 async def power_on_server(
     server_id: int,

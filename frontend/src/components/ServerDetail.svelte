@@ -3,7 +3,7 @@
   import ServerControlsPanel from './ServerControlsPanel.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
-  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
+  import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, getServerIdentify, setServerIdentify, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
 
@@ -171,6 +171,10 @@
   }
 
   let leftPanePowerState = null; // 'on' | 'off' | 'unknown' | null (loading)
+  let identifyState = null; // 'on' | 'timed' | 'off' | 'unknown' | null (loading)
+  let identifyBusy = false;
+  $: identifyCapable = !!(server?.effective_capabilities || []).find(c => c?.id === 'identify');
+  $: identifyLit = identifyState === 'on' || identifyState === 'timed';
   let powerActionInProgress = null; // 'on' | 'off' | 'reset' | null
 
   let showPreviewAssetPicker = false;
@@ -286,8 +290,13 @@
     }
     if (id != null) {
       getServerPowerState(id).then(r => { leftPanePowerState = (r && r.power_state) || 'unknown'; }).catch(() => { leftPanePowerState = 'unknown'; });
+      identifyState = null;
+      if ((server?.effective_capabilities || []).some(c => c?.id === 'identify')) {
+        getServerIdentify(id).then(r => { identifyState = (r && r.state) || 'unknown'; }).catch(() => { identifyState = 'unknown'; });
+      }
     } else {
       leftPanePowerState = null;
+      identifyState = null;
     }
   }
 
@@ -1103,6 +1112,22 @@
     }
   }
 
+  async function handleIdentifyToggle() {
+    if (!serverId || identifyBusy) return;
+    const turnOn = !identifyLit;
+    identifyBusy = true;
+    try {
+      const res = await setServerIdentify(serverId, turnOn);
+      if (res && res.success === false) throw new Error(res.message || 'The BMC refused the identify command');
+      identifyState = (res && res.state) || (turnOn ? 'on' : 'off');
+      if (res && res.message) alert(res.message);
+    } catch (err) {
+      alert(err.message || 'Failed to set identify LED');
+    } finally {
+      identifyBusy = false;
+    }
+  }
+
   async function handlePowerOn() {
     if (!serverId || powerActionInProgress) return;
     if (!confirm(`Power on server "${server?.name || serverId}"?`)) return;
@@ -1678,6 +1703,24 @@
             >
               {leftPanePowerState === 'on' ? 'On' : leftPanePowerState === 'off' ? 'Off' : '—'}
             </span>
+            {#if identifyCapable}
+              <button
+                type="button"
+                class="identify-pill"
+                class:identify-lit={identifyLit}
+                class:identify-unknown={identifyState === 'unknown' || identifyState === null}
+                on:click={handleIdentifyToggle}
+                disabled={identifyBusy}
+                aria-pressed={identifyLit}
+                title={identifyLit
+                  ? (identifyState === 'timed' ? 'Identify LED lit for a set time. Click to turn it off' : 'Identify LED on. Click to turn it off')
+                  : identifyState === 'off'
+                    ? 'Identify LED off. Click to light it until turned off'
+                    : 'Identify LED state not reported by this BMC. Click to light it'}
+              >
+                {identifyBusy ? '…' : 'ID'}
+              </button>
+            {/if}
             <button type="button" class="left-pane-edit-btn" on:click={() => showEditModal = true} title="Edit server">Edit</button>
           </div>
         </div>
@@ -3147,6 +3190,38 @@
   .power-pill.power-unknown {
     background: rgba(255, 255, 255, 0.35);
     color: rgba(255, 255, 255, 0.95);
+  }
+
+  .identify-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.95);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    line-height: 1;
+    margin-top: -2px;
+    cursor: pointer;
+  }
+
+  .identify-pill.identify-lit {
+    background: #1e6fd9;
+    border-color: #1e6fd9;
+    color: #fff;
+    box-shadow: 0 0 8px rgba(30, 111, 217, 0.8);
+  }
+
+  .identify-pill.identify-unknown {
+    border-style: dashed;
+  }
+
+  .identify-pill:disabled {
+    cursor: wait;
+    opacity: 0.7;
   }
 
   .left-pane-edit-btn {

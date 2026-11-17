@@ -10,6 +10,8 @@ import os
 import shutil
 from typing import Dict, Any, List, Optional, Sequence
 
+import httpx
+
 from app.plugins.base import (
     ServerPlugin,
     PluginCategory,
@@ -47,6 +49,36 @@ CHASSIS_POWER_ACTIONS: Sequence[dict[str, Optional[str]]] = (
     {"id": "cycle", "label": "Power Cycle (cold reboot)", "confirm": "Cold-reboot the chassis (power off, then on)?"},
     {"id": "diag", "label": "NMI", "confirm": "Send a diagnostic interrupt (NMI)?"},
 )
+
+
+# IPMI Chassis Identify accepts an interval of 0-255 seconds; 0 turns the LED off.
+IDENTIFY_MAX_SECONDS = 255
+# Get Chassis Status, misc chassis state byte: bits 5:4 identify state, bit 6 "state reported".
+_IDENTIFY_STATES = {0: "off", 1: "timed", 2: "on"}
+
+
+def parse_identify_state(raw: str) -> Optional[str]:
+    """Identify LED state from ``ipmitool raw 0x00 0x01`` output, or None when the BMC does not report it."""
+    try:
+        data = [int(token, 16) for token in raw.split()]
+    except ValueError:
+        return None
+    if len(data) < 3 or not data[2] & 0x40:
+        return None
+    return _IDENTIFY_STATES.get((data[2] >> 4) & 0x03)
+
+
+def redfish_indicator_state(resource: Dict[str, Any]) -> Optional[str]:
+    """Identify LED state from a Redfish System or Chassis resource."""
+    active = resource.get("LocationIndicatorActive")
+    if isinstance(active, bool):
+        return "on" if active else "off"
+    led = str(resource.get("IndicatorLED") or "").lower()
+    if led in {"lit", "blinking"}:
+        return "on"
+    if led == "off":
+        return "off"
+    return None
 
 
 def normalize_chassis_power_action(action: str) -> str:
@@ -117,6 +149,18 @@ class IPMIPlugin(ServerPlugin):
             actions=[
                 ActionDef("set_boot_order", "Save Boot Order"),
                 ActionDef("set_next_boot_device", "Set Next Boot", confirm="Set next boot device?"),
+            ],
+        ),
+        Capability(
+            id="identify",
+            display_name="Identify LED",
+            description="Light the chassis identify (UID) LED to find the server in the rack",
+            optional=False,
+            ui_pattern=UIPattern.STATE_AND_ACTIONS,
+            state_action="get_identify_state",
+            actions=[
+                ActionDef("identify_on", "Identify On"),
+                ActionDef("identify_off", "Identify Off", variant="secondary"),
             ],
         ),
     ]
@@ -300,6 +344,80 @@ class IPMIPlugin(ServerPlugin):
     async def power_reset(self) -> bool:
         """Warm-reset the chassis (pulse the reset line)."""
         return await self.chassis_power("reset")
+
+    async def get_identify_state(self) -> Dict[str, Any]:
+        """Identify LED state: on, timed (lit for a set time), off or unknown.
+
+        IPMI reports it in Get Chassis Status, but only when the BMC sets the
+        "state supported" bit; otherwise Redfish is asked.
+        """
+        stdout, _stderr, rc = await self._run_ipmitool("raw 0x00 0x01")
+        if rc == 0:
+            state = parse_identify_state((stdout or b"").decode("utf-8", errors="replace"))
+            if state is not None:
+                return {"state": state, "source": "ipmi"}
+        state = await self._redfish_identify_state()
+        if state is not None:
+            return {"state": state, "source": "redfish"}
+        return {"state": "unknown", "source": None}
+
+    async def _redfish_identify_state(self) -> Optional[str]:
+        from app.services.ipmi_kvm.bmc_tls import bmc_httpx_verify
+
+        origin = f"https://{self.hostname}"
+        try:
+            async with httpx.AsyncClient(
+                verify=bmc_httpx_verify(megarac=True),
+                timeout=min(self.timeout, 10),
+                auth=(self.username or "", self.password or ""),
+            ) as client:
+                for collection in ("Systems", "Chassis"):
+                    listing = await client.get(f"{origin}/redfish/v1/{collection}")
+                    if listing.status_code >= 400:
+                        continue
+                    for member in (listing.json() or {}).get("Members") or []:
+                        path = (member or {}).get("@odata.id")
+                        if not path:
+                            continue
+                        resource = await client.get(f"{origin}{path}")
+                        if resource.status_code < 400:
+                            state = redfish_indicator_state(resource.json() or {})
+                            if state is not None:
+                                return state
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.debug("Redfish identify state unavailable for %s: %s", self.hostname, exc)
+        return None
+
+    async def set_identify(self, on: bool, seconds: Optional[int] = None) -> Dict[str, Any]:
+        """Turn the identify LED on (until turned off, or for 1-255 seconds) or off."""
+        if not on:
+            _stdout, stderr, rc = await self._run_ipmitool("chassis identify 0")
+            return self._identify_result(rc, stderr, state="off", seconds=None)
+        if seconds is not None:
+            seconds = int(seconds)
+            if not 1 <= seconds <= IDENTIFY_MAX_SECONDS:
+                raise ValueError(f"seconds must be between 1 and {IDENTIFY_MAX_SECONDS}")
+            _stdout, stderr, rc = await self._run_ipmitool(f"chassis identify {seconds}")
+            return self._identify_result(rc, stderr, state="timed", seconds=seconds)
+        _stdout, stderr, rc = await self._run_ipmitool("chassis identify force")
+        if rc == 0:
+            return self._identify_result(rc, stderr, state="on", seconds=None)
+        # Force Identify On is optional in the IPMI spec; fall back to the longest interval.
+        logger.info("BMC %s refused force identify, using %ss", self.hostname, IDENTIFY_MAX_SECONDS)
+        _stdout, stderr, rc = await self._run_ipmitool(f"chassis identify {IDENTIFY_MAX_SECONDS}")
+        result = self._identify_result(rc, stderr, state="timed", seconds=IDENTIFY_MAX_SECONDS)
+        if result["success"]:
+            result["message"] = (
+                f"This BMC cannot keep the LED on indefinitely; it is lit for {IDENTIFY_MAX_SECONDS} seconds"
+            )
+        return result
+
+    @staticmethod
+    def _identify_result(rc: int, stderr: bytes, *, state: str, seconds: Optional[int]) -> Dict[str, Any]:
+        if rc != 0:
+            message = (stderr or b"").decode("utf-8", errors="replace").strip()
+            return {"success": False, "state": None, "seconds": None, "message": message or "ipmitool chassis identify failed"}
+        return {"success": True, "state": state, "seconds": seconds, "message": None}
 
     async def list_users(self) -> List[Dict[str, Any]]:
         raise NotImplementedError("IPMI plugin does not support user control")

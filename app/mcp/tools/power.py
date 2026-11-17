@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
+
+from mcp.server.fastmcp.exceptions import ToolError
 
 from app.api.server import _server_has_capability
 from app.dao.installation_task_dao import InstallationTaskDAO
@@ -196,6 +198,41 @@ async def server_set_boot(
         "write",
         work,
         args={"server_id": server_id, "device": device, "persistent": persistent, "uefi": uefi},
+    )
+
+
+@mcp.tool()
+async def identify_led(
+    server_id: int,
+    action: Literal["status", "on", "off"] = "status",
+    seconds: Optional[int] = None,
+) -> dict:
+    """Chassis identify (UID) LED: status, on (until off, or for 1-255 seconds) or off. No power change."""
+    from app.services import server_identify
+
+    if action != "on" and seconds is not None:
+        raise ToolError("seconds only applies to action=on")
+
+    async def work(db, ctx):
+        server = ServerDAO.get_by_id(db, server_id)
+        if not server:
+            raise ValueError(_MSG_SERVER_NOT_FOUND)
+        if action == "status":
+            return await server_identify.read_identify(db, server)
+        return await server_identify.set_identify(
+            db,
+            server,
+            on=action == "on",
+            seconds=seconds,
+            source="mcp",
+            details={"mcp_key_id": ctx.key_id},
+        )
+
+    return await run_tool(
+        "identify_led",
+        "read" if action == "status" else "write",
+        work,
+        args={"server_id": server_id, "action": action, "seconds": seconds},
     )
 
 

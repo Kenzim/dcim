@@ -11,6 +11,7 @@ class ServerActivityEventType(str, enum.Enum):
     SERVICE = "service"
     POWER = "power"
     INSTALL = "install"
+    IDENTIFY = "identify"
 
 
 class ServerActivityStatus(str, enum.Enum):
