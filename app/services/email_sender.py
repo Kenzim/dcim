@@ -13,6 +13,7 @@ import smtplib
 import ssl
 from datetime import datetime, timezone
 from email.message import EmailMessage as MimeMessage
+from email.utils import formatdate, make_msgid, parseaddr
 from typing import Optional
 
 from sqlalchemy import select
@@ -27,6 +28,12 @@ MAX_ATTEMPTS = 5
 DEFAULT_BATCH_SIZE = 50
 
 
+def message_id_domain(from_header: str) -> Optional[str]:
+    """Domain of the From address, or None so make_msgid uses the hostname."""
+    _, at, domain = parseaddr(from_header)[1].rpartition("@")
+    return domain if at and domain else None
+
+
 def deliver(
     config: Settings,
     *,
@@ -39,6 +46,8 @@ def deliver(
     message["Subject"] = subject
     message["From"] = str(config.smtp_from)
     message["To"] = to_address
+    message["Date"] = formatdate(localtime=False)
+    message["Message-ID"] = make_msgid(domain=message_id_domain(str(config.smtp_from)))
     message.set_content(body_text or "")
     if body_html:
         message.add_alternative(body_html, subtype="html")

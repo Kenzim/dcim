@@ -6,6 +6,7 @@ import smtplib
 import ssl
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from typing import Callable, Optional, Protocol
 
 from sqlalchemy import and_, or_, select
@@ -13,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, settings
+from app.services.email_sender import message_id_domain
 from app.models.reseller import (
     NotificationOutbox,
     NotificationOutboxStatus,
@@ -150,6 +152,8 @@ class SMTPNotificationTransport:
         message["Subject"] = subject
         message["From"] = str(self.config.smtp_from)
         message["To"] = row.recipient
+        message["Date"] = formatdate(localtime=False)
+        message["Message-ID"] = make_msgid(domain=message_id_domain(str(self.config.smtp_from)))
         message.set_content(body)
         with smtplib.SMTP(
             str(self.config.smtp_host),
