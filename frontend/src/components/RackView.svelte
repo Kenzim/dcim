@@ -1,6 +1,7 @@
 <script>
   import PageHeader from './PageHeader.svelte';
-  import { getRack, getRackServers, getSwitches } from '../lib/api.js';
+  import { getRack, getRackServers, getSwitches, getPdus } from '../lib/api.js';
+  import RackPowerPanel from './RackPowerPanel.svelte';
   import { onMount } from 'svelte';
 
   export let rackId;
@@ -9,10 +10,11 @@
   let rack = null;
   let servers = [];
   let switches = [];
+  let pdus = [];
   let loading = true;
   let error = null;
 
-  // Map of rack unit to device: { type: 'server'|'switch', data: {...} }
+  // Map of rack unit to device: { type: 'server'|'switch'|'pdu', data: {...} }
   let rackMap = {};
 
   onMount(async () => {
@@ -23,10 +25,11 @@
     try {
       loading = true;
       error = null;
-      [rack, servers, switches] = await Promise.all([
+      [rack, servers, switches, pdus] = await Promise.all([
         getRack(rackId),
         getRackServers(rackId),
-        getSwitches(null, rackId)
+        getSwitches(null, rackId),
+        getPdus(null, rackId)
       ]);
       
       // Build map of rack units to devices. Servers can occupy multiple units (rack_units); fill each unit they occupy.
@@ -44,6 +47,13 @@
           const size = sw.rack_units || 1;
           for (let u = 0; u < size; u++) {
             rackMap[sw.rack_unit + u] = { type: 'switch', data: sw };
+          }
+        }
+      });
+      (pdus || []).forEach(pdu => {
+        if (pdu.rack_unit && pdu.rack_units > 0) {
+          for (let u = 0; u < pdu.rack_units; u++) {
+            rackMap[pdu.rack_unit + u] = { type: 'pdu', data: pdu };
           }
         }
       });
@@ -65,6 +75,7 @@
     if (!device) return true;
     if (device.type === 'server') return device.data.rack_unit === unit;
     if (device.type === 'switch') return device.data.rack_unit === unit;
+    if (device.type === 'pdu') return device.data.rack_unit === unit;
     return true;
   }
 
@@ -74,11 +85,14 @@
     if (!device || !isStartOfDevice(unit)) return 1;
     if (device.type === 'server') return device.data.rack_units || 1;
     if (device.type === 'switch') return device.data.rack_units || 1;
+    if (device.type === 'pdu') return device.data.rack_units || 1;
     return 1;
   }
 
   /** Total occupied U for summary (servers and switches count their rack_units). */
-  $: occupiedUnits = rack ? servers.reduce((sum, s) => sum + (s.rack_units || 1), 0) + (switches || []).reduce((sum, sw) => sum + (sw.rack_units || 1), 0) : 0;
+  $: occupiedUnits = rack ? servers.reduce((sum, s) => sum + (s.rack_units || 1), 0) + (switches || []).reduce((sum, sw) => sum + (sw.rack_units || 1), 0) + (pdus || []).filter(p => p.rack_unit && p.rack_units > 0).reduce((sum, p) => sum + p.rack_units, 0) : 0;
+
+  $: zeroUPdus = (pdus || []).filter(p => !p.rack_units);
 </script>
 
 <PageHeader title={rack ? `Rack: ${rack.name}` : 'Rack View'} />
@@ -122,6 +136,7 @@
             class="rack-unit"
             class:occupied={device !== null && startOfDevice}
             class:switch-slot={device?.type === 'switch'}
+            class:pdu-slot={device?.type === 'pdu'}
             class:continuation={device !== null && !startOfDevice}
             style={startOfDevice && span > 1 ? `height: ${span * 24}px; min-height: ${span * 24}px;` : (device && !startOfDevice ? 'height: 0; min-height: 0; overflow: hidden; border: none; margin: -1px 0 0 0;' : '')}
           >
@@ -145,11 +160,24 @@
                       {/if}
                     </div>
                   </a>
-                {:else}
+                {:else if device.type === 'switch'}
                   <a href="/admin/switches/{device.data.id}" class="device-slot switch-slot">
                     <span class="device-name">{device.data.name}{span > 1 ? ` (${span}U)` : ''}</span>
                     <div class="device-tooltip">
                       <div><strong>Switch</strong>{#if span > 1} <span>({span}U)</span>{/if}</div>
+                      {#if device.data.model}
+                        <div><strong>Model:</strong> {device.data.model}</div>
+                      {/if}
+                      {#if device.data.description}
+                        <div><strong>Description:</strong> {device.data.description}</div>
+                      {/if}
+                    </div>
+                  </a>
+                {:else}
+                  <a href="/admin/pdus/{device.data.id}" class="device-slot pdu-slot">
+                    <span class="device-name">{device.data.name}{span > 1 ? ` (${span}U)` : ''}</span>
+                    <div class="device-tooltip">
+                      <div><strong>PDU</strong>{#if span > 1} <span>({span}U)</span>{/if}</div>
                       {#if device.data.model}
                         <div><strong>Model:</strong> {device.data.model}</div>
                       {/if}
@@ -186,6 +214,22 @@
         <span class="summary-value">{rack.units ? Math.round((occupiedUnits / rack.units) * 100) : 0}%</span>
       </div>
     </div>
+
+    {#if zeroUPdus.length > 0}
+      <div class="zero-u-pdus">
+        <div class="zero-u-title">Zero-U PDUs</div>
+        <ul>
+          {#each zeroUPdus as pdu (pdu.id)}
+            <li>
+              <a href="/admin/pdus/{pdu.id}">{pdu.name}</a>
+              <span class="zero-u-meta">{pdu.model || 'PDU'}, not using rack units</span>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+
+    <RackPowerPanel {rackId} />
   {/if}
 </div>
 
@@ -385,6 +429,40 @@
 
   .rack-unit.switch-slot.occupied {
     border-color: var(--info-color);
+  }
+
+  .device-slot.pdu-slot .device-name {
+    color: var(--warning-color);
+  }
+
+  .rack-unit.pdu-slot.occupied {
+    border-color: var(--warning-color);
+  }
+
+  .zero-u-pdus {
+    margin-top: 16px;
+    font-size: 14px;
+    color: var(--text-primary);
+  }
+
+  .zero-u-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+  }
+
+  .zero-u-pdus ul {
+    margin: 0;
+    padding-left: 18px;
+  }
+
+  .zero-u-meta {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-left: 6px;
   }
 
   .empty-slot {
