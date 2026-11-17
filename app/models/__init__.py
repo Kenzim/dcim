@@ -17,6 +17,7 @@ from app.models.script import Script
 from app.models.network_port import NetworkPort
 from app.models.switch_port import SwitchPort
 from app.models.cable_run import CableRun
+from app.models.switch_lldp_neighbor import SwitchLldpNeighbor
 from app.models.server_group import ServerGroup, server_group_association
 from app.models.switch_bandwidth_sample import SwitchBandwidthSample
 from app.models.dhcp_config import DHCPConfigModel

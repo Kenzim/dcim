@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +34,7 @@ from app.core.database import SessionLocal
 from app.dao.network_switch_dao import NetworkSwitchDAO
 from app.dao.switch_bandwidth_sample_dao import SwitchBandwidthSampleDAO
 from app.dao.switch_port_dao import SwitchPortDAO
+from app.services.lldp_collection_service import collect_for_switch
 from app.plugins.switch_base import SwitchPluginCategory
 from app.plugins.switch_registry import get_switch_registry
 
@@ -139,6 +141,38 @@ def run_one_cycle() -> int:
         db.close()
 
 
+async def collect_lldp(db, switches: List[Any]) -> Tuple[int, int]:
+    """Collect LLDP from each switch in turn (one shared DB session). Returns (switches ok, switches failed)."""
+    ok = failed = 0
+    for switch in switches:
+        try:
+            await collect_for_switch(db, switch)
+            ok += 1
+        except Exception as e:
+            db.rollback()
+            failed += 1
+            logger.warning("LLDP collection failed for switch %s: %s", switch.name, e)
+    return ok, failed
+
+
+def run_lldp_cycle() -> int:
+    """Collect LLDP neighbour tables from enabled switches whose plugin supports it."""
+    db = SessionLocal()
+    try:
+        registry = get_switch_registry()
+        switches = [
+            sw for sw in NetworkSwitchDAO.get_all(db, limit=500, enabled_only=True)
+            if registry.supports_lldp(sw.plugin_name)
+        ]
+        if not switches:
+            return 0
+        ok, failed = asyncio.run(collect_lldp(db, switches))
+        logger.info("LLDP collection: %d switch(es) ok, %d failed.", ok, failed)
+        return ok
+    finally:
+        db.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Poll SNMP bandwidth data and store in DB")
     parser.add_argument(
@@ -148,6 +182,12 @@ def main() -> None:
         help="Seconds between poll cycles (default: 60)",
     )
     parser.add_argument(
+        "--lldp-interval",
+        type=int,
+        default=int(os.environ.get("LLDP_INTERVAL", "600")),
+        help="Seconds between LLDP neighbour collections (default: 600; 0 disables)",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Run one poll cycle and exit (e.g. for cron)",
@@ -155,15 +195,23 @@ def main() -> None:
     args = parser.parse_args()
     if args.once:
         run_one_cycle()
+        if args.lldp_interval > 0:
+            run_lldp_cycle()
         return
-    logger.info("Starting SNMP bandwidth poller (interval=%ds).", args.interval)
+    logger.info("Starting SNMP bandwidth poller (interval=%ds, lldp_interval=%ds).", args.interval, args.lldp_interval)
+    last_lldp = None
     while True:
         try:
             run_one_cycle()
         except Exception as e:
             logger.exception("Poll cycle failed: %s", e)
+        if args.lldp_interval > 0 and (last_lldp is None or time.monotonic() - last_lldp >= args.lldp_interval):
+            last_lldp = time.monotonic()
+            try:
+                run_lldp_cycle()
+            except Exception as e:
+                logger.exception("LLDP cycle failed: %s", e)
         try:
-            import time
             time.sleep(args.interval)
         except KeyboardInterrupt:
             logger.info("Stopping poller.")

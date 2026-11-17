@@ -8,6 +8,7 @@ Supports:
 - Port listing via IF-MIB
 - Port statistics and bandwidth monitoring via IF-MIB
 - Switch information (model, serial, firmware, port count)
+- LLDP neighbour table via LLDP-MIB (IEEE 802.1AB)
 
 Read-only operations:
 - test_connection: Test SNMPv3 connectivity
@@ -21,7 +22,7 @@ For port control or configuration changes, use a plugin that supports PORT_CONTR
 import logging
 import re
 import sys
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from pysnmp.hlapi.asyncio import (
     SnmpEngine,
     UsmUserData,
@@ -48,6 +49,103 @@ from pysnmp.hlapi.asyncio import (
 from app.plugins.switch_base import SwitchPlugin, SwitchPluginCategory
 
 logger = logging.getLogger(__name__)
+
+LLDP_LOC_PORT_TABLE = "1.0.8802.1.1.2.1.3.7.1"
+LLDP_REM_TABLE = "1.0.8802.1.1.2.1.4.1.1"
+# lldpLocPortEntry columns (index: lldpLocPortNum)
+_LLDP_LOC_COLUMNS = {2: "port_id_subtype", 3: "port_id", 4: "port_desc"}
+# lldpRemEntry columns (index: lldpRemTimeMark.lldpRemLocalPortNum.lldpRemIndex)
+_LLDP_REM_COLUMNS = {
+    4: "chassis_id_subtype", 5: "chassis_id", 6: "port_id_subtype", 7: "port_id",
+    8: "port_desc", 9: "sys_name", 10: "sys_desc",
+}
+# Subtypes whose value is a MAC address (chassis subtype 4, port subtype 3)
+_LLDP_CHASSIS_MAC = 4
+_LLDP_PORT_MAC = 3
+_SNMP_END_TYPES = {"EndOfMibView", "NoSuchObject", "NoSuchInstance"}
+
+
+def _octets(value: Any) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if hasattr(value, "asOctets"):
+        return value.asOctets()
+    return str(value).encode()
+
+
+def _lldp_text(value: Any) -> Optional[str]:
+    raw = _octets(value)
+    if not raw:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.hex(":")
+    text = text.strip("\x00").strip()
+    if text and all(ch.isprintable() for ch in text):
+        return text
+    return raw.hex(":")
+
+
+def _lldp_id(value: Any, subtype: Optional[int], mac_subtype: int) -> Optional[str]:
+    raw = _octets(value)
+    if subtype == mac_subtype and len(raw) == 6:
+        return raw.hex(":")
+    return _lldp_text(value)
+
+
+def _lldp_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_lldp_tables(
+    loc_rows: List[Tuple[Tuple[int, ...], Any]],
+    rem_rows: List[Tuple[Tuple[int, ...], Any]],
+) -> List[Dict[str, Any]]:
+    """Build neighbour dicts from walked LLDP-MIB rows.
+
+    Each row is (OID suffix below the table's entry OID, value): for lldpLocPortTable
+    (column, lldpLocPortNum); for lldpRemTable (column, timeMark, localPortNum, remIndex).
+    """
+    local: Dict[int, Dict[str, Any]] = {}
+    for suffix, value in loc_rows:
+        if len(suffix) != 2 or suffix[0] not in _LLDP_LOC_COLUMNS:
+            continue
+        column, port_num = suffix
+        local.setdefault(port_num, {})[_LLDP_LOC_COLUMNS[column]] = value
+
+    remote: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    for suffix, value in rem_rows:
+        if len(suffix) != 4 or suffix[0] not in _LLDP_REM_COLUMNS:
+            continue
+        column, _time_mark, port_num, rem_index = suffix
+        remote.setdefault((port_num, rem_index), {})[_LLDP_REM_COLUMNS[column]] = value
+
+    neighbours = []
+    for (port_num, rem_index), raw in sorted(remote.items()):
+        loc = local.get(port_num, {})
+        loc_subtype = _lldp_int(loc.get("port_id_subtype"))
+        chassis_subtype = _lldp_int(raw.get("chassis_id_subtype"))
+        port_subtype = _lldp_int(raw.get("port_id_subtype"))
+        neighbours.append({
+            "local_port_num": port_num,
+            "local_port_id": _lldp_id(loc.get("port_id"), loc_subtype, _LLDP_PORT_MAC),
+            "local_port_desc": _lldp_text(loc.get("port_desc")),
+            "remote_index": rem_index,
+            "chassis_id_subtype": chassis_subtype,
+            "chassis_id": _lldp_id(raw.get("chassis_id"), chassis_subtype, _LLDP_CHASSIS_MAC),
+            "port_id_subtype": port_subtype,
+            "port_id": _lldp_id(raw.get("port_id"), port_subtype, _LLDP_PORT_MAC),
+            "port_desc": _lldp_text(raw.get("port_desc")),
+            "sys_name": _lldp_text(raw.get("sys_name")),
+            "sys_desc": _lldp_text(raw.get("sys_desc")),
+        })
+    return neighbours
 
 
 def _extract_firmware_version_fallback(sys_descr: str) -> Optional[str]:
@@ -96,6 +194,7 @@ class SNMPv3Plugin(SwitchPlugin):
     PLUGIN_VERSION = "1.0.0"
     SUPPORTED_CATEGORIES = [
         SwitchPluginCategory.MONITORING,  # Read-only: port statistics and monitoring only
+        SwitchPluginCategory.LLDP_DISCOVERY,  # Read-only: LLDP-MIB neighbour table
     ]
     
     CONFIG_TEMPLATE = {
@@ -689,6 +788,54 @@ class SNMPv3Plugin(SwitchPlugin):
             logger.exception("Failed to get port statistics")
             raise Exception(f"Failed to get port statistics: {str(e)}")
     
+    async def _walk(self, snmp_engine, base_oid: str, max_rows: int = 20000) -> List[Tuple[Tuple[int, ...], Any]]:
+        """Walk a subtree; return (OID suffix below base_oid, value) rows."""
+        prefix = base_oid + "."
+        rows: List[Tuple[Tuple[int, ...], Any]] = []
+        var_binds = [ObjectType(ObjectIdentity(base_oid))]
+        while len(rows) < max_rows:
+            error_indication, error_status, _error_index, var_binds = await next_cmd(
+                snmp_engine,
+                self.user_data,
+                await self._get_transport(),
+                ContextData(),
+                *var_binds,
+                lexicographicMode=False,
+            )
+            if error_indication:
+                raise Exception(f"SNMP error: {error_indication}")
+            if error_status:
+                raise Exception(f"SNMP error status: {error_status.prettyPrint()}")
+            if not var_binds:
+                break
+            left_tree = False
+            for oid, val in var_binds:
+                oid_str = str(oid)
+                if not oid_str.startswith(prefix) or type(val).__name__ in _SNMP_END_TYPES:
+                    left_tree = True
+                    break
+                try:
+                    suffix = tuple(int(part) for part in oid_str[len(prefix):].split("."))
+                except ValueError:
+                    continue
+                rows.append((suffix, val))
+            if left_tree:
+                break
+        return rows
+
+    async def get_lldp_neighbors(self) -> List[Dict[str, Any]]:
+        """Read the LLDP-MIB neighbour table (lldpRemTable) and local port table (lldpLocPortTable)."""
+        try:
+            snmp_engine = SnmpEngine()
+            loc_rows = await self._walk(snmp_engine, LLDP_LOC_PORT_TABLE)
+            rem_rows = await self._walk(snmp_engine, LLDP_REM_TABLE)
+        except Exception as e:
+            logger.warning("LLDP walk failed for %s:%s: %s", self.hostname, self.port, e)
+            raise Exception(f"Failed to read LLDP neighbours: {e}")
+        neighbours = parse_lldp_tables(loc_rows, rem_rows)
+        logger.info("SNMP get_lldp_neighbors: %s:%s returned %d neighbours", self.hostname, self.port, len(neighbours))
+        return neighbours
+
     async def get_port_statistics(self, port: str) -> Dict[str, Any]:
         """
         Get statistics for a specific port (read-only).

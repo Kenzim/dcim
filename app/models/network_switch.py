@@ -31,6 +31,8 @@ class NetworkSwitch(Base):
     # Capabilities tracking (per-switch, since capabilities may differ per switch)
     tested_capabilities = Column(JSON, nullable=True)  # List of capabilities that were successfully tested for this switch
     test_logs = Column(Text, nullable=True)  # Logs from the last capability test run for this switch
+    lldp_collected_at = Column(DateTime(timezone=True), nullable=True)  # Last successful LLDP neighbour collection
+    lldp_error = Column(Text, nullable=True)  # Error from the last failed LLDP collection (cleared on success)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
