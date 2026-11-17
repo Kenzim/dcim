@@ -20,7 +20,9 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Bare-metal Serial-over-LAN | `app/services/sol/` (`ipmi_sol.py` + hub/tickets) + `app/api/sol.py` |
 | BMC virtual CD (ISO mount) | `app/services/virtual_media/` + `app/api/virtual_media.py` |
 | Switch SNMP / bandwidth | `app/plugins/snmpv3.py`, poller `scripts/snmp_bandwidth_poller.py` |
-| Cabling map (servers, switches, cable runs as a graph) | API `app/api/cabling.py` → `app/services/cabling_graph_service.py` → `app/dao/cabling_graph_dao.py`; UI `Cabling.svelte` (Cytoscape.js + ELK, lazy-loaded) and the port trace strip in `ServerDetail.svelte` |
+| Cabling map (servers, switches, patch panels, cable runs as a graph) | API `app/api/cabling.py` → `app/services/cabling_graph_service.py` → `app/dao/cabling_graph_dao.py`; UI `Cabling.svelte` (Cytoscape.js lazy-loaded, ELK layout in a web worker via `frontend/src/lib/elkLayout.js`) and the port trace strip in `ServerDetail.svelte` |
+| Patch panels and multi-hop cable paths | `app/models/patch_panel.py`, API `app/api/patch_panel.py` → `app/services/patch_panel_service.py` → `app/dao/patch_panel_dao.py`; path tracing through panels in `app/services/cable_trace_service.py`; UI `PatchPanels.svelte`, `PatchPanelDetail.svelte` |
+| LLDP neighbours and the recorded-versus-seen check | Collection `app/plugins/snmpv3.py` (`get_lldp_neighbors`) → `app/services/lldp_collection_service.py` → `switch_lldp_neighbors` table; comparison `app/services/lldp_compare_service.py`; both exposed under `/api/admin/cabling/lldp` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
@@ -132,8 +134,9 @@ All included from `app/main.py` under `/api`.
 | `installation_tasks.py` | `/api/servers/{id}/installation-tasks` | Install task history/logs |
 | `server_group.py` | `/api/server-groups` | Server groups |
 | `network_switch.py` | `/api/network-switches` | Switches, ports, bandwidth |
-| `cable_run.py` | `/api/cable-runs` | Cable runs / cabling |
-| `cabling.py` | `/api/admin/cabling` | Read-only `GET /graph?location_id=&rack_id=` for the Cabling page: devices (servers, switches), racks, ports and cable runs. Admin only; never returns `plugin_config` or BMC details; fixed number of queries. Devices outside the filter that are cabled to devices inside it come back with `in_scope=false` |
+| `cable_run.py` | `/api/cable-runs` | Cable runs / cabling. Each end is a server, switch or patch panel port (`{type, id, side}`; `side` is `front` or `rear` for patch ports). `GET /trace?type=&id=&side=` follows a port's path through patch panels |
+| `patch_panel.py` | `/api/patch-panels` | Patch panel CRUD (ports created with the panel), `PUT /{id}/ports/{number}` to label a port; delete refuses panels with cables unless `?force=true`. Rack units are checked against servers, switches and other panels |
+| `cabling.py` | `/api/admin/cabling` | Admin only, never returns `plugin_config` or BMC details, fixed number of queries. `GET /graph?location_id=&rack_id=`: devices (servers, switches, patch panels), racks, ports, cables (`edges`) and end-to-end `paths` through patch panels; devices outside the filter reached by a path come back with `in_scope=false`. `GET /lldp?location_id=&rack_id=`: per switch port, recorded cable versus LLDP neighbour (`match`, `mismatch`, `missing_cable`, `unknown_neighbour`, `no_lldp`, `unmapped_local_port`). `POST /lldp/switches/{id}/refresh` collects LLDP from one switch now |
 | `os_templates.py` | `/api/os-templates` | Scan/list OS templates from disk |
 | `billing.py` | `/api/billing` | External billing API (register/suspend/power/reinstall/…) |
 | `billing_admin.py` | (billing-admin tags) | Admin management of billing integrations |
@@ -173,7 +176,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 |---|---|
 | Identity | `user.py`, `external_user.py`, `user_external_identity_link.py` |
 | Datacenter layout | `location.py`, `rack.py`, `server.py`, `server_group.py`, `network_port.py`, `disk.py` |
-| Networking gear | `network_switch.py`, `switch_port.py`, `cable_run.py`, `switch_bandwidth_sample.py` |
+| Networking gear | `network_switch.py`, `switch_port.py`, `cable_run.py`, `patch_panel.py`, `switch_lldp_neighbor.py`, `switch_bandwidth_sample.py` |
 | Boot / install | `boot_task.py`, `installation_task.py`, `server_capability.py`, `hardware_detection_report.py`, `server_activity.py` |
 | DHCP/TFTP | `dhcp_config.py`, `tftp_config.py`, `service_instance.py` |
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
@@ -210,7 +213,10 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
-| `cabling_graph_service.py` | Builds the cabling graph (nodes, ports, edges with effective speed and link status from switch `oper_status`) from batch queries in `app/dao/cabling_graph_dao.py` |
+| `cabling_graph_service.py` | Builds the cabling graph from batch queries in `app/dao/cabling_graph_dao.py`: nodes, ports, cables and end-to-end paths through patch panels. Link status comes from the switch end's stored `oper_status` and counts only while fresh (`STATUS_STALE_AFTER`, 15 minutes); older data is `stale`, never polled is `unknown` |
+| `cable_trace_service.py` | Follows a port through patch panels (front to rear) to the server or switch port at the far end; shared by the cable-run API, server and switch port views, bandwidth views, MCP and the graph |
+| `patch_panel_service.py` | Patch panel validation (rack placement, port count changes) and per-port front/rear views |
+| `lldp_collection_service.py` / `lldp_compare_service.py` | Store an LLDP snapshot per switch (replaced on each collection, kept on error) / compare it with recorded cables |
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
 | `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC, SuperMicro X9 ATEN HERMON on TCP 5900). X9 JNLP GET from Docker needs host TCPMSS clamp when eth0 MTU < 1500. |
@@ -288,7 +294,9 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/servers/:id` | `ServerDetail.svelte` (**largest UI file**) |
 | `/admin/switches` | `Switches.svelte` |
 | `/admin/switches/:id` | `SwitchDetail.svelte` |
-| `/admin/cabling` | `Cabling.svelte` (loaded with a dynamic import; `?location=`, `?rack=`, `?focus=server:<id>` or `switch:<id>`) |
+| `/admin/cabling` | `Cabling.svelte` (loaded with a dynamic import; `?location=`, `?rack=`, `?focus=server:<id>`, `switch:<id>` or `patch:<id>`, `?lldp=1`) |
+| `/admin/patch-panels` | `PatchPanels.svelte` (dynamic import) |
+| `/admin/patch-panels/:id` | `PatchPanelDetail.svelte` (dynamic import) |
 | `/admin/racks` | `Racks.svelte` |
 | `/admin/racks/:id` | `RackView.svelte` |
 | `/admin/racks/rows/:locationId/:row` | `RowView.svelte` |
@@ -345,7 +353,7 @@ Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelt
 4. Add API helpers in `lib/api.js` if needed.
 5. Implement backend in `app/api/` + DAO/model as required.
 
-Heavy libraries used by one page (for example Cytoscape.js and ELK on `/admin/cabling`) should be loaded with a dynamic `import()` so they land in their own chunk; `Admin.svelte` loads `Cabling.svelte` with `{#await import(...)}` and the page imports `cytoscape` / `cytoscape-elk` on mount.
+Heavy libraries used by one page (for example Cytoscape.js on `/admin/cabling`) should be loaded with a dynamic `import()` so they land in their own chunk; `Admin.svelte` loads `Cabling.svelte` with `{#await import(...)}` and the page imports `cytoscape` and `lib/elkLayout.js` on mount. ELK runs in a web worker (`elkjs/lib/elk-worker.min.js?url`, copied as a ready-minified asset rather than bundled), which keeps layouts off the main thread and keeps the ELK source out of Rollup, so it adds little to `vite build` memory.
 
 ---
 
@@ -358,7 +366,7 @@ Heavy libraries used by one page (for example Cytoscape.js and ELK on `/admin/ca
 | TFTP runner | `tftp_runner/main.py` | Control plane for `in.tftpd` + uplink |
 | Media runner | `media_runner/main.py` | HTTP ISO library + `smbd` share `isos`; enroll via Admin → Runners |
 | Proxy runner | `proxy_runner/cmd/proxy-runner/` | Polls `/api/runner/proxy/config` every 30s (phone-home); register via Admin → Proxy Runners |
-| Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit |
+| Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit. Each cycle also stores switch port admin/oper status (`status_updated_at`); LLDP neighbours are collected every `--lldp-interval` seconds (default 600, `0` turns it off) |
 
 Python runners dial `WS /api/runner/ws` when `RACKFLOW_URL` and `API_KEY` are set. Legacy HTTP `ServiceInstance.base_url` still works if no uplink is connected. App env `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` remains for in-cluster HTTP control — see `INSTALL.md`.
 

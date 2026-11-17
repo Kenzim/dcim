@@ -20,7 +20,7 @@ def _one_end_sql(which: str) -> str:
         f"(({sw} IS NOT NULL AND {sv} IS NULL AND {pp} IS NULL) "
         f"OR ({sw} IS NULL AND {sv} IS NOT NULL AND {pp} IS NULL) "
         f"OR ({sw} IS NULL AND {sv} IS NULL AND {pp} IS NOT NULL)) "
-        f"AND (({pp} IS NULL AND {side} IS NULL) OR ({pp} IS NOT NULL AND {side} IN ('front', 'rear')))"
+        f"AND (({pp} IS NULL AND {side} IS NULL) OR ({pp} IS NOT NULL AND {side} IS NOT NULL AND {side} IN ('front', 'rear')))"
     )
 
 

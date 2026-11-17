@@ -32,7 +32,7 @@ def _one_end_sql(which: str) -> str:
         f"(({sw} IS NOT NULL AND {sv} IS NULL AND {pp} IS NULL) "
         f"OR ({sw} IS NULL AND {sv} IS NOT NULL AND {pp} IS NULL) "
         f"OR ({sw} IS NULL AND {sv} IS NULL AND {pp} IS NOT NULL)) "
-        f"AND (({pp} IS NULL AND {side} IS NULL) OR ({pp} IS NOT NULL AND {side} IN ('front', 'rear')))"
+        f"AND (({pp} IS NULL AND {side} IS NULL) OR ({pp} IS NOT NULL AND {side} IS NOT NULL AND {side} IN ('front', 'rear')))"
     )
 
 
@@ -104,15 +104,12 @@ def downgrade() -> None:
             op.drop_constraint(name, "cable_runs", type_="check")
         op.create_check_constraint(name, "cable_runs", _OLD_CHECK[end])
     for end in ("a", "b"):
-        op.drop_constraint(f"uq_cable_run_end_{end}_patch", "cable_runs", type_="unique")
         op.drop_constraint(f"fk_cable_runs_end_{end}_patch_port", "cable_runs", type_="foreignkey")
+        op.drop_constraint(f"uq_cable_run_end_{end}_patch", "cable_runs", type_="unique")
         op.drop_index(f"ix_cable_runs_end_{end}_patch_port_id", table_name="cable_runs")
         op.drop_column("cable_runs", f"end_{end}_patch_side")
         op.drop_column("cable_runs", f"end_{end}_patch_port_id")
-    op.drop_index("ix_patch_panel_ports_patch_panel_id", table_name="patch_panel_ports")
-    op.drop_index("ix_patch_panel_ports_id", table_name="patch_panel_ports")
+    # Dropping a table drops its indexes; dropping them first fails on MariaDB while a
+    # foreign key still relies on them.
     op.drop_table("patch_panel_ports")
-    op.drop_index("ix_patch_panels_rack_id", table_name="patch_panels")
-    op.drop_index("ix_patch_panels_location_id", table_name="patch_panels")
-    op.drop_index("ix_patch_panels_id", table_name="patch_panels")
     op.drop_table("patch_panels")

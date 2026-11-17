@@ -190,6 +190,33 @@ def test_dao_rejects_same_side_loop_and_missing_side(db_session, client, admin, 
         CableRunDAO.create(db_session, "patch", p1, "server", site["nic"].id)
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"end_a_patch_port_id": "P", "end_a_patch_side": None},
+        {"end_a_patch_port_id": "P", "end_a_patch_side": "side"},
+        {"end_a_server_port_id": "N", "end_a_patch_side": "front"},
+        {"end_a_server_port_id": "N", "end_a_patch_port_id": "P", "end_a_patch_side": "front"},
+    ],
+    ids=["patch-port-without-side", "invalid-side", "side-without-patch-port", "two-ports-on-one-end"],
+)
+def test_check_constraint_rejects_bad_patch_ends(db_session, site, values):
+    from sqlalchemy.exc import IntegrityError
+
+    panel = PatchPanel(name="PP-CK", location_id=site["dc1"].id, port_count=1)
+    db_session.add(panel)
+    db_session.flush()
+    port = PatchPanelPort(patch_panel_id=panel.id, number=1)
+    db_session.add(port)
+    db_session.commit()
+    ids = {"P": port.id, "N": site["nic2"].id}
+    row = {k: ids.get(v, v) if k.endswith("_id") else v for k, v in values.items()}
+    db_session.add(CableRun(**row, end_b_switch_port_id=site["sw_port"].id))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
 def test_trace_through_two_panels(client, admin, site, db_session):
     pa, pb, pa3, pb7 = _two_panels_path(client, admin, site)
 

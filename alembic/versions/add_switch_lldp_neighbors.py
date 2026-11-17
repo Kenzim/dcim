@@ -44,9 +44,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column("network_switches", "lldp_error")
     op.drop_column("network_switches", "lldp_collected_at")
-    op.drop_index("ix_switch_lldp_neighbors_port_id", table_name="switch_lldp_neighbors")
-    op.drop_index("ix_switch_lldp_neighbors_chassis_id", table_name="switch_lldp_neighbors")
-    op.drop_index("ix_switch_lldp_neighbors_switch_port_id", table_name="switch_lldp_neighbors")
-    op.drop_index("ix_switch_lldp_neighbors_switch_id", table_name="switch_lldp_neighbors")
-    op.drop_index("ix_switch_lldp_neighbors_id", table_name="switch_lldp_neighbors")
+    # Dropping the table drops its indexes; dropping them first fails on MariaDB while a
+    # foreign key still relies on them.
     op.drop_table("switch_lldp_neighbors")
