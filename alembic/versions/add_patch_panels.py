@@ -41,7 +41,7 @@ def _check_names() -> set:
         return {"ck_cable_run_end_a_one", "ck_cable_run_end_b_one"}
     try:
         return {c["name"] for c in sa.inspect(op.get_bind()).get_check_constraints("cable_runs")}
-    except Exception:
+    except NotImplementedError:
         return set()
 
 
@@ -96,7 +96,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DELETE FROM cable_runs WHERE end_a_patch_port_id IS NOT NULL OR end_b_patch_port_id IS NOT NULL")
+    if not context.is_offline_mode():
+        patched = op.get_bind().execute(sa.text(
+            "SELECT COUNT(*) FROM cable_runs WHERE end_a_patch_port_id IS NOT NULL OR end_b_patch_port_id IS NOT NULL"
+        )).scalar()
+        if patched:
+            raise RuntimeError(
+                f"Refusing to downgrade: {patched} cable run(s) end on patch panel ports and would be lost. "
+                "Delete or re-record them first."
+            )
     existing = _check_names()
     for end in ("a", "b"):
         name = f"ck_cable_run_end_{end}_one"

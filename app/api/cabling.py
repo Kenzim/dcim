@@ -1,4 +1,5 @@
 """Admin API: read-only cabling graph for the Cabling visualisation page."""
+import logging
 from datetime import datetime
 from typing import Annotated, Dict, List, Literal, Optional
 
@@ -17,6 +18,7 @@ DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 
 router = APIRouter(prefix="/admin/cabling", tags=["cabling"])
+logger = logging.getLogger(__name__)
 
 
 class CablingFilters(BaseModel):
@@ -165,6 +167,7 @@ async def refresh_switch_lldp(switch_id: int, auth: AdminDep, db: DbDep):
     except LldpNotSupported as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.exception("LLDP collection failed for switch %s", switch_id)
         raise HTTPException(status_code=502, detail=f"LLDP collection failed: {e}")
     db.refresh(switch)
     return {**result, "collected_at": switch.lldp_collected_at}

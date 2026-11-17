@@ -162,6 +162,9 @@ def test_patch_port_takes_one_cable_per_side(client, admin, site):
     r = _connect(client, admin, {"type": "server", "id": site["nic2"].id}, {"type": "patch", "id": p1, "side": "front"},
                  expect=400)
     assert "already connected" in r["detail"]
+    r = _connect(client, admin, {"type": "patch", "id": p1, "side": "front"}, {"type": "server", "id": site["nic2"].id},
+                 expect=400)
+    assert "already connected" in r["detail"]
     _connect(client, admin, {"type": "patch", "id": p1, "side": "rear"}, {"type": "switch", "id": site["sw_port"].id})
     _connect(client, admin, {"type": "patch", "id": p1, "side": "rear"}, {"type": "patch", "id": p1, "side": "front"},
              expect=400)
