@@ -281,9 +281,17 @@ api_router.include_router(patch_panel_api.router, tags=["patch-panels"])
 from app.api import switch_plugin as switch_plugin_api
 api_router.include_router(switch_plugin_api.router, prefix="/switch-plugins", tags=["switch-plugins"])
 
+# Include PDU and power feed routes
+from app.api import pdu as pdu_api
+api_router.include_router(pdu_api.router, prefix="/pdus", tags=["pdus"])
+from app.api import power_feed as power_feed_api
+api_router.include_router(power_feed_api.router, prefix="/power-feeds", tags=["power-feeds"])
+
 # Include server routes
 from app.api import server as server_api
 api_router.include_router(server_api.router, prefix="/servers", tags=["servers"])
+from app.api import server_power as server_power_api
+api_router.include_router(server_power_api.router, prefix="/servers", tags=["servers"])
 
 # Include server group routes
 from app.api import server_group as server_group_api

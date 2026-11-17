@@ -10,6 +10,7 @@ from app.models.server_capability import ServerCapability
 from app.models.disk import Disk
 from app.models.network_port import NetworkPort
 from app.models.cable_run import CableRun
+from app.models.server_power_input import ServerPowerInput
 from app.models.service_bare_metal import ServiceBareMetal
 from app.models.server_group import server_group_association
 
@@ -83,6 +84,8 @@ class ServerDAO:
             virtual_media_profile=virtual_media_profile,
         )
         db.add(server)
+        db.flush()
+        db.add(ServerPowerInput(server_id=server.id, name="PSU1"))
         db.commit()
         db.refresh(server)
         return server
@@ -163,6 +166,9 @@ class ServerDAO:
             synchronize_session=False
         )
         db.query(Disk).filter(Disk.server_id == server_id).delete(synchronize_session=False)
+        db.query(ServerPowerInput).filter(ServerPowerInput.server_id == server_id).delete(
+            synchronize_session=False
+        )
 
         port_ids = [
             row[0]

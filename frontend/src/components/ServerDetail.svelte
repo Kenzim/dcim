@@ -1,6 +1,7 @@
 <script>
   import PageHeader from './PageHeader.svelte';
   import ServerControlsPanel from './ServerControlsPanel.svelte';
+  import ServerPowerCard from './ServerPowerCard.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
   import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, getServerIdentify, setServerIdentify, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
@@ -107,7 +108,7 @@
   // Left pane tabs (General, Additional Information, Files)
   let leftPaneTab = 'general';
 
-  // Bottom right pane tabs (Management, Network, Disks, Boot, Hardware Detection, Credentials)
+  // Bottom right pane tabs (Management, Network, Power, Disks, Boot, Hardware Detection, Credentials)
   let bottomTab = 'management';
 
   // Edit network config modal
@@ -2006,6 +2007,7 @@
         <div class="bottom-tabs" role="tablist">
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'management'} on:click={() => bottomTab = 'management'}>Management</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'network'} on:click={() => bottomTab = 'network'}>Network</button>
+          <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'power'} on:click={() => bottomTab = 'power'}>Power</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'disks'} on:click={() => bottomTab = 'disks'}>Disks</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'boot'} on:click={() => bottomTab = 'boot'}>Boot</button>
           <button type="button" role="tab" class="bottom-tab" class:active={bottomTab === 'hardware-detection'} on:click={() => bottomTab = 'hardware-detection'}>Hardware Detection</button>
@@ -2430,6 +2432,8 @@
                 <p class="bottom-placeholder">No network ports. Use Edit network config or edit the server to add ports.</p>
               {/if}
             </div>
+          {:else if bottomTab === 'power'}
+            <ServerPowerCard serverId={server.id} serverName={server.name} locationId={server.location_id} />
           {:else if bottomTab === 'disks'}
             <div class="disks-panel">
               <div class="panel-toolbar">

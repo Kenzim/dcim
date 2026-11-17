@@ -10,6 +10,7 @@ from app.dao.disk_dao import DiskDAO
 from app.dao.network_port_dao import NetworkPortDAO
 from app.dao.switch_port_dao import SwitchPortDAO
 from app.dao.cable_run_dao import CableRunDAO
+from app.dao.pdu_dao import PduDAO, PowerFeedDAO, ServerPowerInputDAO
 from app.dao.boot_task_dao import BootTaskDAO
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.service_dao import ServiceDAO
@@ -37,4 +38,5 @@ from app.dao.reseller_dao import EffectiveProductPrice, ResellerDAO
 
 __all__ = ["UserDAO", "ServerPluginDAO", "SwitchPluginDAO", "ServerDAO", "CategoryDAO", "LocationDAO", "RackDAO", "NetworkSwitchDAO", "DiskDAO", "NetworkPortDAO", "SwitchPortDAO", "CableRunDAO", "BootTaskDAO", "InstallationTaskDAO", "ServiceDAO", "BillingIntegrationDAO", "McpApiKeyDAO", "ScriptDAO", "ServerGroupDAO", "SwitchBandwidthSampleDAO", "ServiceInstanceDAO", "RunnerDAO", "ProxyRunnerDAO", "ProxySubnetGroupDAO", "AssetDAO", "ServerActivityDAO", "HardwareDetectionReportDAO", "ServerCapabilityDAO", "ProductFamilyDAO", "ProductDAO", "VMTemplateDAO", "ProxmoxInventoryDAO", "IPAMDAO", "FamilyVMConfigDAO", "ProductVMConfigDAO", "VMIPAllocationDAO", "VMIDReservationDAO", "VMDeploymentJobDAO"]
 __all__ += ["EffectiveProductPrice", "ResellerDAO"]
+__all__ += ["PduDAO", "PowerFeedDAO", "ServerPowerInputDAO"]
 

@@ -1941,6 +1941,144 @@ export async function deleteSwitch(id) {
   }
 }
 
+// PDU, power feed and server power input API functions
+async function _powerRequest(method, path, body, errorMessage) {
+  const options = { method, credentials: 'include' };
+  if (body !== undefined) {
+    options.headers = { 'Content-Type': 'application/json' };
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(`${API_BASE}${path}`, options);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error((typeof err.detail === 'string' && err.detail) || errorMessage);
+  }
+  return await response.json().catch(() => null);
+}
+
+export async function getPduPlugins() {
+  return _powerRequest('GET', '/pdus/plugins', undefined, 'Failed to get PDU plugins');
+}
+
+export async function getPdus(locationId = null, rackId = null) {
+  const params = new URLSearchParams();
+  if (locationId) params.set('location_id', locationId);
+  if (rackId) params.set('rack_id', rackId);
+  const query = params.toString();
+  return _powerRequest('GET', `/pdus/${query ? `?${query}` : ''}`, undefined, 'Failed to get PDUs');
+}
+
+export async function getPdu(id) {
+  return _powerRequest('GET', `/pdus/${id}`, undefined, 'Failed to get PDU');
+}
+
+export async function createPdu(data) {
+  return _powerRequest('POST', '/pdus/', data, 'Failed to create PDU');
+}
+
+export async function updatePdu(id, data) {
+  return _powerRequest('PUT', `/pdus/${id}`, data, 'Failed to update PDU');
+}
+
+export async function deletePdu(id) {
+  return _powerRequest('DELETE', `/pdus/${id}`, undefined, 'Failed to delete PDU');
+}
+
+export async function testPdu(pluginName, pluginConfig, pduId = null) {
+  return _powerRequest(
+    'POST',
+    '/pdus/test',
+    { plugin_name: pluginName, plugin_config: pluginConfig, pdu_id: pduId },
+    'Failed to test PDU connection'
+  );
+}
+
+export async function regeneratePduPorts(id, counts = null) {
+  return _powerRequest(
+    'POST',
+    `/pdus/${id}/regenerate-ports`,
+    counts || {},
+    'Failed to regenerate PDU ports'
+  );
+}
+
+export async function pollPdu(id) {
+  return _powerRequest('POST', `/pdus/${id}/poll`, undefined, 'Failed to poll PDU');
+}
+
+export async function updatePduInlet(pduId, inletId, data) {
+  return _powerRequest('PUT', `/pdus/${pduId}/inlets/${inletId}`, data, 'Failed to update PDU inlet');
+}
+
+export async function updatePduOutlet(pduId, outletId, data) {
+  return _powerRequest('PUT', `/pdus/${pduId}/outlets/${outletId}`, data, 'Failed to update PDU outlet');
+}
+
+export async function actionPduOutlet(pduId, outletId, action) {
+  return _powerRequest(
+    'POST',
+    `/pdus/${pduId}/outlets/${outletId}/action`,
+    { action, confirm: true },
+    'Failed to control PDU outlet'
+  );
+}
+
+export async function getPowerFeeds(rackId = null) {
+  const query = rackId ? `?rack_id=${encodeURIComponent(rackId)}` : '';
+  return _powerRequest('GET', `/power-feeds/${query}`, undefined, 'Failed to get power feeds');
+}
+
+export async function createPowerFeed(data) {
+  return _powerRequest('POST', '/power-feeds/', data, 'Failed to create power feed');
+}
+
+export async function updatePowerFeed(id, data) {
+  return _powerRequest('PUT', `/power-feeds/${id}`, data, 'Failed to update power feed');
+}
+
+export async function deletePowerFeed(id) {
+  return _powerRequest('DELETE', `/power-feeds/${id}`, undefined, 'Failed to delete power feed');
+}
+
+export async function getRackPower(rackId) {
+  return _powerRequest('GET', `/racks/${rackId}/power`, undefined, 'Failed to get rack power');
+}
+
+export async function getServerPowerInputs(serverId) {
+  return _powerRequest('GET', `/servers/${serverId}/power-inputs`, undefined, 'Failed to get power inputs');
+}
+
+export async function createServerPowerInput(serverId, data) {
+  return _powerRequest('POST', `/servers/${serverId}/power-inputs`, data, 'Failed to add power input');
+}
+
+export async function updateServerPowerInput(serverId, inputId, data) {
+  return _powerRequest(
+    'PUT',
+    `/servers/${serverId}/power-inputs/${inputId}`,
+    data,
+    'Failed to update power input'
+  );
+}
+
+export async function deleteServerPowerInput(serverId, inputId) {
+  return _powerRequest(
+    'DELETE',
+    `/servers/${serverId}/power-inputs/${inputId}`,
+    undefined,
+    'Failed to remove power input'
+  );
+}
+
+export async function actionServerPowerInputOutlet(serverId, inputId, action) {
+  return _powerRequest(
+    'POST',
+    `/servers/${serverId}/power-inputs/${inputId}/outlet-action`,
+    { action, confirm: true },
+    'Failed to control outlet'
+  );
+}
+
 // Cable run (server port <-> switch port mapping) API
 export async function listCableRuns({ switchId, serverId } = {}) {
   const params = new URLSearchParams();

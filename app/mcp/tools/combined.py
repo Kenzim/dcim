@@ -7,7 +7,7 @@ logging. Those functions are no longer advertised as tools on their own.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -20,6 +20,7 @@ from app.mcp.tools import dhcp_tftp as dhcp_tools
 from app.mcp.tools import inventory as inventory_tools
 from app.mcp.tools import ipam as ipam_tools
 from app.mcp.tools import network as network_tools
+from app.mcp.tools import pdus as pdu_tools
 from app.mcp.tools import power as power_tools
 from app.mcp.tools import proxmox as proxmox_tools
 from app.mcp.tools import services as service_tools
@@ -583,3 +584,228 @@ async def save_client(
 async def invite_action(user_id: int, action: Literal["resend", "revoke"]) -> dict:
     """resend: email a fresh invitation link (older ones stop working). revoke: kill the link but keep the account."""
     return await user_tools.invite_action(user_id, action)
+
+
+@mcp.tool()
+async def pdus(
+    location_id: Optional[int] = None,
+    rack_id: Optional[int] = None,
+    pdu_id: Optional[int] = None,
+) -> Any:
+    """List PDUs (filter by location_id or rack_id), or give pdu_id for one PDU with its inlets and outlets. Secrets are masked."""
+    if pdu_id is not None:
+        _reject("Viewing one PDU", location_id=location_id, rack_id=rack_id)
+    return await pdu_tools.pdus(location_id=location_id, rack_id=rack_id, pdu_id=pdu_id)
+
+
+@mcp.tool()
+async def save_pdu(
+    pdu_id: Optional[int] = None,
+    name: Optional[str] = None,
+    location_id: Optional[int] = None,
+    plugin_name: Optional[str] = None,
+    plugin_config: Optional[dict] = None,
+    description: Optional[str] = None,
+    rack_id: Optional[int] = None,
+    rack_unit: Optional[int] = None,
+    rack_units: Optional[int] = None,
+    enabled: Optional[bool] = None,
+    inlet_count: Optional[int] = None,
+    outlet_count: Optional[int] = None,
+    outlet_metering: Optional[bool] = None,
+    outlet_switching: Optional[bool] = None,
+    outlet_control_enabled: Optional[bool] = None,
+    model: Optional[str] = None,
+) -> dict:
+    """Create a PDU (no pdu_id; needs name, location_id and plugin_name), which generates its inlets and outlets, or update one (pdu_id). outlet_control_enabled starts false. Masked secrets in plugin_config keep their stored values."""
+    if pdu_id is None:
+        _require("Creating a PDU", name=name, location_id=location_id, plugin_name=plugin_name)
+    return await pdu_tools.save_pdu(
+        pdu_id=pdu_id,
+        name=name,
+        location_id=location_id,
+        plugin_name=plugin_name,
+        plugin_config=plugin_config,
+        description=description,
+        rack_id=rack_id,
+        rack_unit=rack_unit,
+        rack_units=rack_units,
+        enabled=enabled,
+        inlet_count=inlet_count,
+        outlet_count=outlet_count,
+        outlet_metering=outlet_metering,
+        outlet_switching=outlet_switching,
+        outlet_control_enabled=outlet_control_enabled,
+        model=model,
+    )
+
+
+@mcp.tool()
+async def pdu_action(
+    pdu_id: int,
+    action: Literal["test", "regenerate_ports", "poll", "link_inlet", "update_outlet", "link_outlet", "delete"],
+    inlet_id: Optional[int] = None,
+    power_feed_id: Optional[int] = None,
+    outlet_id: Optional[int] = None,
+    server_power_input_id: Optional[int] = None,
+    name: Optional[str] = None,
+    bank: Optional[str] = None,
+    description: Optional[str] = None,
+    locked: Optional[bool] = None,
+    inlet_count: Optional[int] = None,
+    outlet_count: Optional[int] = None,
+    confirm: bool = False,
+) -> Any:
+    """test: probe the PDU with its stored settings. regenerate_ports: rebuild inlets and outlets (inlet_count / outlet_count override).
+    poll: read the PDU now. link_inlet: link inlet_id to power_feed_id (omit power_feed_id to unlink). update_outlet: rename outlet_id or set its bank, description or locked.
+    link_outlet: connect outlet_id to server_power_input_id (omit it to unlink). delete: remove the PDU (needs confirm=true). Switching outlets is outlet_power.
+    """
+    context = f"PDU {action}"
+    if action == "update_outlet":
+        _require(context, outlet_id=outlet_id)
+        if name is None and bank is None and description is None and locked is None:
+            raise ToolError(f"{context} needs: name, bank, description or locked")
+        _reject(context, inlet_id=inlet_id, power_feed_id=power_feed_id, server_power_input_id=server_power_input_id, inlet_count=inlet_count, outlet_count=outlet_count)
+    elif action == "link_outlet":
+        _require(context, outlet_id=outlet_id)
+        _reject(context, inlet_id=inlet_id, power_feed_id=power_feed_id, name=name, bank=bank, description=description, locked=locked, inlet_count=inlet_count, outlet_count=outlet_count)
+    elif action == "link_inlet":
+        _require(context, inlet_id=inlet_id)
+        _reject(context, outlet_id=outlet_id, server_power_input_id=server_power_input_id, name=name, bank=bank, description=description, locked=locked, inlet_count=inlet_count, outlet_count=outlet_count)
+    elif action == "regenerate_ports":
+        _reject(context, inlet_id=inlet_id, power_feed_id=power_feed_id, outlet_id=outlet_id, server_power_input_id=server_power_input_id, name=name, bank=bank, description=description, locked=locked)
+    else:
+        _reject(context, inlet_id=inlet_id, power_feed_id=power_feed_id, outlet_id=outlet_id, server_power_input_id=server_power_input_id, name=name, bank=bank, description=description, locked=locked, inlet_count=inlet_count, outlet_count=outlet_count)
+    return await pdu_tools.pdu_action(
+        pdu_id,
+        action,
+        inlet_id=inlet_id,
+        power_feed_id=power_feed_id,
+        outlet_id=outlet_id,
+        server_power_input_id=server_power_input_id,
+        name=name,
+        bank=bank,
+        description=description,
+        locked=locked,
+        inlet_count=inlet_count,
+        outlet_count=outlet_count,
+        confirm=confirm,
+    )
+
+
+@mcp.tool()
+async def outlet_power(
+    action: Literal["on", "off", "cycle"],
+    confirm: bool = False,
+    pdu_id: Optional[int] = None,
+    outlet_id: Optional[int] = None,
+    server_id: Optional[int] = None,
+    power_input_id: Optional[int] = None,
+) -> Any:
+    """Switch a PDU outlet on, off or cycle it (needs confirm=true). Give pdu_id and outlet_id, or server_id and power_input_id. The PDU must support switching with outlet control enabled, and the outlet must not be locked."""
+    if server_id is not None:
+        _require("Switching by server", power_input_id=power_input_id)
+        _reject("Switching by server", pdu_id=pdu_id, outlet_id=outlet_id)
+    else:
+        _require("Switching by outlet", pdu_id=pdu_id, outlet_id=outlet_id)
+        _reject("Switching by outlet", power_input_id=power_input_id)
+    return await pdu_tools.outlet_power(
+        action,
+        confirm=confirm,
+        pdu_id=pdu_id,
+        outlet_id=outlet_id,
+        server_id=server_id,
+        power_input_id=power_input_id,
+    )
+
+
+@mcp.tool()
+async def power_feeds(
+    action: Literal["list", "create", "update", "delete"],
+    rack_id: Optional[int] = None,
+    feed_id: Optional[int] = None,
+    name: Optional[str] = None,
+    voltage: Optional[int] = None,
+    amperage: Optional[int] = None,
+    phase: Optional[str] = None,
+    max_utilisation_percent: Optional[int] = None,
+    description: Optional[str] = None,
+    confirm: bool = False,
+) -> Any:
+    """list: the feeds in a rack (rack_id), or one feed (feed_id). create: needs rack_id and name. update: needs feed_id. delete: needs feed_id and confirm=true.
+    voltage, amperage, phase, max_utilisation_percent and description apply to create and update.
+    """
+    if action == "list":
+        _reject("Listing power feeds", name=name, voltage=voltage, amperage=amperage, phase=phase, max_utilisation_percent=max_utilisation_percent, description=description)
+        return await pdu_tools.power_feeds(rack_id=rack_id, feed_id=feed_id)
+    if action == "delete":
+        _require("Deleting a power feed", feed_id=feed_id)
+        _reject("Deleting a power feed", rack_id=rack_id, name=name, voltage=voltage, amperage=amperage, phase=phase, max_utilisation_percent=max_utilisation_percent, description=description)
+        return await pdu_tools.delete_power_feed(feed_id, confirm=confirm)
+    if action == "create":
+        _require("Creating a power feed", rack_id=rack_id, name=name)
+        _reject("Creating a power feed", feed_id=feed_id)
+    else:
+        _require("Updating a power feed", feed_id=feed_id)
+        _reject("Updating a power feed", rack_id=rack_id)
+    return await pdu_tools.save_power_feed(
+        feed_id=feed_id,
+        rack_id=rack_id,
+        name=name,
+        voltage=voltage,
+        amperage=amperage,
+        phase=phase,
+        max_utilisation_percent=max_utilisation_percent,
+        description=description,
+    )
+
+
+@mcp.tool()
+async def rack_power_summary(rack_id: int) -> dict:
+    """Power summary for a rack: its power feeds with their aggregated readings."""
+    return await pdu_tools.rack_power(rack_id)
+
+
+@mcp.tool()
+async def server_power_summary(server_id: int) -> dict:
+    """Power summary for a server: its power inputs, the PDU outlets feeding them and their readings."""
+    return await pdu_tools.server_power(server_id)
+
+
+@mcp.tool()
+async def server_power_inputs(
+    server_id: int,
+    action: Literal["add", "update", "link", "remove"],
+    input_id: Optional[int] = None,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    pdu_outlet_id: Optional[int] = None,
+    confirm: bool = False,
+) -> Any:
+    """add: a new power input (needs name; pdu_outlet_id optional). update: rename or describe input_id. link: connect input_id to pdu_outlet_id (omit pdu_outlet_id to unplug).
+    remove: delete input_id (needs confirm=true).
+    """
+    context = f"Power input {action}"
+    if action == "add":
+        _require(context, name=name)
+        _reject(context, input_id=input_id)
+    elif action == "update":
+        _require(context, input_id=input_id)
+        if name is None and description is None:
+            raise ToolError(f"{context} needs: name or description")
+        _reject(context, pdu_outlet_id=pdu_outlet_id)
+    elif action == "link":
+        _require(context, input_id=input_id)
+        _reject(context, name=name, description=description)
+    else:
+        _require(context, input_id=input_id)
+        _reject(context, name=name, description=description, pdu_outlet_id=pdu_outlet_id)
+    return await pdu_tools.server_power_inputs(
+        server_id,
+        action,
+        input_id=input_id,
+        name=name,
+        description=description,
+        pdu_outlet_id=pdu_outlet_id,
+        confirm=confirm,
+    )

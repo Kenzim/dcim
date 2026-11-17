@@ -27,6 +27,7 @@
   $: isSwitchesActive = currentPath.startsWith('/admin/switches');
   $: isCablingActive = currentPath.startsWith('/admin/cabling');
   $: isPatchPanelsActive = currentPath.startsWith('/admin/patch-panels');
+  $: isPdusActive = currentPath.startsWith('/admin/pdus');
   $: isLocationsActive = currentPath.startsWith('/admin/locations');
   $: isRunnersActive = currentPath.startsWith('/admin/runners');
   $: isRacksActive = currentPath.startsWith('/admin/racks');
@@ -135,6 +136,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm4 2v4m4-4v4m4-4v4" />
             </svg>
             <span>Patch Panels</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/pdus" class="nav-link" class:active={isPdusActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <span>PDUs</span>
           </a>
         </li>
         <li class="nav-item">

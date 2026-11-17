@@ -6,6 +6,7 @@ from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import RackDAO, LocationDAO
 from app.models.rack import Rack
+from app.services.power_service import rack_power_summary
 
 from typing import Annotated
 DbDep = Annotated[Session, Depends(get_db)]
@@ -186,6 +187,21 @@ async def delete_rack(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Rack not found"
         )
+
+
+@router.get("/{rack_id}/power", response_model=dict)
+async def get_rack_power(
+    rack_id: int,
+    auth: AdminDep,
+    db: DbDep
+):
+    """Power feeds of the rack with usage and capacity, the PDUs drawing from them, and rack totals"""
+    if not RackDAO.get_by_id(db, rack_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rack not found"
+        )
+    return rack_power_summary(db, rack_id)
 
 
 @router.get("/{rack_id}/servers", response_model=List[dict])

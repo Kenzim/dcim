@@ -32,25 +32,42 @@ def _panel_query(rows=()):
     return panel_query
 
 
-@pytest.mark.parametrize("query_servers, query_switches, query_panels, placement, expected", [
+@pytest.mark.parametrize("query_servers, query_switches, query_pdus, placement, expected", [
     ([], [], [], (1, 1, 1), False),
     ([SimpleNamespace(rack_unit=1, rack_units=1)], [], [], (1, 1, 1), True),
     ([SimpleNamespace(rack_unit=2, rack_units=2)], [], [], (1, 1, 1), False),
     ([SimpleNamespace(rack_unit=2, rack_units=2)], [], [], (1, 3, 1), True),
     ([], [SimpleNamespace(id=2, rack_unit=5, rack_units=2)], [], (1, 6, 1), True),
-    ([], [], [(10, 1)], (1, 10, 1), True),
-    ([], [], [(10, 1)], (1, 11, 1), False),
+    ([], [], [SimpleNamespace(id=3, rack_unit=8, rack_units=1)], (1, 8, 1), True),
+    ([], [], [SimpleNamespace(id=3, rack_unit=8, rack_units=1)], (1, 9, 1), False),
 ])
-def test_rack_placement_overlap_detects_servers_switches_and_patch_panels(
-    query_servers, query_switches, query_panels, placement, expected
+def test_rack_placement_overlap_detects_servers_switches_and_pdus(
+    query_servers, query_switches, query_pdus, placement, expected
+):
+    _assert_overlap(query_servers, query_switches, query_pdus, [], placement, expected)
+
+
+@pytest.mark.parametrize("query_panels, placement, expected", [
+    ([(10, 1)], (1, 10, 1), True),
+    ([(10, 1)], (1, 11, 1), False),
+])
+def test_rack_placement_overlap_detects_patch_panels(query_panels, placement, expected):
+    _assert_overlap([], [], [], query_panels, placement, expected)
+
+
+def _assert_overlap(
+    query_servers, query_switches, query_pdus, query_panels, placement, expected
 ):
     server_query = MagicMock()
     server_query.filter.return_value.all.return_value = query_servers
     switch_query = MagicMock()
     switch_query.filter.return_value = switch_query
     switch_query.all.return_value = query_switches
+    pdu_query = MagicMock()
+    pdu_query.filter.return_value = pdu_query
+    pdu_query.all.return_value = query_pdus
     db = MagicMock()
-    db.query.side_effect = [server_query, switch_query, _panel_query(query_panels)]
+    db.query.side_effect = [server_query, switch_query, pdu_query, _panel_query(query_panels)]
     assert api._rack_placement_overlaps_switch(db, *placement) is expected
 
 
@@ -60,8 +77,11 @@ def test_rack_placement_overlap_excludes_switch_being_updated():
     switch_query = MagicMock()
     switch_query.filter.return_value = switch_query
     switch_query.all.return_value = []
+    pdu_query = MagicMock()
+    pdu_query.filter.return_value = pdu_query
+    pdu_query.all.return_value = []
     db = MagicMock()
-    db.query.side_effect = [server_query, switch_query, _panel_query()]
+    db.query.side_effect = [server_query, switch_query, pdu_query, _panel_query()]
     assert api._rack_placement_overlaps_switch(
         db, 1, 6, 1, exclude_switch_id=2
     ) is False

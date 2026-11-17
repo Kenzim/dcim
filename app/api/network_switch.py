@@ -7,7 +7,8 @@ from datetime import datetime, timezone, timedelta
 from app.core.database import get_db, SessionLocal
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.auth import require_admin
-from app.dao import NetworkSwitchDAO, LocationDAO, RackDAO, SwitchPortDAO, CableRunDAO, SwitchBandwidthSampleDAO
+from app.dao import NetworkSwitchDAO, LocationDAO, RackDAO, SwitchPortDAO, CableRunDAO, NetworkPortDAO, SwitchBandwidthSampleDAO
+from app.dao.pdu_dao import pdu_overlaps_range
 from app.services.cable_trace_service import other_end_summary
 from app.models.network_switch import NetworkSwitch
 from app.models.server import Server
@@ -56,6 +57,8 @@ def _rack_placement_overlaps_switch(
         sw_end = sw.rack_unit + (getattr(sw, "rack_units", 1) or 1) - 1
         if start <= sw_end and sw.rack_unit <= end:
             return True
+    if pdu_overlaps_range(db, rack_id, start, end):
+        return True
     from app.dao.patch_panel_dao import PatchPanelDAO
     return PatchPanelDAO.overlaps(db, rack_id, rack_unit, rack_units)
 

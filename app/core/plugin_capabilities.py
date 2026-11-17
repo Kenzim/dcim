@@ -45,6 +45,26 @@ SWITCH_PLUGIN_CAPABILITIES = {
 }
 
 
+# PDU plugin capabilities (PDU plugins declare theirs in SUPPORTED_CAPABILITIES; see app/plugins/pdu/)
+PDU_CAPABILITIES = {
+    "metering": {
+        "name": "metering",
+        "display_name": "Metering",
+        "description": "Read input, bank and unit power readings"
+    },
+    "outlet_metering": {
+        "name": "outlet_metering",
+        "display_name": "Outlet Metering",
+        "description": "Read current and power per outlet"
+    },
+    "outlet_control": {
+        "name": "outlet_control",
+        "display_name": "Outlet Control",
+        "description": "Switch outlets on, off and power-cycle them"
+    }
+}
+
+
 def get_server_plugin_capabilities(plugin_name: str) -> list[str]:
     """Get list of capabilities for a server plugin by name."""
     return SERVER_PLUGIN_CAPABILITIES.get(plugin_name, [])

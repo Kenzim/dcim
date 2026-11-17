@@ -8,6 +8,7 @@ from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.auth import require_admin
 from app.dao import ServerDAO, LocationDAO, RackDAO, DiskDAO, NetworkPortDAO, ServerGroupDAO, CableRunDAO, SwitchPortDAO, SwitchBandwidthSampleDAO, NetworkSwitchDAO, ServerCapabilityDAO
 from app.dao.installation_task_dao import InstallationTaskDAO
+from app.dao.pdu_dao import pdu_overlaps_range
 from app.dao.boot_task_dao import BootTaskDAO
 from app.dao.hardware_detection_report_dao import HardwareDetectionReportDAO
 from app.dao.server_activity_dao import ServerActivityDAO
@@ -107,6 +108,8 @@ def _rack_placement_overlaps(
         sw_end = sw.rack_unit + (getattr(sw, "rack_units", 1) or 1) - 1
         if start <= sw_end and sw.rack_unit <= end:
             return True
+    if pdu_overlaps_range(db, rack_id, start, end):
+        return True
     from app.dao.patch_panel_dao import PatchPanelDAO
     return PatchPanelDAO.overlaps(db, rack_id, rack_unit, rack_units)
 
