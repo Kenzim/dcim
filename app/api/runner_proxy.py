@@ -40,21 +40,8 @@ def _client_ip(request: Request) -> str | None:
     return None
 
 
-@router.get("/config")
-async def get_proxy_config(
-    request: Request,
-    authorization: str | None = Header(default=None),
-    x_api_key: str | None = Header(default=None),
-    *,
-    db: DbDep,
-):
-    token = _extract_token(authorization, x_api_key)
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
-
-    runner = _authenticate_runner(db, token)
-    ProxyRunnerDAO.touch_heartbeat(db, runner, client_ip=_client_ip(request))
-
+def build_published_assignments(db: Session) -> tuple[list[dict], str, list[ServiceIPAssignment]]:
+    """Assignments every proxy runner is served, the config version, and the assignments held back."""
     assignments = (
         db.query(ServiceIPAssignment)
         .options(
@@ -65,11 +52,11 @@ async def get_proxy_config(
     )
     rows = []
     version_parts = []
+    held_back = []
     for a in assignments:
         ip_row = a.ip
-        if not ip_row or not ip_row.subnet:
-            continue
-        if not ip_row.subnet.enabled:
+        if not ip_row or not ip_row.subnet or not ip_row.subnet.enabled:
+            held_back.append(a)
             continue
         service = a.service
         # Only publish credentials for services actively allowed to use the
@@ -77,6 +64,7 @@ async def get_proxy_config(
         # authenticate even though their IP assignment row still exists (it
         # stays reserved until an admin/billing action releases it).
         if service is None or service.status != ServiceStatus.ACTIVE:
+            held_back.append(a)
             continue
         rows.append(
             {
@@ -97,6 +85,25 @@ async def get_proxy_config(
     # A stable hash (not Python's per-process salted hash()) so the runner
     # can tell "unchanged" from "changed" across app restarts.
     version = hashlib.sha256("|".join(sorted(version_parts)).encode("utf-8")).hexdigest()[:16]
+    return rows, version, held_back
+
+
+@router.get("/config")
+async def get_proxy_config(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+    *,
+    db: DbDep,
+):
+    token = _extract_token(authorization, x_api_key)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
+
+    runner = _authenticate_runner(db, token)
+    ProxyRunnerDAO.touch_heartbeat(db, runner, client_ip=_client_ip(request))
+
+    rows, version, _held_back = build_published_assignments(db)
     return {
         "version": version,
         "runner_id": runner.id,
