@@ -2,7 +2,7 @@
 
 Go dual-protocol forwarder for customer HTTP proxy / SOCKS5 services.
 
-- Listens on one port (`PROXY_LISTEN`, default `:8080`): SOCKS5 if the first byte is `0x05`, otherwise HTTP proxy (`CONNECT` + absolute-URI).
+- Listens on one port (`PROXY_LISTEN`, default `:11080`; must match the location's proxy port in Rackflow): SOCKS5 if the first byte is `0x05`, otherwise HTTP proxy (`CONNECT` + absolute-URI).
 - Syncs assignments from Rackflow `GET /api/runner/proxy/config` using `RUNNER_API_KEY` (also acts as the 30s health phone-home).
 - Authenticates with `(bind IP, username, password)`. Bind IP is `LocalAddr` of the accepted connection (use host networking / host VIPs), or `X-Bind-IP` for HTTP.
 - Health: `GET` on `HEALTH_LISTEN` (default `:8081`) path `/health`.
@@ -14,7 +14,7 @@ Go dual-protocol forwarder for customer HTTP proxy / SOCKS5 services.
 | `RACKFLOW_BASE_URL` | (required) | App base URL, no trailing slash |
 | `RUNNER_API_KEY` | (required) | Bearer key from Admin → Proxy Runners (generated once) |
 | `SYNC_INTERVAL_SECONDS` | `30` | Config poll / phone-home interval |
-| `PROXY_LISTEN` | `:8080` | Client proxy listen address |
+| `PROXY_LISTEN` | `:11080` | Client proxy listen address |
 | `HEALTH_LISTEN` | `:8081` | Health HTTP listen address |
 | `DIAL_TIMEOUT` | `15s` | Upstream dial timeout |
 | `IDLE_TIMEOUT` | `5m` | Idle splice timeout |

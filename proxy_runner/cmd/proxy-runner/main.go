@@ -19,7 +19,7 @@ import (
 func main() {
 	baseURL := env("RACKFLOW_BASE_URL", "")
 	apiKey := env("RUNNER_API_KEY", "")
-	proxyListen := env("PROXY_LISTEN", ":8080")
+	proxyListen := env("PROXY_LISTEN", ":11080")
 	healthListen := env("HEALTH_LISTEN", ":8081")
 	syncInterval := envDuration("SYNC_INTERVAL_SECONDS", 30*time.Second)
 	dialTimeout := envDuration("DIAL_TIMEOUT", 15*time.Second)

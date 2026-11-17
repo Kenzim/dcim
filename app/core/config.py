@@ -374,6 +374,8 @@ class Settings(BaseSettings):
     # port (e.g. http://{uuid}.ipmi.lan:9082).
     ipmi_proxy_scheme: str = "https"
     ipmi_proxy_port: Optional[int] = None
+    # Port customers use for HTTP/SOCKS5 proxies when the subnet's location sets none.
+    proxy_default_port: int = 11080
     # Shared secret the ipmi_proxy_runner edge presents to the runner API (Bearer).
     ipmi_proxy_runner_api_key: Optional[str] = None
     # One-time launch ticket lifetime (seconds). Kept short: the ticket is only used

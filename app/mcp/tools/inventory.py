@@ -134,25 +134,41 @@ async def get_location(location_id: int) -> dict:
     return await run_tool("get_location", "read", work, args={"location_id": location_id})
 
 
-async def create_location(name: str, description: Optional[str] = None) -> dict:
+def _check_proxy_port(proxy_port: Optional[int]) -> None:
+    if proxy_port is not None and not 0 <= proxy_port <= 65535:
+        raise ValueError("proxy_port must be 1-65535 (0 clears it)")
+
+
+async def create_location(
+    name: str, description: Optional[str] = None, proxy_port: Optional[int] = None
+) -> dict:
     """Create a location."""
 
     def work(db, ctx):
+        _check_proxy_port(proxy_port)
         if LocationDAO.get_by_name(db, name):
             raise ValueError("Location with this name already exists")
-        return location_row(LocationDAO.create(db, name=name, description=description))
+        row = LocationDAO.create(db, name=name, description=description, proxy_port=proxy_port or None)
+        return location_row(row)
 
     return await run_tool(
-        "create_location", "write", work, args={"name": name, "description": description}
+        "create_location",
+        "write",
+        work,
+        args={"name": name, "description": description, "proxy_port": proxy_port},
     )
 
 
 async def update_location(
-    location_id: int, name: Optional[str] = None, description: Optional[str] = None
+    location_id: int,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    proxy_port: Optional[int] = None,
 ) -> dict:
-    """Update a location's name or description."""
+    """Update a location's name, description or proxy port (0 clears the port)."""
 
     def work(db, ctx):
+        _check_proxy_port(proxy_port)
         row = LocationDAO.get_by_id(db, location_id)
         if not row:
             raise ValueError(_MSG_LOCATION_NOT_FOUND)
@@ -160,13 +176,20 @@ async def update_location(
             row.name = name
         if description is not None:
             row.description = description
+        if proxy_port is not None:
+            row.proxy_port = proxy_port or None
         return location_row(LocationDAO.update(db, row))
 
     return await run_tool(
         "update_location",
         "write",
         work,
-        args={"location_id": location_id, "name": name, "description": description},
+        args={
+            "location_id": location_id,
+            "name": name,
+            "description": description,
+            "proxy_port": proxy_port,
+        },
     )
 
 

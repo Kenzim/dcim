@@ -19,7 +19,7 @@ def _iso(value) -> Optional[str]:
 
 
 def location_row(row: Location) -> dict[str, Any]:
-    return {"id": row.id, "name": row.name, "description": row.description}
+    return {"id": row.id, "name": row.name, "description": row.description, "proxy_port": row.proxy_port}
 
 
 def rack_row(row: Rack) -> dict[str, Any]:

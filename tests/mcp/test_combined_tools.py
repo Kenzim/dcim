@@ -114,6 +114,18 @@ async def test_write_scope_still_enforced(mcp_sessionlocal, mcp_auth_ctx_read):
 
 
 @pytest.mark.asyncio
+async def test_save_location_proxy_port(db_session, mcp_sessionlocal, mcp_auth_ctx_write):
+    created = await combined.save_location(name="proxy-loc", proxy_port=11080)
+    assert created["proxy_port"] == 11080
+    renamed = await combined.save_location(location_id=created["id"], name="proxy-loc-2")
+    assert renamed["proxy_port"] == 11080
+    assert (await combined.save_location(location_id=created["id"], proxy_port=3128))["proxy_port"] == 3128
+    assert (await combined.save_location(location_id=created["id"], proxy_port=0))["proxy_port"] is None
+    with pytest.raises(ToolError, match="proxy_port"):
+        await combined.save_location(location_id=created["id"], proxy_port=70000)
+
+
+@pytest.mark.asyncio
 async def test_console_ticket_and_virtual_media(monkeypatch):
     from app.mcp.tools import console
 

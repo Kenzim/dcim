@@ -10,12 +10,14 @@ class LocationDAO:
     def create(
         db: Session,
         name: str,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        proxy_port: Optional[int] = None,
     ) -> Location:
         """Create a new location"""
         location = Location(
             name=name,
-            description=description
+            description=description,
+            proxy_port=proxy_port,
         )
         db.add(location)
         db.commit()

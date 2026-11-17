@@ -10,6 +10,9 @@ class Location(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False, unique=True, index=True)
     description = Column(Text, nullable=True)
+    # Port customers connect to for HTTP proxies on this location's subnets;
+    # NULL means settings.proxy_default_port.
+    proxy_port = Column(Integer, nullable=True)
     
     def __repr__(self):
         return f"<Location(id={self.id}, name='{self.name}')>"

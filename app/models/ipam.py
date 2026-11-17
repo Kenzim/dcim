@@ -26,6 +26,7 @@ class IPSubnet(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     ip_addresses = relationship("IPAddress", back_populates="subnet", cascade="all, delete-orphan")
+    location = relationship("Location", lazy="joined")
 
 
 class IPAddress(Base):

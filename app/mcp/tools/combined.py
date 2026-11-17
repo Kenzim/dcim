@@ -80,13 +80,22 @@ async def lookup(
 
 @mcp.tool()
 async def save_location(
-    location_id: Optional[int] = None, name: Optional[str] = None, description: Optional[str] = None
+    location_id: Optional[int] = None,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    proxy_port: Optional[int] = None,
 ) -> dict:
-    """Create a location (no location_id) or update one."""
+    """Create a location (no location_id) or update one.
+
+    proxy_port: port customers use for HTTP proxies on this location's subnets
+    (0 clears it, falling back to PROXY_DEFAULT_PORT, 11080 by default).
+    """
     if location_id is None:
         _require("Creating a location", name=name)
-        return await inventory_tools.create_location(name=name, description=description)
-    return await inventory_tools.update_location(location_id, name=name, description=description)
+        return await inventory_tools.create_location(name=name, description=description, proxy_port=proxy_port)
+    return await inventory_tools.update_location(
+        location_id, name=name, description=description, proxy_port=proxy_port
+    )
 
 
 @mcp.tool()

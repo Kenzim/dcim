@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.core.database import get_db
 from app.core.auth import require_admin
 from app.dao import LocationDAO
@@ -17,12 +17,15 @@ router = APIRouter()
 class LocationCreate(BaseModel):
     name: str
     description: str | None = None
+    # Proxy port for this location's subnets; null uses PROXY_DEFAULT_PORT.
+    proxy_port: int | None = Field(default=None, ge=1, le=65535)
 
 
 class LocationResponse(BaseModel):
     id: int
     name: str
     description: str | None
+    proxy_port: int | None = None
 
     class Config:
         from_attributes = True
@@ -56,7 +59,8 @@ async def create_location(
     location = LocationDAO.create(
         db,
         name=location_data.name,
-        description=location_data.description
+        description=location_data.description,
+        proxy_port=location_data.proxy_port,
     )
     return location
 
@@ -103,6 +107,8 @@ async def update_location(
     
     location.name = location_data.name
     location.description = location_data.description
+    if "proxy_port" in location_data.model_fields_set:
+        location.proxy_port = location_data.proxy_port
     return LocationDAO.update(db, location)
 
 

@@ -464,14 +464,14 @@ export async function getLocations() {
   return await response.json();
 }
 
-export async function createLocation(name, description) {
+export async function createLocation(name, description, proxy_port = undefined) {
   const response = await fetch(`${API_BASE}/locations/`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     credentials: 'include',
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, proxy_port }),
   });
 
   if (!response.ok) {
@@ -482,14 +482,14 @@ export async function createLocation(name, description) {
   return await response.json();
 }
 
-export async function updateLocation(id, name, description) {
+export async function updateLocation(id, name, description, proxy_port = undefined) {
   const response = await fetch(`${API_BASE}/locations/${id}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
     },
     credentials: 'include',
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, proxy_port }),
   });
 
   if (!response.ok) {

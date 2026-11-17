@@ -12,6 +12,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.dao.ipam_dao import IPAMDAO
 from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
 from app.models.ipam import ServiceIPAssignment
@@ -23,9 +24,17 @@ DEFAULT_IP_COUNT = 1
 # unbounded number of IPs in one request.
 MAX_AUTO_ASSIGN_IPS = 32
 
-# Single dual-protocol port the proxy_runner listens on (SOCKS5 vs HTTP is
-# sniffed from the first byte); see proxy_runner/README.md.
-PROXY_PORT = 8080
+def proxy_port_for(assignment: ServiceIPAssignment) -> int:
+    """Customer-facing proxy port: the IP's subnet location's port, else the default.
+
+    The proxy_runner listens on one dual-protocol port (SOCKS5 vs HTTP is sniffed
+    from the first byte); its PROXY_LISTEN must match this value.
+    """
+    ip_row = assignment.ip
+    location = ip_row.subnet.location if ip_row and ip_row.subnet else None
+    if location is not None and location.proxy_port:
+        return int(location.proxy_port)
+    return int(settings.proxy_default_port)
 
 
 class ProxyIpRequest(NamedTuple):
@@ -41,16 +50,17 @@ def assignment_payload(assignment: ServiceIPAssignment) -> Dict[str, Any]:
     username = assignment.username
     password = assignment.password
     creds = f"{username}:{password}@" if username and password else ""
+    port = proxy_port_for(assignment)
     return {
         "id": assignment.id,
         "ip_address": ip,
-        "port": PROXY_PORT,
+        "port": port,
         "username": username,
         "password": password,
-        "http_url": f"http://{creds}{ip}:{PROXY_PORT}" if ip else None,
-        "socks5_url": f"socks5://{creds}{ip}:{PROXY_PORT}" if ip else None,
+        "http_url": f"http://{creds}{ip}:{port}" if ip else None,
+        "socks5_url": f"socks5://{creds}{ip}:{port}" if ip else None,
         # Compact list format for bulk copy (ip:port:user:pass).
-        "endpoint": f"{ip}:{PROXY_PORT}:{username}:{password}" if ip and username and password else None,
+        "endpoint": f"{ip}:{port}:{username}:{password}" if ip and username and password else None,
         "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
     }
 

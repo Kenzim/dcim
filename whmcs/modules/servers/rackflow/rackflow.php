@@ -71,7 +71,7 @@ function rackflow_proxyEndpointLines(array $assignments)
         $pass = isset($assignment['password']) ? (string)$assignment['password'] : '';
         $port = isset($assignment['port']) && $assignment['port'] !== '' && $assignment['port'] !== null
             ? (string)$assignment['port']
-            : '8080';
+            : '11080';
         if ($ip === '' || $user === '' || $pass === '') {
             continue;
         }

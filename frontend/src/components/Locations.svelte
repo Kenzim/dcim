@@ -9,7 +9,7 @@
   let error = null;
   let showModal = false;
   let editingLocation = null;
-  let formData = { name: '', description: '' };
+  let formData = { name: '', description: '', proxy_port: '' };
   let formError = null;
 
   onMount(async () => {
@@ -31,14 +31,18 @@
 
   function openAddModal() {
     editingLocation = null;
-    formData = { name: '', description: '' };
+    formData = { name: '', description: '', proxy_port: '' };
     formError = null;
     showModal = true;
   }
 
   function openEditModal(location) {
     editingLocation = location;
-    formData = { name: location.name, description: location.description || '' };
+    formData = {
+      name: location.name,
+      description: location.description || '',
+      proxy_port: location.proxy_port ?? '',
+    };
     formError = null;
     showModal = true;
   }
@@ -46,7 +50,7 @@
   function closeModal() {
     showModal = false;
     editingLocation = null;
-    formData = { name: '', description: '' };
+    formData = { name: '', description: '', proxy_port: '' };
     formError = null;
   }
 
@@ -56,12 +60,14 @@
       return;
     }
 
+    const proxyPort = formData.proxy_port === '' || formData.proxy_port == null ? null : Number(formData.proxy_port);
+
     try {
       formError = null;
       if (editingLocation) {
-        await updateLocation(editingLocation.id, formData.name, formData.description);
+        await updateLocation(editingLocation.id, formData.name, formData.description, proxyPort);
       } else {
-        await createLocation(formData.name, formData.description);
+        await createLocation(formData.name, formData.description, proxyPort);
       }
       closeModal();
       await loadLocations();
@@ -138,6 +144,9 @@
           {#if location.description}
             <p class="location-description">{location.description}</p>
           {/if}
+          {#if location.proxy_port}
+            <p class="location-description">Proxy port {location.proxy_port}</p>
+          {/if}
         </div>
       {/each}
     </div>
@@ -185,6 +194,17 @@
             placeholder="Optional description"
             rows="3"
           ></textarea>
+        </div>
+        <div class="form-group">
+          <label for="location-proxy-port">Proxy port</label>
+          <input
+            id="location-proxy-port"
+            type="number"
+            min="1"
+            max="65535"
+            bind:value={formData.proxy_port}
+            placeholder="Default (11080)"
+          />
         </div>
       </div>
       <div class="modal-footer">
