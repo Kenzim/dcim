@@ -78,6 +78,7 @@
   let userId = null;
   let resellerId = null;
   let proxmoxClusterId = null;
+  let patchPanelId = null;
   let redirecting = false;
 
   // Legacy routes removed by the services/users/admins split. Old bookmarks
@@ -198,6 +199,13 @@
       proxmoxClusterId = null;
     }
 
+    if (routeName && routeName.startsWith('patch-panels/')) {
+      const id = parseInt(routeName.split('/')[1], 10);
+      patchPanelId = Number.isNaN(id) ? null : id;
+    } else {
+      patchPanelId = null;
+    }
+
     if (routeName && routeName.startsWith('users/')) {
       const routeParts = routeName.split('/');
       if (routeParts.length > 1 && routeParts[1] && !isNaN(parseInt(routeParts[1], 10))) {
@@ -270,6 +278,26 @@
         {:catch err}
           <PageHeader title="Cabling" />
           <div class="content-body"><p>Could not load the Cabling page: {err.message}</p></div>
+        {/await}
+      {:else if routeName === 'patch-panels'}
+        {#await import('../components/PatchPanels.svelte')}
+          <div class="loading-container"><p>Loading…</p></div>
+        {:then module}
+          <svelte:component this={module.default} />
+        {:catch err}
+          <PageHeader title="Patch Panels" />
+          <div class="content-body"><p>Could not load the Patch Panels page: {err.message}</p></div>
+        {/await}
+      {:else if routeName.startsWith('patch-panels/') && patchPanelId}
+        {#await import('../components/PatchPanelDetail.svelte')}
+          <div class="loading-container"><p>Loading…</p></div>
+        {:then module}
+          {#key patchPanelId}
+            <svelte:component this={module.default} panelId={patchPanelId} onBack={() => navigate('/admin/patch-panels')} />
+          {/key}
+        {:catch err}
+          <PageHeader title="Patch Panel" />
+          <div class="content-body"><p>Could not load the patch panel page: {err.message}</p></div>
         {/await}
       {:else if routeName === 'locations'}
         <Locations />
