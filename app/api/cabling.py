@@ -45,6 +45,7 @@ class CablingNode(BaseModel):
     name: str
     ip: Optional[str] = None
     model: Optional[str] = None
+    medium: Optional[str] = None
     location_id: int
     rack_id: Optional[int] = None
     rack_unit: Optional[int] = None
@@ -75,20 +76,52 @@ class CablingPort(BaseModel):
     link_checked_at: Optional[datetime] = None
     description: Optional[str] = None
     cable_id: Optional[int] = None
+    number: Optional[int] = None
+    front_cable_id: Optional[int] = None
+    rear_cable_id: Optional[int] = None
+    path_id: Optional[str] = None
+
+
+PatchSide = Optional[Literal["front", "rear"]]
+LinkStatus = Literal["up", "down", "stale", "unknown"]
 
 
 class CablingEdge(BaseModel):
     id: str
     cable_id: int
+    path_id: str
     source: str
     target: str
     source_port: str
     target_port: str
+    source_side: PatchSide = None
+    target_side: PatchSide = None
     cable_type: Optional[str] = None
     speed_mbps: Optional[int] = None
     effective_speed_mbps: Optional[int] = None
-    link_status: Literal["up", "down", "stale", "unknown"]
+    link_status: LinkStatus
     description: Optional[str] = None
+
+
+class CablingPathHop(BaseModel):
+    cable_id: int
+    from_port: str
+    from_side: PatchSide = None
+    to_port: str
+    to_side: PatchSide = None
+
+
+class CablingPath(BaseModel):
+    id: str
+    cable_ids: List[int]
+    complete: bool
+    start_port: str
+    start_side: PatchSide = None
+    end_port: str
+    end_side: PatchSide = None
+    link_status: LinkStatus
+    effective_speed_mbps: Optional[int] = None
+    hops: List[CablingPathHop]
 
 
 class CablingGraphResponse(BaseModel):
@@ -100,6 +133,7 @@ class CablingGraphResponse(BaseModel):
     nodes: List[CablingNode]
     ports: List[CablingPort]
     edges: List[CablingEdge]
+    paths: List[CablingPath]
 
 
 @router.get("/graph", response_model=CablingGraphResponse)

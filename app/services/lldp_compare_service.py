@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 from app.dao.cabling_graph_dao import CablingGraphDAO
 from app.dao.switch_lldp_neighbor_dao import SwitchLldpNeighborDAO
 from app.plugins.switch_registry import get_switch_registry
+from app.services.cable_trace_service import CableIndex, cable_ends
 from app.services.cabling_graph_service import (
+    expand_through_patch_panels,
     server_node_id,
     server_port_node_id,
     switch_node_id,
@@ -193,19 +195,24 @@ class _Index:
         return None, None
 
 
-def recorded_far_ends(cables: Iterable[Any]) -> Dict[int, Tuple[int, str, int]]:
-    """Map switch port id -> (cable id, far end kind, far end port id) for cables with a switch end."""
-    far: Dict[int, Tuple[int, str, int]] = {}
+def recorded_far_ends(cables: Iterable[Any]) -> Dict[int, Tuple[int, Optional[str], Optional[int]]]:
+    """Map switch port id -> (first cable id, far end kind, far end port id), following patch panels.
+
+    The far end is the server or switch port the path reaches; kind and port id are None when the
+    path stops at a patch panel with nothing cabled on its other side.
+    """
+    cables = list(cables)
+    index = CableIndex(cables)
+    far: Dict[int, Tuple[int, Optional[str], Optional[int]]] = {}
     for c in cables:
-        ends = [
-            ("switch", c.end_a_switch_port_id) if c.end_a_switch_port_id is not None else ("server", c.end_a_server_port_id),
-            ("switch", c.end_b_switch_port_id) if c.end_b_switch_port_id is not None else ("server", c.end_b_server_port_id),
-        ]
-        for i, (kind, port_id) in enumerate(ends):
-            if kind == "switch" and port_id is not None:
-                other_kind, other_id = ends[1 - i]
-                if other_id is not None:
-                    far[port_id] = (c.id, other_kind, other_id)
+        for ref in cable_ends(c):
+            if ref[0] != "switch" or ref[1] is None or ref[1] in far:
+                continue
+            path = index.trace(ref)
+            if not path["hops"]:
+                continue
+            end = path["far_end"]
+            far[ref[1]] = (path["hops"][0]["cable"].id, end[0] if end else None, end[1] if end else None)
     return far
 
 
@@ -233,7 +240,7 @@ def compare_lldp(
     switch_ids = [s.id for s in dao.list_switches(db, location_id=location_id, rack_id=rack_id)]
     status_rows = dao.lldp_switch_status(db, switch_ids)
     neighbours = SwitchLldpNeighborDAO.list_for_switches(db, switch_ids)
-    cables = dao.cable_runs_for_devices(db, [], switch_ids)
+    cables = expand_through_patch_panels(db, dao.cable_runs_for_devices(db, [], switch_ids))
     far = recorded_far_ends(cables)
 
     in_scope_switch_ports = {p.id: p for p in dao.switch_ports_for_switches(db, switch_ids)}
@@ -280,7 +287,7 @@ def compare_lldp(
         if port.switch_id not in collected:
             continue
         cable = far.get(port_id)
-        recorded = index.endpoint(cable[1], cable[2]) if cable else None
+        recorded = index.endpoint(cable[1], cable[2]) if cable and cable[1] else None
         base = {
             "switch_id": port.switch_id,
             "switch": switch_node_id(port.switch_id),

@@ -12,6 +12,7 @@ from app.models.cable_run import CableRun
 from app.models.location import Location
 from app.models.network_port import NetworkPort
 from app.models.network_switch import NetworkSwitch
+from app.models.patch_panel import PatchPanel, PatchPanelPort
 from app.models.rack import Rack
 from app.models.server import Server
 from app.models.switch_port import SwitchPort
@@ -64,12 +65,35 @@ _SWITCH_PORT_COLUMNS = (
     SwitchPort.description,
 )
 
+_PATCH_PANEL_COLUMNS = (
+    PatchPanel.id,
+    PatchPanel.name,
+    PatchPanel.location_id,
+    PatchPanel.rack_id,
+    PatchPanel.rack_unit,
+    PatchPanel.rack_units,
+    PatchPanel.port_count,
+    PatchPanel.medium,
+    PatchPanel.description,
+)
+
+_PATCH_PORT_COLUMNS = (
+    PatchPanelPort.id,
+    PatchPanelPort.patch_panel_id,
+    PatchPanelPort.number,
+    PatchPanelPort.label,
+)
+
 _CABLE_COLUMNS = (
     CableRun.id,
     CableRun.end_a_switch_port_id,
     CableRun.end_a_server_port_id,
+    CableRun.end_a_patch_port_id,
+    CableRun.end_a_patch_side,
     CableRun.end_b_switch_port_id,
     CableRun.end_b_server_port_id,
+    CableRun.end_b_patch_port_id,
+    CableRun.end_b_patch_side,
     CableRun.cable_type,
     CableRun.speed_mbps,
     CableRun.description,
@@ -120,6 +144,32 @@ class CablingGraphDAO:
                 return []
             q = q.filter(NetworkSwitch.id.in_(ids))
         return q.order_by(NetworkSwitch.name).all()
+
+    @staticmethod
+    def list_patch_panels(
+        db: Session,
+        location_id: Optional[int] = None,
+        rack_id: Optional[int] = None,
+        panel_ids: Optional[Iterable[int]] = None,
+    ):
+        q = db.query(*_PATCH_PANEL_COLUMNS)
+        if location_id is not None:
+            q = q.filter(PatchPanel.location_id == location_id)
+        if rack_id is not None:
+            q = q.filter(PatchPanel.rack_id == rack_id)
+        if panel_ids is not None:
+            ids = _ids(panel_ids)
+            if not ids:
+                return []
+            q = q.filter(PatchPanel.id.in_(ids))
+        return q.order_by(PatchPanel.name).all()
+
+    @staticmethod
+    def patch_ports_by_ids(db: Session, port_ids: Iterable[int]):
+        ids = _ids(port_ids)
+        if not ids:
+            return []
+        return db.query(*_PATCH_PORT_COLUMNS).filter(PatchPanelPort.id.in_(ids)).all()
 
     @staticmethod
     def server_ports_for_servers(db: Session, server_ids: Iterable[int]):
@@ -211,11 +261,17 @@ class CablingGraphDAO:
         db: Session,
         server_ids: Iterable[int],
         switch_ids: Iterable[int],
+        patch_panel_ids: Iterable[int] = (),
     ):
-        """Cable runs with at least one end on a port of the given servers or switches."""
+        """Cable runs with at least one end on a port of the given servers, switches or patch panels."""
         srv = _ids(server_ids)
         sw = _ids(switch_ids)
+        pp = _ids(patch_panel_ids)
         clauses = []
+        if pp:
+            patch_port_ids = db.query(PatchPanelPort.id).filter(PatchPanelPort.patch_panel_id.in_(pp))
+            clauses.append(CableRun.end_a_patch_port_id.in_(patch_port_ids))
+            clauses.append(CableRun.end_b_patch_port_id.in_(patch_port_ids))
         if srv:
             server_port_ids = db.query(NetworkPort.id).filter(NetworkPort.server_id.in_(srv))
             clauses.append(CableRun.end_a_server_port_id.in_(server_port_ids))
@@ -227,6 +283,19 @@ class CablingGraphDAO:
         if not clauses:
             return []
         return db.query(*_CABLE_COLUMNS).filter(or_(*clauses)).order_by(CableRun.id).all()
+
+    @staticmethod
+    def cable_runs_for_patch_ports(db: Session, patch_port_ids: Iterable[int]):
+        """Cable runs on either side of the given patch panel ports."""
+        ids = _ids(patch_port_ids)
+        if not ids:
+            return []
+        return (
+            db.query(*_CABLE_COLUMNS)
+            .filter(or_(CableRun.end_a_patch_port_id.in_(ids), CableRun.end_b_patch_port_id.in_(ids)))
+            .order_by(CableRun.id)
+            .all()
+        )
 
     @staticmethod
     def racks_by_ids(db: Session, rack_ids: Iterable[int]):

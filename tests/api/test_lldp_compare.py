@@ -251,6 +251,51 @@ def test_shared_mac_resolution(db_session, setup):
     assert rows[(tor.id, "Ethernet3/1")]["status"] == "unknown_neighbour"
 
 
+def test_recorded_end_followed_through_patch_panels(db_session, setup):
+    from app.models.patch_panel import PatchPanel, PatchPanelPort
+
+    tor, dc1 = setup["tor"], setup["dc1"]
+    panels = []
+    for name in ("PP-1", "PP-2"):
+        panel = PatchPanel(name=name, location_id=dc1.id, port_count=2)
+        db_session.add(panel)
+        db_session.flush()
+        port = PatchPanelPort(patch_panel_id=panel.id, number=1)
+        db_session.add(port)
+        db_session.flush()
+        panels.append(port)
+    pp1, pp2 = panels
+    srv = _server(db_session, "patched-01", dc1)
+    nic = _nic(db_session, srv, "eno1", "ac:1f:6b:88:00:01")
+    sw_port = _swport(db_session, tor, "Ethernet4/1")
+    first = CableRun(end_a_switch_port_id=sw_port.id, end_b_patch_port_id=pp1.id, end_b_patch_side="front")
+    db_session.add_all([
+        first,
+        CableRun(end_a_patch_port_id=pp1.id, end_a_patch_side="rear", end_b_patch_port_id=pp2.id, end_b_patch_side="rear"),
+        CableRun(end_a_patch_port_id=pp2.id, end_a_patch_side="front", end_b_server_port_id=nic.id),
+    ])
+    _lldp(db_session, tor, sw_port, port_id_subtype=3, port_id="ac:1f:6b:88:00:01")
+
+    half_port = _swport(db_session, tor, "Ethernet4/2")
+    pp_half = PatchPanelPort(patch_panel_id=pp1.patch_panel_id, number=2)
+    db_session.add(pp_half)
+    db_session.flush()
+    db_session.add(CableRun(end_a_switch_port_id=half_port.id, end_b_patch_port_id=pp_half.id, end_b_patch_side="front"))
+    db_session.commit()
+
+    rows = _by_port(compare_lldp(db_session))
+    r = rows[(tor.id, "Ethernet4/1")]
+    assert r["status"] == "match"
+    assert r["cable_id"] == first.id
+    assert r["recorded"]["device_name"] == "patched-01"
+    assert r["recorded"]["port_name"] == "eno1"
+
+    half = rows[(tor.id, "Ethernet4/2")]
+    assert half["status"] == "no_lldp"
+    assert half["recorded"] is None
+    assert half["cable_id"] is not None
+
+
 def test_filter_by_location(db_session, setup):
     result = compare_lldp(db_session, location_id=setup["dc2"].id)
     assert [s["name"] for s in result["switches"]] == ["tor-ams"]
