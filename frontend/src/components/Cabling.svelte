@@ -30,8 +30,12 @@
   let cyContainer;
   let cy = null;
   let cytoscapeLib = null;
+  let computeElkPositions = null;
+  let stopElkWorker = null;
   let loadingLib = true;
   let loading = false;
+  let layingOut = false;
+  let layoutSeq = 0;
   let error = null;
 
   let locations = [];
@@ -477,10 +481,6 @@
 
   function layoutOptions() {
     return {
-      name: 'elk',
-      fit: true,
-      padding: 30,
-      animate: false,
       nodeLayoutOptions: (n) => {
         if (n.isParent()) {
           return {
@@ -496,28 +496,47 @@
         }
         return { 'elk.priority': String(n.data('rackUnit') ?? 0) };
       },
-      elk: {
+      layoutOptions: {
         algorithm: 'layered',
+        'elk.aspectRatio': String(cy.width() / Math.max(cy.height(), 1)),
         'elk.direction': 'DOWN',
         'elk.hierarchyHandling': 'SEPARATE_CHILDREN',
         'elk.layered.layering.strategy': 'LONGEST_PATH',
         'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
-        'elk.spacing.nodeNode': 36,
-        'elk.layered.spacing.nodeNodeBetweenLayers': 90,
-        'elk.spacing.componentComponent': 48,
+        'elk.spacing.nodeNode': '36',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '90',
+        'elk.spacing.componentComponent': '48',
       },
     };
   }
 
-  async function loadLibrary() {
-    const [{ default: cytoscape }, { default: elk }] = await Promise.all([
-      import('cytoscape'),
-      import('cytoscape-elk'),
-    ]);
-    if (!cytoscape.__rackflowElk) {
-      cytoscape.use(elk);
-      cytoscape.__rackflowElk = true;
+  // Runs ELK in its worker and applies the positions; `after` runs once they are applied.
+  // A newer layout request, a new graph or leaving the page discards an older result.
+  async function runLayout(after) {
+    if (!cy) return;
+    const seq = ++layoutSeq;
+    const target = cy;
+    layingOut = true;
+    try {
+      const positions = await computeElkPositions(target.elements().not('.lldp-overlay'), layoutOptions());
+      if (seq !== layoutSeq || destroyed || cy !== target) return;
+      target
+        .nodes()
+        .filter((n) => !n.isParent())
+        .layout({ name: 'preset', positions: (n) => positions[n.id()] || null, fit: false, animate: false })
+        .run();
+      after?.();
+    } catch (err) {
+      if (seq === layoutSeq && !destroyed) error = `Could not lay out the graph: ${err.message}`;
+    } finally {
+      if (seq === layoutSeq) layingOut = false;
     }
+  }
+
+  async function loadLibrary() {
+    const [{ default: cytoscape }, elkModule] = await Promise.all([import('cytoscape'), import('../lib/elkLayout.js')]);
+    computeElkPositions = elkModule.computeElkPositions;
+    stopElkWorker = elkModule.stopElkWorker;
     cytoscapeLib = cytoscape;
   }
 
@@ -681,8 +700,7 @@
       if (evt.target === cy) clearSelection();
     });
     if (showPortLabels) cy.edges().addClass('ports');
-    const layout = cy.layout(layoutOptions());
-    layout.one('layoutstop', () => {
+    runLayout(() => {
       cy.resize();
       cy.fit(undefined, 30);
       applyLldp();
@@ -691,7 +709,6 @@
       }
       focusId = null;
     });
-    layout.run();
   }
 
   function clearHighlight() {
@@ -830,9 +847,10 @@
   function relayout() {
     if (!cy) return;
     clearLldp();
-    const layout = cy.layout(layoutOptions());
-    layout.one('layoutstop', applyLldp);
-    layout.run();
+    runLayout(() => {
+      cy.fit(undefined, 30);
+      applyLldp();
+    });
   }
 
   function exportPng() {
@@ -926,6 +944,7 @@
     unsubscribeTheme?.();
     cy?.destroy();
     cy = null;
+    stopElkWorker?.();
   });
 </script>
 
@@ -997,8 +1016,8 @@
   <div class="workspace">
     <div class="canvas-wrap">
       <div class="canvas" bind:this={cyContainer}></div>
-      {#if loadingLib || loading}
-        <div class="overlay">{loadingLib ? 'Loading graph library…' : 'Loading cabling…'}</div>
+      {#if loadingLib || loading || layingOut}
+        <div class="overlay">{loadingLib ? 'Loading graph library…' : loading ? 'Loading cabling…' : 'Laying out…'}</div>
       {:else if error}
         <div class="overlay error">{error}</div>
       {:else if graph && graph.nodes.length === 0}
