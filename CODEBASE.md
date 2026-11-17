@@ -20,6 +20,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Bare-metal Serial-over-LAN | `app/services/sol/` (`ipmi_sol.py` + hub/tickets) + `app/api/sol.py` |
 | BMC virtual CD (ISO mount) | `app/services/virtual_media/` + `app/api/virtual_media.py` |
 | Switch SNMP / bandwidth | `app/plugins/snmpv3.py`, poller `scripts/snmp_bandwidth_poller.py` |
+| Cabling map (servers, switches, cable runs as a graph) | API `app/api/cabling.py` → `app/services/cabling_graph_service.py` → `app/dao/cabling_graph_dao.py`; UI `Cabling.svelte` (Cytoscape.js + ELK, lazy-loaded) and the port trace strip in `ServerDetail.svelte` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
@@ -132,6 +133,7 @@ All included from `app/main.py` under `/api`.
 | `server_group.py` | `/api/server-groups` | Server groups |
 | `network_switch.py` | `/api/network-switches` | Switches, ports, bandwidth |
 | `cable_run.py` | `/api/cable-runs` | Cable runs / cabling |
+| `cabling.py` | `/api/admin/cabling` | Read-only `GET /graph?location_id=&rack_id=` for the Cabling page: devices (servers, switches), racks, ports and cable runs. Admin only; never returns `plugin_config` or BMC details; fixed number of queries. Devices outside the filter that are cabled to devices inside it come back with `in_scope=false` |
 | `os_templates.py` | `/api/os-templates` | Scan/list OS templates from disk |
 | `billing.py` | `/api/billing` | External billing API (register/suspend/power/reinstall/…) |
 | `billing_admin.py` | (billing-admin tags) | Admin management of billing integrations |
@@ -208,6 +210,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
+| `cabling_graph_service.py` | Builds the cabling graph (nodes, ports, edges with effective speed and link status from switch `oper_status`) from batch queries in `app/dao/cabling_graph_dao.py` |
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
 | `ipmi_kvm/` | Vendor KVM profiles (ASRockRack/Gigabyte AMI MegaRAC IVTP, SuperMicro ATEN InsydeVNC, SuperMicro X9 ATEN HERMON on TCP 5900). X9 JNLP GET from Docker needs host TCPMSS clamp when eth0 MTU < 1500. |
@@ -285,6 +288,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/servers/:id` | `ServerDetail.svelte` (**largest UI file**) |
 | `/admin/switches` | `Switches.svelte` |
 | `/admin/switches/:id` | `SwitchDetail.svelte` |
+| `/admin/cabling` | `Cabling.svelte` (loaded with a dynamic import; `?location=`, `?rack=`, `?focus=server:<id>` or `switch:<id>`) |
 | `/admin/racks` | `Racks.svelte` |
 | `/admin/racks/:id` | `RackView.svelte` |
 | `/admin/racks/rows/:locationId/:row` | `RowView.svelte` |
@@ -340,6 +344,8 @@ Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelt
 3. Add `<a href="/admin/my-page">` in `Sidebar.svelte`.
 4. Add API helpers in `lib/api.js` if needed.
 5. Implement backend in `app/api/` + DAO/model as required.
+
+Heavy libraries used by one page (for example Cytoscape.js and ELK on `/admin/cabling`) should be loaded with a dynamic `import()` so they land in their own chunk; `Admin.svelte` loads `Cabling.svelte` with `{#await import(...)}` and the page imports `cytoscape` / `cytoscape-elk` on mount.
 
 ---
 

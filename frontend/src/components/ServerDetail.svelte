@@ -395,6 +395,39 @@
     return null;
   }
 
+  function formatLinkSpeed(mbps) {
+    if (!mbps) return null;
+    if (mbps >= 1000) {
+      const g = mbps / 1000;
+      return `${Number.isInteger(g) ? g : g.toFixed(1)}G`;
+    }
+    return `${mbps}M`;
+  }
+
+  function portTrace(port, runs) {
+    const cr = (runs || []).find((r) => otherEnd(r, port.id)) || null;
+    const oe = cr ? otherEnd(cr, port.id) : null;
+    const embedded = port.cable_run;
+    if (!oe && !embedded) return null;
+    const type = oe?.type || embedded?.other_end_type;
+    const deviceId = oe?.device_id ?? embedded?.other_end_device_id;
+    return {
+      deviceName: oe?.device_name || embedded?.other_end_device_name || type,
+      portName: oe?.port_name || embedded?.other_end_port_name || `Port #${oe?.id ?? embedded?.other_end_port_id}`,
+      url: deviceId != null ? (type === 'switch' ? `/admin/switches/${deviceId}` : `/admin/servers/${deviceId}`) : null,
+      kind: type === 'switch' ? 'Switch' : 'Server',
+      cableType: cr?.cable_type || null,
+      speed: formatLinkSpeed(cr?.speed_mbps || port.speed_mbps),
+    };
+  }
+
+  $: cablingPageUrl = server
+    ? `/admin/cabling?${new URLSearchParams({
+        ...(server.location_id ? { location: String(server.location_id) } : {}),
+        focus: `server:${server.id}`,
+      })}`
+    : '/admin/cabling';
+
   $: connectedSwitchPortIds = new Set((cableRunsForServer || []).flatMap(cr => {
     if (cr.end_a?.type === 'switch') return [cr.end_a.id];
     if (cr.end_b?.type === 'switch') return [cr.end_b.id];
@@ -2241,8 +2274,42 @@
             <div class="network-tab-content">
               <div class="network-tab-toolbar">
                 <button type="button" class="btn-secondary btn-sm" on:click={openNetworkEditModal}>Edit network config</button>
+                <a href={cablingPageUrl} class="btn-secondary btn-sm">View in Cabling</a>
               </div>
               {#if server.network_ports && server.network_ports.length > 0}
+                <ul class="port-trace" aria-label="Port trace">
+                  {#each server.network_ports as port (port.id)}
+                    {@const trace = portTrace(port, cableRunsForServer)}
+                    <li class="trace-row" class:uncabled={!trace}>
+                      <span class="trace-end trace-local">
+                        <span class="trace-port mono">{port.name}</span>
+                        {#if port.mac_address}<span class="trace-sub mono">{port.mac_address}</span>{/if}
+                      </span>
+                      <span class="trace-wire">
+                        <span class="trace-wire-label">
+                          {#if trace}
+                            {[trace.cableType, trace.speed].filter(Boolean).join(' · ') || 'cable'}
+                          {:else}
+                            not cabled
+                          {/if}
+                        </span>
+                      </span>
+                      {#if trace}
+                        <span class="trace-end trace-peer">
+                          {#if trace.url}
+                            <a href={trace.url} class="link">{trace.deviceName}</a>
+                          {:else}
+                            {trace.deviceName}
+                          {/if}
+                          <span class="trace-port mono">{trace.portName}</span>
+                          <span class="trace-sub">{trace.kind}</span>
+                        </span>
+                      {:else}
+                        <span class="trace-end trace-peer trace-empty">&nbsp;</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
                 <div class="network-ports-wrap">
                   <table class="network-ports-table">
                     <thead>
@@ -3547,6 +3614,118 @@
 
   .network-tab-toolbar {
     flex-shrink: 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .network-tab-toolbar a.btn-secondary {
+    text-decoration: none;
+  }
+
+  .port-trace {
+    list-style: none;
+    margin: 0;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+  }
+
+  .trace-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(48px, 0.8fr) minmax(0, 1.3fr);
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+  }
+
+  .trace-end {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 8px;
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .trace-local {
+    border-left: 3px solid var(--accent-color);
+  }
+
+  .trace-peer {
+    border-right: 3px solid var(--accent-color);
+  }
+
+  .trace-port {
+    font-weight: 600;
+  }
+
+  .trace-sub {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .trace-wire {
+    position: relative;
+    min-height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .trace-wire::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    border-top: 2px solid var(--accent-color);
+  }
+
+  .trace-wire-label {
+    position: relative;
+    padding: 0 6px;
+    font-size: 11px;
+    line-height: 1.25;
+    text-align: center;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+  }
+
+  .trace-row.uncabled .trace-wire::before {
+    border-top: 2px dashed var(--border-color);
+  }
+
+  .trace-row.uncabled .trace-local {
+    border-left-color: var(--border-color);
+  }
+
+  .trace-row.uncabled .trace-wire-label {
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  .trace-empty {
+    background: transparent;
+    border-style: dashed;
+  }
+
+  @media (max-width: 768px) {
+    .trace-row {
+      grid-template-columns: 1fr;
+    }
+
+    .trace-wire {
+      height: 14px;
+    }
   }
 
   .network-ports-wrap {
