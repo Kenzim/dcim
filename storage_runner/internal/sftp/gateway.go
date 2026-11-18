@@ -6,7 +6,9 @@ package sftp
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -71,9 +73,9 @@ type Login struct {
 type Gateway struct {
 	Backend Backend
 	Logf    func(format string, args ...any)
-	Now     func() time.Time
 
 	mu       sync.Mutex
+	clock    func() time.Time
 	hostKey  ssh.Signer
 	users    map[string]User
 	settings Settings
@@ -87,6 +89,34 @@ type Gateway struct {
 type connInfo struct {
 	userID   int64
 	tenantID int64
+	cred     string
+}
+
+// SetClock replaces the clock, for tests.
+func (g *Gateway) SetClock(now func() time.Time) {
+	g.mu.Lock()
+	g.clock = now
+	g.mu.Unlock()
+}
+
+func (g *Gateway) now() time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.clock()
+}
+
+// credential identifies a user's login details, so open sessions are closed
+// when keys, password, allow list or tenant change.
+func credential(u User) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d|%d|%s|%s|", u.ID, u.TenantID, u.Username, u.PasswordHash)
+	for _, k := range u.Keys {
+		fmt.Fprintf(h, "k%x|", k)
+	}
+	for _, p := range u.Allowed {
+		fmt.Fprintf(h, "a%s|", p)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // NewGateway returns a gateway with the given host key.
@@ -97,7 +127,7 @@ func NewGateway(hostKey ssh.Signer, backend Backend, logf func(string, ...any)) 
 	return &Gateway{
 		Backend: backend,
 		Logf:    logf,
-		Now:     time.Now,
+		clock:   time.Now,
 		hostKey: hostKey,
 		users:   map[string]User{},
 		bans:    newBanTracker(),
@@ -125,23 +155,22 @@ func (g *Gateway) SetUsers(users []User, settings Settings) {
 	for _, u := range users {
 		table[u.Username] = u
 	}
-	byID := map[int64]User{}
+	creds := map[int64]string{}
 	for _, u := range users {
-		byID[u.ID] = u
+		creds[u.ID] = credential(u)
 	}
 	g.mu.Lock()
 	g.users = table
 	g.settings = settings
 	var stale []*ssh.ServerConn
 	for c, info := range g.conns {
-		u, ok := byID[info.userID]
-		if !ok || u.TenantID != info.tenantID {
+		if cred, ok := creds[info.userID]; !ok || cred != info.cred {
 			stale = append(stale, c)
 		}
 	}
 	g.mu.Unlock()
 	for _, c := range stale {
-		g.Logf("sftp: closing session of %s (login removed or tenant not active)", c.User())
+		g.Logf("sftp: closing session of %s (login removed, changed or tenant not active)", c.User())
 		c.Close()
 	}
 }
@@ -279,11 +308,11 @@ func (g *Gateway) current() (map[string]User, Settings) {
 
 func (g *Gateway) handle(conn net.Conn) {
 	ip := remoteAddr(conn.RemoteAddr())
-	if g.bans.banned(ip, g.Now()) {
+	if g.bans.banned(ip, g.now()) {
 		conn.Close()
 		return
 	}
-	conn.SetDeadline(g.Now().Add(handshakeTimeout))
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	failed := false
 	cfg := g.serverConfig(ip, &failed)
 	sconn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
@@ -293,7 +322,7 @@ func (g *Gateway) handle(conn net.Conn) {
 		// counts once; each connection allows at most MaxAuthTries attempts.
 		if failed {
 			_, settings := g.current()
-			if g.bans.fail(ip, g.Now(), settings) {
+			if g.bans.fail(ip, g.now(), settings) {
 				g.Logf("sftp: banning %s for %s after %d failed connections", ip, settings.Ban, settings.MaxFailures)
 			}
 		}
@@ -302,17 +331,34 @@ func (g *Gateway) handle(conn net.Conn) {
 	conn.SetDeadline(time.Time{})
 	userID, _ := strconv.ParseInt(sconn.Permissions.Extensions["user_id"], 10, 64)
 	tenantID, _ := strconv.ParseInt(sconn.Permissions.Extensions["tenant_id"], 10, 64)
+	cred := sconn.Permissions.Extensions["cred"]
+	ctx, cancel := context.WithCancel(context.Background())
 	g.mu.Lock()
-	g.conns[sconn] = connInfo{userID: userID, tenantID: tenantID}
-	g.logins[userID] = Login{UserID: userID, At: g.Now().UTC(), IP: ip.String()}
+	g.conns[sconn] = connInfo{userID: userID, tenantID: tenantID, cred: cred}
+	// The table may have changed between authentication and registration.
+	u, ok := g.users[sconn.User()]
+	valid := ok && credential(u) == cred
+	if valid {
+		g.logins[userID] = Login{UserID: userID, At: g.clock().UTC(), IP: ip.String()}
+	}
 	g.mu.Unlock()
-	g.Logf("sftp: session start user=%s tenant=%d ip=%s", sconn.User(), tenantID, ip)
 	defer func() {
+		cancel()
 		g.mu.Lock()
 		delete(g.conns, sconn)
 		g.mu.Unlock()
 		sconn.Close()
-		g.Logf("sftp: session end user=%s tenant=%d ip=%s", sconn.User(), tenantID, ip)
+		if valid {
+			g.Logf("sftp: session end user=%s tenant=%d ip=%s", sconn.User(), tenantID, ip)
+		}
+	}()
+	if !valid {
+		return
+	}
+	g.Logf("sftp: session start user=%s tenant=%d ip=%s", sconn.User(), tenantID, ip)
+	go func() {
+		sconn.Wait()
+		cancel()
 	}()
 	go rejectGlobal(reqs)
 	for nc := range chans {
@@ -320,7 +366,7 @@ func (g *Gateway) handle(conn net.Conn) {
 			nc.Reject(ssh.Prohibited, "only sftp sessions are allowed")
 			continue
 		}
-		if !g.stillValid(sconn.User(), userID, tenantID) {
+		if !g.stillValid(sconn.User(), cred) {
 			nc.Reject(ssh.Prohibited, "login no longer valid")
 			sconn.Close()
 			continue
@@ -329,7 +375,7 @@ func (g *Gateway) handle(conn net.Conn) {
 		if err != nil {
 			continue
 		}
-		go g.session(sconn, tenantID, ch, chReqs)
+		go g.session(ctx, sconn, tenantID, ch, chReqs)
 	}
 }
 
@@ -341,13 +387,13 @@ func rejectGlobal(reqs <-chan *ssh.Request) {
 	}
 }
 
-func (g *Gateway) stillValid(username string, userID, tenantID int64) bool {
+func (g *Gateway) stillValid(username, cred string) bool {
 	users, _ := g.current()
 	u, ok := users[username]
-	return ok && u.ID == userID && u.TenantID == tenantID
+	return ok && credential(u) == cred
 }
 
-func (g *Gateway) session(conn *ssh.ServerConn, tenantID int64, ch ssh.Channel, reqs <-chan *ssh.Request) {
+func (g *Gateway) session(ctx context.Context, conn *ssh.ServerConn, tenantID int64, ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
 	started := false
 	for r := range reqs {
@@ -355,7 +401,7 @@ func (g *Gateway) session(conn *ssh.ServerConn, tenantID int64, ch ssh.Channel, 
 			started = true
 			r.Reply(true, nil)
 			go func() {
-				err := g.Backend.Serve(context.Background(), tenantID, ch, ch, ch.Stderr())
+				err := g.Backend.Serve(ctx, tenantID, ch, ch, ch.Stderr())
 				status := uint32(0)
 				if err != nil {
 					status = 1
@@ -382,7 +428,7 @@ func subsystemName(payload []byte) string {
 
 func (g *Gateway) serverConfig(ip netip.Addr, failed *bool) *ssh.ServerConfig {
 	cfg := &ssh.ServerConfig{
-		MaxAuthTries: MaxAuthTries,
+		MaxAuthTries:  MaxAuthTries,
 		ServerVersion: "SSH-2.0-RackflowSFTP",
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			return g.checkKey(meta.User(), ip, key)
@@ -429,6 +475,7 @@ func permissions(u User, extra map[string]string) *ssh.Permissions {
 	ext := map[string]string{
 		"user_id":   strconv.FormatInt(u.ID, 10),
 		"tenant_id": strconv.FormatInt(u.TenantID, 10),
+		"cred":      credential(u),
 	}
 	for k, v := range extra {
 		ext[k] = v
