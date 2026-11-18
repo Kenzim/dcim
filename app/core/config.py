@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # NFS storage: how long a terminated storage service or a deleted share
     # keeps its data before the storage runner destroys it.
     storage_destroy_grace_seconds: int = 7 * 24 * 3600
+    # Backup slots: how long a terminated slot keeps its retained backup
+    # before the backup is deleted from the backup storage.
+    backup_slot_destroy_grace_seconds: int = 7 * 24 * 3600
     # Storage runner API: failed key checks allowed per source IP and window.
     storage_runner_auth_failures_per_ip: int = 20
     storage_runner_auth_failures_window_seconds: int = 300

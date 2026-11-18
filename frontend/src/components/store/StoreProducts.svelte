@@ -325,6 +325,7 @@
           <option value="bare_metal">Bare metal</option>
           <option value="http_proxy">HTTP proxy</option>
           <option value="nfs_storage">NFS storage</option>
+          <option value="backup_slot">Backup slot</option>
         </select>
       </label>
       <label>Visibility

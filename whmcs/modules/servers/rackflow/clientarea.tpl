@@ -355,6 +355,11 @@ button.rf-ca__btn--danger:hover {
   border-top: 1px solid var(--rf-line);
 }
 .rf-ca__panel-head { margin-bottom: 10px; }
+.rf-ca__slot-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 0 10px; color: var(--rf-muted); }
+.rf-ca__slot-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.rf-ca__slot-form select, .rf-ca__slot-form input { min-width: 180px; }
+.rf-ca__slot-warning { color: #b42318; font-weight: 600; }
+
 .rf-ca__panel-head--row {
   display: flex;
   align-items: flex-start;
@@ -470,10 +475,10 @@ button.rf-ca__btn--danger:hover {
   <div class="rf-ca__card">
     <div class="rf-ca__head">
       <div>
-        <h3 class="rf-ca__title">Server overview</h3>
-        <p class="rf-ca__subtitle">Status and console access for this service.</p>
+        <h3 class="rf-ca__title">{if $rackflow_slot_panel}Backup slot{else}Server overview{/if}</h3>
+        <p class="rf-ca__subtitle">{if $rackflow_slot_panel}Keeps one backup of your VMs for as long as you hold this slot.{else}Status and console access for this service.{/if}</p>
       </div>
-      {if $rackflow_power_available && $rackflow_power_status_label}
+      {if $rackflow_power_available && $rackflow_power_status_label && !$rackflow_slot_panel}
       <span class="rf-ca__badge {$rackflow_power_badge_class|escape}">
         <span class="rf-ca__badge-dot" aria-hidden="true"></span>
         {$rackflow_power_status_label|escape}
@@ -756,6 +761,76 @@ button.rf-ca__btn--danger:hover {
           {/foreach}
         </ul>
         {/if}
+      </div>
+      {/if}
+
+      {if $rackflow_backups_allowed && $rackflow_vm_slots|@count}
+      <div class="rf-ca__backups" data-rf-slot-box data-rf-slot-action="{$rackflow_slot_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}">
+        <div class="rf-ca__panel-head">
+          <p class="rf-ca__action-title">Keep a backup in a slot</p>
+          <p class="rf-ca__action-help">A backup kept in a slot is protected from clean-up, stays after this VM is cancelled, and can be restored onto any of your VMs.</p>
+        </div>
+        <div class="rf-ca__slot-form">
+          <select id="rackflow-slot-backup" aria-label="Backup to keep">
+            {foreach from=$rackflow_backups item=b}
+            {if $b.kind == 'client' && !$b.running && !$b.retained}
+            <option value="{$b.volid|escape}">{if $b.ctime}{$b.ctime|date_format:"%Y-%m-%d %H:%M"}{/if} {if $b.notes_display}{$b.notes_display|escape}{else}backup{/if}</option>
+            {/if}
+            {/foreach}
+          </select>
+          <select id="rackflow-slot-choice" aria-label="Slot">
+            {foreach from=$rackflow_vm_slots item=sl}
+            <option value="{$sl.service_id|escape}" data-occupied="{if $sl.occupied}1{else}0{/if}">{$sl.name|escape} ({$sl.size_gb|escape} GB){if $sl.occupied} - holds a backup{/if}</option>
+            {/foreach}
+          </select>
+          <input type="text" id="rackflow-slot-name" placeholder="Label (optional)" autocomplete="off" />
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" data-rf-slot-op="retain">Keep in slot</button>
+        </div>
+        <p class="rf-ca__note" id="rackflow-slot-msg" hidden></p>
+      </div>
+      {/if}
+
+      {if $rackflow_slot_panel}
+      <div class="rf-ca__backups" data-rf-slot-box data-rf-slot-action="{$rackflow_slot_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}">
+        {if $rackflow_slot_error}
+        <p class="rf-ca__note">{$rackflow_slot_error|escape}</p>
+        {else}
+        <div class="rf-ca__slot-meta">
+          <span>Size: <strong>{$rackflow_slot.size_gb|escape} GB</strong></span>
+          <span>Status: <strong>{$rackflow_slot.status|escape}</strong></span>
+        </div>
+        {if $rackflow_slot.status == 'suspended'}
+        <p class="rf-ca__note">This slot is suspended. Your backup is kept, but it cannot be restored until the slot is active again.</p>
+        {/if}
+        {if $rackflow_slot.retained}
+        <ul class="rf-ca__backup-list">
+          <li class="rf-ca__backup-kind-client">
+            <span class="rf-ca__backup-kind is-client">Kept</span>
+            <span>{if $rackflow_slot.retained.backup_created_at}{$rackflow_slot.retained.backup_created_at|escape}{else}-{/if}</span>
+            {if $rackflow_slot.retained.name}<span class="rf-ca__backup-notes">{$rackflow_slot.retained.name|escape}</span>{/if}
+            {if $rackflow_slot.retained.source_service_name}<span class="rf-ca__backup-template">from {$rackflow_slot.retained.source_service_name|escape}</span>{/if}
+            {if $rackflow_slot.retained.notes_display}<span class="rf-ca__backup-notes">{$rackflow_slot.retained.notes_display|escape}</span>{/if}
+          </li>
+        </ul>
+        {if $rackflow_slot.status == 'active' && $rackflow_slot.restore_targets|@count}
+        <div class="rf-ca__slot-form">
+          <select id="rackflow-slot-target" aria-label="Restore onto">
+            {foreach from=$rackflow_slot.restore_targets item=t}
+            <option value="{$t.service_id|escape}">{$t.name|escape}{if $t.is_source} (original VM){/if}</option>
+            {/foreach}
+          </select>
+          <button type="button" class="rf-ca__btn rf-ca__btn--ghost" data-rf-slot-op="restore">Restore onto...</button>
+        </div>
+        <p class="rf-ca__slot-warning">Restoring replaces everything on the chosen VM. Its address, size and login details stay as they are.</p>
+        {/if}
+        <div class="rf-ca__slot-form">
+          <button type="button" class="rf-ca__btn rf-ca__btn--danger" data-rf-slot-op="release" data-rf-confirm-text="Delete the backup kept in this slot? This cannot be undone.">Release and delete backup</button>
+        </div>
+        {else}
+        <p class="rf-ca__note">This slot is empty. Open one of your VMs and use "Keep a backup in a slot".</p>
+        {/if}
+        {/if}
+        <p class="rf-ca__note" id="rackflow-slot-msg" hidden></p>
       </div>
       {/if}
     </div>
@@ -1184,3 +1259,83 @@ button.rf-ca__btn--danger:hover {
 })();
 </script>
 {/literal}
+
+{if $rackflow_slot_panel || $rackflow_vm_slots|@count}
+{literal}
+<script>
+(function () {
+  var box = document.querySelector('#rackflow-client-area [data-rf-slot-box]');
+  if (!box) { return; }
+  var url = box.getAttribute('data-rf-slot-action');
+  var sid = box.getAttribute('data-rf-service-id');
+  function msg(text, isError) {
+    var el = document.getElementById('rackflow-slot-msg');
+    if (!el) { return; }
+    el.hidden = !text;
+    el.textContent = text || '';
+    el.style.color = isError ? '#b42318' : '#0a7a32';
+  }
+  function val(id) {
+    var el = document.getElementById(id);
+    return el ? el.value : '';
+  }
+  function send(op, extra, onFail) {
+    var body = new URLSearchParams();
+    body.set('serviceid', sid);
+    body.set('op', op);
+    Object.keys(extra).forEach(function (k) { body.set(k, extra[k]); });
+    msg('Working...', false);
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+      body: body.toString(),
+      credentials: 'same-origin'
+    }).then(function (res) {
+      return res.json().catch(function () { return { ok: false, error: 'Unexpected response (' + res.status + ')' }; });
+    }).then(function (data) {
+      if (data && data.ok) {
+        msg(data.message || 'Done.', false);
+        window.setTimeout(function () { window.location.reload(); }, 800);
+        return;
+      }
+      msg((data && data.error) ? data.error : 'Request failed.', true);
+      if (onFail) { onFail(); }
+    }).catch(function (err) {
+      msg(err && err.message ? err.message : 'Request failed.', true);
+      if (onFail) { onFail(); }
+    });
+  }
+  var buttons = box.querySelectorAll('[data-rf-slot-op]');
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].addEventListener('click', function () {
+      var btn = this;
+      var op = btn.getAttribute('data-rf-slot-op');
+      var extra = {};
+      if (op === 'retain') {
+        var slotSel = document.getElementById('rackflow-slot-choice');
+        extra.slot_id = val('rackflow-slot-choice');
+        extra.volid = val('rackflow-slot-backup');
+        extra.name = val('rackflow-slot-name');
+        if (!extra.volid) { msg('There is no customer backup to keep yet. Create one first.', true); return; }
+        var occupied = slotSel && slotSel.selectedOptions.length && slotSel.selectedOptions[0].getAttribute('data-occupied') === '1';
+        if (occupied) {
+          if (!window.confirm('This slot already holds a backup. Replace it? The old one is deleted.')) { return; }
+          extra.replace = '1';
+        }
+      } else if (op === 'restore') {
+        extra.target_id = val('rackflow-slot-target');
+        var sel = document.getElementById('rackflow-slot-target');
+        var label = sel && sel.selectedOptions.length ? sel.selectedOptions[0].textContent : 'the chosen VM';
+        if (!window.confirm('Restore this backup onto ' + label + '? Everything on that VM will be replaced and cannot be recovered.')) { return; }
+        extra.confirm_data_loss = '1';
+      } else if (op === 'release') {
+        if (!window.confirm(btn.getAttribute('data-rf-confirm-text') || 'Release this backup?')) { return; }
+      }
+      btn.disabled = true;
+      send(op, extra, function () { btn.disabled = false; });
+    });
+  }
+})();
+</script>
+{/literal}
+{/if}

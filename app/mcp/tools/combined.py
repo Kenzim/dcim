@@ -488,7 +488,7 @@ async def service_info(
     view: Literal["detail", "backups", "deployment_jobs"] = "detail",
     limit: int = 20,
 ) -> dict:
-    """Service detail (no passwords or proxy credentials), VM backups with running backup jobs, or deployment jobs."""
+    """Service detail (no passwords or proxy credentials), deployment jobs, or backups (backup slots too)."""
     if view == "deployment_jobs":
         return await service_tools.list_deployment_jobs(service_id, limit=limit)
     if view == "backups":
@@ -498,7 +498,7 @@ async def service_info(
 
 @mcp.tool()
 async def provision(
-    kind: Literal["vm", "bare_metal", "http_proxy"],
+    kind: Literal["vm", "bare_metal", "http_proxy", "backup_slot"],
     name: str,
     product_code: Optional[str] = None,
     owner_user_id: Optional[int] = None,
@@ -513,11 +513,20 @@ async def provision(
     template_id: Optional[str] = None,
     ip_count: Optional[int] = None,
     subnet_id: Optional[int] = None,
+    size_gb: Optional[int] = None,
 ) -> dict:
     """Create a service. vm: needs product_code, vm_template_id (optional cluster/node/vmid).
     bare_metal: server_id or server_group_id, optional OS template_id. http_proxy: auto-assigns IPAM addresses.
+    backup_slot: owner_user_id, size_gb.
     """
     common = {"owner_user_id": owner_user_id, "description": description}
+    if kind == "backup_slot":
+        _require("A backup slot", owner_user_id=owner_user_id)
+        _reject("A backup slot", vm_template_id=vm_template_id, proxmox_cluster_id=proxmox_cluster_id,
+                proxmox_node_name=proxmox_node_name, proxmox_vmid=proxmox_vmid, server_id=server_id,
+                server_group_id=server_group_id, template_id=template_id, ip_count=ip_count, subnet_id=subnet_id)
+        return await service_tools.provision_backup_slot(name, product_code=product_code, size_gb=size_gb, **common)
+    _reject(f"A {kind} service", size_gb=size_gb)
     if kind == "vm":
         _require("A VM", product_code=product_code, vm_template_id=vm_template_id)
         _reject("A VM", server_id=server_id, server_group_id=server_group_id, template_id=template_id,

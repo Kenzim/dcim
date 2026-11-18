@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.orm import Session
 
+from app.api import backup_slots as slot_portal
 from app.api import commerce_client as commerce
 from app.api import private_networks as network_portal
 from app.api import services_client as portal
@@ -26,6 +27,7 @@ from app.dao.service_dao import ServiceDAO
 from app.mcp.client.instance import client_mcp
 from app.mcp.client.runtime import run_client_tool
 from app.models.reseller import InvoiceStatus
+from app.models.service import ServiceType
 from app.models.support_ticket import TicketPriority, TicketStatus
 from app.schemas.billing import PowerAction
 from app.services.server_lock import ensure_server_unlocked
@@ -62,8 +64,10 @@ _ACTION_SCOPE = {
     "reset": "write",
     "console": "write",
     "backup_create": "write",
+    "backup_retain": "write",
     "set_ssh_keys": "write",
     "backup_delete": "destructive",
+    "backup_release": "destructive",
     "backup_restore": "destructive",
     "reinstall": "destructive",
     "run_action": "destructive",
@@ -154,7 +158,7 @@ async def services(
     service_id: Optional[int] = None,
     service_type: Optional[str] = None,
 ) -> Any:
-    """Your services. list (service_type filters), detail, backups (VM), ssh_keys (VM), actions (plugin actions).
+    """Your services. list (service_type filters), detail, backups (a VM's backups and your backup slots, or a backup_slot service's retained backup and the VMs it can be restored onto), ssh_keys (VM), actions (plugin actions).
     fast_path: private proxy addresses per location and proxy IP (service_id optional). All others need service_id."""
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
@@ -172,7 +176,10 @@ async def services(
                 out["installation"] = _pick(row["installation"], _INSTALL_FIELDS)
             return out
         if view == "backups":
-            return await portal.client_list_vm_backups(service_id, auth, db)
+            if _owned_service(db, ctx, service_id).service_type == ServiceType.BACKUP_SLOT:
+                return await slot_portal.client_get_slot(service_id, auth, db)
+            out = await portal.client_list_vm_backups(service_id, auth, db)
+            return {**out, **await slot_portal.client_list_slots(auth, db)}
         if view == "ssh_keys":
             return await portal.client_get_vm_ssh_keys(service_id, auth, db)
         return await portal.client_list_strategy_actions(service_id, auth, db)
@@ -190,8 +197,10 @@ async def service_action(
         "reset",
         "console",
         "backup_create",
+        "backup_retain",
         "set_ssh_keys",
         "backup_delete",
+        "backup_release",
         "backup_restore",
         "reinstall",
         "run_action",
@@ -208,11 +217,13 @@ async def service_action(
     ssh_public_keys: Optional[str] = None,
     name: Optional[str] = None,
     params: Optional[dict] = None,
+    slot_service_id: Optional[int] = None,
+    replace: bool = False,
 ) -> Any:
     """Act on one of your services; confirm=true required except console.
 
-    write scope: power_on, power_off, reboot, reset, console (one-time browser link; console_type kvm/sol for servers, vnc/serial for VMs), backup_create (backup_mode, notes; suspend/stop interrupt the VM), set_ssh_keys (VM; replaces all keys, ssh_public_keys).
-    destructive scope: backup_delete and backup_restore (volid, storage), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
+    write scope: power_on, power_off, reboot, reset, console (one-time browser link; console_type kvm/sol for servers, vnc/serial for VMs), backup_create (backup_mode, notes; suspend/stop interrupt the VM), set_ssh_keys (VM; replaces all keys, ssh_public_keys), backup_retain (service_id=VM, volid, slot_service_id; keeps that backup in your backup slot; replace=true swaps out what the slot holds).
+    destructive scope: backup_delete and backup_restore (volid, storage; a volid held in a backup slot restores onto service_id, any of your VMs, and replaces everything on it), backup_release (service_id=backup_slot; deletes its retained backup), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
     write scope, proxies: fast_path_on and fast_path_off turn the private proxy network on or off in the locations of this proxy's IPs (for all your servers there).
     """
     min_scope = _ACTION_SCOPE[action]
@@ -241,9 +252,15 @@ async def service_action(
             _need("set_ssh_keys", ssh_public_keys=ssh_public_keys)
             body = portal.VmSshKeysBody(ssh_public_keys=ssh_public_keys)
             return await portal.client_put_vm_ssh_keys(service_id, body, auth, db)
+        if action == "backup_retain":
+            _need(action, volid=volid, slot_service_id=slot_service_id)
+            slot_body = slot_portal.RetainBody(source_service_id=service_id, volid=volid, replace=replace)
+            return await slot_portal.client_retain(slot_service_id, slot_body, auth, db)
+        if action == "backup_release":
+            return await slot_portal.client_release(service_id, auth, db)
         if action in ("backup_delete", "backup_restore"):
             _need(action, volid=volid)
-            body = BackupMutateBody(volid=volid, storage=storage, wait=False)
+            body = BackupMutateBody(volid=volid, storage=storage, wait=False, confirm_data_loss=confirm)
             handler = (
                 portal.client_delete_vm_backup if action == "backup_delete" else portal.client_restore_vm_backup
             )

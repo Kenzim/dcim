@@ -6,6 +6,8 @@ and configuration is a declarative Proxmox ``config`` PUT.
 """
 from __future__ import annotations
 
+import re
+
 from app.plugins.base import PowerState
 from app.services.deployment.step import DeploymentError, DeploymentStep, StepOutcome
 
@@ -698,3 +700,130 @@ class StampVmIdentityStep(DeploymentStep):
         plugin = ctx.get_plugin()
         token = await stamp_vm_identity(ctx.db, ctx.service, plugin)
         ctx.logger.info("Stamped VM identity token=%s", token)
+
+
+_NET_KEY = re.compile(r"^net\d+$")
+
+
+class CaptureTargetIdentityStep(DeploymentStep):
+    """Record the target VM's own network interfaces and name before a retained backup overwrites them."""
+
+    name = "capture_target_identity"
+    timeout_seconds = 60
+
+    async def precheck(self, ctx) -> StepOutcome:
+        if _vm_restore_state(ctx.service).get("target_identity"):
+            return StepOutcome.skip("Target identity already captured")
+        return StepOutcome.ready()
+
+    async def execute(self, ctx) -> None:
+        plugin = ctx.get_plugin()
+        try:
+            config = await plugin.get_qemu_config()
+        except Exception as exc:
+            raise DeploymentError(f"Could not read the target VM's configuration: {exc}") from exc
+        state = _vm_restore_state(ctx.service)
+        state["target_identity"] = {
+            "nets": {k: str(v) for k, v in config.items() if _NET_KEY.match(str(k))},
+            "name": config.get("name"),
+        }
+        _write_vm_restore_state(ctx, state)
+
+
+class StartRetainedRestoreStep(DeploymentStep):
+    """Start the restore of a retained backup onto the target VMID; store the UPID for the wait step."""
+
+    name = "start_retained_restore"
+    timeout_seconds = 300
+
+    async def precheck(self, ctx) -> StepOutcome:
+        state = _vm_restore_state(ctx.service)
+        if state.get("upid"):
+            return StepOutcome.skip("Restore task already started")
+        if not state.get("volid"):
+            return StepOutcome.failed("vm_restore.volid missing on service config")
+        return StepOutcome.ready()
+
+    async def execute(self, ctx) -> None:
+        from app.models.service_vm import VMGuestState
+
+        _cid, _node, target_vmid = ctx.require_placement()
+        state = _vm_restore_state(ctx.service)
+        plugin = ctx.get_plugin()
+        disk_storage = (ctx.get_specs().get("restore_disk_storage") or "").strip() or None
+        upid = await plugin.restore_backup(
+            archive=str(state["volid"]),
+            vmid=int(target_vmid),
+            force=True,
+            storage=disk_storage,
+            # Power-on happens in finalize, after the target's identity is back.
+            start=False,
+        )
+        state.update({"upid": upid, "normalized_volid": state["volid"], "status": "running"})
+        _write_vm_restore_state(ctx, state)
+        if ctx.service.vm:
+            ctx.service.vm.guest_state = VMGuestState.PROVISIONING
+            ctx.service.vm.guest_last_error = None
+
+
+class ReapplyTargetNetworkStep(DeploymentStep):
+    """Put the target's own network interfaces (MAC addresses, bridges, VLAN tags) and name back after a restore."""
+
+    name = "reapply_target_network"
+    timeout_seconds = 60
+
+    async def precheck(self, ctx) -> StepOutcome:
+        if not _vm_restore_state(ctx.service).get("target_identity"):
+            return StepOutcome.failed("Target identity was not captured before the restore")
+        return StepOutcome.ready()
+
+    async def execute(self, ctx) -> None:
+        identity = _vm_restore_state(ctx.service)["target_identity"]
+        plugin = ctx.get_plugin()
+        wanted = dict(identity.get("nets") or {})
+        restored = await plugin.get_qemu_config()
+        stale = sorted(k for k in restored if _NET_KEY.match(str(k)) and k not in wanted)
+        payload = dict(wanted)
+        name = identity.get("name") or (ctx.service.name or "")[:90]
+        if name:
+            payload["name"] = name
+        try:
+            await plugin.set_qemu_config(payload, delete=stale or None)
+        except Exception as exc:
+            raise DeploymentError(f"Could not re-apply the target's network interfaces: {exc}") from exc
+
+
+class ReapplyCloudInitStep(DeploymentStep):
+    """Re-apply the target's static address (or DHCP), DNS and credentials through cloud-init."""
+
+    name = "reapply_cloudinit"
+    timeout_seconds = 60
+
+    async def precheck(self, ctx) -> StepOutcome:
+        return StepOutcome.ready()
+
+    async def execute(self, ctx) -> None:
+        from app.services.deployment.guest_config import (
+            build_cloudinit_network_payload,
+            cloudinit_credentials_from_ctx,
+        )
+        from app.services.ssh_public_keys import ssh_public_keys_from_service_config
+
+        _cid, _node, target_vmid = ctx.require_placement()
+        alloc = ctx.get_ip_allocation()
+        static = bool(alloc and (alloc.ip_address or "").strip() and (alloc.gateway or "").strip())
+        ciuser, cipassword = cloudinit_credentials_from_ctx(ctx)
+        keys = ssh_public_keys_from_service_config(
+            ctx.service.config if getattr(ctx, "service", None) else None
+        )
+        payload = build_cloudinit_network_payload(
+            alloc if static else None,
+            mode="static" if static else "dhcp",
+            ciuser=ciuser,
+            cipassword=cipassword,
+            ssh_public_keys=keys,
+        )
+        plugin = ctx.get_plugin()
+        ok = await plugin.configure_vm({"vmid": int(target_vmid)}, payload)
+        if not ok:
+            raise DeploymentError("Proxmox cloud-init network config update failed")
