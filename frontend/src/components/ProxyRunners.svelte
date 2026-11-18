@@ -9,6 +9,8 @@
     updateProxyRunner,
     rotateProxyRunnerKey,
     deleteProxyRunner,
+    getLocations,
+    getServers,
   } from '../lib/api.js';
 
   let loading = false;
@@ -23,6 +25,48 @@
 
   let revealedKey = null; // { title, api_key }
   let rotateBusyId = null;
+
+  let placing = null; // runner being placed on the proxy fast path
+  let placeLocation = '';
+  let placeServer = '';
+  let placeMode = 'preconfigured';
+  let placeBusy = false;
+  let locations = [];
+  let servers = [];
+
+  async function openPlacement(runner) {
+    error = '';
+    placing = runner;
+    placeLocation = runner.location_id ? String(runner.location_id) : '';
+    placeServer = runner.server_id ? String(runner.server_id) : '';
+    placeMode = runner.vlan_mode || 'preconfigured';
+    try {
+      if (!locations.length) locations = await getLocations();
+      if (!servers.length) servers = await getServers();
+    } catch (err) {
+      error = err.message || 'Failed to load locations and servers';
+    }
+  }
+
+  $: placeServers = servers.filter((s) => !placeLocation || String(s.location_id) === placeLocation);
+
+  async function submitPlacement() {
+    try {
+      placeBusy = true;
+      error = '';
+      await updateProxyRunner(placing.id, {
+        location_id: placeLocation ? Number(placeLocation) : null,
+        server_id: placeServer ? Number(placeServer) : null,
+        vlan_mode: placeMode,
+      });
+      placing = null;
+      await load();
+    } catch (err) {
+      error = err.message || 'Failed to update placement';
+    } finally {
+      placeBusy = false;
+    }
+  }
 
   onMount(async () => {
     await load();
@@ -136,7 +180,12 @@
   <p class="intro">
     Register standalone proxy runners and generate API keys. Each runner phones home every 30s via
     <code>GET /api/runner/proxy/config</code>; status is Online when last seen within 90 seconds.
-    Not bound to bare-metal locations — set <code>RUNNER_API_KEY</code> on the Go proxy runner.
+    Set <code>RUNNER_API_KEY</code> on the Go proxy runner. Every runner serves every published proxy IP.
+  </p>
+  <p class="intro">
+    <strong>Proxy fast path:</strong> give a runner a location to let clients there reach it over their private
+    access network. Pin each proxy subnet to the runner that hosts it in Proxy IPAM; the subnet's private IP then
+    lives on that runner. Runners without a location are not part of the fast path.
   </p>
 
   {#if error}
@@ -161,6 +210,7 @@
         <div>Last seen</div>
         <div>Last IP</div>
         <div>Enabled</div>
+        <div>Fast path</div>
         <div>Actions</div>
       </div>
       {#each runners as runner}
@@ -180,7 +230,20 @@
           <div class="mono">{formatSeen(runner.last_seen_at)}</div>
           <div class="mono">{runner.last_seen_ip || '—'}</div>
           <div>{runner.enabled ? 'yes' : 'no'}</div>
+          <div class="fast">
+            {#if runner.location_id}
+              <div>{runner.location_name} · {runner.vlan_mode === 'switch' ? `switch (${runner.server_name || 'no server'})` : 'preconfigured VLANs'}</div>
+              {#each runner.hosted_subnets || [] as subnet}
+                <div class="mono">{subnet.cidr} → {subnet.fast_path_ip}:{runner.fast_path_port}</div>
+              {:else}
+                <div class="mono">No subnets pinned</div>
+              {/each}
+            {:else}
+              <span class="mono">Not placed</span>
+            {/if}
+          </div>
           <div class="actions">
+            <button class="tiny" on:click={() => openPlacement(runner)}>Placement</button>
             <button class="tiny" on:click={() => toggleEnabled(runner)}>
               {runner.enabled ? 'Disable' : 'Enable'}
             </button>
@@ -207,6 +270,37 @@
           {createBusy ? 'Creating…' : 'Create & generate key'}
         </Button>
         <Button variant="secondary" size="small" on:click={() => (showCreate = false)}>Cancel</Button>
+      </div>
+    </div>
+  </Modal>
+{/if}
+
+{#if placing}
+  <Modal title={`Fast path placement for “${placing.name}”`} onClose={() => (placing = null)}>
+    <div class="form">
+      <label for="pr-loc">Location</label>
+      <select id="pr-loc" bind:value={placeLocation}>
+        <option value="">None (not part of the fast path)</option>
+        {#each locations as loc}
+          <option value={String(loc.id)}>{loc.name}</option>
+        {/each}
+      </select>
+      <label for="pr-mode">VLAN mode</label>
+      <select id="pr-mode" bind:value={placeMode}>
+        <option value="preconfigured">Preconfigured: the pool's VLAN range is already carried to the runner</option>
+        <option value="switch">Switch: Rackflow trunks each VLAN on the runner server's ports</option>
+      </select>
+      <label for="pr-srv">Server the runner runs on</label>
+      <select id="pr-srv" bind:value={placeServer}>
+        <option value="">None</option>
+        {#each placeServers as srv}
+          <option value={String(srv.id)}>{srv.name}</option>
+        {/each}
+      </select>
+      <p class="hint">Switch mode needs the server, cabled to a switch with a VLAN plugin.</p>
+      <div class="form-actions">
+        <Button size="small" on:click={submitPlacement} disabled={placeBusy}>{placeBusy ? 'Saving…' : 'Save'}</Button>
+        <Button variant="secondary" size="small" on:click={() => (placing = null)}>Cancel</Button>
       </div>
     </div>
   </Modal>
@@ -267,7 +361,7 @@
   }
   .row {
     display: grid;
-    grid-template-columns: minmax(140px, 1.4fr) 110px minmax(140px, 1.2fr) minmax(100px, 0.9fr) 70px minmax(200px, 1.2fr);
+    grid-template-columns: minmax(140px, 1.4fr) 110px minmax(140px, 1.2fr) minmax(100px, 0.9fr) 70px minmax(180px, 1.4fr) minmax(200px, 1.2fr);
     gap: 10px;
     padding: 12px 14px;
     align-items: center;
@@ -349,7 +443,18 @@
     font-size: 0.9rem;
     color: var(--text-primary);
   }
-  .form input {
+  .fast {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.85rem;
+  }
+  .hint {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+  .form input, .form select {
     padding: 8px;
     border: 1px solid var(--border-color);
     border-radius: 6px;

@@ -127,6 +127,18 @@
     );
   }
 
+  function toggleProxyAccess(pool, field) {
+    const labels = {
+      proxy_access_enabled: ['Proxy fast path offered', 'Proxy fast path no longer offered'],
+      proxy_access_requires_product: ['Fast path now needs a product flagged proxy_fast_path', 'Fast path is free'],
+    };
+    const next = !pool[field];
+    return run(
+      () => updatePrivateNetworkPool(pool.id, { [field]: next }),
+      `${labels[field][next ? 0 : 1]} in ${pool.location_name}`,
+    );
+  }
+
   function editReservedRanges(pool) {
     const current = (pool.reserved_cidrs || []).join(', ');
     const value = prompt(
@@ -281,6 +293,9 @@
             {#if pool.reserved_cidrs?.length}
               <small class="reserved" title={pool.reserved_cidrs.join(', ')}>{pool.reserved_cidrs.length} reserved range{pool.reserved_cidrs.length === 1 ? '' : 's'}</small>
             {/if}
+            {#if pool.proxy_access_enabled}
+              <small class="reserved">proxy fast path{pool.proxy_access_requires_product ? ' (product)' : ''}</small>
+            {/if}
           </div>
           <div>{pool.enabled ? 'yes' : 'no'}</div>
           <div class="row-actions">
@@ -288,6 +303,20 @@
               {pool.enabled ? 'Disable' : 'Enable'}
             </button>
             <button class="tiny" disabled={working} on:click={() => editReservedRanges(pool)}>Reserved ranges</button>
+            <button
+              class="tiny"
+              disabled={working}
+              title="Let clients turn on a private network to the proxy runners in this location"
+              on:click={() => toggleProxyAccess(pool, 'proxy_access_enabled')}
+            >{pool.proxy_access_enabled ? 'Stop fast path' : 'Offer fast path'}</button>
+            {#if pool.proxy_access_enabled}
+              <button
+                class="tiny"
+                disabled={working}
+                title="Require an active product whose catalogue specs set proxy_fast_path: true"
+                on:click={() => toggleProxyAccess(pool, 'proxy_access_requires_product')}
+              >{pool.proxy_access_requires_product ? 'Make fast path free' : 'Sell fast path'}</button>
+            {/if}
             <button
               class="tiny danger"
               disabled={working || pool.networks_in_use > 0}
@@ -317,6 +346,7 @@
             <button class="link-btn" on:click={() => toggleExpanded(network)}>
               {expandedId === network.id ? '▾' : '▸'} {network.name}
             </button>
+            {#if network.kind === 'proxy_access'}<span class="badge ok" title="Proxy access network: fixed range, joined by every proxy runner in the location">fast path</span>{/if}
           </div>
           <div>
             <button class="link-btn" on:click={() => navigate(`/admin/users/${network.owner_user_id}`)}>
@@ -340,8 +370,8 @@
             <button class="tiny" disabled={working} on:click={() => resync(network)}>Sync</button>
             <button
               class="tiny danger"
-              disabled={working || network.attachments.length > 0}
-              title={network.attachments.length > 0 ? 'Detach every service first' : 'Delete network'}
+              disabled={working || network.attachments.some((a) => !a.proxy_runner_id)}
+              title={network.attachments.some((a) => !a.proxy_runner_id) ? 'Detach every service first' : 'Delete network'}
               on:click={() => removeNetwork(network)}
             >Delete</button>
           </div>
@@ -365,7 +395,9 @@
               {#each network.attachments as attachment (attachment.id)}
                 <div class="row attachment-row">
                   <div>
-                    {#if attachment.service_id}
+                    {#if attachment.proxy_runner_id}
+                      <span>Proxy runner {attachment.proxy_runner_name || `#${attachment.proxy_runner_id}`}</span>
+                    {:else if attachment.service_id}
                       <button class="link-btn" on:click={() => navigate(`/admin/services/${attachment.service_id}`)}>
                         #{attachment.service_id} {attachment.service_name || ''}
                       </button>
@@ -373,8 +405,8 @@
                       <span class="hint">service deleted</span>
                     {/if}
                   </div>
-                  <div>{attachment.service_type === 'vm' ? 'VM' : attachment.service_type === 'bare_metal' ? 'Dedicated' : '—'}</div>
-                  <div class="mono">{attachment.ip_address}/{attachment.prefix_length}</div>
+                  <div>{attachment.proxy_runner_id ? 'Runner' : attachment.service_type === 'vm' ? 'VM' : attachment.service_type === 'bare_metal' ? 'Dedicated' : '—'}</div>
+                  <div class="mono">{attachment.ip_address ? `${attachment.ip_address}/${attachment.prefix_length}` : 'subnet IPs'}</div>
                   <div class="mono">{attachment.mac_address || '—'}</div>
                   <div>
                     <span class="badge" class:ok={attachment.state === 'active'} class:warn={attachment.state !== 'active'}>

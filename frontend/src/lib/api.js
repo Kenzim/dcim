@@ -4890,6 +4890,29 @@ export function clientDetachPrivateNetwork(networkId, attachmentId) {
   });
 }
 
+// --- Proxy fast path: per-location access network and private proxy addresses ---
+
+export function clientFastPath() {
+  return privateNetworkRequest('/fast-path', { client: true, errorMessage: 'Failed to load the proxy fast path' });
+}
+
+export function clientFastPathOn(locationId) {
+  return privateNetworkRequest('/fast-path', {
+    client: true,
+    method: 'POST',
+    body: { location_id: locationId },
+    errorMessage: 'Failed to turn the proxy fast path on',
+  });
+}
+
+export function clientFastPathOff(locationId) {
+  return privateNetworkRequest(`/fast-path/${locationId}`, {
+    client: true,
+    method: 'DELETE',
+    errorMessage: 'Failed to turn the proxy fast path off',
+  });
+}
+
 // --- NFS storage: storage nodes, nfs_storage services and their shares ---
 
 async function storageRequest(path, { client = false, method = 'GET', body, errorMessage } = {}) {
