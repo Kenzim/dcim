@@ -10,6 +10,7 @@ from app.dao.ipam_dao import IPAMDAO
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ServiceType
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
+from app.services.proxy_fast_path import FastPathError, pin_subnet, subnet_fast_path
 
 
 from typing import Annotated
@@ -37,6 +38,9 @@ class SubnetUpdate(BaseModel):
     location_id: Optional[int] = None
     clear_location: bool = False
     max_resale_count: Optional[int] = None
+    # Proxy fast path: pin the subnet to the runner that hosts it, or unpin it.
+    proxy_runner_id: Optional[int] = None
+    clear_proxy_runner: bool = False
 
 
 class AssignIPRequest(BaseModel):
@@ -75,6 +79,10 @@ def _subnet_payload(s, db: Optional[Session] = None) -> dict:
         "total_slots": total_slots,
         "used_slots": used_slots,
         "free_slots": (total_slots - used_slots) if used_slots is not None else None,
+        "proxy_runner_id": s.proxy_runner_id,
+        "proxy_runner_name": s.proxy_runner.name if s.proxy_runner else None,
+        "fast_path": subnet_fast_path(s),
+        "fast_path_ip": s.fast_path_ip,
     }
 
 
@@ -107,6 +115,10 @@ async def update_subnet(
     auth: AdminDep,
     db: DbDep,
 ):
+    if data.proxy_runner_id is not None and data.clear_proxy_runner:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Give proxy_runner_id or clear_proxy_runner, not both"
+        )
     try:
         row = IPAMDAO.update_subnet(
             db,
@@ -122,6 +134,11 @@ async def update_subnet(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subnet not found")
+    if data.proxy_runner_id is not None or data.clear_proxy_runner:
+        try:
+            row = pin_subnet(db, row, None if data.clear_proxy_runner else data.proxy_runner_id)
+        except FastPathError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     return _subnet_payload(row, db)
 
 

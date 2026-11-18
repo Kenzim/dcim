@@ -22,11 +22,17 @@ class IPSubnet(Base):
     # allows the same IP to be resold to that many distinct owners at once
     # (see ServiceIPAssignment / same-owner collision guard in IPAMDAO).
     max_resale_count = Column(Integer, nullable=False, default=1)
+    # Proxy fast path: the runner that hosts this subnet, and the subnet's one
+    # private IP in the access range. The IP stays with the subnet when it is
+    # unpinned or moved, so clients never have to change it.
+    proxy_runner_id = Column(Integer, ForeignKey("proxy_runners.id", ondelete="SET NULL"), nullable=True, index=True)
+    fast_path_ip = Column(String(64), nullable=True, unique=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     ip_addresses = relationship("IPAddress", back_populates="subnet", cascade="all, delete-orphan")
     location = relationship("Location", lazy="joined")
+    proxy_runner = relationship("ProxyRunner")
 
 
 class IPAddress(Base):
