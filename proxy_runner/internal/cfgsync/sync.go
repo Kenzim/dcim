@@ -10,24 +10,37 @@ import (
 	"time"
 
 	"rackflow/proxy_runner/internal/auth"
+	"rackflow/proxy_runner/internal/fastpath"
 )
+
+// FastPathSink receives the fast_path part of the config.
+type FastPathSink interface {
+	// Apply is called with the fast-path config whenever the version changes;
+	// an absent fast_path key is passed as a config with no tenants.
+	Apply(fastpath.Config)
+	// Retry is called on every poll whose version did not change.
+	Retry()
+}
 
 type Config struct {
 	BaseURL  string
 	APIKey   string
 	Interval time.Duration
 	Client   *http.Client
+	// FastPath, when set, receives the fast_path part of each new config.
+	FastPath FastPathSink
 }
 
 type configResponse struct {
-	Version    string `json:"version"`
-	RunnerID   int    `json:"runner_id"`
+	Version     string `json:"version"`
+	RunnerID    int    `json:"runner_id"`
 	Assignments []struct {
 		ServiceID int    `json:"service_id"`
 		BindIP    string `json:"bind_ip"`
 		Username  string `json:"username"`
 		Password  string `json:"password"`
 	} `json:"assignments"`
+	FastPath *fastpath.Config `json:"fast_path"`
 }
 
 // Loop polls Rackflow until ctx is cancelled.
@@ -106,7 +119,17 @@ func Once(ctx context.Context, store *auth.Store, cfg Config) error {
 	}
 	version := data.Version
 	if version == store.Version() {
+		if cfg.FastPath != nil {
+			cfg.FastPath.Retry()
+		}
 		return nil
+	}
+	if cfg.FastPath != nil {
+		fast := fastpath.Config{}
+		if data.FastPath != nil {
+			fast = *data.FastPath
+		}
+		cfg.FastPath.Apply(fast)
 	}
 	rows := make([]auth.Entry, 0, len(data.Assignments))
 	for _, a := range data.Assignments {

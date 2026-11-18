@@ -334,7 +334,8 @@ def runner_settings(node: StorageNode) -> dict:
 
 def runner_users(tenant: StorageTenant, tenant_state: str, node: StorageNode) -> List[dict]:
     """Logins served for a tenant: only while it is active on a node with SFTP on."""
-    if tenant_state != "active" or not node.sftp_enabled:
+    # Logins carry the service ID, so a tenant without one must not serve any.
+    if tenant_state != "active" or not node.sftp_enabled or tenant.service_id is None:
         return []
     out = []
     for user in tenant.sftp_users:

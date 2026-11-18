@@ -22,7 +22,7 @@ from app.dao.network_port_dao import NetworkPortDAO
 from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.storage_dao import StorageDAO
-from app.models.private_network import AttachmentState, PrivateNetworkAttachment, PrivateNetworkStatus
+from app.models.private_network import AttachmentState, NetworkKind, PrivateNetworkAttachment, PrivateNetworkStatus
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.models.storage import SftpAccess, ShareState, StorageNode, StorageShare, StorageTenant, VlanMode
 from app.services import storage_sftp
@@ -391,6 +391,8 @@ class StorageService:
             raise StorageError("Private network not found", 404)
         if network.status != PrivateNetworkStatus.ACTIVE:
             raise StorageError("This network is being deleted", 409)
+        if network.kind != NetworkKind.STANDARD:
+            raise StorageError("Storage cannot be linked to a proxy access network", 409)
         if tenant.location_id is not None and network.location_id != tenant.location_id:
             raise StorageError("This storage was ordered for another location than the network's", 409)
         if StorageDAO.get_tenant_for_network(db, network.id) is not None:

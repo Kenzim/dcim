@@ -160,8 +160,21 @@ func (g *Gateway) SetUsers(users []User, settings Settings) {
 		settings.Ban = DefaultBan
 	}
 	table := make(map[string]User, len(users))
+	dup := map[string]bool{}
 	for _, u := range users {
+		if _, ok := table[u.Username]; ok {
+			dup[u.Username] = true
+		}
 		table[u.Username] = u
+	}
+	// A username claimed twice could route to the wrong tenant: refuse it.
+	for name := range dup {
+		delete(table, name)
+		g.Logf("sftp: login %s is listed more than once; refusing it", name)
+	}
+	users = users[:0:0]
+	for _, u := range table {
+		users = append(users, u)
 	}
 	creds := map[int64]string{}
 	for _, u := range users {

@@ -13,8 +13,8 @@ from app.dao.location_dao import LocationDAO
 from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
-from app.models.private_network import PrivateNetwork, PrivateNetworkAttachment, PrivateNetworkPool
 from app.dao.storage_dao import StorageDAO
+from app.models.private_network import NetworkKind, PrivateNetwork, PrivateNetworkAttachment, PrivateNetworkPool
 from app.models.service import ServiceStatus, ServiceType
 from app.services.storage_service import StorageService
 from app.services.private_network_service import (
@@ -27,6 +27,7 @@ from app.services.private_network_service import (
     storage_endpoint_ip,
     validate_pool_range,
 )
+from app.services.proxy_fast_path import FastPathError, ProxyAccessService
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -52,6 +53,8 @@ class PoolCreate(BaseModel):
     max_networks_per_client: int = Field(5, ge=0, le=1000)
     max_networks_per_service: int = Field(4, ge=1, le=16)
     reserved_cidrs: List[str] = Field(default_factory=list, max_length=256)
+    proxy_access_enabled: bool = False
+    proxy_access_requires_product: bool = False
 
 
 class PoolUpdate(BaseModel):
@@ -62,6 +65,8 @@ class PoolUpdate(BaseModel):
     max_networks_per_client: Optional[int] = Field(None, ge=0, le=1000)
     max_networks_per_service: Optional[int] = Field(None, ge=1, le=16)
     reserved_cidrs: Optional[List[str]] = Field(None, max_length=256)
+    proxy_access_enabled: Optional[bool] = None
+    proxy_access_requires_product: Optional[bool] = None
 
 
 class PoolResponse(BaseModel):
@@ -75,6 +80,8 @@ class PoolResponse(BaseModel):
     max_networks_per_client: int
     max_networks_per_service: int
     reserved_cidrs: List[str] = []
+    proxy_access_enabled: bool = False
+    proxy_access_requires_product: bool = False
     networks_in_use: int
     capacity: int
 
@@ -82,8 +89,15 @@ class PoolResponse(BaseModel):
 class AdminNetworkCreate(BaseModel):
     owner_user_id: int
     location_id: int
-    name: str = Field(..., min_length=1, max_length=64)
+    # Required for standard networks; proxy access networks are always named "Proxy fast path".
+    name: Optional[str] = Field(None, max_length=64)
     cidr: Optional[str] = None
+    # proxy_access: turn the client's proxy fast path on (fixed range, no product check).
+    kind: NetworkKind = NetworkKind.STANDARD
+
+
+class FastPathToggle(BaseModel):
+    location_id: int
 
 
 class ClientNetworkCreate(BaseModel):
@@ -102,6 +116,9 @@ class AttachmentResponse(BaseModel):
     service_id: Optional[int] = None
     service_name: Optional[str] = None
     service_type: Optional[str] = None
+    # Staff only: set when the attachment is a proxy runner (proxy access networks).
+    proxy_runner_id: Optional[int] = None
+    proxy_runner_name: Optional[str] = None
     ip_address: Optional[str] = None
     prefix_length: int
     mac_address: Optional[str] = None
@@ -120,6 +137,7 @@ class NetworkResponse(BaseModel):
     segmentation_type: str
     vlan_id: int
     cidr: str
+    kind: str = NetworkKind.STANDARD.value
     # The last usable address, kept for the network's storage endpoint.
     storage_endpoint_ip: str
     status: str
@@ -172,6 +190,8 @@ def _pool_out(db: Session, pool: PrivateNetworkPool) -> PoolResponse:
         max_networks_per_client=pool.max_networks_per_client,
         max_networks_per_service=pool.max_networks_per_service,
         reserved_cidrs=list(pool.reserved_cidrs or []),
+        proxy_access_enabled=bool(pool.proxy_access_enabled),
+        proxy_access_requires_product=bool(pool.proxy_access_requires_product),
         networks_in_use=PrivateNetworkDAO.count_for_location(db, pool.location_id),
         capacity=pool.vlan_end - pool.vlan_start + 1,
     )
@@ -181,8 +201,11 @@ def _attachment_out(
     attachment: PrivateNetworkAttachment, prefix_length: int, *, staff: bool
 ) -> AttachmentResponse:
     service = attachment.service
+    runner = attachment.proxy_runner if staff else None
     return AttachmentResponse(
         id=attachment.id,
+        proxy_runner_id=runner.id if runner else None,
+        proxy_runner_name=runner.name if runner else None,
         service_id=attachment.service_id,
         service_name=service.name if service else None,
         service_type=service.service_type.value if service else None,
@@ -199,7 +222,11 @@ def _attachment_out(
 def _network_out(network: PrivateNetwork, *, staff: bool) -> NetworkResponse:
     prefix_length = ipaddress.ip_network(network.cidr).prefixlen
     owner = network.owner_user if staff else None
+    access = network.kind == NetworkKind.PROXY_ACCESS
+    # Clients see their own servers only, never the proxy runners in the network.
+    attachments = [a for a in network.attachments if staff or a.proxy_runner_id is None]
     return NetworkResponse(
+        kind=(network.kind or NetworkKind.STANDARD).value,
         id=network.id,
         name=network.name,
         location_id=network.location_id,
@@ -207,10 +234,10 @@ def _network_out(network: PrivateNetwork, *, staff: bool) -> NetworkResponse:
         segmentation_type=network.segmentation_type.value,
         vlan_id=network.segment_id,
         cidr=network.cidr,
-        storage_endpoint_ip=storage_endpoint_ip(network.cidr),
+        storage_endpoint_ip="" if access else storage_endpoint_ip(network.cidr),
         status=network.status.value,
         created_at=network.created_at,
-        attachments=[_attachment_out(a, prefix_length, staff=staff) for a in network.attachments],
+        attachments=[_attachment_out(a, prefix_length, staff=staff) for a in attachments],
         owner_user_id=network.owner_user_id if staff else None,
         owner_username=owner.username if owner else None,
         switch_synced=network.switch_synced if staff else None,
@@ -230,6 +257,10 @@ def _attachment_of(network: PrivateNetwork, attachment_id: int) -> PrivateNetwor
         if attachment.id == attachment_id:
             return attachment
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+
+
+def _raise_fast_path(exc: FastPathError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 
 async def _attach(db: Session, network: PrivateNetwork, body: AttachBody, *, staff: bool) -> NetworkResponse:
@@ -324,12 +355,20 @@ async def admin_create_network(data: AdminNetworkCreate, auth: AdminDep, db: DbD
     """Create a network for a client. The per-client limit does not apply to staff."""
     if UserDAO.get_by_id(db, data.owner_user_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if data.kind == NetworkKind.PROXY_ACCESS:
+        try:
+            network = await ProxyAccessService.enable(
+                db, owner_user_id=data.owner_user_id, location_id=data.location_id, check_entitlement=False
+            )
+        except FastPathError as exc:
+            _raise_fast_path(exc)
+        return _network_out(network, staff=True)
     try:
         network = await PrivateNetworkService.create_network(
             db,
             owner_user_id=data.owner_user_id,
             location_id=data.location_id,
-            name=data.name,
+            name=data.name or "",
             cidr=data.cidr,
             enforce_limit=False,
         )
@@ -431,7 +470,11 @@ async def client_options(auth: UserDep, db: DbDep):
     # Only locations where the client has something to connect: a server,
     # storage (which needs a network even with no servers), or a network already.
     wanted = {option.location_id for option in services}
-    wanted |= {network.location_id for network in PrivateNetworkDAO.list_networks(db, owner_user_id=user_id)}
+    wanted |= {
+        network.location_id
+        for network in PrivateNetworkDAO.list_networks(db, owner_user_id=user_id)
+        if network.kind == NetworkKind.STANDARD
+    }
     wanted |= _storage_location_ids(db, user_id)
     locations = [
         ClientLocationOption(
@@ -466,6 +509,33 @@ def _storage_location_ids(db, user_id: int) -> set:
             offered = StorageService.storage_location_ids(db) if offered is None else offered
             out |= offered
     return out
+
+
+@client_router.get("/fast-path")
+async def client_fast_path(auth: UserDep, db: DbDep):
+    """Proxy fast path: where it is offered, where it is on, and the private address of each proxy IP."""
+    return ProxyAccessService.overview(db, _client_user_id(auth))
+
+
+@client_router.post("/fast-path")
+async def client_fast_path_on(data: FastPathToggle, auth: UserDep, db: DbDep):
+    user_id = _client_user_id(auth)
+    try:
+        await ProxyAccessService.enable(db, owner_user_id=user_id, location_id=data.location_id)
+    except FastPathError as exc:
+        _raise_fast_path(exc)
+    return ProxyAccessService.overview(db, user_id)
+
+
+@client_router.delete("/fast-path/{location_id}")
+async def client_fast_path_off(location_id: int, auth: UserDep, db: DbDep):
+    user_id = _client_user_id(auth)
+    try:
+        await ProxyAccessService.disable(db, owner_user_id=user_id, location_id=location_id)
+    except FastPathError as exc:
+        _raise_fast_path(exc)
+    db.expire_all()
+    return ProxyAccessService.overview(db, user_id)
 
 
 @client_router.post("", response_model=NetworkResponse, status_code=status.HTTP_201_CREATED)
@@ -503,4 +573,7 @@ async def client_attach(network_id: int, body: AttachBody, auth: UserDep, db: Db
 @client_router.delete("/{network_id}/attachments/{attachment_id}", response_model=NetworkResponse)
 async def client_detach(network_id: int, attachment_id: int, auth: UserDep, db: DbDep):
     network = _client_network(db, network_id, _client_user_id(auth))
+    attachment = _attachment_of(network, attachment_id)
+    if attachment.proxy_runner_id is not None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found")
     return await _detach(db, network, attachment_id, staff=False)

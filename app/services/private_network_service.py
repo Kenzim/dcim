@@ -22,14 +22,17 @@ from app.dao.server_dao import ServerDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.storage_dao import StorageDAO
 from app.models.storage import VlanMode
+from app.core.config import settings
 from app.models.private_network import (
     AttachmentState,
+    NetworkKind,
     PrivateNetwork,
     PrivateNetworkAttachment,
     PrivateNetworkPool,
     PrivateNetworkStatus,
     SegmentationType,
 )
+from app.models.proxy_runner import ProxyRunnerVlanMode
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.plugins.switch_registry import get_switch_registry
 from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
@@ -42,8 +45,12 @@ DEFAULT_CIDR = "10.0.0.0/24"
 MIN_PREFIX, MAX_PREFIX = 16, 29
 # Never usable for a client network, whatever the location's settings.
 ALWAYS_REFUSED = tuple(
-    ipaddress.ip_network(cidr) for cidr in ("0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4")
+    ipaddress.ip_network(cidr)
+    for cidr in ("0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", settings.proxy_access_cidr)
 )
+# Proxy access networks: the first /20 of the fixed range holds the proxy
+# subnets' private IPs; client servers are numbered after it.
+PROXY_SUBNET_IP_PREFIX = 20
 _RANGE_UNAVAILABLE = "This address range is not available, please choose another"
 ATTACHABLE_TYPES = (ServiceType.VM, ServiceType.BARE_METAL)
 # NX-OS keeps 3968-4094 for itself, and 1 is the default VLAN.
@@ -111,6 +118,15 @@ def check_reserved_overlap(network: ipaddress.IPv4Network, pool: PrivateNetworkP
             raise PrivateNetworkError(_RANGE_UNAVAILABLE)
 
 
+def proxy_access_network() -> ipaddress.IPv4Network:
+    return ipaddress.ip_network(settings.proxy_access_cidr)
+
+
+def proxy_subnet_ip_block() -> ipaddress.IPv4Network:
+    """The part of the access range kept for proxy subnet private IPs."""
+    return next(proxy_access_network().subnets(new_prefix=PROXY_SUBNET_IP_PREFIX))
+
+
 def storage_endpoint_ip(cidr: str) -> str:
     """The address every network keeps for its storage endpoint: the last usable one."""
     network = ipaddress.ip_network(cidr)
@@ -134,6 +150,8 @@ def service_location_id(db: Session, service: Service) -> Optional[int]:
 
 
 def _pick_ip(network: PrivateNetwork, requested: Optional[str]) -> str:
+    if network.kind == NetworkKind.PROXY_ACCESS:
+        return _pick_access_ip(network, requested)
     cidr = ipaddress.ip_network(network.cidr)
     endpoint = storage_endpoint_ip(network.cidr)
     used = {a.ip_address for a in network.attachments if a.ip_address} | {endpoint}
@@ -155,6 +173,33 @@ def _pick_ip(network: PrivateNetwork, requested: Optional[str]) -> str:
     for host in cidr.hosts():
         if str(host) not in used:
             return str(host)
+    raise PrivateNetworkError("This network has no free addresses left", status_code=409)
+
+
+def _pick_access_ip(network: PrivateNetwork, requested: Optional[str]) -> str:
+    """A client server address in a proxy access network: never in the proxy subnet block."""
+    cidr = ipaddress.ip_network(network.cidr)
+    reserved = proxy_subnet_ip_block()
+    used = {a.ip_address for a in network.attachments if a.ip_address}
+    if requested:
+        try:
+            address = ipaddress.ip_address(requested.strip())
+        except ValueError:
+            raise PrivateNetworkError("IP address is not valid") from None
+        if address not in cidr or address in reserved or address == cidr.broadcast_address:
+            raise PrivateNetworkError(
+                f"IP address must be inside {network.cidr} and not in {reserved}, which is kept for proxies"
+            )
+        if str(address) in used:
+            raise PrivateNetworkError("IP address is already used in this network", status_code=409)
+        return str(address)
+    # Start at .16.1 rather than .16.0, which some client tools treat as a network address.
+    first = int(reserved.broadcast_address) + 2
+    last = int(cidr.broadcast_address) - 1
+    for value in range(first, last + 1):
+        candidate = str(ipaddress.IPv4Address(value))
+        if candidate not in used:
+            return candidate
     raise PrivateNetworkError("This network has no free addresses left", status_code=409)
 
 
@@ -298,22 +343,29 @@ class PrivateNetworkService:
         name: str,
         cidr: Optional[str] = None,
         enforce_limit: bool = True,
+        kind: NetworkKind = NetworkKind.STANDARD,
     ) -> PrivateNetwork:
+        """Create a network. ``proxy_access`` networks are made by ``ProxyAccessService`` only."""
         clean_name = (name or "").strip()
         if not 1 <= len(clean_name) <= 64:
             raise PrivateNetworkError("Name must be between 1 and 64 characters")
-        network_cidr = parse_cidr(cidr)
+        access = kind == NetworkKind.PROXY_ACCESS
+        network_cidr = proxy_access_network() if access else parse_cidr(cidr)
 
         pool = PrivateNetworkDAO.get_pool_for_location(db, location_id, for_update=True)
         if pool is None or not pool.enabled:
             db.rollback()
             raise PrivateNetworkError("Private networks are not available in this location", status_code=409)
+        if access and PrivateNetworkDAO.get_access_network(db, owner_user_id, location_id) is not None:
+            db.rollback()
+            raise PrivateNetworkError("The proxy fast path is already on in this location", status_code=409)
         try:
-            check_reserved_overlap(network_cidr, pool)
+            if not access:
+                check_reserved_overlap(network_cidr, pool)
         except PrivateNetworkError:
             db.rollback()
             raise
-        if enforce_limit and (
+        if enforce_limit and not access and (
             PrivateNetworkDAO.count_for_owner(db, owner_user_id, location_id) >= pool.max_networks_per_client
         ):
             db.rollback()
@@ -334,6 +386,7 @@ class PrivateNetworkService:
             segmentation_type=SegmentationType.VLAN,
             segment_id=segment_id,
             cidr=str(network_cidr),
+            kind=kind,
             status=PrivateNetworkStatus.ACTIVE,
             switch_synced=False,
         )
@@ -398,10 +451,16 @@ class PrivateNetworkService:
                 raise PrivateNetworkError(
                     "Storage is linked to this network; terminate the storage service first", status_code=409
                 )
-            if network.attachments:
+            if any(a.proxy_runner_id is None for a in network.attachments):
                 raise PrivateNetworkError("Detach every service before deleting the network", status_code=409)
             network.status = PrivateNetworkStatus.DELETING
             PrivateNetworkDAO.save(db, network)
+            # Proxy runners left in a proxy access network leave with it.
+            for attachment in list(network.attachments):
+                await PrivateNetworkService._detach_locked(db, attachment)
+            db.expire(network)
+            if network.attachments:
+                return
             await PrivateNetworkService._finish_delete(db, network, skip_switches=skip_switches)
 
     @staticmethod
@@ -499,6 +558,8 @@ class PrivateNetworkService:
             network = PrivateNetworkService._require_network(db, network_id)
             if network.status != PrivateNetworkStatus.ACTIVE:
                 raise PrivateNetworkError("This network is being deleted", status_code=409)
+            if network.kind == NetworkKind.PROXY_ACCESS:
+                raise PrivateNetworkError("Storage cannot be linked to a proxy access network", status_code=409)
             service = ServiceDAO.get_by_id(db, service_id)
             if service is None or service.service_type != ServiceType.NFS_STORAGE:
                 raise PrivateNetworkError("Service not found", status_code=404)
@@ -599,6 +660,9 @@ class PrivateNetworkService:
         """Make the VM or the switch ports carry the network. Safe to repeat."""
         network = attachment.network
         service = attachment.service
+        if service is None and attachment.proxy_runner_id is not None:
+            await PrivateNetworkService._apply_runner(db, attachment)
+            return
         if service.service_type == ServiceType.VM:
             pool = PrivateNetworkDAO.get_pool_for_location(db, network.location_id)
             if pool is None:
@@ -627,6 +691,24 @@ class PrivateNetworkService:
             current_server_id = service.bare_metal.server_id if service.bare_metal else None
         if current_server_id is None:
             raise PrivateNetworkError("The service has no server assigned")
+        await PrivateNetworkService._trunk_on_server(db, attachment, current_server_id)
+
+    @staticmethod
+    async def _apply_runner(db: Session, attachment: PrivateNetworkAttachment) -> None:
+        """A proxy runner's membership: trunk the VLAN on its server in ``switch`` mode, else nothing."""
+        runner = attachment.proxy_runner
+        if runner.vlan_mode == ProxyRunnerVlanMode.SWITCH and runner.server_id is not None:
+            await PrivateNetworkService._trunk_on_server(db, attachment, runner.server_id)
+            return
+        if attachment.server_id:
+            # The runner moved to preconfigured mode or lost its server.
+            await PrivateNetworkService._remove_from_server(db, attachment.server_id, attachment.network)
+            attachment.server_id = None
+            PrivateNetworkDAO.save(db, attachment)
+
+    @staticmethod
+    async def _trunk_on_server(db: Session, attachment: PrivateNetworkAttachment, current_server_id: int) -> None:
+        network = attachment.network
         if attachment.server_id and attachment.server_id != current_server_id:
             # The service moved to another server: clean the old one first.
             await PrivateNetworkService._remove_from_server(db, attachment.server_id, network)
@@ -650,7 +732,10 @@ class PrivateNetworkService:
         network = attachment.network
         service = attachment.service
         if attachment.server_id:
-            storage = service is None or service.service_type == ServiceType.NFS_STORAGE
+            if service is None and attachment.proxy_runner_id is not None:
+                storage = False
+            else:
+                storage = service is None or service.service_type == ServiceType.NFS_STORAGE
             if storage and _storage_vlans_preconfigured(db, attachment.server_id):
                 # Staff trunk this node's VLANs by hand; nothing to undo here.
                 return
@@ -707,7 +792,16 @@ class PrivateNetworkService:
                 if attachment is None:
                     continue
                 service = attachment.service
-                gone = service is None or service.status == ServiceStatus.TERMINATED
+                if service is None:
+                    # A proxy runner stays while it exists and is in the network's location.
+                    runner = attachment.proxy_runner
+                    gone = (
+                        runner is None
+                        or runner.location_id != attachment.network.location_id
+                        or attachment.network.status != PrivateNetworkStatus.ACTIVE
+                    )
+                else:
+                    gone = service.status == ServiceStatus.TERMINATED
                 if gone or attachment.state == AttachmentState.DETACHING:
                     ok = await PrivateNetworkService._detach_locked(db, attachment)
                     counts["detached" if ok else "failed"] += 1

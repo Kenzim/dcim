@@ -13,6 +13,7 @@ import (
 
 	"rackflow/proxy_runner/internal/auth"
 	"rackflow/proxy_runner/internal/cfgsync"
+	"rackflow/proxy_runner/internal/fastpath"
 	"rackflow/proxy_runner/internal/proxy"
 )
 
@@ -25,15 +26,29 @@ func main() {
 	dialTimeout := envDuration("DIAL_TIMEOUT", 15*time.Second)
 	idleTimeout := envDuration("IDLE_TIMEOUT", 5*time.Minute)
 
+	// Proxy fast path: off unless the interface carrying client VLANs is named.
+	fastPath := &fastpath.Manager{
+		Parent:      env("FASTPATH_PARENT_IFACE", ""),
+		Cmd:         fastpath.ExecCommander{},
+		Listen:      fastpath.ListenInNetns,
+		DialTimeout: dialTimeout,
+		IdleTimeout: idleTimeout,
+	}
+
 	store := auth.NewStore()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	go cfgsync.Loop(ctx, store, cfgsync.Config{
+	syncCfg := cfgsync.Config{
 		BaseURL:  baseURL,
 		APIKey:   apiKey,
 		Interval: syncInterval,
-	})
+	}
+	if fastPath.Enabled() {
+		syncCfg.FastPath = fastPath
+		log.Printf("proxy fast path enabled on %s", fastPath.Parent)
+	}
+	go cfgsync.Loop(ctx, store, syncCfg)
 
 	srv := &proxy.Server{
 		Listen:      proxyListen,
@@ -49,9 +64,10 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":      true,
-			"version": store.Version(),
-			"entries": store.Len(),
+			"ok":        true,
+			"version":   store.Version(),
+			"entries":   store.Len(),
+			"fast_path": fastPath.Status(),
 		})
 	})
 	healthSrv := &http.Server{Addr: healthListen, Handler: mux}
@@ -66,6 +82,8 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = healthSrv.Shutdown(shutdownCtx)
+	// Tenant namespaces are kept so a restart reuses them.
+	fastPath.Close()
 	_ = srv.Close()
 }
 

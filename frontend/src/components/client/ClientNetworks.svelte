@@ -8,12 +8,16 @@
     clientDeletePrivateNetwork,
     clientAttachPrivateNetwork,
     clientDetachPrivateNetwork,
+    clientFastPath,
+    clientFastPathOn,
+    clientFastPathOff,
   } from '../../lib/api.js';
 
   const STATE_LABELS = { pending: 'Connecting', active: 'Connected', error: 'Being retried', detaching: 'Disconnecting' };
   const emptyCreateForm = () => ({ location_id: '', name: '', cidr: '' });
 
   let networks = [];
+  let fastPath = { cidr: '', locations: [], endpoints: [] };
   let options = { default_cidr: '', locations: [], services: [] };
   let loading = true;
   let working = false;
@@ -47,6 +51,11 @@
   async function load() {
     try {
       [networks, options] = await Promise.all([clientListPrivateNetworks(), clientPrivateNetworkOptions()]);
+      try {
+        fastPath = await clientFastPath();
+      } catch {
+        fastPath = { cidr: '', locations: [], endpoints: [] };
+      }
     } catch (err) {
       error = err.message || 'Failed to load private networks';
     } finally {
@@ -110,6 +119,27 @@
     return run(() => clientDeletePrivateNetwork(network.id), 'Private network deleted.');
   }
 
+  function fastPathOn(loc) {
+    return run(
+      () => clientFastPathOn(loc.location_id),
+      `Proxy fast path on in ${loc.location_name}. Connect your servers to the "Proxy fast path" network below.`,
+    );
+  }
+
+  function fastPathOff(loc) {
+    if (!confirm(`Turn the proxy fast path off in ${loc.location_name}?`)) return null;
+    return run(() => clientFastPathOff(loc.location_id), `Proxy fast path off in ${loc.location_name}.`);
+  }
+
+  async function copy(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      success = 'Copied.';
+    } catch {
+      error = 'Clipboard unavailable';
+    }
+  }
+
   onMount(load);
 </script>
 
@@ -157,6 +187,80 @@
       </div>
     {/if}
 
+    {#if fastPath.locations.length > 0}
+      <div class="panel">
+        <h2>Proxy fast path</h2>
+        <p class="hint">
+          Reach your proxies from your servers over a private network instead of the internet. Your servers get an
+          address in <span class="mono">{fastPath.cidr}</span> and connect to the private address of each proxy with
+          the same username and password; traffic still leaves from the proxy's public IP.
+        </p>
+        <div class="rows">
+          {#each fastPath.locations as loc (loc.location_id)}
+            <div class="row">
+              <div><span>{loc.location_name}</span></div>
+              <div>
+                {#if loc.enabled}
+                  <span class="badge ok">On</span>
+                  <small>{loc.servers_attached} server{loc.servers_attached === 1 ? '' : 's'} connected</small>
+                {:else if loc.status === 'deleting'}
+                  <span class="badge warn">Turning off</span>
+                {:else}
+                  <span class="badge">Off</span>
+                {/if}
+              </div>
+              <div>
+                {#if !loc.available}
+                  <small>No longer offered here</small>
+                {:else if loc.requires_product && !loc.entitled && !loc.enabled}
+                  <small>Needs a plan that includes the fast path</small>
+                {/if}
+              </div>
+              <div class="row-end">
+                {#if loc.enabled}
+                  <button
+                    class="link"
+                    disabled={working || loc.servers_attached > 0}
+                    title={loc.servers_attached > 0 ? 'Disconnect your servers from the network first' : ''}
+                    on:click={() => fastPathOff(loc)}
+                  >Turn off</button>
+                {:else if loc.available && !loc.status && (loc.entitled || !loc.requires_product)}
+                  <Button size="small" disabled={working} on:click={() => fastPathOn(loc)}>Turn on</Button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+        {#if fastPath.endpoints.length > 0}
+          <h3>Private proxy addresses</h3>
+          <div class="rows">
+            {#each fastPath.endpoints as ep (ep.assignment_id)}
+              <div class="row">
+                <div>
+                  <a href={`/client/services/${ep.service_id}`}>{ep.service_name}</a>
+                  <small class="mono">{ep.public_ip}</small>
+                </div>
+                <div>
+                  <span class="mono">{ep.fast_path_ip}:{ep.port}</span>
+                  <small>{ep.location_name}</small>
+                </div>
+                <div>
+                  <span class="badge" class:ok={ep.active}>{ep.active ? 'Ready' : 'Turn on in this location'}</span>
+                </div>
+                <div class="row-end">
+                  <button class="link" on:click={() => copy(`${ep.fast_path_ip}:${ep.port}`)}>Copy</button>
+                </div>
+              </div>
+            {/each}
+          </div>
+          <p class="hint">
+            Proxy IPs in the same subnet share one private address; your username and password pick which public IP
+            is used.
+          </p>
+        {/if}
+      </div>
+    {/if}
+
     {#if networks.length === 0 && !showCreate}
       <div class="empty">
         <h2>No private networks yet</h2>
@@ -180,13 +284,17 @@
             <p>
               {network.location_name} · <span class="mono">{network.cidr}</span> · VLAN
               <span class="mono">{network.vlan_id}</span>
-              {#if network.storage_endpoint_ip}
+              {#if network.kind === 'proxy_access'}
+                · private access to your proxies; <span class="mono">{fastPath.reserved_block || ''}</span> is kept for proxy addresses
+              {:else if network.storage_endpoint_ip}
                 · <span class="mono">{network.storage_endpoint_ip}</span> reserved for storage
               {/if}
             </p>
           </div>
           {#if network.status === 'deleting'}
             <span class="badge warn">Deleting</span>
+          {:else if network.kind === 'proxy_access'}
+            <span class="badge ok">Proxy fast path</span>
           {:else}
             <Button
               variant="danger"

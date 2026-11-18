@@ -248,3 +248,79 @@ async def test_write_key_cannot_remove_power_input(site, db_session, mcp_session
         input_id = summary["inputs"][0]["id"]
         with pytest.raises(ToolError):
             await combined.server_power_inputs(server.id, "remove", input_id=input_id, confirm=True)
+
+
+async def _poll_samples(db_session, pdu_id, minutes=90, power=1000.0):
+    """Store `minutes` of history for a PDU as if it had been polled every minute until now."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.dao.pdu_dao import PduDAO
+    from app.services import power_service
+
+    pdu = PduDAO.get_by_id(db_session, pdu_id)
+    now = datetime.now(timezone.utc)
+    for m in range(minutes, 0, -1):
+        power_service.apply_readings(
+            db_session,
+            pdu,
+            {"inlets": [{"position": 1, "voltage_v": 208.0, "power_w": power, "current_a": power / 208.0}],
+             "banks": [{"name": "A", "current_a": 3.0, "rated_current_a": 16}]},
+            now=now - timedelta(minutes=m),
+        )
+
+
+@pytest.mark.asyncio
+async def test_pdus_history_is_bucketed_and_read_scoped(site, db_session, mcp_sessionlocal):
+    loc, rack = site
+    row = await _make_pdu(loc, rack)
+    await _poll_samples(db_session, row["id"])
+
+    with scoped_key("read"):
+        out = await combined.pdus(pdu_id=row["id"], history_hours=24)
+        assert out["scope"] == "pdu" and out["resolution"] == "raw"
+        assert 1 <= len(out["metrics"]["power_w"]) <= 25  # buckets, not the 90 raw samples
+        assert out["metrics"]["power_w"][0]["value"] == 1000.0
+        assert out["energy"]["method"] == "integrated" and out["energy"]["kwh"] > 0
+        assert out["banks"][0]["rated_current_a"] == 16.0
+
+        week = await combined.pdus(pdu_id=row["id"], history_hours=168)
+        assert week["resolution"] == "5m"
+
+        by_rack = await combined.pdus(rack_id=rack.id, history_hours=24)
+        assert by_rack["scope"] == "rack" and by_rack["metrics"]["power_w"][0]["value"] == 1000.0
+        by_location = await combined.pdus(location_id=loc.id, history_hours=24)
+        assert by_location["scope"] == "location"
+        overall = await combined.pdus(history_hours=24)
+        assert overall["scope"] == "all" and overall["pdu_count"] == 1
+
+        with pytest.raises(ToolError):
+            await combined.pdus(pdu_id=999, history_hours=24)
+        with pytest.raises(ToolError):
+            await combined.pdus(rack_id=rack.id, location_id=loc.id, history_hours=24)
+
+
+@pytest.mark.asyncio
+async def test_feed_rack_and_server_summaries_take_history_hours(site, db_session, mcp_sessionlocal):
+    loc, rack = site
+    row = await _make_pdu(loc, rack)
+    with scoped_key("write"):
+        feed = await combined.power_feeds("create", rack_id=rack.id, name="A1", voltage=208, amperage=30)
+        detail = await combined.pdus(pdu_id=row["id"])
+        await combined.pdu_action(row["id"], "link_inlet", inlet_id=detail["inlets"][0]["id"], power_feed_id=feed["id"])
+    await _poll_samples(db_session, row["id"], minutes=30)
+    server = Server(name="hist-srv", server_ip="10.9.9.11", location_id=loc.id, plugin_name="ipmi", plugin_config={})
+    db_session.add(server)
+    db_session.commit()
+    db_session.refresh(server)
+
+    with scoped_key("read"):
+        feed_out = await combined.power_feeds("list", feed_id=feed["id"], history_hours=24)
+        assert feed_out["history"]["metrics"]["power_w"][0]["value"] == 1000.0
+        assert feed_out["history"]["limits"]["usable_current_a"] == 24.0
+        with pytest.raises(ToolError):
+            await combined.power_feeds("list", rack_id=rack.id, history_hours=24)
+        rack_out = await combined.rack_power_summary(rack.id, history_hours=24)
+        assert "feeds" in rack_out and rack_out["history"]["metrics"]["power_w"][0]["value"] == 1000.0
+        server_out = await combined.server_power_summary(server.id, history_hours=24)
+        assert server_out["history"]["available"] is False and server_out["history"]["reason"]
+        assert "history" not in await combined.server_power_summary(server.id)

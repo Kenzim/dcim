@@ -30,7 +30,7 @@ from app.core.client_permissions import PermissionKey
 from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.storage_dao import StorageDAO
-from app.models.private_network import PrivateNetworkStatus
+from app.models.private_network import NetworkKind, PrivateNetworkStatus
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.services.client_permission_resolver import require_client_permission
 from app.services.storage_service import StorageService
@@ -95,7 +95,7 @@ async def client_linkable_networks(service_id: int, auth: UserDep, db: DbDep):
     node_locations = StorageService.storage_location_ids(db)
     out = []
     for network in PrivateNetworkDAO.list_networks(db, owner_user_id=service.owner_user_id):
-        if network.status != PrivateNetworkStatus.ACTIVE:
+        if network.status != PrivateNetworkStatus.ACTIVE or network.kind != NetworkKind.STANDARD:
             continue
         has_storage = StorageDAO.get_tenant_for_network(db, network.id) is not None
         if has_storage:

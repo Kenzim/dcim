@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"rackflow/proxy_runner/internal/auth"
 )
 
 // handleHTTP serves one or more proxied HTTP requests on conn. Plain
@@ -18,7 +16,7 @@ import (
 // requests over one connection doesn't pay a fresh TCP handshake + fresh
 // upstream dial per request; CONNECT tunnels (used for all HTTPS traffic)
 // take the connection over completely via splice, as before.
-func handleHTTP(conn net.Conn, br *bufio.Reader, first byte, bindIP string, store *auth.Store, dialTimeout, idleTimeout time.Duration) {
+func handleHTTP(conn net.Conn, br *bufio.Reader, first byte, bindIP string, authz Authorizer, dialTimeout, idleTimeout time.Duration) {
 	reader := bufio.NewReader(io.MultiReader(strings.NewReader(string([]byte{first})), br))
 	for {
 		if idleTimeout > 0 {
@@ -28,7 +26,7 @@ func handleHTTP(conn net.Conn, br *bufio.Reader, first byte, bindIP string, stor
 		if err != nil {
 			return
 		}
-		if !serveOneHTTPRequest(conn, req, bindIP, store, dialTimeout, idleTimeout) {
+		if !serveOneHTTPRequest(conn, req, bindIP, authz, dialTimeout, idleTimeout) {
 			return
 		}
 	}
@@ -38,7 +36,7 @@ func handleHTTP(conn net.Conn, br *bufio.Reader, first byte, bindIP string, stor
 // the connection should stay open for another request (HTTP keep-alive),
 // false if the caller should stop (CONNECT tunnel, auth failure, or either
 // side requesting the connection be closed).
-func serveOneHTTPRequest(conn net.Conn, req *http.Request, bindIP string, store *auth.Store, dialTimeout, idleTimeout time.Duration) bool {
+func serveOneHTTPRequest(conn net.Conn, req *http.Request, bindIP string, authz Authorizer, dialTimeout, idleTimeout time.Duration) bool {
 	defer req.Body.Close()
 
 	username, password, ok := parseProxyBasicAuth(req)
@@ -46,11 +44,8 @@ func serveOneHTTPRequest(conn net.Conn, req *http.Request, bindIP string, store 
 		conn.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
 		return false
 	}
-	effectiveBindIP := bindIP
-	if hdr := req.Header.Get("X-Bind-IP"); hdr != "" {
-		effectiveBindIP = hdr
-	}
-	if _, allowed := store.Allow(effectiveBindIP, username, password); !allowed {
+	effectiveBindIP, allowed := authz.Authorize(bindIP, username, password, req.Header.Get("X-Bind-IP"))
+	if !allowed {
 		writeHTTPStatus(conn, http.StatusForbidden, "Forbidden")
 		return false
 	}

@@ -1,7 +1,7 @@
 """add SFTP access to NFS storage: node endpoint, share access mode, SFTP users
 
 Revision ID: add_storage_sftp
-Revises: add_nfs_storage
+Revises: add_proxy_fast_path
 Create Date: 2026-11-18 18:00:00.000000
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision: str = "add_storage_sftp"
-down_revision: Union[str, Sequence[str], None] = "add_nfs_storage"
+down_revision: Union[str, Sequence[str], None] = "add_proxy_fast_path"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

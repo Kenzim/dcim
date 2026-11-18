@@ -556,6 +556,56 @@ button.rf-ca__btn--danger:hover {
       </div>
       {/if}
 
+      {if $rackflow_fast_path_available}
+      <div class="rf-ca__backups" id="rackflow-fast-path">
+        <div class="rf-ca__panel-head rf-ca__panel-head--row">
+          <div>
+            <p class="rf-ca__action-title">Private proxy access</p>
+            <p class="rf-ca__action-help">
+              Reach these proxies from your servers over a private network instead of the internet. Use the same
+              username and password; traffic still leaves from the proxy's public IP. Your servers get an address in
+              <code>{$rackflow_fast_path_cidr|escape}</code> once connected to the "Proxy fast path" network in the portal.
+            </p>
+          </div>
+          {if $rackflow_fast_path_lines}
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-fast-path-copy">Copy addresses</button>
+          {/if}
+        </div>
+        <textarea id="rackflow-fast-path-lines" class="rf-ca__sr-only" readonly aria-hidden="true">{$rackflow_fast_path_lines|escape}</textarea>
+        {foreach from=$rackflow_fast_path_locations item=loc}
+        <div class="rf-ca__action">
+          <div class="rf-ca__action-copy">
+            <p class="rf-ca__action-title">{$loc.location_name|escape}:
+              {if $loc.enabled}On{elseif $loc.status == 'deleting'}Turning off{else}Off{/if}</p>
+            {if $loc.requires_product && !$loc.entitled && !$loc.enabled}
+            <p class="rf-ca__action-help">Needs a plan that includes private proxy access.</p>
+            {/if}
+            {if $loc.enabled && $loc.servers_attached > 0}
+            <p class="rf-ca__action-help">{$loc.servers_attached|escape} server(s) connected. Disconnect them in the portal before turning this off.</p>
+            {/if}
+          </div>
+        </div>
+        {/foreach}
+        {foreach from=$rackflow_fast_path_endpoints item=ep}
+        <div class="rf-ca__action">
+          <div class="rf-ca__action-copy">
+            <p class="rf-ca__action-title"><code>{$ep.fast_path_ip|escape}:{$ep.port|escape}</code></p>
+            <p class="rf-ca__action-help">For <code>{$ep.public_ip|escape}</code>{if !$ep.active} (turn private access on to use it){/if}</p>
+          </div>
+        </div>
+        {/foreach}
+        <div class="rf-ca__proxy-actions">
+          {if $rackflow_fast_path_can_enable}
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" data-rf-fast-path-op="on" data-rf-fast-path-action="{$rackflow_fast_path_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}">Turn private access on</button>
+          {/if}
+          {if $rackflow_fast_path_can_disable}
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" data-rf-fast-path-op="off" data-rf-fast-path-action="{$rackflow_fast_path_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}">Turn private access off</button>
+          {/if}
+          <p class="rf-ca__note" id="rackflow-fast-path-msg" hidden></p>
+        </div>
+      </div>
+      {/if}
+
       {if $rackflow_portal_open_url || $rackflow_ipmi_available || $rackflow_vnc_available || $rackflow_kvm_available || $rackflow_sol_available || $rackflow_virtual_media_available}
       <div class="rf-ca__actions">
         {if $rackflow_portal_open_url}
@@ -970,6 +1020,65 @@ button.rf-ca__btn--danger:hover {
       rfCopyText(linesEl ? linesEl.value : '', proxyCopyBtn, 'Copied');
     });
   }
+
+  var fastPathCopyBtn = document.getElementById('rackflow-fast-path-copy');
+  if (fastPathCopyBtn) {
+    fastPathCopyBtn.addEventListener('click', function () {
+      var linesEl = document.getElementById('rackflow-fast-path-lines');
+      rfCopyText(linesEl ? linesEl.value : '', fastPathCopyBtn, 'Copied');
+    });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-rf-fast-path-op]'), function (btn) {
+    btn.addEventListener('click', function () {
+      var op = btn.getAttribute('data-rf-fast-path-op');
+      if (op === 'off' && !window.confirm('Turn private proxy access off? Your servers lose the private route to these proxies.')) {
+        return;
+      }
+      var url = btn.getAttribute('data-rf-fast-path-action') || '';
+      var sid = btn.getAttribute('data-rf-service-id') || '';
+      var msgEl = document.getElementById('rackflow-fast-path-msg');
+      function setMsg(text, isError) {
+        if (!msgEl) { return; }
+        msgEl.hidden = false;
+        msgEl.textContent = text;
+        msgEl.style.color = isError ? '#b42318' : '#0a7a32';
+      }
+      if (!url || !sid) {
+        setMsg('Action URL missing. Reload the page.', true);
+        return;
+      }
+      btn.disabled = true;
+      setMsg('Working…', false);
+      var body = new URLSearchParams();
+      body.set('serviceid', sid);
+      body.set('op', op);
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: body.toString(),
+        credentials: 'same-origin'
+      }).then(function (res) {
+        return res.json().catch(function () {
+          return { ok: false, error: 'Unexpected response (' + res.status + ')' };
+        });
+      }).then(function (data) {
+        btn.disabled = false;
+        if (data && data.ok) {
+          setMsg((data.message || 'Done.') + ' Reloading…', false);
+          window.setTimeout(function () { window.location.reload(); }, 600);
+          return;
+        }
+        setMsg((data && data.error) ? data.error : 'Request failed.', true);
+      }).catch(function (e) {
+        btn.disabled = false;
+        setMsg(e && e.message ? e.message : 'Request failed.', true);
+      });
+    });
+  });
 
   var proxyRotateBtn = document.getElementById('rackflow-proxy-rotate');
   if (proxyRotateBtn) {

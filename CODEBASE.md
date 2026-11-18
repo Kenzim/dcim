@@ -23,7 +23,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Cabling map (servers, switches, patch panels, cable runs as a graph) | API `app/api/cabling.py` → `app/services/cabling_graph_service.py` → `app/dao/cabling_graph_dao.py`; UI `Cabling.svelte` (Cytoscape.js lazy-loaded, ELK layout in a web worker via `frontend/src/lib/elkLayout.js`) and the port trace strip in `ServerDetail.svelte` |
 | Patch panels and multi-hop cable paths | `app/models/patch_panel.py`, API `app/api/patch_panel.py` → `app/services/patch_panel_service.py` → `app/dao/patch_panel_dao.py`; path tracing through panels in `app/services/cable_trace_service.py`; UI `PatchPanels.svelte`, `PatchPanelDetail.svelte` |
 | LLDP neighbours and the recorded-versus-seen check | Collection `app/plugins/snmpv3.py` (`get_lldp_neighbors`) → `app/services/lldp_collection_service.py` → `switch_lldp_neighbors` table; comparison `app/services/lldp_compare_service.py`; both exposed under `/api/admin/cabling/lldp` |
-| PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py` |
+| PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py`; power history (graphs, kWh, retention) `app/services/power_history_service.py` |
 | Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, switch drivers `app/plugins/nxos.py` and `app/plugins/qnap_qss.py`; setup and limits in `docs/private-networks.md` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
@@ -33,7 +33,8 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | PXE / cloud-init / boot scripts served to bare metal | `app/api/server_interaction.py` |
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
 | DHCP/TFTP/media runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, `media_runner/main.py`, uplink in `runner_common/`, hub in `app/services/runners/` |
-| Proxy runner (IPAM sync) | `proxy_runner/main.py`, API `app/api/runner_proxy.py` |
+| Proxy runner (IPAM sync) | Go runner `proxy_runner/` (see its README), API `app/api/runner_proxy.py` |
+| Proxy fast path (clients reach proxies over a private VLAN) | Design `docs/proxy-fast-path.md`; service `app/services/proxy_fast_path.py` (subnet pinning, `ProxyAccessService`, runner `fast_path` config, client overview); access networks are `PrivateNetwork.kind = proxy_access` in `private_network_service.py`; runner side `proxy_runner/internal/fastpath/` (namespace per client) |
 | NFS storage on private networks (`nfs_storage` services, storage nodes, shares) | Models `app/models/storage.py`, DAO `app/dao/storage_dao.py`, service `app/services/storage_service.py`, provisioning `app/services/provisioning/nfs_storage.py`; API `app/api/storage.py` (staff), `app/api/storage_client.py` (client), `app/api/storage_common.py` (shared shapes), runner API `app/api/runner_storage.py`; MCP `app/mcp/tools/storage.py` and the client `storage` tool; UI `StorageNodes.svelte`, `client/ClientStorage.svelte`, `components/storage/` |
 | Storage runner (per-customer NFS on CephFS) | `storage_runner/internal/reconcile/reconcile.go` (loop), drivers in `storage_runner/internal/{netns,firewall,ceph,ganesha}/`, public SFTP gateway and per-tenant back ends in `storage_runner/internal/sftp/` |
 | Selling storage (WHMCS, store) | `docs/nfs-storage-billing.md`; WHMCS `rackflow_storageClientArea` and `clientarea_storage.tpl`, Module Settings storage panel in `hooks.php` (`storagePanelHtml`) |
@@ -85,7 +86,7 @@ Runners (dhcp_runner/, tftp_runner/, media_runner/, proxy_runner/, storage_runne
 | `tftp_runner/` | Container API that runs `in.tftpd` + WebSocket uplink |
 | `media_runner/` | Per-location ISO library (HTTP range + SMB) + WebSocket uplink |
 | `runner_common/` | Shared protocol/agent used by Python runners |
-| `proxy_runner/` | Sidecar that syncs proxy/IPAM config from Rackflow |
+| `proxy_runner/` | Go HTTP/SOCKS5 proxy runner; syncs proxy/IPAM config from Rackflow and, with `FASTPATH_PARENT_IFACE`, serves the proxy fast path in one network namespace per client |
 | `storage_runner/` | Go agent on storage nodes: one isolated NFS-Ganesha per customer (own netns + VLAN) on erasure-coded CephFS |
 | `os_templates/` | Disk-based OS install templates |
 | `isos/`, `disk_images/`, `tftp/` | Central boot media (ISO catalog fallback); per-location libraries live on media runners |
@@ -132,7 +133,7 @@ All included from `app/main.py` under `/api`.
 | `service_instance.py` | `/api/service-instances` | Legacy DHCP/TFTP HTTP runner registration per location |
 | `runners_admin.py` | `/api/admin/runners` | Unified runner enroll / rotate key / ISO library |
 | `runner_ws.py` | `WS /api/runner/ws` | Runner-initiated uplink |
-| `proxy_runners.py` | `/api/admin/proxy-runners` | Standalone proxy runners (generated key, phone-home health) |
+| `proxy_runners.py` | `/api/admin/proxy-runners` | Standalone proxy runners (generated key, phone-home health, fast path location/server/VLAN mode and hosted subnets) |
 | `proxy_subnet_groups.py` | `/api/admin/proxy-subnet-groups` | Named IPAM subnet pools for proxy catalog auto-assign |
 | `rack.py` | `/api/racks` | Racks + servers-in-rack |
 | `server.py` | `/api/servers` | Servers CRUD, power, boot, capabilities, hardware detection, activity, bandwidth |
@@ -145,6 +146,7 @@ All included from `app/main.py` under `/api`.
 | `cabling.py` | `/api/admin/cabling` | Admin only, never returns `plugin_config` or BMC details, fixed number of queries. `GET /graph?location_id=&rack_id=`: devices (servers, switches, patch panels), racks, ports, cables (`edges`) and end-to-end `paths` through patch panels; devices outside the filter reached by a path come back with `in_scope=false`. `GET /lldp?location_id=&rack_id=`: per switch port, recorded cable versus LLDP neighbour (`match`, `mismatch`, `missing_cable`, `unknown_neighbour`, `no_lldp`, `unmapped_local_port`). `POST /lldp/switches/{id}/refresh` collects LLDP from one switch now |
 | `cable_run.py` | `/api/cable-runs` | Cable runs / cabling |
 | `pdu.py` | `/api/pdus` | PDUs, inlets, outlets, poll, outlet on/off/cycle (guarded) |
+| `power_history.py` | `/api/pdus/{id}/history`, `/api/pdus/{id}/inlets/{inlet}/history`, `/api/power-feeds/{id}/history`, `/api/racks/{id}/power-history`, `/api/servers/{id}/power-history`, `/api/power-history[?location_id=]` | Admin power history: `?hours=` 1 to 9600, raw up to 24 h, 5-minute rollups up to 35 days, hourly beyond |
 | `power_feed.py` | `/api/power-feeds` | Rack power feeds with live usage |
 | `server_power.py` | `/api/servers/{id}/power-inputs` | Server PSUs, outlet links, draw, outlet action |
 | `os_templates.py` | `/api/os-templates` | Scan/list OS templates from disk |
@@ -158,10 +160,10 @@ All included from `app/main.py` under `/api`.
 | `commerce_auth_public.py` | `/api/commerce/auth` | Register, verify email, password reset |
 | `product_catalog.py` | `/api/product-catalog` | Families, products, VM templates, OS profiles, VM config |
 | `proxmox_inventory.py` | `/api/proxmox` | Clusters, sync, inventory, VM plan |
-| `private_networks.py` | `/api/admin/private-networks`, `/api/client/private-networks` | Private network pools, networks, attachments |
+| `private_networks.py` | `/api/admin/private-networks`, `/api/client/private-networks` | Private network pools, networks, attachments; client `/fast-path` (proxy fast path overview, on, off) |
 | `ipam.py` | `/api/ipam` | Subnets, assignments, history |
 | `vm_ip_allocations.py` | `/api/vm-ip-allocations` | Preallocated VM IPs |
-| `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner |
+| `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner (`fast_path` block only for runners with a location whose pool offers the fast path) |
 | `storage.py` | `/api/admin/storage` | Storage nodes (key shown once, VLAN mode and ports, switch port preview) and nfs_storage services with shares |
 | `storage_client.py` | `/api/client/storage` | Client's own storage: link to a private network (or create one on link), share CRUD with SFTP access mode, SFTP users (`/sftp-users`; permission `storage.manage_shares`) |
 | `runner_storage.py` | `/api/runner/storage` | Storage runner: `GET /config` (only that node's tenants), `POST /status`; bearer node key, failed keys rate-limited per IP |
@@ -193,6 +195,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 | Networking gear | `network_switch.py`, `switch_port.py`, `cable_run.py`, `patch_panel.py`, `switch_lldp_neighbor.py`, `switch_bandwidth_sample.py` |
 | Networking gear | `network_switch.py`, `switch_port.py`, `cable_run.py`, `switch_bandwidth_sample.py` |
 | Power | `power_feed.py` (rack feeds), `pdu.py` (`Pdu`, `PduInlet`, `PduOutlet`), `server_power_input.py` (PSUs; new servers get `PSU1`) |
+| Power history | `pdu_sample.py`: raw sample and rollup tables for PDU, inlet, bank and outlet (`SAMPLE_KINDS` describes them); DAO `pdu_sample_dao.py` |
 | Boot / install | `boot_task.py`, `installation_task.py`, `server_capability.py`, `hardware_detection_report.py`, `server_activity.py` |
 | DHCP/TFTP | `dhcp_config.py`, `tftp_config.py`, `service_instance.py` |
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
@@ -222,14 +225,16 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `os_template_service.py` | Scan/load `os_templates/` |
 | `download_token_service.py` | One-time download tokens for boot media |
 | `server_activity_logger.py` | Server activity log writes |
-| `power_service.py` | PDU inlet/outlet generation (`sync_pdu_ports`), readings (`poll_pdu`, `apply_readings`), feed/rack/server aggregation, outlet-control guards |
+| `power_service.py` | PDU inlet/outlet generation (`sync_pdu_ports`), readings (`poll_pdu`, `apply_readings`, which also writes the history sample), feed/rack/server aggregation, outlet-control guards |
+| `power_history_service.py` | PDU power history: `record_samples`, `rollup` (5 min and hourly, re-runnable), `prune`, `run_maintenance` (poller), and the per-scope views (`pdu_history`, `feed_history`, `rack_history`, `location_history`, `server_history`) with kWh from the energy counter or by integrating power |
 | `vm_provisioning_service.py` / `vm_strategy_executor.py` / `vm_os_strategy.py` / `vm_install_type_strategy.py` | VM provision strategies |
 | `provisioning/` | Unified service create (`ProvisioningService.create` + `ProvisionRequest`); used by billing, admin, MCP, reseller, and commerce checkout |
 | `checkout_service.py` | Retail checkout quote/place + fulfillment via `ProvisioningService` |
 | `proxmox_placement.py` / `vmid_allocator.py` / `ip_allocation.py` | Placement, VMID, IP assignment |
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
-| `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair. The last usable address of every network is reserved for storage (`storage_endpoint_ip`); `attach_storage` is the only way it is handed out. Storage attachments trunk the node's `vlan_port_ids` (or the PXE uplink), or make no switch calls in `preconfigured` VLAN mode |
+| `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair. The last usable address of every network is reserved for storage (`storage_endpoint_ip`); `attach_storage` is the only way it is handed out. Storage attachments trunk the node's `vlan_port_ids` (or the PXE uplink), or make no switch calls in `preconfigured` VLAN mode. Proxy access networks (`kind = proxy_access`) always use `settings.proxy_access_cidr` (100.80.0.0/16, refused for normal networks), keep its first /20 for proxy subnet IPs, have no storage address, and also hold proxy runner attachments (`proxy_runner_id`, no service) |
+| `proxy_fast_path.py` | Proxy fast path: `pin_subnet` (subnet to runner, allocates the subnet's private IP once), `ProxyAccessService` (client on/off per location, runners join and leave, `runner_config` builds per-client tenants, `overview` for clients), product flag `proxy_fast_path` for paid offers |
 | `storage_service.py` | NFS storage: node CRUD (including the public SFTP endpoint), placement (least-loaded enabled node in the location), location chosen at order or at link (a network is created on link when none is given), share validation and quotas, terminate and share delete with `storage_destroy_grace_seconds`, combined readiness (attachment applied and runner ready), runner config and status |
 | `storage_sftp.py` | Storage SFTP: users (bcrypt password hashes and public keys only), key and CIDR validation, logins `<name>.<service_id>`, client/staff views, the runner's `sftp`/`sftp_users` config and status. Design: `docs/nfs-storage-sftp.md`; selling and WHMCS setup: `docs/nfs-storage-billing.md` |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
@@ -261,6 +266,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `qnap_qss.py` | QNAP QSW switches (QSS firmware): tagged VLANs per port and the port list over the web UI's `/api/v3` JSON API; VLAN IDs 2 to 4000 |
 | `switch_base.py` / `switch_registry.py` | Switch plugin ABC + registry |
 | `pdu/` | PDU plugins: `base.py` (`PduPlugin`, capabilities metering / outlet_metering / outlet_control), `registry.py` (auto-discovers modules in `pdu/`), `snmp.py` (shared SNMP v1/v2c/v3 client), `manual.py` (unmanaged PDU) |
+
+**Power history:** each successful poll adds one raw row per PDU, inlet, bank and (when `outlet_metering`) outlet. The poller (`run_power_history_cycle`, every `POWER_HISTORY_INTERVAL` s, default 300) rolls raw rows up into 300 s and 3600 s buckets (avg/min/max, energy counter first/last) and deletes rows past `POWER_HISTORY_RAW_RETENTION_DAYS` (7), `POWER_HISTORY_5M_RETENTION_DAYS` (35) and `POWER_HISTORY_1H_RETENTION_DAYS` (396); a tier is only pruned once the next tier has absorbed it (and never the rows of the newest bucket). Each rollup run re-rolls the newest bucket of each tier and only rolls buckets that ended over 2 minutes ago, so a late sample from a manual poll is still counted. Summed totals (rack, feed, location, overall, server) mark a bucket `partial` when fewer series than the scope has reported in it, and the response has `partial: true`; the graphs then show an incomplete-data note. Failed polls write nothing. A server's history comes from its linked metered outlets and says when it cannot be known. MCP: `history_hours` on `pdus`, `power_feeds` (list with `feed_id`), `rack_power_summary` and `server_power_summary` returns about 24 buckets per metric.
 
 **Power model:** rack `PowerFeed` (entered by hand) ← `PduInlet` (1, or 2 on an ATS) of a `Pdu` → `PduOutlet` ← `ServerPowerInput` (a PSU). Latest readings are stored on the PDU, inlets and outlets by the bandwidth poller (`run_pdu_cycle`) or `POST /api/pdus/{id}/poll`. Outlet switching needs a plugin with `outlet_control`, the PDU's `outlet_control_enabled` opt-in (off by default), an unlocked outlet and `confirm=true`; actions are logged to the linked server's activity.
 
@@ -324,6 +331,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/patch-panels/:id` | `PatchPanelDetail.svelte` (dynamic import) |
 | `/admin/pdus` | `Pdus.svelte` |
 | `/admin/pdus/:id` | `PduDetail.svelte` (rack power: `RackPowerPanel.svelte` in `RackView`; server PSUs: `ServerPowerCard.svelte` in `ServerDetail`) |
+| Power history graphs | `PowerHistoryPanel.svelte` (range selector, kWh, charts from a loader and a builder in `lib/powerCharts.js`) is used on `PduDetail`, in `RackPowerPanel` (per feed and per rack, collapsible) and in `ServerPowerCard`; `PowerDrawPanel.svelte` is the dashboard "Power draw" panel beside the traffic panel. Charts: `ui/PowerChart.svelte` wraps `ui/AggregateTrafficChart.svelte`, which takes `format`, `referenceLines` (rated or usable current) and `showBand`; unit formatting is in `lib/powerFormat.js`. |
 | `/admin/racks` | `Racks.svelte` |
 | `/admin/racks/:id` | `RackView.svelte` |
 | `/admin/racks/rows/:locationId/:row` | `RowView.svelte` |
@@ -396,7 +404,7 @@ Heavy libraries used by one page (for example Cytoscape.js on `/admin/cabling`) 
 | Media runner | `media_runner/main.py` | HTTP ISO library + `smbd` share `isos`; enroll via Admin → Runners |
 | Proxy runner | `proxy_runner/cmd/proxy-runner/` | Polls `/api/runner/proxy/config` every 30s (phone-home); register via Admin → Proxy Runners |
 | Storage runner | `storage_runner/cmd/storage-runner/` | Polls `GET /api/runner/storage/config`, reconciles (netns + VLAN + veth per tenant, nftables table `inet rf-storage`, CephFS subvolumes and `client.rf-t<id>` users, podman Ganesha per tenant), posts `POST /api/runner/storage/status`. Never deletes anything not listed with a destroy state; see `storage_runner/README.md` |
-| Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit. Each cycle also stores switch port admin/oper status (`status_updated_at`); LLDP neighbours are collected every `--lldp-interval` seconds (default 600, `0` turns it off) |
+| Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit. Each cycle also stores switch port admin/oper status (`status_updated_at`); LLDP neighbours are collected every `--lldp-interval` seconds (default 600, `0` turns it off); PDU history is rolled up and pruned every `--power-history-interval` seconds (default 300, `0` turns it off) |
 
 Python runners dial `WS /api/runner/ws` when `RACKFLOW_URL` and `API_KEY` are set. Legacy HTTP `ServiceInstance.base_url` still works if no uplink is connected. App env `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` remains for in-cluster HTTP control — see `INSTALL.md`.
 
@@ -455,7 +463,7 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 
 Run: `pytest` (see `pytest.ini`).
 
-Go runners: `cd proxy_runner && go test ./...`; `cd storage_runner && go test -race ./...` (fakes only). The storage runner's kernel-level checks are behind the `sandbox` build tag and run in a throwaway namespace (see `storage_runner/README.md`).
+Go runners: `cd proxy_runner && go test -race ./...` (fast path kernel check: `-tags sandbox`, see `proxy_runner/README.md`); `cd storage_runner && go test -race ./...` (fakes only). The storage runner's kernel-level checks are behind the `sandbox` build tag and run in a throwaway namespace (see `storage_runner/README.md`).
 
 ---
 

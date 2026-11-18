@@ -286,6 +286,8 @@ from app.api import pdu as pdu_api
 api_router.include_router(pdu_api.router, prefix="/pdus", tags=["pdus"])
 from app.api import power_feed as power_feed_api
 api_router.include_router(power_feed_api.router, prefix="/power-feeds", tags=["power-feeds"])
+from app.api import power_history as power_history_api
+api_router.include_router(power_history_api.router, tags=["power-history"])
 
 # Include server routes
 from app.api import server as server_api

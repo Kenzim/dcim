@@ -34,7 +34,11 @@ Dedicated servers also need what Rackflow already records: a port marked as the 
 
 An admin can create a network for a client beyond the per-client limit.
 
-Every network keeps its last usable address (for example `.254` on a /24) for an NFS storage endpoint; it is never given to a VM or dedicated server. Client ranges may not overlap 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4 or the pool's admin-only **reserved ranges** (`reserved_cidrs`); the client is only told the range is not available.
+Every network keeps its last usable address (for example `.254` on a /24) for an NFS storage endpoint; it is never given to a VM or dedicated server. Client ranges may not overlap 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, the proxy access range (`100.80.0.0/16`, see below) or the pool's admin-only **reserved ranges** (`reserved_cidrs`); the client is only told the range is not available.
+
+## Proxy fast path
+
+A pool can offer the **proxy fast path** (`proxy_access_enabled`, optionally sold with `proxy_access_requires_product`). A client then turns on one proxy access network per location: a normal VLAN from the pool, but always `100.80.0.0/16`, outside the client's network limit, joined automatically by every proxy runner in the location and never linked to storage. Client servers attach as usual and get addresses from `100.80.16.1` up; `100.80.0.0/20` holds the private IPs of the proxy subnets. Full design and rollout: `docs/proxy-fast-path.md`.
 
 ## NFS storage
 

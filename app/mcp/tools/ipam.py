@@ -14,6 +14,7 @@ from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 from app.models.service import ServiceType
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
+from app.services.proxy_fast_path import FastPathError, pin_subnet
 
 
 async def list_subnets() -> dict:
@@ -145,12 +146,16 @@ async def update_subnet(
     location_id: Optional[int] = None,
     clear_location: bool = False,
     max_resale_count: Optional[int] = None,
+    proxy_runner_id: Optional[int] = None,
+    clear_proxy_runner: bool = False,
 ) -> dict:
-    """Update a subnet's name, enabled flag, allocation strategy, location or resale count."""
+    """Update a subnet's name, enabled flag, allocation strategy, location, resale count or fast path runner."""
 
     def work(db, ctx):
         if clear_location and location_id is not None:
             raise ValueError("Pass location_id or clear_location, not both")
+        if clear_proxy_runner and proxy_runner_id is not None:
+            raise ValueError("Pass proxy_runner_id or clear_proxy_runner, not both")
         _require_location(db, location_id)
         subnet = IPAMDAO.update_subnet(
             db,
@@ -164,6 +169,11 @@ async def update_subnet(
         )
         if not subnet:
             raise ValueError("Subnet not found")
+        if proxy_runner_id is not None or clear_proxy_runner:
+            try:
+                subnet = pin_subnet(db, subnet, None if clear_proxy_runner else proxy_runner_id)
+            except FastPathError as exc:
+                raise ValueError(exc.message) from exc
         return _subnet_payload(subnet, db)
 
     return await run_tool(
@@ -178,6 +188,8 @@ async def update_subnet(
             "location_id": location_id,
             "clear_location": clear_location,
             "max_resale_count": max_resale_count,
+            "proxy_runner_id": proxy_runner_id,
+            "clear_proxy_runner": clear_proxy_runner,
         },
     )
 

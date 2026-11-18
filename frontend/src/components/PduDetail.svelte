@@ -2,6 +2,7 @@
   import PageHeader from './PageHeader.svelte';
   import {
     getPdu,
+    getPduHistory,
     getRacks,
     getPowerFeeds,
     pollPdu,
@@ -13,6 +14,8 @@
   import { navigate } from '../lib/router.js';
   import { formatWatts, formatAmps, formatRelativeTime } from '../lib/power.js';
   import { onMount } from 'svelte';
+  import PowerHistoryPanel from './PowerHistoryPanel.svelte';
+  import { buildPduCharts } from '../lib/powerCharts.js';
 
   export let pduId;
   export let onBack;
@@ -234,6 +237,17 @@
       {#if pdu.last_poll_error}
         <div class="error-message poll-error">Last poll failed: {pdu.last_poll_error}</div>
       {/if}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <PowerHistoryPanel
+        title="Power history"
+        loader={(hours) => getPduHistory(pdu.id, hours)}
+        build={buildPduCharts}
+        reloadKey={pdu.last_polled_at}
+      />
     </div>
   </div>
 

@@ -6,24 +6,58 @@ functions call them directly, as the network tools do for switches.
 
 from typing import Any, Dict, Optional
 
+from fastapi import HTTPException
+
 from app.api import pdu as pdu_api
 from app.api import power_feed as power_feed_api
 from app.api import rack as rack_api
 from app.api import server_power as server_power_api
+from app.dao import LocationDAO, RackDAO, ServerDAO
+from app.dao.pdu_dao import PduDAO, PowerFeedDAO
 from app.mcp.runtime import run_tool
+from app.services import power_history_service as history
+
+# History is returned as a few dozen buckets per metric, never raw rows.
+HISTORY_POINTS = 24
 
 
 def _given(**values: Any) -> Dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
 
 
-async def pdus(location_id: Optional[int] = None, rack_id: Optional[int] = None, pdu_id: Optional[int] = None):
+def _pdu_scope_history(db, location_id: Optional[int], rack_id: Optional[int], pdu_id: Optional[int], hours: int):
+    """History of one PDU, a rack, a location, or all PDUs, depending on which id is given."""
+    if pdu_id is not None:
+        pdu = PduDAO.get_by_id(db, pdu_id)
+        if pdu is None:
+            raise HTTPException(status_code=404, detail="PDU not found")
+        return history.pdu_history(db, pdu, hours, points=HISTORY_POINTS)
+    if rack_id is not None:
+        rack = RackDAO.get_by_id(db, rack_id)
+        if rack is None:
+            raise HTTPException(status_code=404, detail="Rack not found")
+        return history.rack_history(db, rack.id, rack.name, hours, points=HISTORY_POINTS)
+    location = LocationDAO.get_by_id(db, location_id) if location_id is not None else None
+    if location_id is not None and location is None:
+        raise HTTPException(status_code=404, detail="Location not found")
+    return history.location_history(db, location_id, location.name if location else None, hours, points=HISTORY_POINTS)
+
+
+async def pdus(
+    location_id: Optional[int] = None,
+    rack_id: Optional[int] = None,
+    pdu_id: Optional[int] = None,
+    history_hours: Optional[int] = None,
+):
     async def work(db, ctx):
+        if history_hours is not None:
+            return _pdu_scope_history(db, location_id, rack_id, pdu_id, history_hours)
         if pdu_id is not None:
             return await pdu_api.get_pdu(pdu_id=pdu_id, auth={}, db=db)
         return await pdu_api.list_pdus(location_id=location_id, rack_id=rack_id, auth={}, db=db)
 
-    return await run_tool("pdus", "read", work, args=_given(location_id=location_id, rack_id=rack_id, pdu_id=pdu_id))
+    return await run_tool("pdus", "read", work, args=_given(location_id=location_id, rack_id=rack_id, pdu_id=pdu_id, history_hours=history_hours),
+    )
 
 
 async def save_pdu(
@@ -148,13 +182,18 @@ async def outlet_power(
     )
 
 
-async def power_feeds(rack_id: Optional[int] = None, feed_id: Optional[int] = None):
+async def power_feeds(rack_id: Optional[int] = None, feed_id: Optional[int] = None, history_hours: Optional[int] = None):
     async def work(db, ctx):
+        if feed_id is not None and history_hours is not None:
+            feed = await power_feed_api.get_power_feed(feed_id=feed_id, auth={}, db=db)
+            feed_row = PowerFeedDAO.get_by_id(db, feed_id)
+            return {**feed, "history": history.feed_history(db, feed_row, history_hours, points=HISTORY_POINTS)}
         if feed_id is not None:
             return await power_feed_api.get_power_feed(feed_id=feed_id, auth={}, db=db)
         return await power_feed_api.list_power_feeds(rack_id=rack_id, auth={}, db=db)
 
-    return await run_tool("power_feeds", "read", work, args=_given(rack_id=rack_id, feed_id=feed_id))
+    return await run_tool("power_feeds", "read", work, args=_given(rack_id=rack_id, feed_id=feed_id, history_hours=history_hours),
+    )
 
 
 async def save_power_feed(
@@ -208,18 +247,26 @@ async def delete_power_feed(feed_id: int, confirm: bool = False):
     )
 
 
-async def rack_power(rack_id: int):
+async def rack_power(rack_id: int, history_hours: Optional[int] = None):
     async def work(db, ctx):
-        return await rack_api.get_rack_power(rack_id=rack_id, auth={}, db=db)
+        summary = await rack_api.get_rack_power(rack_id=rack_id, auth={}, db=db)
+        if history_hours is None:
+            return summary
+        rack = RackDAO.get_by_id(db, rack_id)
+        return {**summary, "history": history.rack_history(db, rack.id, rack.name, history_hours, points=HISTORY_POINTS)}
 
-    return await run_tool("rack_power", "read", work, args={"rack_id": rack_id})
+    return await run_tool("rack_power", "read", work, args=_given(rack_id=rack_id, history_hours=history_hours))
 
 
-async def server_power(server_id: int):
+async def server_power(server_id: int, history_hours: Optional[int] = None):
     async def work(db, ctx):
-        return await server_power_api.get_server_power(server_id=server_id, auth={}, db=db)
+        summary = await server_power_api.get_server_power(server_id=server_id, auth={}, db=db)
+        if history_hours is None:
+            return summary
+        server = ServerDAO.get_by_id(db, server_id)
+        return {**summary, "history": history.server_history(db, server, history_hours, points=HISTORY_POINTS)}
 
-    return await run_tool("server_power", "read", work, args={"server_id": server_id})
+    return await run_tool("server_power", "read", work, args=_given(server_id=server_id, history_hours=history_hours))
 
 
 async def server_power_inputs(

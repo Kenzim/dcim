@@ -21,6 +21,7 @@ from app.models.switch_lldp_neighbor import SwitchLldpNeighbor
 from app.models.patch_panel import PatchPanel, PatchPanelPort
 from app.models.power_feed import PowerFeed
 from app.models.pdu import Pdu, PduInlet, PduOutlet
+from app.models import pdu_sample  # noqa: F401  (registers the PDU history tables)
 from app.models.server_power_input import ServerPowerInput
 from app.models.server_group import ServerGroup, server_group_association
 from app.models.switch_bandwidth_sample import SwitchBandwidthSample

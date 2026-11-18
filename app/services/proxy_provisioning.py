@@ -18,6 +18,7 @@ from app.dao.proxy_subnet_group_dao import ProxySubnetGroupDAO
 from app.models.ipam import ServiceIPAssignment
 from app.models.service import Service, ServiceStatus
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
+from app.services.proxy_fast_path import assignment_fast_path
 
 DEFAULT_IP_COUNT = 1
 # Sanity cap so a bad catalog default (or client override) can't request an
@@ -62,6 +63,8 @@ def assignment_payload(assignment: ServiceIPAssignment) -> Dict[str, Any]:
         # Compact list format for bulk copy (ip:port:user:pass).
         "endpoint": f"{ip}:{port}:{username}:{password}" if ip and username and password else None,
         "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
+        # Private address of the IP's subnet on the proxy fast path, or None.
+        "fast_path": assignment_fast_path(assignment),
     }
 
 

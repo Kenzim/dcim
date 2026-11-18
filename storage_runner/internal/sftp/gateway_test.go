@@ -356,3 +356,14 @@ func waitErr(wait func() error) error {
 }
 
 func remoteLoopback() netip.Addr { return netip.MustParseAddr("127.0.0.1") }
+
+func TestDuplicateUsernamesAreRefused(t *testing.T) {
+	f := newFixture(t, nil, Settings{MaxFailures: 100})
+	a, _ := ParseUser(7, 65, "web.65", []string{authorizedLine(f.key)}, "", nil)
+	b, _ := ParseUser(8, 66, "web.65", []string{authorizedLine(f.key)}, "", nil)
+	f.g.SetUsers([]User{a, b}, Settings{MaxFailures: 100})
+	if c, err := dial(f.addr, "web.65", ssh.PublicKeys(f.key)); err == nil {
+		c.Close()
+		t.Fatal("a username listed twice was accepted")
+	}
+}

@@ -26,6 +26,13 @@ class SegmentationType(str, enum.Enum):
     VLAN = "vlan"
 
 
+class NetworkKind(str, enum.Enum):
+    """``proxy_access`` networks use the fixed proxy access range and are joined by proxy runners."""
+
+    STANDARD = "standard"
+    PROXY_ACCESS = "proxy_access"
+
+
 class PrivateNetworkStatus(str, enum.Enum):
     ACTIVE = "active"
     DELETING = "deleting"
@@ -63,6 +70,10 @@ class PrivateNetworkPool(Base):
     max_networks_per_service = Column(Integer, nullable=False, default=4)
     # Admin-only list of CIDRs that client networks may not overlap.
     reserved_cidrs = Column(JSON, nullable=True)
+    # Proxy fast path: clients may turn on a proxy access network here, and
+    # optionally only with a product flagged ``proxy_fast_path``.
+    proxy_access_enabled = Column(Boolean, nullable=False, default=False)
+    proxy_access_requires_product = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -82,6 +93,7 @@ class PrivateNetwork(Base):
     segmentation_type = Column(_enum(SegmentationType), nullable=False, default=SegmentationType.VLAN)
     segment_id = Column(Integer, nullable=False)
     cidr = Column(String(32), nullable=False)
+    kind = Column(_enum(NetworkKind), nullable=False, default=NetworkKind.STANDARD, index=True)
     status = Column(_enum(PrivateNetworkStatus), nullable=False, default=PrivateNetworkStatus.ACTIVE, index=True)
     # False until the segment exists on every managed switch in the location.
     switch_synced = Column(Boolean, nullable=False, default=False)
@@ -119,6 +131,10 @@ class PrivateNetworkAttachment(Base):
     service_id = Column(Integer, ForeignKey("services.id", ondelete="SET NULL"), nullable=True, index=True)
     # Dedicated servers only: whose switch ports carry the segment.
     server_id = Column(Integer, ForeignKey("servers.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Proxy access networks only: the attachment is this runner, not a service.
+    proxy_runner_id = Column(
+        Integer, ForeignKey("proxy_runners.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     ip_address = Column(String(45), nullable=True)
     # VMs only: the Proxmox ``netN`` index and the NIC's MAC address.
     vm_net_index = Column(Integer, nullable=True)
@@ -131,3 +147,4 @@ class PrivateNetworkAttachment(Base):
     network = relationship("PrivateNetwork", back_populates="attachments")
     service = relationship("Service")
     server = relationship("Server")
+    proxy_runner = relationship("ProxyRunner")
