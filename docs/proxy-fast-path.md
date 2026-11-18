@@ -112,6 +112,7 @@ The cost is one listening socket and goroutine per client per runner, and the ru
 
 - **Public path (unchanged):** credentials are checked against (the IP the client connected to, username); egress uses that IP. An `X-Bind-IP` header replaces that IP for both the check and the egress, so the header can only select an IP the credentials own.
 - **Fast path:** credentials are checked against the tenant's own table, keyed by (private IP the client connected to, username), with a constant-time password compare. Egress uses the matching assignment's public IP. If the same username and password own several IPs in that subnet, `X-Bind-IP` chooses among them and anything else is refused (`403`); without the header the lowest IP is used. Fast-path credentials are never added to the public store, so a public connection cannot use a private IP, and a tenant's listener never sees another tenant's credentials.
+- **Destinations:** shared address space (`100.64.0.0/10`, which holds the access range) is refused as a proxy destination on both paths, alongside the private and loopback ranges already refused, so no client can proxy into the access range or the runner host's own carrier-grade NAT or overlay addresses.
 
 ## Interfaces
 
@@ -121,8 +122,9 @@ The cost is one listening socket and goroutine per client per runner, and the ru
 | Admin UI, Proxy IPAM | Pin a subnet to a runner (or unpin); shows the private IP |
 | Admin UI, Private Networks | Pool switches for proxy access and "requires product"; access networks are labelled and show runner attachments |
 | Client portal, `/client/networks` | Turn the fast path on or off per location, see the fast-path address of each proxy IP, attach servers as usual |
-| WHMCS proxy client area | Fast-path address per IP, and on or off for the service's locations |
-| Staff MCP | `proxy_runner` (update takes `location_id`, `server_id`, `vlan_mode`; new `fast_path` view), `save_subnet` (`proxy_runner_id`, `clear_proxy_runner`) |
+| WHMCS proxy client area | "Private proxy access" panel: fast-path address per IP, and on or off for the service's locations (`fastpath_action.php`, `rackflow_proxyFastPath*` functions) |
+| Billing API | `GET` and `POST /api/billing/services/{id}/proxy/fast-path` (`{"enabled": true}`), gated by the `proxy.view_credentials` client permission; the status payload's `proxy_assignments[].fast_path` carries each IP's private address |
+| Staff MCP | `proxy_runner` (update takes `location_id`, `server_id`, `vlan_mode` or `clear_placement`; new `fast_path` view with tenants and addresses, never credentials), `save_subnet` (`proxy_runner_id`, `clear_proxy_runner`) |
 | Client MCP | `services` view `fast_path`; `service_action` actions `fast_path_on` and `fast_path_off` (with `location_id`) |
 
 ## Turning it on in a location
