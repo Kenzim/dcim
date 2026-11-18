@@ -24,7 +24,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Patch panels and multi-hop cable paths | `app/models/patch_panel.py`, API `app/api/patch_panel.py` → `app/services/patch_panel_service.py` → `app/dao/patch_panel_dao.py`; path tracing through panels in `app/services/cable_trace_service.py`; UI `PatchPanels.svelte`, `PatchPanelDetail.svelte` |
 | LLDP neighbours and the recorded-versus-seen check | Collection `app/plugins/snmpv3.py` (`get_lldp_neighbors`) → `app/services/lldp_collection_service.py` → `switch_lldp_neighbors` table; comparison `app/services/lldp_compare_service.py`; both exposed under `/api/admin/cabling/lldp` |
 | PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py` |
-| Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, switch driver `app/plugins/nxos.py`; setup and limits in `docs/private-networks.md` |
+| Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, switch drivers `app/plugins/nxos.py` and `app/plugins/qnap_qss.py`; setup and limits in `docs/private-networks.md` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
@@ -256,6 +256,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `proxmox.py` | Proxmox VM provisioning / power |
 | `snmpv3.py` | SNMPv3 switch plugin (ports, bandwidth) |
 | `nxos.py` | Cisco NX-OS switch plugin: VLANs and port trunks over NX-API, monitoring through SNMPv3 |
+| `qnap_qss.py` | QNAP QSW switches (QSS firmware): tagged VLANs per port and the port list over the web UI's `/api/v3` JSON API; VLAN IDs 2 to 4000 |
 | `switch_base.py` / `switch_registry.py` | Switch plugin ABC + registry |
 | `pdu/` | PDU plugins: `base.py` (`PduPlugin`, capabilities metering / outlet_metering / outlet_control), `registry.py` (auto-discovers modules in `pdu/`), `snmp.py` (shared SNMP v1/v2c/v3 client), `manual.py` (unmanaged PDU) |
 

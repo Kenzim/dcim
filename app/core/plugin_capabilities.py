@@ -48,6 +48,7 @@ SERVER_PLUGIN_CAPABILITIES = {
 SWITCH_PLUGIN_CAPABILITIES = {
     "snmpv3": ["monitoring"],
     "nxos": ["monitoring", "vlan_management"],
+    "qnap_qss": ["monitoring", "vlan_management"],
 }
 
 

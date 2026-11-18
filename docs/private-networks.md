@@ -7,7 +7,8 @@ A client can create an isolated layer 2 network in one location and connect thei
 - **Network:** a row in `private_networks` with an owner, a location, a VLAN ID (`segment_id`) and an address range. `segmentation_type` is always `vlan` today; it exists so that another driver (for example VXLAN) can be added without changing the API or the portal.
 - **Virtual machine:** Rackflow adds an extra network card to the VM on the pool's bridge with `tag=<vlan>`, and sets `ipconfigN` so cloud-init can apply the address. The tag is set on the hypervisor, so the client cannot change it.
 - **Dedicated server:** the server's uplink is its PXE port plus any ports in the same LAG group. Rackflow follows the cable runs to the switch ports and adds the VLAN there as tagged. An access port becomes a trunk whose untagged VLAN is the old access VLAN, with an explicit allowed list, so PXE and reinstalls keep working. A port in a port-channel is configured on the port-channel.
-- **VLAN database:** creating a network creates the VLAN (named `pn-<network id>`) on every enabled switch in the location that uses the `nxos` plugin. Deleting the network removes it.
+- **VLAN database:** creating a network creates the VLAN (named `pn-<network id>`) on every enabled switch in the location whose plugin manages VLANs (`nxos` or `qnap_qss`). Deleting the network removes it.
+- **QNAP QSW switches (`qnap_qss`):** QSS has no CLI, so the plugin uses the web interface's JSON API (`https://<switch>/api/v3`) with the switch's admin login. A QSS VLAN cannot exist without ports, so it is created with the first server port and removed with the last. The port keeps its untagged VLAN, and the private network is added tagged. VLAN IDs must be 2 to 4000, the management VLAN and LAG member ports are refused, and each operation logs in and out, so it fails with "busy" while someone is logged into the switch's web page.
 - **Addresses:** Rackflow hands out static addresses inside the network's range. There is no gateway, DHCP or routing.
 
 ## One-off setup per location
@@ -58,7 +59,7 @@ The portal page is `/client/networks`. After connecting a service, the client se
 
 - A port that is already a trunk allowing every VLAN is refused; give it an explicit allowed list first.
 - Switch and hypervisor changes run one at a time inside the single app process (the Docker image starts one uvicorn process). Running several app processes would need a shared lock first.
-- The NX-OS driver is covered by tests with mocked HTTP only; it has not been run against a real switch yet.
+- The NX-OS driver is covered by tests with mocked HTTP only; it has not been run against a real switch yet. The QNAP driver was written from the QSS web interface's own code and is also tested against a mock only.
 - Private traffic on a dedicated server is included in that server's port traffic graph, because the poller counts the whole port.
 - The portal does not configure the operating system on dedicated servers.
 - No WHMCS module changes: WHMCS clients reach the page through portal sign-in.
@@ -72,8 +73,8 @@ The portal page is `/client/networks`. After connecting a service, the client se
 | DAO | `app/dao/private_network_dao.py` |
 | Service | `app/services/private_network_service.py` |
 | API | `app/api/private_networks.py` (`/api/admin/private-networks`, `/api/client/private-networks`) |
-| Switch driver | `app/plugins/nxos.py` |
+| Switch drivers | `app/plugins/nxos.py`, `app/plugins/qnap_qss.py` |
 | Hypervisor | `attach_private_nic` / `detach_private_nic` in `app/plugins/proxmox.py` |
 | Admin UI | `frontend/src/components/PrivateNetworks.svelte` |
 | Client UI | `frontend/src/components/client/ClientNetworks.svelte` |
-| Tests | `tests/services/test_private_network_service.py`, `tests/api/test_private_networks_api.py`, `tests/plugins/test_nxos.py`, `tests/plugins/test_proxmox_private_nic.py` |
+| Tests | `tests/services/test_private_network_service.py`, `tests/api/test_private_networks_api.py`, `tests/plugins/test_nxos.py`, `tests/plugins/test_qnap_qss.py`, `tests/plugins/test_proxmox_private_nic.py` |
