@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -40,6 +41,9 @@ import (
 
 // DefaultDestroyGrace applies when the config does not carry destroy_grace_seconds.
 const DefaultDestroyGrace = 7 * 24 * time.Hour
+
+// maxGraceSeconds is the largest grace that fits a time.Duration.
+const maxGraceSeconds = int64(math.MaxInt64 / int64(time.Second))
 
 var shareNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
@@ -126,6 +130,10 @@ type tenantWork struct {
 	userOK         bool
 	exportsCurrent bool
 	destroyed      bool
+	// hold is set when an existing subvolume could not be described this
+	// pass (invalid share config or failed info). Caps are then never
+	// narrowed and Ganesha is left as it is, so access is not lost.
+	hold bool
 }
 
 func (w *tenantWork) fail(format string, args ...any) {
@@ -384,6 +392,8 @@ func (p *pass) setGrace(s api.Settings) {
 		p.grace, p.graceOK = DefaultDestroyGrace, true
 	case *s.DestroyGraceSeconds < 0:
 		p.nodeErr("destroy_grace_seconds is negative; nothing will be destroyed")
+	case *s.DestroyGraceSeconds > maxGraceSeconds:
+		p.nodeErr("destroy_grace_seconds %d is too large; nothing will be destroyed", *s.DestroyGraceSeconds)
 	default:
 		p.grace, p.graceOK = time.Duration(*s.DestroyGraceSeconds)*time.Second, true
 	}
@@ -619,6 +629,9 @@ func (p *pass) ensureStorage(w *tenantWork) {
 	var access []ceph.Access
 	for _, s := range w.shares {
 		if !s.valid {
+			if p.subvols[s.name] {
+				w.hold = true
+			}
 			continue
 		}
 		switch s.s.State {
@@ -634,6 +647,7 @@ func (p *pass) ensureStorage(w *tenantWork) {
 			info, err := r.Ceph.SubvolumeInfo(p.ctx, s.name)
 			if err != nil {
 				s.err = fmt.Sprintf("subvolume info: %v", err)
+				w.hold = true
 				continue
 			}
 			if info.BytesQuota != s.s.QuotaBytes {
@@ -652,6 +666,9 @@ func (p *pass) ensureStorage(w *tenantWork) {
 			}
 			p.loadInfo(s)
 		}
+	}
+	if w.hold {
+		w.fail("cephx caps and nfs exports left unchanged until every existing share can be applied")
 	}
 	p.ensureUser(w, access)
 }
@@ -686,7 +703,7 @@ func (p *pass) ensureUser(w *tenantWork, access []ceph.Access) {
 		}
 		p.users[entity] = ceph.User{Key: key, Caps: caps}
 		r.logf("tenant %d: created cephx user %s", w.t.ID, entity)
-	case existing.Caps != caps:
+	case existing.Caps != caps && !w.hold:
 		if err := r.Ceph.SetCaps(p.ctx, entity, caps); err != nil {
 			w.fail("update cephx caps: %v", err)
 			return
@@ -794,7 +811,7 @@ func (p *pass) applyNFS(w *tenantWork) {
 		w.exportsCurrent = !running
 		return
 	}
-	if !p.cephOK {
+	if !p.cephOK || w.hold {
 		return
 	}
 	var exports []ganesha.Export
@@ -927,6 +944,12 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 
 	confPath := filepath.Join(confDir, "ganesha.conf")
 	conf := []byte(core + exp)
+	// appliedPath holds the hash of the config Ganesha last loaded; it is
+	// written only after a successful start or reload, so a failed reload is
+	// retried on the next pass.
+	appliedPath := filepath.Join(dir, "ganesha.applied")
+	sum := sha256.Sum256(conf)
+	confHash := []byte(hex.EncodeToString(sum[:]) + "\n")
 	cur, has := p.containers[id]
 	if !has || !cur.Running || cur.CoreHash != spec.CoreHash {
 		if _, err := writeIfChanged(confPath, conf, 0o644); err != nil {
@@ -943,19 +966,21 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 		}
 		p.containers[id] = ganesha.Container{Name: spec.Name, TenantID: id, Running: true, CoreHash: spec.CoreHash}
 		r.logf("tenant %d: nfs started with %d exports", id, len(exports))
-		return nil
-	}
-	changed, err := writeIfChanged(confPath, conf, 0o644)
-	if err != nil {
+		_, err := writeIfChanged(appliedPath, confHash, 0o600)
 		return err
 	}
-	if changed {
-		if err := r.NFS.Reload(p.ctx, cur.Name); err != nil {
-			return err
-		}
-		r.logf("tenant %d: nfs exports reloaded (%d exports)", id, len(exports))
+	if _, err := writeIfChanged(confPath, conf, 0o644); err != nil {
+		return err
 	}
-	return nil
+	if applied, err := os.ReadFile(appliedPath); err == nil && bytes.Equal(applied, confHash) {
+		return nil
+	}
+	if err := r.NFS.Reload(p.ctx, cur.Name); err != nil {
+		return err
+	}
+	r.logf("tenant %d: nfs exports reloaded (%d exports)", id, len(exports))
+	_, err = writeIfChanged(appliedPath, confHash, 0o600)
+	return err
 }
 
 func (p *pass) tenantDue(t api.Tenant) bool {
@@ -1047,22 +1072,21 @@ func (p *pass) destroy(w *tenantWork) {
 }
 
 // pruneState forgets deleting marks of shares that are no longer deleting and
-// export ids of shares a validly described tenant no longer has active.
+// export ids of shares that a validly described tenant no longer lists or
+// that were destroyed.
 func (p *pass) pruneState(works []*tenantWork) {
 	keep := map[int64]bool{}
 	listed := map[int64]map[int64]bool{}
 	for _, w := range works {
-		active := map[int64]bool{}
+		live := map[int64]bool{}
 		for _, s := range w.shares {
-			switch s.s.State {
-			case api.ShareDeleting:
+			if s.s.State == api.ShareDeleting {
 				keep[s.s.ID] = true
-			case api.ShareActive:
-				active[s.s.ID] = !w.destroyed
 			}
+			live[s.s.ID] = !w.destroyed && !s.destroyed
 		}
 		if w.valid {
-			listed[w.t.ID] = active
+			listed[w.t.ID] = live
 		}
 	}
 	if err := p.r.State.PruneDeleting(keep); err != nil {

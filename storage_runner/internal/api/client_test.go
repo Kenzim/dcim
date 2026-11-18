@@ -79,6 +79,24 @@ func TestFetchHTTPError(t *testing.T) {
 	}
 }
 
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	followed := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/runner/storage/config", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	})
+	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, r *http.Request) {
+		followed = true
+		_, _ = io.WriteString(w, `{"version":"v","tenants":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	_, err := (&Client{BaseURL: srv.URL, Key: "k", HTTP: srv.Client()}).Fetch(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "302") || followed {
+		t.Fatalf("err=%v followed=%v", err, followed)
+	}
+}
+
 func TestRequiresHTTPS(t *testing.T) {
 	_, err := (&Client{BaseURL: "http://rackflow.example.com", Key: "k"}).Fetch(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "https") {

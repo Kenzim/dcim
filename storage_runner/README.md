@@ -154,6 +154,16 @@ active tenants are in the `tenant_links` set.
   `error` and left exactly as it is.
 - If Ceph is unavailable, running Ganesha containers are left alone and
   nothing is destroyed.
+- If an existing share cannot be applied in a pass (its config is invalid or
+  `ceph fs subvolume info` fails), the tenant's cephx caps are not narrowed
+  and its Ganesha is left exactly as it is; the tenant reports `error` until
+  the share can be applied again.
+- A share's subvolume is only destroyed after Ganesha has confirmed it no
+  longer exports it. The hash of the last config Ganesha loaded is kept in
+  `STATE_DIR`, so a failed reload is retried on the next pass.
+- A negative or overflowing `destroy_grace_seconds` disables destruction.
+- The runner never follows HTTP redirects from Rackflow, so the bearer key
+  cannot be sent anywhere but `RACKFLOW_URL`.
 - The runner only touches objects it names: `rf-t*` namespaces, `rf-v*`,
   `rf-h*`, `rf-n*` interfaces, the `inet rf-storage` table, `rf-t*-nfs`
   containers labelled `rackflow.role=storage-nfs`, `client.rf-t*` users, and

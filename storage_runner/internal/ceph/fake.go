@@ -16,7 +16,8 @@ type Fake struct {
 	ECPool    string
 	CheckErr  error
 	FreeBytes int64
-	Fail      map[string]error // errors keyed by subvolume name or entity
+	Fail      map[string]error // create errors keyed by subvolume name or entity
+	InfoFail  map[string]error // SubvolumeInfo errors keyed by subvolume name
 
 	mu         sync.Mutex
 	groupPool  string
@@ -33,6 +34,7 @@ func NewFake(rec *record.Recorder, group, pool string) *Fake {
 		ECPool:     pool,
 		FreeBytes:  1 << 40,
 		Fail:       map[string]error{},
+		InfoFail:   map[string]error{},
 		subvolumes: map[string]*SubvolumeInfo{},
 		users:      map[string]User{},
 	}
@@ -148,6 +150,9 @@ func (f *Fake) ResizeSubvolume(_ context.Context, name string, size int64) error
 func (f *Fake) SubvolumeInfo(_ context.Context, name string) (SubvolumeInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.InfoFail[name]; err != nil {
+		return SubvolumeInfo{}, err
+	}
 	sv, ok := f.subvolumes[name]
 	if !ok {
 		return SubvolumeInfo{}, fmt.Errorf("subvolume %s not found", name)

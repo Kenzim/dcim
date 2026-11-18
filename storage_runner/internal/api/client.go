@@ -18,11 +18,16 @@ type Client struct {
 	HTTP    *http.Client
 }
 
+// http returns a client that never follows redirects: a redirect could move
+// the request (and the bearer key) off the validated https URL. A 3xx then
+// surfaces as an HTTP status error.
 func (c *Client) http() *http.Client {
+	hc := http.Client{Timeout: 20 * time.Second}
 	if c.HTTP != nil {
-		return c.HTTP
+		hc = *c.HTTP
 	}
-	return &http.Client{Timeout: 20 * time.Second}
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &hc
 }
 
 // validateBaseURL requires HTTPS unless the target is loopback, because the

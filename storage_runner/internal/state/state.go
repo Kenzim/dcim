@@ -249,15 +249,6 @@ func (s *Store) MarkDeleting(share int64, now time.Time) (time.Time, error) {
 	return now.UTC(), s.save()
 }
 
-// ClearDeleting forgets a share's deleting mark.
-func (s *Store) ClearDeleting(share int64) error {
-	if _, ok := s.d.DeletingSince[key(share)]; !ok {
-		return nil
-	}
-	delete(s.d.DeletingSince, key(share))
-	return s.save()
-}
-
 // PruneDeleting drops marks for shares that are no longer deleting.
 func (s *Store) PruneDeleting(keep map[int64]bool) error {
 	changed := false

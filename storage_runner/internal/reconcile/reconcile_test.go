@@ -708,6 +708,105 @@ func TestExportIDsStableAndIndependentOfShareIDs(t *testing.T) {
 	}
 }
 
+func twoShares() api.Tenant {
+	return tenant(12, 1234, share(5, "data", 100*gib, "10.0.0.5"), share(6, "logs", 10*gib, "10.0.0.6"))
+}
+
+func TestInvalidExistingShareKeepsAccess(t *testing.T) {
+	e := newEnv(t)
+	e.apply(cfgOf("v1", twoShares()))
+	user, _ := e.ceph.User("client.rf-t12")
+
+	bad := twoShares()
+	bad.Shares[1].Clients = []string{"192.168.1.5"}
+	expect(t, e.apply(cfgOf("v2", bad)), nil)
+	if got, _ := e.ceph.User("client.rf-t12"); got.Caps != user.Caps {
+		t.Fatalf("caps narrowed to %s", got.Caps)
+	}
+	if !strings.Contains(e.ganeshaConf("t12"), `Pseudo = "/logs";`) {
+		t.Fatal("export of the existing share dropped")
+	}
+	s := tenantStatus(t, e.status(), 12)
+	if s.State != api.StateError || !strings.Contains(*s.Error, "left unchanged") || s.Shares[1].State != api.StateError {
+		t.Fatalf("status: %+v", s)
+	}
+
+	expect(t, e.apply(cfgOf("v3", twoShares())), nil)
+	if s := tenantStatus(t, e.status(), 12); s.State != api.StateReady {
+		t.Fatalf("after fix: %+v", s)
+	}
+}
+
+func TestSubvolumeInfoFailureKeepsAccess(t *testing.T) {
+	e := newEnv(t)
+	e.apply(cfgOf("v1", twoShares()))
+	user, _ := e.ceph.User("client.rf-t12")
+
+	e.ceph.InfoFail["t12-s6"] = errors.New("timed out")
+	expect(t, e.apply(cfgOf("v1", twoShares())), nil)
+	if got, _ := e.ceph.User("client.rf-t12"); got.Caps != user.Caps {
+		t.Fatalf("caps narrowed to %s", got.Caps)
+	}
+	if !strings.Contains(e.ganeshaConf("t12"), `Pseudo = "/logs";`) {
+		t.Fatal("export dropped")
+	}
+
+	delete(e.ceph.InfoFail, "t12-s6")
+	expect(t, e.apply(cfgOf("v1", twoShares())), nil)
+}
+
+func TestFailedReloadIsRetriedAndBlocksDestroy(t *testing.T) {
+	e := newEnv(t)
+	grace := int64(0)
+	withGrace := func(c *api.Config) *api.Config { c.Settings.DestroyGraceSeconds = &grace; return c }
+	e.apply(withGrace(cfgOf("v1", twoShares())))
+
+	del := twoShares()
+	del.Shares[1].State = api.ShareDeleting
+	del.Shares[1].DestroyAfter = ts(t0.Add(-time.Hour))
+	e.nfs.ReloadFail["rf-t12-nfs"] = errors.New("container paused")
+	expect(t, e.apply(withGrace(cfgOf("v2", del))), []string{
+		`ceph user caps client.rf-t12 mon="allow r" mds="allow rw path=/volumes/rackflow/t12-s5/uuid-t12-s5" osd="allow rw pool=ec namespace=fsvolumens_t12-s5"`,
+	})
+	if s := tenantStatus(t, e.status(), 12); s.State != api.StateError || !strings.Contains(*s.Error, "container paused") {
+		t.Fatalf("status: %+v", s)
+	}
+	if !e.ceph.HasSubvolume("t12-s6") {
+		t.Fatal("subvolume destroyed while Ganesha may still export it")
+	}
+
+	delete(e.nfs.ReloadFail, "rf-t12-nfs")
+	e.now = t0.Add(time.Minute)
+	expect(t, e.apply(withGrace(cfgOf("v2", del))), []string{"nfs reload rf-t12-nfs", "ceph subvolume rm t12-s6"})
+	expect(t, e.apply(withGrace(cfgOf("v2", del))), nil)
+}
+
+func TestExportIDKeptWhileDeleting(t *testing.T) {
+	e := newEnv(t)
+	e.apply(cfgOf("v1", twoShares()))
+	del := twoShares()
+	del.Shares[1].State = api.ShareDeleting
+	e.apply(cfgOf("v2", del))
+	e.apply(cfgOf("v3", twoShares()))
+	if conf := e.ganeshaConf("t12"); !strings.Contains(conf, "Export_Id = 2;\n\tPath = \"/volumes/rackflow/t12-s6") {
+		t.Fatalf("export id changed after deleting and back:\n%s", conf)
+	}
+}
+
+func TestHugeGraceNeverDestroys(t *testing.T) {
+	e := newEnv(t)
+	e.apply(cfgOf("v1", basic()))
+	cfg := cfgOf("v2", terminated(t0, ts(t0)))
+	huge := int64(9_300_000_000) // overflows time.Duration when multiplied by time.Second
+	cfg.Settings.DestroyGraceSeconds = &huge
+	e.now = t0.Add(365 * 24 * time.Hour)
+	expect(t, e.apply(cfg), []string{"nfs rm rf-t12-nfs", "net remove rf-t12", fwNone})
+	st := e.status()
+	if !e.ceph.HasSubvolume("t12-s5") || st.Node.Error == nil || !strings.Contains(*st.Node.Error, "too large") {
+		t.Fatalf("huge grace: node %+v", st.Node)
+	}
+}
+
 func TestNegativeGraceNeverDestroys(t *testing.T) {
 	e := newEnv(t)
 	e.apply(cfgOf("v1", basic()))

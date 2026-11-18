@@ -11,8 +11,9 @@ import (
 
 // Fake keeps containers in memory and records changes.
 type Fake struct {
-	Rec  *record.Recorder
-	Fail map[string]error // errors keyed by container name
+	Rec        *record.Recorder
+	Fail       map[string]error // Run and Remove errors keyed by container name
+	ReloadFail map[string]error // Reload errors keyed by container name
 
 	mu         sync.Mutex
 	containers map[string]Container
@@ -20,7 +21,7 @@ type Fake struct {
 }
 
 func NewFake(rec *record.Recorder) *Fake {
-	return &Fake{Rec: rec, Fail: map[string]error{}, containers: map[string]Container{}, specs: map[string]Spec{}}
+	return &Fake{Rec: rec, Fail: map[string]error{}, ReloadFail: map[string]error{}, containers: map[string]Container{}, specs: map[string]Spec{}}
 }
 
 // Seed adds a container that was not started through this fake.
@@ -96,6 +97,9 @@ func (f *Fake) Reload(_ context.Context, name string) error {
 	defer f.mu.Unlock()
 	if _, ok := f.containers[name]; !ok {
 		return fmt.Errorf("container %s not found", name)
+	}
+	if err := f.ReloadFail[name]; err != nil {
+		return err
 	}
 	f.Rec.Add("nfs reload %s", name)
 	return nil
