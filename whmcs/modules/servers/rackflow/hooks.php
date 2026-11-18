@@ -119,6 +119,11 @@ add_hook('AdminProductConfigFieldsSave', 1, function (array $vars) {
 
     $enabled = rackflow_isCustomerOsSelectionEnabled(isset($opts[7]) ? $opts[7] : '');
     $productCode = isset($opts[2]) ? trim((string)$opts[2]) : '';
+    // NFS storage has no OS or SSH keys: leave its configurable options alone.
+    if (strtolower(trim((string)(isset($opts[1]) ? $opts[1] : ''))) === 'nfs_storage') {
+        rackflow_warnProductHygiene($productId);
+        return;
+    }
     $serverId = rackflow_resolveModuleServerId($productId, array());
     if (!$serverId) {
         rackflow_log('OS sync skipped: no server', array('pid' => $productId));
@@ -626,7 +631,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
   .rf-ms__git:hover { border-color: var(--rf-accent); color: var(--rf-accent); }
   .rf-ms__seg {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
     margin-bottom: 20px;
   }
@@ -971,7 +976,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
   function specEntries(specs) {
     var out = [];
     if (!specs || typeof specs !== 'object') return out;
-    var prefer = ['cpu_cores', 'cores', 'ram_mb', 'memory_mb', 'disk_gb', 'disk_size_gb', 'sockets', 'cpu_count'];
+    var prefer = ['cpu_cores', 'cores', 'ram_mb', 'memory_mb', 'disk_gb', 'disk_size_gb', 'size_gb', 'sockets', 'cpu_count'];
     var seen = {};
     prefer.forEach(function (k) {
       if (specs[k] === undefined || specs[k] === null || specs[k] === '') return;
@@ -1198,6 +1203,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
           : 'Not used for HTTP proxy products.')
     );
     \$ui.find('[data-rf-field-wrap="customerOs"]').toggle(!isProxy);
+    applyStoragePanels(\$ui, st);
     // The "bm" panel's Server Group field is required for bare metal but only
     // a legacy/optional override for http_proxy (which normally provisions
     // straight from the product's IPAM subnet, no server group needed).
@@ -1207,6 +1213,41 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
         ? 'Optional — only for a proxy bound to a physical server. Leave blank for the normal IPAM-based proxy (IP(s) come from the Product Code\\'s subnet).'
         : 'Controls permitted ISOs, scripts, and OS templates.'
     );
+  }
+
+  // --- NFS storage (service type nfs_storage) ---
+  // Storage needs only the Product Code (its size_gb is the default size) and
+  // the portal sign-in switch. Size and location come from the order form's
+  // configurable options; see docs/nfs-storage-billing.md.
+  function storageServiceTypeHtml() {
+    return ''
+      + '      <input type="radio" name="rf_service_type" id="rf_st_storage" value="nfs_storage"/>'
+      + '      <label for="rf_st_storage"><strong>NFS storage</strong><span class="rf-desc">Network storage with NFS and SFTP, kept without servers.</span></label>';
+  }
+
+  function storagePanelHtml() {
+    return ''
+      + '    <div class="rf-ms__panel" data-rf-panel="storage">'
+      + '      <p class="rf-ms__panel-title">NFS storage</p>'
+      + '      <p class="rf-help">Default size: the RackFlow product\\'s <strong>size_gb</strong>. '
+      + 'Add a configurable option <strong>Storage Size</strong> (values such as <code>500|500 GB</code>) to sell sizes, '
+      + 'and <strong>Storage Location</strong> (values such as <code>1|London</code>, the RackFlow location ID before the bar) '
+      + 'to let the client choose where it lives. Upgrades and downgrades resize the storage. '
+      + 'The client links it to a private network (or has one created) in the client area or portal.</p>'
+      + '    </div>';
+  }
+
+  function applyStoragePanels(\$ui, st) {
+    var isStorage = (st === 'nfs_storage');
+    \$ui.find('[data-rf-panel="storage"]').toggle(isStorage);
+    if (!isStorage) return;
+    \$ui.find('[data-rf-panel="bm"], [data-rf-panel="vm"]').hide();
+    \$ui.find('[data-rf-field-wrap="osCode"], [data-rf-field-wrap="customerOs"]').hide();
+    \$ui.find('[data-rf-preview-for]').hide();
+    \$ui.find('[data-rf-preview-grid]').show().addClass('rf-ms__preview-grid--single');
+    \$ui.find('[data-rf-preview-for="vm"]').first().show();
+    \$ui.find('[data-rf-lead]').text('Pick a RackFlow storage product. Its size_gb is the default size.');
+    \$ui.find('[data-rf-product-help]').text('Catalog product this WHMCS package provisions (storage family).');
   }
 
   function ensureUi(\$) {
@@ -1236,6 +1277,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '      <label for="rf_st_vm"><strong>VM</strong><span class="rf-desc">Proxmox guests from a catalog product / template.</span></label>'
       + '      <input type="radio" name="rf_service_type" id="rf_st_proxy" value="http_proxy"/>'
       + '      <label for="rf_st_proxy"><strong>HTTP proxy</strong><span class="rf-desc">HTTP/SOCKS5 proxy — IP(s) auto-assigned from IPAM.</span></label>'
+      + storageServiceTypeHtml()
       + '    </div>'
       + '    <div class="rf-ms__grid">'
       + '      <div class="rf-ms__field">'
@@ -1301,6 +1343,7 @@ add_hook('AdminAreaFooterOutput', 1, function (array $vars) {
       + '        </div>'
       + '      </div>'
       + '    </div>'
+      + storagePanelHtml()
       + '  </div>'
       + '</div>';
 

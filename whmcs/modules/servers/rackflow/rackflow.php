@@ -238,6 +238,9 @@ function rackflow_ClientArea(array $vars)
     if (empty($params['pid']) && !empty($params['packageid'])) {
         $params['pid'] = $params['packageid'];
     }
+    if (rackflow_getConfiguredServiceType($params) === 'nfs_storage') {
+        return rackflow_storageClientArea($params, $vars);
+    }
     $rackflowServiceId = rackflow_getRackflowServiceId($params);
     $powerStatusLabel = '';
     $powerStatusStyle = '';
@@ -1369,6 +1372,159 @@ function rackflow_storageSizeGbFromOptions(array $params)
     }
     $size = (int)$m[1];
     return $size > 0 ? $size : null;
+}
+
+/**
+ * Client area for an nfs_storage service: size and usage, linked network,
+ * shares with mount lines, SFTP endpoint and logins, and portal sign-in.
+ * Uses its own template (clientarea_storage.tpl); there is no server, so the
+ * power, console and backup panels do not apply.
+ *
+ * @param array $params resolved module parameters (serviceid, pid, serverid, configoption8)
+ * @param array $vars   WHMCS client area variables
+ * @return array
+ */
+function rackflow_storageClientArea(array $params, array $vars)
+{
+    $systemUrl = isset($vars['systemurl']) ? (string)$vars['systemurl'] : '';
+    $rackflowServiceId = rackflow_getRackflowServiceId($params);
+    $storage = null;
+    $message = '';
+    $portalAllowed = rackflow_isPortalSignInEnabled(
+        isset($params['configoption8']) ? $params['configoption8'] : null
+    );
+    if (!empty($rackflowServiceId)) {
+        $apiConfig = rackflow_getApiConfig($params);
+        $result = rackflow_apiCall(
+            $apiConfig['url'],
+            $apiConfig['key'],
+            'GET',
+            '/api/billing/services/' . (int)$rackflowServiceId . '/storage',
+            null
+        );
+        if (!empty($result['success']) && isset($result['data']) && is_array($result['data'])) {
+            $storage = $result['data'];
+        } else {
+            $message = 'Unable to load storage details.';
+        }
+        $perms = rackflow_getClientPermissions($params);
+        if (is_array($perms) && isset($perms['permissions']) && array_key_exists('service.portal', $perms['permissions'])) {
+            $portalAllowed = $portalAllowed && !empty($perms['permissions']['service.portal']);
+        }
+    } else {
+        $message = 'Storage details will appear here once the service is set up.';
+    }
+
+    $shares = array();
+    $usedBytes = 0;
+    $sizeGb = 0;
+    $sftp = array('available' => false, 'state' => '', 'host' => '', 'port' => '', 'host_key_fingerprint' => '', 'users' => array());
+    if (is_array($storage)) {
+        $sizeGb = isset($storage['size_gb']) ? (int)$storage['size_gb'] : 0;
+        $usedBytes = isset($storage['used_bytes']) ? (int)$storage['used_bytes'] : 0;
+        foreach (isset($storage['shares']) && is_array($storage['shares']) ? $storage['shares'] : array() as $share) {
+            if (!is_array($share)) {
+                continue;
+            }
+            $share['used_label'] = rackflow_storageBytesLabel(isset($share['used_bytes']) ? $share['used_bytes'] : null);
+            $share['sftp_label'] = rackflow_storageSftpAccessLabel(isset($share['sftp_access']) ? $share['sftp_access'] : 'off');
+            $shares[] = $share;
+        }
+        if (isset($storage['sftp']) && is_array($storage['sftp'])) {
+            $sftp = array_merge($sftp, $storage['sftp']);
+        }
+    }
+    $usedPercent = $sizeGb > 0 ? min(100, (int)round($usedBytes * 100 / ($sizeGb * 1073741824))) : 0;
+
+    return array(
+        'templatefile' => 'clientarea_storage',
+        'vars' => array(
+            'rackflow_storage' => is_array($storage) ? $storage : array(),
+            'rackflow_storage_loaded' => is_array($storage),
+            'rackflow_storage_message' => $message,
+            'rackflow_storage_status_label' => rackflow_storageStatusLabel(is_array($storage) && isset($storage['status']) ? $storage['status'] : ''),
+            'rackflow_storage_used_label' => rackflow_storageBytesLabel($usedBytes),
+            'rackflow_storage_used_percent' => $usedPercent,
+            'rackflow_storage_shares' => $shares,
+            'rackflow_storage_sftp' => $sftp,
+            'rackflow_storage_sftp_state_label' => rackflow_storageSftpStateLabel(isset($sftp['state']) ? $sftp['state'] : ''),
+            'rackflow_portal_open_url' => !empty($rackflowServiceId) && !empty($params['serviceid']) && $portalAllowed
+                ? rackflow_portalOpenEndpointUrl((int)$params['serviceid'], $systemUrl)
+                : '',
+        ),
+    );
+}
+
+/**
+ * @param int|null $bytes
+ * @return string
+ */
+function rackflow_storageBytesLabel($bytes)
+{
+    if ($bytes === null || $bytes === '') {
+        return 'Not measured yet';
+    }
+    $bytes = (float)$bytes;
+    $units = array('B', 'KB', 'MB', 'GB', 'TB', 'PB');
+    $i = 0;
+    while ($bytes >= 1024 && $i < count($units) - 1) {
+        $bytes /= 1024;
+        $i++;
+    }
+    return ($i === 0 ? (string)(int)$bytes : number_format($bytes, 1)) . ' ' . $units[$i];
+}
+
+/**
+ * @param string $status RackFlow storage status
+ * @return string
+ */
+function rackflow_storageStatusLabel($status)
+{
+    $labels = array(
+        'ready' => 'Ready',
+        'unlinked' => 'Not linked to a network',
+        'provisioning' => 'Being set up',
+        'error' => 'Needs attention',
+        'suspended' => 'Suspended',
+        'terminated' => 'Terminated',
+    );
+    $status = strtolower((string)$status);
+    return isset($labels[$status]) ? $labels[$status] : ucfirst($status);
+}
+
+/**
+ * @param string $access off, ro or rw
+ * @return string
+ */
+function rackflow_storageSftpAccessLabel($access)
+{
+    $access = strtolower((string)$access);
+    if ($access === 'rw') {
+        return 'Read and write';
+    }
+    if ($access === 'ro') {
+        return 'Read only';
+    }
+    return 'Off';
+}
+
+/**
+ * @param string $state SFTP state from RackFlow
+ * @return string
+ */
+function rackflow_storageSftpStateLabel($state)
+{
+    $labels = array(
+        'ready' => 'Ready',
+        'provisioning' => 'Being set up',
+        'off' => 'Off (turn on SFTP for a share and add a user)',
+        'error' => 'Needs attention',
+        'suspended' => 'Suspended',
+        'terminated' => 'Removed',
+        'unavailable' => 'Not available yet',
+    );
+    $state = strtolower((string)$state);
+    return isset($labels[$state]) ? $labels[$state] : ucfirst($state);
 }
 
 /**
