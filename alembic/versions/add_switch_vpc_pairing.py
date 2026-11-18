@@ -1,7 +1,7 @@
 """Add Cisco vPC pairing columns on network_switches
 
 Revision ID: add_switch_vpc_pairing
-Revises: add_nfs_storage
+Revises: add_backup_slots
 """
 
 from typing import Sequence, Union
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "add_switch_vpc_pairing"
-down_revision: Union[str, Sequence[str], None] = "add_nfs_storage"
+down_revision: Union[str, Sequence[str], None] = "add_backup_slots"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

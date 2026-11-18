@@ -13,6 +13,7 @@
   import ClientAccount from '../components/client/ClientAccount.svelte';
   import ClientNetworks from '../components/client/ClientNetworks.svelte';
   import ClientStorage from '../components/client/ClientStorage.svelte';
+  import ClientBackupSlots from '../components/client/ClientBackupSlots.svelte';
 
   let authChecked = false;
   let impersonating = false;
@@ -58,6 +59,8 @@
         routeName = 'networks';
       } else if (parts[1] === 'storage') {
         routeName = 'storage';
+      } else if (parts[1] === 'backup-slots') {
+        routeName = 'backup-slots';
       } else if (parts[1] === 'account') {
         routeName = 'account';
       } else {
@@ -122,6 +125,8 @@
         <ClientNetworks />
       {:else if routeName === 'storage'}
         <ClientStorage />
+      {:else if routeName === 'backup-slots'}
+        <ClientBackupSlots />
       {:else if routeName === 'account'}
         <ClientAccount {impersonating} />
       {:else}

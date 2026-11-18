@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # NFS storage: how long a terminated storage service or a deleted share
     # keeps its data before the storage runner destroys it.
     storage_destroy_grace_seconds: int = 7 * 24 * 3600
+    # Backup slots: how long a terminated slot keeps its retained backup
+    # before the backup is deleted from the backup storage.
+    backup_slot_destroy_grace_seconds: int = 7 * 24 * 3600
     # Storage runner API: failed key checks allowed per source IP and window.
     storage_runner_auth_failures_per_ip: int = 20
     storage_runner_auth_failures_window_seconds: int = 300
@@ -383,6 +386,10 @@ class Settings(BaseSettings):
     ipmi_proxy_port: Optional[int] = None
     # Port customers use for HTTP/SOCKS5 proxies when the subnet's location sets none.
     proxy_default_port: int = 11080
+    # Fixed range of every client's proxy access network (proxy fast path).
+    # The first /20 holds one private IP per pinned proxy subnet; client servers
+    # get the rest. Must not change once access networks exist.
+    proxy_access_cidr: str = "100.80.0.0/16"
     # Shared secret the ipmi_proxy_runner edge presents to the runner API (Bearer).
     ipmi_proxy_runner_api_key: Optional[str] = None
     # One-time launch ticket lifetime (seconds). Kept short: the ticket is only used
@@ -451,6 +458,15 @@ class Settings(BaseSettings):
     # BMCs that only mount NFS, e.g. ASRock Rack MegaRAC. Used when the runner does
     # not advertise ``nfs_export`` itself.
     virtual_media_nfs_export: str = ""
+
+    # PDU power history (see app/services/power_history_service.py). Raw samples are written on
+    # every successful poll; the poller rolls them up into 5-minute and hourly buckets (average,
+    # minimum, maximum) and deletes what is older than these windows.
+    power_history_raw_retention_days: int = 7
+    power_history_5m_retention_days: int = 35
+    power_history_1h_retention_days: int = 396
+    # Nominal seconds between polls (the poller's POLL_INTERVAL); used when integrating power into kWh.
+    power_history_sample_seconds: int = 60
 
     class Config:
         env_file = ".env"

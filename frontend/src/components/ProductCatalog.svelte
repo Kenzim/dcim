@@ -33,7 +33,11 @@
     { id: 'bare_metal', label: 'Bare metal' },
     { id: 'http_proxy', label: 'HTTP proxy' },
     { id: 'nfs_storage', label: 'NFS storage' },
+    { id: 'backup_slot', label: 'Backup slot' },
   ];
+
+  // Types whose products are sold by size only.
+  const isSizedType = (t) => t === 'nfs_storage' || t === 'backup_slot';
 
   const storageSizeForm = (values) => ({ size_gb: values?.size_gb ?? '' });
   const storageSizePayload = (form) => (form.size_gb === '' || form.size_gb == null ? {} : { size_gb: Number(form.size_gb) });
@@ -41,7 +45,7 @@
   function typeFromUrl() {
     const params = new URLSearchParams(window.location.search);
     const t = (params.get('type') || '').trim();
-    if (t === 'bare_metal' || t === 'http_proxy' || t === 'vm' || t === 'nfs_storage') return t;
+    if (t === 'bare_metal' || t === 'http_proxy' || t === 'vm' || isSizedType(t)) return t;
     return 'vm';
   }
 
@@ -342,7 +346,7 @@
       if (catalogType === 'http_proxy') {
         payload.overrides = proxyDefaultsFormToPayload(productForm);
       }
-      if (catalogType === 'nfs_storage') {
+      if (isSizedType(catalogType)) {
         payload.overrides = storageSizePayload(productForm);
       }
       await createCatalogProduct(payload);
@@ -409,7 +413,7 @@
     identityForm = { name: family.name || '', description: family.description || '' };
     specsForm = catalogType === 'http_proxy'
       ? proxyDefaultsForm(family.defaults || {})
-      : catalogType === 'nfs_storage'
+      : isSizedType(catalogType)
         ? storageSizeForm(family.defaults)
         : buildSpecsForm(family.vm_config || {}, true);
     inheritedConfig = {};
@@ -436,7 +440,7 @@
     };
     specsForm = catalogType === 'http_proxy'
       ? proxyDefaultsForm(product.overrides || {})
-      : catalogType === 'nfs_storage'
+      : isSizedType(catalogType)
         ? storageSizeForm(product.overrides)
         : buildSpecsForm(product.vm_config || {}, product.extends_group_vm_config ?? true);
     if (catalogType === 'vm' && !family) specsForm.extends_family = false;
@@ -499,7 +503,7 @@
         if (catalogType === 'http_proxy') {
           familyPayload.defaults = proxyDefaultsFormToPayload(specsForm);
         }
-        if (catalogType === 'nfs_storage') {
+        if (isSizedType(catalogType)) {
           familyPayload.defaults = storageSizePayload(specsForm);
         }
         await updateProductFamily(editor.id, familyPayload);
@@ -523,7 +527,7 @@
           }
           productPayload.overrides = proxyDefaultsFormToPayload(specsForm);
         }
-        if (catalogType === 'nfs_storage') {
+        if (isSizedType(catalogType)) {
           productPayload.overrides = storageSizePayload(specsForm);
         }
         await updateCatalogProduct(editor.id, productPayload);
@@ -834,15 +838,15 @@
         </section>
       {/if}
 
-      {#if catalogType === 'nfs_storage'}
+      {#if isSizedType(catalogType)}
         <section class="panel">
           <div class="panel-head">
-            <h3>Storage size</h3>
+            <h3>{catalogType === 'backup_slot' ? 'Slot size' : 'Storage size'}</h3>
             <p>
               {#if editor.kind === 'product'}
                 Size in GB for this product; leave blank to inherit the family default.
               {:else}
-                Default size in GB for storage in this family.
+                {catalogType === 'backup_slot' ? 'Default size in GB, the largest backup a slot in this family can hold.' : 'Default size in GB for storage in this family.'}
               {/if}
             </p>
           </div>

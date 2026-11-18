@@ -86,6 +86,38 @@ class ServiceDAO:
         return service
 
     @staticmethod
+    def create_backup_slot(
+        db: Session,
+        *,
+        name: str,
+        owner_user_id: Optional[int],
+        external_service_id: Optional[str] = None,
+        description: Optional[str] = None,
+        config: Optional[dict] = None,
+        product_code: Optional[str] = None,
+        product_snapshot: Optional[dict] = None,
+        provisioning_source: ProvisioningSource = ProvisioningSource.BILLING,
+    ) -> Service:
+        """A ``backup_slot`` service: active at once, no server or VM row; its data lives in ``backup_slots``."""
+        if owner_user_id is None:
+            raise ValueError("owner_user_id is required for backup_slot services")
+        service = Service(
+            name=name,
+            external_service_id=external_service_id,
+            owner_user_id=owner_user_id,
+            service_type=ServiceType.BACKUP_SLOT,
+            status=ServiceStatus.ACTIVE,
+            description=description,
+            config=config or {},
+            product_code=product_code,
+            product_snapshot=product_snapshot or {},
+            provisioning_source=provisioning_source,
+        )
+        db.add(service)
+        db.flush()
+        return service
+
+    @staticmethod
     def create_vm(
         db: Session,
         *,

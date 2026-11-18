@@ -2016,6 +2016,31 @@ export async function regeneratePduPorts(id, counts = null) {
   );
 }
 
+export async function getPduHistory(id, hours = 24) {
+  return _powerRequest('GET', `/pdus/${id}/history?hours=${hours}`, undefined, 'Failed to get PDU history');
+}
+
+export async function getPduInletHistory(pduId, inletId, hours = 24) {
+  return _powerRequest('GET', `/pdus/${pduId}/inlets/${inletId}/history?hours=${hours}`, undefined, 'Failed to get inlet history');
+}
+
+export async function getPowerFeedHistory(feedId, hours = 24) {
+  return _powerRequest('GET', `/power-feeds/${feedId}/history?hours=${hours}`, undefined, 'Failed to get power feed history');
+}
+
+export async function getRackPowerHistory(rackId, hours = 24) {
+  return _powerRequest('GET', `/racks/${rackId}/power-history?hours=${hours}`, undefined, 'Failed to get rack power history');
+}
+
+export async function getServerPowerHistory(serverId, hours = 24) {
+  return _powerRequest('GET', `/servers/${serverId}/power-history?hours=${hours}`, undefined, 'Failed to get server power history');
+}
+
+export async function getPowerHistory(hours = 24, locationId = null) {
+  const location = locationId ? `&location_id=${locationId}` : '';
+  return _powerRequest('GET', `/power-history?hours=${hours}${location}`, undefined, 'Failed to get power history');
+}
+
 export async function pollPdu(id) {
   return _powerRequest('POST', `/pdus/${id}/poll`, undefined, 'Failed to poll PDU');
 }
@@ -4904,6 +4929,29 @@ export function clientDetachPrivateNetwork(networkId, attachmentId) {
   });
 }
 
+// --- Proxy fast path: per-location access network and private proxy addresses ---
+
+export function clientFastPath() {
+  return privateNetworkRequest('/fast-path', { client: true, errorMessage: 'Failed to load the proxy fast path' });
+}
+
+export function clientFastPathOn(locationId) {
+  return privateNetworkRequest('/fast-path', {
+    client: true,
+    method: 'POST',
+    body: { location_id: locationId },
+    errorMessage: 'Failed to turn the proxy fast path on',
+  });
+}
+
+export function clientFastPathOff(locationId) {
+  return privateNetworkRequest(`/fast-path/${locationId}`, {
+    client: true,
+    method: 'DELETE',
+    errorMessage: 'Failed to turn the proxy fast path off',
+  });
+}
+
 // --- NFS storage: storage nodes, nfs_storage services and their shares ---
 
 async function storageRequest(path, { client = false, method = 'GET', body, errorMessage } = {}) {
@@ -4949,3 +4997,26 @@ export const clientStorageNetworks = (id) =>
   storageRequest(`/${id}/networks`, { client: true, errorMessage: 'Failed to load networks' });
 export const clientLinkStorage = (id, networkId) =>
   storageRequest(`/${id}/link`, { client: true, method: 'POST', body: { network_id: networkId }, errorMessage: 'Failed to link storage' });
+
+// --- Backup slots: client portal ---
+
+async function backupSlotRequest(path, { method = 'GET', body, errorMessage } = {}) {
+  const headers = { ..._impersonationHeaders() };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}/client/backup-slots${path}`, {
+    method,
+    headers,
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return _jsonOrThrow(response, errorMessage || 'Backup slot request failed');
+}
+
+export const clientListBackupSlots = () =>
+  backupSlotRequest('', { errorMessage: 'Failed to load backup slots' });
+export const clientRetainBackup = (slotId, data) =>
+  backupSlotRequest(`/${slotId}/retain`, { method: 'POST', body: data, errorMessage: 'Failed to keep the backup in the slot' });
+export const clientReleaseSlotBackup = (slotId) =>
+  backupSlotRequest(`/${slotId}/release`, { method: 'POST', errorMessage: 'Failed to release the backup' });
+export const clientRestoreSlotBackup = (slotId, data) =>
+  backupSlotRequest(`/${slotId}/restore`, { method: 'POST', body: data, errorMessage: 'Failed to restore the backup' });

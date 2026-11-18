@@ -34,6 +34,7 @@ from app.services.provisioning import (
 )
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox, reserve_vmid_for_service
 from app.services.private_network_service import PrivateNetworkService
+from app.services import backup_slot_service
 from app.services.storage_service import StorageService
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
@@ -632,7 +633,7 @@ async def list_services(
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid service_type. Use 'bare_metal', 'vm', 'http_proxy' or 'nfs_storage'.",
+                detail="Invalid service_type. Use 'bare_metal', 'vm', 'http_proxy', 'nfs_storage' or 'backup_slot'.",
             )
 
     if status_filter:
@@ -1455,10 +1456,12 @@ async def admin_restore_vm_backup(
             wait=body.wait,
             start=body.start,
             vm_template_id=getattr(body, "vm_template_id", None),
+            confirm_data_loss=body.confirm_data_loss,
+            staff=True,
         )
     except Exception as exc:
         raise map_backup_error(exc) from exc
-    if body.wait and service.vm:
+    if body.wait and not result.get("async") and service.vm:
         _set_guest_state(db, service, VMGuestState.STOPPED if not body.start else VMGuestState.RUNNING)
         ServiceDAO.update(db, service)
     return result
@@ -1701,8 +1704,11 @@ async def update_service_status(
     else:
         service.terminated_at = None
     ServiceDAO.update(db, service)
+    if old_status == ServiceStatus.TERMINATED and new_status != ServiceStatus.TERMINATED:
+        backup_slot_service.mark_reinstated(db, service.id)
     if new_status == ServiceStatus.TERMINATED:
         StorageService.mark_terminated_quietly(db, service.id)
+        backup_slot_service.mark_terminated_quietly(db, service.id)
         await PrivateNetworkService.release_service_quietly(db, service.id)
 
     log_server_activity_success(

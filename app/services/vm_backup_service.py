@@ -12,6 +12,7 @@ from typing import Any, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from app.dao.backup_slot_dao import RetainedBackupDAO
 from app.dao.product_catalog_dao import ProductDAO
 from app.dao.vm_config_dao import ProductVMConfigDAO
 from app.models.service import Service, ServiceType
@@ -187,6 +188,32 @@ async def _enrich_backup_identity(
     return item
 
 
+def _annotate_retained(db: Session, service: Service, items: List[dict[str, Any]]) -> List[dict[str, Any]]:
+    """Mark backups held in a backup slot; hide ones a slot holds for another VM.
+
+    A retained backup outlives its VM, so a later VM that reuses the VMID must
+    not see it listed (or be able to delete it).
+    """
+    retained = RetainedBackupDAO.by_volid(db, [i.get("volid") for i in items])
+    out: List[dict[str, Any]] = []
+    for item in items:
+        row = retained.get(item.get("volid"))
+        if row is None:
+            item["retained"] = False
+        elif row.source_service_id != service.id:
+            continue
+        else:
+            item.update(
+                retained=True,
+                retained_backup_id=row.id,
+                slot_service_id=row.slot.service_id if row.slot else None,
+                protected=True,
+                deletable=False,
+            )
+        out.append(item)
+    return out
+
+
 async def list_service_backups(db: Session, service: Service) -> List[dict[str, Any]]:
     settings = resolve_backup_settings(db, service)
     plugin, _cid, _node, vmid = await get_vm_backup_plugin(db, service)
@@ -201,6 +228,7 @@ async def list_service_backups(db: Session, service: Service) -> List[dict[str, 
         for r in client_rows
     )
     items.sort(key=lambda i: i.get("ctime") or 0, reverse=True)
+    items = _annotate_retained(db, service, items)
     extract_cache: dict[str, Optional[str]] = {}
     for item in items:
         await _enrich_backup_identity(db, plugin, item, extract_cache=extract_cache)
@@ -381,6 +409,8 @@ async def create_client_backup(
         )
 
     existing = await plugin.list_backups(settings.client_storage, vmid=vmid)
+    held = RetainedBackupDAO.by_volid(db, [r.get("volid") for r in existing])
+    existing = [r for r in existing if r.get("volid") not in held]
     if len(existing) >= settings.max_client_backups:
         raise BackupQuotaError(
             f"Client backup quota reached ({settings.max_client_backups}). "
@@ -435,6 +465,8 @@ async def delete_client_backup(
     kind, normalized = _resolve_backup_kind(settings, storage or "", volid)
     if kind != "client":
         raise BackupForbiddenError("Platform backups cannot be deleted by clients")
+    if RetainedBackupDAO.get_by_volid(db, normalized) is not None:
+        raise BackupForbiddenError("This backup is retained in a backup slot; release it from the slot to delete it")
     plugin, *_ = await get_vm_backup_plugin(db, service)
     await plugin.delete_backup(settings.client_storage, normalized)
 
@@ -724,6 +756,23 @@ async def lookup_backup_notes(
     return None
 
 
+def _find_retained_for_volid(db: Session, service: Service, volid: str, storage: Optional[str]):
+    """The retained backup a restore request names, if any (by full or storage-less volid)."""
+    candidates = {str(volid or "").strip()}
+    try:
+        settings = resolve_backup_settings(db, service)
+        for store in (storage, settings.client_storage):
+            if store:
+                candidates.add(_normalize_volid(store, volid))
+    except (BackupConfigError, ValueError):
+        pass
+    for candidate in candidates:
+        row = RetainedBackupDAO.get_by_volid(db, candidate)
+        if row is not None:
+            return row
+    return None
+
+
 async def restore_service_backup(
     db: Session,
     service: Service,
@@ -733,14 +782,33 @@ async def restore_service_backup(
     wait: bool = False,
     start: bool = True,
     vm_template_id: Optional[int] = None,
+    confirm_data_loss: bool = False,
+    staff: bool = False,
 ) -> dict[str, Any]:
     """Restore a backup onto the service VMID.
+
+    A volid held in a backup slot goes through the retained-backup restore,
+    which checks that the client owns it and that the target can take it.
 
     When ``wait`` is False (default), enqueue a durable deployment job and
     return immediately — preferred for client/billing HTTP paths that must not
     block on power-off + qmrestore. When ``wait`` is True, run synchronously
     (admin/tests) and apply metadata after completion.
     """
+    retained = _find_retained_for_volid(db, service, volid, storage)
+    if retained is not None:
+        from app.services.retained_restore_service import restore_retained_onto
+
+        return await restore_retained_onto(
+            db,
+            retained,
+            service,
+            start=start,
+            confirm_data_loss=confirm_data_loss,
+            staff=staff,
+            vm_template_id=vm_template_id,
+        )
+
     if not wait:
         return enqueue_restore_backup_job(
             db,
@@ -803,11 +871,12 @@ async def purge_client_backups(db: Session, service: Service) -> dict[str, Any]:
         return {"purged": 0, "skipped": True, "reason": str(exc)}
 
     rows = await plugin.list_backups(settings.client_storage, vmid=vmid)
+    retained = RetainedBackupDAO.by_volid(db, [r.get("volid") for r in rows])
     purged = 0
     errors: List[str] = []
     for row in rows:
         volid = row.get("volid")
-        if not volid:
+        if not volid or volid in retained:
             continue
         try:
             await plugin.delete_backup(settings.client_storage, str(volid))

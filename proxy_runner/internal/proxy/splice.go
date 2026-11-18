@@ -26,11 +26,16 @@ func allowPrivateDestinations() bool {
 	return os.Getenv("PROXY_ALLOW_PRIVATE_DESTINATIONS") == "true"
 }
 
+// sharedAddressSpace is 100.64.0.0/10. It holds the proxy fast path's
+// access range and carrier-grade NAT or overlay addresses on the host, none
+// of which a customer may reach through the proxy.
+var sharedAddressSpace = &net.IPNet{IP: net.IPv4(100, 64, 0, 0).To4(), Mask: net.CIDRMask(10, 32)}
+
 // isBlockedDestination reports whether ip must never be reachable through
 // the proxy: loopback, link-local (incl. IPv6 link-local -- this also
 // covers the 169.254.169.254 cloud metadata address, which lives in the
-// 169.254.0.0/16 link-local block), unspecified, multicast, and
-// private/ULA ranges (RFC1918 / fc00::/7).
+// 169.254.0.0/16 link-local block), unspecified, multicast, private/ULA
+// ranges (RFC1918 / fc00::/7) and shared address space (100.64.0.0/10).
 func isBlockedDestination(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -39,7 +44,7 @@ func isBlockedDestination(ip net.IP) bool {
 		ip.IsUnspecified() || ip.IsMulticast() {
 		return true
 	}
-	return ip.IsPrivate()
+	return ip.IsPrivate() || sharedAddressSpace.Contains(ip)
 }
 
 func splice(a, b net.Conn, idle time.Duration) {

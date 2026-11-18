@@ -22,11 +22,11 @@ router = APIRouter(prefix="/product-catalog", tags=["product-catalog"])
 # VM template os_type values are the provisioning strategy keys (model + strategy merged).
 ALLOWED_VM_OS_TYPES = sorted(INSTALL_TYPE_STRATEGIES.keys())
 # Service types this catalog can define families/products for.
-ALLOWED_FAMILY_SERVICE_TYPES = ("vm", "http_proxy", "bare_metal", "nfs_storage")
+ALLOWED_FAMILY_SERVICE_TYPES = ("vm", "http_proxy", "bare_metal", "nfs_storage", "backup_slot")
 
 
 def _validate_storage_defaults(values: dict) -> None:
-    """nfs_storage families and products may set ``size_gb`` (a positive integer)."""
+    """nfs_storage and backup_slot families and products may set ``size_gb`` (a positive integer)."""
     size = (values or {}).get("size_gb")
     if size in (None, ""):
         return
@@ -254,6 +254,10 @@ async def create_family(
         # nfs_storage: placed on a storage node; defaults carry size_gb.
         _validate_storage_defaults(data.defaults or {})
         payload["provisioning_backend"] = data.provisioning_backend or "storage_node"
+    elif data.service_type == "backup_slot":
+        # backup_slot: no hardware; defaults carry size_gb, the largest backup the slot accepts.
+        _validate_storage_defaults(data.defaults or {})
+        payload["provisioning_backend"] = data.provisioning_backend or "backup_storage"
     else:
         # bare_metal: server_group driven provisioning defaults.
         payload["provisioning_backend"] = data.provisioning_backend or "server_group"
@@ -293,7 +297,7 @@ async def update_family(
     elif row.service_type == "http_proxy":
         if "defaults" in update_data and update_data["defaults"] is not None:
             _validate_proxy_defaults(update_data["defaults"], db=db)
-    elif row.service_type == "nfs_storage":
+    elif row.service_type in ("nfs_storage", "backup_slot"):
         if "defaults" in update_data and update_data["defaults"] is not None:
             _validate_storage_defaults(update_data["defaults"])
     ProductFamilyDAO.update(db, row, **update_data)
@@ -328,7 +332,7 @@ async def create_product(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
         if family.service_type == "http_proxy":
             _validate_proxy_defaults(data.overrides or {}, db=db)
-        elif family.service_type == "nfs_storage":
+        elif family.service_type in ("nfs_storage", "backup_slot"):
             _validate_storage_defaults(data.overrides or {})
     if data.permission_set_id is not None and PermissionSetDAO.get_by_id(db, data.permission_set_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
@@ -407,7 +411,7 @@ def _validate_product_update_overrides(db: Session, row, update_data: dict) -> N
         target_family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
     if target_family and target_family.service_type == "http_proxy":
         _validate_proxy_defaults(update_data["overrides"], db=db)
-    elif target_family and target_family.service_type == "nfs_storage":
+    elif target_family and target_family.service_type in ("nfs_storage", "backup_slot"):
         _validate_storage_defaults(update_data["overrides"])
 
 

@@ -290,14 +290,14 @@ func TestDialTCPBlocksPrivateDestinationsByDefault(t *testing.T) {
 func TestIsBlockedDestination(t *testing.T) {
 	blocked := []string{
 		"127.0.0.1", "169.254.169.254", "10.0.0.1", "192.168.1.1",
-		"172.16.5.5", "::1", "fe80::1", "fc00::1", "0.0.0.0",
+		"172.16.5.5", "::1", "fe80::1", "fc00::1", "0.0.0.0", "100.64.0.1", "100.80.0.1", "100.127.255.254",
 	}
 	for _, ip := range blocked {
 		if !isBlockedDestination(net.ParseIP(ip)) {
 			t.Errorf("expected %s to be blocked", ip)
 		}
 	}
-	allowed := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34"}
+	allowed := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "100.63.255.255", "100.128.0.1"}
 	for _, ip := range allowed {
 		if isBlockedDestination(net.ParseIP(ip)) {
 			t.Errorf("expected %s to be allowed", ip)

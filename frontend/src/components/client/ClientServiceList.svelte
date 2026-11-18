@@ -15,6 +15,7 @@
     { id: 'bare_metal', label: 'Bare metal' },
     { id: 'http_proxy', label: 'HTTP proxies' },
     { id: 'nfs_storage', label: 'Storage' },
+    { id: 'backup_slot', label: 'Backup slots' },
   ];
 
   $: filtered = filter === 'all' ? services : services.filter((s) => s.service_type === filter);

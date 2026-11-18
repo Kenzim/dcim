@@ -5,8 +5,10 @@ Standalone SNMP bandwidth poller.
 Polls all enabled network switches that support MONITORING (e.g. SNMPv3 plugin),
 collects IF-MIB octet counters per port, and stores them in switch_bandwidth_samples.
 The same poll stores each port's admin/oper status on switch_ports (status_updated_at).
-Each cycle also reads every enabled metering PDU and stores its latest readings
-(app/services/power_service.py).
+Each cycle also reads every enabled metering PDU and stores its latest readings and one
+history sample (app/services/power_service.py). Every POWER_HISTORY_INTERVAL seconds the PDU
+history is rolled up into 5-minute and hourly buckets and old rows are deleted
+(app/services/power_history_service.py).
 
 Run as a long-lived process (e.g. systemd service) or from cron at a fixed interval.
 Uses the same DATABASE_URL and app plugins as the main DCIM app.
@@ -19,6 +21,7 @@ Usage:
 Environment:
   DATABASE_URL  - Required. Same as main app (e.g. postgresql://...)
   POLL_INTERVAL - Optional. Seconds between poll cycles (default 60).
+  POWER_HISTORY_INTERVAL - Optional. Seconds between PDU history rollup and pruning runs (default 300).
 """
 import argparse
 import asyncio
@@ -188,6 +191,25 @@ def run_pdu_cycle() -> None:
         db.close()
 
 
+def run_power_history_cycle() -> Dict[str, Any]:
+    """Roll PDU history up into 5-minute and hourly buckets, then delete rows past their retention window."""
+    from app.services.power_history_service import run_maintenance
+
+    db = SessionLocal()
+    try:
+        result = run_maintenance(db)
+        rolled = sum(result["rolled_up"].values())
+        deleted = sum(n for tiers in result["deleted"].values() for n in tiers.values())
+        if rolled or deleted:
+            logger.info("PDU history: %d rollup rows written, %d old rows deleted.", rolled, deleted)
+        return result
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def _run_all() -> None:
     for cycle in (run_one_cycle, run_pdu_cycle):
         try:
@@ -211,6 +233,12 @@ def main() -> None:
         help="Seconds between LLDP neighbour collections (default: 600; 0 disables)",
     )
     parser.add_argument(
+        "--power-history-interval",
+        type=int,
+        default=int(os.environ.get("POWER_HISTORY_INTERVAL", "300")),
+        help="Seconds between PDU history rollup and pruning runs (default: 300; 0 disables)",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Run one poll cycle and exit (e.g. for cron)",
@@ -220,11 +248,25 @@ def main() -> None:
         _run_all()
         if args.lldp_interval > 0:
             run_lldp_cycle()
+        if args.power_history_interval > 0:
+            run_power_history_cycle()
         return
-    logger.info("Starting SNMP bandwidth poller (interval=%ds, lldp_interval=%ds).", args.interval, args.lldp_interval)
+    logger.info(
+        "Starting SNMP bandwidth poller (interval=%ds, lldp_interval=%ds, power_history_interval=%ds).",
+        args.interval, args.lldp_interval, args.power_history_interval,
+    )
     last_lldp = None
+    last_power_history = None
     while True:
         _run_all()
+        if args.power_history_interval > 0 and (
+            last_power_history is None or time.monotonic() - last_power_history >= args.power_history_interval
+        ):
+            last_power_history = time.monotonic()
+            try:
+                run_power_history_cycle()
+            except Exception as e:
+                logger.exception("PDU history maintenance failed: %s", e)
         if args.lldp_interval > 0 and (last_lldp is None or time.monotonic() - last_lldp >= args.lldp_interval):
             last_lldp = time.monotonic()
             try:

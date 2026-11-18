@@ -53,6 +53,7 @@ def _run_reconciliation_cycle(db) -> None:
 async def _reconcile_private_networks() -> None:
     """Retry failed private network work and repair drift on VMs and switch ports."""
     from app.services.private_network_service import PrivateNetworkService
+    from app.services.proxy_fast_path import ProxyAccessService
     from app.services.storage_service import StorageService
 
     try:
@@ -62,12 +63,29 @@ async def _reconcile_private_networks() -> None:
             # before the attachment loop detaches the node.
             StorageService.reconcile_terminations(db)
             counts = await PrivateNetworkService.reconcile(db)
+            # Runners added to a location after its access networks were made.
+            counts["runners_joined"] = await ProxyAccessService.reconcile(db)
         finally:
             db.close()
         if counts.get("failed"):
             logger.warning("Private network reconciliation left failures: %s", counts)
     except Exception as exc:
         logger.warning("Private network reconciliation failed: %s", exc)
+
+
+async def _reconcile_backup_slots() -> None:
+    """Start the grace period of slots terminated elsewhere, and delete backups whose grace has passed."""
+    from app.services import backup_slot_service
+
+    try:
+        db = SessionLocal()
+        try:
+            backup_slot_service.reconcile_terminations(db)
+            await backup_slot_service.purge_expired(db)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Backup slot reconciliation failed: %s", exc)
 
 
 async def run_reconciliation_jobs(interval_seconds: int = 300) -> None:
@@ -82,4 +100,5 @@ async def run_reconciliation_jobs(interval_seconds: int = 300) -> None:
         except Exception as exc:
             logger.warning("Reconciliation cycle failed: %s", exc)
         await _reconcile_private_networks()
+        await _reconcile_backup_slots()
         await asyncio.sleep(max(30, interval_seconds))

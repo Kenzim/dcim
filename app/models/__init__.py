@@ -21,6 +21,7 @@ from app.models.switch_lldp_neighbor import SwitchLldpNeighbor
 from app.models.patch_panel import PatchPanel, PatchPanelPort
 from app.models.power_feed import PowerFeed
 from app.models.pdu import Pdu, PduInlet, PduOutlet
+from app.models import pdu_sample  # noqa: F401  (registers the PDU history tables)
 from app.models.server_power_input import ServerPowerInput
 from app.models.server_group import ServerGroup, server_group_association
 from app.models.switch_bandwidth_sample import SwitchBandwidthSample
@@ -52,6 +53,7 @@ from app.models.private_network import (
     PrivateNetworkAttachment,
 )
 from app.models.storage import StorageNode, StorageTenant, StorageShare, ShareState, VlanMode
+from app.models.backup_slot import BackupSlot, RetainedBackup
 from app.models.permission_set import PermissionSet
 from app.models.vm_deployment_job import (
     VMDeploymentJob,
@@ -162,6 +164,7 @@ from app.models.commerce_webhook import (
 __all__ = ["User", "Server", "Category", "Location", "Rack", "NetworkSwitch", "Disk", "DiskType", "BootTask", "BootType", "BootTaskStatus", "InstallationTask", "InstallationStatus", "BillingIntegration", "McpApiKey", "Service", "ServiceBareMetal", "ServiceVm", "ServiceStatus", "ServiceType", "ProvisioningSource", "Script", "NetworkPort", "SwitchPort", "CableRun", "SwitchLldpNeighbor", "PatchPanel", "PatchPanelPort", "ServerGroup", "server_group_association", "SwitchBandwidthSample", "DHCPConfigModel", "TFTPConfigModel", "ServiceInstance", "Runner", "ProxyRunner", "ProxySubnetGroup", "ProxySubnetGroupMember", "Asset", "AssetLabel", "ServerActivity", "ServerActivityEventType", "ServerActivityStatus", "HardwareDetectionReport", "HardwareDetectionReportStatus", "ServerCapability", "ProductFamily", "Product", "VMTemplate", "ProductVMTemplate", "ProxmoxCluster", "ProxmoxNode", "ProxmoxStorage", "ProxmoxTemplate", "ProxmoxCapacitySnapshot", "IPSubnet", "IPAddress", "ServiceIPAssignment", "ServiceIPAssignmentHistory", "FamilyVMConfig", "ProductVMConfig", "VMIPAllocation", "vm_ip_allocation_cluster_association", "VMIDReservation", "PermissionSet", "VMDeploymentJob", "VMDeploymentJobStep", "DeploymentJobStatus", "DeploymentStepStatus"]
 __all__ += ["PowerFeed", "Pdu", "PduInlet", "PduOutlet", "ServerPowerInput"]
 __all__ += ["StorageNode", "StorageTenant", "StorageShare", "ShareState", "VlanMode"]
+__all__ += ["BackupSlot", "RetainedBackup"]
 __all__ += [
     "ResellerGroup",
     "Reseller",

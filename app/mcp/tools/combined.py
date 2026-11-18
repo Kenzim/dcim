@@ -331,16 +331,25 @@ async def save_subnet(
     allocation_strategy: Optional[Literal["first_free", "least_recently_used", "spread_subnets"]] = None,
     max_resale_count: Optional[int] = None,
     enabled: Optional[bool] = None,
+    proxy_runner_id: Optional[int] = None,
+    clear_proxy_runner: bool = False,
 ) -> dict:
     """Create an IPAM subnet (no subnet_id; needs name, cidr) or update one.
 
     Create seeds every host address (max 4096), or only range_start..range_end, and refuses CIDRs that
     overlap an existing subnet. cidr, range_start, range_end and tags are set on create only.
     max_resale_count > 1 lets one IP be sold to that many different owners at once.
+    Update only: proxy_runner_id pins the subnet to the runner hosting it (proxy fast path; gives it a
+    private IP); clear_proxy_runner unpins it (the IP is kept).
     """
     if subnet_id is None:
         _require("Creating a subnet", name=name, cidr=cidr)
-        _reject("Creating a subnet", clear_location=clear_location or None)
+        _reject(
+            "Creating a subnet",
+            clear_location=clear_location or None,
+            proxy_runner_id=proxy_runner_id,
+            clear_proxy_runner=clear_proxy_runner or None,
+        )
         return await ipam_tools.create_subnet(
             name,
             cidr,
@@ -361,6 +370,8 @@ async def save_subnet(
         location_id=location_id,
         clear_location=clear_location,
         max_resale_count=max_resale_count,
+        proxy_runner_id=proxy_runner_id,
+        clear_proxy_runner=clear_proxy_runner,
     )
 
 
@@ -489,7 +500,7 @@ async def service_info(
     view: Literal["detail", "backups", "deployment_jobs"] = "detail",
     limit: int = 20,
 ) -> dict:
-    """Service detail (no passwords or proxy credentials), VM backups with running backup jobs, or deployment jobs."""
+    """Service detail (no passwords or proxy credentials), deployment jobs, or backups (backup slots too)."""
     if view == "deployment_jobs":
         return await service_tools.list_deployment_jobs(service_id, limit=limit)
     if view == "backups":
@@ -499,7 +510,7 @@ async def service_info(
 
 @mcp.tool()
 async def provision(
-    kind: Literal["vm", "bare_metal", "http_proxy"],
+    kind: Literal["vm", "bare_metal", "http_proxy", "backup_slot"],
     name: str,
     product_code: Optional[str] = None,
     owner_user_id: Optional[int] = None,
@@ -514,11 +525,20 @@ async def provision(
     template_id: Optional[str] = None,
     ip_count: Optional[int] = None,
     subnet_id: Optional[int] = None,
+    size_gb: Optional[int] = None,
 ) -> dict:
     """Create a service. vm: needs product_code, vm_template_id (optional cluster/node/vmid).
     bare_metal: server_id or server_group_id, optional OS template_id. http_proxy: auto-assigns IPAM addresses.
+    backup_slot: owner_user_id, size_gb.
     """
     common = {"owner_user_id": owner_user_id, "description": description}
+    if kind == "backup_slot":
+        _require("A backup slot", owner_user_id=owner_user_id)
+        _reject("A backup slot", vm_template_id=vm_template_id, proxmox_cluster_id=proxmox_cluster_id,
+                proxmox_node_name=proxmox_node_name, proxmox_vmid=proxmox_vmid, server_id=server_id,
+                server_group_id=server_group_id, template_id=template_id, ip_count=ip_count, subnet_id=subnet_id)
+        return await service_tools.provision_backup_slot(name, product_code=product_code, size_gb=size_gb, **common)
+    _reject(f"A {kind} service", size_gb=size_gb)
     if kind == "vm":
         _require("A VM", product_code=product_code, vm_template_id=vm_template_id)
         _reject("A VM", server_id=server_id, server_group_id=server_group_id, template_id=template_id,
@@ -603,11 +623,16 @@ async def pdus(
     location_id: Optional[int] = None,
     rack_id: Optional[int] = None,
     pdu_id: Optional[int] = None,
+    history_hours: Optional[int] = None,
 ) -> Any:
-    """List PDUs (filter by location_id or rack_id), or give pdu_id for one PDU with its inlets and outlets. Secrets are masked."""
+    """List PDUs (filter by location_id or rack_id), or give pdu_id for one PDU with its inlets and outlets. Secrets are masked.
+    history_hours (up to about a year) returns bucketed power history instead: of the PDU (pdu_id, with inlets, banks and rated current), of a rack (rack_id), of a location (location_id), or of all PDUs. Includes energy in kWh.
+    """
     if pdu_id is not None:
         _reject("Viewing one PDU", location_id=location_id, rack_id=rack_id)
-    return await pdu_tools.pdus(location_id=location_id, rack_id=rack_id, pdu_id=pdu_id)
+    if history_hours is not None and rack_id is not None:
+        _reject("History of a rack", location_id=location_id)
+    return await pdu_tools.pdus(location_id=location_id, rack_id=rack_id, pdu_id=pdu_id, history_hours=history_hours)
 
 
 @mcp.tool()
@@ -743,13 +768,17 @@ async def power_feeds(
     max_utilisation_percent: Optional[int] = None,
     description: Optional[str] = None,
     confirm: bool = False,
+    history_hours: Optional[int] = None,
 ) -> Any:
     """list: the feeds in a rack (rack_id), or one feed (feed_id). create: needs rack_id and name. update: needs feed_id. delete: needs feed_id and confirm=true.
     voltage, amperage, phase, max_utilisation_percent and description apply to create and update.
+    history_hours (list with feed_id only): adds bucketed power history of the feed, with its limits and energy in kWh.
     """
+    if history_hours is not None and (action != "list" or feed_id is None):
+        raise ToolError("history_hours needs action=list and feed_id")
     if action == "list":
         _reject("Listing power feeds", name=name, voltage=voltage, amperage=amperage, phase=phase, max_utilisation_percent=max_utilisation_percent, description=description)
-        return await pdu_tools.power_feeds(rack_id=rack_id, feed_id=feed_id)
+        return await pdu_tools.power_feeds(rack_id=rack_id, feed_id=feed_id, history_hours=history_hours)
     if action == "delete":
         _require("Deleting a power feed", feed_id=feed_id)
         _reject("Deleting a power feed", rack_id=rack_id, name=name, voltage=voltage, amperage=amperage, phase=phase, max_utilisation_percent=max_utilisation_percent, description=description)
@@ -773,15 +802,16 @@ async def power_feeds(
 
 
 @mcp.tool()
-async def rack_power_summary(rack_id: int) -> dict:
-    """Power summary for a rack: its power feeds with their aggregated readings."""
-    return await pdu_tools.rack_power(rack_id)
+async def rack_power_summary(rack_id: int, history_hours: Optional[int] = None) -> dict:
+    """Power summary for a rack: its power feeds with their aggregated readings. history_hours adds bucketed power history and energy in kWh."""
+    return await pdu_tools.rack_power(rack_id, history_hours=history_hours)
 
 
 @mcp.tool()
-async def server_power_summary(server_id: int) -> dict:
-    """Power summary for a server: its power inputs, the PDU outlets feeding them and their readings."""
-    return await pdu_tools.server_power(server_id)
+async def server_power_summary(server_id: int, history_hours: Optional[int] = None) -> dict:
+    """Power summary for a server: its power inputs, the PDU outlets feeding them and their readings.
+    history_hours adds bucketed power history and energy in kWh from the linked metered outlets (it says when that cannot be known)."""
+    return await pdu_tools.server_power(server_id, history_hours=history_hours)
 
 
 @mcp.tool()
