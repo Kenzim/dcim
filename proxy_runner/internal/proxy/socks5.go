@@ -7,8 +7,6 @@ import (
 	"io"
 	"net"
 	"time"
-
-	"rackflow/proxy_runner/internal/auth"
 )
 
 const (
@@ -23,7 +21,7 @@ const (
 	socks5UserPassVer      = 0x01
 )
 
-func handleSOCKS5(conn net.Conn, br *bufio.Reader, _ byte, bindIP string, store *auth.Store, dialTimeout, idleTimeout time.Duration) {
+func handleSOCKS5(conn net.Conn, br *bufio.Reader, _ byte, localIP string, authz Authorizer, dialTimeout, idleTimeout time.Duration) {
 	// Version byte already consumed (0x05); read nmethods + methods.
 	nmethods, err := br.ReadByte()
 	if err != nil {
@@ -69,7 +67,8 @@ func handleSOCKS5(conn net.Conn, br *bufio.Reader, _ byte, bindIP string, store 
 	}
 	username := string(ubuf)
 	password := string(pbuf)
-	if _, allowed := store.Allow(bindIP, username, password); !allowed {
+	bindIP, allowed := authz.Authorize(localIP, username, password, "")
+	if !allowed {
 		_, _ = conn.Write([]byte{socks5UserPassVer, 0x01}) // failure
 		return
 	}

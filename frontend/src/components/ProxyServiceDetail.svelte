@@ -256,7 +256,14 @@
           <tbody>
             {#each assignments as a (a.id)}
               <tr>
-                <td class="mono">{a.ip_address}</td>
+                <td class="mono">
+                  {a.ip_address}
+                  {#if a.fast_path}
+                    <div class="small" title={a.fast_path.active ? 'Fast path on for this client' : 'Client has not turned the fast path on here'}>
+                      fast path {a.fast_path.ip}:{a.fast_path.port}{a.fast_path.active ? '' : ' (off)'}
+                    </div>
+                  {/if}
+                </td>
                 <td class="mono">{a.username || '—'}</td>
                 <td class="mono">{a.password || '—'}</td>
                 <td class="mono small">{proxyUrl('http', a)}</td>

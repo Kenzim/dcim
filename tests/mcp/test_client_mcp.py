@@ -674,3 +674,52 @@ def test_staff_can_list_and_revoke_client_keys(client, db_session, test_admin_us
     # a client session cannot use the staff routes
     client_headers = _login(client, "alice")
     assert client.get(f"/api/admin/clients/{alice.id}/mcp-keys", headers=client_headers).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_fast_path_view_and_toggle_are_owner_scoped(db_session, as_client, monkeypatch):
+    from app.dao.ipam_dao import IPAMDAO
+    from app.dao.private_network_dao import PrivateNetworkDAO
+    from app.dao.proxy_runner_dao import ProxyRunnerDAO
+    from app.models.service import ServiceType
+
+    alice, bob = _user(db_session, "alice"), _user(db_session, "bob")
+    location = Location(name="fast-loc", description="")
+    db_session.add(location)
+    db_session.commit()
+    pool = PrivateNetworkDAO.create_pool(
+        db_session, location_id=location.id, vlan_start=2200, vlan_end=2209, bridge="vmbr0",
+        max_networks_per_client=2, max_networks_per_service=4,
+    )
+    pool.proxy_access_enabled = True
+    runner, _ = ProxyRunnerDAO.create(db_session, name="fast-r", api_key="kfr")
+    runner.location_id = location.id
+    db_session.commit()
+    subnet = IPAMDAO.create_subnet(db_session, name="fast", cidr="203.0.113.64/29", location_id=location.id)
+    subnet.proxy_runner_id, subnet.fast_path_ip = runner.id, "100.80.0.9"
+    db_session.commit()
+    srv = _server(db_session, "px-srv", "10.1.0.9")
+    proxy = ServiceDAO.create_bare_metal(
+        db_session, name="a-px", server_id=srv.id, owner_user_id=alice.id, service_type=ServiceType.HTTP_PROXY,
+        status=ServiceStatus.ACTIVE, provisioning_source=ProvisioningSource.INTERNAL,
+    )
+    IPAMDAO.assign_ip(db_session, proxy.id, subnet_id=subnet.id, username="ua", password="pa-secret")
+
+    as_client(alice, ["read", "write"])
+    view = await tools.services(view="fast_path", service_id=proxy.id)
+    assert [(e["fast_path_ip"], e["active"]) for e in view["endpoints"]] == [("100.80.0.9", False)]
+    with pytest.raises(ToolError, match="confirm"):
+        await tools.service_action(proxy.id, "fast_path_on")
+    on = await tools.service_action(proxy.id, "fast_path_on", confirm=True)
+    assert on["endpoints"][0]["active"] is True and on["locations"][0]["enabled"] is True
+
+    as_client(bob, ["read", "write"])
+    assert (await tools.services(view="fast_path"))["endpoints"] == []
+    with pytest.raises(ToolError, match="no proxy IPs"):
+        await tools.service_action(proxy.id, "fast_path_off", confirm=True)
+
+    as_client(alice, ["read", "write"])
+    off = await tools.service_action(proxy.id, "fast_path_off", confirm=True)
+    assert off["locations"][0]["enabled"] is False
+    again = await tools.service_action(proxy.id, "fast_path_off", confirm=True)
+    assert again["locations"][0]["enabled"] is False

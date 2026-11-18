@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models.private_network import (
     AttachmentState,
+    NetworkKind,
     PrivateNetwork,
     PrivateNetworkAttachment,
     PrivateNetworkPool,
@@ -81,14 +82,42 @@ class PrivateNetworkDAO:
 
     @staticmethod
     def count_for_owner(db: Session, owner_user_id: int, location_id: int) -> int:
+        """Networks that count towards the client's limit (proxy access networks do not)."""
         return (
             db.query(PrivateNetwork)
             .filter(
                 PrivateNetwork.owner_user_id == owner_user_id,
                 PrivateNetwork.location_id == location_id,
+                PrivateNetwork.kind == NetworkKind.STANDARD,
             )
             .count()
         )
+
+    @staticmethod
+    def get_access_network(db: Session, owner_user_id: int, location_id: int) -> Optional[PrivateNetwork]:
+        """The client's proxy access network in a location, whatever its status."""
+        return (
+            db.query(PrivateNetwork)
+            .filter(
+                PrivateNetwork.owner_user_id == owner_user_id,
+                PrivateNetwork.location_id == location_id,
+                PrivateNetwork.kind == NetworkKind.PROXY_ACCESS,
+            )
+            .first()
+        )
+
+    @staticmethod
+    def list_access_networks(
+        db: Session, *, location_id: Optional[int] = None, owner_user_id: Optional[int] = None
+    ) -> List[PrivateNetwork]:
+        query = db.query(PrivateNetwork).options(joinedload(PrivateNetwork.attachments)).filter(
+            PrivateNetwork.kind == NetworkKind.PROXY_ACCESS
+        )
+        if location_id is not None:
+            query = query.filter(PrivateNetwork.location_id == location_id)
+        if owner_user_id is not None:
+            query = query.filter(PrivateNetwork.owner_user_id == owner_user_id)
+        return query.order_by(PrivateNetwork.id).all()
 
     @staticmethod
     def count_for_location(db: Session, location_id: int) -> int:

@@ -383,6 +383,10 @@ class Settings(BaseSettings):
     ipmi_proxy_port: Optional[int] = None
     # Port customers use for HTTP/SOCKS5 proxies when the subnet's location sets none.
     proxy_default_port: int = 11080
+    # Fixed range of every client's proxy access network (proxy fast path).
+    # The first /20 holds one private IP per pinned proxy subnet; client servers
+    # get the rest. Must not change once access networks exist.
+    proxy_access_cidr: str = "100.80.0.0/16"
     # Shared secret the ipmi_proxy_runner edge presents to the runner API (Bearer).
     ipmi_proxy_runner_api_key: Optional[str] = None
     # One-time launch ticket lifetime (seconds). Kept short: the ticket is only used

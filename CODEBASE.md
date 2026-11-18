@@ -33,7 +33,8 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | PXE / cloud-init / boot scripts served to bare metal | `app/api/server_interaction.py` |
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
 | DHCP/TFTP/media runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, `media_runner/main.py`, uplink in `runner_common/`, hub in `app/services/runners/` |
-| Proxy runner (IPAM sync) | `proxy_runner/main.py`, API `app/api/runner_proxy.py` |
+| Proxy runner (IPAM sync) | Go runner `proxy_runner/` (see its README), API `app/api/runner_proxy.py` |
+| Proxy fast path (clients reach proxies over a private VLAN) | Design `docs/proxy-fast-path.md`; service `app/services/proxy_fast_path.py` (subnet pinning, `ProxyAccessService`, runner `fast_path` config, client overview); access networks are `PrivateNetwork.kind = proxy_access` in `private_network_service.py`; runner side `proxy_runner/internal/fastpath/` (namespace per client) |
 | NFS storage on private networks (`nfs_storage` services, storage nodes, shares) | Models `app/models/storage.py`, DAO `app/dao/storage_dao.py`, service `app/services/storage_service.py`, provisioning `app/services/provisioning/nfs_storage.py`; API `app/api/storage.py` (staff), `app/api/storage_client.py` (client), `app/api/storage_common.py` (shared shapes), runner API `app/api/runner_storage.py`; MCP `app/mcp/tools/storage.py` and the client `storage` tool; UI `StorageNodes.svelte`, `client/ClientStorage.svelte`, `components/storage/` |
 | Storage runner (per-customer NFS on CephFS) | `storage_runner/internal/reconcile/reconcile.go` (loop), drivers in `storage_runner/internal/{netns,firewall,ceph,ganesha}/` |
 | Tests | Mirror path under `tests/` (`tests/api/`, `tests/dao/`, `tests/services/`, …) |
@@ -84,7 +85,7 @@ Runners (dhcp_runner/, tftp_runner/, media_runner/, proxy_runner/, storage_runne
 | `tftp_runner/` | Container API that runs `in.tftpd` + WebSocket uplink |
 | `media_runner/` | Per-location ISO library (HTTP range + SMB) + WebSocket uplink |
 | `runner_common/` | Shared protocol/agent used by Python runners |
-| `proxy_runner/` | Sidecar that syncs proxy/IPAM config from Rackflow |
+| `proxy_runner/` | Go HTTP/SOCKS5 proxy runner; syncs proxy/IPAM config from Rackflow and, with `FASTPATH_PARENT_IFACE`, serves the proxy fast path in one network namespace per client |
 | `storage_runner/` | Go agent on storage nodes: one isolated NFS-Ganesha per customer (own netns + VLAN) on erasure-coded CephFS |
 | `os_templates/` | Disk-based OS install templates |
 | `isos/`, `disk_images/`, `tftp/` | Central boot media (ISO catalog fallback); per-location libraries live on media runners |
@@ -131,7 +132,7 @@ All included from `app/main.py` under `/api`.
 | `service_instance.py` | `/api/service-instances` | Legacy DHCP/TFTP HTTP runner registration per location |
 | `runners_admin.py` | `/api/admin/runners` | Unified runner enroll / rotate key / ISO library |
 | `runner_ws.py` | `WS /api/runner/ws` | Runner-initiated uplink |
-| `proxy_runners.py` | `/api/admin/proxy-runners` | Standalone proxy runners (generated key, phone-home health) |
+| `proxy_runners.py` | `/api/admin/proxy-runners` | Standalone proxy runners (generated key, phone-home health, fast path location/server/VLAN mode and hosted subnets) |
 | `proxy_subnet_groups.py` | `/api/admin/proxy-subnet-groups` | Named IPAM subnet pools for proxy catalog auto-assign |
 | `rack.py` | `/api/racks` | Racks + servers-in-rack |
 | `server.py` | `/api/servers` | Servers CRUD, power, boot, capabilities, hardware detection, activity, bandwidth |
@@ -158,10 +159,10 @@ All included from `app/main.py` under `/api`.
 | `commerce_auth_public.py` | `/api/commerce/auth` | Register, verify email, password reset |
 | `product_catalog.py` | `/api/product-catalog` | Families, products, VM templates, OS profiles, VM config |
 | `proxmox_inventory.py` | `/api/proxmox` | Clusters, sync, inventory, VM plan |
-| `private_networks.py` | `/api/admin/private-networks`, `/api/client/private-networks` | Private network pools, networks, attachments |
+| `private_networks.py` | `/api/admin/private-networks`, `/api/client/private-networks` | Private network pools, networks, attachments; client `/fast-path` (proxy fast path overview, on, off) |
 | `ipam.py` | `/api/ipam` | Subnets, assignments, history |
 | `vm_ip_allocations.py` | `/api/vm-ip-allocations` | Preallocated VM IPs |
-| `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner |
+| `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner (`fast_path` block only for runners with a location whose pool offers the fast path) |
 | `storage.py` | `/api/admin/storage` | Storage nodes (key shown once, VLAN mode and ports, switch port preview) and nfs_storage services with shares |
 | `storage_client.py` | `/api/client/storage` | Client's own storage: link to a private network, share CRUD (permission `storage.manage_shares`) |
 | `runner_storage.py` | `/api/runner/storage` | Storage runner: `GET /config` (only that node's tenants), `POST /status`; bearer node key, failed keys rate-limited per IP |
@@ -231,7 +232,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `proxmox_placement.py` / `vmid_allocator.py` / `ip_allocation.py` | Placement, VMID, IP assignment |
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
-| `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair. The last usable address of every network is reserved for storage (`storage_endpoint_ip`); `attach_storage` is the only way it is handed out. Storage attachments trunk the node's `vlan_port_ids` (or the PXE uplink), or make no switch calls in `preconfigured` VLAN mode |
+| `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair. The last usable address of every network is reserved for storage (`storage_endpoint_ip`); `attach_storage` is the only way it is handed out. Storage attachments trunk the node's `vlan_port_ids` (or the PXE uplink), or make no switch calls in `preconfigured` VLAN mode. Proxy access networks (`kind = proxy_access`) always use `settings.proxy_access_cidr` (100.80.0.0/16, refused for normal networks), keep its first /20 for proxy subnet IPs, have no storage address, and also hold proxy runner attachments (`proxy_runner_id`, no service) |
+| `proxy_fast_path.py` | Proxy fast path: `pin_subnet` (subnet to runner, allocates the subnet's private IP once), `ProxyAccessService` (client on/off per location, runners join and leave, `runner_config` builds per-client tenants, `overview` for clients), product flag `proxy_fast_path` for paid offers |
 | `storage_service.py` | NFS storage: node CRUD, placement (least-loaded enabled node in the location), share validation and quotas, terminate and share delete with `storage_destroy_grace_seconds`, combined readiness (attachment applied and runner ready), runner config and status |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
 | `cabling_graph_service.py` | Builds the cabling graph from batch queries in `app/dao/cabling_graph_dao.py`: nodes, ports, cables and end-to-end paths through patch panels. Link status comes from the switch end's stored `oper_status` and counts only while fresh (`STATUS_STALE_AFTER`, 15 minutes); older data is `stale`, never polled is `unknown` |
@@ -459,7 +461,7 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 
 Run: `pytest` (see `pytest.ini`).
 
-Go runners: `cd proxy_runner && go test ./...`; `cd storage_runner && go test -race ./...` (fakes only). The storage runner's kernel-level checks are behind the `sandbox` build tag and run in a throwaway namespace (see `storage_runner/README.md`).
+Go runners: `cd proxy_runner && go test -race ./...` (fast path kernel check: `-tags sandbox`, see `proxy_runner/README.md`); `cd storage_runner && go test -race ./...` (fakes only). The storage runner's kernel-level checks are behind the `sandbox` build tag and run in a throwaway namespace (see `storage_runner/README.md`).
 
 ---
 

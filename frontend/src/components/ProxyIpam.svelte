@@ -14,6 +14,7 @@
     assignIpamAddress,
     listIpamHistory,
     releaseIpamAssignment,
+    listProxyRunners,
   } from '../lib/api.js';
 
   const PROXY_PORT = 8080;
@@ -26,6 +27,7 @@
   let locations = [];
   let assignments = [];
   let history = [];
+  let runners = [];
   let historyServiceFilter = '';
   let showCreateSubnet = false;
   let revealedPasswords = {};
@@ -94,14 +96,16 @@
     loading = true;
     error = '';
     try {
-      const [subnetRows, serviceRows, locationRows, assignmentRows, historyRows] = await Promise.all([
+      const [subnetRows, serviceRows, locationRows, assignmentRows, historyRows, runnerRows] = await Promise.all([
         listIpamSubnets(),
         getServices({ service_type: 'http_proxy' }),
         getLocations(),
         listIpamAssignments(),
         listIpamHistory(),
+        listProxyRunners(),
       ]);
       subnets = subnetRows;
+      runners = (runnerRows || []).filter((r) => r.location_id);
       services = Array.isArray(serviceRows) ? serviceRows.filter((s) => s.service_type === 'http_proxy') : [];
       locations = locationRows || [];
       assignments = assignmentRows || [];
@@ -139,6 +143,23 @@
       await loadAll();
     } catch (err) {
       error = err.message;
+    }
+  }
+
+  async function pinSubnet(subnet, value) {
+    const runnerId = value ? Number(value) : null;
+    if (runnerId === (subnet.proxy_runner_id ?? null)) return;
+    error = '';
+    try {
+      const body = runnerId ? { proxy_runner_id: runnerId } : { clear_proxy_runner: true };
+      const row = await updateIpamSubnet(subnet.id, body);
+      success = row.fast_path
+        ? `${subnet.cidr} is on ${row.proxy_runner_name}; fast path ${row.fast_path.ip}:${row.fast_path.port}`
+        : `${subnet.cidr} unpinned`;
+      await loadAll();
+    } catch (err) {
+      error = err.message;
+      await loadAll();
     }
   }
 
@@ -246,7 +267,7 @@
     {:else}
       <div class="table subnet-table">
         <div class="row head subnet-row">
-          <div>Name</div><div>CIDR</div><div>Location</div><div>Strategy</div><div>Enabled</div><div>IPs</div><div>Resale cap</div><div>Slots used</div><div>Actions</div>
+          <div>Name</div><div>CIDR</div><div>Location</div><div>Strategy</div><div>Enabled</div><div>IPs</div><div>Resale cap</div><div>Slots used</div><div>Fast path runner</div><div>Actions</div>
         </div>
         {#each subnets as subnet}
           <div class="row subnet-row">
@@ -267,6 +288,24 @@
               />
             </div>
             <div>{subnet.used_slots ?? '—'}/{subnet.total_slots ?? '—'}</div>
+            <div class="fast-cell">
+              <select
+                class="runner-select"
+                value={subnet.proxy_runner_id ? String(subnet.proxy_runner_id) : ''}
+                title="The proxy runner that hosts this subnet; its private IP lives there"
+                on:change={(e) => pinSubnet(subnet, e.target.value)}
+              >
+                <option value="">Not pinned</option>
+                {#each runners as runner}
+                  <option value={String(runner.id)}>{runner.name} ({runner.location_name})</option>
+                {/each}
+              </select>
+              {#if subnet.fast_path}
+                <span class="mono">{subnet.fast_path.ip}:{subnet.fast_path.port}</span>
+              {:else if subnet.fast_path_ip}
+                <span class="mono muted-ip" title="Kept for this subnet while unpinned">{subnet.fast_path_ip}</span>
+              {/if}
+            </div>
             <div class="row-actions">
               <button class="tiny" on:click={() => toggleSubnetEnabled(subnet)}>
                 {subnet.enabled ? 'Disable' : 'Enable'}
@@ -495,7 +534,18 @@
   }
   .row.head { font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--border-color); }
   .subnet-row {
-    grid-template-columns: 1fr 1.2fr 1fr 0.9fr 0.6fr 0.7fr 0.8fr 0.8fr 1.1fr;
+    grid-template-columns: 1fr 1.2fr 1fr 0.9fr 0.6fr 0.7fr 0.8fr 0.8fr 1.3fr 1.1fr;
+  }
+  .fast-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .runner-select {
+    max-width: 100%;
+  }
+  .muted-ip {
+    opacity: 0.6;
   }
   .resale-input {
     width: 60px;

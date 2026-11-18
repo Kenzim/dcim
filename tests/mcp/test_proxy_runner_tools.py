@@ -113,3 +113,40 @@ async def test_published_view_matches_runner_config(db_session, mcp_sessionlocal
 
     only = await proxy_runner(action="published", service_id=suspended.id)
     assert only["entries"] == [] and only["held_back_entries"][0]["reason"] == "service_suspended"
+
+
+@pytest.mark.asyncio
+async def test_fast_path_placement_pinning_and_view(db_session, mcp_sessionlocal, mcp_auth_ctx_write):
+    from app.dao.private_network_dao import PrivateNetworkDAO
+    from app.mcp.tools.combined import save_subnet
+    from app.mcp.tools.proxy_runners import proxy_runner
+
+    location = LocationDAO.create(db_session, name="loc-mcp-fast")
+    pool = PrivateNetworkDAO.create_pool(
+        db_session, location_id=location.id, vlan_start=2100, vlan_end=2109, bridge="vmbr0",
+        max_networks_per_client=2, max_networks_per_service=4,
+    )
+    pool.proxy_access_enabled = True
+    db_session.commit()
+    runner, _ = ProxyRunnerDAO.create(db_session, name="fast-1", api_key="kf")
+    subnet = IPAMDAO.create_subnet(db_session, name="fast-pool", cidr="198.51.100.32/29", location_id=location.id)
+
+    with pytest.raises(ToolError, match="location"):
+        await save_subnet(subnet_id=subnet.id, proxy_runner_id=runner.id)
+    with pytest.raises(ToolError, match="does not accept: proxy_runner_id"):
+        await save_subnet(name="x", cidr="198.51.100.40/29", proxy_runner_id=runner.id)
+
+    placed = await proxy_runner(action="update", runner_id=runner.id, location_id=location.id)
+    assert placed["location_id"] == location.id and placed["vlan_mode"] == "preconfigured"
+    pinned = await save_subnet(subnet_id=subnet.id, proxy_runner_id=runner.id)
+    assert pinned["fast_path"]["ip"] == "100.80.0.1" and pinned["proxy_runner_name"] == "fast-1"
+
+    view = await proxy_runner(action="fast_path", runner_id=runner.id)
+    assert view["cidr"] == "100.80.0.0/16"
+    assert view["runners"][0]["active"] is True and view["runners"][0]["tenants"] == []
+
+    cleared = await proxy_runner(action="update", runner_id=runner.id, clear_placement=True)
+    assert cleared["location_id"] is None
+    assert (await proxy_runner(action="fast_path"))["runners"][0]["active"] is False
+    with pytest.raises(ToolError, match="not both"):
+        await proxy_runner(action="update", runner_id=runner.id, clear_placement=True, location_id=location.id)

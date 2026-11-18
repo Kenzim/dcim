@@ -385,9 +385,12 @@ function rackflow_ClientArea(array $vars)
     } else {
         $powerMessage = 'Server status will appear here once the service is linked.';
     }
+    $fastPathVars = ($isProxyService && $proxyCredentialsAvailable && !empty($rackflowServiceId))
+        ? rackflow_proxyFastPathTemplateVars($params, isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
+        : rackflow_proxyFastPathEmptyVars();
     return array(
         'templatefile' => 'clientarea',
-        'vars' => array(
+        'vars' => array_merge($fastPathVars, array(
             'rackflow_hostname' => $hostname,
             'rackflow_primary_ip' => $primaryIp,
             'rackflow_power_available' => $powerAvailable,
@@ -460,7 +463,7 @@ function rackflow_ClientArea(array $vars)
             'rackflow_proxy_action_url' => !empty($params['serviceid'])
                 ? rackflow_proxyActionEndpointUrl((int)$params['serviceid'], isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
                 : '',
-        ),
+        )),
     );
 }
 
@@ -5646,4 +5649,154 @@ function rackflow_AdminServicesTabFieldsSave(array $params)
             'packageid' => $packageId,
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Proxy fast path: private proxy addresses and the per-location access network
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the fast path view of a proxy service: private addresses of its IPs
+ * and whether the client's access network is on in their locations.
+ *
+ * @return array|null Decoded payload, or null when unavailable.
+ */
+function rackflow_proxyFastPathFetch(array $params)
+{
+    $rackflowServiceId = rackflow_getRackflowServiceId($params);
+    if (empty($rackflowServiceId)) {
+        return null;
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return null;
+    }
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'GET',
+        '/api/billing/services/' . (int)$rackflowServiceId . '/proxy/fast-path',
+        null,
+        10
+    );
+    if (empty($result['success']) || !is_array($result['data'])) {
+        return null;
+    }
+    return $result['data'];
+}
+
+/**
+ * Turn the fast path on or off for the locations of a proxy service's IPs.
+ *
+ * @return string "success" or an error message
+ */
+function rackflow_proxyFastPathToggle(array $params, $enabled)
+{
+    $rackflowServiceId = rackflow_getRackflowServiceId($params);
+    if (empty($rackflowServiceId)) {
+        return 'This service is not linked to RackFlow.';
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return 'API URL and API key must be configured (Setup > Servers).';
+    }
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'POST',
+        '/api/billing/services/' . (int)$rackflowServiceId . '/proxy/fast-path',
+        array('enabled' => (bool)$enabled)
+    );
+    if (!$result['success']) {
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        return (string)$detail;
+    }
+    return 'success';
+}
+
+/**
+ * Default (hidden) fast path panel variables.
+ */
+function rackflow_proxyFastPathEmptyVars()
+{
+    return array(
+        'rackflow_fast_path_available' => false,
+        'rackflow_fast_path_cidr' => '',
+        'rackflow_fast_path_locations' => array(),
+        'rackflow_fast_path_endpoints' => array(),
+        'rackflow_fast_path_lines' => '',
+        'rackflow_fast_path_can_enable' => false,
+        'rackflow_fast_path_can_disable' => false,
+        'rackflow_fast_path_action_url' => '',
+    );
+}
+
+/**
+ * Template variables for the fast path panel of the proxy client area.
+ *
+ * @return array rackflow_fast_path_* variables (empty view when unavailable)
+ */
+function rackflow_proxyFastPathTemplateVars(array $params, $systemUrl = '')
+{
+    $view = rackflow_proxyFastPathFetch($params);
+    if (!is_array($view)) {
+        return rackflow_proxyFastPathEmptyVars();
+    }
+    return rackflow_proxyFastPathVarsFromView($view, rackflow_proxyFastPathActionUrl($systemUrl));
+}
+
+/**
+ * Same-origin URL of fastpath_action.php, also under a WHMCS subdirectory.
+ */
+function rackflow_proxyFastPathActionUrl($systemUrl = '')
+{
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $basePath = rtrim((string)parse_url($systemUrl, PHP_URL_PATH), '/');
+        }
+    }
+    return $basePath . '/modules/servers/rackflow/fastpath_action.php';
+}
+
+/**
+ * Turn the billing API fast path view into template variables.
+ *
+ * @return array rackflow_fast_path_* variables
+ */
+function rackflow_proxyFastPathVarsFromView(array $view, $actionUrl)
+{
+    $vars = rackflow_proxyFastPathEmptyVars();
+    if (empty($view['locations']) || !is_array($view['locations'])) {
+        return $vars;
+    }
+    $locations = $view['locations'];
+    $endpoints = isset($view['endpoints']) && is_array($view['endpoints']) ? $view['endpoints'] : array();
+    $canEnable = false;
+    $canDisable = false;
+    foreach ($locations as $loc) {
+        if (!empty($loc['enabled'])) {
+            $canDisable = true;
+        } elseif (!empty($loc['available']) && empty($loc['status'])
+            && (!empty($loc['entitled']) || empty($loc['requires_product']))) {
+            $canEnable = true;
+        }
+    }
+    $lines = array();
+    foreach ($endpoints as $ep) {
+        if (!empty($ep['fast_path_ip']) && !empty($ep['port'])) {
+            $lines[(string)$ep['fast_path_ip'] . ':' . (string)$ep['port']] = true;
+        }
+    }
+    $vars['rackflow_fast_path_available'] = true;
+    $vars['rackflow_fast_path_cidr'] = isset($view['cidr']) ? (string)$view['cidr'] : '';
+    $vars['rackflow_fast_path_locations'] = $locations;
+    $vars['rackflow_fast_path_endpoints'] = $endpoints;
+    $vars['rackflow_fast_path_lines'] = implode("\n", array_keys($lines));
+    $vars['rackflow_fast_path_can_enable'] = $canEnable;
+    $vars['rackflow_fast_path_can_disable'] = $canDisable;
+    $vars['rackflow_fast_path_action_url'] = (string)$actionUrl;
+    return $vars;
 }

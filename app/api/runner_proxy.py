@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session, joinedload
@@ -8,6 +9,7 @@ from app.dao.proxy_runner_dao import ProxyRunnerDAO
 from app.models.ipam import IPAddress, ServiceIPAssignment
 from app.models.proxy_runner import ProxyRunner
 from app.models.service import ServiceStatus
+from app.services.proxy_fast_path import ProxyAccessService
 
 
 from typing import Annotated
@@ -104,8 +106,15 @@ async def get_proxy_config(
     ProxyRunnerDAO.touch_heartbeat(db, runner, client_ip=_client_ip(request))
 
     rows, version, _held_back = build_published_assignments(db)
-    return {
+    body = {
         "version": version,
         "runner_id": runner.id,
         "assignments": rows,
     }
+    fast_path = ProxyAccessService.runner_config(db, runner)
+    if fast_path is not None:
+        # Runners without the fast path keep exactly the version they had.
+        content = version + json.dumps(fast_path, sort_keys=True)
+        body["version"] = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        body["fast_path"] = fast_path
+    return body
