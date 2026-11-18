@@ -38,11 +38,31 @@ class _ShareReport(BaseModel):
     error: Optional[str] = None
 
 
+class _SftpReport(BaseModel):
+    state: Optional[str] = None
+    error: Optional[str] = None
+
+
 class _TenantReport(BaseModel):
     id: int
     state: Optional[str] = None
     error: Optional[str] = None
     shares: List[_ShareReport] = Field(default_factory=list)
+    sftp: Optional[_SftpReport] = None
+
+
+class _NodeSftpReport(BaseModel):
+    listening: Optional[bool] = None
+    port: Optional[int] = None
+    host_key: Optional[str] = None
+    host_key_fingerprint: Optional[str] = None
+    error: Optional[str] = None
+
+
+class _SftpLogin(BaseModel):
+    user_id: int
+    at: str
+    ip: Optional[str] = None
 
 
 class StatusReport(BaseModel):
@@ -53,6 +73,8 @@ class StatusReport(BaseModel):
     destroyed_tenants: List[int] = Field(default_factory=list)
     destroyed_shares: List[int] = Field(default_factory=list)
     orphans: List[str] = Field(default_factory=list)
+    sftp: Optional[_NodeSftpReport] = None
+    sftp_logins: List[_SftpLogin] = Field(default_factory=list, max_length=10000)
 
 
 def _client_ip(request: Request) -> str:
