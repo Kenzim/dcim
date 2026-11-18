@@ -200,8 +200,9 @@ def test_rollup_rerun_is_a_no_op_and_windows_are_idempotent(db_session, site):
     history.rollup(db_session, NOW)
     before_5m, before_1h = snapshot(db_session, BUCKET_5M), snapshot(db_session, BUCKET_1H)
 
-    assert history.rollup(db_session, NOW)["pdu"] == 0
+    assert history.rollup(db_session, NOW)["pdu"] == 2  # only the newest 5-minute and hourly buckets are re-rolled
     assert snapshot(db_session, BUCKET_5M) == before_5m
+    assert snapshot(db_session, BUCKET_1H) == before_1h
 
     kind = history.SAMPLE_KINDS["pdu"]
     end = START + timedelta(hours=3)
@@ -238,6 +239,52 @@ def test_hourly_rollup_keeps_counter_and_weights_by_samples(db_session, site):
     history.rollup(db_session, NOW)
     hour = rollup_rows(db_session, BUCKET_1H)[0]
     assert hour.energy_kwh_first == pytest.approx(50.0) and hour.energy_kwh_last == pytest.approx(50.59)
+
+
+def test_late_sample_in_an_already_rolled_bucket_is_counted_by_the_next_run(db_session, site):
+    pdu = make_pdu(db_session, site)
+    put_raw(db_session, pdu.id, START, 190, power=lambda m: 100.0)
+    history.rollup(db_session, NOW)
+    newest = rollup_rows(db_session, BUCKET_5M)[-1]
+    assert newest.bucket_start.replace(tzinfo=timezone.utc) == datetime(2026, 11, 18, 9, 0, tzinfo=timezone.utc)
+    assert newest.sample_count == 5
+
+    # a manual poll commits a sample into the 09:00 bucket after that bucket was rolled up
+    PduSampleDAO.insert_raw(db_session, "pdu", [{"pdu_id": pdu.id, "sampled_at": datetime(2026, 11, 18, 9, 4, 30, tzinfo=timezone.utc), "power_w": 600.0}])
+    db_session.commit()
+    history.rollup(db_session, NOW + timedelta(minutes=1))
+
+    newest = rollup_rows(db_session, BUCKET_5M)[-1]
+    assert newest.sample_count == 6 and newest.power_w_max == 600.0
+    hour = rollup_rows(db_session, BUCKET_1H)[-1]  # the 08:00 hour was rolled before and does not include 09:00 yet
+    assert hour.bucket_start.replace(tzinfo=timezone.utc) == datetime(2026, 11, 18, 8, 0, tzinfo=timezone.utc)
+
+    # the hour containing the late sample, once complete, includes it
+    history.rollup(db_session, datetime(2026, 11, 18, 10, 5, tzinfo=timezone.utc))
+    nine = rollup_rows(db_session, BUCKET_1H)[-1]
+    assert nine.bucket_start.replace(tzinfo=timezone.utc) == datetime(2026, 11, 18, 9, 0, tzinfo=timezone.utc)
+    assert nine.power_w_max == 600.0
+
+
+def test_buckets_are_rolled_only_after_a_two_minute_settle_time(db_session, site):
+    pdu = make_pdu(db_session, site)
+    put_raw(db_session, pdu.id, START, 190)
+    history.rollup(db_session, datetime(2026, 11, 18, 9, 5, 59, tzinfo=timezone.utc))  # 09:00 bucket ended 59 s ago
+    assert rollup_rows(db_session, BUCKET_5M)[-1].bucket_start.replace(tzinfo=timezone.utc) == datetime(2026, 11, 18, 8, 55, tzinfo=timezone.utc)
+    history.rollup(db_session, datetime(2026, 11, 18, 9, 7, 0, tzinfo=timezone.utc))
+    assert rollup_rows(db_session, BUCKET_5M)[-1].bucket_start.replace(tzinfo=timezone.utc) == datetime(2026, 11, 18, 9, 0, tzinfo=timezone.utc)
+
+
+def test_prune_never_removes_the_source_rows_of_the_newest_bucket(db_session, site, monkeypatch):
+    monkeypatch.setattr(settings, "power_history_raw_retention_days", 1)
+    pdu = make_pdu(db_session, site)
+    old = START - timedelta(days=5)
+    put_raw(db_session, pdu.id, old, 60)
+    history.rollup(db_session, old + timedelta(hours=1))  # poller then stops for days
+    history.prune(db_session, NOW)
+    history.rollup(db_session, NOW)
+    first = rollup_rows(db_session, BUCKET_5M)[0]
+    assert first.sample_count == 5  # the old buckets were not emptied by a later re-roll
 
 
 # ---------------------------------------------------------------------------
@@ -440,3 +487,37 @@ def test_empty_scope_returns_empty_series(db_session, site):
     out = history.rack_history(db_session, rack.id, rack.name, 24, NOW)
     assert out["metrics"]["power_w"] == [] and out["energy"] == {"kwh": None, "method": None}
     assert out["pdu_count"] == 0
+
+
+def test_totals_mark_buckets_where_a_pdu_had_no_data(db_session, site):
+    a = make_pdu(db_session, site, "pdu-a")
+    b = make_pdu(db_session, site, "pdu-b")
+    put_raw(db_session, a.id, START, 60, power=lambda m: 100.0)
+    put_raw(db_session, b.id, START, 30, power=lambda m: 50.0)  # b goes quiet after 30 minutes
+    loc, rack = site
+    out = history.rack_history(db_session, rack.id, rack.name, 3, START + timedelta(hours=1))
+    samples = out["metrics"]["power_w"]
+    full = [x for x in samples if x["value"] == 150.0]
+    dipped = [x for x in samples if x["value"] == 100.0]
+    assert full and dipped
+    assert not any(x.get("partial") for x in full)
+    assert all(x.get("partial") is True for x in dipped)
+    assert out["partial"] is True
+
+
+def test_totals_are_not_partial_when_every_pdu_reports(db_session, site):
+    a = make_pdu(db_session, site, "pdu-a")
+    b = make_pdu(db_session, site, "pdu-b")
+    for pdu in (a, b):
+        put_raw(db_session, pdu.id, START, 30, power=lambda m: 100.0)
+    loc, rack = site
+    out = history.location_history(db_session, loc.id, loc.name, 3, START + timedelta(minutes=30))
+    assert out["partial"] is False and not any("partial" in x for x in out["metrics"]["power_w"])
+
+
+def test_a_pdu_with_no_data_at_all_makes_the_total_partial(db_session, site):
+    a = make_pdu(db_session, site, "pdu-a")
+    make_pdu(db_session, site, "pdu-b")
+    put_raw(db_session, a.id, START, 30, power=lambda m: 100.0)
+    out = history.location_history(db_session, None, None, 3, START + timedelta(minutes=30))
+    assert out["partial"] is True and out["pdus_with_data"] == 1

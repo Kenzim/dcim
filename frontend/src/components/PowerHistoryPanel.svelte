@@ -79,6 +79,11 @@
           <span class="energy-note">({energyNote(data.energy)})</span>
         </div>
       {/if}
+      {#if data.partial}
+        <div class="history-note">
+          Incomplete data: in some intervals at least one source reported nothing, so the totals there are lower than the real draw.
+        </div>
+      {/if}
       {#each charts as chart (chart.title)}
         <div class="chart-block">
           <div class="chart-title">{chart.title}</div>

@@ -103,9 +103,9 @@ class PduSampleDAO:
         """
         model = _kind(kind).rollup
         db.execute(
-            delete(model).where(
-                and_(model.bucket_seconds == bucket_seconds, model.bucket_start >= start, model.bucket_start < end)
-            )
+            delete(model)
+            .where(and_(model.bucket_seconds == bucket_seconds, model.bucket_start >= start, model.bucket_start < end))
+            .execution_options(synchronize_session=False)
         )
         if rows:
             db.bulk_insert_mappings(model, list(rows))
@@ -113,12 +113,16 @@ class PduSampleDAO:
     @staticmethod
     def delete_raw_before(db: Session, kind: str, cutoff: datetime) -> int:
         model = _kind(kind).raw
-        return db.execute(delete(model).where(model.sampled_at < cutoff)).rowcount or 0
+        return db.execute(
+            delete(model).where(model.sampled_at < cutoff).execution_options(synchronize_session=False)
+        ).rowcount or 0
 
     @staticmethod
     def delete_rollups_before(db: Session, kind: str, bucket_seconds: int, cutoff: datetime) -> int:
         model = _kind(kind).rollup
         result = db.execute(
-            delete(model).where(and_(model.bucket_seconds == bucket_seconds, model.bucket_start < cutoff))
+            delete(model)
+            .where(and_(model.bucket_seconds == bucket_seconds, model.bucket_start < cutoff))
+            .execution_options(synchronize_session=False)
         )
         return result.rowcount or 0

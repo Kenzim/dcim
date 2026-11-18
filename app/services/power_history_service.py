@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 # One rollup transaction covers at most this much time, so catching up after downtime stays small.
 ROLLUP_CHUNK_SECONDS = 6 * 3600
+# A bucket is rolled up only this long after it ended, so in-flight polls have been committed.
+ROLLUP_SETTLE_SECONDS = 120
 # Points per series that a history response aims for.
 TARGET_POINTS = 288
 RAW_MAX_HOURS = 24
@@ -272,19 +274,20 @@ def _rollup_window(db: Session, kind: SampleKind, bucket_seconds: int, source: O
 
 def rollup(db: Session, now: Optional[datetime] = None) -> Dict[str, int]:
     """
-    Roll completed 5-minute buckets up from raw rows, then completed hours up from the 5-minute
-    buckets, continuing from the newest bucket of each table. Re-running writes the same rows.
-    Returns the number of rollup rows written per series kind.
+    Roll 5-minute buckets up from raw rows, then hours up from the 5-minute buckets, only once a
+    bucket ended at least ROLLUP_SETTLE_SECONDS ago. Each run starts from the newest existing
+    bucket (not after it), so a sample committed late, such as one from a manual poll, is counted
+    by the next run. Re-running writes the same rows. Returns the rollup rows written per series kind.
     """
     now = _now(now)
     written: Dict[str, int] = {}
     for kind in SAMPLE_KINDS.values():
         total = 0
         for bucket_seconds, source in ((BUCKET_5M, None), (BUCKET_1H, BUCKET_5M)):
-            end = _floor(now, bucket_seconds)
+            end = _floor(now - timedelta(seconds=ROLLUP_SETTLE_SECONDS), bucket_seconds)
             newest = PduSampleDAO.newest_rollup(db, kind.name, bucket_seconds)
             if newest is not None:
-                start = _utc(newest) + timedelta(seconds=bucket_seconds)
+                start = _utc(newest)
             else:
                 oldest = (
                     PduSampleDAO.oldest_raw(db, kind.name)
@@ -303,7 +306,7 @@ def rollup(db: Session, now: Optional[datetime] = None) -> Dict[str, int]:
 
 
 def _delete_cutoff(cutoff: datetime, rolled_to: Optional[datetime]) -> Optional[datetime]:
-    """Never delete rows that the next tier has not absorbed yet."""
+    """Never delete rows that the next tier has not absorbed yet, nor those of its newest bucket, which is re-rolled."""
     if rolled_to is None:
         return None
     return min(cutoff, _utc(rolled_to))
@@ -323,8 +326,8 @@ def prune(db: Session, now: Optional[datetime] = None) -> Dict[str, Dict[str, in
     for kind in SAMPLE_KINDS.values():
         newest_5m = PduSampleDAO.newest_rollup(db, kind.name, BUCKET_5M)
         newest_1h = PduSampleDAO.newest_rollup(db, kind.name, BUCKET_1H)
-        raw_to = _delete_cutoff(raw_cut, _utc(newest_5m) + timedelta(seconds=BUCKET_5M) if newest_5m else None)
-        m5_to = _delete_cutoff(m5_cut, _utc(newest_1h) + timedelta(seconds=BUCKET_1H) if newest_1h else None)
+        raw_to = _delete_cutoff(raw_cut, newest_5m)
+        m5_to = _delete_cutoff(m5_cut, newest_1h)
         deleted[kind.name] = {
             "raw": PduSampleDAO.delete_raw_before(db, kind.name, raw_to) if raw_to else 0,
             "5m": PduSampleDAO.delete_rollups_before(db, kind.name, BUCKET_5M, m5_to) if m5_to else 0,
@@ -425,19 +428,30 @@ def bucketise(kind: SampleKind, points: Sequence[Point], span: int) -> List[Poin
     return [merge_points(kind, grouped[t], t, span) for t in sorted(grouped)]
 
 
-def sum_points(kind: SampleKind, series: Sequence[Sequence[Point]], metrics: Sequence[str]) -> List[Point]:
-    """Add already bucketed series together bucket by bucket (min and max add up to bounds)."""
+def sum_points(
+    kind: SampleKind, series: Sequence[Sequence[Point]], metrics: Sequence[str], expected: Optional[int] = None
+) -> List[Point]:
+    """
+    Add already bucketed series together bucket by bucket (min and max add up to bounds). "c" is the
+    number of series that had a point in the bucket; with `expected` (how many series the scope has)
+    a bucket where fewer contributed is marked "partial", because its total is a lower bound.
+    """
     sums: Dict[datetime, Dict[str, List[float]]] = {}
+    counts: Dict[datetime, int] = {}
     for points in series:
         for p in points:
             acc = sums.setdefault(p["t"], {})
+            counts[p["t"]] = counts.get(p["t"], 0) + 1
             for metric in metrics:
                 if metric in p["m"]:
                     cur = acc.setdefault(metric, [0.0, 0.0, 0.0])
                     for i in range(3):
                         cur[i] += p["m"][metric][i]
     return [
-        {"t": t, "n": 0, "w": 0, "m": {m: tuple(v) for m, v in acc.items()}, "e": None, "x": {}}
+        {
+            "t": t, "n": 0, "w": 0, "m": {m: tuple(v) for m, v in acc.items()}, "e": None, "x": {},
+            "c": counts[t], "partial": expected is not None and counts[t] < expected,
+        }
         for t, acc in sorted(sums.items())
     ]
 
@@ -447,12 +461,15 @@ def _samples(points: Sequence[Point], metric: str, digits: int = 2) -> List[Dict
     for p in points:
         if metric in p["m"]:
             avg, low, high = p["m"][metric]
-            out.append({
+            sample = {
                 "t": int(p["t"].timestamp() * 1000),
                 "value": round(avg, digits),
                 "min": round(low, digits),
                 "max": round(high, digits),
-            })
+            }
+            if p.get("partial"):
+                sample["partial"] = True
+            out.append(sample)
     return out
 
 
@@ -504,13 +521,17 @@ def _summed(
     kind_name: str,
     win: Dict[str, Any],
     filters: Dict[str, Any],
+    expected: Optional[int] = None,
 ) -> Tuple[List[Point], Dict[str, Any], Dict[Tuple, List[Point]]]:
-    """Bucket each series, sum them, and add their energies. Returns (summed points, energy, bucketed series)."""
+    """
+    Bucket each series, sum them, and add their energies. `expected` is the number of series in the
+    scope (buckets with fewer are marked partial). Returns (summed points, energy, bucketed series).
+    """
     kind = SAMPLE_KINDS[kind_name]
     has_series = all(v != [] for v in filters.values())
     raw = read_points(db, kind_name, win, filters) if has_series else {}
     bucketed = {key: bucketise(kind, pts, win["span"]) for key, pts in raw.items()}
-    total = sum_points(kind, list(bucketed.values()), SUM_METRICS)
+    total = sum_points(kind, list(bucketed.values()), SUM_METRICS, expected)
     energy = _combine_energy([energy_kwh(pts) for pts in raw.values()])
     return total, energy, bucketed
 
@@ -535,7 +556,7 @@ def _aggregate(
     hours: Any, now: Optional[datetime], points: int = TARGET_POINTS,
 ) -> Dict[str, Any]:
     win = _window(hours, now, points)
-    total, energy, bucketed = _summed(db, "pdu", win, {"pdu_id": [p.id for p in pdus]})
+    total, energy, bucketed = _summed(db, "pdu", win, {"pdu_id": [p.id for p in pdus]}, len(pdus))
     return {
         "scope": scope,
         "id": scope_id,
@@ -546,6 +567,7 @@ def _aggregate(
         "current_power_w": _live_power(pdus),
         "metrics": _metrics(total, SUM_METRICS),
         "energy": energy,
+        "partial": any(p["partial"] for p in total),
     }
 
 
@@ -616,7 +638,7 @@ def feed_history(db: Session, feed: PowerFeed, hours: Any = 24, now: Optional[da
 
     win = _window(hours, now, points)
     inlets = [i for i in feed.pdu_inlets if i.pdu is not None]
-    total, energy, bucketed = _summed(db, "inlet", win, {"inlet_id": [i.id for i in inlets]})
+    total, energy, bucketed = _summed(db, "inlet", win, {"inlet_id": [i.id for i in inlets]}, len(inlets))
     live = [i.power_w for i in inlets if i.pdu.enabled and i.power_w is not None]
     return {
         "scope": "feed",
@@ -627,6 +649,7 @@ def feed_history(db: Session, feed: PowerFeed, hours: Any = 24, now: Optional[da
         "current_power_w": round(sum(live), 1) if live else None,
         "metrics": _metrics(total, SUM_METRICS),
         "energy": energy,
+        "partial": any(p["partial"] for p in total),
         "inlets": [
             {
                 "id": i.id,
@@ -705,7 +728,7 @@ def server_history(db: Session, server: Server, hours: Any = 24, now: Optional[d
     total: List[Point] = []
     energy: Dict[str, Any] = {"kwh": None, "method": None}
     if available:
-        total, energy, _ = _summed(db, "outlet", win, {"outlet_id": outlet_ids})
+        total, energy, _ = _summed(db, "outlet", win, {"outlet_id": outlet_ids}, len(outlet_ids))
     return {
         "scope": "server",
         "id": server.id,
@@ -717,4 +740,5 @@ def server_history(db: Session, server: Server, hours: Any = 24, now: Optional[d
         "inputs": inputs,
         "metrics": _metrics(total, kind.metrics),
         "energy": energy,
+        "partial": any(p["partial"] for p in total),
     }

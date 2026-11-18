@@ -72,6 +72,9 @@
         <span class="figure-value">{data.energy?.kwh != null ? formatKwh(data.energy.kwh) : 'n/a'}</span>
       </div>
     </div>
+    {#if data.partial}
+      <p class="power-sub">Incomplete data: in some intervals at least one PDU reported nothing, so the totals there are lower than the real draw.</p>
+    {/if}
     <div class="power-chart-wrap">
       <PowerChart {series} unit="W" hours={data.hours} minHeight={200} emptyText="No power history yet. The poller records a sample each minute." />
     </div>
