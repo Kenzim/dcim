@@ -781,6 +781,24 @@ class ProxmoxPlugin(ServerPlugin):
             logger.error(f"[ProxmoxPlugin.power_off] Failed to power off VM: {str(e)}")
             return False
     
+    async def shutdown_then_stop(self, timeout_seconds: int) -> bool:
+        """Ask the guest to shut down, and have Proxmox hard-stop it after ``timeout_seconds``.
+
+        One Proxmox task does both, so a separate stop cannot fail on the VM lock
+        that a running shutdown task holds.
+        """
+        try:
+            response = await self._post_with_relocate(
+                lambda: f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/shutdown",
+                data={"timeout": int(timeout_seconds), "forceStop": 1},
+                http_timeout=30.0,
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"[ProxmoxPlugin.shutdown_then_stop] Failed to shut down VM {self.vmid}: {e}")
+            return False
+
     async def power_reset(self) -> bool:
         """
         Reset/reboot the VM via Proxmox API.

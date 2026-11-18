@@ -23,7 +23,8 @@ class StepResult(str, enum.Enum):
     READY = "ready"  # Precheck passed; execute() should run now
     WAIT = "wait"  # Not ready yet; re-run precheck after a backoff
     SKIP = "skip"  # Already satisfied; advance without executing
-    FAILED = "failed"  # Broken; fail the job
+    FAILED = "failed"  # Broken; retried until the job's retry budget runs out
+    ABORT = "abort"  # Retrying cannot help; fail the job now
 
 
 @dataclass
@@ -57,6 +58,10 @@ class StepOutcome:
     @classmethod
     def failed(cls, message: Optional[str] = None, detail: Optional[Dict[str, Any]] = None) -> "StepOutcome":
         return cls(StepResult.FAILED, message=message, detail=detail)
+
+    @classmethod
+    def abort(cls, message: Optional[str] = None, detail: Optional[Dict[str, Any]] = None) -> "StepOutcome":
+        return cls(StepResult.ABORT, message=message, detail=detail)
 
 
 class DeploymentStep(ABC):

@@ -333,6 +333,17 @@ async def _handle_precheck_outcome(
         await _advance(db, job, steps, ctx, strategy=strategy)
         return True
 
+    if outcome.result == StepResult.ABORT:
+        _fail_step_and_job(
+            db,
+            job,
+            step_row,
+            outcome.message or f"Step '{step_def.name}' failed",
+            detail=outcome.detail,
+            strategy=strategy,
+        )
+        return True
+
     if outcome.result == StepResult.FAILED:
         _retry_step_or_fail(
             db,

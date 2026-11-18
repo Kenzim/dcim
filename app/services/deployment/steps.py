@@ -499,7 +499,7 @@ class StopGuestForRestoreStep(DeploymentStep):
     """Power off the guest so a force-restore can overwrite the VMID."""
 
     name = "stop_guest_for_restore"
-    timeout_seconds = 180
+    timeout_seconds = 300
     default_retry_after_seconds = 5
 
     async def precheck(self, ctx) -> StepOutcome:
@@ -602,7 +602,16 @@ class WaitForBackupRestoreStep(DeploymentStep):
             )
         exitstatus = (data.get("exitstatus") or "").upper()
         if exitstatus != "OK":
-            return StepOutcome.failed(f"Restore task failed: {data!r}")
+            # Polling the same finished task again cannot change its result.
+            message = f"Restore task failed: {data.get('exitstatus') or 'unknown error'}"
+            state.update({"status": "failed", "error": message})
+            _write_vm_restore_state(ctx, state)
+            if ctx.service.vm:
+                from app.models.service_vm import VMGuestState
+
+                ctx.service.vm.guest_state = VMGuestState.ERROR
+                ctx.service.vm.guest_last_error = message
+            return StepOutcome.abort(message, detail={"upid": upid, "task": data})
         return StepOutcome.ready("Restore task finished")
 
     async def execute(self, ctx) -> None:

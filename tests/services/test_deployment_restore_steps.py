@@ -188,8 +188,13 @@ def test_start_and_wait_backup_restore():
     plugin.task_status = {"status": "running"}
     assert _run(WaitForBackupRestoreStep().precheck(ctx)).result == StepResult.WAIT
 
-    plugin.task_status = {"status": "stopped", "exitstatus": "ERROR"}
-    assert _run(WaitForBackupRestoreStep().precheck(ctx)).result == StepResult.FAILED
+    plugin.task_status = {"status": "stopped", "exitstatus": "unable to restore VM 100 - vm is running"}
+    out = _run(WaitForBackupRestoreStep().precheck(ctx))
+    assert out.result == StepResult.ABORT
+    assert out.message == "Restore task failed: unable to restore VM 100 - vm is running"
+    assert ctx.service.config["vm_restore"]["status"] == "failed"
+    assert ctx.service.vm.guest_state == VMGuestState.ERROR
+    ctx.service.config = {"vm_restore": {"upid": "UPID:r"}}
 
     plugin.task_status = {"status": "stopped", "exitstatus": "OK"}
     assert _run(WaitForBackupRestoreStep().precheck(ctx)).result == StepResult.READY

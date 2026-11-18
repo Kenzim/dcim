@@ -504,6 +504,29 @@ def test_runner_fails_after_retry_budget(db_session, monkeypatch):
     assert service.vm.guest_state == VMGuestState.ERROR
 
 
+def test_runner_abort_fails_job_without_retry(db_session, monkeypatch):
+    """An ABORT outcome fails the job at once instead of parking it for retries."""
+    from app.services.deployment.step import StepOutcome
+    from app.services.deployment.steps import StopGuestForRestoreStep
+
+    plugin = FakePlugin(exists=True, power=PowerState.ON)
+    _patch_context(monkeypatch, plugin, alloc=_fake_alloc())
+
+    async def _abort(self, ctx):
+        return StepOutcome.abort("Restore task failed: vm is running")
+
+    monkeypatch.setattr(StopGuestForRestoreStep, "precheck", _abort)
+    service = _placed_vm_service(db_session, "restore_backup")
+    job = _create_job(db_session, service, "restore_backup")
+
+    job = _drive(db_session)
+    assert job.status == DeploymentJobStatus.FAILED
+    assert job.error_message == "Restore task failed: vm is running"
+    assert job.next_run_at is None
+    step = VMDeploymentJobDAO.get_step(db_session, job.id, 0)
+    assert step.status == DeploymentStepStatus.FAILED
+
+
 def test_configure_sizing_grows_disk_and_bridge():
     from app.services.deployment.steps import ConfigureSizingStep
 

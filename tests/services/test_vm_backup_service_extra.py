@@ -288,10 +288,39 @@ async def test_stop_guest_for_restore_powers_off_running_guest():
     plugin = MagicMock()
     plugin.vm_exists = AsyncMock(return_value=True)
     plugin.get_power_state = AsyncMock(side_effect=[PowerState.ON, PowerState.OFF])
+    plugin.shutdown_then_stop = AsyncMock(return_value=True)
     plugin.power_off = AsyncMock()
     with patch("app.services.vm_backup_service.asyncio.sleep", new=AsyncMock()):
         await stop_guest_for_restore(plugin)
-    plugin.power_off.assert_awaited()
+    plugin.shutdown_then_stop.assert_awaited_once_with(30)
+    plugin.power_off.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_guest_for_restore_hard_stops_then_raises_if_still_running():
+    plugin = MagicMock()
+    plugin.vm_exists = AsyncMock(return_value=True)
+    plugin.get_power_state = AsyncMock(return_value=PowerState.ON)
+    plugin.shutdown_then_stop = AsyncMock(return_value=True)
+    # Proxmox refusing the stop (for example on the VM lock) returns False, not an error.
+    plugin.power_off = AsyncMock(return_value=False)
+    with patch("app.services.vm_backup_service.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(RuntimeError, match="did not stop"):
+            await stop_guest_for_restore(plugin)
+    plugin.power_off.assert_awaited_once_with(force=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_guest_for_restore_hard_stop_succeeds_after_shutdown():
+    plugin = MagicMock()
+    plugin.vm_exists = AsyncMock(return_value=True)
+    states = [PowerState.ON] * 61 + [PowerState.OFF]
+    plugin.get_power_state = AsyncMock(side_effect=states)
+    plugin.shutdown_then_stop = AsyncMock(return_value=True)
+    plugin.power_off = AsyncMock(return_value=True)
+    with patch("app.services.vm_backup_service.asyncio.sleep", new=AsyncMock()):
+        await stop_guest_for_restore(plugin)
+    plugin.power_off.assert_awaited_once_with(force=True)
 
 
 @pytest.mark.asyncio

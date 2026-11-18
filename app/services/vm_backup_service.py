@@ -473,9 +473,27 @@ async def delete_client_backup(
 
 RESTORE_BACKUP_STRATEGY = "restore_backup"
 
+# The restore overwrites the guest's disks, so a short graceful window is enough.
+RESTORE_SHUTDOWN_SECONDS = 30
+
+
+async def _wait_powered_off(plugin, seconds: int) -> bool:
+    for _ in range(seconds):
+        await asyncio.sleep(1.0)
+        try:
+            if await plugin.get_power_state() == PowerState.OFF:
+                return True
+        except Exception:
+            continue
+    return False
+
 
 async def stop_guest_for_restore(plugin) -> None:
-    """Stop a running guest so a force-restore can overwrite its VMID."""
+    """Stop a running guest so a force-restore can overwrite its VMID.
+
+    Raises when the guest is still running afterwards: Proxmox refuses to
+    restore over a running VM, so starting the restore would only fail.
+    """
     try:
         exists = await plugin.vm_exists()
     except Exception:
@@ -488,19 +506,15 @@ async def stop_guest_for_restore(plugin) -> None:
         state = PowerState.UNKNOWN
     if state != PowerState.ON:
         return
-    await plugin.power_off(force=False)
-    for _ in range(20):
-        await asyncio.sleep(1.0)
-        try:
-            if await plugin.get_power_state() == PowerState.OFF:
-                return
-        except Exception:
-            continue
-    try:
-        if await plugin.get_power_state() != PowerState.OFF:
-            await plugin.power_off(force=True)
-    except Exception:
-        await plugin.power_off(force=True)
+    # Proxmox hard-stops the guest itself at the end of the shutdown timeout, inside
+    # the same task. A separate stop sent during a shutdown fails on the VM lock.
+    await plugin.shutdown_then_stop(RESTORE_SHUTDOWN_SECONDS)
+    if await _wait_powered_off(plugin, RESTORE_SHUTDOWN_SECONDS + 30):
+        return
+    await plugin.power_off(force=True)
+    if await _wait_powered_off(plugin, 30):
+        return
+    raise RuntimeError("The VM did not stop, so the restore was not started")
 
 
 async def start_restore_task(
