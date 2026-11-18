@@ -23,7 +23,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Cabling map (servers, switches, patch panels, cable runs as a graph) | API `app/api/cabling.py` → `app/services/cabling_graph_service.py` → `app/dao/cabling_graph_dao.py`; UI `Cabling.svelte` (Cytoscape.js lazy-loaded, ELK layout in a web worker via `frontend/src/lib/elkLayout.js`) and the port trace strip in `ServerDetail.svelte` |
 | Patch panels and multi-hop cable paths | `app/models/patch_panel.py`, API `app/api/patch_panel.py` → `app/services/patch_panel_service.py` → `app/dao/patch_panel_dao.py`; path tracing through panels in `app/services/cable_trace_service.py`; UI `PatchPanels.svelte`, `PatchPanelDetail.svelte` |
 | LLDP neighbours and the recorded-versus-seen check | Collection `app/plugins/snmpv3.py` (`get_lldp_neighbors`) → `app/services/lldp_collection_service.py` → `switch_lldp_neighbors` table; comparison `app/services/lldp_compare_service.py`; both exposed under `/api/admin/cabling/lldp` |
-| PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py` |
+| PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py`; power history (graphs, kWh, retention) `app/services/power_history_service.py` |
 | Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, switch drivers `app/plugins/nxos.py` and `app/plugins/qnap_qss.py`; setup and limits in `docs/private-networks.md` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
@@ -144,6 +144,7 @@ All included from `app/main.py` under `/api`.
 | `cabling.py` | `/api/admin/cabling` | Admin only, never returns `plugin_config` or BMC details, fixed number of queries. `GET /graph?location_id=&rack_id=`: devices (servers, switches, patch panels), racks, ports, cables (`edges`) and end-to-end `paths` through patch panels; devices outside the filter reached by a path come back with `in_scope=false`. `GET /lldp?location_id=&rack_id=`: per switch port, recorded cable versus LLDP neighbour (`match`, `mismatch`, `missing_cable`, `unknown_neighbour`, `no_lldp`, `unmapped_local_port`). `POST /lldp/switches/{id}/refresh` collects LLDP from one switch now |
 | `cable_run.py` | `/api/cable-runs` | Cable runs / cabling |
 | `pdu.py` | `/api/pdus` | PDUs, inlets, outlets, poll, outlet on/off/cycle (guarded) |
+| `power_history.py` | `/api/pdus/{id}/history`, `/api/pdus/{id}/inlets/{inlet}/history`, `/api/power-feeds/{id}/history`, `/api/racks/{id}/power-history`, `/api/servers/{id}/power-history`, `/api/power-history[?location_id=]` | Admin power history: `?hours=` 1 to 9600, raw up to 24 h, 5-minute rollups up to 35 days, hourly beyond |
 | `power_feed.py` | `/api/power-feeds` | Rack power feeds with live usage |
 | `server_power.py` | `/api/servers/{id}/power-inputs` | Server PSUs, outlet links, draw, outlet action |
 | `os_templates.py` | `/api/os-templates` | Scan/list OS templates from disk |
@@ -192,6 +193,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 | Networking gear | `network_switch.py`, `switch_port.py`, `cable_run.py`, `patch_panel.py`, `switch_lldp_neighbor.py`, `switch_bandwidth_sample.py` |
 | Networking gear | `network_switch.py`, `switch_port.py`, `cable_run.py`, `switch_bandwidth_sample.py` |
 | Power | `power_feed.py` (rack feeds), `pdu.py` (`Pdu`, `PduInlet`, `PduOutlet`), `server_power_input.py` (PSUs; new servers get `PSU1`) |
+| Power history | `pdu_sample.py`: raw sample and rollup tables for PDU, inlet, bank and outlet (`SAMPLE_KINDS` describes them); DAO `pdu_sample_dao.py` |
 | Boot / install | `boot_task.py`, `installation_task.py`, `server_capability.py`, `hardware_detection_report.py`, `server_activity.py` |
 | DHCP/TFTP | `dhcp_config.py`, `tftp_config.py`, `service_instance.py` |
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
@@ -221,7 +223,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `os_template_service.py` | Scan/load `os_templates/` |
 | `download_token_service.py` | One-time download tokens for boot media |
 | `server_activity_logger.py` | Server activity log writes |
-| `power_service.py` | PDU inlet/outlet generation (`sync_pdu_ports`), readings (`poll_pdu`, `apply_readings`), feed/rack/server aggregation, outlet-control guards |
+| `power_service.py` | PDU inlet/outlet generation (`sync_pdu_ports`), readings (`poll_pdu`, `apply_readings`, which also writes the history sample), feed/rack/server aggregation, outlet-control guards |
+| `power_history_service.py` | PDU power history: `record_samples`, `rollup` (5 min and hourly, re-runnable), `prune`, `run_maintenance` (poller), and the per-scope views (`pdu_history`, `feed_history`, `rack_history`, `location_history`, `server_history`) with kWh from the energy counter or by integrating power |
 | `vm_provisioning_service.py` / `vm_strategy_executor.py` / `vm_os_strategy.py` / `vm_install_type_strategy.py` | VM provision strategies |
 | `provisioning/` | Unified service create (`ProvisioningService.create` + `ProvisionRequest`); used by billing, admin, MCP, reseller, and commerce checkout |
 | `checkout_service.py` | Retail checkout quote/place + fulfillment via `ProvisioningService` |
@@ -259,6 +262,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `qnap_qss.py` | QNAP QSW switches (QSS firmware): tagged VLANs per port and the port list over the web UI's `/api/v3` JSON API; VLAN IDs 2 to 4000 |
 | `switch_base.py` / `switch_registry.py` | Switch plugin ABC + registry |
 | `pdu/` | PDU plugins: `base.py` (`PduPlugin`, capabilities metering / outlet_metering / outlet_control), `registry.py` (auto-discovers modules in `pdu/`), `snmp.py` (shared SNMP v1/v2c/v3 client), `manual.py` (unmanaged PDU) |
+
+**Power history:** each successful poll adds one raw row per PDU, inlet, bank and (when `outlet_metering`) outlet. The poller (`run_power_history_cycle`, every `POWER_HISTORY_INTERVAL` s, default 300) rolls raw rows up into 300 s and 3600 s buckets (avg/min/max, energy counter first/last) and deletes rows past `POWER_HISTORY_RAW_RETENTION_DAYS` (7), `POWER_HISTORY_5M_RETENTION_DAYS` (35) and `POWER_HISTORY_1H_RETENTION_DAYS` (396); a tier is only pruned once the next tier has absorbed it. Failed polls write nothing. A server's history comes from its linked metered outlets and says when it cannot be known. MCP: `history_hours` on `pdus`, `power_feeds` (list with `feed_id`), `rack_power_summary` and `server_power_summary` returns about 24 buckets per metric.
 
 **Power model:** rack `PowerFeed` (entered by hand) ← `PduInlet` (1, or 2 on an ATS) of a `Pdu` → `PduOutlet` ← `ServerPowerInput` (a PSU). Latest readings are stored on the PDU, inlets and outlets by the bandwidth poller (`run_pdu_cycle`) or `POST /api/pdus/{id}/poll`. Outlet switching needs a plugin with `outlet_control`, the PDU's `outlet_control_enabled` opt-in (off by default), an unlocked outlet and `confirm=true`; actions are logged to the linked server's activity.
 
@@ -394,7 +399,7 @@ Heavy libraries used by one page (for example Cytoscape.js on `/admin/cabling`) 
 | Media runner | `media_runner/main.py` | HTTP ISO library + `smbd` share `isos`; enroll via Admin → Runners |
 | Proxy runner | `proxy_runner/cmd/proxy-runner/` | Polls `/api/runner/proxy/config` every 30s (phone-home); register via Admin → Proxy Runners |
 | Storage runner | `storage_runner/cmd/storage-runner/` | Polls `GET /api/runner/storage/config`, reconciles (netns + VLAN + veth per tenant, nftables table `inet rf-storage`, CephFS subvolumes and `client.rf-t<id>` users, podman Ganesha per tenant), posts `POST /api/runner/storage/status`. Never deletes anything not listed with a destroy state; see `storage_runner/README.md` |
-| Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit. Each cycle also stores switch port admin/oper status (`status_updated_at`); LLDP neighbours are collected every `--lldp-interval` seconds (default 600, `0` turns it off) |
+| Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit. Each cycle also stores switch port admin/oper status (`status_updated_at`); LLDP neighbours are collected every `--lldp-interval` seconds (default 600, `0` turns it off); PDU history is rolled up and pruned every `--power-history-interval` seconds (default 300, `0` turns it off) |
 
 Python runners dial `WS /api/runner/ws` when `RACKFLOW_URL` and `API_KEY` are set. Legacy HTTP `ServiceInstance.base_url` still works if no uplink is connected. App env `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` remains for in-cluster HTTP control — see `INSTALL.md`.
 

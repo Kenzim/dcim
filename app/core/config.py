@@ -452,6 +452,15 @@ class Settings(BaseSettings):
     # not advertise ``nfs_export`` itself.
     virtual_media_nfs_export: str = ""
 
+    # PDU power history (see app/services/power_history_service.py). Raw samples are written on
+    # every successful poll; the poller rolls them up into 5-minute and hourly buckets (average,
+    # minimum, maximum) and deletes what is older than these windows.
+    power_history_raw_retention_days: int = 7
+    power_history_5m_retention_days: int = 35
+    power_history_1h_retention_days: int = 396
+    # Nominal seconds between polls (the poller's POLL_INTERVAL); used when integrating power into kWh.
+    power_history_sample_seconds: int = 60
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

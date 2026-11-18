@@ -591,11 +591,16 @@ async def pdus(
     location_id: Optional[int] = None,
     rack_id: Optional[int] = None,
     pdu_id: Optional[int] = None,
+    history_hours: Optional[int] = None,
 ) -> Any:
-    """List PDUs (filter by location_id or rack_id), or give pdu_id for one PDU with its inlets and outlets. Secrets are masked."""
+    """List PDUs (filter by location_id or rack_id), or give pdu_id for one PDU with its inlets and outlets. Secrets are masked.
+    history_hours (up to about a year) returns bucketed power history instead: of the PDU (pdu_id, with inlets, banks and rated current), of a rack (rack_id), of a location (location_id), or of all PDUs. Includes energy in kWh.
+    """
     if pdu_id is not None:
         _reject("Viewing one PDU", location_id=location_id, rack_id=rack_id)
-    return await pdu_tools.pdus(location_id=location_id, rack_id=rack_id, pdu_id=pdu_id)
+    if history_hours is not None and rack_id is not None:
+        _reject("History of a rack", location_id=location_id)
+    return await pdu_tools.pdus(location_id=location_id, rack_id=rack_id, pdu_id=pdu_id, history_hours=history_hours)
 
 
 @mcp.tool()
@@ -731,13 +736,17 @@ async def power_feeds(
     max_utilisation_percent: Optional[int] = None,
     description: Optional[str] = None,
     confirm: bool = False,
+    history_hours: Optional[int] = None,
 ) -> Any:
     """list: the feeds in a rack (rack_id), or one feed (feed_id). create: needs rack_id and name. update: needs feed_id. delete: needs feed_id and confirm=true.
     voltage, amperage, phase, max_utilisation_percent and description apply to create and update.
+    history_hours (list with feed_id only): adds bucketed power history of the feed, with its limits and energy in kWh.
     """
+    if history_hours is not None and (action != "list" or feed_id is None):
+        raise ToolError("history_hours needs action=list and feed_id")
     if action == "list":
         _reject("Listing power feeds", name=name, voltage=voltage, amperage=amperage, phase=phase, max_utilisation_percent=max_utilisation_percent, description=description)
-        return await pdu_tools.power_feeds(rack_id=rack_id, feed_id=feed_id)
+        return await pdu_tools.power_feeds(rack_id=rack_id, feed_id=feed_id, history_hours=history_hours)
     if action == "delete":
         _require("Deleting a power feed", feed_id=feed_id)
         _reject("Deleting a power feed", rack_id=rack_id, name=name, voltage=voltage, amperage=amperage, phase=phase, max_utilisation_percent=max_utilisation_percent, description=description)
@@ -761,15 +770,16 @@ async def power_feeds(
 
 
 @mcp.tool()
-async def rack_power_summary(rack_id: int) -> dict:
-    """Power summary for a rack: its power feeds with their aggregated readings."""
-    return await pdu_tools.rack_power(rack_id)
+async def rack_power_summary(rack_id: int, history_hours: Optional[int] = None) -> dict:
+    """Power summary for a rack: its power feeds with their aggregated readings. history_hours adds bucketed power history and energy in kWh."""
+    return await pdu_tools.rack_power(rack_id, history_hours=history_hours)
 
 
 @mcp.tool()
-async def server_power_summary(server_id: int) -> dict:
-    """Power summary for a server: its power inputs, the PDU outlets feeding them and their readings."""
-    return await pdu_tools.server_power(server_id)
+async def server_power_summary(server_id: int, history_hours: Optional[int] = None) -> dict:
+    """Power summary for a server: its power inputs, the PDU outlets feeding them and their readings.
+    history_hours adds bucketed power history and energy in kWh from the linked metered outlets (it says when that cannot be known)."""
+    return await pdu_tools.server_power(server_id, history_hours=history_hours)
 
 
 @mcp.tool()

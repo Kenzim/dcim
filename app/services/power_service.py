@@ -7,6 +7,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.dao.pdu_dao import PduDAO, PowerFeedDAO, ServerPowerInputDAO
@@ -15,6 +16,7 @@ from app.models.power_feed import PowerFeed
 from app.models.server import Server
 from app.plugins.pdu.base import OUTLET_ACTIONS, PduCapability, secret_fields
 from app.plugins.pdu.registry import get_pdu_registry
+from app.services.power_history_service import record_samples
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +172,13 @@ def _num(value: Any) -> Optional[float]:
     return None if math.isnan(f) else round(f, 3)
 
 
-def apply_readings(db: Session, pdu: Pdu, readings: Dict[str, Any]) -> None:
-    """Store a get_readings() result on the PDU, its inlets and outlets."""
+def apply_readings(db: Session, pdu: Pdu, readings: Dict[str, Any], now: Optional[datetime] = None) -> None:
+    """
+    Store a get_readings() result on the PDU, its inlets and outlets, and add it to the power
+    history in the same transaction. A failure while writing history is logged and does not stop
+    the latest values from being saved.
+    """
+    previous_poll = pdu.last_polled_at
     inlet_rows = {int(r["position"]): r for r in (readings.get("inlets") or []) if r.get("position")}
     outlet_rows = {int(r["position"]): r for r in (readings.get("outlets") or []) if r.get("position")}
     totals = dict(readings.get("totals") or {})
@@ -227,9 +234,24 @@ def apply_readings(db: Session, pdu: Pdu, readings: Dict[str, Any]) -> None:
         "sensors": readings.get("sensors") or [],
         "power_estimated": estimated,
     }
-    pdu.last_polled_at = datetime.now(timezone.utc)
+    pdu.last_polled_at = now or datetime.now(timezone.utc)
     pdu.last_poll_error = None
+    _record_history(db, pdu, previous_poll, set(outlet_rows))
     db.commit()
+
+
+def _record_history(db: Session, pdu: Pdu, previous_poll: Optional[datetime], metered_outlets: set) -> None:
+    """One raw history sample per series, at most one per second per PDU (the table keys on the second)."""
+    sampled_at = pdu.last_polled_at.replace(microsecond=0)
+    if previous_poll is not None:
+        earlier = previous_poll if previous_poll.tzinfo else previous_poll.replace(tzinfo=timezone.utc)
+        if sampled_at.astimezone(timezone.utc) <= earlier.astimezone(timezone.utc).replace(microsecond=0):
+            return
+    try:
+        with db.begin_nested():
+            record_samples(db, pdu, sampled_at, metered_outlets)
+    except SQLAlchemyError as exc:
+        logger.warning("Could not record power history for %s: %s", pdu.name, exc)
 
 
 async def poll_pdu(db: Session, pdu: Pdu) -> Dict[str, Any]:
