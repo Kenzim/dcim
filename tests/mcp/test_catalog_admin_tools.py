@@ -47,6 +47,24 @@ async def test_proxy_product_end_to_end(db_session, mcp_sessionlocal, mcp_auth_c
 
 
 @pytest.mark.asyncio
+async def test_backup_slot_family_and_product(db_session, mcp_sessionlocal, mcp_auth_ctx_write):
+    from app.mcp import server  # noqa: F401  registers tools
+    from app.mcp.instance import mcp
+    from app.mcp.tools.catalog_admin import save_product, save_product_family
+
+    tool = next(t for t in await mcp.list_tools() if t.name == "save_product_family")
+    assert "backup_slot" in str(tool.inputSchema["properties"]["service_type"])
+
+    family = await save_product_family(name="Backup slots", service_type="backup_slot", defaults={"size_gb": 50})
+    assert family["service_type"] == "backup_slot" and family["defaults"] == {"size_gb": 50}
+    product = await save_product(name="Slot 100", code="slot-100", family_id=family["id"], overrides={"size_gb": 100})
+    assert product["family_service_type"] == "backup_slot" and product["overrides"]["size_gb"] == 100
+
+    with pytest.raises(ToolError, match="size_gb"):
+        await save_product_family(family_id=family["id"], defaults={"size_gb": 0})
+
+
+@pytest.mark.asyncio
 async def test_vm_template_register_and_update(db_session, mcp_sessionlocal, mcp_auth_ctx_write):
     from app.api.product_catalog import ALLOWED_VM_OS_TYPES
     from app.mcp.tools.catalog_admin import save_product, save_product_family, save_vm_template
