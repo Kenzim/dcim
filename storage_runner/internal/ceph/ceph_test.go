@@ -102,7 +102,7 @@ func TestMutatingCommands(t *testing.T) {
 	}
 	want := []string{
 		pre + "fs subvolumegroup create cephfs rackflow --pool_layout ec",
-		pre + "fs subvolume create cephfs t12-s5 --size 1073741824 --group_name rackflow --pool_layout ec --namespace-isolated",
+		pre + "fs subvolume create cephfs t12-s5 --size 1073741824 --group_name rackflow --pool_layout ec --mode 777 --namespace-isolated",
 		pre + "fs subvolume resize cephfs t12-s5 2147483648 --group_name rackflow",
 		pre + "auth get-or-create client.rf-t12 mon \"allow r\" mds \"allow rw path=/volumes/rackflow/t12-s5/u\" osd \"allow rw pool=ec namespace=fsvolumens_t12-s5\" --format json",
 		pre + "auth caps client.rf-t12 mon \"allow r\"",
@@ -151,5 +151,30 @@ func TestTenantCaps(t *testing.T) {
 		c.OSD != "allow rw pool=ec namespace=fsvolumens_t12-s5, allow rw pool=ec namespace=fsvolumens_t12-s6" ||
 		c.Mon != "allow r" {
 		t.Fatalf("caps %+v", c)
+	}
+}
+
+func TestEvictSessionsEveryActiveRank(t *testing.T) {
+	s := execx.NewScript().
+		On(pre+"fs get cephfs --format json", `{"mdsmap":{"in":[0,1],"max_mds":2}}`).
+		On(pre+"tell mds.cephfs:0 client evict auth_name=rf-t12", "").
+		On(pre+"tell mds.cephfs:1 client evict auth_name=rf-t12", "")
+	if err := cli(s).EvictSessions(context.Background(), "client.rf-t12"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		pre + "fs get cephfs --format json",
+		pre + "tell mds.cephfs:0 client evict auth_name=rf-t12",
+		pre + "tell mds.cephfs:1 client evict auth_name=rf-t12",
+	}
+	if got := s.Lines(); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls:\n%s", strings.Join(got, "\n"))
+	}
+
+	s = execx.NewScript().
+		On(pre+"fs get cephfs --format json", `{"mdsmap":{"in":[0]}}`).
+		Fail(pre+"tell mds.cephfs:0 client evict auth_name=rf-t12", errors.New("EPERM"))
+	if err := cli(s).EvictSessions(context.Background(), "client.rf-t12"); err == nil || !strings.Contains(err.Error(), "mds.cephfs:0") {
+		t.Fatalf("err %v", err)
 	}
 }

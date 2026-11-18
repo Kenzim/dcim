@@ -961,6 +961,11 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 			}
 			delete(p.containers, id)
 		}
+		// A previous Ganesha for this tenant may still hold CephFS caps; the
+		// new one would stall until the MDS timed that session out.
+		if err := r.Ceph.EvictSessions(p.ctx, entity); err != nil {
+			r.logf("tenant %d: evict old cephfs sessions: %v", id, err)
+		}
 		if err := r.NFS.Run(p.ctx, spec); err != nil {
 			return err
 		}

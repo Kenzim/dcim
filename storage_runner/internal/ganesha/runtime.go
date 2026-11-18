@@ -112,7 +112,9 @@ func RunArgs(spec Spec) []string {
 		"run", "-d",
 		"--name", spec.Name,
 		"--network", "ns:" + spec.Netns,
-		"--restart", "on-failure",
+		// The runner restarts a stopped container itself, after evicting the
+		// old CephFS session; an in-place restart would stall on its caps.
+		"--restart", "no",
 		"--label", LabelRole + "=" + RoleValue,
 		"--label", LabelTenant + "=" + strconv.FormatInt(spec.TenantID, 10),
 		"--label", LabelCoreHash + "=" + spec.CoreHash,

@@ -218,6 +218,11 @@ func (f *Fake) RemoveUser(_ context.Context, entity string) error {
 	return nil
 }
 
+func (f *Fake) EvictSessions(_ context.Context, entity string) error {
+	f.Rec.Add("ceph evict %s", entity)
+	return nil
+}
+
 func (f *Fake) MinimalConf(context.Context) (string, error) {
 	return "[global]\n\tfsid = 00000000-0000-0000-0000-000000000000\n\tmon_host = [v2:10.10.0.5:3300/0,v1:10.10.0.5:6789/0]\n", nil
 }

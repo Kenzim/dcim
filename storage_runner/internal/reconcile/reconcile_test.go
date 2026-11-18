@@ -28,6 +28,7 @@ const (
 	fwNone    = "fw apply links=[] ceph=[10.10.0.0/24]"
 	fw12      = "fw apply links=[rf-h12] ceph=[10.10.0.0/24]"
 	net12     = "net ensure rf-t12 vlan=1234 addr=10.0.0.254/24 host=169.254.128.1/30 ns=169.254.128.2/30 routes=10.10.0.0/24"
+	evict12   = "ceph evict client.rf-t12"
 	run12     = "nfs run rf-t12-nfs netns=/run/netns/rf-t12 image=ganesha:test"
 	user12    = `ceph user create client.rf-t12 mon="allow r" mds="allow rw path=/volumes/rackflow/t12-s5/uuid-t12-s5" osd="allow rw pool=ec namespace=fsvolumens_t12-s5"`
 	groupMake = "ceph group create rackflow pool=ec"
@@ -211,7 +212,7 @@ func cfgOf(version string, tenants ...api.Tenant) *api.Config {
 func basic() api.Tenant { return tenant(12, 1234, share(5, "data", 100*gib, "10.0.0.5")) }
 
 func firstApply() []string {
-	return []string{groupMake, net12, "ceph subvolume create t12-s5 size=107374182400", user12, fw12, run12}
+	return []string{groupMake, net12, "ceph subvolume create t12-s5 size=107374182400", user12, fw12, evict12, run12}
 }
 
 func tenantStatus(t *testing.T, st api.Status, id int64) api.TenantStatus {
@@ -301,7 +302,7 @@ func TestSuspendAndUnsuspend(t *testing.T) {
 	}
 	expect(t, e.apply(cfgOf("v2", sus)), nil)
 
-	expect(t, e.apply(cfgOf("v3", basic())), []string{fw12, run12})
+	expect(t, e.apply(cfgOf("v3", basic())), []string{fw12, evict12, run12})
 	if ts := tenantStatus(t, e.status(), 12); ts.State != api.StateReady {
 		t.Fatalf("unsuspended status: %+v", ts)
 	}
@@ -458,6 +459,7 @@ func TestEndpointChangeRestarts(t *testing.T) {
 	expect(t, e.apply(cfgOf("v2", moved)), []string{
 		"net ensure rf-t12 vlan=1234 addr=10.0.0.253/24 host=169.254.128.1/30 ns=169.254.128.2/30 routes=10.10.0.0/24",
 		"nfs rm rf-t12-nfs",
+		evict12,
 		run12,
 	})
 }
@@ -466,7 +468,7 @@ func TestStoppedContainerIsRestarted(t *testing.T) {
 	e := newEnv(t)
 	e.apply(cfgOf("v1", basic()))
 	e.nfs.Stop("rf-t12-nfs")
-	expect(t, e.apply(cfgOf("v1", basic())), []string{"nfs rm rf-t12-nfs", run12})
+	expect(t, e.apply(cfgOf("v1", basic())), []string{"nfs rm rf-t12-nfs", evict12, run12})
 }
 
 func TestConfigFetchFailureChangesNothing(t *testing.T) {
@@ -548,7 +550,9 @@ func TestOverlappingCIDRsAcrossTenants(t *testing.T) {
 		"ceph subvolume create t13-s7 size=53687091200",
 		`ceph user create client.rf-t13 mon="allow r" mds="allow rw path=/volumes/rackflow/t13-s7/uuid-t13-s7" osd="allow rw pool=ec namespace=fsvolumens_t13-s7"`,
 		"fw apply links=[rf-h12,rf-h13] ceph=[10.10.0.0/24]",
+		evict12,
 		run12,
+		"ceph evict client.rf-t13",
 		"nfs run rf-t13-nfs netns=/run/netns/rf-t13 image=ganesha:test",
 	})
 	st := e.status()
@@ -600,7 +604,7 @@ func TestCephUnavailable(t *testing.T) {
 	}
 
 	e.ceph.CheckErr = nil
-	expect(t, e.apply(cfgOf("v1", basic())), []string{groupMake, "ceph subvolume create t12-s5 size=107374182400", user12, run12})
+	expect(t, e.apply(cfgOf("v1", basic())), []string{groupMake, "ceph subvolume create t12-s5 size=107374182400", user12, evict12, run12})
 
 	e.ceph.CheckErr = errors.New("timed out")
 	expect(t, e.apply(cfgOf("v1", basic())), nil)

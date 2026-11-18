@@ -48,6 +48,8 @@ EXPORT {
 		Clients = 10.0.0.5, 10.0.0.32/28;
 		Access_Type = RW;
 		Squash = root_squash;
+		Anonymous_Uid = 65534;
+		Anonymous_Gid = 65534;
 	}
 }
 `
@@ -76,7 +78,7 @@ func TestPodmanRunArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "podman run -d --name rf-t12-nfs --network ns:/run/netns/rf-t12 --restart on-failure" +
+	want := "podman run -d --name rf-t12-nfs --network ns:/run/netns/rf-t12 --restart no" +
 		" --label rackflow.role=storage-nfs --label rackflow.tenant=12 --label rackflow.core-hash=abc" +
 		" -v /var/lib/r/tenants/t12/ganesha:/etc/ganesha:ro -v /var/lib/r/tenants/t12/recovery:/var/lib/nfs/ganesha" +
 		" --entrypoint /usr/bin/ganesha.nfsd quay.io/ceph/ceph:v20.2.5 -F -L STDERR -f /etc/ganesha/ganesha.conf"

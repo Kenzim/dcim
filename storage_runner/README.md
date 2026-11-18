@@ -16,7 +16,12 @@ backed by erasure-coded CephFS. Each tenant gets:
   RADOS namespaces;
 - an NFS-Ganesha container `rf-t<id>-nfs` (podman) inside the namespace:
   NFSv4 only, bound to the endpoint IP, one export per share at `/<share name>`,
-  `root_squash`, access limited to the share's client IPs (RW or RO).
+  access limited to the share's client IPs (RW or RO), with `root_squash` to
+  uid/gid 65534 (`nobody`/`nogroup`).
+  Each share's top folder is created with mode `0777`, so any client user,
+  including squashed root, can write without setting anything up. It has no
+  sticky bit: with one, Linux clients' `fs.protected_regular` refuses root
+  creating files there, because those files belong to `nobody`.
 
 Every pass it posts a status report back to Rackflow.
 
@@ -198,6 +203,10 @@ EnvironmentFile=/etc/rackflow/storage-runner.env
 ExecStart=/usr/local/bin/storage-runner
 Restart=always
 RestartSec=10
+# podman's conmon for each tenant's Ganesha lives in this unit's cgroup. The
+# default KillMode would stop every tenant's NFS server whenever the runner
+# restarts; with process only the runner stops and the new one adopts them.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

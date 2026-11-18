@@ -74,6 +74,10 @@ func Render(c Config) (core, exports string) {
 			fmt.Fprintf(&e, "\t\tClients = %s;\n", strings.Join(x.Clients, ", "))
 			fmt.Fprintf(&e, "\t\tAccess_Type = %s;\n", access)
 			e.WriteString("\t\tSquash = root_squash;\n")
+			// Squashed root writes as nobody:nogroup rather than Ganesha's default
+			// of -2, which clients would show as uid 4294967294.
+			e.WriteString("\t\tAnonymous_Uid = 65534;\n")
+			e.WriteString("\t\tAnonymous_Gid = 65534;\n")
 			e.WriteString("\t}\n")
 		}
 		e.WriteString("}\n")

@@ -98,6 +98,8 @@ type Cluster interface {
 	CreateUser(ctx context.Context, entity string, caps Caps) (key string, err error)
 	SetCaps(ctx context.Context, entity string, caps Caps) error
 	RemoveUser(ctx context.Context, entity string) error
+	// EvictSessions ends every MDS session of entity on each active rank.
+	EvictSessions(ctx context.Context, entity string) error
 	MinimalConf(ctx context.Context) (string, error)
 }
 
@@ -232,10 +234,14 @@ func (c *CLI) Subvolumes(ctx context.Context) ([]string, error) {
 }
 
 func (c *CLI) CreateSubvolume(ctx context.Context, name string, size int64) error {
+	// root_squash maps client root to nobody, so the share root must be writable
+	// by everyone. No sticky bit: clients with fs.protected_regular refuse root's
+	// O_CREAT in a sticky world-writable folder because the file belongs to nobody.
 	_, err := c.ceph(ctx, "fs", "subvolume", "create", c.FS, name,
 		"--size", strconv.FormatInt(size, 10),
 		"--group_name", c.SubvolumeGroup,
 		"--pool_layout", c.ECPool,
+		"--mode", "777",
 		"--namespace-isolated")
 	return err
 }
@@ -316,6 +322,27 @@ func (c *CLI) SetCaps(ctx context.Context, entity string, caps Caps) error {
 func (c *CLI) RemoveUser(ctx context.Context, entity string) error {
 	_, err := c.ceph(ctx, "auth", "rm", entity)
 	return err
+}
+
+// EvictSessions evicts entity's sessions so a dead Ganesha's caps are released
+// at once; otherwise the MDS makes its successor wait for session_autoclose.
+func (c *CLI) EvictSessions(ctx context.Context, entity string) error {
+	var fs struct {
+		MDSMap struct {
+			In []int `json:"in"`
+		} `json:"mdsmap"`
+	}
+	if err := c.cephJSON(ctx, &fs, "fs", "get", c.FS); err != nil {
+		return err
+	}
+	authName := strings.TrimPrefix(entity, "client.")
+	for _, rank := range fs.MDSMap.In {
+		target := fmt.Sprintf("mds.%s:%d", c.FS, rank)
+		if _, err := c.ceph(ctx, "tell", target, "client", "evict", "auth_name="+authName); err != nil {
+			return fmt.Errorf("evict %s on %s: %w", entity, target, err)
+		}
+	}
+	return nil
 }
 
 func (c *CLI) MinimalConf(ctx context.Context) (string, error) {
