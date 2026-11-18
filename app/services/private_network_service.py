@@ -689,6 +689,16 @@ class PrivateNetworkService:
             if storage and _storage_vlans_preconfigured(db, attachment.server_id):
                 # Staff trunk this node's VLANs by hand; nothing to undo here.
                 return
+            others = [
+                other
+                for other in PrivateNetworkDAO.attachments_for_server(db, attachment.server_id)
+                if other.id != attachment.id
+                and other.network_id == attachment.network_id
+                and other.state != AttachmentState.DETACHING
+            ]
+            if others:
+                # Another attachment of this server still uses the VLAN.
+                return
             # Dedicated servers and storage nodes: take the VLAN off the trunk.
             await PrivateNetworkService._remove_from_server(db, attachment.server_id, network)
             return

@@ -536,6 +536,21 @@ async def test_detach_dedicated_cleans_the_port_and_holds_the_row_on_failure(env
 
 
 @pytest.mark.asyncio
+async def test_detach_keeps_the_vlan_while_another_attachment_of_the_server_uses_it(env):
+    from app.models.private_network import PrivateNetworkAttachment
+
+    service, server, switch = _dedicated(env)
+    network = await _network(env)
+    attachment = await PrivateNetworkService.attach(env.db, network.id, service.id)
+    env.db.add(PrivateNetworkAttachment(network_id=network.id, server_id=server.id, state=AttachmentState.ACTIVE))
+    env.db.commit()
+    fake = env.switches[switch.name]
+
+    assert await PrivateNetworkService.detach(env.db, attachment.id) is True
+    assert fake.tagged == {"Ethernet1/5": {network.segment_id}}
+
+
+@pytest.mark.asyncio
 async def test_repair_restores_a_vlan_removed_from_a_port_by_hand(env):
     service, _, switch = _dedicated(env)
     network = await _network(env)

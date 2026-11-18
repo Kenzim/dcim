@@ -10,7 +10,10 @@ that must change together:
   the VLAN, both peer-links carry it, and both port-channels allow it, as one
   operation that is rolled back if any step fails.
 
-Only interfaces reached from the server's own cabling are touched. The vPC
+Only interfaces reached from the server's own cabling are touched, plus the
+twin of a cabled vPC port-channel on the vPC peer even when its cable is not
+recorded: NX-OS suspends a VLAN that is allowed on one side of a vPC only, so
+both sides change together and a warning names the missing cable. The vPC
 peer-link, routed ports and port-channels with a member cabled to another
 switch or another server are refused.
 """
@@ -286,7 +289,11 @@ async def _run_steps(steps: List[Tuple[str, Callable, Callable]], *, dry_run: bo
             undone = f"; rolled back {len(journal)} earlier change(s)" if journal else ""
             if failures:
                 undone += f", but rollback failed for: {'; '.join(failures)}"
-            raise UplinkError(f"{description} failed: {exc}{undone}") from exc
+            # The failed step is not undone: it may have partly applied, and undoing a step
+            # that changed nothing could remove a VLAN another server still uses.
+            raise UplinkError(
+                f"{description} failed and may have partly applied on the switch: {exc}{undone}"
+            ) from exc
         if isinstance(result, dict) and result.get("changed"):
             journal.append((description, lambda undo=undo, result=result: undo(result)))
 
