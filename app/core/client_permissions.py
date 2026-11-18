@@ -43,6 +43,9 @@ class PermissionKey:
     PROXY_ROTATE_CREDENTIALS = "proxy.rotate_credentials"
 
     STORAGE_MANAGE_SHARES = "storage.manage_shares"
+    STORAGE_SFTP = "storage.sftp"
+
+    BACKUP_SLOT_MANAGE = "backup_slot.manage"
 
     # Account-level (not per service): may the client create and use MCP API keys.
     ACCOUNT_MCP = "account.mcp"
@@ -55,12 +58,12 @@ PERMISSION_CATALOG: List[Dict] = [
     {
         "key": PermissionKey.SERVICE_VIEW,
         "label": "View service status",
-        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage"],
+        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage", "backup_slot"],
     },
     {
         "key": PermissionKey.SERVICE_PORTAL,
         "label": "Open client portal (SSO)",
-        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage"],
+        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage", "backup_slot"],
     },
     {
         "key": PermissionKey.BMS_POWER,
@@ -144,8 +147,18 @@ PERMISSION_CATALOG: List[Dict] = [
     },
     {
         "key": PermissionKey.STORAGE_MANAGE_SHARES,
-        "label": "Create, change and delete storage shares and SFTP users",
+        "label": "Create, change and delete storage shares",
         "service_types": ["nfs_storage"],
+    },
+    {
+        "key": PermissionKey.STORAGE_SFTP,
+        "label": "Manage SFTP logins and open shares to SFTP from the internet",
+        "service_types": ["nfs_storage"],
+    },
+    {
+        "key": PermissionKey.BACKUP_SLOT_MANAGE,
+        "label": "Retain, release and restore the backup in a backup slot",
+        "service_types": ["backup_slot"],
     },
     {
         # Account-level: "account" is not a real service type, so per-service
@@ -222,6 +235,12 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
         PermissionKey.SERVICE_VIEW: True,
         PermissionKey.SERVICE_PORTAL: True,
         PermissionKey.STORAGE_MANAGE_SHARES: True,
+        PermissionKey.STORAGE_SFTP: True,
+    },
+    ServiceType.BACKUP_SLOT: {
+        PermissionKey.SERVICE_VIEW: True,
+        PermissionKey.SERVICE_PORTAL: True,
+        PermissionKey.BACKUP_SLOT_MANAGE: True,
     },
 }
 
@@ -253,6 +272,8 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.PROXY_VIEW_CREDENTIALS: True,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: True,
             PermissionKey.STORAGE_MANAGE_SHARES: True,
+            PermissionKey.STORAGE_SFTP: True,
+            PermissionKey.BACKUP_SLOT_MANAGE: True,
         },
     },
     {
@@ -300,6 +321,8 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.PROXY_VIEW_CREDENTIALS: False,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
             PermissionKey.STORAGE_MANAGE_SHARES: False,
+            PermissionKey.STORAGE_SFTP: False,
+            PermissionKey.BACKUP_SLOT_MANAGE: False,
         },
     },
     {

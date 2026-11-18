@@ -21,6 +21,7 @@
     bare_metal: 'Bare metal',
     http_proxy: 'HTTP proxy',
     nfs_storage: 'NFS storage',
+    backup_slot: 'Backup slot',
   };
 
   async function load() {
@@ -110,6 +111,8 @@
         <ProxyServiceView service={detail} />
       {:else if detail.service_type === 'nfs_storage'}
         <p class="muted">Manage shares, client addresses and mount commands on the <a href="/client/storage">Storage</a> page.</p>
+      {:else if detail.service_type === 'backup_slot'}
+        <p class="muted">Keep, restore and release the backup in this slot on the <a href="/client/backup-slots">Backup slots</a> page.</p>
       {:else}
         <p class="muted">This service type has no portal controls.</p>
       {/if}

@@ -455,6 +455,9 @@ from app.api import storage_client as storage_client_api
 from app.api import runner_storage as runner_storage_api
 api_router.include_router(storage_api.admin_router)
 api_router.include_router(storage_client_api.client_router)
+from app.api import backup_slots as backup_slots_api
+api_router.include_router(backup_slots_api.admin_router)
+api_router.include_router(backup_slots_api.client_router)
 api_router.include_router(runner_storage_api.router)
 
 # Mount the API router FIRST (before static files)

@@ -20,7 +20,7 @@ def from_billing_bare_metal(data, owner_user_id: int) -> ProvisionRequest:
     except ValueError as exc:
         raise ProvisioningError(
             "invalid_request",
-            "Invalid service_type. Must be bare_metal, vm, http_proxy or nfs_storage",
+            "Invalid service_type. Must be bare_metal, vm, http_proxy, nfs_storage or backup_slot",
         ) from exc
     if resolved == ServiceType.VM:
         raise ProvisioningError(

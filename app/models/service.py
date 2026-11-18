@@ -21,6 +21,7 @@ class ServiceType(str, enum.Enum):
     VM = "vm"
     HTTP_PROXY = "http_proxy"
     NFS_STORAGE = "nfs_storage"
+    BACKUP_SLOT = "backup_slot"
 
 
 class ProvisioningSource(str, enum.Enum):

@@ -181,15 +181,18 @@
     const plugin = getSelectedPlugin();
     
     if (previousPluginName !== null && previousPluginName !== formData.plugin_name) {
-      formData.plugin_config = {};
       testResult = null;
       testPassed = false;
       pluginConfigError = null;
-      // Clear hardware info when plugin changes
-      formData.model = '';
-      formData.serial_number = '';
-      formData.firmware_version = '';
-      formData.port_count = null;
+      // An edited switch is the same device on a new plugin: settings both
+      // plugins share (hostname, SNMP login) and the hardware details stay.
+      if (!editingSwitch) {
+        formData.plugin_config = {};
+        formData.model = '';
+        formData.serial_number = '';
+        formData.firmware_version = '';
+        formData.port_count = null;
+      }
     }
     previousPluginName = formData.plugin_name;
     

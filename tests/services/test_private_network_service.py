@@ -41,7 +41,7 @@ class FakeSwitch:
         self._check()
         self.vlans[vlan_id] = name
 
-    async def delete_vlan(self, vlan_id):
+    async def delete_vlan(self, vlan_id, name=None):
         self._check()
         self.vlans.pop(vlan_id, None)
 
@@ -533,6 +533,21 @@ async def test_detach_dedicated_cleans_the_port_and_holds_the_row_on_failure(env
     await PrivateNetworkService.reconcile(env.db)
     assert PrivateNetworkDAO.server_has_attachments(env.db, server.id) is False
     assert fake.tagged == {"Ethernet1/5": set()}
+
+
+@pytest.mark.asyncio
+async def test_detach_keeps_the_vlan_while_another_attachment_of_the_server_uses_it(env):
+    from app.models.private_network import PrivateNetworkAttachment
+
+    service, server, switch = _dedicated(env)
+    network = await _network(env)
+    attachment = await PrivateNetworkService.attach(env.db, network.id, service.id)
+    env.db.add(PrivateNetworkAttachment(network_id=network.id, server_id=server.id, state=AttachmentState.ACTIVE))
+    env.db.commit()
+    fake = env.switches[switch.name]
+
+    assert await PrivateNetworkService.detach(env.db, attachment.id) is True
+    assert fake.tagged == {"Ethernet1/5": {network.segment_id}}
 
 
 @pytest.mark.asyncio

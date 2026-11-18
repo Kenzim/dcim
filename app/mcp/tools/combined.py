@@ -448,21 +448,33 @@ async def save_switch(
 
 @mcp.tool()
 async def switch_action(
-    action: Literal["test", "regenerate_ports", "update_port"],
+    action: Literal["test", "regenerate_ports", "update_port", "detect_vpc", "vlan_dry_run"],
     switch_id: Optional[int] = None,
     plugin_name: Optional[str] = None,
     plugin_config: Optional[dict] = None,
     port_id: Optional[int] = None,
     speed_mbps: Optional[int] = None,
     description: Optional[str] = None,
+    server_id: Optional[int] = None,
+    vlan_id: Optional[int] = None,
+    network_id: Optional[int] = None,
+    remove: bool = False,
 ) -> dict:
     """test: probe a switch (switch_id, or plugin_name + plugin_config before adding; read-only on the device).
     regenerate_ports: rebuild the port list (cabled ports kept). update_port: set a port's speed/description.
+    detect_vpc: read every switch's Cisco vPC state (read-only) and record vPC peers (shown as `vpc` on switches).
+    vlan_dry_run: exact switch commands for carrying vlan_id (or a private network_id) on server_id's uplink,
+    including both vPC peers; remove=true for detaching. Nothing is sent to the switches.
     """
     if action == "test":
         return await network_tools.test_switch_connection(
             switch_id=switch_id, plugin_name=plugin_name, plugin_config=plugin_config
         )
+    if action == "detect_vpc":
+        return await network_tools.detect_switch_vpc()
+    if action == "vlan_dry_run":
+        _require("A VLAN dry run", server_id=server_id)
+        return await network_tools.switch_vlan_dry_run(server_id, vlan_id=vlan_id, network_id=network_id, remove=remove)
     _require(f"Switch {action}", switch_id=switch_id)
     _reject(f"Switch {action}", plugin_name=plugin_name, plugin_config=plugin_config)
     if action == "regenerate_ports":
@@ -488,7 +500,7 @@ async def service_info(
     view: Literal["detail", "backups", "deployment_jobs"] = "detail",
     limit: int = 20,
 ) -> dict:
-    """Service detail (no passwords or proxy credentials), VM backups with running backup jobs, or deployment jobs."""
+    """Service detail (no passwords or proxy credentials), deployment jobs, or backups (backup slots too)."""
     if view == "deployment_jobs":
         return await service_tools.list_deployment_jobs(service_id, limit=limit)
     if view == "backups":
@@ -498,7 +510,7 @@ async def service_info(
 
 @mcp.tool()
 async def provision(
-    kind: Literal["vm", "bare_metal", "http_proxy"],
+    kind: Literal["vm", "bare_metal", "http_proxy", "backup_slot"],
     name: str,
     product_code: Optional[str] = None,
     owner_user_id: Optional[int] = None,
@@ -513,11 +525,20 @@ async def provision(
     template_id: Optional[str] = None,
     ip_count: Optional[int] = None,
     subnet_id: Optional[int] = None,
+    size_gb: Optional[int] = None,
 ) -> dict:
     """Create a service. vm: needs product_code, vm_template_id (optional cluster/node/vmid).
     bare_metal: server_id or server_group_id, optional OS template_id. http_proxy: auto-assigns IPAM addresses.
+    backup_slot: owner_user_id, size_gb.
     """
     common = {"owner_user_id": owner_user_id, "description": description}
+    if kind == "backup_slot":
+        _require("A backup slot", owner_user_id=owner_user_id)
+        _reject("A backup slot", vm_template_id=vm_template_id, proxmox_cluster_id=proxmox_cluster_id,
+                proxmox_node_name=proxmox_node_name, proxmox_vmid=proxmox_vmid, server_id=server_id,
+                server_group_id=server_group_id, template_id=template_id, ip_count=ip_count, subnet_id=subnet_id)
+        return await service_tools.provision_backup_slot(name, product_code=product_code, size_gb=size_gb, **common)
+    _reject(f"A {kind} service", size_gb=size_gb)
     if kind == "vm":
         _require("A VM", product_code=product_code, vm_template_id=vm_template_id)
         _reject("A VM", server_id=server_id, server_group_id=server_group_id, template_id=template_id,

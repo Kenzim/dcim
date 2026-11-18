@@ -56,7 +56,7 @@ class ServiceLifecycle:
 
     async def ensure_powered_off(self, db: Session, service: Service) -> None:
         """Force power off VM/BM; proxies, storage and unplaced pending VMs are no-ops."""
-        if service.service_type in (ServiceType.HTTP_PROXY, ServiceType.NFS_STORAGE):
+        if service.service_type in (ServiceType.HTTP_PROXY, ServiceType.NFS_STORAGE, ServiceType.BACKUP_SLOT):
             return
         if service.service_type == ServiceType.VM:
             cluster_id, _node, vmid = vm_placement(service)

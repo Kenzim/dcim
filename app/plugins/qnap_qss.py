@@ -329,7 +329,7 @@ class QNAPQSSPlugin(SwitchPlugin):
             exists = vlan in await self._vlans(client)
         return {"success": True, "vlan_id": vlan, "created": exists, "deferred": not exists}
 
-    async def delete_vlan(self, vlan_id: int) -> Dict[str, Any]:
+    async def delete_vlan(self, vlan_id: int, name: Optional[str] = None) -> Dict[str, Any]:
         async with self._session() as client:
             vlan = await self._check_vlan(client, vlan_id)
             members = (await self._vlans(client)).get(vlan)

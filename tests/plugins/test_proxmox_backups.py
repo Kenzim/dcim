@@ -140,3 +140,54 @@ async def test_delete_backup_uses_full_volid():
     args, _kwargs = fake_client.delete.call_args
     assert "pbs-rf-client:backup/vm/101/" in args[0]
     assert "backup%2Fvm" not in args[0]
+
+
+@pytest.mark.asyncio
+async def test_set_backup_protected_puts_the_flag():
+    plugin = _make_plugin()
+    plugin.ticket = "t"
+    plugin.csrf_token = "c"
+    fake_client = _fake_httpx_client({"data": None})
+    fake_client.put = AsyncMock(return_value=fake_client.get.return_value)
+    with patch("app.plugins.proxmox.httpx.AsyncClient", return_value=fake_client):
+        await plugin.set_backup_protected("pbs", "pbs:backup/vm/101/a", True)
+        await plugin.set_backup_protected("pbs", "pbs:backup/vm/101/a", False)
+    first, second = fake_client.put.await_args_list
+    assert first.args[0].endswith("/nodes/pve/storage/pbs/content/pbs:backup/vm/101/a") or "content" in first.args[0]
+    assert first.kwargs["data"] == {"protected": 1}
+    assert second.kwargs["data"] == {"protected": 0}
+
+
+@pytest.mark.asyncio
+async def test_list_backups_reports_protected_flag():
+    plugin = _make_plugin()
+    plugin.ticket = "t"
+    plugin.csrf_token = "c"
+    fake_client = _fake_httpx_client(
+        {
+            "data": [
+                {"volid": "pbs:backup/vm/101/a", "vmid": 101, "protected": 1},
+                {"volid": "pbs:backup/vm/101/b", "vmid": 101},
+            ]
+        }
+    )
+    with patch("app.plugins.proxmox.httpx.AsyncClient", return_value=fake_client):
+        rows = await plugin.list_backups("pbs", vmid=101)
+    assert [r["protected"] for r in rows] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_list_node_storages_reports_active():
+    plugin = _make_plugin()
+    plugin.ticket = "t"
+    plugin.csrf_token = "c"
+    fake_client = _fake_httpx_client(
+        {"data": [{"storage": "pbs", "active": 1, "type": "pbs"}, {"storage": "old", "active": 0, "type": "pbs"}]}
+    )
+    with patch("app.plugins.proxmox.httpx.AsyncClient", return_value=fake_client):
+        rows = await plugin.list_node_storages("backup")
+    assert rows == [
+        {"storage": "pbs", "active": True, "type": "pbs"},
+        {"storage": "old", "active": False, "type": "pbs"},
+    ]
+    assert fake_client.get.await_args.kwargs["params"]["content"] == "backup"

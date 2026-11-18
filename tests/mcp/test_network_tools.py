@@ -219,3 +219,73 @@ async def test_get_aggregate_bandwidth(
 
     result = await get_aggregate_bandwidth(hours=12)
     assert result["hours"] == 12
+
+
+@pytest.mark.asyncio
+async def test_moving_switch_from_snmpv3_to_nxos_keeps_ports_cables_and_snmp_login(
+    db_session, mcp_sessionlocal, mcp_auth_ctx_write
+):
+    from app.models.cable_run import CableRun
+    from app.models.network_port import NetworkPort
+    from app.models.server import Server
+    from app.models.switch_port import SwitchPort
+
+    loc = Location(name="sw-move-loc", description="")
+    db_session.add(loc)
+    db_session.flush()
+    sw = NetworkSwitch(name="sw-move", location_id=loc.id, plugin_name="snmpv3", plugin_config=_snmp_config(),
+                       enabled=True)
+    server = Server(name="srv-move", server_ip="10.1.1.1", location_id=loc.id, plugin_name="ipmi", plugin_config={})
+    db_session.add_all([sw, server])
+    db_session.flush()
+    port = SwitchPort(switch_id=sw.id, name="Ethernet1/1", if_index=1, speed_mbps=10000)
+    nic = NetworkPort(server_id=server.id, name="eth0", speed_mbps=10000)
+    db_session.add_all([port, nic])
+    db_session.flush()
+    cable = CableRun(end_a_server_port_id=nic.id, end_b_switch_port_id=port.id)
+    db_session.add(cable)
+    db_session.commit()
+    port_id, cable_id, switch_id = port.id, cable.id, sw.id
+
+    from app.mcp.tools.network import update_switch
+
+    with pytest.raises(ToolError, match="incomplete"):
+        await update_switch(switch_id, plugin_name="nxos")
+
+    await update_switch(switch_id, plugin_name="nxos", plugin_config={"nxapi_username": "rackflow",
+                                                                      "nxapi_password": "nx-secret"})
+    db_session.expire_all()
+    row = db_session.get(NetworkSwitch, switch_id)
+    assert row.plugin_name == "nxos"
+    assert row.plugin_config["auth_password"] == "auth-secret" and row.plugin_config["username"] == "rfmonitor"
+    assert row.plugin_config["nxapi_password"] == "nx-secret"
+    assert db_session.get(SwitchPort, port_id) is not None
+    assert db_session.get(CableRun, cable_id).end_b_switch_port_id == port_id
+
+
+@pytest.mark.asyncio
+async def test_switch_rows_show_vpc_pairing_and_detect_runs(
+    db_session, mcp_sessionlocal, mcp_auth_ctx_write, monkeypatch
+):
+    loc = Location(name="sw-vpc-loc", description="")
+    db_session.add(loc)
+    db_session.flush()
+    a = NetworkSwitch(name="vpc-a", location_id=loc.id, plugin_name="snmpv3", plugin_config={}, enabled=True)
+    b = NetworkSwitch(name="vpc-b", location_id=loc.id, plugin_name="snmpv3", plugin_config={}, enabled=True)
+    db_session.add_all([a, b])
+    db_session.flush()
+    a.vpc_domain_id, a.vpc_peer_switch_id, a.vpc_peer_link = 1, b.id, "port-channel45"
+    db_session.commit()
+
+    from app.mcp.tools.network import detect_switch_vpc, get_switch
+
+    row = await get_switch(a.id)
+    assert row["vpc"]["domain_id"] == 1 and row["vpc"]["peer_switch_id"] == b.id
+    assert row["vpc"]["peer_link"] == "port-channel45"
+
+    async def fake_detect(db):
+        return {"switches": [], "pairs": [(a.id, b.id)]}
+
+    monkeypatch.setattr("app.services.switch_vpc_service.detect_vpc_pairs", fake_detect)
+    result = await detect_switch_vpc()
+    assert [list(p) for p in result["pairs"]] == [[a.id, b.id]]

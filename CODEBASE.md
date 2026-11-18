@@ -24,7 +24,8 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Patch panels and multi-hop cable paths | `app/models/patch_panel.py`, API `app/api/patch_panel.py` → `app/services/patch_panel_service.py` → `app/dao/patch_panel_dao.py`; path tracing through panels in `app/services/cable_trace_service.py`; UI `PatchPanels.svelte`, `PatchPanelDetail.svelte` |
 | LLDP neighbours and the recorded-versus-seen check | Collection `app/plugins/snmpv3.py` (`get_lldp_neighbors`) → `app/services/lldp_collection_service.py` → `switch_lldp_neighbors` table; comparison `app/services/lldp_compare_service.py`; both exposed under `/api/admin/cabling/lldp` |
 | PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py`; power history (graphs, kWh, retention) `app/services/power_history_service.py` |
-| Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, switch drivers `app/plugins/nxos.py` and `app/plugins/qnap_qss.py`; setup and limits in `docs/private-networks.md` |
+| Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, uplink planning and vPC pairs `app/services/uplink_vlan_service.py`, switch drivers `app/plugins/nxos.py` and `app/plugins/qnap_qss.py`; setup and limits in `docs/private-networks.md`, Nexus setup in `docs/nxos-vlan-management.md` |
+| Cisco vPC pair detection | `app/services/switch_vpc_service.py` (CISCO-VPC-MIB via `snmpv3.get_vpc_info`, pairs by peer-keepalive addresses) → `network_switches.vpc_*`; `POST /api/admin/network-switches/vpc/detect`, MCP `switch_action` `detect_vpc` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
@@ -38,6 +39,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | NFS storage on private networks (`nfs_storage` services, storage nodes, shares) | Models `app/models/storage.py`, DAO `app/dao/storage_dao.py`, service `app/services/storage_service.py`, provisioning `app/services/provisioning/nfs_storage.py`; API `app/api/storage.py` (staff), `app/api/storage_client.py` (client), `app/api/storage_common.py` (shared shapes), runner API `app/api/runner_storage.py`; MCP `app/mcp/tools/storage.py` and the client `storage` tool; UI `StorageNodes.svelte`, `client/ClientStorage.svelte`, `components/storage/` |
 | Storage runner (per-customer NFS on CephFS) | `storage_runner/internal/reconcile/reconcile.go` (loop), drivers in `storage_runner/internal/{netns,firewall,ceph,ganesha}/`, public SFTP gateway and per-tenant back ends in `storage_runner/internal/sftp/` |
 | Selling storage (WHMCS, store) | `docs/nfs-storage-billing.md`; WHMCS `rackflow_storageClientArea` and `clientarea_storage.tpl`, Module Settings storage panel in `hooks.php` (`storagePanelHtml`) |
+| Backup slots (`backup_slot` services holding one retained VM backup) | Models `app/models/backup_slot.py`, DAO `app/dao/backup_slot_dao.py`, services `app/services/backup_slot_service.py` (retain, release, resize, grace-period purge) and `app/services/retained_restore_service.py` (restore onto another VM), provisioning `app/services/provisioning/backup_slot.py`; API `app/api/backup_slots.py` (client and staff) plus `/api/billing/services/{id}/backup-slot*` in `billing.py`; restore job `RestoreRetainedBackupStrategy` in `app/services/deployment/strategies.py`; MCP on `restore_backup`/`service_info`/`provision` (staff) and `services`/`service_action` (client); WHMCS functions `rackflow_slot*` and `slot_action.php`; UI `client/ClientBackupSlots.svelte`, `client/BackupsPanel.svelte`; design and set-up in `docs/backup-slots.md` |
 | Tests | Mirror path under `tests/` (`tests/api/`, `tests/dao/`, `tests/services/`, …) |
 | Install / Docker ops | `INSTALL.md`, `docker-compose.yml`, `Makefile`, `Dockerfile` |
 
@@ -166,6 +168,7 @@ All included from `app/main.py` under `/api`.
 | `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner (`fast_path` block only for runners with a location whose pool offers the fast path) |
 | `storage.py` | `/api/admin/storage` | Storage nodes (key shown once, VLAN mode and ports, switch port preview) and nfs_storage services with shares |
 | `storage_client.py` | `/api/client/storage` | Client's own storage: link to a private network (or create one on link), share CRUD with SFTP access mode, SFTP users (`/sftp-users`; permission `storage.manage_shares`) |
+| `backup_slots.py` | `/api/client/backup-slots`, `/api/admin/backup-slots` | Backup slots: client list and detail, retain, release, restore onto a VM (confirm_data_loss); staff create, resize, release |
 | `runner_storage.py` | `/api/runner/storage` | Storage runner: `GET /config` (only that node's tenants), `POST /status`; bearer node key, failed keys rate-limited per IP |
 | `services_admin.py` | `/api/admin/services` | Admin service lifecycle (VM/bare-metal provision, ownership) |
 | `services_client.py` | `/api/services` | Client “my services” |
@@ -237,10 +240,13 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `proxy_fast_path.py` | Proxy fast path: `pin_subnet` (subnet to runner, allocates the subnet's private IP once), `ProxyAccessService` (client on/off per location, runners join and leave, `runner_config` builds per-client tenants, `overview` for clients), product flag `proxy_fast_path` for paid offers |
 | `storage_service.py` | NFS storage: node CRUD (including the public SFTP endpoint), placement (least-loaded enabled node in the location), location chosen at order or at link (a network is created on link when none is given), share validation and quotas, terminate and share delete with `storage_destroy_grace_seconds`, combined readiness (attachment applied and runner ready), runner config and status |
 | `storage_sftp.py` | Storage SFTP: users (bcrypt password hashes and public keys only), key and CIDR validation, logins `<name>.<service_id>`, client/staff views, the runner's `sftp`/`sftp_users` config and status. Design: `docs/nfs-storage-sftp.md`; selling and WHMCS setup: `docs/nfs-storage-billing.md` |
+| `backup_slot_service.py` / `retained_restore_service.py` | Backup slots: one retained backup per slot, set under Proxmox's `protected` flag (no copy); retain, release, resize, terminate with `backup_slot_destroy_grace_seconds` then purge from `reconciliation_jobs.py`. Restore onto another VM checks owner, status, cluster, backup storage on the target's node and disk size, then queues `restore_retained_backup` |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
 | `cabling_graph_service.py` | Builds the cabling graph from batch queries in `app/dao/cabling_graph_dao.py`: nodes, ports, cables and end-to-end paths through patch panels. Link status comes from the switch end's stored `oper_status` and counts only while fresh (`STATUS_STALE_AFTER`, 15 minutes); older data is `stale`, never polled is `unknown` |
 | `cable_trace_service.py` | Follows a port through patch panels (front to rear) to the server or switch port at the far end; shared by the cable-run API, server and switch port views, bandwidth views, MCP and the graph |
 | `patch_panel_service.py` | Patch panel validation (rack placement, port count changes) and per-port front/rear views |
+| `uplink_vlan_service.py` | Turns a server's uplink into targets (port, port-channel, or vPC port-channel on both peers), refuses peer-links, inter-switch links and unpaired vPCs, applies/removes a VLAN with rollback, and records dry-run commands (`dry_run_uplink`, `GET /api/admin/network-switches/vlan-dry-run/{server_id}`) |
+| `switch_vpc_service.py` | vPC pair detection and the stored pairing summary |
 | `lldp_collection_service.py` / `lldp_compare_service.py` | Store an LLDP snapshot per switch (replaced on each collection, kept on error) / compare it with recorded cables |
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
@@ -262,7 +268,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `ipmi.py` | IPMI/BMC power & related |
 | `proxmox.py` | Proxmox VM provisioning / power |
 | `snmpv3.py` | SNMPv3 switch plugin (ports, bandwidth) |
-| `nxos.py` | Cisco NX-OS switch plugin: VLANs and port trunks over NX-API, monitoring through SNMPv3 |
+| `nxos.py` | Cisco NX-OS switch plugin: VLANs, port trunks and vPC peer-links over NX-API (`add`/`remove` only, VLANs 2 to 3967, never another VLAN's name), dry run; monitoring, LLDP and vPC discovery through SNMPv3 |
 | `qnap_qss.py` | QNAP QSW switches (QSS firmware): tagged VLANs per port and the port list over the web UI's `/api/v3` JSON API; VLAN IDs 2 to 4000 |
 | `switch_base.py` / `switch_registry.py` | Switch plugin ABC + registry |
 | `pdu/` | PDU plugins: `base.py` (`PduPlugin`, capabilities metering / outlet_metering / outlet_control), `registry.py` (auto-discovers modules in `pdu/`), `snmp.py` (shared SNMP v1/v2c/v3 client), `manual.py` (unmanaged PDU) |

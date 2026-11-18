@@ -40,6 +40,11 @@ MAX_SIZE_GB = 1024 * 1024
 MAX_SHARES_PER_STORAGE = 64
 MAX_CLIENTS_PER_SHARE = 256
 SHARE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+# SFTP binds each share at /<name> in the tenant's container, over the image's own root.
+RESERVED_SHARE_NAMES = frozenset({
+    "bin", "boot", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32", "media", "mnt",
+    "opt", "proc", "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var",
+})
 SFTP_HOST_RE = re.compile(r"^[a-z0-9.:-]+$")
 RUNNER_STATES = {"ready", "pending", "error", "suspended"}
 
@@ -570,6 +575,8 @@ class StorageService:
             raise StorageError(
                 "Share name must start with a letter and use 1-32 lowercase letters, digits, '-' or '_'"
             )
+        if name in RESERVED_SHARE_NAMES:
+            raise StorageError(f"'{name}' is a reserved system folder name; choose another share name")
         if any(share.name == name for share in tenant.shares):
             raise StorageError("A share with this name already exists (or is still being deleted)", 409)
         if sum(1 for share in tenant.shares if share.state == ShareState.ACTIVE) >= MAX_SHARES_PER_STORAGE:

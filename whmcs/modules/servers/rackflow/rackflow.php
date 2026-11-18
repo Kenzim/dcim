@@ -391,9 +391,15 @@ function rackflow_ClientArea(array $vars)
     $fastPathVars = ($isProxyService && $proxyCredentialsAvailable && !empty($rackflowServiceId))
         ? rackflow_proxyFastPathTemplateVars($params, isset($vars['systemurl']) ? (string)$vars['systemurl'] : '')
         : rackflow_proxyFastPathEmptyVars();
+    $slotVars = rackflow_slotClientAreaVars(
+        $params,
+        $serviceType,
+        !empty($rackflowServiceId) && $backupsAllowed,
+        isset($vars['systemurl']) ? (string)$vars['systemurl'] : ''
+    );
     return array(
         'templatefile' => 'clientarea',
-        'vars' => array_merge($fastPathVars, array(
+        'vars' => array_merge($fastPathVars, $slotVars + array(
             'rackflow_hostname' => $hostname,
             'rackflow_primary_ip' => $primaryIp,
             'rackflow_power_available' => $powerAvailable,
@@ -486,10 +492,10 @@ function rackflow_ConfigOptions()
         // configoption1
         'Service Type' => array(
             'Type' => 'dropdown',
-            'Options' => 'bare_metal,vm,http_proxy,nfs_storage',
+            'Options' => 'bare_metal,vm,http_proxy,nfs_storage,backup_slot',
             'Default' => 'bare_metal',
             'SimpleMode' => true,
-            'Description' => 'Controls which fields apply below and which RackFlow billing API is used (bare metal vs VM). nfs_storage: size comes from the Product Code\'s size_gb or a size_gb configurable option; the client links it to one of their private networks in the RackFlow portal after ordering.',
+            'Description' => 'Controls which fields apply below and which RackFlow billing API is used (bare metal vs VM). nfs_storage: size comes from the Product Code\'s size_gb or a size_gb configurable option; the client links it to one of their private networks in the RackFlow portal after ordering. backup_slot: size comes the same way; the slot holds one retained VM backup up to that size.',
         ),
         // configoption2 — maps to RackFlow catalog products.code
         'Product Code' => array(
@@ -953,7 +959,7 @@ function rackflow_CreateAccount(array $params)
         if ($serverGroupId) {
             $serviceConfig['server_group_id'] = $serverGroupId;
         }
-        if (strtolower($serviceType) === 'nfs_storage') {
+        if (in_array(strtolower($serviceType), array('nfs_storage', 'backup_slot'), true)) {
             $sizeGb = rackflow_storageSizeGbFromOptions($params);
             if ($sizeGb !== null) {
                 $serviceConfig['size_gb'] = $sizeGb;
@@ -1321,8 +1327,9 @@ function rackflow_TerminateAccount(array $params)
         // IPAM assignments below is the only teardown they need.
         // NFS storage has no machine either; RackFlow keeps its data for the
         // grace period and the storage node destroys it afterwards.
+        // A backup slot has no machine either; its retained backup is deleted after the grace period.
         $serviceType = rackflow_getConfiguredServiceType($params);
-        if ($serviceType !== 'http_proxy' && $serviceType !== 'nfs_storage') {
+        if ($serviceType !== 'http_proxy' && $serviceType !== 'nfs_storage' && $serviceType !== 'backup_slot') {
             // First ensure the server is powered off
             $powerResult = rackflow_powerAction($params, 'off');
             if ($powerResult !== 'success') {
@@ -1595,6 +1602,9 @@ function rackflow_storageSizeGb(array $params)
 function rackflow_ChangePackage(array $params)
 {
     try {
+        if (rackflow_getConfiguredServiceType($params) === 'backup_slot') {
+            return rackflow_slotChangePackage($params);
+        }
         if (rackflow_getConfiguredServiceType($params) !== 'nfs_storage') {
             return 'success';
         }
@@ -5981,4 +5991,186 @@ function rackflow_proxyFastPathVarsFromView(array $view, $actionUrl)
     $vars['rackflow_fast_path_can_disable'] = $canDisable;
     $vars['rackflow_fast_path_action_url'] = (string)$actionUrl;
     return $vars;
+}
+
+
+// ---------------------------------------------------------------------------
+// Backup slots: a purchasable place to keep one VM backup past the normal
+// backup quota. Kept apart from the VM backup functions above.
+// ---------------------------------------------------------------------------
+
+/**
+ * Package change for a backup_slot service: resize to the new package's size.
+ * RackFlow refuses a size below the retained backup's size.
+ *
+ * @param array $params common module parameters (already the new package)
+ * @return string "success" or an error message
+ */
+function rackflow_slotChangePackage(array $params)
+{
+    $rackflowServiceId = rackflow_getRackflowServiceId($params);
+    if (empty($rackflowServiceId)) {
+        return 'This service is not linked to RackFlow. Use Register in RackFlow first or set the RackFlow Service ID.';
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return 'API URL and API key must be configured (Setup > Servers).';
+    }
+    $sizeGb = rackflow_storageSizeGb($params);
+    if ($sizeGb === null) {
+        return 'The new package has no slot size: set size_gb on the RackFlow product or a size_gb configurable option.';
+    }
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'POST',
+        '/api/billing/services/' . (int)$rackflowServiceId . '/backup-slot/resize',
+        array('size_gb' => $sizeGb)
+    );
+    if (!$result['success']) {
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        return 'Backup slot resize failed: ' . (is_string($detail) ? $detail : $err);
+    }
+    return 'success';
+}
+
+/**
+ * GET a backup-slot billing endpoint for a service.
+ *
+ * @param array  $params
+ * @param string $path    relative to /api/billing/services/{id}/
+ * @param string $audience client|admin
+ * @return array {success, data|error}
+ */
+function rackflow_slotFetch(array $params, $path, $audience = 'client')
+{
+    $rackflowServiceId = rackflow_getRackflowServiceId($params);
+    if (empty($rackflowServiceId)) {
+        return array('success' => false, 'error' => 'This service is not linked to RackFlow.');
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return array('success' => false, 'error' => 'API URL and API key must be configured.');
+    }
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'GET',
+        '/api/billing/services/' . (int)$rackflowServiceId . '/' . ltrim($path, '/') . '?audience=' . urlencode($audience),
+        null,
+        60
+    );
+    if (!$result['success']) {
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : (isset($result['error']) ? $result['error'] : 'Request failed');
+        return array('success' => false, 'error' => is_string($detail) ? $detail : 'Request failed');
+    }
+    return array('success' => true, 'data' => is_array($result['data']) ? $result['data'] : array());
+}
+
+/**
+ * POST a backup-slot billing action.
+ *
+ * @param array  $params
+ * @param int    $rackflowSlotServiceId RackFlow id of the slot service the action is on
+ * @param string $action   retain|release|restore
+ * @param array  $body
+ * @param string $audience client|admin
+ * @return array {success, data|error}
+ */
+function rackflow_slotPost(array $params, $rackflowSlotServiceId, $action, array $body, $audience = 'client')
+{
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return array('success' => false, 'error' => 'API URL and API key must be configured (Setup > Servers).');
+    }
+    if (!in_array($action, array('retain', 'release', 'restore'), true) || (int)$rackflowSlotServiceId <= 0) {
+        return array('success' => false, 'error' => 'Invalid backup slot request.');
+    }
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'POST',
+        '/api/billing/services/' . (int)$rackflowSlotServiceId . '/backup-slot/' . $action
+            . '?audience=' . urlencode($audience),
+        $body,
+        120
+    );
+    if (!$result['success']) {
+        $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+        return array('success' => false, 'error' => is_string($detail) ? $detail : $err);
+    }
+    return array('success' => true, 'data' => is_array($result['data']) ? $result['data'] : array());
+}
+
+/**
+ * Template variables for the backup-slot blocks of the client area.
+ *
+ * - On a backup_slot service: the slot's size, state, retained backup and the
+ *   VMs it can be restored onto.
+ * - On a VM with backups: the client's slots, so a backup can be retained.
+ *
+ * @param array  $params
+ * @param string $serviceType
+ * @param bool   $vmBackupsShown whether the VM Backups panel is shown
+ * @param string $systemUrl WHMCS system URL, used when the base path cannot be derived
+ * @return array
+ */
+function rackflow_slotClientAreaVars(array $params, $serviceType, $vmBackupsShown, $systemUrl = '')
+{
+    $vars = array(
+        'rackflow_slot_panel' => false,
+        'rackflow_slot' => array(),
+        'rackflow_slot_error' => '',
+        'rackflow_vm_slots' => array(),
+        'rackflow_slot_action_url' => '',
+    );
+    if (empty($params['serviceid'])) {
+        return $vars;
+    }
+    $vars['rackflow_slot_action_url'] = rackflow_slotActionEndpointUrl($systemUrl);
+    if ($serviceType === 'backup_slot') {
+        $vars['rackflow_slot_panel'] = true;
+        $fetch = rackflow_slotFetch($params, 'backup-slot', 'client');
+        if (!empty($fetch['success'])) {
+            $slot = $fetch['data'];
+            if (!empty($slot['retained']) && is_array($slot['retained'])) {
+                $slot['retained']['notes_display'] = rackflow_backupNotesDisplay(
+                    isset($slot['retained']['notes']) ? (string)$slot['retained']['notes'] : ''
+                );
+            }
+            $vars['rackflow_slot'] = $slot;
+        } else {
+            $vars['rackflow_slot_error'] = isset($fetch['error']) ? (string)$fetch['error'] : 'Unable to load the backup slot.';
+        }
+        return $vars;
+    }
+    if ($serviceType === 'vm' && $vmBackupsShown) {
+        $fetch = rackflow_slotFetch($params, 'backup-slots', 'client');
+        if (!empty($fetch['success']) && !empty($fetch['data']['slots']) && is_array($fetch['data']['slots'])) {
+            $vars['rackflow_vm_slots'] = array_values(array_filter($fetch['data']['slots'], function ($slot) {
+                return is_array($slot) && isset($slot['status']) && $slot['status'] === 'active';
+            }));
+        }
+    }
+    return $vars;
+}
+
+/**
+ * URL of slot_action.php (AJAX endpoint for retain/release/restore).
+ *
+ * @param string $systemUrl
+ * @return string
+ */
+function rackflow_slotActionEndpointUrl($systemUrl = '')
+{
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $basePath = rtrim((string)parse_url($systemUrl, PHP_URL_PATH), '/');
+        }
+    }
+    return $basePath . '/modules/servers/rackflow/slot_action.php';
 }

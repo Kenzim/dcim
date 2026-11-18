@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from app.api.services_admin import (
     ServiceStatusUpdateBody,
@@ -19,6 +19,7 @@ from app.mcp.instance import mcp
 from app.mcp.runtime import run_tool
 from app.mcp.serialize import service_row
 from app.models.service import ServiceStatus, ServiceType
+from app.services import backup_slot_service as slots
 from app.services.provisioning import (
     ProvisionRequest,
     ProvisioningActor,
@@ -88,8 +89,15 @@ async def list_service_backups(service_id: int) -> dict:
         row = ServiceDAO.get_by_id(db, service_id)
         if not row:
             raise ValueError(_MSG_SERVICE_NOT_FOUND)
+        if row.service_type == ServiceType.BACKUP_SLOT:
+            from app.api.backup_slots import slot_detail
+
+            return slot_detail(db, row)
         items, jobs = await list_service_backups_and_jobs(db, row)
-        return {"backups": items, "jobs": jobs}
+        out = {"backups": items, "jobs": jobs}
+        if row.owner_user_id is not None:
+            out["slots"] = slots.list_slot_summaries(db, row.owner_user_id)
+        return out
 
     return await run_tool("list_service_backups", "read", work, args={"service_id": service_id})
 
@@ -197,6 +205,36 @@ async def provision_http_proxy(
     )
 
 
+async def provision_backup_slot(
+    name: str,
+    product_code: Optional[str] = None,
+    owner_user_id: Optional[int] = None,
+    size_gb: Optional[int] = None,
+    description: Optional[str] = None,
+) -> dict:
+    """Create a backup slot service for a client."""
+
+    def work(db, ctx):
+        req = ProvisionRequest(
+            name=name,
+            service_type=ServiceType.BACKUP_SLOT,
+            owner_user_id=owner_user_id,
+            product_code=product_code,
+            description=description,
+            provisioning_source=infer_provisioning_source(db, owner_user_id),
+            size_gb=size_gb,
+        )
+        service = _create(db, req)
+        return service_row(db, service)
+
+    return await run_tool(
+        "provision_backup_slot",
+        "write",
+        work,
+        args={"name": name, "product_code": product_code, "owner_user_id": owner_user_id, "size_gb": size_gb},
+    )
+
+
 async def provision_bare_metal(
     name: str,
     server_id: Optional[int] = None,
@@ -296,24 +334,51 @@ async def terminate_service(service_id: int, confirm: bool = False) -> dict:
 @mcp.tool()
 async def restore_backup(
     service_id: int,
-    volid: str,
+    volid: Optional[str] = None,
     storage: Optional[str] = None,
     start: bool = True,
     confirm: bool = False,
+    action: Literal["restore", "retain", "release", "resize"] = "restore",
+    slot_service_id: Optional[int] = None,
+    size_gb: Optional[int] = None,
 ) -> dict:
-    """Restore a VM backup onto the service VMID (enqueued)."""
+    """Restore a VM backup (enqueued). retain/release/resize manage backup slots: retain needs slot_service_id
+    (confirm=true replaces its backup); release and resize take the slot as service_id. A backup held in a slot
+    restores onto any VM of its client and replaces that VM's data.
+    """
+    if action == "restore" and not volid:
+        raise ValueError("restore needs: volid")
 
     async def work(db, ctx):
-        body = BackupMutateBody(volid=volid, storage=storage, wait=False, start=start)
-        return await admin_restore_vm_backup(service_id, body, _auth(ctx), db)
+        from app.api import backup_slots as slot_api
 
+        if action == "restore":
+            body = BackupMutateBody(volid=volid, storage=storage, wait=False, start=start, confirm_data_loss=confirm)
+            return await admin_restore_vm_backup(service_id, body, _auth(ctx), db)
+        row = ServiceDAO.get_by_id(db, service_id)
+        if not row:
+            raise ValueError(_MSG_SERVICE_NOT_FOUND)
+        if action == "retain":
+            slot_row = ServiceDAO.get_by_id(db, slot_service_id) if slot_service_id else None
+            if not volid or slot_row is None or slot_row.service_type != ServiceType.BACKUP_SLOT:
+                raise ValueError("retain needs: volid and slot_service_id (a backup_slot service)")
+            body = slot_api.RetainBody(source_service_id=row.id, volid=volid, replace=confirm)
+            return await slot_api.do_retain(db, slot_row, row, body)
+        slot_api.admin_slot_service(db, service_id)
+        if action == "release":
+            return await slot_api.do_release(db, row)
+        if size_gb is None:
+            raise ValueError("resize needs: size_gb")
+        return await slot_api.admin_resize_slot(service_id, slot_api.ResizeBody(size_gb=size_gb), auth={}, db=db)
+
+    destructive = action in ("restore", "release")
     return await run_tool(
         "restore_backup",
-        "destructive",
+        "destructive" if destructive else "write",
         work,
-        destructive=True,
+        destructive=destructive,
         confirm=confirm,
-        args={"service_id": service_id, "volid": volid, "confirm": confirm},
+        args={"service_id": service_id, "volid": volid, "action": action, "confirm": confirm},
     )
 
 

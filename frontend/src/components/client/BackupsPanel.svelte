@@ -6,6 +6,7 @@
     createVmBackup,
     deleteVmBackup,
     restoreVmBackup,
+    clientRetainBackup,
   } from '../../lib/api.js';
 
   /** VM service object (uses `id` and `proxmox_vmid`). */
@@ -17,6 +18,8 @@
   let notes = '';
   let backups = [];
   let jobs = [];
+  let slots = [];
+  let slotChoice = {};
   let busy = false;
   let pollTimer = null;
 
@@ -53,6 +56,7 @@
       const res = await listVmBackups(service.id, { client: true });
       backups = res.backups || [];
       jobs = res.jobs || [];
+      slots = (res.slots || []).filter((sl) => sl.status === 'active');
       if (jobs.length) ensurePoll();
       else stopPoll();
       if (!background) error = '';
@@ -117,6 +121,29 @@
     }
   }
 
+  async function retain(b) {
+    const slotId = Number(slotChoice[b.volid] || slots[0]?.service_id);
+    if (busy || !slotId) return;
+    const slot = slots.find((sl) => sl.service_id === slotId);
+    let replace = false;
+    if (slot?.occupied) {
+      if (!confirm(`${slot.name} already holds a backup. Replace it? The old one is deleted.`)) return;
+      replace = true;
+    }
+    busy = true;
+    message = '';
+    error = '';
+    try {
+      await clientRetainBackup(slotId, { source_service_id: service.id, volid: b.volid, replace });
+      message = 'Backup kept in the slot';
+      await load({ background: true });
+    } catch (e) {
+      error = e.message || String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   onMount(load);
   onDestroy(stopPoll);
 </script>
@@ -124,7 +151,7 @@
 <section class="panel">
   <header class="panel-head">
     <h3>Backups</h3>
-    <p class="muted">Scheduled backups are read-only. Customer backups count toward your quota and can be deleted.</p>
+    <p class="muted">Scheduled backups are read-only. Customer backups count toward your quota and can be deleted. A backup kept in a slot does not count toward your quota.</p>
   </header>
 
   {#if loading}
@@ -174,11 +201,22 @@
               {#if b.template_name}<span class="template">{b.template_name}</span>{/if}
               {#if b.notes_display}<span class="notes">{b.notes_display}</span>{/if}
               {#if b.storage}<span class="muted">{b.storage}</span>{/if}
+              {#if b.retained}<Badge variant="success">Kept in slot</Badge>{/if}
             </span>
             {#if b.running}
               <Badge variant="warning">Running</Badge>
             {:else}
               <span class="row-actions">
+                {#if b.kind === 'client' && !b.retained && slots.length}
+                  {#if slots.length > 1}
+                    <select aria-label="Slot" bind:value={slotChoice[b.volid]} disabled={busy}>
+                      {#each slots as sl}
+                        <option value={sl.service_id}>{sl.name}{sl.occupied ? ' (full)' : ''}</option>
+                      {/each}
+                    </select>
+                  {/if}
+                  <Button variant="secondary" size="small" disabled={busy} on:click={() => retain(b)}>Keep in slot</Button>
+                {/if}
                 <Button variant="secondary" size="small" disabled={busy} on:click={() => restore(b)}>Restore</Button>
                 {#if b.deletable}
                   <Button variant="danger" size="small" disabled={busy} on:click={() => remove(b)}>Delete</Button>
@@ -292,6 +330,14 @@
   }
   .notes {
     font-weight: 650;
+  }
+  .row-actions select {
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 13px;
   }
   .empty {
     margin: 8px 0 0;

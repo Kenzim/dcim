@@ -33,6 +33,12 @@ class SwitchPlugin(ABC):
     PLUGIN_VERSION: str = ""
     SUPPORTED_CATEGORIES: List[SwitchPluginCategory] = []
     CONFIG_TEMPLATE: Dict[str, Any] = {}  # JSON schema for configuration form
+    # True when the plugin honours ``dry_run``: configuration batches are
+    # recorded in ``planned_batches`` instead of being sent, while read-only
+    # queries still go to the switch.
+    SUPPORTS_DRY_RUN: bool = False
+    # True when the plugin implements the vPC methods below.
+    SUPPORTS_VPC: bool = False
     
     def __init__(self, config: Dict[str, Any]):
         """
@@ -43,6 +49,8 @@ class SwitchPlugin(ABC):
                     (e.g., hostname, SNMP community, credentials, etc.)
         """
         self.config = config
+        self.dry_run = False
+        self.planned_batches: List[List[str]] = []
     
     def get_plugin_info(self) -> Dict[str, Any]:
         """Get plugin metadata"""
@@ -106,9 +114,37 @@ class SwitchPlugin(ABC):
         """Create a new VLAN"""
         raise NotImplementedError("VLAN management not supported by this plugin")
     
-    async def delete_vlan(self, vlan_id: int) -> Dict[str, Any]:
-        """Delete a VLAN"""
+    async def delete_vlan(self, vlan_id: int, name: Optional[str] = None) -> Dict[str, Any]:
+        """Delete a VLAN. With ``name``, a plugin that can read VLAN names leaves a VLAN of another name alone."""
         raise NotImplementedError("VLAN management not supported by this plugin")
+
+    async def describe_port(self, port: str) -> Dict[str, Any]:
+        """Where a port's VLAN settings live, before anything is changed.
+
+        Returns 'interface' (the port, or its port-channel when bundled),
+        'port_channel' (name or None), 'vpc_id' (int or None), 'members'
+        (member ports of the port-channel, or the port itself) and
+        'peer_link' (True for a vPC peer-link or one of its members).
+        """
+        return {"interface": port, "port_channel": None, "vpc_id": None, "members": [port], "peer_link": False}
+
+    # Optional vPC methods (SUPPORTS_VPC)
+
+    async def find_vpc_interface(self, vpc_id: int) -> Optional[str]:
+        """The port-channel configured with ``vpc <vpc_id>``, or None"""
+        raise NotImplementedError("vPC not supported by this plugin")
+
+    async def add_peer_link_vlan(self, vlan_id: int) -> Dict[str, Any]:
+        """Make the vPC peer-link carry ``vlan_id``; a no-op when it carries every VLAN"""
+        raise NotImplementedError("vPC not supported by this plugin")
+
+    async def remove_peer_link_vlan(self, vlan_id: int) -> Dict[str, Any]:
+        """Stop the vPC peer-link carrying ``vlan_id`` when its allowed list is explicit"""
+        raise NotImplementedError("vPC not supported by this plugin")
+
+    async def check_vpc_vlan(self, vpc_id: int, vlan_id: int, expect_up: bool = True) -> List[str]:
+        """Problems with a vPC after a change (consistency, VLAN state); empty when healthy"""
+        raise NotImplementedError("vPC not supported by this plugin")
 
     async def get_port_vlans(self, port: str) -> Dict[str, Any]:
         """

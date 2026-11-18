@@ -1893,6 +1893,20 @@ export async function regenerateSwitchPorts(switchId) {
   return await response.json();
 }
 
+export async function detectSwitchVpc() {
+  const response = await fetch(`${API_BASE}/network-switches/vpc/detect`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to detect vPC pairs');
+  }
+
+  return await response.json();
+}
+
 export async function createSwitch(switchData) {
   const response = await fetch(`${API_BASE}/network-switches/`, {
     method: 'POST',
@@ -4989,3 +5003,26 @@ export const updateStorageSftpUser = (id, userId, data, client = false) =>
   storageRequest(client ? `/${id}/sftp-users/${userId}` : `/services/${id}/sftp-users/${userId}`, { client, method: 'PATCH', body: data, errorMessage: 'Failed to update SFTP user' });
 export const deleteStorageSftpUser = (id, userId, client = false) =>
   storageRequest(client ? `/${id}/sftp-users/${userId}` : `/services/${id}/sftp-users/${userId}`, { client, method: 'DELETE', errorMessage: 'Failed to delete SFTP user' });
+
+// --- Backup slots: client portal ---
+
+async function backupSlotRequest(path, { method = 'GET', body, errorMessage } = {}) {
+  const headers = { ..._impersonationHeaders() };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}/client/backup-slots${path}`, {
+    method,
+    headers,
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return _jsonOrThrow(response, errorMessage || 'Backup slot request failed');
+}
+
+export const clientListBackupSlots = () =>
+  backupSlotRequest('', { errorMessage: 'Failed to load backup slots' });
+export const clientRetainBackup = (slotId, data) =>
+  backupSlotRequest(`/${slotId}/retain`, { method: 'POST', body: data, errorMessage: 'Failed to keep the backup in the slot' });
+export const clientReleaseSlotBackup = (slotId) =>
+  backupSlotRequest(`/${slotId}/release`, { method: 'POST', errorMessage: 'Failed to release the backup' });
+export const clientRestoreSlotBackup = (slotId, data) =>
+  backupSlotRequest(`/${slotId}/restore`, { method: 'POST', body: data, errorMessage: 'Failed to restore the backup' });

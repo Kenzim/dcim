@@ -1423,6 +1423,7 @@ class ProxmoxPlugin(ServerPlugin):
                     "format": row.get("format"),
                     "notes": row.get("notes") or row.get("comment"),
                     "subtype": row.get("subtype"),
+                    "protected": bool(int(row.get("protected") or 0)),
                 }
             )
         return out
@@ -1485,6 +1486,56 @@ class ProxmoxPlugin(ServerPlugin):
         headers = await self._get_headers()
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=60.0) as client:
             response = await client.put(url, headers=headers, data={"notes": notes or ""})
+            response.raise_for_status()
+
+    async def set_backup_protected(self, storage: str, volume: str, protected: bool) -> None:
+        """Set or clear Proxmox's ``protected`` flag on a backup volume.
+
+        A protected backup is skipped by prune jobs and refused by volume deletion.
+        """
+        url = self._backup_content_url(self.base_url, self.node, storage, volume)
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=60.0) as client:
+            response = await client.put(url, headers=headers, data={"protected": 1 if protected else 0})
+            response.raise_for_status()
+
+    async def list_node_storages(self, content: Optional[str] = "backup") -> List[Dict[str, Any]]:
+        """Storages usable from this node (``active`` and ``enabled``), optionally by content type."""
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/storage"
+        headers = await self._get_headers()
+        params: Dict[str, Any] = {"enabled": 1}
+        if content:
+            params["content"] = content
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            rows = response.json().get("data") or []
+        return [
+            {"storage": row.get("storage"), "active": bool(int(row.get("active") or 0)), "type": row.get("type")}
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
+    async def set_qemu_config(
+        self,
+        payload: Dict[str, Any],
+        *,
+        delete: Optional[List[str]] = None,
+        vmid: Optional[int] = None,
+    ) -> None:
+        """Set and remove keys on a VM's QEMU config (``PUT .../config``)."""
+        target = vmid if vmid is not None else self.vmid
+        if target is None:
+            raise ValueError("vmid is required")
+        data: Dict[str, Any] = {str(k): v for k, v in (payload or {}).items()}
+        if delete:
+            data["delete"] = ",".join(delete)
+        if not data:
+            return
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{int(target)}/config"
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.put(url, headers=headers, data=data)
             response.raise_for_status()
 
     async def list_tasks(

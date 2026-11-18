@@ -361,6 +361,8 @@
         return 'HTTP proxy';
       case 'nfs_storage':
         return 'NFS storage';
+      case 'backup_slot':
+        return 'Backup slot';
       default:
         return t || '—';
     }
@@ -450,6 +452,7 @@
         <option value="vm">Virtual machine</option>
         <option value="http_proxy">HTTP proxy</option>
         <option value="nfs_storage">NFS storage</option>
+        <option value="backup_slot">Backup slot</option>
       </select>
       <label for="status-filter">Status:</label>
       <select id="status-filter" bind:value={statusFilter} on:change={loadServices}>

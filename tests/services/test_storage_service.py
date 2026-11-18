@@ -50,7 +50,7 @@ class FakeSwitch:
         self.calls += 1
         self.vlans[vlan_id] = name
 
-    async def delete_vlan(self, vlan_id):
+    async def delete_vlan(self, vlan_id, name=None):
         self.calls += 1
         self.vlans.pop(vlan_id, None)
 

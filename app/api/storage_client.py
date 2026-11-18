@@ -129,12 +129,16 @@ async def client_link_storage(service_id: int, body: LinkBody, auth: UserDep, db
 @client_router.post("/{service_id}/shares", status_code=status.HTTP_201_CREATED)
 async def client_create_share(service_id: int, body: ShareCreate, auth: UserDep, db: DbDep):
     service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    if body.sftp_access != "off":
+        require_client_permission(db, service, PermissionKey.STORAGE_SFTP)
     return _create_share(db, service, body, staff=False)
 
 
 @client_router.patch("/{service_id}/shares/{share_id}")
 async def client_update_share(service_id: int, share_id: int, body: ShareUpdate, auth: UserDep, db: DbDep):
     service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    if body.sftp_access not in (None, "off"):
+        require_client_permission(db, service, PermissionKey.STORAGE_SFTP)
     return _update_share(db, service, share_id, body, staff=False)
 
 
@@ -146,17 +150,17 @@ async def client_delete_share(service_id: int, share_id: int, auth: UserDep, db:
 
 @client_router.post("/{service_id}/sftp-users", status_code=status.HTTP_201_CREATED)
 async def client_create_sftp_user(service_id: int, body: SftpUserCreate, auth: UserDep, db: DbDep):
-    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_SFTP)
     return _create_sftp_user(db, service, body, staff=False)
 
 
 @client_router.patch("/{service_id}/sftp-users/{user_id}")
 async def client_update_sftp_user(service_id: int, user_id: int, body: SftpUserUpdate, auth: UserDep, db: DbDep):
-    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_SFTP)
     return _update_sftp_user(db, service, user_id, body, staff=False)
 
 
 @client_router.delete("/{service_id}/sftp-users/{user_id}")
 async def client_delete_sftp_user(service_id: int, user_id: int, auth: UserDep, db: DbDep):
-    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_SFTP)
     return _delete_sftp_user(db, service, user_id, staff=False)

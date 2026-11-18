@@ -50,6 +50,7 @@ from app.services.provisioning.adapters import from_billing_bare_metal, from_bil
 from app.services.client_permission_resolver import require_client_permission
 from app.services.client_portal_service import mint_sso_ticket
 from app.services.private_network_service import PrivateNetworkService
+from app.services import backup_slot_service
 from app.services.storage_service import StorageService
 from app.services.reseller_billing_service import (
     DeployCreditRequiredError,
@@ -768,6 +769,7 @@ async def terminate_service(
         billing.next_charge_at = None
     db.commit()
     StorageService.mark_terminated_quietly(db, service.id)
+    backup_slot_service.mark_terminated_quietly(db, service.id)
     await PrivateNetworkService.release_service_quietly(db, service.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

@@ -111,6 +111,12 @@ class NetworkSwitchResponse(BaseModel):
     firmware_version: str | None = None
     tested_capabilities: List[str] | None = None
     test_logs: str | None = None
+    vpc_domain_id: int | None = None
+    vpc_peer_switch_id: int | None = None
+    vpc_peer_link: str | None = None
+    vpc_role: str | None = None
+    vpc_detected_at: datetime | None = None
+    vpc_error: str | None = None
 
     class Config:
         from_attributes = True
@@ -302,6 +308,35 @@ async def get_aggregate_bandwidth(
     return get_aggregate_monitored_bandwidth(db, hours=hours)
 
 
+@router.post("/vpc/detect", response_model=dict, responses=COMMON_ERROR_RESPONSES)
+async def detect_vpc(auth: AdminDep, db: DbDep):
+    """Read every enabled switch's Cisco vPC state (read-only) and record which switches are vPC peers."""
+    from app.services.switch_vpc_service import detect_vpc_pairs
+
+    return await detect_vpc_pairs(db)
+
+
+@router.get("/vlan-dry-run/{server_id}", response_model=dict, responses=COMMON_ERROR_RESPONSES)
+async def vlan_dry_run(
+    server_id: int,
+    vlan_id: int | None = None,
+    network_id: int | None = None,
+    remove: bool = False,
+    *,
+    auth: AdminDep,
+    db: DbDep,
+):
+    """The exact switch commands carrying a VLAN on a server's uplink would send, without sending them."""
+    from app.services.private_network_service import PrivateNetworkError, dry_run_uplink
+
+    if db.get(Server, server_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    try:
+        return await dry_run_uplink(db, server_id, network_id=network_id, vlan_id=vlan_id, remove=remove)
+    except PrivateNetworkError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
 @router.get("/{switch_id}", response_model=NetworkSwitchResponse, responses=COMMON_ERROR_RESPONSES)
 async def get_switch(
     switch_id: int,
@@ -429,10 +464,26 @@ async def update_switch(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Switch plugin '{switch_data.plugin_name}' not found in registry"
             )
-        switch.plugin_name = switch_data.plugin_name
-    
-    if switch_data.plugin_config is not None:
-        switch.plugin_config = switch_data.plugin_config
+    if switch_data.plugin_name is not None or switch_data.plugin_config is not None:
+        # Ports, port IDs and cable runs stay as they are; only the settings
+        # change. Refuse settings the plugin cannot start with, since monitoring
+        # and VLAN changes would otherwise fail later with no clear cause.
+        new_name = switch_data.plugin_name if switch_data.plugin_name is not None else switch.plugin_name
+        new_config = switch_data.plugin_config if switch_data.plugin_config is not None else (switch.plugin_config or {})
+        try:
+            get_switch_registry().new_plugin(new_name, new_config)
+        except KeyError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown switch plugin '{new_name}'"
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Plugin '{new_name}' settings are incomplete: {exc}"
+            )
+        switch.plugin_name = new_name
+        switch.plugin_config = new_config
     
     switch = NetworkSwitchDAO.update(db, switch)
     

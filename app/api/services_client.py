@@ -984,10 +984,11 @@ async def client_restore_vm_backup(
             wait=body.wait,
             start=body.start,
             vm_template_id=body.vm_template_id,
+            confirm_data_loss=body.confirm_data_loss,
         )
     except Exception as exc:
         raise map_backup_error(exc) from exc
-    if body.wait and service.vm:
+    if body.wait and not result.get("async") and service.vm:
         service.vm.guest_state = VMGuestState.RUNNING if body.start else VMGuestState.STOPPED
         service.vm.guest_last_error = None
         ServiceDAO.update(db, service)

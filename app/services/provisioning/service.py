@@ -16,6 +16,7 @@ from app.services.provisioning.bare_metal import (
 )
 from app.services.provisioning.errors import ProvisioningError
 from app.services.provisioning.http_proxy import create_http_proxy_service
+from app.services.provisioning.backup_slot import create_backup_slot_service
 from app.services.provisioning.nfs_storage import create_nfs_storage_service
 from app.services.provisioning.request import ProvisionRequest, ProvisioningActor
 from app.services.provisioning.vm import create_vm_service
@@ -143,6 +144,8 @@ class ProvisioningService:
             return create_bare_metal_service(db, req, actor, snapshot)
         if req.service_type == ServiceType.NFS_STORAGE:
             return create_nfs_storage_service(db, req, actor, snapshot)
+        if req.service_type == ServiceType.BACKUP_SLOT:
+            return create_backup_slot_service(db, req, actor, snapshot)
         raise ProvisioningError(
             "invalid_request",
             f"Unsupported service_type '{req.service_type}'",

@@ -27,7 +27,7 @@ class FakeSwitch:
     async def create_vlan(self, vlan_id, name):
         return None
 
-    async def delete_vlan(self, vlan_id):
+    async def delete_vlan(self, vlan_id, name=None):
         return None
 
     async def get_port_vlans(self, port):
@@ -288,6 +288,43 @@ def test_permission_preset_can_deny_share_management(client, world, admin, alice
     )
     assert response.status_code == 403
     assert client.get(f"{CLIENT}/{storage['service_id']}", headers=headers).status_code == 200
+
+
+def test_sftp_needs_its_own_permission(client, world, admin, alice):
+    from app.models.permission_set import PermissionSet
+    from app.dao.service_dao import ServiceDAO
+
+    _node(client, admin, world.servers[0])
+    headers = _headers(client, alice[0])
+    net = _client_network(client, headers, world)
+    storage = _storage(client, admin, alice[0], network_id=net["id"])
+    preset = PermissionSet(name="storage without sftp", permissions={"storage.sftp": False})
+    world.db.add(preset)
+    world.db.commit()
+    service = ServiceDAO.get_by_id(world.db, storage["service_id"])
+    service.permission_set_id = preset.id
+    world.db.commit()
+    base = f"{CLIENT}/{storage['service_id']}"
+
+    exposed = client.post(f"{base}/shares", headers=headers, json={"name": "web", "quota_gb": 1, "sftp_access": "rw"})
+    assert exposed.status_code == 403
+    share = client.post(f"{base}/shares", headers=headers, json={"name": "data", "quota_gb": 1})
+    assert share.status_code == 201
+    opened = client.patch(f"{base}/shares/{share.json()['shares'][0]['id']}", headers=headers, json={"sftp_access": "ro"})
+    assert opened.status_code == 403
+    login = client.post(f"{base}/sftp-users", headers=headers, json={"name": "deploy", "generate_password": True})
+    assert login.status_code == 403
+
+
+def test_share_name_cannot_shadow_a_system_folder(client, world, admin, alice):
+    _node(client, admin, world.servers[0])
+    headers = _headers(client, alice[0])
+    net = _client_network(client, headers, world)
+    storage = _storage(client, admin, alice[0], network_id=net["id"])
+    response = client.post(
+        f"{CLIENT}/{storage['service_id']}/shares", headers=headers, json={"name": "usr", "quota_gb": 1}
+    )
+    assert response.status_code == 400 and "reserved" in response.text
 
 
 def test_network_with_storage_cannot_be_deleted(client, world, admin, alice):
