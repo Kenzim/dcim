@@ -45,6 +45,8 @@ from app.models.service_vm import ServiceVm
 from app.services.boot_launcher import release_boot_media, schedule_launch, vmedia_capable
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox
 from app.services.private_network_service import PrivateNetworkService
+from app.api.backup_slots import RestoreBody, RetainBody
+from app.services import backup_slot_service
 from app.services.storage_service import GIB, StorageError, StorageService, tenant_status
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
@@ -1739,6 +1741,7 @@ async def terminate_service(
     service.terminated_at = datetime.now(timezone.utc)
     ServiceDAO.update(db, service)
     StorageService.mark_terminated_quietly(db, service.id)
+    backup_slot_service.mark_terminated_quietly(db, service.id)
     await PrivateNetworkService.release_service_quietly(db, service.id)
 
     log_server_activity_success(
@@ -2480,6 +2483,124 @@ async def resize_storage(
     return _billing_storage_summary(db, service)
 
 
+class BillingSlotResize(BaseModel):
+    size_gb: int = Field(..., ge=1, description="New slot size in GB (1 GB = 1024^3 bytes)")
+
+
+def _billing_slot_service(
+    db: Session, service_id: int, integration: BillingIntegration, *, audience: str = "admin"
+) -> Service:
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.BACKUP_SLOT:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a backup slot service")
+    if audience == "client":
+        require_client_permission(db, service, PermissionKey.BACKUP_SLOT_MANAGE)
+    return service
+
+
+def _billing_slot_vm(db: Session, vm_id: int, integration: BillingIntegration, slot_service: Service) -> Service:
+    vm = ServiceDAO.get_by_id(db, vm_id)
+    if not vm:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
+    _assert_billing_owned_service(vm, integration)
+    if vm.service_type != ServiceType.VM:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_NOT_VM_SERVICE_MSG)
+    if vm.owner_user_id != slot_service.owner_user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
+    require_client_permission(db, vm, PermissionKey.VM_BACKUPS)
+    return vm
+
+
+def _check_audience(audience: str) -> None:
+    if audience not in ("admin", "client"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
+
+
+@router.get("/services/{service_id}/backup-slot", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def get_backup_slot(
+    service_id: int, integration: BillingIntegrationDep, db: DbDep, audience: str = "client"
+):
+    """Size, state and retained backup of a backup_slot service, with the VMs it could be restored onto."""
+    from app.api.backup_slots import slot_detail
+
+    _check_audience(audience)
+    return slot_detail(db, _billing_slot_service(db, service_id, integration, audience=audience))
+
+
+@router.get("/services/{service_id}/backup-slots", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def list_vm_backup_slots(
+    service_id: int, integration: BillingIntegrationDep, db: DbDep, audience: str = "client"
+):
+    """The backup slots held by the owner of a VM service, for the VM's Backups panel."""
+    from app.services import backup_slot_service as slots
+
+    _check_audience(audience)
+    vm, _ = _billing_backup_service(db, service_id, integration, audience=audience)
+    return {"slots": slots.list_slot_summaries(db, vm.owner_user_id)}
+
+
+@router.post("/services/{service_id}/backup-slot/resize", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def resize_backup_slot(
+    service_id: int, body: BillingSlotResize, integration: BillingIntegrationDep, db: DbDep
+):
+    """Change a backup_slot service's size (package change). Refused below the retained backup's size."""
+    from app.api.backup_slots import raise_slot_error, slot_detail
+    from app.services import backup_slot_service as slots
+
+    service = _billing_slot_service(db, service_id, integration)
+    try:
+        slots.resize(db, service, body.size_gb)
+    except slots.BackupSlotError as exc:
+        raise raise_slot_error(exc) from exc
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="backup_slot_resize",
+        source="billing_api",
+        message=f"Backup slot size set to {body.size_gb} GB",
+        details={"service_id": service.id, "integration_id": integration.id, "size_gb": body.size_gb},
+    )
+    return slot_detail(db, service)
+
+
+@router.post("/services/{service_id}/backup-slot/retain", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def retain_backup_in_slot(
+    service_id: int, body: RetainBody, integration: BillingIntegrationDep, db: DbDep, audience: str = "client"
+):
+    from app.api.backup_slots import do_retain
+
+    _check_audience(audience)
+    slot_service = _billing_slot_service(db, service_id, integration, audience=audience)
+    source = _billing_slot_vm(db, body.source_service_id, integration, slot_service)
+    return await do_retain(db, slot_service, source, body)
+
+
+@router.post("/services/{service_id}/backup-slot/release", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def release_backup_slot(
+    service_id: int, integration: BillingIntegrationDep, db: DbDep, audience: str = "client"
+):
+    from app.api.backup_slots import do_release
+
+    _check_audience(audience)
+    return await do_release(db, _billing_slot_service(db, service_id, integration, audience=audience))
+
+
+@router.post("/services/{service_id}/backup-slot/restore", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def restore_backup_slot(
+    service_id: int, body: RestoreBody, integration: BillingIntegrationDep, db: DbDep, audience: str = "client"
+):
+    from app.api.backup_slots import do_restore
+
+    _check_audience(audience)
+    slot_service = _billing_slot_service(db, service_id, integration, audience=audience)
+    target = _billing_slot_vm(db, body.target_service_id, integration, slot_service)
+    return await do_restore(db, slot_service, target, body, staff=audience == "admin")
+
+
 @router.post("/services/{service_id}/proxy/rotate", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
 async def rotate_proxy_credentials(
     service_id: int,
@@ -2609,6 +2730,7 @@ class BillingBackupMutate(BaseModel):
     wait: bool = False
     start: bool = True
     vm_template_id: Optional[int] = None
+    confirm_data_loss: bool = False
 
 
 def _billing_backup_service(
@@ -2738,11 +2860,13 @@ async def billing_restore_backup(
             wait=body.wait,
             start=body.start,
             vm_template_id=body.vm_template_id,
+            confirm_data_loss=body.confirm_data_loss,
+            staff=audience == "admin",
         )
     except Exception as exc:
         raise map_err(exc) from exc
     # Async enqueue already sets PROVISIONING; only sync wait path finalizes power state here.
-    if body.wait and service.vm:
+    if body.wait and not result.get("async") and service.vm:
         service.vm.guest_state = VMGuestState.RUNNING if body.start else VMGuestState.STOPPED
         service.vm.guest_last_error = None
         ServiceDAO.update(db, service)

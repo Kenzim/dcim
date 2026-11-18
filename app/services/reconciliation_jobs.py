@@ -70,6 +70,21 @@ async def _reconcile_private_networks() -> None:
         logger.warning("Private network reconciliation failed: %s", exc)
 
 
+async def _reconcile_backup_slots() -> None:
+    """Start the grace period of slots terminated elsewhere, and delete backups whose grace has passed."""
+    from app.services import backup_slot_service
+
+    try:
+        db = SessionLocal()
+        try:
+            backup_slot_service.reconcile_terminations(db)
+            await backup_slot_service.purge_expired(db)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Backup slot reconciliation failed: %s", exc)
+
+
 async def run_reconciliation_jobs(interval_seconds: int = 300) -> None:
     """Background reconciliation loop for VM inventory and IP assignment consistency."""
     while True:
@@ -82,4 +97,5 @@ async def run_reconciliation_jobs(interval_seconds: int = 300) -> None:
         except Exception as exc:
             logger.warning("Reconciliation cycle failed: %s", exc)
         await _reconcile_private_networks()
+        await _reconcile_backup_slots()
         await asyncio.sleep(max(30, interval_seconds))

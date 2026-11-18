@@ -27,11 +27,15 @@ from app.services.deployment.steps import (
     ConfigureMacosGuestStep,
     ConfigureSizingStep,
     ConfigureViaGuestAgentStep,
+    CaptureTargetIdentityStep,
     ConfigureWindowsGuestStep,
     FinalizeBackupRestoreStep,
     PowerOnStep,
+    ReapplyCloudInitStep,
+    ReapplyTargetNetworkStep,
     StampVmIdentityStep,
     StartBackupRestoreStep,
+    StartRetainedRestoreStep,
     StopGuestForRestoreStep,
     WaitForBackupRestoreStep,
     WaitForGuestAgentStep,
@@ -256,5 +260,32 @@ class RestoreBackupStrategy(DeploymentStrategy):
             StopGuestForRestoreStep(),
             StartBackupRestoreStep(),
             WaitForBackupRestoreStep(),
+            FinalizeBackupRestoreStep(),
+        ]
+
+
+class RestoreRetainedBackupStrategy(DeploymentStrategy):
+    """Runtime job: restore a retained backup onto one of the client's VMs and keep that VM's identity.
+
+    Params live on ``service.config.vm_restore``. The restore overwrites the
+    target's disks and configuration, so the target's network interfaces are
+    captured first and put back afterwards, then size, address and credentials
+    are re-applied from the target's own product and allocation.
+    """
+
+    name = "restore_retained_backup"
+    include_default_actions = False
+    mutates_provision_lifecycle = False
+    max_attempts = 2
+
+    def steps(self) -> List[DeploymentStep]:
+        return [
+            StopGuestForRestoreStep(),
+            CaptureTargetIdentityStep(),
+            StartRetainedRestoreStep(),
+            WaitForBackupRestoreStep(),
+            ReapplyTargetNetworkStep(),
+            ConfigureSizingStep(),
+            ReapplyCloudInitStep(),
             FinalizeBackupRestoreStep(),
         ]

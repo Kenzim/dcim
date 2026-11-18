@@ -44,6 +44,8 @@ class PermissionKey:
 
     STORAGE_MANAGE_SHARES = "storage.manage_shares"
 
+    BACKUP_SLOT_MANAGE = "backup_slot.manage"
+
     # Account-level (not per service): may the client create and use MCP API keys.
     ACCOUNT_MCP = "account.mcp"
 
@@ -55,12 +57,12 @@ PERMISSION_CATALOG: List[Dict] = [
     {
         "key": PermissionKey.SERVICE_VIEW,
         "label": "View service status",
-        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage"],
+        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage", "backup_slot"],
     },
     {
         "key": PermissionKey.SERVICE_PORTAL,
         "label": "Open client portal (SSO)",
-        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage"],
+        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage", "backup_slot"],
     },
     {
         "key": PermissionKey.BMS_POWER,
@@ -148,6 +150,11 @@ PERMISSION_CATALOG: List[Dict] = [
         "service_types": ["nfs_storage"],
     },
     {
+        "key": PermissionKey.BACKUP_SLOT_MANAGE,
+        "label": "Retain, release and restore the backup in a backup slot",
+        "service_types": ["backup_slot"],
+    },
+    {
         # Account-level: "account" is not a real service type, so per-service
         # permission panels and reseller product ceilings (which filter on
         # service type) skip it; only the preset editor shows it.
@@ -223,6 +230,11 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
         PermissionKey.SERVICE_PORTAL: True,
         PermissionKey.STORAGE_MANAGE_SHARES: True,
     },
+    ServiceType.BACKUP_SLOT: {
+        PermissionKey.SERVICE_VIEW: True,
+        PermissionKey.SERVICE_PORTAL: True,
+        PermissionKey.BACKUP_SLOT_MANAGE: True,
+    },
 }
 
 
@@ -253,6 +265,7 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.PROXY_VIEW_CREDENTIALS: True,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: True,
             PermissionKey.STORAGE_MANAGE_SHARES: True,
+            PermissionKey.BACKUP_SLOT_MANAGE: True,
         },
     },
     {
@@ -300,6 +313,7 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.PROXY_VIEW_CREDENTIALS: False,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
             PermissionKey.STORAGE_MANAGE_SHARES: False,
+            PermissionKey.BACKUP_SLOT_MANAGE: False,
         },
     },
     {
