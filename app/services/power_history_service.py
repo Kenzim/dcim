@@ -556,7 +556,9 @@ def _aggregate(
     hours: Any, now: Optional[datetime], points: int = TARGET_POINTS,
 ) -> Dict[str, Any]:
     win = _window(hours, now, points)
-    total, energy, bucketed = _summed(db, "pdu", win, {"pdu_id": [p.id for p in pdus]}, len(pdus))
+    total, energy, bucketed = _summed(
+        db, "pdu", win, {"pdu_id": [p.id for p in pdus]}, sum(1 for p in pdus if p.enabled)
+    )
     return {
         "scope": scope,
         "id": scope_id,
@@ -638,7 +640,9 @@ def feed_history(db: Session, feed: PowerFeed, hours: Any = 24, now: Optional[da
 
     win = _window(hours, now, points)
     inlets = [i for i in feed.pdu_inlets if i.pdu is not None]
-    total, energy, bucketed = _summed(db, "inlet", win, {"inlet_id": [i.id for i in inlets]}, len(inlets))
+    total, energy, bucketed = _summed(
+        db, "inlet", win, {"inlet_id": [i.id for i in inlets]}, sum(1 for i in inlets if i.pdu.enabled)
+    )
     live = [i.power_w for i in inlets if i.pdu.enabled and i.power_w is not None]
     return {
         "scope": "feed",

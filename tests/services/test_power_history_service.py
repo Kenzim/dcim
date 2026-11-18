@@ -521,3 +521,13 @@ def test_a_pdu_with_no_data_at_all_makes_the_total_partial(db_session, site):
     put_raw(db_session, a.id, START, 30, power=lambda m: 100.0)
     out = history.location_history(db_session, None, None, 3, START + timedelta(minutes=30))
     assert out["partial"] is True and out["pdus_with_data"] == 1
+
+
+def test_a_disabled_pdu_does_not_make_the_total_partial(db_session, site):
+    a = make_pdu(db_session, site, "pdu-a")
+    b = make_pdu(db_session, site, "pdu-b")
+    b.enabled = False
+    db_session.commit()
+    put_raw(db_session, a.id, START, 30, power=lambda m: 100.0)
+    out = history.location_history(db_session, None, None, 3, START + timedelta(minutes=30))
+    assert out["partial"] is False
