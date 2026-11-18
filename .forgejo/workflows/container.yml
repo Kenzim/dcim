@@ -2,7 +2,7 @@
 #
 # Unique images:
 #   app, bandwidth-poller, dhcp-runner, tftp-runner, media-runner, proxy-runner,
-#   ipmi-proxy-runner
+#   ipmi-proxy-runner, storage-runner
 #
 # Worker services (deployment-worker, usdt-watcher, recurring-billing-worker,
 # notification-worker) run the `app` image directly; no alias repositories.
@@ -56,6 +56,10 @@ jobs:
           - image_suffix: ipmi-proxy-runner
             context: ipmi_proxy_runner
             dockerfile: ipmi_proxy_runner/Dockerfile
+            target: ""
+          - image_suffix: storage-runner
+            context: storage_runner
+            dockerfile: storage_runner/Dockerfile
             target: ""
 
     steps:
