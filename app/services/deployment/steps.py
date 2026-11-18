@@ -827,3 +827,10 @@ class ReapplyCloudInitStep(DeploymentStep):
         ok = await plugin.configure_vm({"vmid": int(target_vmid)}, payload)
         if not ok:
             raise DeploymentError("Proxmox cloud-init network config update failed")
+        # The restored config carries the source VM's credentials; drop any the target does not have.
+        clear = [key for key in ("sshkeys", "cipassword") if key not in payload]
+        if clear:
+            try:
+                await plugin.set_qemu_config({}, delete=clear, vmid=int(target_vmid))
+            except Exception as exc:
+                raise DeploymentError(f"Could not clear the source VM's cloud-init credentials: {exc}") from exc

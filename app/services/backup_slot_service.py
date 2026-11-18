@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 GIB = 1024**3
 MAX_SIZE_GB = 102400
 _MISSING_VOLUME = re.compile(r"does not exist|not found|no such", re.IGNORECASE)
+# Errors that name something other than the volume as missing (storage, node, datastore).
+_MISSING_OTHER = re.compile(
+    r"\b(storage|node|datastore|cluster)\s+'[^']*'\s+(does not exist|not found)"
+    r"|no such (storage|node|datastore|host)",
+    re.IGNORECASE,
+)
 
 
 class BackupSlotError(Exception):
@@ -225,6 +231,9 @@ async def purge_expired(db: Session) -> int:
         if due is None or due > now:
             continue
         if slot.retained is not None:
+            if _restore_in_progress(db, slot.retained.id):
+                logger.info("Backup slot %s: a restore from its backup is still running; purging later", slot.id)
+                continue
             try:
                 await release_backup(db, slot.retained)
             except Exception:
@@ -261,23 +270,60 @@ def get_cluster_plugin(
 
 
 def _is_missing_volume(exc: Exception) -> bool:
+    """True only when the error says the volume itself is gone, not its storage or node."""
     response = getattr(exc, "response", None)
+    # Proxmox puts its error text in the HTTP reason; str(exc) would also include the URL.
+    text = str(getattr(response, "reason_phrase", "") or "") if response is not None else ""
+    text = text or str(exc)
+    if _MISSING_OTHER.search(text):
+        return False
     if response is not None and getattr(response, "status_code", None) == 404:
         return True
-    return bool(_MISSING_VOLUME.search(str(exc)))
+    return bool(_MISSING_VOLUME.search(text))
 
 
 async def _drop_volume(plugin, storage: str, volid: str) -> None:
-    """Unprotect then delete a backup volume; a volume that is already gone counts as done."""
-    for step in (
-        lambda: plugin.set_backup_protected(storage, volid, False),
-        lambda: plugin.delete_backup(storage, volid),
-    ):
+    """Unprotect then delete a backup volume; a volume that is already gone counts as done.
+
+    If the delete fails, the volume is protected again so pruning cannot remove a backup
+    that is still recorded as retained.
+    """
+    try:
+        await plugin.set_backup_protected(storage, volid, False)
+    except Exception as exc:
+        if not _is_missing_volume(exc):
+            raise
+    try:
+        await plugin.delete_backup(storage, volid)
+    except Exception as exc:
+        if _is_missing_volume(exc):
+            return
         try:
-            await step()
-        except Exception as exc:
-            if not _is_missing_volume(exc):
-                raise
+            await plugin.set_backup_protected(storage, volid, True)
+        except Exception:
+            logger.warning("Backup %s is unprotected after a failed delete", volid, exc_info=True)
+        raise
+
+
+def _restore_in_progress(db: Session, retained_id: int) -> bool:
+    """True while a restore job reading this retained backup has not finished."""
+    from app.models.vm_deployment_job import TERMINAL_JOB_STATUSES, VMDeploymentJob
+    from app.services.retained_restore_service import RESTORE_RETAINED_STRATEGY
+
+    jobs = (
+        db.query(VMDeploymentJob)
+        .filter(
+            VMDeploymentJob.strategy_name == RESTORE_RETAINED_STRATEGY,
+            VMDeploymentJob.status.notin_(list(TERMINAL_JOB_STATUSES)),
+        )
+        .all()
+    )
+    for job in jobs:
+        target = db.get(Service, job.service_id)
+        state = dict((target.config or {}).get("vm_restore") or {}) if target is not None else {}
+        if state.get("retained_backup_id") == retained_id:
+            return True
+    return False
 
 
 def _parse_config_text(text: str) -> dict[str, str]:

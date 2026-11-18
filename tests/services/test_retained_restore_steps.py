@@ -130,6 +130,15 @@ def test_reapply_cloudinit_sets_targets_static_address():
     assert "10.0.0.7" in str(payload) and "10.0.0.1" in str(payload)
 
 
+def test_reapply_cloudinit_clears_source_credentials_the_target_lacks():
+    plugin = FakeVm({})
+    _run(ReapplyCloudInitStep().execute(Ctx(plugin)))
+    _ref, payload = plugin.configure_calls[0]
+    assert "sshkeys" not in payload
+    cleared = [delete for _payload, delete in plugin.set_calls]
+    assert any("sshkeys" in delete for delete in cleared)
+
+
 def test_reapply_cloudinit_failure_is_reported():
     plugin = FakeVm({})
 

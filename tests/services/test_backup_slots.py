@@ -331,6 +331,28 @@ async def test_release_keeps_the_record_when_storage_delete_fails(world, db_sess
     with pytest.raises(BackupSlotError, match="Could not delete"):
         await slots.release_from_slot(db_session, world.slot1)
     assert RetainedBackupDAO.get_by_volid(db_session, volid) is not None
+    assert volid in world.pbs.protected
+
+
+@pytest.mark.asyncio
+async def test_release_does_not_treat_a_missing_storage_as_a_missing_volume(world, db_session):
+    volid = world.pbs.add(5100, "a")
+    await slots.retain_from_vm(db_session, world.slot1, world.vm1, volid=volid)
+    world.pbs.delete_error = RuntimeError(f"storage '{STORAGE}' does not exist")
+    with pytest.raises(BackupSlotError, match="Could not delete"):
+        await slots.release_from_slot(db_session, world.slot1)
+    assert RetainedBackupDAO.get_by_volid(db_session, volid) is not None
+    assert volid in world.pbs.protected
+
+
+@pytest.mark.asyncio
+async def test_release_counts_an_already_deleted_volume_as_done(world, db_session):
+    volid = world.pbs.add(5100, "a")
+    await slots.retain_from_vm(db_session, world.slot1, world.vm1, volid=volid)
+    world.pbs.delete_error = RuntimeError(f"volume '{volid}' does not exist")
+    out = await slots.release_from_slot(db_session, world.slot1)
+    assert out["released"] is True
+    assert RetainedBackupDAO.get_by_volid(db_session, volid) is None
 
 
 @pytest.mark.asyncio
@@ -363,6 +385,21 @@ async def test_termination_starts_grace_then_purges(world, db_session, monkeypat
     assert await slots.purge_expired(db_session) == 1
     assert volid in world.pbs.deleted
     assert db_session.query(BackupSlot).filter_by(service_id=world.slot1.id).first() is None
+
+
+@pytest.mark.asyncio
+async def test_purge_waits_for_a_running_restore_from_the_backup(world, db_session):
+    volid = world.pbs.add(5100, "a")
+    await slots.retain_from_vm(db_session, world.slot1, world.vm1, volid=volid)
+    await slots.restore_from_slot(db_session, world.slot1, world.vm2, confirm_data_loss=True)
+    world.slot1.status = ServiceStatus.TERMINATED
+    db_session.commit()
+    slots.reconcile_terminations(db_session)
+    slot = db_session.query(BackupSlot).filter_by(service_id=world.slot1.id).one()
+    slot.destroy_after = datetime.now(timezone.utc) - timedelta(minutes=1)
+    db_session.commit()
+    assert await slots.purge_expired(db_session) == 0
+    assert volid not in world.pbs.deleted and volid in world.pbs.protected
 
 
 def test_empty_slot_terminates_without_grace(world, db_session):
