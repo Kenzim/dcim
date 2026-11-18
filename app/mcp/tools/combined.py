@@ -55,10 +55,11 @@ async def lookup(
         "sol_profiles",
         "switch_plugins",
         "subnet_groups",
+        "network_pools",
     ],
     location_id: Optional[int] = None,
 ) -> dict:
-    """List reference data. location_id filters racks."""
+    """List reference data. location_id filters racks. network_pools: private network VLAN pools."""
     if kind == "racks":
         return await inventory_tools.list_racks(location_id=location_id)
     _reject(f"lookup {kind}", location_id=location_id)
@@ -75,6 +76,7 @@ async def lookup(
         "sol_profiles": console_tools.list_sol_profiles,
         "switch_plugins": network_tools.list_switch_plugins,
         "subnet_groups": catalog_admin_tools.list_subnet_groups,
+        "network_pools": network_tools.list_network_pools,
     }
     return await handlers[kind]()
 
@@ -85,18 +87,27 @@ async def save_location(
     name: Optional[str] = None,
     description: Optional[str] = None,
     proxy_port: Optional[int] = None,
+    network_pool: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Create a location (no location_id) or update one.
 
     proxy_port: port customers use for HTTP proxies on this location's subnets
     (0 clears it, falling back to PROXY_DEFAULT_PORT, 11080 by default).
+    network_pool: create or update the location's private network pool; keys vlan_start,
+    vlan_end (both needed to create), bridge, enabled, max_networks_per_client,
+    max_networks_per_service, reserved_cidrs (replaces), proxy_access_enabled,
+    proxy_access_requires_product.
     """
     if location_id is None:
         _require("Creating a location", name=name)
-        return await inventory_tools.create_location(name=name, description=description, proxy_port=proxy_port)
-    return await inventory_tools.update_location(
-        location_id, name=name, description=description, proxy_port=proxy_port
-    )
+        result = await inventory_tools.create_location(name=name, description=description, proxy_port=proxy_port)
+    else:
+        result = await inventory_tools.update_location(
+            location_id, name=name, description=description, proxy_port=proxy_port
+        )
+    if network_pool is not None:
+        result["network_pool"] = await network_tools.save_network_pool(result["id"], network_pool)
+    return result
 
 
 @mcp.tool()

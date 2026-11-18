@@ -57,9 +57,15 @@ def start_keyspace_notification_listener():
             logger.info("Started Redis keyspace notification listener")
             
             for message in pubsub.listen():
-                if message["type"] == "pmessage":
-                    key = message["data"].decode("utf-8")
+                if message["type"] != "pmessage":
+                    continue
+                # The client may or may not decode responses.
+                data = message["data"]
+                key = data.decode("utf-8") if isinstance(data, bytes) else str(data)
+                try:
                     handle_expired_token(key)
+                except Exception as e:
+                    logger.warning(f"Expired key {key!r} not handled: {e}")
         except Exception as e:
             logger.error(f"Error in keyspace notification listener: {e}")
     

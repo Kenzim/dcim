@@ -194,6 +194,16 @@ class StorageDAO:
             query = query.filter(StorageTenant.location_id == location_id)
         return query.first()
 
+    @staticmethod
+    def held_vlans(db: Session, location_id: int) -> set:
+        """VLANs in the location still used by a tenant (live or awaiting destruction)."""
+        rows = (
+            db.query(StorageTenant.vlan)
+            .filter(StorageTenant.location_id == location_id, StorageTenant.vlan.isnot(None))
+            .all()
+        )
+        return {row[0] for row in rows}
+
     # --- shares ---
 
     @staticmethod

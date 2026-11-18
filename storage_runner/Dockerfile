@@ -2,8 +2,9 @@ FROM golang:1.24-bookworm AS build
 WORKDIR /src
 COPY go.mod ./
 COPY . .
-ARG VERSION=0.1.0
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/storage-runner ./cmd/storage-runner
+# Empty keeps the version in cmd/storage-runner/main.go.
+ARG VERSION=
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w ${VERSION:+-X main.version=${VERSION}}" -o /out/storage-runner ./cmd/storage-runner
 
 # The runner changes host networking and drives Ceph and podman, so it runs as
 # root with the host network; see README.md for the required flags.

@@ -433,8 +433,13 @@ class PrivateNetworkService:
 
     @staticmethod
     def _next_segment_id(db: Session, pool: PrivateNetworkPool) -> Optional[int]:
-        """Next free ID after the last one handed out, wrapping at the end of the range."""
+        """Next free ID after the last one handed out, wrapping at the end of the range.
+
+        A VLAN still held by storage awaiting destruction is skipped, so a new
+        network never shares it with a storage node that has not let it go.
+        """
         used = PrivateNetworkDAO.used_segment_ids(db, pool.location_id, SegmentationType.VLAN)
+        used |= StorageDAO.held_vlans(db, pool.location_id)
         size = pool.vlan_end - pool.vlan_start + 1
         last = pool.last_allocated
         first = pool.vlan_start if last is None or not pool.vlan_start <= last <= pool.vlan_end else last + 1

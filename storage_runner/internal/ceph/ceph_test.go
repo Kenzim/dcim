@@ -19,7 +19,27 @@ func healthy() *execx.Script {
 	return execx.NewScript().
 		On(pre+"osd pool get ec allow_ec_overwrites --format json", `{"pool":"ec","pool_id":3,"allow_ec_overwrites":true}`).
 		On(pre+"fs ls --format json", `[{"name":"cephfs","metadata_pool":"cephfs_metadata","data_pools":["cephfs_data","ec"]}]`).
-		On(pre+"df --format json", `{"pools":[{"name":"cephfs_data","stats":{"max_avail":1}},{"name":"ec","stats":{"max_avail":5000}}]}`)
+		On(pre+"df detail --format json", `{"pools":[{"name":"cephfs_data","stats":{"max_avail":1}},{"name":"ec","stats":{"max_avail":5000,"stored":100,"quota_bytes":0}}]}`)
+}
+
+func TestCheckPoolQuota(t *testing.T) {
+	cases := map[string]struct {
+		stats string
+		want  int64
+	}{
+		"quota below max_avail": {`{"max_avail":5000,"stored":400,"quota_bytes":1000}`, 600},
+		"quota above max_avail": {`{"max_avail":5000,"stored":400,"quota_bytes":100000}`, 5000},
+		"quota used up":         {`{"max_avail":5000,"stored":1200,"quota_bytes":1000}`, 0},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := healthy().On(pre+"df detail --format json", `{"pools":[{"name":"ec","stats":`+c.stats+`}]}`)
+			free, err := cli(s).Check(context.Background())
+			if err != nil || free != c.want {
+				t.Fatalf("free=%d err=%v, want %d", free, err, c.want)
+			}
+		})
+	}
 }
 
 func TestCheckHealthy(t *testing.T) {

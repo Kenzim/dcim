@@ -520,6 +520,35 @@ async def test_node_with_undestroyed_tenant_on_the_same_vlan_is_skipped(env):
 
 
 @pytest.mark.asyncio
+async def test_vlan_of_storage_awaiting_destruction_is_not_handed_out(env):
+    from app.dao.private_network_dao import PrivateNetworkDAO
+
+    node, _, network, service, tenant = await _linked(env)
+    held = network.segment_id
+    service.status = ServiceStatus.TERMINATED
+    env.db.commit()
+    StorageService.mark_terminated(env.db, service.id)
+    await PrivateNetworkService.release_service(env.db, service.id)
+    await PrivateNetworkService.delete_network(env.db, network.id)
+    pool = next(p for p in PrivateNetworkDAO.list_pools(env.db) if p.location_id == env.location.id)
+
+    async def next_network(name):
+        pool.last_allocated = held - 1
+        env.db.commit()
+        return await PrivateNetworkService.create_network(
+            env.db, owner_user_id=env.owner.id, location_id=env.location.id, name=name, enforce_limit=False
+        )
+
+    replacement = await next_network("next")
+    assert replacement.segment_id != held
+    linked = await StorageService.link_network(env.db, _storage(env, "again"), replacement.id)
+    assert linked.node_id == node.id
+
+    apply_runner_status(env.db, node, {"destroyed_tenants": [tenant.id]}, None)
+    assert (await next_network("after")).segment_id == held
+
+
+@pytest.mark.asyncio
 async def test_status_updates_only_this_nodes_rows_and_destroys_only_marked_ones(env):
     node, _, _, _, tenant = await _linked(env)
     other_node, _, _ = _node(env, "store-02")

@@ -32,7 +32,8 @@ Every pass it posts a status report back to Rackflow.
   node, settings, tenants and their shares).
 - `POST {RACKFLOW_URL}/api/runner/storage/status` (expects 2xx, normally 204)
   reports `version_applied`, `runner_version`, node health (`ceph_ok`,
-  `free_bytes` of the EC pool, `error`), per-tenant and per-share state
+  `free_bytes` of the EC pool, capped by what is left under the pool's
+  `max_bytes` quota when it has one, `error`), per-tenant and per-share state
   (`ready`, `pending`, `error`, `suspended`) with `used_bytes`, and the lists
   `destroyed_tenants`, `destroyed_shares` and `orphans`.
 

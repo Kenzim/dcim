@@ -129,6 +129,30 @@ async def test_save_location_proxy_port(db_session, mcp_sessionlocal, mcp_auth_c
 
 
 @pytest.mark.asyncio
+async def test_save_location_network_pool(db_session, mcp_sessionlocal, mcp_auth_ctx_write):
+    location = await combined.save_location(name="pool-loc")
+    with pytest.raises(ToolError, match="vlan_end"):
+        await combined.save_location(location_id=location["id"], network_pool={"vlan_start": 3000})
+    with pytest.raises(ToolError, match="Unknown network_pool settings: vlans"):
+        await combined.save_location(location_id=location["id"], network_pool={"vlans": "3000-3099"})
+
+    created = await combined.save_location(
+        location_id=location["id"],
+        network_pool={"vlan_start": 3000, "vlan_end": 3099, "bridge": "vmbr3000", "reserved_cidrs": ["10.16.0.0/16"]},
+    )
+    pool = created["network_pool"]
+    assert (pool["vlan_start"], pool["vlan_end"], pool["bridge"], pool["capacity"]) == (3000, 3099, "vmbr3000", 100)
+    assert pool["reserved_cidrs"] == ["10.16.0.0/16"]
+
+    updated = await combined.save_location(location_id=location["id"], network_pool={"proxy_access_enabled": True})
+    assert updated["network_pool"]["id"] == pool["id"]
+    assert updated["network_pool"]["proxy_access_enabled"] and updated["network_pool"]["vlan_end"] == 3099
+
+    listed = (await combined.lookup("network_pools"))["network_pools"]
+    assert [row["location_name"] for row in listed] == ["pool-loc"]
+
+
+@pytest.mark.asyncio
 async def test_console_ticket_and_virtual_media(monkeypatch):
     from app.mcp.tools import console
 

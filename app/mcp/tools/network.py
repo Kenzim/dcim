@@ -10,8 +10,10 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from app.api import network_switch as switch_api
+from app.api import private_networks as private_network_api
 from app.core.plugin_capabilities import get_switch_plugin_capabilities
 from app.dao.network_switch_dao import NetworkSwitchDAO
+from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.switch_port_dao import SwitchPortDAO
 from app.mcp.instance import mcp
 from app.mcp.runtime import redact, run_tool
@@ -61,6 +63,38 @@ def _merge_config(existing: Optional[dict], changes: dict) -> dict:
         else:
             merged[key] = value
     return merged
+
+
+_POOL_SETTINGS = frozenset(private_network_api.PoolUpdate.model_fields)
+
+
+async def list_network_pools() -> dict:
+    """Private network pools, one per location."""
+
+    async def work(db, ctx):
+        rows = await private_network_api.list_pools(auth={}, db=db)
+        return {"network_pools": [row.model_dump(mode="json") for row in rows]}
+
+    return await run_tool("list_network_pools", "read", work)
+
+
+async def save_network_pool(location_id: int, settings: dict[str, Any]) -> dict:
+    """Create the location's private network pool, or update it if it has one."""
+
+    async def work(db, ctx):
+        unknown = sorted(set(settings) - _POOL_SETTINGS)
+        if unknown:
+            raise ValueError(f"Unknown network_pool settings: {', '.join(unknown)}")
+        pool = PrivateNetworkDAO.get_pool_for_location(db, location_id)
+        if pool is None:
+            body = private_network_api.PoolCreate(location_id=location_id, **settings)
+            row = await private_network_api.create_pool(body, auth={}, db=db)
+        else:
+            body = private_network_api.PoolUpdate(**settings)
+            row = await private_network_api.update_pool(pool.id, body, auth={}, db=db)
+        return row.model_dump(mode="json")
+
+    return await run_tool("save_network_pool", "write", work, args={"location_id": location_id, **settings})
 
 
 async def list_switch_plugins() -> dict:

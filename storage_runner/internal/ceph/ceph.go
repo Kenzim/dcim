@@ -83,7 +83,8 @@ func TenantCaps(access []Access) Caps {
 }
 
 type Cluster interface {
-	// Check verifies the EC pool and file system and returns the EC pool's free bytes.
+	// Check verifies the EC pool and file system and returns the EC pool's free
+	// bytes, capped by what is left under the pool's quota when it has one.
 	Check(ctx context.Context) (freeBytes int64, err error)
 	// Group reports whether the subvolume group exists and its data pool.
 	Group(ctx context.Context) (exists bool, pool string, err error)
@@ -173,16 +174,23 @@ func (c *CLI) Check(ctx context.Context) (int64, error) {
 		Pools []struct {
 			Name  string `json:"name"`
 			Stats struct {
-				MaxAvail int64 `json:"max_avail"`
+				MaxAvail   int64 `json:"max_avail"`
+				Stored     int64 `json:"stored"`
+				QuotaBytes int64 `json:"quota_bytes"`
 			} `json:"stats"`
 		} `json:"pools"`
 	}
-	if err := c.cephJSON(ctx, &df, "df"); err != nil {
+	// "detail" adds quota_bytes; max_avail ignores a pool quota.
+	if err := c.cephJSON(ctx, &df, "df", "detail"); err != nil {
 		return 0, err
 	}
 	for _, p := range df.Pools {
 		if p.Name == c.ECPool {
-			return p.Stats.MaxAvail, nil
+			free := p.Stats.MaxAvail
+			if quota := p.Stats.QuotaBytes; quota > 0 {
+				free = min(free, max(quota-p.Stats.Stored, 0))
+			}
+			return free, nil
 		}
 	}
 	return 0, fmt.Errorf("EC pool %q missing from ceph df", c.ECPool)
