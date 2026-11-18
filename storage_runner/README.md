@@ -59,6 +59,9 @@ Nothing here ever comes from Rackflow.
 | `LINK_CIDR` | `169.254.128.0/17` | Carved into /30s for tenant veth links; must not overlap Ceph or customer networks |
 | `STATE_DIR` | `/var/lib/rackflow-storage-runner` | Link allocations, share deleting marks, per-tenant Ganesha config and keyrings (mode 0700) |
 | `PODMAN_REMOTE_URL` | empty | Podman service URL (`unix:///run/podman/podman.sock`) when the runner itself runs in a container |
+| `SFTP_LISTEN_ADDR` | `0.0.0.0` | Address the public SFTP gateway listens on; the port comes from Rackflow (node SFTP settings) |
+| `SFTP_IMAGE` | empty | Image for the per-tenant SFTP back ends (see SFTP below). Needed only when Rackflow turns SFTP on; otherwise the node reports an SFTP error |
+| `SFTP_SERVER_PATH` | `/usr/lib/ssh/sftp-server` | Path of OpenSSH's `sftp-server` inside `SFTP_IMAGE` |
 
 Customer networks that overlap a Ceph public network or `LINK_CIDR` are
 rejected per tenant with a clear error.
@@ -147,6 +150,47 @@ active tenants are in the `tenant_links` set.
   tenant, because NFS file handles carry it.
 - **limits** (`bandwidth_mbps`, `iops`) are parsed but not enforced; the hook
   is `applyLimits` in `internal/reconcile/reconcile.go`.
+
+## SFTP
+
+Design and trade-offs: `docs/nfs-storage-sftp.md`. In short:
+
+- **Gateway (in the runner):** listens in the host namespace on `SFTP_LISTEN_ADDR` and the port
+  Rackflow sends (default 2222). Open that TCP port to the node from the internet; the
+  `inet rf-storage` table only filters tenant veths, so it does not block it. The ed25519 host key
+  is created once at `STATE_DIR/sftp_host_ed25519_key` (mode 0600) and its fingerprint is reported
+  to Rackflow. Logins are `<name>.<service id>`, checked against bcrypt hashes and public keys from
+  Rackflow, after the user's source allow list. Only the `sftp` subsystem is offered. A source
+  address is refused for `ban_seconds` after `max_auth_failures` failed connections within
+  `failure_window_seconds`. Every login result and session is logged, never a password.
+- **Back end per tenant:** only for active tenants with at least one SFTP share and one login.
+  Each SFTP share is mounted with the kernel CephFS client as the tenant's own cephx user
+  `client.rf-t<id>` at `/run/rackflow-storage/sftp/t<id>/<share>` (read-only for `ro` shares);
+  the key is in `STATE_DIR/tenants/<id>/sftp/secret` (0600), never on a command line. Container
+  `rf-sftp-t<id>` runs `sleep infinity` with `--network none --read-only --cap-drop all
+  --security-opt no-new-privileges --user 65534:65534`, and only the tenant's shares bound at
+  `/<share>`. Each session runs `podman exec -i rf-sftp-t<id> sftp-server`. The container is
+  recreated when its shares or modes change (that tenant's open sessions drop).
+- **Lifecycle:** suspend closes the tenant's sessions, removes the container and unmounts (data
+  kept); terminate does the same and removes the tenant's SFTP state; a share turned off or being
+  deleted is unmounted before its subvolume can be destroyed. SFTP errors only set the tenant's
+  `sftp` status; NFS is never touched by the SFTP phase.
+- **Safety:** `rf-sftp-t*` containers and mounts of tenants not in the config are reported as
+  orphans and left alone; mount directories are only removed with a non-recursive remove.
+
+Host prerequisites for SFTP: the kernel `ceph` module and `mount.ceph` (package `ceph-common`),
+and the back end image, for example:
+
+```Dockerfile
+FROM alpine:3.20
+RUN apk add --no-cache openssh-sftp-server
+```
+
+built as `podman build -t localhost/rf-sftp:1 .` and set as `SFTP_IMAGE=localhost/rf-sftp:1`.
+
+Assumptions not yet checked on a real cluster: the kernel mount uses the tenant directory's
+`ceph.conf` (monitor addresses) and `mds_namespace=<CEPH_FS_NAME>`; the tenant's cephx caps (which
+Ganesha already uses) are enough for a kernel mount of its subvolume paths.
 
 ## Safety rules
 
