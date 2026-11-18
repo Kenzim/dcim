@@ -114,6 +114,27 @@ def test_reapply_network_puts_back_target_macs_and_drops_the_sources():
     assert deleted == ["net1"]
 
 
+def test_reapply_network_drops_the_sources_cloudinit_addresses():
+    # The source had a private network on net1 with ipconfig1; the target only has net0.
+    plugin = FakeVm(
+        {
+            "net0": "virtio=AA:BB:CC:00:00:01,bridge=vmbr0",
+            "ipconfig0": "ip=10.0.0.5/24,gw=10.0.0.1",
+            "net1": "virtio=AA:BB:CC:00:00:09,bridge=vmbr90,tag=3901",
+            "ipconfig1": "ip=10.77.0.1/24",
+        }
+    )
+    ctx = Ctx(plugin)
+    target = {"net0": TARGET_NET, "ipconfig0": "ip=192.0.2.7/24,gw=192.0.2.1"}
+    _write_vm_restore_state(
+        ctx, {**_vm_restore_state(ctx.service), "target_identity": {"nets": target, "name": "target-vm"}}
+    )
+    _run(ReapplyTargetNetworkStep().execute(ctx))
+    payload, deleted = plugin.set_calls[0]
+    assert payload == {**target, "name": "target-vm"}
+    assert deleted == ["ipconfig1", "net1"]
+
+
 def test_reapply_network_refuses_without_captured_identity():
     assert _run(ReapplyTargetNetworkStep().precheck(Ctx(FakeVm({})))).result == StepResult.FAILED
 

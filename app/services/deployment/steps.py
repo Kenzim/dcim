@@ -702,11 +702,13 @@ class StampVmIdentityStep(DeploymentStep):
         ctx.logger.info("Stamped VM identity token=%s", token)
 
 
-_NET_KEY = re.compile(r"^net\d+$")
+# A VM's network interfaces and the cloud-init address set for each of them.
+_NET_KEY = re.compile(r"^(net|ipconfig)\d+$")
 
 
 class CaptureTargetIdentityStep(DeploymentStep):
-    """Record the target VM's own network interfaces and name before a retained backup overwrites them."""
+    """Record the target VM's own network interfaces, their cloud-init addresses and its name before a
+    retained backup overwrites them."""
 
     name = "capture_target_identity"
     timeout_seconds = 60
@@ -767,7 +769,8 @@ class StartRetainedRestoreStep(DeploymentStep):
 
 
 class ReapplyTargetNetworkStep(DeploymentStep):
-    """Put the target's own network interfaces (MAC addresses, bridges, VLAN tags) and name back after a restore."""
+    """Put the target's own network interfaces (MAC addresses, bridges, VLAN tags), their cloud-init
+    addresses and its name back after a restore, and drop the source's."""
 
     name = "reapply_target_network"
     timeout_seconds = 60
