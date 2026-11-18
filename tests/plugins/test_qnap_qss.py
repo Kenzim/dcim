@@ -66,7 +66,7 @@ class FakeQSS:
         if path == "/lacp/group":
             return self.ok(self.lag_groups)
         if path == "/system/board":
-            return self.ok({"Product": "QSW", "Model": "QSW-M2116P-2T2S", "MacAddr": "24:5e:be:98:07:43", "PortNum": 20})
+            return self.ok({"Product": "QSW", "Model": "QSW-M2116P-2T2S", "MacAddr": "24:5e:be:98:07:43", "PortNum": 20, "SerialNumber": "Q123"})
         if path == "/firmware/info":
             return self.ok({"version": "2.0.1", "number": "40148", "date": "20240101"})
         if path == "/ports/status":
@@ -128,6 +128,7 @@ def test_config_requires_password():
 async def test_login_uses_base64_password_and_always_logs_out(plugin, fake):
     info = await plugin.get_switch_info()
     assert info["model"] == "QSW-M2116P-2T2S"
+    assert info["serial_number"] == "Q123"
     assert info["firmware_version"] == "2.0.1.40148"
     assert fake.calls[0][2]["password"] == base64.b64encode(PASSWORD.encode()).decode()
     assert fake.logins == fake.logouts == 1
@@ -226,6 +227,15 @@ async def test_delete_vlan_refuses_when_it_is_a_native_vlan(plugin, fake):
     assert (await plugin.delete_vlan(3901))["changed"] is True
     assert "3901" not in fake.vlans
     assert (await plugin.delete_vlan(3901))["changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_vlans_leaves_out_lag_interfaces(plugin, fake):
+    fake.vlans["1"].append({"Port": "29", "Tagged": False})
+    fake.vlans["20"] = [{"Port": "7", "Tagged": True}, {"Port": "30", "Tagged": True}]
+    vlans = {v["vlan_id"]: v for v in await plugin.list_vlans()}
+    assert vlans[1]["untagged_ports"] == [str(p) for p in range(1, 29)]
+    assert vlans[20]["tagged_ports"] == ["7"]
 
 
 @pytest.mark.asyncio

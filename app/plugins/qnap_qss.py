@@ -255,7 +255,7 @@ class QNAPQSSPlugin(SwitchPlugin):
         version = ".".join(str(part) for part in (firmware.get("version"), firmware.get("number")) if part)
         return {
             "model": board.get("Model") or board.get("Product") or "QNAP QSS",
-            "serial_number": board.get("SerialNum") or board.get("Serial") or "",
+            "serial_number": board.get("SerialNumber") or board.get("SerialNum") or "",
             "firmware_version": version,
             "port_count": board.get("PortNum"),
             "mac_address": board.get("MacAddr"),
@@ -308,11 +308,16 @@ class QNAPQSSPlugin(SwitchPlugin):
     async def list_vlans(self) -> List[Dict[str, Any]]:
         async with self._session() as client:
             vlans = await self._vlans(client)
+            lag_start = _as_int((await self._call(client, "GET", "/lacp/info") or {}).get("StartIndex"))
+
+        def physical(ports):
+            return sorted((p for p in ports if not lag_start or int(p) <= lag_start), key=int)
+
         return [
             {
                 "vlan_id": vlan,
-                "untagged_ports": sorted((p for p, t in members.items() if not t), key=int),
-                "tagged_ports": sorted((p for p, t in members.items() if t), key=int),
+                "untagged_ports": physical(p for p, t in members.items() if not t),
+                "tagged_ports": physical(p for p, t in members.items() if t),
             }
             for vlan, members in sorted(vlans.items())
         ]
