@@ -22,7 +22,20 @@ router = APIRouter(prefix="/product-catalog", tags=["product-catalog"])
 # VM template os_type values are the provisioning strategy keys (model + strategy merged).
 ALLOWED_VM_OS_TYPES = sorted(INSTALL_TYPE_STRATEGIES.keys())
 # Service types this catalog can define families/products for.
-ALLOWED_FAMILY_SERVICE_TYPES = ("vm", "http_proxy", "bare_metal")
+ALLOWED_FAMILY_SERVICE_TYPES = ("vm", "http_proxy", "bare_metal", "nfs_storage")
+
+
+def _validate_storage_defaults(values: dict) -> None:
+    """nfs_storage families and products may set ``size_gb`` (a positive integer)."""
+    size = (values or {}).get("size_gb")
+    if size in (None, ""):
+        return
+    try:
+        ok = int(size) >= 1 and str(int(size)) == str(size).strip()
+    except (TypeError, ValueError):
+        ok = False
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="size_gb must be a whole number of GB, at least 1")
 
 
 def _slugify(text: str) -> str:
@@ -237,6 +250,10 @@ async def create_family(
         # http_proxy: no hardware/hypervisor backend — IPs come from IPAM.
         _validate_proxy_defaults(data.defaults or {}, db=db)
         payload["provisioning_backend"] = data.provisioning_backend or "ipam"
+    elif data.service_type == "nfs_storage":
+        # nfs_storage: placed on a storage node; defaults carry size_gb.
+        _validate_storage_defaults(data.defaults or {})
+        payload["provisioning_backend"] = data.provisioning_backend or "storage_node"
     else:
         # bare_metal: server_group driven provisioning defaults.
         payload["provisioning_backend"] = data.provisioning_backend or "server_group"
@@ -276,6 +293,9 @@ async def update_family(
     elif row.service_type == "http_proxy":
         if "defaults" in update_data and update_data["defaults"] is not None:
             _validate_proxy_defaults(update_data["defaults"], db=db)
+    elif row.service_type == "nfs_storage":
+        if "defaults" in update_data and update_data["defaults"] is not None:
+            _validate_storage_defaults(update_data["defaults"])
     ProductFamilyDAO.update(db, row, **update_data)
     return {"status": "ok"}
 
@@ -308,6 +328,8 @@ async def create_product(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Family not found")
         if family.service_type == "http_proxy":
             _validate_proxy_defaults(data.overrides or {}, db=db)
+        elif family.service_type == "nfs_storage":
+            _validate_storage_defaults(data.overrides or {})
     if data.permission_set_id is not None and PermissionSetDAO.get_by_id(db, data.permission_set_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Permission set not found")
     if ProductDAO.get_by_code(db, data.code):
@@ -385,6 +407,8 @@ def _validate_product_update_overrides(db: Session, row, update_data: dict) -> N
         target_family = ProductFamilyDAO.get_by_id(db, update_data["family_id"])
     if target_family and target_family.service_type == "http_proxy":
         _validate_proxy_defaults(update_data["overrides"], db=db)
+    elif target_family and target_family.service_type == "nfs_storage":
+        _validate_storage_defaults(update_data["overrides"])
 
 
 def _validate_product_update_permission_set(db: Session, update_data: dict) -> None:

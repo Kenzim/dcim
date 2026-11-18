@@ -27,7 +27,9 @@
     bridge: 'vmbr0',
     max_networks_per_client: 5,
     max_networks_per_service: 4,
+    reserved_cidrs: '',
   });
+  const parseCidrList = (text) => text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
   const emptyNetworkForm = () => ({ owner_user_id: '', location_id: '', name: '', cidr: '' });
 
   let loading = false;
@@ -108,6 +110,7 @@
           bridge: poolForm.bridge.trim(),
           max_networks_per_client: Number(poolForm.max_networks_per_client),
           max_networks_per_service: Number(poolForm.max_networks_per_service),
+          reserved_cidrs: parseCidrList(poolForm.reserved_cidrs),
         }),
       'Pool created',
     );
@@ -121,6 +124,19 @@
     return run(
       () => updatePrivateNetworkPool(pool.id, { enabled: !pool.enabled }),
       pool.enabled ? 'Pool disabled: no new networks in this location' : 'Pool enabled',
+    );
+  }
+
+  function editReservedRanges(pool) {
+    const current = (pool.reserved_cidrs || []).join(', ');
+    const value = prompt(
+      `Reserved ranges for ${pool.location_name} (comma separated CIDRs). Clients cannot create networks overlapping them.`,
+      current,
+    );
+    if (value === null || value.trim() === current) return null;
+    return run(
+      () => updatePrivateNetworkPool(pool.id, { reserved_cidrs: parseCidrList(value) }),
+      `Reserved ranges for ${pool.location_name} saved`,
     );
   }
 
@@ -260,12 +276,18 @@
               on:change={(e) => updateClientLimit(pool, e.target.value)}
             />
           </div>
-          <div>{pool.max_networks_per_service}</div>
+          <div>
+            {pool.max_networks_per_service}
+            {#if pool.reserved_cidrs?.length}
+              <small class="reserved" title={pool.reserved_cidrs.join(', ')}>{pool.reserved_cidrs.length} reserved range{pool.reserved_cidrs.length === 1 ? '' : 's'}</small>
+            {/if}
+          </div>
           <div>{pool.enabled ? 'yes' : 'no'}</div>
           <div class="row-actions">
             <button class="tiny" disabled={working} on:click={() => togglePool(pool)}>
               {pool.enabled ? 'Disable' : 'Enable'}
             </button>
+            <button class="tiny" disabled={working} on:click={() => editReservedRanges(pool)}>Reserved ranges</button>
             <button
               class="tiny danger"
               disabled={working || pool.networks_in_use > 0}
@@ -303,7 +325,7 @@
           </div>
           <div>{network.location_name}</div>
           <div class="mono">{network.vlan_id}</div>
-          <div class="mono">{network.cidr}</div>
+          <div class="mono" title={network.storage_endpoint_ip ? `${network.storage_endpoint_ip} reserved for storage` : ''}>{network.cidr}</div>
           <div>{network.attachments.length}</div>
           <div>
             {#if network.status !== 'active'}
@@ -424,6 +446,13 @@
           <input type="number" min="1" max="16" bind:value={poolForm.max_networks_per_service} />
         </label>
       </div>
+      <label class="field-label">Reserved ranges
+        <textarea rows="3" bind:value={poolForm.reserved_cidrs} placeholder="10.16.0.0/12"></textarea>
+      </label>
+      <p class="hint">
+        One CIDR per line. Clients cannot create networks overlapping these (for example your own management ranges);
+        they are only told the range is not available, never which ranges are reserved.
+      </p>
       <div class="actions">
         <Button variant="secondary" on:click={() => (showCreatePool = false)}>Cancel</Button>
         <Button on:click={submitPool} disabled={working || !poolForm.location_id || !poolForm.bridge.trim()}>Create</Button>
@@ -549,6 +578,8 @@
   .badge.ok { color: var(--success-color, #2e7d32); border-color: var(--success-color, #2e7d32); }
   .badge.warn { color: var(--warning-color, #b7791f); border-color: var(--warning-color, #b7791f); }
   .hint { margin: 0; color: var(--text-secondary); font-size: 0.85rem; }
+  .reserved { display: block; font-size: 0.75rem; color: var(--text-secondary); }
+  textarea { padding: 7px 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); font-family: inherit; }
   .field-label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--text-secondary); }
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .error { color: var(--danger-color); margin: 0; }

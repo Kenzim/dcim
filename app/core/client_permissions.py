@@ -42,6 +42,8 @@ class PermissionKey:
     PROXY_VIEW_CREDENTIALS = "proxy.view_credentials"
     PROXY_ROTATE_CREDENTIALS = "proxy.rotate_credentials"
 
+    STORAGE_MANAGE_SHARES = "storage.manage_shares"
+
     # Account-level (not per service): may the client create and use MCP API keys.
     ACCOUNT_MCP = "account.mcp"
 
@@ -53,12 +55,12 @@ PERMISSION_CATALOG: List[Dict] = [
     {
         "key": PermissionKey.SERVICE_VIEW,
         "label": "View service status",
-        "service_types": ["bare_metal", "vm", "http_proxy"],
+        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage"],
     },
     {
         "key": PermissionKey.SERVICE_PORTAL,
         "label": "Open client portal (SSO)",
-        "service_types": ["bare_metal", "vm", "http_proxy"],
+        "service_types": ["bare_metal", "vm", "http_proxy", "nfs_storage"],
     },
     {
         "key": PermissionKey.BMS_POWER,
@@ -141,6 +143,11 @@ PERMISSION_CATALOG: List[Dict] = [
         "service_types": ["http_proxy"],
     },
     {
+        "key": PermissionKey.STORAGE_MANAGE_SHARES,
+        "label": "Create, change and delete storage shares",
+        "service_types": ["nfs_storage"],
+    },
+    {
         # Account-level: "account" is not a real service type, so per-service
         # permission panels and reseller product ceilings (which filter on
         # service type) skip it; only the preset editor shows it.
@@ -211,6 +218,11 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
         PermissionKey.PROXY_VIEW_CREDENTIALS: True,
         PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
     },
+    ServiceType.NFS_STORAGE: {
+        PermissionKey.SERVICE_VIEW: True,
+        PermissionKey.SERVICE_PORTAL: True,
+        PermissionKey.STORAGE_MANAGE_SHARES: True,
+    },
 }
 
 
@@ -240,6 +252,7 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.VM_MANAGE_SSH_KEYS: True,
             PermissionKey.PROXY_VIEW_CREDENTIALS: True,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: True,
+            PermissionKey.STORAGE_MANAGE_SHARES: True,
         },
     },
     {
@@ -286,6 +299,7 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.VM_MANAGE_SSH_KEYS: False,
             PermissionKey.PROXY_VIEW_CREDENTIALS: False,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
+            PermissionKey.STORAGE_MANAGE_SHARES: False,
         },
     },
     {

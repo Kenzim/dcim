@@ -9,6 +9,7 @@ from sqlalchemy import (
     Enum as SQLEnum,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -60,6 +61,8 @@ class PrivateNetworkPool(Base):
     bridge = Column(String(64), nullable=False, default="vmbr0")
     max_networks_per_client = Column(Integer, nullable=False, default=5)
     max_networks_per_service = Column(Integer, nullable=False, default=4)
+    # Admin-only list of CIDRs that client networks may not overlap.
+    reserved_cidrs = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

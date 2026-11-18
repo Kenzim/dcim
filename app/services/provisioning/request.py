@@ -69,3 +69,5 @@ class ProvisionRequest:
     subnet_id: Optional[int] = None
     subnet_group_id: Optional[int] = None
     allocation_strategy: Optional[str] = None
+    # NFS storage
+    size_gb: Optional[int] = None

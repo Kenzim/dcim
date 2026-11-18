@@ -20,7 +20,9 @@ from app.services.private_network_service import (
     DEFAULT_CIDR,
     PrivateNetworkError,
     PrivateNetworkService,
+    parse_reserved_cidrs,
     service_location_id,
+    storage_endpoint_ip,
     validate_pool_range,
 )
 
@@ -47,6 +49,7 @@ class PoolCreate(BaseModel):
     enabled: bool = True
     max_networks_per_client: int = Field(5, ge=0, le=1000)
     max_networks_per_service: int = Field(4, ge=1, le=16)
+    reserved_cidrs: List[str] = Field(default_factory=list, max_length=256)
 
 
 class PoolUpdate(BaseModel):
@@ -56,6 +59,7 @@ class PoolUpdate(BaseModel):
     enabled: Optional[bool] = None
     max_networks_per_client: Optional[int] = Field(None, ge=0, le=1000)
     max_networks_per_service: Optional[int] = Field(None, ge=1, le=16)
+    reserved_cidrs: Optional[List[str]] = Field(None, max_length=256)
 
 
 class PoolResponse(BaseModel):
@@ -68,6 +72,7 @@ class PoolResponse(BaseModel):
     bridge: str
     max_networks_per_client: int
     max_networks_per_service: int
+    reserved_cidrs: List[str] = []
     networks_in_use: int
     capacity: int
 
@@ -113,6 +118,8 @@ class NetworkResponse(BaseModel):
     segmentation_type: str
     vlan_id: int
     cidr: str
+    # The last usable address, kept for the network's storage endpoint.
+    storage_endpoint_ip: str
     status: str
     created_at: Optional[datetime] = None
     attachments: List[AttachmentResponse]
@@ -162,6 +169,7 @@ def _pool_out(db: Session, pool: PrivateNetworkPool) -> PoolResponse:
         bridge=pool.bridge,
         max_networks_per_client=pool.max_networks_per_client,
         max_networks_per_service=pool.max_networks_per_service,
+        reserved_cidrs=list(pool.reserved_cidrs or []),
         networks_in_use=PrivateNetworkDAO.count_for_location(db, pool.location_id),
         capacity=pool.vlan_end - pool.vlan_start + 1,
     )
@@ -197,6 +205,7 @@ def _network_out(network: PrivateNetwork, *, staff: bool) -> NetworkResponse:
         segmentation_type=network.segmentation_type.value,
         vlan_id=network.segment_id,
         cidr=network.cidr,
+        storage_endpoint_ip=storage_endpoint_ip(network.cidr),
         status=network.status.value,
         created_at=network.created_at,
         attachments=[_attachment_out(a, prefix_length, staff=staff) for a in network.attachments],
@@ -253,11 +262,13 @@ async def create_pool(data: PoolCreate, auth: AdminDep, db: DbDep):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Location not found")
     if PrivateNetworkDAO.get_pool_for_location(db, data.location_id) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This location already has a pool")
+    fields = data.model_dump()
     try:
         validate_pool_range(data.vlan_start, data.vlan_end)
+        fields["reserved_cidrs"] = parse_reserved_cidrs(data.reserved_cidrs)
     except PrivateNetworkError as exc:
         _raise(exc)
-    return _pool_out(db, PrivateNetworkDAO.create_pool(db, **data.model_dump()))
+    return _pool_out(db, PrivateNetworkDAO.create_pool(db, **fields))
 
 
 @admin_router.patch("/pools/{pool_id}", response_model=PoolResponse)
@@ -270,6 +281,8 @@ async def update_pool(pool_id: int, data: PoolUpdate, auth: AdminDep, db: DbDep)
         validate_pool_range(
             changes.get("vlan_start", pool.vlan_start), changes.get("vlan_end", pool.vlan_end)
         )
+        if "reserved_cidrs" in changes:
+            changes["reserved_cidrs"] = parse_reserved_cidrs(changes["reserved_cidrs"])
     except PrivateNetworkError as exc:
         _raise(exc)
     for key, value in changes.items():

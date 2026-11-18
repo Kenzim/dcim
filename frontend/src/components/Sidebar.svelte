@@ -52,6 +52,7 @@
   $: isProxmoxInventoryActive = currentPath.startsWith('/admin/proxmox-inventory');
   $: isProxyIpamActive = currentPath.startsWith('/admin/proxy-ipam');
   $: isPrivateNetworksActive = currentPath.startsWith('/admin/private-networks');
+  $: isStorageActive = currentPath.startsWith('/admin/storage');
   $: isProxyRunnersActive = currentPath.startsWith('/admin/proxy-runners');
   $: isServerGroupsActive = currentPath.startsWith('/admin/server-groups');
   $: isUserActive = currentPath === '/admin/user' || currentPath === '/admin/user/';
@@ -282,6 +283,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v6m0 0H6v4m6-4h6v4M10 3h4v2h-4zM4 15h4v4H4zm12 0h4v4h-4z" />
             </svg>
             <span>Private Networks</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/storage" class="nav-link" class:active={isStorageActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 0v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
+            </svg>
+            <span>Storage</span>
           </a>
         </li>
         <li class="nav-item">

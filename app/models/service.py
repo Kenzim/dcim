@@ -20,6 +20,7 @@ class ServiceType(str, enum.Enum):
     BARE_METAL = "bare_metal"
     VM = "vm"
     HTTP_PROXY = "http_proxy"
+    NFS_STORAGE = "nfs_storage"
 
 
 class ProvisioningSource(str, enum.Enum):

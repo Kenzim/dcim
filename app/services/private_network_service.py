@@ -20,6 +20,8 @@ from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.service_dao import ServiceDAO
+from app.dao.storage_dao import StorageDAO
+from app.models.storage import VlanMode
 from app.models.private_network import (
     AttachmentState,
     PrivateNetwork,
@@ -35,7 +37,14 @@ from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmo
 logger = logging.getLogger(__name__)
 
 DEFAULT_CIDR = "10.0.0.0/24"
+# /29 is the smallest size: it leaves five client addresses next to the
+# storage endpoint.
 MIN_PREFIX, MAX_PREFIX = 16, 29
+# Never usable for a client network, whatever the location's settings.
+ALWAYS_REFUSED = tuple(
+    ipaddress.ip_network(cidr) for cidr in ("0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4")
+)
+_RANGE_UNAVAILABLE = "This address range is not available, please choose another"
 ATTACHABLE_TYPES = (ServiceType.VM, ServiceType.BARE_METAL)
 # NX-OS keeps 3968-4094 for itself, and 1 is the default VLAN.
 VLAN_MIN, VLAN_MAX = 2, 3967
@@ -69,9 +78,43 @@ def parse_cidr(cidr: Optional[str]) -> ipaddress.IPv4Network:
         raise PrivateNetworkError("Address range is not a valid network, for example 10.0.0.0/24") from None
     if network.version != 4 or not network.is_private or network.is_loopback or network.is_link_local:
         raise PrivateNetworkError("Address range must be a private IPv4 range (10/8, 172.16/12 or 192.168/16)")
+    if any(network.overlaps(refused) for refused in ALWAYS_REFUSED):
+        raise PrivateNetworkError(_RANGE_UNAVAILABLE)
     if not MIN_PREFIX <= network.prefixlen <= MAX_PREFIX:
         raise PrivateNetworkError(f"Address range must be between /{MIN_PREFIX} and /{MAX_PREFIX}")
     return network
+
+
+def parse_reserved_cidrs(values) -> List[str]:
+    """Normalise a pool's reserved ranges; raises on anything that is not an IPv4 network."""
+    out = []
+    for value in values or []:
+        try:
+            network = ipaddress.ip_network(str(value).strip(), strict=False)
+        except ValueError:
+            raise PrivateNetworkError(f"Reserved range '{value}' is not a valid network") from None
+        if network.version != 4:
+            raise PrivateNetworkError(f"Reserved range '{value}' is not an IPv4 network")
+        if str(network) not in out:
+            out.append(str(network))
+    return out
+
+
+def check_reserved_overlap(network: ipaddress.IPv4Network, pool: PrivateNetworkPool) -> None:
+    """Refuse a range that overlaps the location's reserved ranges without naming them."""
+    for value in pool.reserved_cidrs or []:
+        try:
+            reserved = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if reserved.version == 4 and network.overlaps(reserved):
+            raise PrivateNetworkError(_RANGE_UNAVAILABLE)
+
+
+def storage_endpoint_ip(cidr: str) -> str:
+    """The address every network keeps for its storage endpoint: the last usable one."""
+    network = ipaddress.ip_network(cidr)
+    return str(network.broadcast_address - 1)
 
 
 def service_location_id(db: Session, service: Service) -> Optional[int]:
@@ -84,12 +127,16 @@ def service_location_id(db: Session, service: Service) -> Optional[int]:
         server_id = service.bare_metal.server_id if service.bare_metal else None
         server = ServerDAO.get_by_id(db, server_id) if server_id else None
         return server.location_id if server else None
+    if service.service_type == ServiceType.NFS_STORAGE:
+        tenant = StorageDAO.get_tenant_for_service(db, service.id)
+        return tenant.location_id if tenant else None
     return None
 
 
 def _pick_ip(network: PrivateNetwork, requested: Optional[str]) -> str:
     cidr = ipaddress.ip_network(network.cidr)
-    used = {a.ip_address for a in network.attachments if a.ip_address}
+    endpoint = storage_endpoint_ip(network.cidr)
+    used = {a.ip_address for a in network.attachments if a.ip_address} | {endpoint}
     if requested:
         try:
             address = ipaddress.ip_address(requested.strip())
@@ -97,6 +144,11 @@ def _pick_ip(network: PrivateNetwork, requested: Optional[str]) -> str:
             raise PrivateNetworkError("IP address is not valid") from None
         if address not in cidr or address in (cidr.network_address, cidr.broadcast_address):
             raise PrivateNetworkError(f"IP address must be a usable address inside {network.cidr}")
+        if str(address) == endpoint:
+            raise PrivateNetworkError(
+                f"{endpoint} is kept for the network's storage endpoint, please choose another address",
+                status_code=409,
+            )
         if str(address) in used:
             raise PrivateNetworkError("IP address is already used in this network", status_code=409)
         return str(address)
@@ -126,13 +178,27 @@ def _vlan_name(network: PrivateNetwork) -> str:
     return f"pn-{network.id}"
 
 
-def resolve_uplink_ports(db: Session, server_id: int) -> List[Tuple[object, object]]:
-    """Return ``(switch, switch_port)`` for each port of a server's uplink.
+def _storage_vlans_preconfigured(db: Session, server_id: int) -> bool:
+    """True when the server is a storage node whose VLANs need no switch calls."""
+    node = StorageDAO.get_node_by_server(db, server_id)
+    return node is not None and node.vlan_mode == VlanMode.PRECONFIGURED
 
-    The uplink is the PXE port plus the ports bonded with it. Every one of
-    them must be cabled to a port on a switch that can be configured, so a
-    bond is never left half configured.
+
+def _server_uplink(db: Session, server_id: int) -> list:
+    """The ports that carry private networks for a server.
+
+    A storage node with ``vlan_port_ids`` uses exactly those ports. Any other
+    server uses its PXE port plus the ports bonded with it.
     """
+    node = StorageDAO.get_node_by_server(db, server_id)
+    if node is not None and node.vlan_port_ids:
+        wanted = {int(port_id) for port_id in node.vlan_port_ids}
+        ports = [port for port in NetworkPortDAO.get_by_server(db, server_id) if port.id in wanted]
+        if len(ports) != len(wanted):
+            raise PrivateNetworkError(
+                "A port chosen to carry storage VLANs no longer belongs to the server", status_code=409
+            )
+        return sorted(ports, key=lambda port: port.id)
     pxe_port = NetworkPortDAO.get_pxe_boot_port(db, server_id)
     if pxe_port is None:
         raise PrivateNetworkError("The server has no uplink port marked as its PXE port", status_code=409)
@@ -143,7 +209,16 @@ def resolve_uplink_ports(db: Session, server_id: int) -> List[Tuple[object, obje
             for port in NetworkPortDAO.get_by_server(db, server_id)
             if port.id != pxe_port.id and port.lag_group == pxe_port.lag_group
         ]
+    return uplink
 
+
+def resolve_uplink_ports(db: Session, server_id: int) -> List[Tuple[object, object]]:
+    """Return ``(switch, switch_port)`` for each port of a server's uplink.
+
+    Every uplink port must be cabled to a port on a switch that can be
+    configured, so a bond is never left half configured.
+    """
+    uplink = _server_uplink(db, server_id)
     registry = get_switch_registry()
     resolved = []
     for port in uplink:
@@ -162,6 +237,53 @@ def resolve_uplink_ports(db: Session, server_id: int) -> List[Tuple[object, obje
             )
         resolved.append((switch, switch_port))
     return resolved
+
+
+def preview_uplink_ports(db: Session, server_id: int) -> dict:
+    """Which switch ports would carry private networks for a server, with any problem.
+
+    Never raises: problems are reported per port (or overall) so staff can fix
+    cabling or switch plugins before anything is attached. A storage node in
+    ``preconfigured`` mode needs neither cabling nor switch support.
+    """
+    if _storage_vlans_preconfigured(db, server_id):
+        return {"ok": True, "error": None, "ports": [], "vlan_mode": VlanMode.PRECONFIGURED.value}
+    try:
+        uplink = _server_uplink(db, server_id)
+    except PrivateNetworkError as exc:
+        return {"ok": False, "error": exc.message, "ports": [], "vlan_mode": VlanMode.SWITCH.value}
+    registry = get_switch_registry()
+    ports = []
+    for port in uplink:
+        cable = CableRunDAO.get_by_server_port(db, port.id)
+        switch_port = (cable.end_a_switch_port or cable.end_b_switch_port) if cable is not None else None
+        entry = {
+            "server_port_id": port.id,
+            "server_port": port.name,
+            "switch_id": None,
+            "switch": None,
+            "switch_port": None,
+            "vlan_management": False,
+            "problem": None,
+        }
+        if switch_port is None:
+            entry["problem"] = "No cable run to a switch port"
+        else:
+            switch = switch_port.switch
+            entry.update(switch_id=switch.id, switch=switch.name, switch_port=switch_port.name)
+            if not switch.enabled:
+                entry["problem"] = "Switch is disabled"
+            elif not registry.supports_vlan_management(switch.plugin_name):
+                entry["problem"] = f"Switch plugin '{switch.plugin_name}' has no VLAN management"
+            else:
+                entry["vlan_management"] = True
+        ports.append(entry)
+    return {
+        "ok": all(p["problem"] is None for p in ports) and bool(ports),
+        "error": None,
+        "ports": ports,
+        "vlan_mode": VlanMode.SWITCH.value,
+    }
 
 
 class PrivateNetworkService:
@@ -186,6 +308,11 @@ class PrivateNetworkService:
         if pool is None or not pool.enabled:
             db.rollback()
             raise PrivateNetworkError("Private networks are not available in this location", status_code=409)
+        try:
+            check_reserved_overlap(network_cidr, pool)
+        except PrivateNetworkError:
+            db.rollback()
+            raise
         if enforce_limit and (
             PrivateNetworkDAO.count_for_owner(db, owner_user_id, location_id) >= pool.max_networks_per_client
         ):
@@ -267,6 +394,10 @@ class PrivateNetworkService:
         """
         async with _ops_lock:
             network = PrivateNetworkService._require_network(db, network_id)
+            if StorageDAO.get_tenant_for_network(db, network.id) is not None:
+                raise PrivateNetworkError(
+                    "Storage is linked to this network; terminate the storage service first", status_code=409
+                )
             if network.attachments:
                 raise PrivateNetworkError("Detach every service before deleting the network", status_code=409)
             network.status = PrivateNetworkStatus.DELETING
@@ -356,12 +487,61 @@ class PrivateNetworkService:
             return attachment
 
     @staticmethod
+    async def attach_storage(
+        db: Session, network_id: int, service_id: int, *, server_id: int
+    ) -> PrivateNetworkAttachment:
+        """Attach a storage service's node to the network on the reserved endpoint address.
+
+        This is the only way the endpoint address is ever handed out. The VLAN
+        is trunked to the node's server like any dedicated server attachment.
+        """
+        async with _ops_lock:
+            network = PrivateNetworkService._require_network(db, network_id)
+            if network.status != PrivateNetworkStatus.ACTIVE:
+                raise PrivateNetworkError("This network is being deleted", status_code=409)
+            service = ServiceDAO.get_by_id(db, service_id)
+            if service is None or service.service_type != ServiceType.NFS_STORAGE:
+                raise PrivateNetworkError("Service not found", status_code=404)
+            if network.owner_user_id is None or service.owner_user_id != network.owner_user_id:
+                raise PrivateNetworkError("Service not found", status_code=404)
+            if any(a.service_id == service.id for a in network.attachments):
+                raise PrivateNetworkError("The storage is already attached to this network", status_code=409)
+            endpoint = storage_endpoint_ip(network.cidr)
+            if any(a.ip_address == endpoint for a in network.attachments):
+                raise PrivateNetworkError("The storage endpoint address is in use", status_code=409)
+            attachment = PrivateNetworkAttachment(
+                network_id=network.id,
+                service_id=service.id,
+                server_id=server_id,
+                ip_address=endpoint,
+                state=AttachmentState.PENDING,
+            )
+            db.add(attachment)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                raise PrivateNetworkError("Could not attach the storage, please try again", status_code=409) from None
+            db.refresh(attachment)
+            await PrivateNetworkService._apply_safely(db, attachment)
+            return attachment
+
+    @staticmethod
     async def detach(db: Session, attachment_id: int) -> bool:
         """Remove an attachment. Returns False when cleanup failed and will be retried."""
         async with _ops_lock:
             attachment = PrivateNetworkDAO.get_attachment(db, attachment_id)
             if attachment is None:
                 raise PrivateNetworkError("Attachment not found", status_code=404)
+            service = attachment.service
+            if (
+                service is not None
+                and service.service_type == ServiceType.NFS_STORAGE
+                and service.status != ServiceStatus.TERMINATED
+            ):
+                raise PrivateNetworkError(
+                    "Storage leaves the network only when the storage service is terminated", status_code=409
+                )
             return await PrivateNetworkService._detach_locked(db, attachment)
 
     @staticmethod
@@ -436,7 +616,15 @@ class PrivateNetworkService:
             attachment.mac_address = result.get("mac") or attachment.mac_address
             return
 
-        current_server_id = service.bare_metal.server_id if service.bare_metal else None
+        if service.service_type == ServiceType.NFS_STORAGE:
+            # Storage stays on the node it was placed on: the attachment's server.
+            current_server_id = attachment.server_id
+            if current_server_id is None:
+                raise PrivateNetworkError("The storage has no node assigned")
+            if _storage_vlans_preconfigured(db, current_server_id):
+                return
+        else:
+            current_server_id = service.bare_metal.server_id if service.bare_metal else None
         if current_server_id is None:
             raise PrivateNetworkError("The service has no server assigned")
         if attachment.server_id and attachment.server_id != current_server_id:
@@ -460,11 +648,17 @@ class PrivateNetworkService:
     @staticmethod
     async def _remove(db: Session, attachment: PrivateNetworkAttachment) -> None:
         network = attachment.network
+        service = attachment.service
         if attachment.server_id:
+            storage = service is None or service.service_type == ServiceType.NFS_STORAGE
+            if storage and _storage_vlans_preconfigured(db, attachment.server_id):
+                # Staff trunk this node's VLANs by hand; nothing to undo here.
+                return
+            # Dedicated servers and storage nodes: take the VLAN off the trunk.
             await PrivateNetworkService._remove_from_server(db, attachment.server_id, network)
             return
-        service = attachment.service
         if service is None or service.service_type != ServiceType.VM:
+            # A storage attachment without a node never reached a switch.
             return
         pool = PrivateNetworkDAO.get_pool_for_location(db, network.location_id)
         if pool is None:

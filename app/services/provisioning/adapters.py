@@ -20,7 +20,7 @@ def from_billing_bare_metal(data, owner_user_id: int) -> ProvisionRequest:
     except ValueError as exc:
         raise ProvisioningError(
             "invalid_request",
-            "Invalid service_type. Must be bare_metal, vm, or http_proxy",
+            "Invalid service_type. Must be bare_metal, vm, http_proxy or nfs_storage",
         ) from exc
     if resolved == ServiceType.VM:
         raise ProvisioningError(
@@ -45,6 +45,7 @@ def from_billing_bare_metal(data, owner_user_id: int) -> ProvisionRequest:
         subnet_id=_as_int(cfg.get("subnet_id")),
         subnet_group_id=_as_int(cfg.get("subnet_group_id")),
         allocation_strategy=cfg.get("allocation_strategy"),
+        size_gb=_as_int(cfg.get("size_gb")),
         leave_pending_on_placement_error=False,
     )
 

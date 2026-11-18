@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.api import commerce_client as commerce
 from app.api import services_client as portal
+from app.api import storage_client as storage_portal
 from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody
 from app.core.client_mcp_auth import ClientMcpAuthContext
 from app.core.config import settings
@@ -310,4 +311,84 @@ async def tickets(
 
     return await run_client_tool(
         f"tickets_{action}", min_scope, work, args={"ticket_id": ticket_id, "service_id": service_id}
+    )
+
+
+_STORAGE_SCOPE = {
+    "list": "read",
+    "view": "read",
+    "networks": "read",
+    "link": "write",
+    "share_create": "write",
+    "share_update": "write",
+    "share_delete": "destructive",
+}
+
+
+@client_mcp.tool()
+async def storage(
+    action: Literal["list", "view", "networks", "link", "share_create", "share_update", "share_delete"] = "list",
+    service_id: Optional[int] = None,
+    network_id: Optional[int] = None,
+    share_id: Optional[int] = None,
+    name: Optional[str] = None,
+    quota_gb: Optional[int] = None,
+    clients: Optional[list[str]] = None,
+    all_clients: Optional[bool] = None,
+    read_only: Optional[bool] = None,
+    confirm: bool = False,
+) -> Any:
+    """Your NFS storage. list, view (service_id): status is ready only once the storage is on
+    your network and set up; each share has its mount command and fstab line. networks
+    (service_id): your private networks it can be linked to. link (service_id, network_id).
+    share_create (service_id, name, quota_gb; clients = IPs on the network, all_clients to allow
+    every service attached to it, read_only), share_update (service_id, share_id; quota_gb,
+    clients, all_clients, read_only), share_delete (service_id, share_id, confirm=true; the data
+    is destroyed after a grace period).
+    """
+    async def work(db: Session, ctx: ClientMcpAuthContext):
+        auth = _auth(ctx)
+        if action == "list":
+            return await storage_portal.client_list_storage(auth=auth, db=db)
+        _need(f"storage {action}", service_id=service_id)
+        if action == "view":
+            return await storage_portal.client_get_storage(service_id, auth=auth, db=db)
+        if action == "networks":
+            return await storage_portal.client_linkable_networks(service_id, auth=auth, db=db)
+        if action == "link":
+            _need("storage link", network_id=network_id)
+            body = storage_portal.LinkBody(network_id=network_id)
+            return await storage_portal.client_link_storage(service_id, body, auth=auth, db=db)
+        if action == "share_create":
+            _need("storage share_create", name=name, quota_gb=quota_gb)
+            body = storage_portal.ShareCreate(
+                name=name,
+                quota_gb=quota_gb,
+                clients=clients or [],
+                all_clients=bool(all_clients),
+                read_only=bool(read_only),
+            )
+            return await storage_portal.client_create_share(service_id, body, auth=auth, db=db)
+        _need(f"storage {action}", share_id=share_id)
+        if action == "share_update":
+            changes = {
+                key: value
+                for key, value in {
+                    "quota_gb": quota_gb, "clients": clients, "all_clients": all_clients, "read_only": read_only
+                }.items()
+                if value is not None
+            }
+            if not changes:
+                raise ToolError("storage share_update needs at least one of: quota_gb, clients, all_clients, read_only")
+            body = storage_portal.ShareUpdate(**changes)
+            return await storage_portal.client_update_share(service_id, share_id, body, auth=auth, db=db)
+        return await storage_portal.client_delete_share(service_id, share_id, auth=auth, db=db)
+
+    return await run_client_tool(
+        f"storage_{action}",
+        _STORAGE_SCOPE[action],
+        work,
+        confirm_required=action == "share_delete",
+        confirm=confirm,
+        args={"service_id": service_id, "share_id": share_id, "network_id": network_id},
     )

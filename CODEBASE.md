@@ -34,6 +34,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
 | DHCP/TFTP/media runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, `media_runner/main.py`, uplink in `runner_common/`, hub in `app/services/runners/` |
 | Proxy runner (IPAM sync) | `proxy_runner/main.py`, API `app/api/runner_proxy.py` |
+| NFS storage on private networks (`nfs_storage` services, storage nodes, shares) | Models `app/models/storage.py`, DAO `app/dao/storage_dao.py`, service `app/services/storage_service.py`, provisioning `app/services/provisioning/nfs_storage.py`; API `app/api/storage.py` (staff), `app/api/storage_client.py` (client), `app/api/storage_common.py` (shared shapes), runner API `app/api/runner_storage.py`; MCP `app/mcp/tools/storage.py` and the client `storage` tool; UI `StorageNodes.svelte`, `client/ClientStorage.svelte`, `components/storage/` |
 | Tests | Mirror path under `tests/` (`tests/api/`, `tests/dao/`, `tests/services/`, …) |
 | Install / Docker ops | `INSTALL.md`, `docker-compose.yml`, `Makefile`, `Dockerfile` |
 
@@ -158,6 +159,9 @@ All included from `app/main.py` under `/api`.
 | `ipam.py` | `/api/ipam` | Subnets, assignments, history |
 | `vm_ip_allocations.py` | `/api/vm-ip-allocations` | Preallocated VM IPs |
 | `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner |
+| `storage.py` | `/api/admin/storage` | Storage nodes (key shown once, VLAN mode and ports, switch port preview) and nfs_storage services with shares |
+| `storage_client.py` | `/api/client/storage` | Client's own storage: link to a private network, share CRUD (permission `storage.manage_shares`) |
+| `runner_storage.py` | `/api/runner/storage` | Storage runner: `GET /config` (only that node's tenants), `POST /status`; bearer node key, failed keys rate-limited per IP |
 | `services_admin.py` | `/api/admin/services` | Admin service lifecycle (VM/bare-metal provision, ownership) |
 | `services_client.py` | `/api/services` | Client “my services” |
 | `scripts_admin.py` | (scripts-admin) | Admin scripts CRUD |
@@ -222,7 +226,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `proxmox_placement.py` / `vmid_allocator.py` / `ip_allocation.py` | Placement, VMID, IP assignment |
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
-| `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair |
+| `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair. The last usable address of every network is reserved for storage (`storage_endpoint_ip`); `attach_storage` is the only way it is handed out. Storage attachments trunk the node's `vlan_port_ids` (or the PXE uplink), or make no switch calls in `preconfigured` VLAN mode |
+| `storage_service.py` | NFS storage: node CRUD, placement (least-loaded enabled node in the location), share validation and quotas, terminate and share delete with `storage_destroy_grace_seconds`, combined readiness (attachment applied and runner ready), runner config and status |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
 | `cabling_graph_service.py` | Builds the cabling graph from batch queries in `app/dao/cabling_graph_dao.py`: nodes, ports, cables and end-to-end paths through patch panels. Link status comes from the switch end's stored `oper_status` and counts only while fresh (`STATUS_STALE_AFTER`, 15 minutes); older data is `stale`, never polled is `unknown` |
 | `cable_trace_service.py` | Follows a port through patch panels (front to rear) to the server or switch port at the far end; shared by the cable-run API, server and switch port views, bandwidth views, MCP and the graph |
@@ -337,6 +342,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/vm-ip-allocations` | `VMIpAllocations.svelte` |
 | `/admin/proxmox-inventory` | `ProxmoxInventory.svelte` |
 | `/admin/private-networks` | `PrivateNetworks.svelte` |
+| `/admin/storage` | `StorageNodes.svelte` (nodes, storage services; `?service=ID` opens one); server detail has `storage/ServerStorageNodeCard.svelte` |
 | `/admin/proxy-catalog` | Redirects to `/admin/product-catalog?type=http_proxy` |
 | `/admin/proxy-ipam` | `ProxyIpam.svelte` (IPAM proxy flag) |
 | `/admin/proxy-runners` | `ProxyRunners.svelte` (standalone proxy runners) |
@@ -355,7 +361,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/user` | `User.svelte` |
 | `/login` | `Login.svelte` |
 
-Client portal (commerce always on; no public storefront): `/client/billing`, `/client/checkout`, `/client/support`, `/client/account`, `/client/networks` — see `frontend/src/components/client/Client*.svelte`. Coexistence notes: `docs/commerce-whmcs-coexistence.md`.
+Client portal (commerce always on; no public storefront): `/client/billing`, `/client/checkout`, `/client/support`, `/client/account`, `/client/networks`, `/client/storage` — see `frontend/src/components/client/Client*.svelte`. Coexistence notes: `docs/commerce-whmcs-coexistence.md`.
 
 Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelte`, `CodeEditor.svelte`.
 

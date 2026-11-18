@@ -13,6 +13,7 @@
   $: onDashboard = path === '/client' || path === '/client/';
   $: onServices = path.startsWith('/client/services');
   $: onNetworks = path.startsWith('/client/networks');
+  $: onStorage = path.startsWith('/client/storage');
   $: onBilling = path.startsWith('/client/billing') || path.startsWith('/client/orders');
   $: onCheckout = path.startsWith('/client/checkout');
   $: onSupport = path.startsWith('/client/support');
@@ -40,6 +41,7 @@
         <a href="/client" class:active={onDashboard} on:click={() => (menuOpen = false)}>Dashboard</a>
         <a href="/client/services" class:active={onServices} on:click={() => (menuOpen = false)}>Services</a>
         <a href="/client/networks" class:active={onNetworks} on:click={() => (menuOpen = false)}>Networks</a>
+        <a href="/client/storage" class:active={onStorage} on:click={() => (menuOpen = false)}>Storage</a>
         <a href="/client/billing" class:active={onBilling} on:click={() => (menuOpen = false)}>Billing</a>
         <a href="/client/support" class:active={onSupport} on:click={() => (menuOpen = false)}>Support</a>
         <a href="/client/account" class:active={onAccount} on:click={() => (menuOpen = false)}>Account</a>

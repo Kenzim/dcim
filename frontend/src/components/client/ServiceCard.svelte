@@ -11,6 +11,7 @@
     vm: 'Virtual machine',
     bare_metal: 'Bare metal',
     http_proxy: 'HTTP proxy',
+    nfs_storage: 'NFS storage',
   };
 
   $: typeLabel = TYPE_LABELS[service.service_type] || 'Service';

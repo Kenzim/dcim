@@ -14,6 +14,7 @@
     { id: 'vm', label: 'Virtual machines' },
     { id: 'bare_metal', label: 'Bare metal' },
     { id: 'http_proxy', label: 'HTTP proxies' },
+    { id: 'nfs_storage', label: 'Storage' },
   ];
 
   $: filtered = filter === 'all' ? services : services.filter((s) => s.service_type === filter);

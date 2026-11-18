@@ -45,6 +45,7 @@ from app.models.service_vm import ServiceVm
 from app.services.boot_launcher import release_boot_media, schedule_launch, vmedia_capable
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox
 from app.services.private_network_service import PrivateNetworkService
+from app.services.storage_service import GIB, StorageError, StorageService, tenant_status
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.utils.shell_escape import shell_escape_double_quoted
@@ -1737,6 +1738,7 @@ async def terminate_service(
     service.status = ServiceStatus.TERMINATED
     service.terminated_at = datetime.now(timezone.utc)
     ServiceDAO.update(db, service)
+    StorageService.mark_terminated_quietly(db, service.id)
     await PrivateNetworkService.release_service_quietly(db, service.id)
 
     log_server_activity_success(
@@ -2409,6 +2411,73 @@ async def get_service_debug(
         "deployment_jobs": _debug_deployment_jobs(db, service, limit=5),
         "activity": _debug_activity(db, service, server, limit=20),
     }
+
+
+class BillingStorageResize(BaseModel):
+    size_gb: int = Field(..., ge=1, description="New storage size in GB (1 GB = 1024^3 bytes)")
+
+
+def _billing_storage_service(db: Session, service_id: int, integration: BillingIntegration) -> Service:
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.NFS_STORAGE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not an NFS storage service")
+    return service
+
+
+def _billing_storage_summary(db: Session, service: Service) -> dict:
+    try:
+        tenant = StorageService.require_tenant(db, service)
+    except StorageError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    status_value, status_detail = tenant_status(db, tenant)
+    active = [share for share in tenant.shares if share.state.value == "active"]
+    return {
+        "service_id": service.id,
+        "status": status_value,
+        "status_detail": status_detail,
+        "size_gb": tenant.size_bytes // GIB,
+        "allocated_gb": sum(share.quota_bytes for share in active) // GIB,
+        "used_bytes": sum(share.used_bytes or 0 for share in active),
+        "network_name": tenant.network.name if tenant.network else None,
+        "network_cidr": tenant.network_cidr if tenant.terminated_at is None else None,
+        "endpoint_ip": tenant.endpoint_ip if tenant.terminated_at is None else None,
+        "share_count": len(active),
+        "linked": tenant.network_id is not None,
+    }
+
+
+@router.get("/services/{service_id}/storage", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def get_storage_summary(service_id: int, integration: BillingIntegrationDep, db: DbDep):
+    """Size, usage, network and state of an nfs_storage service, for the billing client area."""
+    return _billing_storage_summary(db, _billing_storage_service(db, service_id, integration))
+
+
+@router.post("/services/{service_id}/storage/resize", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def resize_storage(
+    service_id: int,
+    body: BillingStorageResize,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+):
+    """Change an nfs_storage service's size (package change). Refused below the shares' total quota."""
+    service = _billing_storage_service(db, service_id, integration)
+    try:
+        StorageService.resize(db, service, body.size_gb)
+    except StorageError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="storage_resize",
+        source="billing_api",
+        message=f"Storage size set to {body.size_gb} GB",
+        details={"service_id": service.id, "integration_id": integration.id, "size_gb": body.size_gb},
+    )
+    return _billing_storage_summary(db, service)
 
 
 @router.post("/services/{service_id}/proxy/rotate", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)

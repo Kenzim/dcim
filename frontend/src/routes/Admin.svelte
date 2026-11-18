@@ -40,6 +40,7 @@
   import ProxmoxClusterDetail from '../components/ProxmoxClusterDetail.svelte';
   import ProxyIpam from '../components/ProxyIpam.svelte';
   import PrivateNetworks from '../components/PrivateNetworks.svelte';
+  import StorageNodes from '../components/StorageNodes.svelte';
   import ProxyRunners from '../components/ProxyRunners.svelte';
   import Runners from '../components/Runners.svelte';
   import PermissionSets from '../components/PermissionSets.svelte';
@@ -371,6 +372,8 @@
         <ProxmoxClusterDetail clusterId={proxmoxClusterId} />
       {:else if routeName === 'private-networks'}
         <PrivateNetworks />
+      {:else if routeName === 'storage'}
+        <StorageNodes />
       {:else if routeName === 'proxy-ipam'}
         <ProxyIpam />
       {:else if routeName === 'runners'}

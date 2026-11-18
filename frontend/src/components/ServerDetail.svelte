@@ -4,6 +4,7 @@
   import ServerPowerCard from './ServerPowerCard.svelte';
   import Servers from './Servers.svelte';
   import TrafficGraph from './ui/TrafficGraph.svelte';
+  import ServerStorageNodeCard from './storage/ServerStorageNodeCard.svelte';
   import { getServer, getPlugins, getLocations, getBootTask, createBootTask, cancelBootTask, listISOs, getScripts, getOSTemplates, getInstallationHistory, getServerActivity, updateInstallationTaskStatus, purgePendingInstallationHistory, generatePassword, getServerGroups, updateServer, listCableRuns, getSwitches, getSwitchPorts, createCableRun, deleteCableRun, getServerBandwidth, testServerConnection, getServerPowerState, getServerIdentify, setServerIdentify, powerOnServer, powerOffServer, powerResetServer, getAssets, getAssetFileUrl, runServerHardwareDetection, listServerHardwareDetectionReports, getServerHardwareDetectionDiff, applyServerHardwareDetectionReport, rejectServerHardwareDetectionReport, deleteServerHardwareDetectionReport, getServerBootOptions, setServerBootOption, previewServerKernelArgs, openServerIpmiConsole, getServerVirtualMedia, insertServerVirtualMedia, ejectServerVirtualMedia } from '../lib/api.js';
   import { link } from 'svelte-spa-router';
   import { navigate } from '../lib/router.js';
@@ -2002,6 +2003,7 @@
             </ul>
           {/if}
         </section>
+        <ServerStorageNodeCard {serverId} />
       </div>
       <div class="right-bottom">
         <div class="bottom-tabs" role="tablist">

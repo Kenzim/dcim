@@ -49,7 +49,7 @@ async def save_product_family(
     family_id: Optional[int] = None,
     name: Optional[str] = None,
     code: Optional[str] = None,
-    service_type: Optional[Literal["vm", "bare_metal", "http_proxy"]] = None,
+    service_type: Optional[Literal["vm", "bare_metal", "http_proxy", "nfs_storage"]] = None,
     provisioning_backend: Optional[str] = None,
     defaults: Optional[dict[str, Any]] = None,
     constraints: Optional[dict[str, Any]] = None,
@@ -59,6 +59,7 @@ async def save_product_family(
     """Create a product family (no family_id; needs name, service_type) or update one.
 
     http_proxy defaults: ip_count (1-32), subnet_id, subnet_group_id, location_id, allocation_strategy.
+    nfs_storage defaults: size_gb.
     code and service_type are set on create only (code is generated from the name if omitted).
     """
 

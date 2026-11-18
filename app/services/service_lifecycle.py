@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 import inspect
 
+from app.dao.storage_dao import StorageDAO
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.plugins.base import PowerState
 from app.plugins.registry import get_registry
@@ -54,8 +55,8 @@ class ServiceLifecycle:
         return get_registry().get_plugin(server.plugin_name, server.plugin_config)
 
     async def ensure_powered_off(self, db: Session, service: Service) -> None:
-        """Force power off VM/BM; proxies and unplaced pending VMs are no-ops."""
-        if service.service_type == ServiceType.HTTP_PROXY:
+        """Force power off VM/BM; proxies, storage and unplaced pending VMs are no-ops."""
+        if service.service_type in (ServiceType.HTTP_PROXY, ServiceType.NFS_STORAGE):
             return
         if service.service_type == ServiceType.VM:
             cluster_id, _node, vmid = vm_placement(service)
@@ -114,6 +115,11 @@ class ServiceLifecycle:
         if service.status != ServiceStatus.SUSPENDED:
             return False
         service.status = ServiceStatus.ACTIVE
+        if service.service_type == ServiceType.NFS_STORAGE:
+            tenant = StorageDAO.get_tenant_for_service(db, service.id)
+            if tenant is None or tenant.network_id is None:
+                # Storage never linked to a network is still waiting for one.
+                service.status = ServiceStatus.PENDING
         db.flush()
         logger.info("Unsuspended service %s (%s)", service.id, reason)
         return True

@@ -324,6 +324,7 @@
           <option value="vm">VM</option>
           <option value="bare_metal">Bare metal</option>
           <option value="http_proxy">HTTP proxy</option>
+          <option value="nfs_storage">NFS storage</option>
         </select>
       </label>
       <label>Visibility

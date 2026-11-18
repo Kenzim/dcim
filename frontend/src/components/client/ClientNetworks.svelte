@@ -27,7 +27,8 @@
   $: creatableLocations = options.locations.filter((l) => l.networks_in_use < l.max_networks);
   $: canCreate = creatableLocations.length > 0;
 
-  const typeLabel = (type) => (type === 'vm' ? 'Virtual machine' : type === 'bare_metal' ? 'Dedicated server' : 'Service');
+  const TYPE_LABELS = { vm: 'Virtual machine', bare_metal: 'Dedicated server', nfs_storage: 'NFS storage' };
+  const typeLabel = (type) => TYPE_LABELS[type] || 'Service';
 
   function attachForm(networkId) {
     return attachForms[networkId] || { service_id: '', ip_address: '' };
@@ -145,7 +146,7 @@
         <label>Name <input bind:value={createForm.name} maxlength="64" placeholder="backend" /></label>
         <label>Address range
           <input bind:value={createForm.cidr} placeholder={options.default_cidr} />
-          <small>Optional. A private IPv4 range such as {options.default_cidr}.</small>
+          <small>Optional. A private IPv4 range such as {options.default_cidr}, between /16 and /29. The last usable address is kept for storage.</small>
         </label>
         <div class="actions">
           <Button variant="secondary" on:click={() => (showCreate = false)}>Cancel</Button>
@@ -179,6 +180,9 @@
             <p>
               {network.location_name} · <span class="mono">{network.cidr}</span> · VLAN
               <span class="mono">{network.vlan_id}</span>
+              {#if network.storage_endpoint_ip}
+                · <span class="mono">{network.storage_endpoint_ip}</span> reserved for storage
+              {/if}
             </p>
           </div>
           {#if network.status === 'deleting'}
@@ -218,7 +222,9 @@
                   </span>
                 </div>
                 <div class="row-end">
-                  {#if attachment.state !== 'detaching'}
+                  {#if attachment.service_type === 'nfs_storage'}
+                    <a href="/client/storage">Storage</a>
+                  {:else if attachment.state !== 'detaching'}
                     <button class="link" disabled={working} on:click={() => detach(network, attachment)}>Disconnect</button>
                   {/if}
                 </div>

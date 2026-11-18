@@ -53,10 +53,14 @@ def _run_reconciliation_cycle(db) -> None:
 async def _reconcile_private_networks() -> None:
     """Retry failed private network work and repair drift on VMs and switch ports."""
     from app.services.private_network_service import PrivateNetworkService
+    from app.services.storage_service import StorageService
 
     try:
         db = SessionLocal()
         try:
+            # Storage terminated by a path without the storage hook: record it
+            # before the attachment loop detaches the node.
+            StorageService.reconcile_terminations(db)
             counts = await PrivateNetworkService.reconcile(db)
         finally:
             db.close()

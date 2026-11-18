@@ -54,6 +54,38 @@ class ServiceDAO:
         return service
 
     @staticmethod
+    def create_nfs_storage(
+        db: Session,
+        *,
+        name: str,
+        owner_user_id: Optional[int],
+        external_service_id: Optional[str] = None,
+        description: Optional[str] = None,
+        config: Optional[dict] = None,
+        product_code: Optional[str] = None,
+        product_snapshot: Optional[dict] = None,
+        provisioning_source: ProvisioningSource = ProvisioningSource.BILLING,
+    ) -> Service:
+        """An ``nfs_storage`` service: no server or VM row; its storage lives in ``storage_tenants``."""
+        if owner_user_id is None:
+            raise ValueError("owner_user_id is required for nfs_storage services")
+        service = Service(
+            name=name,
+            external_service_id=external_service_id,
+            owner_user_id=owner_user_id,
+            service_type=ServiceType.NFS_STORAGE,
+            status=ServiceStatus.PENDING,
+            description=description,
+            config=config or {},
+            product_code=product_code,
+            product_snapshot=product_snapshot or {},
+            provisioning_source=provisioning_source,
+        )
+        db.add(service)
+        db.flush()
+        return service
+
+    @staticmethod
     def create_vm(
         db: Session,
         *,

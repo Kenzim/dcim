@@ -359,6 +359,8 @@
         return 'Bare metal';
       case 'http_proxy':
         return 'HTTP proxy';
+      case 'nfs_storage':
+        return 'NFS storage';
       default:
         return t || '—';
     }
@@ -447,6 +449,7 @@
         <option value="bare_metal">Bare metal</option>
         <option value="vm">Virtual machine</option>
         <option value="http_proxy">HTTP proxy</option>
+        <option value="nfs_storage">NFS storage</option>
       </select>
       <label for="status-filter">Status:</label>
       <select id="status-filter" bind:value={statusFilter} on:change={loadServices}>
@@ -785,6 +788,7 @@
                   class:type-badge-bare_metal={service.service_type === 'bare_metal'}
                   class:type-badge-vm={service.service_type === 'vm'}
                   class:type-badge-http_proxy={service.service_type === 'http_proxy'}
+                  class:type-badge-nfs_storage={service.service_type === 'nfs_storage'}
                 >{serviceTypeLabel(service.service_type)}</span>
               </td>
               <td><span class={getStatusBadgeClass(service.status)}>{service.status}</span></td>
@@ -891,6 +895,11 @@
   .type-badge-http_proxy {
     background: var(--warning-bg);
     color: var(--warning-text);
+  }
+
+  .type-badge-nfs_storage {
+    background: var(--bg-tertiary, var(--bg-secondary));
+    color: var(--text-primary);
   }
 
   .status-badge {

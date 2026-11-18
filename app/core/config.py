@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     client_mcp_enabled: bool = False
     client_mcp_max_keys_per_user: int = 10
 
+    # NFS storage: how long a terminated storage service or a deleted share
+    # keeps its data before the storage runner destroys it.
+    storage_destroy_grace_seconds: int = 7 * 24 * 3600
+    # Storage runner API: failed key checks allowed per source IP and window.
+    storage_runner_auth_failures_per_ip: int = 20
+    storage_runner_auth_failures_window_seconds: int = 300
+
     # Trust the X-Forwarded-For header when determining the caller's source IP.
     # This must ONLY be enabled when the app sits behind a trusted reverse proxy
     # that sets/overwrites the header; otherwise clients can spoof their identity

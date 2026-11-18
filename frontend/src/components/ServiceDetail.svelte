@@ -97,6 +97,9 @@
     <button class="btn-secondary" on:click={() => navigate('/admin/services')}>Back to Services</button>
     {#if error}<p class="error">{error}</p>{/if}
     {#if service}
+      {#if service.service_type === 'nfs_storage'}
+        <p><a href={`/admin/storage?service=${service.id}`}>Open the storage (shares, usage, node and network)</a></p>
+      {/if}
       <section class="panel">
         <h3>Service</h3>
         <table class="kv-table">

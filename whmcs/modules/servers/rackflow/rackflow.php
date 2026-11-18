@@ -480,10 +480,10 @@ function rackflow_ConfigOptions()
         // configoption1
         'Service Type' => array(
             'Type' => 'dropdown',
-            'Options' => 'bare_metal,vm,http_proxy',
+            'Options' => 'bare_metal,vm,http_proxy,nfs_storage',
             'Default' => 'bare_metal',
             'SimpleMode' => true,
-            'Description' => 'Controls which fields apply below and which RackFlow billing API is used (bare metal vs VM).',
+            'Description' => 'Controls which fields apply below and which RackFlow billing API is used (bare metal vs VM). nfs_storage: size comes from the Product Code\'s size_gb or a size_gb configurable option; the client links it to one of their private networks in the RackFlow portal after ordering.',
         ),
         // configoption2 — maps to RackFlow catalog products.code
         'Product Code' => array(
@@ -947,6 +947,12 @@ function rackflow_CreateAccount(array $params)
         if ($serverGroupId) {
             $serviceConfig['server_group_id'] = $serverGroupId;
         }
+        if (strtolower($serviceType) === 'nfs_storage') {
+            $sizeGb = rackflow_storageSizeGbFromOptions($params);
+            if ($sizeGb !== null) {
+                $serviceConfig['size_gb'] = $sizeGb;
+            }
+        }
 
         // Checkout OS / VM template (order form) overrides module default OS Code.
         $vmTemplateId = null;
@@ -1303,8 +1309,10 @@ function rackflow_TerminateAccount(array $params)
         // HTTP-proxy services are provisioned straight from the IP pool with
         // no linked rack Server/VM to power off; the billing API release of
         // IPAM assignments below is the only teardown they need.
+        // NFS storage has no machine either; RackFlow keeps its data for the
+        // grace period and the storage node destroys it afterwards.
         $serviceType = rackflow_getConfiguredServiceType($params);
-        if ($serviceType !== 'http_proxy') {
+        if ($serviceType !== 'http_proxy' && $serviceType !== 'nfs_storage') {
             // First ensure the server is powered off
             $powerResult = rackflow_powerAction($params, 'off');
             if ($powerResult !== 'success') {
@@ -1335,6 +1343,103 @@ function rackflow_TerminateAccount(array $params)
             $e->getMessage(),
             $e->getTraceAsString()
         );
+        return 'Error: ' . $e->getMessage();
+    }
+}
+
+/**
+ * Storage size in GB chosen on the order form (configurable option size_gb or
+ * "Storage Size"), or null to use the RackFlow product's size_gb.
+ *
+ * @param array $params common module parameters
+ * @return int|null
+ */
+function rackflow_storageSizeGbFromOptions(array $params)
+{
+    $raw = rackflow_configOptionValue($params, array('size_gb', 'Storage Size', 'Storage Size (GB)'));
+    if ($raw === null || $raw === '') {
+        return null;
+    }
+    if (!preg_match('/(\d+)/', (string)$raw, $m)) {
+        return null;
+    }
+    $size = (int)$m[1];
+    return $size > 0 ? $size : null;
+}
+
+/**
+ * Storage size in GB for an nfs_storage service: the order-form option, else
+ * the RackFlow catalog product's size_gb (Product Code, configoption2).
+ *
+ * @param array $params common module parameters
+ * @return int|null
+ */
+function rackflow_storageSizeGb(array $params)
+{
+    $size = rackflow_storageSizeGbFromOptions($params);
+    if ($size !== null) {
+        return $size;
+    }
+    $productCode = isset($params['configoption2']) && $params['configoption2'] !== ''
+        ? (string)$params['configoption2']
+        : null;
+    if (isset($params['configoptions']['product_code']) && $params['configoptions']['product_code'] !== '') {
+        $productCode = (string)$params['configoptions']['product_code'];
+    }
+    if (!$productCode) {
+        return null;
+    }
+    $product = rackflow_fetchCatalogProduct($params, $productCode);
+    $specs = isset($product['effective_specs']) && is_array($product['effective_specs'])
+        ? $product['effective_specs']
+        : array();
+    if (isset($specs['size_gb']) && (int)$specs['size_gb'] > 0) {
+        return (int)$specs['size_gb'];
+    }
+    return null;
+}
+
+/**
+ * Package change. NFS storage is resized to the new package's size; RackFlow
+ * refuses a size below the total quota of the client's shares. Other service
+ * types have no automatic package change.
+ *
+ * @param array $params common module parameters (already the new package)
+ * @return string "success" or an error message
+ */
+function rackflow_ChangePackage(array $params)
+{
+    try {
+        if (rackflow_getConfiguredServiceType($params) !== 'nfs_storage') {
+            return 'success';
+        }
+        $rackflowServiceId = rackflow_getRackflowServiceId($params);
+        if (empty($rackflowServiceId)) {
+            return 'This service is not linked to RackFlow. Use Register in RackFlow first or set the RackFlow Service ID.';
+        }
+        $apiConfig = rackflow_getApiConfig($params);
+        if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+            return 'API URL and API key must be configured (Setup > Servers).';
+        }
+        $sizeGb = rackflow_storageSizeGb($params);
+        if ($sizeGb === null) {
+            return 'The new package has no storage size: set size_gb on the RackFlow product or a size_gb configurable option.';
+        }
+        $result = rackflow_apiCall(
+            $apiConfig['url'],
+            $apiConfig['key'],
+            'POST',
+            '/api/billing/services/' . (int)$rackflowServiceId . '/storage/resize',
+            array('size_gb' => $sizeGb)
+        );
+        if (!$result['success']) {
+            $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+            $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
+            return 'Storage resize failed: ' . $detail;
+        }
+        return 'success';
+    } catch (Exception $e) {
+        logModuleCall('rackflow', __FUNCTION__, $params, $e->getMessage(), $e->getTraceAsString());
         return 'Error: ' . $e->getMessage();
     }
 }

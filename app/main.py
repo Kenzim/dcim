@@ -448,6 +448,12 @@ api_router.include_router(virtual_media_api.servers_router, tags=["virtual-media
 from app.api import private_networks as private_networks_api
 api_router.include_router(private_networks_api.admin_router)
 api_router.include_router(private_networks_api.client_router)
+from app.api import storage as storage_api
+from app.api import storage_client as storage_client_api
+from app.api import runner_storage as runner_storage_api
+api_router.include_router(storage_api.admin_router)
+api_router.include_router(storage_client_api.client_router)
+api_router.include_router(runner_storage_api.router)
 
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)

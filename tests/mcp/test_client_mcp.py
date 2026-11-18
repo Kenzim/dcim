@@ -298,7 +298,7 @@ def test_tool_surface_is_compact():
     from app.mcp.client.instance import client_mcp
 
     listed = client_mcp._tool_manager.list_tools()
-    assert sorted(t.name for t in listed) == ["account", "billing", "service_action", "services", "tickets"]
+    assert sorted(t.name for t in listed) == ["account", "billing", "service_action", "services", "storage", "tickets"]
     assert '"title"' not in str([t.parameters for t in listed])
 
 

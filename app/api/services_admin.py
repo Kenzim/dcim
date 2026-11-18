@@ -34,6 +34,7 @@ from app.services.provisioning import (
 )
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox, reserve_vmid_for_service
 from app.services.private_network_service import PrivateNetworkService
+from app.services.storage_service import StorageService
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -631,7 +632,7 @@ async def list_services(
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid service_type. Use 'bare_metal', 'vm', or 'http_proxy'.",
+                detail="Invalid service_type. Use 'bare_metal', 'vm', 'http_proxy' or 'nfs_storage'.",
             )
 
     if status_filter:
@@ -1701,6 +1702,7 @@ async def update_service_status(
         service.terminated_at = None
     ServiceDAO.update(db, service)
     if new_status == ServiceStatus.TERMINATED:
+        StorageService.mark_terminated_quietly(db, service.id)
         await PrivateNetworkService.release_service_quietly(db, service.id)
 
     log_server_activity_success(

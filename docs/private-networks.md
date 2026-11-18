@@ -33,6 +33,12 @@ Dedicated servers also need what Rackflow already records: a port marked as the 
 
 An admin can create a network for a client beyond the per-client limit.
 
+Every network keeps its last usable address (for example `.254` on a /24) for an NFS storage endpoint; it is never given to a VM or dedicated server. Client ranges may not overlap 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4 or the pool's admin-only **reserved ranges** (`reserved_cidrs`); the client is only told the range is not available.
+
+## NFS storage
+
+An `nfs_storage` service is linked to exactly one of the owner's networks (in the portal at `/client/storage`, or by staff). Linking places it on the least-loaded enabled storage node in the network's location and attaches that node's server on the reserved endpoint address. A storage node in `switch` VLAN mode gets the VLAN trunked on its `vlan_port_ids` (or its PXE uplink and bond when none are set); in `preconfigured` mode no switch is touched and the attachment counts as applied at once. A network with storage linked cannot be deleted. Terminating the storage detaches the node straight away and keeps the data for `storage_destroy_grace_seconds` (default seven days) before the storage runner destroys it.
+
 ## What the client does
 
 The portal page is `/client/networks`. After connecting a service, the client sets the address inside the operating system:

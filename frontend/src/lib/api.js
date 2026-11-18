@@ -4889,3 +4889,49 @@ export function clientDetachPrivateNetwork(networkId, attachmentId) {
     errorMessage: 'Failed to detach service',
   });
 }
+
+// --- NFS storage: storage nodes, nfs_storage services and their shares ---
+
+async function storageRequest(path, { client = false, method = 'GET', body, errorMessage } = {}) {
+  const headers = client ? { ..._impersonationHeaders() } : {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}/${client ? 'client' : 'admin'}/storage${path}`, {
+    method,
+    headers,
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (response.status === 204) return null;
+  return _jsonOrThrow(response, errorMessage || 'Storage request failed');
+}
+
+export const listStorageNodes = (serverId) =>
+  storageRequest(serverId ? `/nodes?server_id=${serverId}` : '/nodes', { errorMessage: 'Failed to load storage nodes' });
+export const getStorageNode = (id) => storageRequest(`/nodes/${id}`, { errorMessage: 'Failed to load storage node' });
+export const createStorageNode = (data) =>
+  storageRequest('/nodes', { method: 'POST', body: data, errorMessage: 'Failed to create storage node' });
+export const updateStorageNode = (id, data) =>
+  storageRequest(`/nodes/${id}`, { method: 'PATCH', body: data, errorMessage: 'Failed to update storage node' });
+export const rotateStorageNodeKey = (id) =>
+  storageRequest(`/nodes/${id}/rotate-key`, { method: 'POST', errorMessage: 'Failed to rotate key' });
+export const deleteStorageNode = (id) =>
+  storageRequest(`/nodes/${id}`, { method: 'DELETE', errorMessage: 'Failed to delete storage node' });
+export const getServerVlanPorts = (serverId) =>
+  storageRequest(`/servers/${serverId}/vlan-ports`, { errorMessage: 'Failed to load VLAN ports' });
+export const listStorageServices = () => storageRequest('/services', { errorMessage: 'Failed to load storage' });
+export const getStorageService = (id) => storageRequest(`/services/${id}`, { errorMessage: 'Failed to load storage' });
+export const linkStorageService = (id, data) =>
+  storageRequest(`/services/${id}/link`, { method: 'POST', body: data, errorMessage: 'Failed to link storage' });
+export const resizeStorageService = (id, sizeGb) =>
+  storageRequest(`/services/${id}/resize`, { method: 'POST', body: { size_gb: sizeGb }, errorMessage: 'Failed to resize storage' });
+export const createStorageShare = (id, data, client = false) =>
+  storageRequest(client ? `/${id}/shares` : `/services/${id}/shares`, { client, method: 'POST', body: data, errorMessage: 'Failed to create share' });
+export const updateStorageShare = (id, shareId, data, client = false) =>
+  storageRequest(client ? `/${id}/shares/${shareId}` : `/services/${id}/shares/${shareId}`, { client, method: 'PATCH', body: data, errorMessage: 'Failed to update share' });
+export const deleteStorageShare = (id, shareId, client = false) =>
+  storageRequest(client ? `/${id}/shares/${shareId}` : `/services/${id}/shares/${shareId}`, { client, method: 'DELETE', errorMessage: 'Failed to delete share' });
+export const clientListStorage = () => storageRequest('', { client: true, errorMessage: 'Failed to load storage' });
+export const clientStorageNetworks = (id) =>
+  storageRequest(`/${id}/networks`, { client: true, errorMessage: 'Failed to load networks' });
+export const clientLinkStorage = (id, networkId) =>
+  storageRequest(`/${id}/link`, { client: true, method: 'POST', body: { network_id: networkId }, errorMessage: 'Failed to link storage' });
