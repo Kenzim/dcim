@@ -5,6 +5,8 @@
   import Modal from './ui/Modal.svelte';
   import StorageSharesPanel from './storage/StorageSharesPanel.svelte';
   import StorageNodeVlanPorts from './storage/StorageNodeVlanPorts.svelte';
+  import StorageNodeSftp from './storage/StorageNodeSftp.svelte';
+  import StorageSftpPanel from './storage/StorageSftpPanel.svelte';
   import {
     listStorageNodes,
     getStorageNode,
@@ -262,6 +264,9 @@
           disabled={busy}
           on:save={(e) => saveNode(e.detail)}
         />
+        {#key selectedNode.id}
+          <StorageNodeSftp node={selectedNode} disabled={busy} on:save={(e) => saveNode(e.detail)} />
+        {/key}
 
         {#if selectedNode.orphans.length}
           <h3>Unknown volumes on the node</h3>
@@ -347,6 +352,7 @@
           {#if selectedStorage.status !== 'unlinked'}
             <StorageSharesPanel storage={selectedStorage} on:change={(e) => (selectedStorage = e.detail)} />
           {/if}
+          <StorageSftpPanel storage={selectedStorage} on:change={(e) => (selectedStorage = e.detail)} />
         {/if}
       </div>
     {/if}

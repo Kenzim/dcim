@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import Button from '../ui/Button.svelte';
   import { createStorageShare, updateStorageShare, deleteStorageShare } from '../../lib/api.js';
-  import { GIB, STORAGE_STATUS_LABELS as STATUS_LABELS, formatBytes, percent as pct } from '../../lib/storage.js';
+  import { GIB, SFTP_ACCESS, STORAGE_STATUS_LABELS as STATUS_LABELS, formatBytes, percent as pct } from '../../lib/storage.js';
 
   // A storage object from /api/admin/storage or /api/client/storage.
   export let storage;
@@ -19,7 +19,7 @@
   let editForm = {};
 
   function emptyForm() {
-    return { name: '', quota_gb: '', clients: '', all_clients: false, read_only: false };
+    return { name: '', quota_gb: '', clients: '', all_clients: false, read_only: false, sftp_access: 'off' };
   }
 
   $: writable = storage && (storage.status === 'ready' || storage.status === 'provisioning' || storage.status === 'error');
@@ -57,6 +57,7 @@
           clients: parseClients(form.clients),
           all_clients: form.all_clients,
           read_only: form.read_only,
+          sftp_access: form.sftp_access,
         },
         client,
       ),
@@ -74,6 +75,7 @@
       clients: share.clients.join('\n'),
       all_clients: share.all_clients,
       read_only: share.read_only,
+      sftp_access: share.sftp_access || 'off',
     };
   }
 
@@ -87,6 +89,7 @@
           clients: parseClients(editForm.clients),
           all_clients: editForm.all_clients,
           read_only: editForm.read_only,
+          sftp_access: editForm.sftp_access,
         },
         client,
       ),
@@ -150,6 +153,11 @@
       <small>Addresses on {storage.network?.cidr || 'the network'}, one per line or comma separated.</small>
       <label class="check"><input type="checkbox" bind:checked={form.all_clients} /> Allow every service attached to this network</label>
       <label class="check"><input type="checkbox" bind:checked={form.read_only} /> Read only</label>
+      <label>SFTP access
+        <select bind:value={form.sftp_access}>
+          {#each SFTP_ACCESS as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
+        </select>
+      </label>
       <div class="actions">
         <Button size="small" on:click={submitCreate} disabled={working || !form.name.trim() || !form.quota_gb}>Create share</Button>
         <Button size="small" variant="secondary" on:click={() => (showCreate = false)}>Cancel</Button>
@@ -170,6 +178,7 @@
             {STATUS_LABELS[share.status] || share.status}
           </span>
           {#if share.read_only}<span class="badge">Read only</span>{/if}
+          {#if share.sftp_access && share.sftp_access !== 'off'}<span class="badge">SFTP {share.sftp_access === 'rw' ? 'read and write' : 'read only'}</span>{/if}
         </div>
         {#if share.state === 'active' && writable}
           <div class="actions">
@@ -208,6 +217,11 @@
             </label>
             <label class="check"><input type="checkbox" bind:checked={editForm.all_clients} /> Allow every service attached to this network</label>
             <label class="check"><input type="checkbox" bind:checked={editForm.read_only} /> Read only</label>
+            <label>SFTP access
+              <select bind:value={editForm.sftp_access}>
+                {#each SFTP_ACCESS as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
+              </select>
+            </label>
             <div class="actions">
               <Button size="small" on:click={() => submitEdit(share)} disabled={working}>Save</Button>
               <Button size="small" variant="secondary" on:click={() => (editingId = null)}>Cancel</Button>
@@ -253,7 +267,7 @@
   .form label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; }
   .form label.check { display: flex; align-items: center; gap: 6px; font-weight: 400; }
   .form small { color: var(--text-tertiary); font-size: 12px; margin-top: -4px; }
-  input:not([type='checkbox']), textarea { padding: 7px 9px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
+  input:not([type='checkbox']), textarea, select { padding: 7px 9px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
   .actions { display: flex; gap: 6px; }
   .tiny { padding: 3px 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); cursor: pointer; font-size: 12px; }
   .tiny.danger { color: var(--danger-color); border-color: var(--danger-color); }

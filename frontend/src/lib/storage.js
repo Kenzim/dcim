@@ -12,6 +12,22 @@ export const STORAGE_STATUS_LABELS = {
   deleting: 'Deleting',
 };
 
+export const SFTP_ACCESS = [
+  { value: 'off', label: 'Off' },
+  { value: 'ro', label: 'Read only' },
+  { value: 'rw', label: 'Read and write' },
+];
+
+export const SFTP_STATE_LABELS = {
+  ready: 'Ready',
+  provisioning: 'Setting up',
+  off: 'Off',
+  error: 'Problem',
+  suspended: 'Suspended',
+  terminated: 'Removed',
+  unavailable: 'Not available',
+};
+
 export function formatBytes(bytes) {
   if (bytes == null) return '—';
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];

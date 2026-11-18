@@ -14,7 +14,9 @@ from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.service_dao import ServiceDAO
 from app.dao.user_dao import UserDAO
 from app.models.private_network import PrivateNetwork, PrivateNetworkAttachment, PrivateNetworkPool
-from app.models.service import ServiceStatus
+from app.dao.storage_dao import StorageDAO
+from app.models.service import ServiceStatus, ServiceType
+from app.services.storage_service import StorageService
 from app.services.private_network_service import (
     ATTACHABLE_TYPES,
     DEFAULT_CIDR,
@@ -426,7 +428,11 @@ async def client_options(auth: UserDep, db: DbDep):
                     location_id=location_id,
                 )
             )
-    # Only locations where the client has something to connect.
+    # Only locations where the client has something to connect: a server,
+    # storage (which needs a network even with no servers), or a network already.
+    wanted = {option.location_id for option in services}
+    wanted |= {network.location_id for network in PrivateNetworkDAO.list_networks(db, owner_user_id=user_id)}
+    wanted |= _storage_location_ids(db, user_id)
     locations = [
         ClientLocationOption(
             location_id=location_id,
@@ -436,9 +442,30 @@ async def client_options(auth: UserDep, db: DbDep):
             max_networks_per_service=pool.max_networks_per_service,
         )
         for location_id, pool in pools.items()
-        if any(option.location_id == location_id for option in services)
+        if location_id in wanted
     ]
     return ClientOptionsResponse(default_cidr=DEFAULT_CIDR, locations=locations, services=services)
+
+
+def _storage_location_ids(db, user_id: int) -> set:
+    """Locations a client's live, unlinked storage can use: its ordered location, else any with storage."""
+    offered = None
+    out = set()
+    for service in ServiceDAO.get_by_owner_user(db, user_id):
+        if service.service_type != ServiceType.NFS_STORAGE or service.status not in (
+            ServiceStatus.PENDING,
+            ServiceStatus.ACTIVE,
+        ):
+            continue
+        tenant = StorageDAO.get_tenant_for_service(db, service.id)
+        if tenant is None or tenant.network_id is not None:
+            continue
+        if tenant.location_id is not None:
+            out.add(tenant.location_id)
+        else:
+            offered = StorageService.storage_location_ids(db) if offered is None else offered
+            out |= offered
+    return out
 
 
 @client_router.post("", response_model=NetworkResponse, status_code=status.HTTP_201_CREATED)

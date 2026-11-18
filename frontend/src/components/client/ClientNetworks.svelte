@@ -161,7 +161,7 @@
       <div class="empty">
         <h2>No private networks yet</h2>
         {#if options.locations.length === 0}
-          <p>Private networks are available once you have an active virtual machine or dedicated server in a supported location.</p>
+          <p>Private networks are available once you have an active virtual machine, dedicated server or NFS storage in a supported location.</p>
         {:else if !canCreate}
           <p>You have reached the limit of private networks for your locations.</p>
         {:else}

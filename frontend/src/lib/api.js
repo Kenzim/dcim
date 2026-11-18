@@ -4933,5 +4933,11 @@ export const deleteStorageShare = (id, shareId, client = false) =>
 export const clientListStorage = () => storageRequest('', { client: true, errorMessage: 'Failed to load storage' });
 export const clientStorageNetworks = (id) =>
   storageRequest(`/${id}/networks`, { client: true, errorMessage: 'Failed to load networks' });
-export const clientLinkStorage = (id, networkId) =>
-  storageRequest(`/${id}/link`, { client: true, method: 'POST', body: { network_id: networkId }, errorMessage: 'Failed to link storage' });
+export const clientLinkStorage = (id, networkId, extra = {}) =>
+  storageRequest(`/${id}/link`, { client: true, method: 'POST', body: { network_id: networkId || null, ...extra }, errorMessage: 'Failed to link storage' });
+export const createStorageSftpUser = (id, data, client = false) =>
+  storageRequest(client ? `/${id}/sftp-users` : `/services/${id}/sftp-users`, { client, method: 'POST', body: data, errorMessage: 'Failed to create SFTP user' });
+export const updateStorageSftpUser = (id, userId, data, client = false) =>
+  storageRequest(client ? `/${id}/sftp-users/${userId}` : `/services/${id}/sftp-users/${userId}`, { client, method: 'PATCH', body: data, errorMessage: 'Failed to update SFTP user' });
+export const deleteStorageSftpUser = (id, userId, client = false) =>
+  storageRequest(client ? `/${id}/sftp-users/${userId}` : `/services/${id}/sftp-users/${userId}`, { client, method: 'DELETE', errorMessage: 'Failed to delete SFTP user' });

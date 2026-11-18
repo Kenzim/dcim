@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { Alert, Button, Spinner } from '../ui/index.js';
   import StorageSharesPanel from '../storage/StorageSharesPanel.svelte';
+  import StorageSftpPanel from '../storage/StorageSftpPanel.svelte';
   import { clientListStorage, clientStorageNetworks, clientLinkStorage } from '../../lib/api.js';
   import { STORAGE_STATUS_LABELS } from '../../lib/storage.js';
 
@@ -27,16 +28,20 @@
   }
 
   async function link(storage) {
-    const networkId = Number(chosen[storage.service_id]);
-    if (!networkId) return;
+    const choice = chosen[storage.service_id];
+    if (!choice) return;
+    const networkId = choice === 'new' ? null : Number(choice);
     const network = (networksByService[storage.service_id] || []).find((n) => n.id === networkId);
-    if (!confirm(`Link ${storage.service_name} to ${network?.name}? A storage stays on the network it is linked to.`)) return;
+    const target = networkId ? network?.name : 'a new private network';
+    if (!confirm(`Link ${storage.service_name} to ${target}? A storage stays on the network it is linked to.`)) return;
     working = true;
     error = '';
     success = '';
     try {
       await clientLinkStorage(storage.service_id, networkId);
-      success = 'Storage linked. It is being set up on your network.';
+      success = networkId
+        ? 'Storage linked. It is being set up on your network.'
+        : 'A private network was created and the storage linked to it. It is being set up.';
       await load();
     } catch (err) {
       error = err.message || 'Failed to link storage';
@@ -57,7 +62,7 @@
   <div class="page-head">
     <div>
       <h1 id="storage-title">Storage</h1>
-      <p class="sub">NFS storage on your private network. Create shares, choose which addresses may mount them, and mount them with NFS 4.</p>
+      <p class="sub">NFS storage on your private network, also reachable over SFTP. It is kept whether or not you have servers with us.</p>
     </div>
   </div>
 
@@ -69,7 +74,7 @@
   {:else if storages.length === 0}
     <div class="empty">
       <h2>No storage yet</h2>
-      <p>Order NFS storage, then link it to one of your <a href="/client/networks">private networks</a>.</p>
+      <p>Order NFS storage, then link it to one of your <a href="/client/networks">private networks</a> or let us create one.</p>
     </div>
   {:else}
     {#each storages as storage (storage.service_id)}
@@ -94,11 +99,12 @@
         {#if storage.status === 'unlinked'}
           {@const networks = networksByService[storage.service_id] || []}
           {#if networks.length === 0}
-            <p class="hint">You have no private networks yet. <a href="/client/networks">Create one</a> in the same location first.</p>
-          {:else}
-            <div class="link">
+            <p class="hint">You have no private networks yet. One is created for you when you link{storage.location_name ? ` (in ${storage.location_name})` : ''}.</p>
+          {/if}
+          <div class="link">
               <select bind:value={chosen[storage.service_id]} aria-label="Private network">
                 <option value="">Choose a private network</option>
+                <option value="new">Create a new private network</option>
                 {#each networks as network (network.id)}
                   <option value={network.id} disabled={!network.available}>
                     {network.name} ({network.cidr}, {network.location_name}){network.reason ? `: ${network.reason}` : ''}
@@ -106,10 +112,11 @@
                 {/each}
               </select>
               <Button size="small" disabled={working || !chosen[storage.service_id]} on:click={() => link(storage)}>Link</Button>
-            </div>
-          {/if}
+          </div>
+          <StorageSftpPanel {storage} client={true} on:change={replaced} />
         {:else}
           <StorageSharesPanel {storage} client={true} on:change={replaced} />
+          <StorageSftpPanel {storage} client={true} on:change={replaced} />
           {#if storage.endpoint_ip}
             <p class="hint">
               Mount from any address you allowed on {storage.network?.cidr}. The storage endpoint
@@ -143,7 +150,7 @@
   .badge.ok { color: var(--success-color, #2e7d32); border-color: var(--success-color, #2e7d32); }
   .badge.bad { color: var(--danger-color); border-color: var(--danger-color); }
   .hint { margin: 10px 0 0; font-size: 13px; color: var(--text-tertiary); line-height: 1.5; }
-  .hint a, .empty a { color: var(--portal-accent); }
+  .empty a { color: var(--portal-accent); }
   .link { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 12px; }
   select { padding: 9px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); min-width: 0; }
   .empty { text-align: center; padding: 56px 24px; background: var(--portal-card-bg); border: 1px dashed var(--border-color); border-radius: var(--radius-lg); color: var(--text-tertiary); }

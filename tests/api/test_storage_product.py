@@ -342,6 +342,23 @@ def test_storage_only_client_orders_links_and_uses_storage(client, world, admin,
     assert share.json()["shares"][0]["mount_command"] == "mount -t nfs4 10.0.0.254:/data /mnt/data"
 
 
+def test_storage_only_client_can_create_a_network_in_the_portal(client, world, admin, alice):
+    _node(client, admin, world.servers[0])
+    headers = _headers(client, alice[0])
+    assert client.get("/api/client/private-networks/options", headers=headers).json()["locations"] == []
+    client.post(
+        f"{ADMIN}/services", headers=admin,
+        json={"owner_user_id": alice[0].id, "name": "nfs", "size_gb": 10, "location_id": world.location.id},
+    )
+    options = client.get("/api/client/private-networks/options", headers=headers).json()
+    assert [loc["location_id"] for loc in options["locations"]] == [world.location.id]
+    assert options["services"] == []
+    created = client.post(
+        "/api/client/private-networks", headers=headers, json={"location_id": world.location.id, "name": "files"}
+    )
+    assert created.status_code == 201, created.text
+
+
 def test_link_without_network_needs_a_location_when_several_offer_storage(client, world, admin, alice, db_session):
     _node(client, admin, world.servers[0])
     paris = Location(name="Paris", description="")

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import Button from '../ui/Button.svelte';
   import StorageNodeVlanPorts from './StorageNodeVlanPorts.svelte';
+  import StorageNodeSftp from './StorageNodeSftp.svelte';
   import { listStorageNodes, createStorageNode, updateStorageNode, getServerVlanPorts } from '../../lib/api.js';
 
   export let serverId;
@@ -95,6 +96,7 @@
       </Button>
     </div>
     <StorageNodeVlanPorts {node} disabled={busy} on:save={(e) => save(e.detail)} />
+    <StorageNodeSftp {node} disabled={busy} on:save={(e) => save(e.detail)} />
   {:else if showCreate}
     <label>Name <input bind:value={createForm.name} placeholder="Default: the server's name" /></label>
     <label>VLAN mode
