@@ -1,0 +1,163 @@
+// Package config reads the node-side settings of the storage runner from the
+// environment. None of these ever come from Rackflow.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net/netip"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Host struct {
+	RackflowURL        string
+	RunnerKey          string
+	PollInterval       time.Duration
+	ParentIface        string
+	CephFSName         string
+	CephECPool         string
+	CephSubvolumeGroup string
+	CephPublicNetworks []netip.Prefix
+	CephConf           string
+	CephKeyring        string
+	GaneshaImage       string
+	LinkCIDR           netip.Prefix
+	StateDir           string
+	PodmanRemoteURL    string
+}
+
+const (
+	DefaultPollInterval = 30 * time.Second
+	DefaultGroup        = "rackflow"
+	DefaultLinkCIDR     = "169.254.128.0/17"
+	DefaultStateDir     = "/var/lib/rackflow-storage-runner"
+)
+
+var (
+	cephNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+	ifaceRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,14}$`)
+)
+
+// FromEnv builds the host config; getenv is os.Getenv in production.
+func FromEnv(getenv func(string) string) (Host, error) {
+	get := func(key, def string) string {
+		if v := strings.TrimSpace(getenv(key)); v != "" {
+			return v
+		}
+		return def
+	}
+	var errs []error
+	h := Host{
+		RackflowURL:        strings.TrimRight(get("RACKFLOW_URL", ""), "/"),
+		RunnerKey:          get("RUNNER_KEY", ""),
+		ParentIface:        get("PARENT_IFACE", ""),
+		CephFSName:         get("CEPH_FS_NAME", ""),
+		CephECPool:         get("CEPH_EC_POOL", ""),
+		CephSubvolumeGroup: get("CEPH_SUBVOLUME_GROUP", DefaultGroup),
+		CephConf:           get("CEPH_CONF", ""),
+		CephKeyring:        get("CEPH_KEYRING", ""),
+		GaneshaImage:       get("GANESHA_IMAGE", ""),
+		StateDir:           get("STATE_DIR", DefaultStateDir),
+		PodmanRemoteURL:    get("PODMAN_REMOTE_URL", ""),
+	}
+	for _, kv := range [][2]string{
+		{"RACKFLOW_URL", h.RackflowURL},
+		{"RUNNER_KEY", h.RunnerKey},
+		{"PARENT_IFACE", h.ParentIface},
+		{"CEPH_FS_NAME", h.CephFSName},
+		{"CEPH_EC_POOL", h.CephECPool},
+		{"GANESHA_IMAGE", h.GaneshaImage},
+	} {
+		if kv[1] == "" {
+			errs = append(errs, fmt.Errorf("%s is required", kv[0]))
+		}
+	}
+
+	interval, err := parseInterval(get("POLL_INTERVAL", ""))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	h.PollInterval = interval
+
+	if h.ParentIface != "" && !ifaceRe.MatchString(h.ParentIface) {
+		errs = append(errs, fmt.Errorf("PARENT_IFACE %q is not a valid interface name", h.ParentIface))
+	}
+	for _, kv := range [][2]string{
+		{"CEPH_FS_NAME", h.CephFSName},
+		{"CEPH_EC_POOL", h.CephECPool},
+		{"CEPH_SUBVOLUME_GROUP", h.CephSubvolumeGroup},
+	} {
+		if kv[1] != "" && !cephNameRe.MatchString(kv[1]) {
+			errs = append(errs, fmt.Errorf("%s %q may only contain letters, digits, '.', '_' and '-'", kv[0], kv[1]))
+		}
+	}
+
+	nets, err := parseNetworks(get("CEPH_PUBLIC_NETWORKS", ""))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	h.CephPublicNetworks = nets
+
+	link, err := netip.ParsePrefix(get("LINK_CIDR", DefaultLinkCIDR))
+	switch {
+	case err != nil:
+		errs = append(errs, fmt.Errorf("LINK_CIDR: %w", err))
+	case !link.Addr().Is4() || link.Bits() > 30:
+		errs = append(errs, fmt.Errorf("LINK_CIDR %s must be an IPv4 prefix of /30 or larger", link))
+	default:
+		h.LinkCIDR = link.Masked()
+		for _, n := range h.CephPublicNetworks {
+			if n.Overlaps(h.LinkCIDR) {
+				errs = append(errs, fmt.Errorf("LINK_CIDR %s overlaps Ceph public network %s", h.LinkCIDR, n))
+			}
+		}
+	}
+	return h, errors.Join(errs...)
+}
+
+func parseInterval(v string) (time.Duration, error) {
+	if v == "" {
+		return DefaultPollInterval, nil
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0, fmt.Errorf("POLL_INTERVAL must be positive")
+		}
+		return time.Duration(secs) * time.Second, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("POLL_INTERVAL %q must be seconds or a positive Go duration", v)
+	}
+	return d, nil
+}
+
+func parseNetworks(v string) ([]netip.Prefix, error) {
+	if v == "" {
+		return nil, fmt.Errorf("CEPH_PUBLIC_NETWORKS is required")
+	}
+	var out []netip.Prefix
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("CEPH_PUBLIC_NETWORKS: %w", err)
+		}
+		if !p.Addr().Is4() {
+			return nil, fmt.Errorf("CEPH_PUBLIC_NETWORKS: %s is not IPv4", p)
+		}
+		out = append(out, p.Masked())
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("CEPH_PUBLIC_NETWORKS is required")
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out, nil
+}

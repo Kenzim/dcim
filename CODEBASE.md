@@ -34,6 +34,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Billing / WHMCS API surface | Backend: `app/api/billing.py`; WHMCS module: `whmcs/modules/servers/rackflow/` |
 | DHCP/TFTP/media runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, `media_runner/main.py`, uplink in `runner_common/`, hub in `app/services/runners/` |
 | Proxy runner (IPAM sync) | `proxy_runner/main.py`, API `app/api/runner_proxy.py` |
+| Storage runner (per-customer NFS on CephFS) | `storage_runner/internal/reconcile/reconcile.go` (loop), drivers in `storage_runner/internal/{netns,firewall,ceph,ganesha}/` |
 | Tests | Mirror path under `tests/` (`tests/api/`, `tests/dao/`, `tests/services/`, …) |
 | Install / Docker ops | `INSTALL.md`, `docker-compose.yml`, `Makefile`, `Dockerfile` |
 
@@ -56,7 +57,7 @@ MySQL (Alembic migrations)
 
 Plugins (app/plugins/)              ← BMC/hypervisor/switch adapters (loaded from disk)
 Integrations (app/integrations/)    ← billing adapters (e.g. WHMCS)
-Runners (dhcp_runner/, tftp_runner/, media_runner/, proxy_runner/)  ← optional sidecars
+Runners (dhcp_runner/, tftp_runner/, media_runner/, proxy_runner/, storage_runner/)  ← optional sidecars
 ```
 
 **Conventions**
@@ -83,6 +84,7 @@ Runners (dhcp_runner/, tftp_runner/, media_runner/, proxy_runner/)  ← optional
 | `media_runner/` | Per-location ISO library (HTTP range + SMB) + WebSocket uplink |
 | `runner_common/` | Shared protocol/agent used by Python runners |
 | `proxy_runner/` | Sidecar that syncs proxy/IPAM config from Rackflow |
+| `storage_runner/` | Go agent on storage nodes: one isolated NFS-Ganesha per customer (own netns + VLAN) on erasure-coded CephFS |
 | `os_templates/` | Disk-based OS install templates |
 | `isos/`, `disk_images/`, `tftp/` | Central boot media (ISO catalog fallback); per-location libraries live on media runners |
 | `whmcs/` | WHMCS provisioning module + hooks |
@@ -384,6 +386,7 @@ Heavy libraries used by one page (for example Cytoscape.js on `/admin/cabling`) 
 | TFTP runner | `tftp_runner/main.py` | Control plane for `in.tftpd` + uplink |
 | Media runner | `media_runner/main.py` | HTTP ISO library + `smbd` share `isos`; enroll via Admin → Runners |
 | Proxy runner | `proxy_runner/cmd/proxy-runner/` | Polls `/api/runner/proxy/config` every 30s (phone-home); register via Admin → Proxy Runners |
+| Storage runner | `storage_runner/cmd/storage-runner/` | Polls `GET /api/runner/storage/config`, reconciles (netns + VLAN + veth per tenant, nftables table `inet rf-storage`, CephFS subvolumes and `client.rf-t<id>` users, podman Ganesha per tenant), posts `POST /api/runner/storage/status`. Never deletes anything not listed with a destroy state; see `storage_runner/README.md` |
 | Bandwidth poller | `scripts/snmp_bandwidth_poller.py` | Docker service `bandwidth-poller` / systemd unit. Each cycle also stores switch port admin/oper status (`status_updated_at`); LLDP neighbours are collected every `--lldp-interval` seconds (default 600, `0` turns it off) |
 
 Python runners dial `WS /api/runner/ws` when `RACKFLOW_URL` and `API_KEY` are set. Legacy HTTP `ServiceInstance.base_url` still works if no uplink is connected. App env `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` remains for in-cluster HTTP control — see `INSTALL.md`.
@@ -442,6 +445,8 @@ Serving path for bare metal: `app/api/server_interaction.py` + `app/services/os_
 | `tests/fixtures/` | Shared fixtures |
 
 Run: `pytest` (see `pytest.ini`).
+
+Go runners: `cd proxy_runner && go test ./...`; `cd storage_runner && go test -race ./...` (fakes only). The storage runner's kernel-level checks are behind the `sandbox` build tag and run in a throwaway namespace (see `storage_runner/README.md`).
 
 ---
 
