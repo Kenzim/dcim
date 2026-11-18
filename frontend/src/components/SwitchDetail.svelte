@@ -1,7 +1,7 @@
 <script>
   import PageHeader from './PageHeader.svelte';
   import { cablePathParts, viaText } from '../lib/cablePath.js';
-  import { getSwitch, getSwitchPorts, updateSwitchPorts, getLocations, getRacks, getServers, getServer, regenerateSwitchPorts, listCableRuns, createCableRun, deleteCableRun, getSwitchBandwidth } from '../lib/api.js';
+  import { getSwitch, getSwitchPorts, updateSwitchPorts, getLocations, getRacks, getServers, getServer, regenerateSwitchPorts, listCableRuns, createCableRun, deleteCableRun, getSwitchBandwidth, getSwitches, detectSwitchVpc } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { onMount } from 'svelte';
 
@@ -23,6 +23,9 @@
   let regeneratingPorts = false;
   let regenerateError = null;
   let regenerateSuccess = null;
+  let vpcPeerName = null;
+  let detectingVpc = false;
+  let vpcDetectError = null;
 
   // Connect port modal
   let connectModalPort = null;
@@ -129,6 +132,32 @@
       console.error('Failed to refresh:', err);
     } finally {
       refreshing = false;
+    }
+  }
+
+  async function loadVpcPeerName() {
+    vpcPeerName = null;
+    if (!switchData?.vpc_peer_switch_id) return;
+    try {
+      const all = await getSwitches();
+      vpcPeerName = all.find((s) => s.id === switchData.vpc_peer_switch_id)?.name ?? `Switch ${switchData.vpc_peer_switch_id}`;
+    } catch (err) {
+      vpcPeerName = `Switch ${switchData.vpc_peer_switch_id}`;
+    }
+  }
+
+  $: if (switchData) loadVpcPeerName();
+
+  async function handleDetectVpc() {
+    detectingVpc = true;
+    vpcDetectError = null;
+    try {
+      await detectSwitchVpc();
+      await loadSwitch();
+    } catch (err) {
+      vpcDetectError = err.message;
+    } finally {
+      detectingVpc = false;
     }
   }
 
@@ -450,6 +479,24 @@
               <span class="info-field-label">Status:</span>
               <span class="status-badge" class:enabled={switchData.enabled} class:disabled={!switchData.enabled}>
                 {switchData.enabled ? 'Enabled' : 'Disabled'}
+              </span>
+            </div>
+            <div class="info-item full-width">
+              <span class="info-field-label">vPC:</span>
+              <span>
+                {#if switchData.vpc_domain_id}
+                  Domain {switchData.vpc_domain_id}{switchData.vpc_role ? `, ${switchData.vpc_role}` : ''}{switchData.vpc_peer_link ? `, peer-link ${switchData.vpc_peer_link}` : ''}{#if switchData.vpc_peer_switch_id}, peer
+                    <a href="/admin/switches/{switchData.vpc_peer_switch_id}" on:click|preventDefault={() => navigate(`/admin/switches/${switchData.vpc_peer_switch_id}`)}>{vpcPeerName ?? '...'}</a>{/if}
+                {:else if switchData.vpc_detected_at}
+                  None
+                {:else}
+                  Not detected yet
+                {/if}
+                {#if switchData.vpc_error}<span class="error-text"> ({switchData.vpc_error})</span>{/if}
+                <button class="btn-secondary btn-small" on:click={handleDetectVpc} disabled={detectingVpc}>
+                  {detectingVpc ? 'Detecting...' : 'Detect vPC pairs'}
+                </button>
+                {#if vpcDetectError}<span class="error-text"> {vpcDetectError}</span>{/if}
               </span>
             </div>
             {#if switchData.description}
@@ -914,6 +961,10 @@
   .text-muted {
     color: var(--text-secondary);
     font-style: italic;
+  }
+
+  .error-text {
+    color: #dc2626;
   }
 
   .error-message {

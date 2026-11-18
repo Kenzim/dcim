@@ -284,7 +284,9 @@
       {:else if routeName === 'switches'}
         <Switches />
       {:else if routeName.startsWith('switches/') && switchId}
-        <SwitchDetail switchId={switchId} onBack={() => navigate('/admin/switches')} />
+        {#key switchId}
+          <SwitchDetail switchId={switchId} onBack={() => navigate('/admin/switches')} />
+        {/key}
       {:else if routeName === 'cabling'}
         {#await import('../components/Cabling.svelte')}
           <div class="loading-container"><p>Loading…</p></div>

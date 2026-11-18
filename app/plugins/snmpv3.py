@@ -9,6 +9,7 @@ Supports:
 - Port statistics and bandwidth monitoring via IF-MIB
 - Switch information (model, serial, firmware, port count)
 - LLDP neighbour table via LLDP-MIB (IEEE 802.1AB)
+- Cisco vPC domain, peer-link and vPC host links via CISCO-VPC-MIB
 
 Read-only operations:
 - test_connection: Test SNMPv3 connectivity
@@ -19,6 +20,7 @@ Read-only operations:
 Note: This plugin only supports MONITORING category (read-only).
 For port control or configuration changes, use a plugin that supports PORT_CONTROL.
 """
+import ipaddress
 import logging
 import re
 import sys
@@ -63,6 +65,34 @@ _LLDP_REM_COLUMNS = {
 _LLDP_CHASSIS_MAC = 4
 _LLDP_PORT_MAC = 3
 _SNMP_END_TYPES = {"EndOfMibView", "NoSuchObject", "NoSuchInstance"}
+
+IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
+CISCO_VPC_MIB = "1.3.6.1.4.1.9.9.807.1"
+# Tables below CISCO_VPC_MIB, as (group, table): each entry is <table>.1.<column>.<index>
+_VPC_KEEPALIVE_CONFIG = (1, 1)  # index domain; 3 dest addr, 5 source addr, 13 VRF
+_VPC_KEEPALIVE_STATUS = (1, 2)  # index domain; 2 status
+_VPC_ROLE = (2, 1)  # index domain; 2 role, 5 operational system MAC
+_VPC_PEER_LINK = (4, 1)  # index domain; 2 peer-link ifIndex
+_VPC_HOST_LINK = (4, 2)  # index domain.vpcId; 3 ifIndex, 4 status, 5 consistency, 6 detail
+_VPC_ROLES = {
+    1: "primary (operational secondary)",
+    2: "primary",
+    3: "secondary (operational primary)",
+    4: "secondary",
+    5: "none established",
+}
+_VPC_KEEPALIVE = {
+    1: "disabled",
+    2: "alive",
+    3: "peer unreachable",
+    4: "alive, domain ID mismatch",
+    5: "suspended during ISSU",
+    6: "suspended, destination unreachable",
+    7: "suspended, VRF unusable",
+    8: "misconfigured",
+}
+_VPC_LINK_STATUS = {1: "down", 2: "down, forwarding via peer-link", 3: "up"}
+_VPC_CONSISTENCY = {1: "success", 2: "failed", 3: "not applicable"}
 
 
 def _octets(value: Any) -> bytes:
@@ -146,6 +176,70 @@ def parse_lldp_tables(
             "sys_desc": _lldp_text(raw.get("sys_desc")),
         })
     return neighbours
+
+
+def _inet_address(value: Any) -> Optional[str]:
+    raw = _octets(value)
+    if len(raw) in (4, 16):
+        return str(ipaddress.ip_address(raw))
+    return _lldp_text(value)
+
+
+def parse_vpc_tables(
+    rows: List[Tuple[Tuple[int, ...], Any]],
+    if_names: Dict[int, str],
+) -> Optional[Dict[str, Any]]:
+    """Build the vPC summary from walked CISCO-VPC-MIB rows, or None without a vPC domain.
+
+    Each row is (OID suffix below CISCO_VPC_MIB, value): (group, table, 1, column, *index).
+    ``if_names`` maps ifIndex to interface name (ifDescr).
+    """
+    tables: Dict[Tuple[int, int], Dict[Tuple[int, ...], Dict[int, Any]]] = {}
+    for suffix, value in rows:
+        if len(suffix) < 5 or suffix[2] != 1:
+            continue
+        group, table, _entry, column, *index = suffix
+        tables.setdefault((group, table), {}).setdefault(tuple(index), {})[column] = value
+
+    domains = sorted(
+        index[0]
+        for key in (_VPC_KEEPALIVE_CONFIG, _VPC_ROLE)
+        for index in tables.get(key, {})
+        if len(index) == 1 and index[0]
+    )
+    if not domains:
+        return None
+    domain = domains[0]
+    keepalive = tables.get(_VPC_KEEPALIVE_CONFIG, {}).get((domain,), {})
+    status = tables.get(_VPC_KEEPALIVE_STATUS, {}).get((domain,), {})
+    role = tables.get(_VPC_ROLE, {}).get((domain,), {})
+    peer_link = tables.get(_VPC_PEER_LINK, {}).get((domain,), {})
+    system_mac = _octets(role.get(5))
+
+    vpcs = []
+    for index, columns in sorted(tables.get(_VPC_HOST_LINK, {}).items()):
+        if len(index) != 2 or index[0] != domain:
+            continue
+        if_index = _lldp_int(columns.get(3))
+        vpcs.append({
+            "vpc_id": index[1],
+            "interface": if_names.get(if_index) if if_index else None,
+            "status": _VPC_LINK_STATUS.get(_lldp_int(columns.get(4))),
+            "consistency": _VPC_CONSISTENCY.get(_lldp_int(columns.get(5))),
+            "consistency_detail": _lldp_text(columns.get(6)),
+        })
+    peer_link_index = _lldp_int(peer_link.get(2))
+    return {
+        "domain_id": domain,
+        "role": _VPC_ROLES.get(_lldp_int(role.get(2))),
+        "keepalive_status": _VPC_KEEPALIVE.get(_lldp_int(status.get(2))),
+        "keepalive_source": _inet_address(keepalive.get(5)),
+        "keepalive_destination": _inet_address(keepalive.get(3)),
+        "keepalive_vrf": _lldp_text(keepalive.get(13)),
+        "system_mac": system_mac.hex(":") if len(system_mac) == 6 else None,
+        "peer_link": if_names.get(peer_link_index) if peer_link_index else None,
+        "vpcs": vpcs,
+    }
 
 
 def _extract_firmware_version_fallback(sys_descr: str) -> Optional[str]:
@@ -835,6 +929,23 @@ class SNMPv3Plugin(SwitchPlugin):
         neighbours = parse_lldp_tables(loc_rows, rem_rows)
         logger.info("SNMP get_lldp_neighbors: %s:%s returned %d neighbours", self.hostname, self.port, len(neighbours))
         return neighbours
+
+    async def get_vpc_info(self) -> Optional[Dict[str, Any]]:
+        """Read the switch's vPC domain from CISCO-VPC-MIB; None when it has none."""
+        try:
+            snmp_engine = SnmpEngine()
+            rows = await self._walk(snmp_engine, CISCO_VPC_MIB)
+            if not rows:
+                return None
+            if_names = {
+                suffix[0]: _lldp_text(value)
+                for suffix, value in await self._walk(snmp_engine, IF_DESCR)
+                if len(suffix) == 1
+            }
+        except Exception as e:
+            logger.warning("vPC walk failed for %s:%s: %s", self.hostname, self.port, e)
+            raise Exception(f"Failed to read vPC state: {e}")
+        return parse_vpc_tables(rows, if_names)
 
     async def get_port_statistics(self, port: str) -> Dict[str, Any]:
         """

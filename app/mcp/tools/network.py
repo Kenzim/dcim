@@ -39,6 +39,14 @@ def _switch_row(switch: Any) -> dict:
         "serial_number": data.get("serial_number"),
         "firmware_version": data.get("firmware_version"),
         "port_count": data.get("port_count"),
+        "vpc": {
+            "domain_id": data.get("vpc_domain_id"),
+            "peer_switch_id": data.get("vpc_peer_switch_id"),
+            "peer_link": data.get("vpc_peer_link"),
+            "role": data.get("vpc_role"),
+            "detected_at": data.get("vpc_detected_at").isoformat() if data.get("vpc_detected_at") else None,
+            "error": data.get("vpc_error"),
+        },
     }
 
 
@@ -250,6 +258,33 @@ async def regenerate_switch_ports(switch_id: int) -> dict:
         return await switch_api.regenerate_switch_ports(switch_id, auth={}, db=db)
 
     return await run_tool("regenerate_switch_ports", "write", work, args={"switch_id": switch_id})
+
+
+async def detect_switch_vpc() -> dict:
+    """Read every enabled switch's Cisco vPC state (read-only on the devices) and record the vPC pairs."""
+
+    async def work(db, ctx):
+        return await switch_api.detect_vpc(auth={}, db=db)
+
+    return await run_tool("detect_switch_vpc", "write", work)
+
+
+async def switch_vlan_dry_run(
+    server_id: int, vlan_id: Optional[int] = None, network_id: Optional[int] = None, remove: bool = False
+) -> dict:
+    """Switch commands carrying (or removing) a VLAN on a server's uplink would send; nothing is sent."""
+
+    async def work(db, ctx):
+        return await switch_api.vlan_dry_run(
+            server_id, vlan_id=vlan_id, network_id=network_id, remove=remove, auth={}, db=db
+        )
+
+    return await run_tool(
+        "switch_vlan_dry_run",
+        "read",
+        work,
+        args={"server_id": server_id, "vlan_id": vlan_id, "network_id": network_id, "remove": remove},
+    )
 
 
 async def update_switch_port(

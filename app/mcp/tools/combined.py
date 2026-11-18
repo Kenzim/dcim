@@ -437,21 +437,33 @@ async def save_switch(
 
 @mcp.tool()
 async def switch_action(
-    action: Literal["test", "regenerate_ports", "update_port"],
+    action: Literal["test", "regenerate_ports", "update_port", "detect_vpc", "vlan_dry_run"],
     switch_id: Optional[int] = None,
     plugin_name: Optional[str] = None,
     plugin_config: Optional[dict] = None,
     port_id: Optional[int] = None,
     speed_mbps: Optional[int] = None,
     description: Optional[str] = None,
+    server_id: Optional[int] = None,
+    vlan_id: Optional[int] = None,
+    network_id: Optional[int] = None,
+    remove: bool = False,
 ) -> dict:
     """test: probe a switch (switch_id, or plugin_name + plugin_config before adding; read-only on the device).
     regenerate_ports: rebuild the port list (cabled ports kept). update_port: set a port's speed/description.
+    detect_vpc: read every switch's Cisco vPC state (read-only) and record vPC peers (shown as `vpc` on switches).
+    vlan_dry_run: exact switch commands for carrying vlan_id (or a private network_id) on server_id's uplink,
+    including both vPC peers; remove=true for detaching. Nothing is sent to the switches.
     """
     if action == "test":
         return await network_tools.test_switch_connection(
             switch_id=switch_id, plugin_name=plugin_name, plugin_config=plugin_config
         )
+    if action == "detect_vpc":
+        return await network_tools.detect_switch_vpc()
+    if action == "vlan_dry_run":
+        _require("A VLAN dry run", server_id=server_id)
+        return await network_tools.switch_vlan_dry_run(server_id, vlan_id=vlan_id, network_id=network_id, remove=remove)
     _require(f"Switch {action}", switch_id=switch_id)
     _reject(f"Switch {action}", plugin_name=plugin_name, plugin_config=plugin_config)
     if action == "regenerate_ports":

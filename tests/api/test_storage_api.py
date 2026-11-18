@@ -27,7 +27,7 @@ class FakeSwitch:
     async def create_vlan(self, vlan_id, name):
         return None
 
-    async def delete_vlan(self, vlan_id):
+    async def delete_vlan(self, vlan_id, name=None):
         return None
 
     async def get_port_vlans(self, port):

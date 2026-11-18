@@ -24,7 +24,8 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Patch panels and multi-hop cable paths | `app/models/patch_panel.py`, API `app/api/patch_panel.py` → `app/services/patch_panel_service.py` → `app/dao/patch_panel_dao.py`; path tracing through panels in `app/services/cable_trace_service.py`; UI `PatchPanels.svelte`, `PatchPanelDetail.svelte` |
 | LLDP neighbours and the recorded-versus-seen check | Collection `app/plugins/snmpv3.py` (`get_lldp_neighbors`) → `app/services/lldp_collection_service.py` → `switch_lldp_neighbors` table; comparison `app/services/lldp_compare_service.py`; both exposed under `/api/admin/cabling/lldp` |
 | PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py` |
-| Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, switch drivers `app/plugins/nxos.py` and `app/plugins/qnap_qss.py`; setup and limits in `docs/private-networks.md` |
+| Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, uplink planning and vPC pairs `app/services/uplink_vlan_service.py`, switch drivers `app/plugins/nxos.py` and `app/plugins/qnap_qss.py`; setup and limits in `docs/private-networks.md`, Nexus setup in `docs/nxos-vlan-management.md` |
+| Cisco vPC pair detection | `app/services/switch_vpc_service.py` (CISCO-VPC-MIB via `snmpv3.get_vpc_info`, pairs by peer-keepalive addresses) → `network_switches.vpc_*`; `POST /api/admin/network-switches/vpc/detect`, MCP `switch_action` `detect_vpc` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
@@ -234,6 +235,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `cabling_graph_service.py` | Builds the cabling graph from batch queries in `app/dao/cabling_graph_dao.py`: nodes, ports, cables and end-to-end paths through patch panels. Link status comes from the switch end's stored `oper_status` and counts only while fresh (`STATUS_STALE_AFTER`, 15 minutes); older data is `stale`, never polled is `unknown` |
 | `cable_trace_service.py` | Follows a port through patch panels (front to rear) to the server or switch port at the far end; shared by the cable-run API, server and switch port views, bandwidth views, MCP and the graph |
 | `patch_panel_service.py` | Patch panel validation (rack placement, port count changes) and per-port front/rear views |
+| `uplink_vlan_service.py` | Turns a server's uplink into targets (port, port-channel, or vPC port-channel on both peers), refuses peer-links, inter-switch links and unpaired vPCs, applies/removes a VLAN with rollback, and records dry-run commands (`dry_run_uplink`, `GET /api/admin/network-switches/vlan-dry-run/{server_id}`) |
+| `switch_vpc_service.py` | vPC pair detection and the stored pairing summary |
 | `lldp_collection_service.py` / `lldp_compare_service.py` | Store an LLDP snapshot per switch (replaced on each collection, kept on error) / compare it with recorded cables |
 | `vm_vnc_ticket_service.py` | One-time VM VNC launch tickets + WS sessions |
 | `ipmi_kvm_ticket_service.py` | One-time IPMI HTML5 KVM launch tickets + WS sessions |
@@ -255,7 +258,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `ipmi.py` | IPMI/BMC power & related |
 | `proxmox.py` | Proxmox VM provisioning / power |
 | `snmpv3.py` | SNMPv3 switch plugin (ports, bandwidth) |
-| `nxos.py` | Cisco NX-OS switch plugin: VLANs and port trunks over NX-API, monitoring through SNMPv3 |
+| `nxos.py` | Cisco NX-OS switch plugin: VLANs, port trunks and vPC peer-links over NX-API (`add`/`remove` only, VLANs 2 to 3967, never another VLAN's name), dry run; monitoring, LLDP and vPC discovery through SNMPv3 |
 | `qnap_qss.py` | QNAP QSW switches (QSS firmware): tagged VLANs per port and the port list over the web UI's `/api/v3` JSON API; VLAN IDs 2 to 4000 |
 | `switch_base.py` / `switch_registry.py` | Switch plugin ABC + registry |
 | `pdu/` | PDU plugins: `base.py` (`PduPlugin`, capabilities metering / outlet_metering / outlet_control), `registry.py` (auto-discovers modules in `pdu/`), `snmp.py` (shared SNMP v1/v2c/v3 client), `manual.py` (unmanaged PDU) |

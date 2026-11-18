@@ -8,7 +8,7 @@ their uplink switch ports.
 import asyncio
 import ipaddress
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -33,6 +33,13 @@ from app.models.private_network import (
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.plugins.switch_registry import get_switch_registry
 from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
+from app.services.uplink_vlan_service import (
+    UplinkError,
+    UplinkPlanner,
+    apply_vlan,
+    planned_commands,
+    remove_vlan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,33 +219,6 @@ def _server_uplink(db: Session, server_id: int) -> list:
     return uplink
 
 
-def resolve_uplink_ports(db: Session, server_id: int) -> List[Tuple[object, object]]:
-    """Return ``(switch, switch_port)`` for each port of a server's uplink.
-
-    Every uplink port must be cabled to a port on a switch that can be
-    configured, so a bond is never left half configured.
-    """
-    uplink = _server_uplink(db, server_id)
-    registry = get_switch_registry()
-    resolved = []
-    for port in uplink:
-        cable = CableRunDAO.get_by_server_port(db, port.id)
-        switch_port = None
-        if cable is not None:
-            switch_port = cable.end_a_switch_port or cable.end_b_switch_port
-        if switch_port is None:
-            raise PrivateNetworkError(
-                f"Server port '{port.name}' has no cable run to a switch port", status_code=409
-            )
-        switch = switch_port.switch
-        if not switch.enabled or not registry.supports_vlan_management(switch.plugin_name):
-            raise PrivateNetworkError(
-                f"Switch '{switch.name}' cannot be configured automatically", status_code=409
-            )
-        resolved.append((switch, switch_port))
-    return resolved
-
-
 def preview_uplink_ports(db: Session, server_id: int) -> dict:
     """Which switch ports would carry private networks for a server, with any problem.
 
@@ -271,6 +251,9 @@ def preview_uplink_ports(db: Session, server_id: int) -> dict:
         else:
             switch = switch_port.switch
             entry.update(switch_id=switch.id, switch=switch.name, switch_port=switch_port.name)
+            if switch.vpc_peer_switch_id:
+                peer = NetworkSwitchDAO.get_by_id(db, switch.vpc_peer_switch_id)
+                entry.update(vpc_domain_id=switch.vpc_domain_id, vpc_peer_switch=peer.name if peer else None)
             if not switch.enabled:
                 entry["problem"] = "Switch is disabled"
             elif not registry.supports_vlan_management(switch.plugin_name):
@@ -284,6 +267,52 @@ def preview_uplink_ports(db: Session, server_id: int) -> dict:
         "ports": ports,
         "vlan_mode": VlanMode.SWITCH.value,
     }
+
+
+async def dry_run_uplink(
+    db: Session,
+    server_id: int,
+    *,
+    network_id: Optional[int] = None,
+    vlan_id: Optional[int] = None,
+    remove: bool = False,
+) -> dict:
+    """The exact switch commands attaching (or detaching) a server would send, without sending them.
+
+    Read-only ``show`` commands do go to the switches, to find port-channels,
+    vPCs and the current allowed lists. Never raises for planning problems:
+    they come back in ``error``.
+    """
+    if network_id is not None:
+        network = PrivateNetworkDAO.get_network(db, network_id)
+        if network is None:
+            raise PrivateNetworkError("Private network not found", status_code=404)
+        vlan, name = network.segment_id, _vlan_name(network)
+    elif vlan_id is not None:
+        vlan, name = int(vlan_id), f"pn-preview-{int(vlan_id)}"
+    else:
+        raise PrivateNetworkError("Give network_id or vlan_id")
+    out = {"ok": False, "error": None, "vlan_id": vlan, "action": "remove" if remove else "add",
+           "targets": [], "warnings": [], "commands": []}
+    if _storage_vlans_preconfigured(db, server_id):
+        out.update(ok=True, error="Storage node in preconfigured mode: no switch commands are sent")
+        return out
+    planner = UplinkPlanner(db, server_id, dry_run=True, plugin_factory=_switch_plugin)
+    try:
+        targets = await planner.plan(_server_uplink(db, server_id))
+        out["targets"] = [target.describe() for target in targets]
+        if remove:
+            await remove_vlan(targets, vlan, dry_run=True)
+        else:
+            await apply_vlan(targets, vlan, name, dry_run=True)
+        out["warnings"] = [w for target in targets for w in target.warnings]
+        out["ok"] = True
+    except (PrivateNetworkError, UplinkError) as exc:
+        out["error"] = exc.message
+    except Exception as exc:
+        out["error"] = str(exc)
+    out["commands"] = planned_commands(planner)
+    return out
 
 
 class PrivateNetworkService:
@@ -408,12 +437,24 @@ class PrivateNetworkService:
     async def _finish_delete(db: Session, network: PrivateNetwork, *, skip_switches: bool = False) -> bool:
         errors = []
         if not skip_switches:
-            for switch in _managed_switches(db, network.location_id):
+            switches = _managed_switches(db, network.location_id)
+            # Reverse of attaching: vPC peer-links stop carrying the VLAN, then it is deleted.
+            for switch in switches:
+                plugin = _switch_plugin(switch)
+                if not (switch.vpc_domain_id and getattr(plugin, "SUPPORTS_VPC", False)):
+                    continue
                 try:
-                    await _switch_plugin(switch).delete_vlan(network.segment_id)
+                    await plugin.remove_peer_link_vlan(network.segment_id)
                 except Exception as exc:
-                    logger.warning("Private network %s: VLAN delete failed on %s: %s", network.id, switch.name, exc)
+                    logger.warning("Private network %s: peer-link cleanup failed on %s: %s", network.id, switch.name, exc)
                     errors.append(f"{switch.name}: {exc}")
+            if not errors:
+                for switch in switches:
+                    try:
+                        await _switch_plugin(switch).delete_vlan(network.segment_id, _vlan_name(network))
+                    except Exception as exc:
+                        logger.warning("Private network %s: VLAN delete failed on %s: %s", network.id, switch.name, exc)
+                        errors.append(f"{switch.name}: {exc}")
         if errors:
             network.last_error = "; ".join(errors)[:2000]
             PrivateNetworkDAO.save(db, network)
@@ -581,7 +622,7 @@ class PrivateNetworkService:
     @staticmethod
     async def _apply_safely(db: Session, attachment: PrivateNetworkAttachment) -> bool:
         try:
-            await PrivateNetworkService._apply(db, attachment)
+            warnings = await PrivateNetworkService._apply(db, attachment)
         except Exception as exc:
             logger.warning("Private network attachment %s: apply failed: %s", attachment.id, exc)
             db.rollback()
@@ -589,14 +630,17 @@ class PrivateNetworkService:
             attachment.last_error = str(exc)[:2000]
             PrivateNetworkDAO.save(db, attachment)
             return False
+        if warnings:
+            logger.warning("Private network attachment %s: applied with warnings: %s", attachment.id, warnings)
         attachment.state = AttachmentState.ACTIVE
-        attachment.last_error = None
+        # An active attachment keeps warnings (missing cables, vPC consistency) here for staff.
+        attachment.last_error = ("Warning: " + "; ".join(warnings))[:2000] if warnings else None
         PrivateNetworkDAO.save(db, attachment)
         return True
 
     @staticmethod
-    async def _apply(db: Session, attachment: PrivateNetworkAttachment) -> None:
-        """Make the VM or the switch ports carry the network. Safe to repeat."""
+    async def _apply(db: Session, attachment: PrivateNetworkAttachment) -> List[str]:
+        """Make the VM or the switch ports carry the network. Safe to repeat. Returns warnings."""
         network = attachment.network
         service = attachment.service
         if service.service_type == ServiceType.VM:
@@ -614,7 +658,7 @@ class PrivateNetworkService:
             )
             attachment.vm_net_index = result.get("index")
             attachment.mac_address = result.get("mac") or attachment.mac_address
-            return
+            return []
 
         if service.service_type == ServiceType.NFS_STORAGE:
             # Storage stays on the node it was placed on: the attachment's server.
@@ -622,7 +666,7 @@ class PrivateNetworkService:
             if current_server_id is None:
                 raise PrivateNetworkError("The storage has no node assigned")
             if _storage_vlans_preconfigured(db, current_server_id):
-                return
+                return []
         else:
             current_server_id = service.bare_metal.server_id if service.bare_metal else None
         if current_server_id is None:
@@ -632,18 +676,9 @@ class PrivateNetworkService:
             await PrivateNetworkService._remove_from_server(db, attachment.server_id, network)
         attachment.server_id = current_server_id
         PrivateNetworkDAO.save(db, attachment)
-        for switch, switch_port in resolve_uplink_ports(db, current_server_id):
-            plugin = _switch_plugin(switch)
-            state = await plugin.get_port_vlans(switch_port.name)
-            carried = (
-                state.get("mode") == "trunk"
-                and not state.get("allowed_all")
-                and network.segment_id in state.get("allowed_vlans", [])
-            )
-            if carried:
-                continue
-            await plugin.create_vlan(network.segment_id, _vlan_name(network))
-            await plugin.add_port_vlan(switch_port.name, network.segment_id)
+        planner = UplinkPlanner(db, current_server_id, plugin_factory=_switch_plugin)
+        targets = await planner.plan(_server_uplink(db, current_server_id))
+        return await apply_vlan(targets, network.segment_id, _vlan_name(network))
 
     @staticmethod
     async def _remove(db: Session, attachment: PrivateNetworkAttachment) -> None:
@@ -676,8 +711,11 @@ class PrivateNetworkService:
     async def _remove_from_server(db: Session, server_id: int, network: PrivateNetwork) -> None:
         if ServerDAO.get_by_id(db, server_id) is None:
             return
-        for switch, switch_port in resolve_uplink_ports(db, server_id):
-            await _switch_plugin(switch).remove_port_vlan(switch_port.name, network.segment_id)
+        planner = UplinkPlanner(db, server_id, plugin_factory=_switch_plugin)
+        targets = await planner.plan(_server_uplink(db, server_id))
+        warnings = await remove_vlan(targets, network.segment_id)
+        if warnings:
+            logger.warning("Private network %s: removed from server %s with warnings: %s", network.id, server_id, warnings)
 
     # --- repair loop ---
 

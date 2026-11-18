@@ -1893,6 +1893,20 @@ export async function regenerateSwitchPorts(switchId) {
   return await response.json();
 }
 
+export async function detectSwitchVpc() {
+  const response = await fetch(`${API_BASE}/network-switches/vpc/detect`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Failed to detect vPC pairs');
+  }
+
+  return await response.json();
+}
+
 export async function createSwitch(switchData) {
   const response = await fetch(`${API_BASE}/network-switches/`, {
     method: 'POST',

@@ -33,6 +33,14 @@ class NetworkSwitch(Base):
     test_logs = Column(Text, nullable=True)  # Logs from the last capability test run for this switch
     lldp_collected_at = Column(DateTime(timezone=True), nullable=True)  # Last successful LLDP neighbour collection
     lldp_error = Column(Text, nullable=True)  # Error from the last failed LLDP collection (cleared on success)
+    # Cisco vPC (MLAG) pairing, written by vPC detection (switch_vpc_service). The peer is
+    # the switch at the other end of the peer-keepalive link.
+    vpc_domain_id = Column(Integer, nullable=True)
+    vpc_peer_switch_id = Column(Integer, ForeignKey("network_switches.id", ondelete="SET NULL"), nullable=True)
+    vpc_peer_link = Column(String(64), nullable=True)  # Peer-link interface, e.g. port-channel45
+    vpc_role = Column(String(64), nullable=True)
+    vpc_detected_at = Column(DateTime(timezone=True), nullable=True)
+    vpc_error = Column(Text, nullable=True)  # Why the last detection could not pair this switch
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
