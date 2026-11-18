@@ -125,7 +125,7 @@ The cost is one listening socket and goroutine per client per runner, and the ru
 | WHMCS proxy client area | "Private proxy access" panel: fast-path address per IP, and on or off for the service's locations (`fastpath_action.php`, `rackflow_proxyFastPath*` functions) |
 | Billing API | `GET` and `POST /api/billing/services/{id}/proxy/fast-path` (`{"enabled": true}`), gated by the `proxy.view_credentials` client permission; the status payload's `proxy_assignments[].fast_path` carries each IP's private address |
 | Staff MCP | `proxy_runner` (update takes `location_id`, `server_id`, `vlan_mode` or `clear_placement`; new `fast_path` view with tenants and addresses, never credentials), `save_subnet` (`proxy_runner_id`, `clear_proxy_runner`) |
-| Client MCP | `services` view `fast_path`; `service_action` actions `fast_path_on` and `fast_path_off` (with `location_id`) |
+| Client MCP | `services` view `fast_path` (optionally narrowed by `service_id`); `service_action` actions `fast_path_on` and `fast_path_off` on a proxy service, applied to the locations of its IPs |
 
 ## Turning it on in a location
 

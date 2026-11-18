@@ -111,7 +111,7 @@ def pin_subnet(db: Session, subnet: IPSubnet, runner_id: Optional[int]) -> IPSub
 
 def subnet_fast_path(subnet: Optional[IPSubnet]) -> Optional[dict]:
     """Where a subnet's fast path is: its private IP, port and location, or None."""
-    if subnet is None or not subnet.fast_path_ip:
+    if subnet is None or not getattr(subnet, "fast_path_ip", None):
         return None
     runner = subnet.proxy_runner
     if runner is None or runner.location_id is None:
