@@ -56,10 +56,13 @@ class StatusReport(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip() or "unknown"
-    return request.client.host if request.client else "unknown"
+    """Source address; X-Forwarded-For counts only behind a trusted proxy."""
+    client_ip = request.client.host if request.client else None
+    if settings.trust_x_forwarded_for:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            client_ip = forwarded.split(",", 1)[0].strip() or client_ip
+    return client_ip or "unknown"
 
 
 def _failure_key(client_ip: str) -> str:

@@ -379,6 +379,12 @@ def test_runner_auth_failures_and_disabled_node(client, world, admin, monkeypatc
     assert 429 in codes
     # Once blocked, even the right key is refused from that address until the window ends.
     assert client.get(f"{RUNNER}/config", headers=_bearer(node["api_key"])).status_code == 429
+    # A forged X-Forwarded-For cannot dodge the block unless the proxy header is trusted.
+    spoofed = {**_bearer(node["api_key"]), "X-Forwarded-For": "203.0.113.9"}
+    monkeypatch.setattr(settings, "trust_x_forwarded_for", False)
+    assert client.get(f"{RUNNER}/config", headers=spoofed).status_code == 429
+    monkeypatch.setattr(settings, "trust_x_forwarded_for", True)
+    assert client.get(f"{RUNNER}/config", headers=spoofed).status_code == 200
 
 
 def test_admin_resize_and_terminated_storage_hidden_from_client(client, world, admin, alice, db_session):
