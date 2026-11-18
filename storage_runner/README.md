@@ -50,7 +50,7 @@ Nothing here ever comes from Rackflow.
 | `CEPH_PUBLIC_NETWORKS` | required | Comma-separated IPv4 CIDRs of the Ceph public network(s) (mons, OSDs, MDS) |
 | `CEPH_CONF` | ceph default | `ceph.conf` path for the admin CLI |
 | `CEPH_KEYRING` | ceph default | Admin keyring path on the node |
-| `GANESHA_IMAGE` | required | Container image with `ganesha.nfsd` and the CephFS FSAL, e.g. `quay.io/ceph/ceph:v18` |
+| `GANESHA_IMAGE` | required | Container image with `ganesha.nfsd` and the CephFS FSAL, e.g. `quay.io/ceph/ceph:v20.2.5` (nfs-ganesha 5.9, libcephfs2 20.2.5). Must be Ceph 20.2.4+ for clusters using aes256k keys |
 | `LINK_CIDR` | `169.254.128.0/17` | Carved into /30s for tenant veth links; must not overlap Ceph or customer networks |
 | `STATE_DIR` | `/var/lib/rackflow-storage-runner` | Link allocations, share deleting marks, per-tenant Ganesha config and keyrings (mode 0700) |
 | `PODMAN_REMOTE_URL` | empty | Podman service URL (`unix:///run/podman/podman.sock`) when the runner itself runs in a container |
@@ -62,7 +62,12 @@ rejected per tenant with a clear error.
 
 - **Ceph:** `ceph-common` (the `ceph` CLI) and an admin keyring
   (`CEPH_KEYRING`). The node needs `ceph` admin rights to manage subvolumes and
-  `ceph auth`.
+  `ceph auth`. **Version:** clusters on Ceph 20.2.4 or newer accept only
+  aes256k cephx keys, which older clients cannot use, so both `ceph-common`
+  on the node (or in the runner image) and the Ganesha image (its
+  `libcephfs2`) must be Ceph 20.2.4+ for such clusters. The runner image
+  installs ceph-common from download.ceph.com's `debian-tentacle` repository
+  and its build fails if the client is older than 20.2.4.
 - **EC data pool** added to the file system, with overwrites enabled. The
   runner checks but never creates or changes pools; if the pool is missing,
   is not a data pool of `CEPH_FS_NAME`, or lacks `allow_ec_overwrites`, it
@@ -76,8 +81,10 @@ rejected per tenant with a clear error.
 
 - **Trunk interface** (`PARENT_IFACE`) receiving the customer VLANs tagged.
 - **Kernel:** `8021q` (VLAN), `veth`, `nf_tables`, `nft_nat`/`nft_masq`,
-  `nf_conntrack` modules; `net.ipv4.ip_forward=1` (needed for remote Ceph
-  nodes; the runner reports a node error while it is off).
+  `nf_conntrack` modules; `net.ipv4.ip_forward=1`. Forwarding is only used
+  for remote Ceph nodes, but the runner checks it on every pass regardless
+  (it does not work out whether all Ceph addresses are local) and reports a
+  node error while it is off; tenants are still reconciled.
 - **Tools:** `iproute2` (`ip`, with JSON output), `nftables` (`nft`),
   `podman` (Docker cannot join a named network namespace by path, so podman
   is the only runtime).
@@ -231,14 +238,30 @@ For a pilot on one VM that runs the Ceph mons and OSDs as well as the runner.
    PARENT_IFACE=ens19
    CEPH_FS_NAME=cephfs
    CEPH_EC_POOL=cephfs_ec
-   CEPH_PUBLIC_NETWORKS=192.168.50.0/24   # ceph config get mon public_network
+   # from: ceph config get mon public_network
+   CEPH_PUBLIC_NETWORKS=192.168.50.0/24
    CEPH_KEYRING=/etc/ceph/ceph.client.admin.keyring
-   GANESHA_IMAGE=quay.io/ceph/ceph:v18
+   # Ceph 20.2.4+ (aes256k cephx keys); must not be older than the cluster's client requirement
+   GANESHA_IMAGE=quay.io/ceph/ceph:v20.2.5
    ```
 
-   `sysctl -w net.ipv4.ip_forward=1`. The VM's own Ceph address is inside
-   `CEPH_PUBLIC_NETWORKS`, so tenant traffic to Ceph takes the local `input`
-   path described above.
+   The node's own `ceph` CLI must also be 20.2.4 or newer. Debian's own
+   packages are too old (Debian 12 has 16.2.15, Debian 13 has 18.2.7), and
+   download.ceph.com's Tentacle repository builds only for bookworm, jammy
+   and noble. On a Debian 13 node, run the runner from its image (which has
+   a 20.2.x client) or install a 20.2.4+ client some other way.
+
+   Turn on forwarding even though every Ceph address is local here: the
+   runner reports a node error on every pass while `net.ipv4.ip_forward` is
+   0, whether or not anything is forwarded.
+
+   ```sh
+   echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-rackflow-storage.conf
+   sysctl -p /etc/sysctl.d/90-rackflow-storage.conf
+   ```
+
+   The VM's own Ceph address is inside `CEPH_PUBLIC_NETWORKS`, so tenant
+   traffic to Ceph takes the local `input` path described above.
 
 4. Check from the test client VM:
 

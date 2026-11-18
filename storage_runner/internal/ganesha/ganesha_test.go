@@ -67,7 +67,7 @@ func TestPodmanRunArgs(t *testing.T) {
 	s := execx.NewScript()
 	p := &Podman{Cmd: s}
 	err := p.Run(context.Background(), Spec{
-		Name: "rf-t12-nfs", TenantID: 12, Image: "quay.io/ceph/ceph:v18", Netns: "/run/netns/rf-t12", CoreHash: "abc",
+		Name: "rf-t12-nfs", TenantID: 12, Image: "quay.io/ceph/ceph:v20.2.5", Netns: "/run/netns/rf-t12", CoreHash: "abc",
 		Mounts: []Mount{
 			{Source: "/var/lib/r/tenants/t12/ganesha", Target: ConfDir, ReadOnly: true},
 			{Source: "/var/lib/r/tenants/t12/recovery", Target: RecoveryDir},
@@ -79,7 +79,7 @@ func TestPodmanRunArgs(t *testing.T) {
 	want := "podman run -d --name rf-t12-nfs --network ns:/run/netns/rf-t12 --restart on-failure" +
 		" --label rackflow.role=storage-nfs --label rackflow.tenant=12 --label rackflow.core-hash=abc" +
 		" -v /var/lib/r/tenants/t12/ganesha:/etc/ganesha:ro -v /var/lib/r/tenants/t12/recovery:/var/lib/nfs/ganesha" +
-		" --entrypoint /usr/bin/ganesha.nfsd quay.io/ceph/ceph:v18 -F -L STDERR -f /etc/ganesha/ganesha.conf"
+		" --entrypoint /usr/bin/ganesha.nfsd quay.io/ceph/ceph:v20.2.5 -F -L STDERR -f /etc/ganesha/ganesha.conf"
 	if got := s.Lines(); len(got) != 1 || got[0] != want {
 		t.Fatalf("got %v\nwant %s", got, want)
 	}

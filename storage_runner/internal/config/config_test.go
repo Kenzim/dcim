@@ -18,7 +18,7 @@ func minimal() map[string]string {
 		"CEPH_FS_NAME":         "cephfs",
 		"CEPH_EC_POOL":         "cephfs_ec",
 		"CEPH_PUBLIC_NETWORKS": "10.20.0.0/24, 10.10.0.5/24",
-		"GANESHA_IMAGE":        "quay.io/ceph/ceph:v18",
+		"GANESHA_IMAGE":        "quay.io/ceph/ceph:v20.2.5",
 	}
 }
 
