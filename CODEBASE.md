@@ -327,6 +327,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/patch-panels/:id` | `PatchPanelDetail.svelte` (dynamic import) |
 | `/admin/pdus` | `Pdus.svelte` |
 | `/admin/pdus/:id` | `PduDetail.svelte` (rack power: `RackPowerPanel.svelte` in `RackView`; server PSUs: `ServerPowerCard.svelte` in `ServerDetail`) |
+| Power history graphs | `PowerHistoryPanel.svelte` (range selector, kWh, charts from a loader and a builder in `lib/powerCharts.js`) is used on `PduDetail`, in `RackPowerPanel` (per feed and per rack, collapsible) and in `ServerPowerCard`; `PowerDrawPanel.svelte` is the dashboard "Power draw" panel beside the traffic panel. Charts: `ui/PowerChart.svelte` wraps `ui/AggregateTrafficChart.svelte`, which takes `format`, `referenceLines` (rated or usable current) and `showBand`; unit formatting is in `lib/powerFormat.js`. |
 | `/admin/racks` | `Racks.svelte` |
 | `/admin/racks/:id` | `RackView.svelte` |
 | `/admin/racks/rows/:locationId/:row` | `RowView.svelte` |

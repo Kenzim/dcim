@@ -2002,6 +2002,31 @@ export async function regeneratePduPorts(id, counts = null) {
   );
 }
 
+export async function getPduHistory(id, hours = 24) {
+  return _powerRequest('GET', `/pdus/${id}/history?hours=${hours}`, undefined, 'Failed to get PDU history');
+}
+
+export async function getPduInletHistory(pduId, inletId, hours = 24) {
+  return _powerRequest('GET', `/pdus/${pduId}/inlets/${inletId}/history?hours=${hours}`, undefined, 'Failed to get inlet history');
+}
+
+export async function getPowerFeedHistory(feedId, hours = 24) {
+  return _powerRequest('GET', `/power-feeds/${feedId}/history?hours=${hours}`, undefined, 'Failed to get power feed history');
+}
+
+export async function getRackPowerHistory(rackId, hours = 24) {
+  return _powerRequest('GET', `/racks/${rackId}/power-history?hours=${hours}`, undefined, 'Failed to get rack power history');
+}
+
+export async function getServerPowerHistory(serverId, hours = 24) {
+  return _powerRequest('GET', `/servers/${serverId}/power-history?hours=${hours}`, undefined, 'Failed to get server power history');
+}
+
+export async function getPowerHistory(hours = 24, locationId = null) {
+  const location = locationId ? `&location_id=${locationId}` : '';
+  return _powerRequest('GET', `/power-history?hours=${hours}${location}`, undefined, 'Failed to get power history');
+}
+
 export async function pollPdu(id) {
   return _powerRequest('POST', `/pdus/${id}/poll`, undefined, 'Failed to poll PDU');
 }

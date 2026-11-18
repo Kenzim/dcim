@@ -4,6 +4,7 @@
   import Alert from './ui/Alert.svelte';
   import HoverTip from './ui/HoverTip.svelte';
   import AggregateTrafficPanel from './AggregateTrafficPanel.svelte';
+  import PowerDrawPanel from './PowerDrawPanel.svelte';
   import {
     getLocations,
     getRacks,
@@ -425,10 +426,15 @@
       </div>
     </div>
 
-    <!-- Aggregate traffic: fills the remaining viewport height -->
-    <section class="panel traffic-shell">
-      <AggregateTrafficPanel />
-    </section>
+    <!-- Aggregate traffic and power draw: fill the remaining viewport height -->
+    <div class="traffic-row">
+      <section class="panel traffic-shell">
+        <AggregateTrafficPanel />
+      </section>
+      <section class="panel traffic-shell">
+        <PowerDrawPanel />
+      </section>
+    </div>
   </div>
 {/if}
 
@@ -767,6 +773,14 @@
     color: var(--danger-text);
   }
 
+  .traffic-row {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    min-height: 380px;
+  }
+
   /* Traffic panel shell — flexes to fill the remaining viewport height */
   .traffic-shell {
     flex: 1;
@@ -798,6 +812,10 @@
 
     .traffic-shell {
       min-height: 320px;
+    }
+
+    .traffic-row {
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 </style>

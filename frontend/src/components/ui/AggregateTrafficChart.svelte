@@ -1,20 +1,35 @@
 <script>
   /**
    * Multi-series SVG line chart for aggregate throughput (mbps) over time.
-   * series: [{ id, label, color, visible, samples: [{ t: epochMs, value: mbps }] }]
+   * series: [{ id, label, color, visible, samples: [{ t: epochMs, value: mbps, min?, max? }] }]
+   * Samples with min and max get a faint band when showBand is set.
+   * format: value formatter for axis labels and tooltips (defaults to Mbps).
+   * referenceLines: [{ value, label, color, dashed }] drawn across the chart; they count towards the y-axis maximum.
+   * showDate: label the time axis with dates (for ranges longer than a day).
    * width/height are measured pixel sizes from the parent so the chart fills
    * whatever space it's given without distortion.
    */
   export let series = [];
   export let width = 960;
   export let height = 280;
+  export let format = null;
+  export let referenceLines = [];
+  export let showBand = false;
+  export let showDate = false;
+  export let emptyText = 'No traffic data in this window.';
+  export let ariaLabel = 'Aggregate traffic chart';
 
   $: visibleSeries = series.filter((s) => s.visible !== false);
   $: allSamples = visibleSeries.flatMap((s) => s.samples || []);
   $: domainStart = allSamples.length ? Math.min(...allSamples.map((s) => s.t)) : 0;
   $: domainEnd = allSamples.length ? Math.max(...allSamples.map((s) => s.t)) : 1;
   $: domainSpan = Math.max(1, domainEnd - domainStart);
-  $: rawMax = Math.max(1, ...allSamples.map((s) => s.value || 0));
+  $: refValues = (referenceLines || []).map((r) => Number(r.value) || 0);
+  $: rawMax = Math.max(
+    1,
+    ...allSamples.map((s) => (showBand && s.max != null ? s.max : s.value) || 0),
+    ...refValues
+  );
   $: maxValue = niceCeiling(rawMax * 1.1);
   $: padding = { top: 16, right: 16, bottom: 28, left: 64 };
   $: chartWidth = Math.max(1, width - padding.left - padding.right);
@@ -34,6 +49,7 @@
   }
 
   function formatRate(mbps) {
+    if (format) return format(mbps);
     const value = Number(mbps ?? 0);
     if (!Number.isFinite(value) || value <= 0) return '0 Mbps';
     if (value >= 1000) {
@@ -51,6 +67,7 @@
     if (!t) return '—';
     const d = new Date(t);
     if (Number.isNaN(d.getTime())) return '—';
+    if (showDate) return d.toLocaleDateString([], { day: 'numeric', month: 'short' });
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
@@ -78,10 +95,11 @@
     domainStart,
     domainSpan,
     maxValue,
-    padding
+    padding,
+    showBand
   );
 
-  function buildSeriesPaths(seriesList, w, h, x0, xSpan, yMax, pad) {
+  function buildSeriesPaths(seriesList, w, h, x0, xSpan, yMax, pad, band) {
     const xAt = (t) => pad.left + ((t - x0) / xSpan) * w;
     const yAt = (v) => pad.top + h - (v / yMax) * h;
     return seriesList.map((s) => {
@@ -92,7 +110,14 @@
           : samples
               .map((p, i) => `${i === 0 ? 'M' : 'L'} ${xAt(p.t)} ${yAt(p.value || 0)}`)
               .join(' ');
-      return { id: s.id, color: s.color, d };
+      const banded = band && samples.length >= 2 && samples.every((p) => p.min != null && p.max != null);
+      const bandD = banded
+        ? samples.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xAt(p.t)} ${yAt(p.max)}`).join(' ') +
+          ' ' +
+          [...samples].reverse().map((p) => `L ${xAt(p.t)} ${yAt(p.min)}`).join(' ') +
+          ' Z'
+        : '';
+      return { id: s.id, color: s.color, d, bandD };
     });
   }
 
@@ -144,7 +169,7 @@
 
 <div class="agg-chart">
   {#if allSamples.length === 0}
-    <div class="agg-chart-empty">No traffic data in this window.</div>
+    <div class="agg-chart-empty">{emptyText}</div>
   {:else}
     <svg
       width="100%"
@@ -152,7 +177,7 @@
       viewBox="0 0 {width} {height}"
       preserveAspectRatio="none"
       role="img"
-      aria-label="Aggregate traffic chart"
+      aria-label={ariaLabel}
       on:mousemove={handleMove}
       on:mouseleave={clearHover}
     >
@@ -172,8 +197,26 @@
 
         <line x1={padding.left} y1={padding.top + chartHeight} x2={width - padding.right} y2={padding.top + chartHeight} class="axis-line" />
 
+        {#each referenceLines || [] as ref}
+          <line
+            x1={padding.left}
+            y1={y(Number(ref.value) || 0)}
+            x2={width - padding.right}
+            y2={y(Number(ref.value) || 0)}
+            stroke={ref.color || '#dc2626'}
+            stroke-width="1.5"
+            stroke-dasharray={ref.dashed === false ? 'none' : '6 4'}
+          />
+          {#if ref.label}
+            <text x={width - padding.right - 4} y={y(Number(ref.value) || 0) - 4} text-anchor="end" class="axis-label" style="fill: {ref.color || '#dc2626'}">{ref.label}</text>
+          {/if}
+        {/each}
+
         {#key `${width}x${height}:${maxValue}`}
           {#each seriesPaths as s (s.id)}
+            {#if s.bandD}
+              <path d={s.bandD} fill={s.color} fill-opacity="0.12" stroke="none" />
+            {/if}
             <path d={s.d} fill="none" stroke={s.color} stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
           {/each}
         {/key}

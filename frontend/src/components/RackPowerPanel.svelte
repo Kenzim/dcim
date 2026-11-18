@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { getRackPower, createPowerFeed, updatePowerFeed, deletePowerFeed } from '../lib/api.js';
+  import { getRackPower, getPowerFeedHistory, getRackPowerHistory, createPowerFeed, updatePowerFeed, deletePowerFeed } from '../lib/api.js';
   import {
     formatWatts,
     formatAmps,
@@ -10,7 +10,12 @@
     feedLimitPercent
   } from '../lib/power.js';
 
+  import PowerHistoryPanel from './PowerHistoryPanel.svelte';
+  import { buildFeedCharts, buildRackCharts } from '../lib/powerCharts.js';
+
   export let rackId;
+  let openHistory = {};
+  let showRackHistory = false;
 
   const phaseLabels = { single: 'Single phase', three: 'Three phase' };
 
@@ -205,6 +210,23 @@
                 <li class="muted">No PDU inlets drawing from this feed.</li>
               {/each}
             </ul>
+            <button
+              type="button"
+              class="btn-secondary btn-small history-toggle"
+              on:click={() => (openHistory = { ...openHistory, [feed.id]: !openHistory[feed.id] })}
+            >
+              {openHistory[feed.id] ? 'Hide history' : 'Show history'}
+            </button>
+            {#if openHistory[feed.id]}
+              <div class="history-block">
+                <PowerHistoryPanel
+                  title="{feed.name} history"
+                  loader={(hours) => getPowerFeedHistory(feed.id, hours)}
+                  build={buildFeedCharts}
+                  reloadKey={feed.id}
+                />
+              </div>
+            {/if}
           </div>
         {/each}
       </div>
@@ -251,6 +273,20 @@
             {/each}
           </tbody>
         </table>
+      </div>
+    {/if}
+
+    <button type="button" class="btn-secondary btn-small history-toggle" on:click={() => (showRackHistory = !showRackHistory)}>
+      {showRackHistory ? 'Hide rack power history' : 'Show rack power history'}
+    </button>
+    {#if showRackHistory}
+      <div class="history-block">
+        <PowerHistoryPanel
+          title="Rack power history"
+          loader={(hours) => getRackPowerHistory(rackId, hours)}
+          build={buildRackCharts}
+          reloadKey={rackId}
+        />
       </div>
     {/if}
   {/if}
@@ -312,6 +348,16 @@
 {/if}
 
 <style>
+  .history-toggle {
+    margin-top: 10px;
+  }
+
+  .history-block {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+  }
+
   .power-panel {
     margin-top: 24px;
     padding: 20px;

@@ -7,8 +7,11 @@
     deleteServerPowerInput,
     actionServerPowerInputOutlet,
     getPdus,
-    getPdu
+    getPdu,
+    getServerPowerHistory
   } from '../lib/api.js';
+  import PowerHistoryPanel from './PowerHistoryPanel.svelte';
+  import { buildServerCharts } from '../lib/powerCharts.js';
   import { formatWatts, formatAmps } from '../lib/power.js';
 
   export let serverId;
@@ -308,6 +311,15 @@
         </table>
       </div>
     {/if}
+
+    <div class="server-history">
+      <PowerHistoryPanel
+        title="Power history"
+        loader={(hours) => getServerPowerHistory(serverId, hours)}
+        build={buildServerCharts}
+        reloadKey={serverId}
+      />
+    </div>
   {/if}
 </div>
 
@@ -398,6 +410,12 @@
 {/if}
 
 <style>
+  .server-history {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+  }
+
   .power-card {
     display: flex;
     flex-direction: column;
