@@ -1,0 +1,73 @@
+# Private networks
+
+A client can create an isolated layer 2 network in one location and connect their virtual machines and dedicated servers to it. Version 1 uses one 802.1Q VLAN per network, taken from a pool that is set per location. The feature is free and unmetered, with limits per client.
+
+## How it works
+
+- **Network:** a row in `private_networks` with an owner, a location, a VLAN ID (`segment_id`) and an address range. `segmentation_type` is always `vlan` today; it exists so that another driver (for example VXLAN) can be added without changing the API or the portal.
+- **Virtual machine:** Rackflow adds an extra network card to the VM on the pool's bridge with `tag=<vlan>`, and sets `ipconfigN` so cloud-init can apply the address. The tag is set on the hypervisor, so the client cannot change it.
+- **Dedicated server:** the server's uplink is its PXE port plus any ports in the same LAG group. Rackflow follows the cable runs to the switch ports and adds the VLAN there as tagged. An access port becomes a trunk whose untagged VLAN is the old access VLAN, with an explicit allowed list, so PXE and reinstalls keep working. A port in a port-channel is configured on the port-channel.
+- **VLAN database:** creating a network creates the VLAN (named `pn-<network id>`) on every enabled switch in the location that uses the `nxos` plugin. Deleting the network removes it.
+- **Addresses:** Rackflow hands out static addresses inside the network's range. There is no gateway, DHCP or routing.
+
+## One-off setup per location
+
+1. **Pick a VLAN range** that nothing else uses, for example 2000 to 3899. Rackflow accepts 2 to 3967, because NX-OS keeps 3968 to 4094 for itself. Check with `show vlan internal usage` on a switch.
+2. **Allow the range on the trunks** between the switches that carry client traffic, and on the hypervisor uplinks. Keep it off switches that should never carry client traffic (IPMI, Ceph).
+3. **Make the Proxmox bridge VLAN-aware** on every node (`bridge-vlan-aware yes` and a `bridge-vids` range that covers the pool).
+4. **Enable NX-API** on each switch that dedicated servers plug into (`feature nxapi`, HTTPS), and create a switch account that may configure VLANs and interfaces.
+5. **Switch plugin:** in Admin → Switches, change those switches from `snmpv3` to `nxos` and fill in the NX-API account. The SNMP settings stay as they are, and monitoring and bandwidth graphs continue to work. Only switches set to `nxos` are configured by Rackflow, so leave the IPMI and Ceph switches on `snmpv3`.
+6. **Cluster location:** in Admin → Proxmox Inventory, set the location of each cluster. A VM can only join networks of its cluster's location.
+7. **Pool:** in Admin → Private Networks, add a pool for the location with the VLAN range, the bridge name and the limits.
+
+Dedicated servers also need what Rackflow already records: a port marked as the PXE port, its LAG group if it is bonded, and a cable run from each uplink port to a switch port.
+
+## Limits
+
+| Setting | Default | Where |
+|---|---|---|
+| Networks per client per location | 5 | Pool |
+| Networks per service | 4 | Pool |
+| Address range | `10.0.0.0/24`; any private IPv4 range from /16 to /29 | Chosen per network |
+| Networks per location | Size of the pool's VLAN range | Pool |
+
+An admin can create a network for a client beyond the per-client limit.
+
+## What the client does
+
+The portal page is `/client/networks`. After connecting a service, the client sets the address inside the operating system:
+
+- **Virtual machine:** configure the new network card (the portal shows its MAC address). Templates that use cloud-init apply the address on the next reboot.
+- **Dedicated server:** add a VLAN interface with the network's VLAN ID on the main network card and give it the address shown.
+
+## Cleanup and repair
+
+- **Terminate:** terminating a service through the billing API, the reseller API or admin delete detaches it from all its networks straight away. A service terminated by the commerce lifecycle worker (non-payment) is detached by the repair loop, within about five minutes.
+- **Reuse gate:** a dedicated server is not offered for a new order while any attachment row still points at it, so a recycled server cannot land in the previous client's network. If a switch is unreachable, the attachment stays in `detaching` with the error shown on the admin page.
+- **Repair loop:** the reconciliation loop (`app/services/reconciliation_jobs.py`) retries failed attaches and detaches, re-adds a VM network card lost in a rebuild, puts back a VLAN removed from a port by hand, and finishes network deletes.
+- **VLAN reuse:** VLAN IDs are handed out in rotation, so a released ID is not reused until the pool wraps round.
+- **Force delete:** deleting a network with "skip switches" drops the record without contacting the switches. Use it only for a switch that is gone for good.
+
+## Known limits of version 1
+
+- A port that is already a trunk allowing every VLAN is refused; give it an explicit allowed list first.
+- Switch and hypervisor changes run one at a time inside the single app process (the Docker image starts one uvicorn process). Running several app processes would need a shared lock first.
+- The NX-OS driver is covered by tests with mocked HTTP only; it has not been run against a real switch yet.
+- Private traffic on a dedicated server is included in that server's port traffic graph, because the poller counts the whole port.
+- The portal does not configure the operating system on dedicated servers.
+- No WHMCS module changes: WHMCS clients reach the page through portal sign-in.
+
+## Code map
+
+| Layer | Path |
+|---|---|
+| Models | `app/models/private_network.py`, `proxmox_clusters.location_id` |
+| Migration | `alembic/versions/add_private_networks.py` |
+| DAO | `app/dao/private_network_dao.py` |
+| Service | `app/services/private_network_service.py` |
+| API | `app/api/private_networks.py` (`/api/admin/private-networks`, `/api/client/private-networks`) |
+| Switch driver | `app/plugins/nxos.py` |
+| Hypervisor | `attach_private_nic` / `detach_private_nic` in `app/plugins/proxmox.py` |
+| Admin UI | `frontend/src/components/PrivateNetworks.svelte` |
+| Client UI | `frontend/src/components/client/ClientNetworks.svelte` |
+| Tests | `tests/services/test_private_network_service.py`, `tests/api/test_private_networks_api.py`, `tests/plugins/test_nxos.py`, `tests/plugins/test_proxmox_private_nic.py` |

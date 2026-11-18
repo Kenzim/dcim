@@ -1141,6 +1141,128 @@ class ProxmoxPlugin(ServerPlugin):
             response.raise_for_status()
         return {"changed": True, "net_key": key, "value": updated, "previous": current}
 
+    @staticmethod
+    def _parse_net_config(value: str) -> Dict[str, str]:
+        """Split a ``netN`` value into its options, plus ``model`` and ``mac``."""
+        parsed: Dict[str, str] = {}
+        for position, part in enumerate(str(value or "").split(",")):
+            key, _, val = part.partition("=")
+            key = key.strip()
+            if not key:
+                continue
+            if position == 0:
+                parsed["model"] = key
+                if val:
+                    parsed["mac"] = val.strip().upper()
+            else:
+                parsed[key] = val.strip()
+        return parsed
+
+    def _private_nics(self, cfg: Dict[str, Any], bridge: str, vlan_tag: int) -> List[int]:
+        """Indexes of the extra NICs (never ``net0``) on ``bridge`` tagged ``vlan_tag``."""
+        found = []
+        for key, value in cfg.items():
+            match = re.match(r"^net(\d+)$", str(key))
+            if not match or int(match.group(1)) == 0:
+                continue
+            nic = self._parse_net_config(value)
+            if nic.get("bridge") == bridge and nic.get("tag") == str(vlan_tag):
+                found.append(int(match.group(1)))
+        return sorted(found)
+
+    @staticmethod
+    def _validate_private_nic_args(bridge: str, vlan_tag: int) -> tuple:
+        bridge_name = (bridge or "").strip()
+        if not re.match(r"^[A-Za-z0-9._-]+$", bridge_name):
+            raise ValueError(f"Invalid bridge name: {bridge_name!r}")
+        tag = int(vlan_tag)
+        if not 1 <= tag <= 4094:
+            raise ValueError(f"Invalid VLAN tag: {vlan_tag!r}")
+        return bridge_name, tag
+
+    async def attach_private_nic(
+        self,
+        bridge: str,
+        vlan_tag: int,
+        *,
+        ip_cidr: Optional[str] = None,
+        mac: Optional[str] = None,
+        vmid: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Add an extra NIC on ``bridge`` tagged ``vlan_tag``; a no-op if one exists.
+
+        The tag is set on the hypervisor, so the guest cannot move itself to
+        another VLAN. ``ip_cidr`` is written to cloud-init when the VM has a
+        cloud-init drive; ``mac`` keeps a previous address across a rebuild.
+        """
+        target = vmid if vmid is not None else self.vmid
+        if target is None:
+            raise ValueError("vmid is required")
+        bridge_name, tag = self._validate_private_nic_args(bridge, vlan_tag)
+        if mac is not None and not re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", mac):
+            raise ValueError(f"Invalid MAC address: {mac!r}")
+        if ip_cidr is not None and not re.match(r"^[0-9.]+/\d{1,2}$", ip_cidr):
+            raise ValueError(f"Invalid IP: {ip_cidr!r}")
+
+        cfg = await self.get_qemu_config(vmid=int(target))
+        existing = self._private_nics(cfg, bridge_name, tag)
+        if existing:
+            index = existing[0]
+            nic = self._parse_net_config(cfg.get(f"net{index}"))
+            return {"changed": False, "index": index, "mac": nic.get("mac")}
+
+        index = next((i for i in range(1, 32) if f"net{i}" not in cfg), None)
+        if index is None:
+            raise RuntimeError(f"VM {target} has no free network device slot")
+        model = self._parse_net_config(cfg.get("net0")).get("model") or "virtio"
+        head = f"{model}={mac.upper()}" if mac else model
+        payload = {f"net{index}": f"{head},bridge={bridge_name},tag={tag},firewall=0"}
+        has_cloud_init = any("cloudinit" in str(v) for k, v in cfg.items() if not str(k).startswith("net"))
+        if ip_cidr and has_cloud_init:
+            payload[f"ipconfig{index}"] = f"ip={ip_cidr}"
+
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{int(target)}/config"
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.put(url, headers=headers, data=payload)
+            response.raise_for_status()
+
+        assigned = mac.upper() if mac else None
+        if assigned is None:
+            cfg = await self.get_qemu_config(vmid=int(target))
+            assigned = self._parse_net_config(cfg.get(f"net{index}")).get("mac")
+        return {"changed": True, "index": index, "mac": assigned}
+
+    async def detach_private_nic(
+        self,
+        bridge: str,
+        vlan_tag: int,
+        *,
+        vmid: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Remove every extra NIC on ``bridge`` tagged ``vlan_tag`` (never ``net0``)."""
+        target = vmid if vmid is not None else self.vmid
+        if target is None:
+            raise ValueError("vmid is required")
+        bridge_name, tag = self._validate_private_nic_args(bridge, vlan_tag)
+
+        cfg = await self.get_qemu_config(vmid=int(target))
+        indexes = self._private_nics(cfg, bridge_name, tag)
+        if not indexes:
+            return {"changed": False, "removed": []}
+        keys = []
+        for index in indexes:
+            keys.append(f"net{index}")
+            if f"ipconfig{index}" in cfg:
+                keys.append(f"ipconfig{index}")
+
+        url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{int(target)}/config"
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
+            response = await client.put(url, headers=headers, data={"delete": ",".join(keys)})
+            response.raise_for_status()
+        return {"changed": True, "removed": indexes}
+
     async def resize_disk(self, disk: str, size: str, vmid: Optional[int] = None) -> None:
         """
         Resize a VM disk via Proxmox ``PUT .../resize``.

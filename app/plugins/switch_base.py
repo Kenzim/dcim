@@ -14,6 +14,7 @@ class SwitchPluginCategory(str, Enum):
     MONITORING = "monitoring"  # Port statistics, bandwidth monitoring
     PORT_CONTROL = "port_control"  # Enable/disable ports, configure port settings
     LLDP_DISCOVERY = "lldp_discovery"  # Read LLDP neighbour tables
+    VLAN_MANAGEMENT = "vlan_management"  # Create/delete VLANs, change the VLANs a port carries
 
 
 class SwitchPlugin(ABC):
@@ -107,6 +108,25 @@ class SwitchPlugin(ABC):
     
     async def delete_vlan(self, vlan_id: int) -> Dict[str, Any]:
         """Delete a VLAN"""
+        raise NotImplementedError("VLAN management not supported by this plugin")
+
+    async def get_port_vlans(self, port: str) -> Dict[str, Any]:
+        """
+        Get the VLANs a port carries.
+
+        Returns:
+            Dict with 'interface' (the interface the settings live on, which is
+            the port-channel for a bundled port), 'mode' ("access" or "trunk"),
+            'native_vlan' (int) and 'allowed_vlans' (list of int)
+        """
+        raise NotImplementedError("VLAN management not supported by this plugin")
+
+    async def add_port_vlan(self, port: str, vlan_id: int) -> Dict[str, Any]:
+        """Carry ``vlan_id`` tagged on a port, keeping its untagged VLAN as it is"""
+        raise NotImplementedError("VLAN management not supported by this plugin")
+
+    async def remove_port_vlan(self, port: str, vlan_id: int) -> Dict[str, Any]:
+        """Stop carrying ``vlan_id`` tagged on a port"""
         raise NotImplementedError("VLAN management not supported by this plugin")
     
     # Optional methods for LLDP_DISCOVERY category

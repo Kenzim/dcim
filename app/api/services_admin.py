@@ -33,6 +33,7 @@ from app.services.provisioning import (
     infer_provisioning_source,
 )
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox, reserve_vmid_for_service
+from app.services.private_network_service import PrivateNetworkService
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -1699,6 +1700,8 @@ async def update_service_status(
     else:
         service.terminated_at = None
     ServiceDAO.update(db, service)
+    if new_status == ServiceStatus.TERMINATED:
+        await PrivateNetworkService.release_service_quietly(db, service.id)
 
     log_server_activity_success(
         db,

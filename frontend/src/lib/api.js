@@ -4782,3 +4782,110 @@ export const adminUpdateClientMcpKey = (userId, keyId, data) =>
   clientMcpKeysRequest(`/admin/clients/${userId}/mcp-keys/${keyId}`, { method: 'PATCH', body: JSON.stringify(data), errorMessage: 'Failed to update MCP key' });
 export const adminDeleteClientMcpKey = (userId, keyId) =>
   clientMcpKeysRequest(`/admin/clients/${userId}/mcp-keys/${keyId}`, { method: 'DELETE', errorMessage: 'Failed to delete MCP key' });
+
+// --- Private networks: one layer 2 network per client per location ---
+
+async function privateNetworkRequest(path, { client = false, method = 'GET', body, errorMessage } = {}) {
+  const headers = client ? { ..._impersonationHeaders() } : {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}/${client ? 'client' : 'admin'}/private-networks${path}`, {
+    method,
+    headers,
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (response.status === 204) return null;
+  return _jsonOrThrow(response, errorMessage || 'Private network request failed');
+}
+
+export function listPrivateNetworkPools() {
+  return privateNetworkRequest('/pools', { errorMessage: 'Failed to list private network pools' });
+}
+
+export function createPrivateNetworkPool(data) {
+  return privateNetworkRequest('/pools', { method: 'POST', body: data, errorMessage: 'Failed to create pool' });
+}
+
+export function updatePrivateNetworkPool(poolId, data) {
+  return privateNetworkRequest(`/pools/${poolId}`, { method: 'PATCH', body: data, errorMessage: 'Failed to update pool' });
+}
+
+export function deletePrivateNetworkPool(poolId) {
+  return privateNetworkRequest(`/pools/${poolId}`, { method: 'DELETE', errorMessage: 'Failed to delete pool' });
+}
+
+export function listPrivateNetworks() {
+  return privateNetworkRequest('', { errorMessage: 'Failed to list private networks' });
+}
+
+export function createPrivateNetwork(data) {
+  return privateNetworkRequest('', { method: 'POST', body: data, errorMessage: 'Failed to create private network' });
+}
+
+export function deletePrivateNetwork(networkId, { skipSwitches = false } = {}) {
+  return privateNetworkRequest(`/${networkId}${skipSwitches ? '?skip_switches=true' : ''}`, {
+    method: 'DELETE',
+    errorMessage: 'Failed to delete private network',
+  });
+}
+
+export function syncPrivateNetwork(networkId) {
+  return privateNetworkRequest(`/${networkId}/sync`, { method: 'POST', errorMessage: 'Failed to sync private network' });
+}
+
+export function attachPrivateNetwork(networkId, data) {
+  return privateNetworkRequest(`/${networkId}/attachments`, {
+    method: 'POST',
+    body: data,
+    errorMessage: 'Failed to attach service',
+  });
+}
+
+export function detachPrivateNetwork(networkId, attachmentId) {
+  return privateNetworkRequest(`/${networkId}/attachments/${attachmentId}`, {
+    method: 'DELETE',
+    errorMessage: 'Failed to detach service',
+  });
+}
+
+export function clientListPrivateNetworks() {
+  return privateNetworkRequest('', { client: true, errorMessage: 'Failed to load private networks' });
+}
+
+export function clientPrivateNetworkOptions() {
+  return privateNetworkRequest('/options', { client: true, errorMessage: 'Failed to load private network options' });
+}
+
+export function clientCreatePrivateNetwork(data) {
+  return privateNetworkRequest('', {
+    client: true,
+    method: 'POST',
+    body: data,
+    errorMessage: 'Failed to create private network',
+  });
+}
+
+export function clientDeletePrivateNetwork(networkId) {
+  return privateNetworkRequest(`/${networkId}`, {
+    client: true,
+    method: 'DELETE',
+    errorMessage: 'Failed to delete private network',
+  });
+}
+
+export function clientAttachPrivateNetwork(networkId, data) {
+  return privateNetworkRequest(`/${networkId}/attachments`, {
+    client: true,
+    method: 'POST',
+    body: data,
+    errorMessage: 'Failed to attach service',
+  });
+}
+
+export function clientDetachPrivateNetwork(networkId, attachmentId) {
+  return privateNetworkRequest(`/${networkId}/attachments/${attachmentId}`, {
+    client: true,
+    method: 'DELETE',
+    errorMessage: 'Failed to detach service',
+  });
+}

@@ -49,6 +49,7 @@ from app.services.provisioning import (
 from app.services.provisioning.adapters import from_billing_bare_metal, from_billing_vm
 from app.services.client_permission_resolver import require_client_permission
 from app.services.client_portal_service import mint_sso_ticket
+from app.services.private_network_service import PrivateNetworkService
 from app.services.reseller_billing_service import (
     DeployCreditRequiredError,
     IdempotencyConflictError,
@@ -765,6 +766,7 @@ async def terminate_service(
         billing.status = ServiceBillingStatus.CANCELLED
         billing.next_charge_at = None
     db.commit()
+    await PrivateNetworkService.release_service_quietly(db, service.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

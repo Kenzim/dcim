@@ -30,6 +30,11 @@ SWITCH_CAPABILITIES = {
         "name": "port_control",
         "display_name": "Port Control",
         "description": "Control switch ports (enable/disable)"
+    },
+    "vlan_management": {
+        "name": "vlan_management",
+        "display_name": "VLAN Management",
+        "description": "Create VLANs and change the VLANs a port carries"
     }
 }
 
@@ -42,6 +47,7 @@ SERVER_PLUGIN_CAPABILITIES = {
 
 SWITCH_PLUGIN_CAPABILITIES = {
     "snmpv3": ["monitoring"],
+    "nxos": ["monitoring", "vlan_management"],
 }
 
 

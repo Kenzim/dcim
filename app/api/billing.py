@@ -44,6 +44,7 @@ from app.models.service_bare_metal import ServiceBareMetal
 from app.models.service_vm import ServiceVm
 from app.services.boot_launcher import release_boot_media, schedule_launch, vmedia_capable
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox
+from app.services.private_network_service import PrivateNetworkService
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.utils.shell_escape import shell_escape_double_quoted
@@ -1736,6 +1737,7 @@ async def terminate_service(
     service.status = ServiceStatus.TERMINATED
     service.terminated_at = datetime.now(timezone.utc)
     ServiceDAO.update(db, service)
+    await PrivateNetworkService.release_service_quietly(db, service.id)
 
     log_server_activity_success(
         db,

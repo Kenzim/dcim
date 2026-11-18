@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.dao.boot_task_dao import BootTaskDAO
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.network_port_dao import NetworkPortDAO
+from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.dao.service_dao import ServiceDAO
@@ -28,6 +29,8 @@ from app.services.server_lock import locked_message
 
 logger = logging.getLogger(__name__)
 
+_PRIVATE_NETWORK_HOLD = "still attached to a private network"
+
 
 def server_not_ready_reason(db: Session, server: Server) -> Optional[str]:
     """Why ``server`` can't take a new order right now, or None if it can."""
@@ -41,6 +44,9 @@ def server_not_ready_reason(db: Session, server: Server) -> Optional[str]:
         return "has an open install task"
     if BootTaskDAO.get_active_by_server(db, server.id):
         return "has an open boot task"
+    if PrivateNetworkDAO.server_has_attachments(db, server.id):
+        # The previous client's private VLANs are still on its switch ports.
+        return _PRIVATE_NETWORK_HOLD
     port = NetworkPortDAO.get_pxe_boot_port(db, server.id)
     if port is None or not port.pxe_ip:
         return "no PXE boot port with a reserved IP"
@@ -250,6 +256,8 @@ def _pin_existing_server(db: Session, server_id: int) -> Server:
     existing = ServiceDAO.get_by_server(db, server_id)
     if any(s.status != ServiceStatus.TERMINATED for s in existing):
         raise ProvisioningError("conflict", "Server is already assigned to a service")
+    if PrivateNetworkDAO.server_has_attachments(db, server_id):
+        raise ProvisioningError("conflict", f"Server is {_PRIVATE_NETWORK_HOLD}; its switch ports are not clean yet")
     return server
 
 

@@ -46,6 +46,11 @@ from app.models.ipam import IPSubnet, IPAddress, ServiceIPAssignment, ServiceIPA
 from app.models.vm_config import FamilyVMConfig, ProductVMConfig
 from app.models.vm_ip_allocation import VMIPAllocation, vm_ip_allocation_cluster_association
 from app.models.vmid_reservation import VMIDReservation
+from app.models.private_network import (
+    PrivateNetworkPool,
+    PrivateNetwork,
+    PrivateNetworkAttachment,
+)
 from app.models.permission_set import PermissionSet
 from app.models.vm_deployment_job import (
     VMDeploymentJob,

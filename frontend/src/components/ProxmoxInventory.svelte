@@ -7,9 +7,11 @@
     createProxmoxCluster,
     updateProxmoxCluster,
     syncProxmoxCluster,
+    getLocations,
   } from '../lib/api.js';
 
   let clusters = [];
+  let locations = [];
   let loading = false;
   let syncingClusterId = null;
   let error = '';
@@ -19,14 +21,18 @@
   let showEditModal = false;
   let editingClusterId = null;
 
-  let createForm = { name: '', api_url: '', username: '', password: '', verify_ssl: false };
-  let editForm = { name: '', api_url: '', username: '', password: '', verify_ssl: false, enabled: true };
+  const emptyCreateForm = () => ({ name: '', api_url: '', username: '', password: '', verify_ssl: false, location_id: '' });
+  let createForm = emptyCreateForm();
+  let editForm = { name: '', api_url: '', username: '', password: '', verify_ssl: false, enabled: true, location_id: '' };
+
+  const locationIdOrNull = (value) => (value === '' || value == null ? null : Number(value));
+  $: locationNames = Object.fromEntries(locations.map((l) => [l.id, l.name]));
 
   async function load() {
     loading = true;
     error = '';
     try {
-      clusters = await listProxmoxClusters();
+      [clusters, locations] = await Promise.all([listProxmoxClusters(), getLocations()]);
     } catch (err) {
       error = err.message;
     } finally {
@@ -36,8 +42,8 @@
 
   async function submitCreate() {
     try {
-      await createProxmoxCluster(createForm);
-      createForm = { name: '', api_url: '', username: '', password: '', verify_ssl: false };
+      await createProxmoxCluster({ ...createForm, location_id: locationIdOrNull(createForm.location_id) });
+      createForm = emptyCreateForm();
       showCreateModal = false;
       success = 'Cluster created.';
       await load();
@@ -55,6 +61,7 @@
       password: '',
       verify_ssl: false,
       enabled: true,
+      location_id: cluster.location_id ?? '',
     };
     showEditModal = true;
   }
@@ -67,6 +74,7 @@
         api_url: editForm.api_url,
         verify_ssl: editForm.verify_ssl,
         enabled: editForm.enabled,
+        location_id: locationIdOrNull(editForm.location_id),
       };
       if (editForm.username) payload.username = editForm.username;
       if (editForm.password) payload.password = editForm.password;
@@ -121,6 +129,7 @@
     <div class="table">
       <div class="row head">
         <div>Cluster</div>
+        <div>Location</div>
         <div>API URL</div>
         <div>Nodes</div>
         <div>Templates</div>
@@ -131,6 +140,7 @@
       {#each clusters as c}
         <div class="row">
           <div>{c.cluster_name}</div>
+          <div class:muted={!c.location_id}>{locationNames[c.location_id] || 'not set'}</div>
           <div class="mono">{c.api_url}</div>
           <div>{c.node_count}</div>
           <div>{c.template_count}</div>
@@ -157,6 +167,12 @@
       <input bind:value={createForm.api_url} placeholder="https://proxmox:8006" />
       <input bind:value={createForm.username} placeholder="root@pam" />
       <input bind:value={createForm.password} type="password" placeholder="Password" />
+      <select bind:value={createForm.location_id} title="Needed for private networks: VMs join networks of this location">
+        <option value="">No location</option>
+        {#each locations as loc (loc.id)}
+          <option value={loc.id}>{loc.name}</option>
+        {/each}
+      </select>
       <label><input type="checkbox" bind:checked={createForm.verify_ssl} /> Verify SSL</label>
       <div class="row-actions">
         <button class="tiny-btn" on:click={() => (showCreateModal = false)}>Cancel</button>
@@ -174,6 +190,12 @@
       <input bind:value={editForm.api_url} placeholder="https://proxmox:8006" />
       <input bind:value={editForm.username} placeholder="New username (optional)" />
       <input bind:value={editForm.password} type="password" placeholder="New password (optional)" />
+      <select bind:value={editForm.location_id} title="Needed for private networks: VMs join networks of this location">
+        <option value="">No location</option>
+        {#each locations as loc (loc.id)}
+          <option value={loc.id}>{loc.name}</option>
+        {/each}
+      </select>
       <label><input type="checkbox" bind:checked={editForm.verify_ssl} /> Verify SSL</label>
       <label><input type="checkbox" bind:checked={editForm.enabled} /> Enabled</label>
       <div class="row-actions">
@@ -190,7 +212,8 @@
   .top-actions { display: flex; gap: 8px; }
   .action-btn { padding: 8px 12px; border: none; border-radius: 6px; background: var(--accent-color); color: #fff; cursor: pointer; }
   .table { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .row { display: grid; grid-template-columns: minmax(160px, 1.3fr) minmax(200px, 1.8fr) 70px 90px 90px 150px 220px; gap: 8px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; min-width: 980px; }
+  .row { display: grid; grid-template-columns: minmax(160px, 1.3fr) minmax(110px, 0.9fr) minmax(200px, 1.8fr) 70px 90px 90px 150px 220px; gap: 8px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--border-color); font-size: 13px; min-width: 1100px; }
+  select { background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 8px; }
   .head { background: var(--bg-secondary); font-size: 12px; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; }
   .muted { color: var(--text-secondary); font-size: 12px; }
   input { background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 8px; }

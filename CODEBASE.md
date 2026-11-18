@@ -24,6 +24,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Patch panels and multi-hop cable paths | `app/models/patch_panel.py`, API `app/api/patch_panel.py` → `app/services/patch_panel_service.py` → `app/dao/patch_panel_dao.py`; path tracing through panels in `app/services/cable_trace_service.py`; UI `PatchPanels.svelte`, `PatchPanelDetail.svelte` |
 | LLDP neighbours and the recorded-versus-seen check | Collection `app/plugins/snmpv3.py` (`get_lldp_neighbors`) → `app/services/lldp_collection_service.py` → `switch_lldp_neighbors` table; comparison `app/services/lldp_compare_service.py`; both exposed under `/api/admin/cabling/lldp` |
 | PDUs, rack power feeds, server PSUs | Plugins `app/plugins/pdu/`, logic `app/services/power_service.py`, API `app/api/pdu.py` / `power_feed.py` / `server_power.py`, MCP `app/mcp/tools/pdus.py` |
+| Client private networks (VLAN per network) | `app/services/private_network_service.py`, `app/api/private_networks.py`, switch driver `app/plugins/nxos.py`; setup and limits in `docs/private-networks.md` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
@@ -153,6 +154,7 @@ All included from `app/main.py` under `/api`.
 | `commerce_auth_public.py` | `/api/commerce/auth` | Register, verify email, password reset |
 | `product_catalog.py` | `/api/product-catalog` | Families, products, VM templates, OS profiles, VM config |
 | `proxmox_inventory.py` | `/api/proxmox` | Clusters, sync, inventory, VM plan |
+| `private_networks.py` | `/api/admin/private-networks`, `/api/client/private-networks` | Private network pools, networks, attachments |
 | `ipam.py` | `/api/ipam` | Subnets, assignments, history |
 | `vm_ip_allocations.py` | `/api/vm-ip-allocations` | Preallocated VM IPs |
 | `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner |
@@ -187,7 +189,7 @@ Exported from `app/models/__init__.py`. One file per entity (or small group).
 | Boot / install | `boot_task.py`, `installation_task.py`, `server_capability.py`, `hardware_detection_report.py`, `server_activity.py` |
 | DHCP/TFTP | `dhcp_config.py`, `tftp_config.py`, `service_instance.py` |
 | Catalog / services | `product_catalog.py`, `service.py`, `service_bare_metal.py`, `service_vm.py`, `vm_config.py`, `script.py` |
-| Proxmox / IPAM | `proxmox_inventory.py`, `ipam.py`, `vm_ip_allocation.py`, `vmid_reservation.py`, `proxy_runner.py`, `proxy_subnet_group.py` |
+| Proxmox / IPAM | `proxmox_inventory.py`, `ipam.py`, `vm_ip_allocation.py`, `vmid_reservation.py`, `proxy_runner.py`, `proxy_subnet_group.py`, `private_network.py` |
 | Billing / assets | `billing_integration.py`, `mcp_api_key.py`, `asset.py` |
 | Retail commerce | `commerce_account.py`, `commerce_order.py`, `storefront.py`, `commerce_invoice_ext.py`, `commerce_coupon_tax.py`, `commerce_email.py`, `commerce_audit.py`, `commerce_gateway_log.py`, `commerce_auth_extra.py`, `commerce_webhook.py`, `support_ticket.py` |
 | Plugins (metadata leftovers) | `plugin.py`, `plugin_category.py`, `switch_plugin.py`, `category.py` |
@@ -220,6 +222,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `proxmox_placement.py` / `vmid_allocator.py` / `ip_allocation.py` | Placement, VMID, IP assignment |
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
+| `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
 | `cabling_graph_service.py` | Builds the cabling graph from batch queries in `app/dao/cabling_graph_dao.py`: nodes, ports, cables and end-to-end paths through patch panels. Link status comes from the switch end's stored `oper_status` and counts only while fresh (`STATUS_STALE_AFTER`, 15 minutes); older data is `stale`, never polled is `unknown` |
 | `cable_trace_service.py` | Follows a port through patch panels (front to rear) to the server or switch port at the far end; shared by the cable-run API, server and switch port views, bandwidth views, MCP and the graph |
@@ -245,6 +248,7 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `ipmi.py` | IPMI/BMC power & related |
 | `proxmox.py` | Proxmox VM provisioning / power |
 | `snmpv3.py` | SNMPv3 switch plugin (ports, bandwidth) |
+| `nxos.py` | Cisco NX-OS switch plugin: VLANs and port trunks over NX-API, monitoring through SNMPv3 |
 | `switch_base.py` / `switch_registry.py` | Switch plugin ABC + registry |
 | `pdu/` | PDU plugins: `base.py` (`PduPlugin`, capabilities metering / outlet_metering / outlet_control), `registry.py` (auto-discovers modules in `pdu/`), `snmp.py` (shared SNMP v1/v2c/v3 client), `manual.py` (unmanaged PDU) |
 
@@ -332,6 +336,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/vm-templates` | `VMTemplates.svelte` |
 | `/admin/vm-ip-allocations` | `VMIpAllocations.svelte` |
 | `/admin/proxmox-inventory` | `ProxmoxInventory.svelte` |
+| `/admin/private-networks` | `PrivateNetworks.svelte` |
 | `/admin/proxy-catalog` | Redirects to `/admin/product-catalog?type=http_proxy` |
 | `/admin/proxy-ipam` | `ProxyIpam.svelte` (IPAM proxy flag) |
 | `/admin/proxy-runners` | `ProxyRunners.svelte` (standalone proxy runners) |
@@ -350,7 +355,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/user` | `User.svelte` |
 | `/login` | `Login.svelte` |
 
-Client portal (commerce always on; no public storefront): `/client/billing`, `/client/checkout`, `/client/support`, `/client/account` — see `frontend/src/components/client/Client*.svelte`. Coexistence notes: `docs/commerce-whmcs-coexistence.md`.
+Client portal (commerce always on; no public storefront): `/client/billing`, `/client/checkout`, `/client/support`, `/client/account`, `/client/networks` — see `frontend/src/components/client/Client*.svelte`. Coexistence notes: `docs/commerce-whmcs-coexistence.md`.
 
 Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelte`, `CodeEditor.svelte`.
 

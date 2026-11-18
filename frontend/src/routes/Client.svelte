@@ -11,6 +11,7 @@
   import ClientCheckout from '../components/client/ClientCheckout.svelte';
   import ClientSupport from '../components/client/ClientSupport.svelte';
   import ClientAccount from '../components/client/ClientAccount.svelte';
+  import ClientNetworks from '../components/client/ClientNetworks.svelte';
 
   let authChecked = false;
   let impersonating = false;
@@ -52,6 +53,8 @@
         if (parts.length === 3 && !isNaN(parseInt(parts[2], 10))) {
           ticketId = parseInt(parts[2], 10);
         }
+      } else if (parts[1] === 'networks') {
+        routeName = 'networks';
       } else if (parts[1] === 'account') {
         routeName = 'account';
       } else {
@@ -112,6 +115,8 @@
         <ClientCheckout {impersonating} />
       {:else if routeName === 'support'}
         <ClientSupport {ticketId} />
+      {:else if routeName === 'networks'}
+        <ClientNetworks />
       {:else if routeName === 'account'}
         <ClientAccount {impersonating} />
       {:else}

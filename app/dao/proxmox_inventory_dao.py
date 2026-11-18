@@ -30,9 +30,11 @@ class ProxmoxInventoryDAO:
         vmid_min: Optional[int] = None,
         vmid_max: Optional[int] = None,
         details: Optional[dict] = None,
+        location_id: Optional[int] = None,
     ) -> ProxmoxCluster:
         row = ProxmoxCluster(
             name=name,
+            location_id=location_id,
             api_url=api_url,
             username=username,
             password=password,
@@ -117,6 +119,7 @@ class ProxmoxInventoryDAO:
                     "name": cluster.name,
                     "api_url": cluster.api_url,
                     "enabled": cluster.enabled,
+                    "location_id": cluster.location_id,
                     "vmid_min": cluster.vmid_min,
                     "vmid_max": cluster.vmid_max,
                     "node_count": node_counts.get(cluster.id, 0),

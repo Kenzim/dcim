@@ -7,6 +7,7 @@ import httpx
 
 from app.core.auth import require_admin
 from app.core.database import get_db
+from app.dao.location_dao import LocationDAO
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 from app.models.proxmox_inventory import ProxmoxCapacitySnapshot, ProxmoxNode, ProxmoxStorage
 from app.services.vm_provisioning_service import VMProvisioningService
@@ -33,6 +34,8 @@ class ClusterCreate(BaseModel):
     vmid_min: Optional[int] = None
     vmid_max: Optional[int] = None
     details: dict[str, Any] = Field(default_factory=dict)
+    # Where the hypervisors are; private networks join VMs and servers per location.
+    location_id: Optional[int] = None
 
 
 class ClusterUpdate(BaseModel):
@@ -45,6 +48,12 @@ class ClusterUpdate(BaseModel):
     vmid_min: Optional[int] = None
     vmid_max: Optional[int] = None
     details: Optional[dict[str, Any]] = None
+    location_id: Optional[int] = None
+
+
+def _require_location(db: Session, location_id: Optional[int]) -> None:
+    if location_id is not None and LocationDAO.get_by_id(db, location_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Location not found")
 
 
 class NodeUpsert(BaseModel):
@@ -118,6 +127,7 @@ async def create_cluster(
     auth: AdminDep,
     db: DbDep,
 ):
+    _require_location(db, data.location_id)
     row = ProxmoxInventoryDAO.create_cluster(db, **data.model_dump())
     return {"id": row.id}
 
@@ -133,6 +143,7 @@ async def update_cluster(
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CLUSTER_NOT_FOUND)
     update_data = data.model_dump(exclude_unset=True)
+    _require_location(db, update_data.get("location_id"))
     ProxmoxInventoryDAO.update_cluster(db, row, **update_data)
     return {"status": "ok"}
 

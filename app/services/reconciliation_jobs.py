@@ -50,6 +50,22 @@ def _run_reconciliation_cycle(db) -> None:
     db.commit()
 
 
+async def _reconcile_private_networks() -> None:
+    """Retry failed private network work and repair drift on VMs and switch ports."""
+    from app.services.private_network_service import PrivateNetworkService
+
+    try:
+        db = SessionLocal()
+        try:
+            counts = await PrivateNetworkService.reconcile(db)
+        finally:
+            db.close()
+        if counts.get("failed"):
+            logger.warning("Private network reconciliation left failures: %s", counts)
+    except Exception as exc:
+        logger.warning("Private network reconciliation failed: %s", exc)
+
+
 async def run_reconciliation_jobs(interval_seconds: int = 300) -> None:
     """Background reconciliation loop for VM inventory and IP assignment consistency."""
     while True:
@@ -61,4 +77,5 @@ async def run_reconciliation_jobs(interval_seconds: int = 300) -> None:
                 db.close()
         except Exception as exc:
             logger.warning("Reconciliation cycle failed: %s", exc)
+        await _reconcile_private_networks()
         await asyncio.sleep(max(30, interval_seconds))

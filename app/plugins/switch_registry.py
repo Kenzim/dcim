@@ -150,6 +150,23 @@ class SwitchPluginRegistry:
             return False
         return SwitchPluginCategory.LLDP_DISCOVERY in self._plugins[plugin_name].SUPPORTED_CATEGORIES
 
+    def supports_vlan_management(self, plugin_name: str) -> bool:
+        """Return True if the plugin can create VLANs and change the VLANs a port carries."""
+        if plugin_name not in self._plugins:
+            return False
+        return SwitchPluginCategory.VLAN_MANAGEMENT in self._plugins[plugin_name].SUPPORTED_CATEGORIES
+
+    def new_plugin(self, plugin_name: str, config: Dict[str, Any]) -> SwitchPlugin:
+        """Build a plugin instance that is never shared or cached.
+
+        ``get_plugin`` caches by the identity of the config dict, which a later
+        dict can reuse. Callers that write to a switch use this instead, so a
+        change can never be sent to a previously cached switch.
+        """
+        if plugin_name not in self._plugins:
+            raise KeyError(f"Switch plugin '{plugin_name}' not found in registry")
+        return self._plugins[plugin_name](config)
+
 
 # Global registry instance
 _switch_registry: Optional[SwitchPluginRegistry] = None

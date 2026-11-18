@@ -51,6 +51,7 @@
   $: isVmIpAllocationsActive = currentPath.startsWith('/admin/vm-ip-allocations');
   $: isProxmoxInventoryActive = currentPath.startsWith('/admin/proxmox-inventory');
   $: isProxyIpamActive = currentPath.startsWith('/admin/proxy-ipam');
+  $: isPrivateNetworksActive = currentPath.startsWith('/admin/private-networks');
   $: isProxyRunnersActive = currentPath.startsWith('/admin/proxy-runners');
   $: isServerGroupsActive = currentPath.startsWith('/admin/server-groups');
   $: isUserActive = currentPath === '/admin/user' || currentPath === '/admin/user/';
@@ -273,6 +274,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
             <span>Services</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/private-networks" class="nav-link" class:active={isPrivateNetworksActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v6m0 0H6v4m6-4h6v4M10 3h4v2h-4zM4 15h4v4H4zm12 0h4v4h-4z" />
+            </svg>
+            <span>Private Networks</span>
           </a>
         </li>
         <li class="nav-item">
