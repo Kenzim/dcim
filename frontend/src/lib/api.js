@@ -4935,3 +4935,26 @@ export const clientStorageNetworks = (id) =>
   storageRequest(`/${id}/networks`, { client: true, errorMessage: 'Failed to load networks' });
 export const clientLinkStorage = (id, networkId) =>
   storageRequest(`/${id}/link`, { client: true, method: 'POST', body: { network_id: networkId }, errorMessage: 'Failed to link storage' });
+
+// --- Backup slots: client portal ---
+
+async function backupSlotRequest(path, { method = 'GET', body, errorMessage } = {}) {
+  const headers = { ..._impersonationHeaders() };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}/client/backup-slots${path}`, {
+    method,
+    headers,
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return _jsonOrThrow(response, errorMessage || 'Backup slot request failed');
+}
+
+export const clientListBackupSlots = () =>
+  backupSlotRequest('', { errorMessage: 'Failed to load backup slots' });
+export const clientRetainBackup = (slotId, data) =>
+  backupSlotRequest(`/${slotId}/retain`, { method: 'POST', body: data, errorMessage: 'Failed to keep the backup in the slot' });
+export const clientReleaseSlotBackup = (slotId) =>
+  backupSlotRequest(`/${slotId}/release`, { method: 'POST', errorMessage: 'Failed to release the backup' });
+export const clientRestoreSlotBackup = (slotId, data) =>
+  backupSlotRequest(`/${slotId}/restore`, { method: 'POST', body: data, errorMessage: 'Failed to restore the backup' });
