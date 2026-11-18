@@ -34,8 +34,36 @@ type Config struct {
 	Version  string   `json:"version"`
 	Node     Node     `json:"node"`
 	Settings Settings `json:"settings"`
-	Tenants  []Tenant `json:"tenants"`
+	// SFTP is the node's public SFTP endpoint; nil (older Rackflow) means off.
+	SFTP    *SFTPSettings `json:"sftp,omitempty"`
+	Tenants []Tenant      `json:"tenants"`
 }
+
+// SFTPSettings configures the node's SFTP front end.
+type SFTPSettings struct {
+	Enabled              bool  `json:"enabled"`
+	Port                 int   `json:"port"`
+	MaxAuthFailures      int   `json:"max_auth_failures"`
+	FailureWindowSeconds int64 `json:"failure_window_seconds"`
+	BanSeconds           int64 `json:"ban_seconds"`
+}
+
+// SFTPUser is one login of a tenant. Rackflow sends only a bcrypt hash of
+// the password and the public keys.
+type SFTPUser struct {
+	ID           int64    `json:"id"`
+	Username     string   `json:"username"`
+	PublicKeys   []string `json:"public_keys"`
+	PasswordHash *string  `json:"password_hash"`
+	AllowedIPs   []string `json:"allowed_ips"`
+}
+
+// SFTP access modes of a share.
+const (
+	SFTPOff       = "off"
+	SFTPReadOnly  = "ro"
+	SFTPReadWrite = "rw"
+)
 
 type Node struct {
 	ID   int64  `json:"id"`
@@ -58,6 +86,7 @@ type Tenant struct {
 	SizeBytes    int64      `json:"size_bytes"`
 	Limits       *Limits    `json:"limits"`
 	Shares       []Share    `json:"shares"`
+	SFTPUsers    []SFTPUser `json:"sftp_users,omitempty"`
 }
 
 // Limits are parsed but not enforced yet.
@@ -72,8 +101,18 @@ type Share struct {
 	QuotaBytes   int64      `json:"quota_bytes"`
 	Clients      []string   `json:"clients"`
 	ReadOnly     bool       `json:"read_only"`
+	SFTP         string     `json:"sftp,omitempty"`
 	State        string     `json:"state"`
 	DestroyAfter *Timestamp `json:"destroy_after"`
+}
+
+// SFTPMode is the share's SFTP access, "off" when missing or unknown.
+func (s Share) SFTPMode() string {
+	switch s.SFTP {
+	case SFTPReadOnly, SFTPReadWrite:
+		return s.SFTP
+	}
+	return SFTPOff
 }
 
 type Status struct {
@@ -84,7 +123,39 @@ type Status struct {
 	DestroyedTenants []int64        `json:"destroyed_tenants"`
 	DestroyedShares  []int64        `json:"destroyed_shares"`
 	Orphans          []string       `json:"orphans"`
+	SFTP             *SFTPStatus    `json:"sftp,omitempty"`
+	SFTPLogins       []SFTPLogin    `json:"sftp_logins"`
 }
+
+// SFTPStatus reports the node's SFTP front end.
+type SFTPStatus struct {
+	Listening          bool    `json:"listening"`
+	Port               int     `json:"port"`
+	HostKey            string  `json:"host_key"`
+	HostKeyFingerprint string  `json:"host_key_fingerprint"`
+	Error              *string `json:"error"`
+}
+
+// SFTPLogin is the latest successful login of a user.
+type SFTPLogin struct {
+	UserID int64     `json:"user_id"`
+	At     time.Time `json:"at"`
+	IP     string    `json:"ip"`
+}
+
+// TenantSFTP reports a tenant's SFTP back end.
+type TenantSFTP struct {
+	State string  `json:"state"`
+	Error *string `json:"error"`
+}
+
+// Tenant SFTP states.
+const (
+	SFTPStateReady   = "ready"
+	SFTPStatePending = "pending"
+	SFTPStateError   = "error"
+	SFTPStateOff     = "off"
+)
 
 type NodeStatus struct {
 	CephOK    bool    `json:"ceph_ok"`
@@ -97,6 +168,7 @@ type TenantStatus struct {
 	State  string        `json:"state"`
 	Error  *string       `json:"error"`
 	Shares []ShareStatus `json:"shares"`
+	SFTP   *TenantSFTP   `json:"sftp,omitempty"`
 }
 
 type ShareStatus struct {
@@ -126,6 +198,9 @@ func (s Status) MarshalJSON() ([]byte, error) {
 	}
 	if p.Orphans == nil {
 		p.Orphans = []string{}
+	}
+	if p.SFTPLogins == nil {
+		p.SFTPLogins = []SFTPLogin{}
 	}
 	return json.Marshal(p)
 }

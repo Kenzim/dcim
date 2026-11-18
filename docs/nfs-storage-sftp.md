@@ -65,7 +65,7 @@ same files.
 - Only the `sftp` subsystem is offered: shell, exec, PTY, environment, agent and port
   forwarding requests are refused.
 - At most 6 authentication attempts per connection.
-- Brute-force protection per source address: after `max_auth_failures` failures within
+- Brute-force protection per source address: after `max_auth_failures` failed connections (a connection that ends without logging in after at least one failed attempt; each connection allows at most 6 attempts) within
   `failure_window_seconds`, the address is refused for `ban_seconds` (defaults 10, 600 and
   900, served by Rackflow). Unknown usernames cost the same bcrypt work as known ones.
 - Source allow lists are checked before any key or password.
