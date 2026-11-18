@@ -312,17 +312,17 @@
           {#if selectedStorage.service_id}<a href={`/admin/services/${selectedStorage.service_id}`}>Service record</a>{/if}
         </div>
         <div class="grid">
-          <div><label>Status</label><span class="badge" class:ok={selectedStorage.status === 'ready'}>{STORAGE_STATUS_LABELS[selectedStorage.status] || selectedStorage.status}</span>
+          <div><span class="field">Status</span><span class="badge" class:ok={selectedStorage.status === 'ready'}>{STORAGE_STATUS_LABELS[selectedStorage.status] || selectedStorage.status}</span>
             {#if selectedStorage.status_detail}<small>{selectedStorage.status_detail}</small>{/if}</div>
-          <div><label>Switch attachment</label>{selectedStorage.attachment_state || '—'}
+          <div><span class="field">Switch attachment</span>{selectedStorage.attachment_state || '—'}
             {#if selectedStorage.attachment_error}<small class="err">{selectedStorage.attachment_error}</small>{/if}</div>
-          <div><label>Runner</label>{selectedStorage.runner_state || 'not reported'}
+          <div><span class="field">Runner</span>{selectedStorage.runner_state || 'not reported'}
             {#if selectedStorage.runner_error}<small class="err">{selectedStorage.runner_error}</small>{/if}</div>
-          <div><label>Node</label>{selectedStorage.node?.name || '—'}</div>
-          <div><label>Network</label>{selectedStorage.network ? `${selectedStorage.network.name} (VLAN ${selectedStorage.network.vlan_id})` : '—'}</div>
-          <div><label>Endpoint</label><span class="mono">{selectedStorage.endpoint_ip || '—'}</span></div>
-          <div><label>Owner</label>{selectedStorage.owner_username || '—'}</div>
-          {#if selectedStorage.destroy_after}<div><label>Data destroyed after</label>{seen(selectedStorage.destroy_after)}</div>{/if}
+          <div><span class="field">Node</span>{selectedStorage.node?.name || '—'}</div>
+          <div><span class="field">Network</span>{selectedStorage.network ? `${selectedStorage.network.name} (VLAN ${selectedStorage.network.vlan_id})` : '—'}</div>
+          <div><span class="field">Endpoint</span><span class="mono">{selectedStorage.endpoint_ip || '—'}</span></div>
+          <div><span class="field">Owner</span>{selectedStorage.owner_username || '—'}</div>
+          {#if selectedStorage.destroy_after}<div><span class="field">Data destroyed after</span>{seen(selectedStorage.destroy_after)}</div>{/if}
         </div>
 
         {#if selectedStorage.status === 'unlinked'}
@@ -437,7 +437,7 @@
   .warn { color: var(--warning-text); margin: 0 0 0.75rem; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
-  .grid label { display: block; font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); }
+  .grid .field { display: block; font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); }
   .mini { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 0.9rem; }
   .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .inline input, .inline select, .form input, .form select { padding: 7px 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); }
