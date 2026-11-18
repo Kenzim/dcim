@@ -7,16 +7,32 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var (
+	// key=..., val=..., secret=... as printed by Ceph tools, for example when a keyring fails to parse.
+	keyAssignment = regexp.MustCompile(`(?i)\b(key|val|secret)(\s*=\s*)[A-Za-z0-9+/=]{16,}`)
+	// A bare base64 cephx secret: they start with AQ (aes) or Ag (aes256k).
+	cephxSecret = regexp.MustCompile(`\bA[Qg][A-Za-z0-9+/]{30,}={0,2}`)
+)
+
+// Redact removes Ceph key material from command output before it is logged or
+// reported to Rackflow.
+func Redact(s string) string {
+	s = keyAssignment.ReplaceAllString(s, "${1}${2}[redacted]")
+	return cephxSecret.ReplaceAllString(s, "[redacted]")
+}
 
 // Commander runs one command and returns its standard output.
 type Commander interface {
 	Run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error)
 }
 
-// Exec runs real processes. Errors include the command line and its stderr.
+// Exec runs real processes. Errors include the command line and its stderr,
+// with Ceph key material redacted.
 type Exec struct {
 	Timeout time.Duration
 }
@@ -41,7 +57,7 @@ func (e Exec) Run(ctx context.Context, stdin []byte, name string, args ...string
 		} else {
 			msg += " (" + err.Error() + ")"
 		}
-		return stdout.Bytes(), fmt.Errorf("%s: %s", Line(name, args...), msg)
+		return stdout.Bytes(), fmt.Errorf("%s", Redact(Line(name, args...)+": "+msg))
 	}
 	return stdout.Bytes(), nil
 }

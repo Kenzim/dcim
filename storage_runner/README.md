@@ -179,7 +179,10 @@ Design and trade-offs: `docs/nfs-storage-sftp.md`. In short:
   orphans and left alone; mount directories are only removed with a non-recursive remove.
 
 Host prerequisites for SFTP: the kernel `ceph` module and `mount.ceph` (package `ceph-common`),
-and the back end image, for example:
+and the back end image. On clusters that use aes256k cephx keys (Ceph 20.2.4 and later),
+`mount.ceph` must also be 20.2.4 or newer: older versions cannot parse the keys and the mount
+fails. Debian 13's own `ceph-common` is 18.x; Proxmox's `ceph-tentacle` repository (suite
+`trixie`, component `no-subscription`) has 20.2.x. Pin only the Ceph packages to it. Example back end image:
 
 ```Dockerfile
 FROM alpine:3.20
