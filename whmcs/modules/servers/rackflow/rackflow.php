@@ -4438,6 +4438,414 @@ function rackflow_mintPortalSsoTicket($apiUrl, $apiKey, $rackflowSvcId)
 }
 
 /**
+ * GET a billing endpoint and record timing for the admin Debug panel.
+ *
+ * @return array{success: bool, endpoint: string, http_code: int, ms: int, error: string, data: mixed}
+ */
+function rackflow_timedApiGet($apiUrl, $apiKey, $endpoint, $timeoutSeconds = 30)
+{
+    if (empty($apiUrl) || empty($apiKey)) {
+        return array(
+            'success' => false,
+            'endpoint' => $endpoint,
+            'http_code' => 0,
+            'ms' => 0,
+            'error' => 'RackFlow API URL or API key is not configured on the WHMCS server.',
+            'data' => null,
+        );
+    }
+    $t0 = microtime(true);
+    $result = rackflow_apiCall($apiUrl, $apiKey, 'GET', $endpoint, null, $timeoutSeconds);
+    $error = isset($result['error']) ? $result['error'] : '';
+    if (is_array($error)) {
+        $error = json_encode($error);
+    }
+    return array(
+        'success' => !empty($result['success']),
+        'endpoint' => $endpoint,
+        'http_code' => isset($result['http_code']) ? (int)$result['http_code'] : 0,
+        'ms' => (int)round((microtime(true) - $t0) * 1000),
+        'error' => (string)$error,
+        'data' => isset($result['data']) ? $result['data'] : null,
+    );
+}
+
+/**
+ * One-line "HTTP 404 · 35 ms · Service not found" summary of a timed call.
+ *
+ * @param array|null $call Result of {@see rackflow_timedApiGet()}
+ * @return string
+ */
+function rackflow_debugCallSummary($call)
+{
+    if (!is_array($call)) {
+        return 'not called';
+    }
+    $parts = array($call['http_code'] > 0 ? 'HTTP ' . $call['http_code'] : 'no HTTP response');
+    $parts[] = $call['ms'] . ' ms';
+    if (!$call['success'] && $call['error'] !== '') {
+        $parts[] = $call['error'];
+    }
+    return implode(' · ', $parts);
+}
+
+/**
+ * Recursively mask credential-looking values before showing raw JSON to admins.
+ *
+ * @param mixed  $value
+ * @param string $key
+ * @return mixed
+ */
+function rackflow_debugRedact($value, $key = '')
+{
+    if (is_array($value)) {
+        $out = array();
+        foreach ($value as $k => $v) {
+            $out[$k] = rackflow_debugRedact($v, (string)$k);
+        }
+        return $out;
+    }
+    // proxy_assignments[].endpoint is "ip:port:username:password".
+    if (is_string($value) && $value !== ''
+        && preg_match('/(pass|secret|token|api_?key|username|credential|^endpoint$|_url$)/i', $key)
+        && !preg_match('/^(ipmi_web_management_url|redeem_path|external_username)$/i', $key)
+    ) {
+        return '[redacted]';
+    }
+    return $value;
+}
+
+/**
+ * Ensure $keys exist (null default) so an older/newer backend payload never raises notices.
+ *
+ * @param mixed $value
+ * @param array $keys
+ * @return array
+ */
+function rackflow_debugFill($value, array $keys)
+{
+    return (is_array($value) ? $value : array()) + array_fill_keys($keys, null);
+}
+
+/**
+ * Format a scalar for the Debug panel tables.
+ *
+ * @param mixed $v
+ * @return string
+ */
+function rackflow_debugFormat($v)
+{
+    if ($v === null || $v === '') {
+        return '—';
+    }
+    if (is_bool($v)) {
+        return $v ? 'Yes' : 'No';
+    }
+    if (is_array($v)) {
+        return empty($v) ? '—' : json_encode($v, JSON_UNESCAPED_SLASHES);
+    }
+    return (string)$v;
+}
+
+/**
+ * Render a two-column key/value table for the Debug panel.
+ *
+ * @param string $title
+ * @param array  $rows label => value
+ * @return string HTML
+ */
+function rackflow_debugKvTable($title, array $rows)
+{
+    $h = function ($v) {
+        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    };
+    $html = '<div class="rf-as__debug-section"><p class="rf-as__debug-title">' . $h($title) . '</p>'
+        . '<table class="rf-as__debug-table"><tbody>';
+    foreach ($rows as $label => $value) {
+        $html .= '<tr><th>' . $h($label) . '</th><td>' . $h(rackflow_debugFormat($value)) . '</td></tr>';
+    }
+    return $html . '</tbody></table></div>';
+}
+
+/**
+ * Render a list of records as a table with the given columns.
+ *
+ * @param string $title
+ * @param array  $records list of associative arrays
+ * @param array  $columns field => header label
+ * @param string $empty  text when there are no records
+ * @return string HTML
+ */
+function rackflow_debugListTable($title, $records, array $columns, $empty)
+{
+    $h = function ($v) {
+        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    };
+    $html = '<div class="rf-as__debug-section"><p class="rf-as__debug-title">' . $h($title) . '</p>';
+    if (!is_array($records) || empty($records)) {
+        return $html . '<p class="rf-as__panel-help">' . $h($empty) . '</p></div>';
+    }
+    $html .= '<div class="rf-as__debug-scroll"><table class="rf-as__debug-table rf-as__debug-table--list"><thead><tr>';
+    foreach ($columns as $label) {
+        $html .= '<th>' . $h($label) . '</th>';
+    }
+    $html .= '</tr></thead><tbody>';
+    foreach ($records as $rec) {
+        if (!is_array($rec)) {
+            continue;
+        }
+        $html .= '<tr>';
+        foreach ($columns as $field => $label) {
+            $html .= '<td>' . $h(rackflow_debugFormat(isset($rec[$field]) ? $rec[$field] : null)) . '</td>';
+        }
+        $html .= '</tr>';
+    }
+    return $html . '</tbody></table></div></div>';
+}
+
+/**
+ * Collapsible admin-only Debug panel: WHMCS-side config, API call diagnostics,
+ * the /status payload and the server-side /debug payload (redacted).
+ *
+ * @param array       $params        WHMCS module params
+ * @param int         $serviceId     tblhosting.id
+ * @param string      $rackflowSvcId linked RackFlow service id
+ * @param string      $serviceType   configured service type
+ * @param array|null  $statusData    /status payload
+ * @param array       $debug         status_call / debug_call / debug_data
+ * @return string HTML
+ */
+function rackflow_renderAdminDebugPanel(array $params, $serviceId, $rackflowSvcId, $serviceType, $statusData, array $debug)
+{
+    $h = function ($v) {
+        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    };
+    $apiConfig = rackflow_getApiConfig($params);
+    $cfg = function ($n) use ($params) {
+        $k = 'configoption' . $n;
+        return isset($params[$k]) ? $params[$k] : null;
+    };
+    $status = is_array($statusData) ? $statusData : array();
+    $dbg = isset($debug['debug_data']) && is_array($debug['debug_data']) ? $debug['debug_data'] : array();
+    $statusCall = isset($debug['status_call']) ? $debug['status_call'] : null;
+    $debugCall = isset($debug['debug_call']) ? $debug['debug_call'] : null;
+
+    $html = '<details class="rf-as__debug" id="rf-as-debug">'
+        . '<summary class="rf-as__debug-summary">Debug information</summary>'
+        . '<div class="rf-as__debug-body">';
+
+    $html .= rackflow_debugKvTable('WHMCS side', array(
+        'WHMCS service ID' => (int)$serviceId,
+        'WHMCS product ID' => isset($params['packageid']) ? $params['packageid'] : (isset($params['pid']) ? $params['pid'] : null),
+        'WHMCS server ID' => isset($params['serverid']) ? $params['serverid'] : null,
+        'Service type (configured)' => $serviceType,
+        'Product code (opt 2)' => $cfg(2),
+        'Default OS (opt 3)' => $cfg(3),
+        'Server group (opt 4)' => $cfg(4),
+        'Proxmox location (opt 5)' => $cfg(5),
+        'Proxmox node (opt 6)' => $cfg(6),
+        'Linked RackFlow service' => ($rackflowSvcId !== '' ? '#' . $rackflowSvcId : null),
+        'RackFlow API URL' => isset($apiConfig['url']) ? $apiConfig['url'] : null,
+        'API key configured' => !empty($apiConfig['key']),
+        'GET /status' => $statusCall !== null ? rackflow_debugCallSummary($statusCall) : null,
+        'GET /debug' => $debugCall !== null ? rackflow_debugCallSummary($debugCall) : null,
+        'Rendered at' => date('Y-m-d H:i:s T'),
+    ));
+
+    if ($debugCall !== null && empty($dbg)) {
+        $hint = ($debugCall['http_code'] === 404 && $debugCall['error'] === 'Not Found')
+            ? 'This RackFlow backend does not have the /debug endpoint yet; deploy a newer RackFlow to see server-side detail.'
+            : 'Server-side detail unavailable: ' . rackflow_debugCallSummary($debugCall);
+        $html .= '<p class="rf-as__note">' . $h($hint) . '</p>';
+    }
+
+    $svc = isset($dbg['service']) && is_array($dbg['service']) ? $dbg['service'] : array();
+    if (!empty($status) || !empty($svc)) {
+        $owner = isset($svc['owner']) && is_array($svc['owner']) ? $svc['owner'] : array();
+        $html .= rackflow_debugKvTable('RackFlow service', array(
+            'ID' => isset($svc['id']) ? $svc['id'] : (isset($status['service_id']) ? $status['service_id'] : null),
+            'Name' => isset($svc['name']) ? $svc['name'] : (isset($status['service_name']) ? $status['service_name'] : null),
+            'Type' => isset($svc['service_type']) ? $svc['service_type'] : (isset($status['service_type']) ? $status['service_type'] : null),
+            'Status' => isset($svc['status']) ? $svc['status'] : (isset($status['service_status']) ? $status['service_status'] : null),
+            'Power state (raw)' => isset($status['power_state']) ? $status['power_state'] : null,
+            'External service ID' => isset($svc['external_service_id']) ? $svc['external_service_id'] : null,
+            'Product code' => isset($svc['product_code']) ? $svc['product_code'] : null,
+            'OS code' => isset($svc['os_code']) ? $svc['os_code'] : null,
+            'Provisioning source' => isset($svc['provisioning_source']) ? $svc['provisioning_source'] : null,
+            'Owner (RackFlow user / WHMCS client)' => !empty($owner) && ($owner = rackflow_debugFill($owner, array('user_id', 'external_user_id', 'external_username')))
+                ? ('#' . $owner['user_id'] . ' / ' . rackflow_debugFormat($owner['external_user_id']) . ' (' . rackflow_debugFormat($owner['external_username']) . ')')
+                : null,
+            'Permission preset ID' => isset($svc['permission_set_id']) ? $svc['permission_set_id'] : null,
+            'Permission overrides' => isset($svc['permission_overrides']) ? $svc['permission_overrides'] : null,
+            'Config keys' => isset($svc['config_keys']) ? implode(', ', $svc['config_keys']) : null,
+            'Created' => isset($svc['created_at']) ? $svc['created_at'] : null,
+            'Updated' => isset($svc['updated_at']) ? $svc['updated_at'] : null,
+            'Terminated' => isset($svc['terminated_at']) ? $svc['terminated_at'] : null,
+        ));
+    }
+
+    if (isset($dbg['server']) && is_array($dbg['server'])) {
+        $srv = rackflow_debugFill($dbg['server'], array(
+            'id', 'name', 'uuid', 'server_ip', 'enabled', 'plugin_name', 'bmc_host', 'bmc_port',
+            'location', 'rack', 'rack_unit', 'rack_units', 'server_groups', 'cpu_count', 'cpu_model',
+            'ram_gb', 'port_speed_mbps', 'pxe_boot_mode', 'os_boot_mode', 'ipmi_proxy_enabled',
+            'ipmi_web_management_url', 'ipmi_kvm_profile', 'sol_profile', 'virtual_media_profile',
+            'kvm_ready', 'sol_ready', 'virtual_media_ready', 'tested_capabilities',
+        ));
+        $groups = array();
+        if (!empty($srv['server_groups']) && is_array($srv['server_groups'])) {
+            foreach ($srv['server_groups'] as $g) {
+                $g = rackflow_debugFill($g, array('id', 'name'));
+                $groups[] = '#' . $g['id'] . ' ' . $g['name'];
+            }
+        }
+        $rackText = null;
+        if (!empty($srv['rack'])) {
+            $rack = rackflow_debugFill($srv['rack'], array('id', 'name'));
+            $rackText = $rack['name'] . ' (#' . $rack['id'] . ')';
+            if ($srv['rack_unit'] !== null) {
+                $rackText .= ' U' . $srv['rack_unit'] . ((int)$srv['rack_units'] > 1 ? '-' . ((int)$srv['rack_unit'] + (int)$srv['rack_units'] - 1) : '');
+            }
+        }
+        $html .= rackflow_debugKvTable('Server', array(
+            'ID / name' => '#' . $srv['id'] . ' ' . $srv['name'],
+            'UUID' => $srv['uuid'],
+            'Server IP' => $srv['server_ip'],
+            'Enabled' => $srv['enabled'],
+            'Plugin' => $srv['plugin_name'],
+            'BMC host' => $srv['bmc_host'] !== null ? $srv['bmc_host'] . ($srv['bmc_port'] !== null ? ':' . $srv['bmc_port'] : '') : null,
+            'Location' => !empty($srv['location']) && ($loc = rackflow_debugFill($srv['location'], array('id', 'name')))
+                ? $loc['name'] . ' (#' . $loc['id'] . ')'
+                : null,
+            'Rack' => $rackText,
+            'Server groups' => !empty($groups) ? implode(', ', $groups) : null,
+            'CPU' => trim($srv['cpu_count'] . ' × ' . rackflow_debugFormat($srv['cpu_model'])),
+            'RAM (GB)' => $srv['ram_gb'],
+            'Port speed (Mbps)' => $srv['port_speed_mbps'],
+            'PXE / OS boot mode' => rackflow_debugFormat($srv['pxe_boot_mode']) . ' / ' . rackflow_debugFormat($srv['os_boot_mode']),
+            'IPMI web proxy' => $srv['ipmi_proxy_enabled'] ? ('Yes · ' . rackflow_debugFormat($srv['ipmi_web_management_url'])) : 'No',
+            'KVM profile (ready)' => rackflow_debugFormat($srv['ipmi_kvm_profile']) . ' (' . rackflow_debugFormat($srv['kvm_ready']) . ')',
+            'SOL profile (ready)' => rackflow_debugFormat($srv['sol_profile']) . ' (' . rackflow_debugFormat($srv['sol_ready']) . ')',
+            'Virtual media profile (ready)' => rackflow_debugFormat($srv['virtual_media_profile']) . ' (' . rackflow_debugFormat($srv['virtual_media_ready']) . ')',
+            'Tested capabilities' => !empty($srv['tested_capabilities']) ? implode(', ', (array)$srv['tested_capabilities']) : null,
+        ));
+    }
+
+    if (isset($dbg['vm']) && is_array($dbg['vm'])) {
+        $vm = rackflow_debugFill($dbg['vm'], array(
+            'proxmox_cluster_id', 'proxmox_cluster_name', 'proxmox_node_name', 'proxmox_vmid',
+            'vm_template_id', 'vm_template_name', 'guest_state', 'guest_last_error',
+            'guest_last_transition_at', 'vm_ip_address', 'vm_ip_allocation_id',
+        ));
+        $html .= rackflow_debugKvTable('Virtual machine', array(
+            'Proxmox cluster' => $vm['proxmox_cluster_id'] !== null
+                ? rackflow_debugFormat($vm['proxmox_cluster_name']) . ' (#' . $vm['proxmox_cluster_id'] . ')'
+                : null,
+            'Node' => $vm['proxmox_node_name'],
+            'VMID' => $vm['proxmox_vmid'],
+            'Template' => $vm['vm_template_id'] !== null
+                ? rackflow_debugFormat($vm['vm_template_name']) . ' (#' . $vm['vm_template_id'] . ')'
+                : null,
+            'Guest state' => $vm['guest_state'],
+            'Guest last error' => $vm['guest_last_error'],
+            'Guest state changed' => $vm['guest_last_transition_at'],
+            'IP (allocation ID)' => rackflow_debugFormat($vm['vm_ip_address']) . ' (' . rackflow_debugFormat($vm['vm_ip_allocation_id']) . ')',
+        ));
+    }
+
+    if (!empty($status)) {
+        $avail = array();
+        foreach ($status as $k => $v) {
+            if (is_bool($v) && (substr($k, -10) === '_available' || $k === 'server_enabled')) {
+                $avail[$k] = $v;
+            }
+        }
+        if (!empty($avail)) {
+            $html .= rackflow_debugKvTable('Feature availability (from /status)', $avail);
+        }
+        if (!empty($status['client_permissions']) && is_array($status['client_permissions'])) {
+            $html .= rackflow_debugKvTable('Effective client permissions', $status['client_permissions']);
+        }
+        $actionNames = function ($list) {
+            $names = array();
+            if (is_array($list)) {
+                foreach ($list as $a) {
+                    if (is_array($a)) {
+                        $names[] = isset($a['name']) ? $a['name'] : (isset($a['label']) ? $a['label'] : '?');
+                    }
+                }
+            }
+            return empty($names) ? null : implode(', ', $names);
+        };
+        $html .= rackflow_debugKvTable('Strategy actions', array(
+            'Admin' => $actionNames(isset($status['admin_actions']) ? $status['admin_actions'] : null),
+            'Client' => $actionNames(isset($status['client_actions']) ? $status['client_actions'] : null),
+        ));
+    }
+
+    if (!empty($dbg)) {
+        if (!empty($dbg['boot_task']) && is_array($dbg['boot_task'])) {
+            $html .= rackflow_debugKvTable('Active boot task', $dbg['boot_task']);
+        }
+        if (isset($dbg['server']) && is_array($dbg['server'])) {
+            $html .= rackflow_debugListTable('Installation tasks (latest 5)', isset($dbg['installation_tasks']) ? $dbg['installation_tasks'] : array(), array(
+                'id' => 'ID',
+                'template_id' => 'Template',
+                'status' => 'Status',
+                'progress_percent' => '%',
+                'os_name' => 'OS',
+                'error_message' => 'Error',
+                'created_at' => 'Created',
+                'completed_at' => 'Completed',
+            ), 'No installation tasks for this server.');
+        }
+        if ($serviceType === 'vm' || !empty($dbg['deployment_jobs'])) {
+            $jobs = array();
+            foreach ((isset($dbg['deployment_jobs']) && is_array($dbg['deployment_jobs']) ? $dbg['deployment_jobs'] : array()) as $job) {
+                $job = rackflow_debugFill($job, array('steps', 'attempt', 'max_attempts'));
+                $stepText = array();
+                foreach ((is_array($job['steps']) ? $job['steps'] : array()) as $step) {
+                    $step = rackflow_debugFill($step, array('name', 'status'));
+                    $stepText[] = $step['name'] . ':' . $step['status'];
+                }
+                $job['steps_text'] = implode(', ', $stepText);
+                $job['attempts_text'] = $job['attempt'] . '/' . $job['max_attempts'];
+                $jobs[] = $job;
+            }
+            $html .= rackflow_debugListTable('VM deployment jobs (latest 5)', $jobs, array(
+                'id' => 'ID',
+                'strategy_name' => 'Strategy',
+                'status' => 'Status',
+                'attempts_text' => 'Attempt',
+                'steps_text' => 'Steps',
+                'error_message' => 'Error',
+                'created_at' => 'Created',
+                'finished_at' => 'Finished',
+            ), 'No deployment jobs for this service.');
+        }
+        $html .= rackflow_debugListTable('Recent activity (latest 20)', isset($dbg['activity']) ? $dbg['activity'] : array(), array(
+            'created_at' => 'When',
+            'scope' => 'Scope',
+            'event_type' => 'Type',
+            'action' => 'Action',
+            'status' => 'Result',
+            'message' => 'Message',
+            'source' => 'Source',
+        ), 'No activity recorded.');
+    }
+
+    $raw = array(
+        'status' => $statusCall !== null ? $statusCall['data'] : null,
+        'debug' => $debugCall !== null ? $debugCall['data'] : null,
+    );
+    $rawJson = json_encode(rackflow_debugRedact($raw), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    $html .= '<div class="rf-as__debug-section"><p class="rf-as__debug-title">Raw API responses (credentials redacted)</p>'
+        . '<textarea class="rf-as__debug-raw" rows="12" readonly>' . $h($rawJson) . '</textarea></div>';
+
+    return $html . '</div></details>';
+}
+
+/**
  * Admin Services Tab: editable RackFlow Service ID and live server status from RackFlow.
  *
  * @param array $params serviceid, userid, packageid, serverid, etc.
@@ -4493,27 +4901,87 @@ function rackflow_AdminServicesTabFields(array $params)
         }
     }
 
+    // Linked services: render a placeholder and let hooks.php fetch the live card
+    // via admin_link.php (action=card) so the RackFlow API calls don't block page load.
+    if ($rackflowSvcId !== '' && is_numeric($rackflowSvcId)) {
+        $out['RackFlow Server Status'] = rackflow_renderAdminStatusPlaceholder($params, $serviceId, $rackflowSvcId);
+    } else {
+        $out['RackFlow Server Status'] = rackflow_buildAdminStatusCard($params, $serviceId, $rackflowSvcId);
+    }
+
+    return $out;
+}
+
+/**
+ * Lightweight stand-in for the admin status card while the live card loads over AJAX.
+ *
+ * @param array  $params        WHMCS module params
+ * @param int    $serviceId     tblhosting.id
+ * @param string $rackflowSvcId linked RackFlow service id
+ * @return string HTML
+ */
+function rackflow_renderAdminStatusPlaceholder(array $params, $serviceId, $rackflowSvcId)
+{
+    $h = function ($v) {
+        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    };
+    $serviceType = rackflow_getConfiguredServiceType($params);
+    $typeLabel = $serviceType === 'vm' ? 'Virtual machine' : ($serviceType === 'http_proxy' ? 'HTTP proxy' : 'Bare metal');
+    $systemUrl = isset($params['systemurl']) ? (string)$params['systemurl'] : '';
+
+    return '<div class="rf-as" id="rackflow-admin-status-loading"'
+        . ' data-serviceid="' . (int)$serviceId . '"'
+        . ' data-admin-link-url="' . $h(rackflow_adminLinkEndpointUrl($systemUrl)) . '">'
+        . '<div class="rf-as__card">'
+        . '<div class="rf-as__head"><div><h3 class="rf-as__title">Server overview</h3>'
+        . '<p class="rf-as__subtitle">' . $h($typeLabel) . ' · RackFlow #' . (int)$rackflowSvcId . '</p></div></div>'
+        . '<div class="rf-as__body">'
+        . '<p class="rf-as__note" id="rf-as-loading-note">Loading live data from RackFlow…</p>'
+        . '<button type="button" class="rf-as__btn rf-as__btn--secondary" id="rf-as-loading-retry" hidden>Retry</button>'
+        . '</div></div></div>';
+}
+
+/**
+ * Fetch live RackFlow data and build the full admin status card.
+ *
+ * Used by admin_link.php (action=card) for linked services and inline for unlinked ones.
+ *
+ * @param array  $params        WHMCS module params (serviceid, packageid, serverid, configoptionN)
+ * @param int    $serviceId     tblhosting.id
+ * @param string $rackflowSvcId linked RackFlow service id, or '' when not linked
+ * @return string HTML
+ */
+function rackflow_buildAdminStatusCard(array $params, $serviceId, $rackflowSvcId)
+{
+    $rackflowSvcId = trim((string)$rackflowSvcId);
     $statusData = null;
     $statusError = '';
+    $debug = array('status_call' => null, 'debug_call' => null, 'debug_data' => null);
     if ($rackflowSvcId !== '' && is_numeric($rackflowSvcId)) {
         $apiConfig = rackflow_getApiConfig($params);
-        $statusData = rackflow_fetchServiceStatus($apiConfig['url'], $apiConfig['key'], (int)$rackflowSvcId);
-        if (!$statusData) {
-            $statusError = 'Could not load status (check API and RackFlow service ID).';
+        $basePath = '/api/billing/services/' . (int)$rackflowSvcId;
+        $debug['status_call'] = rackflow_timedApiGet($apiConfig['url'], $apiConfig['key'], $basePath . '/status');
+        if ($debug['status_call']['success'] && is_array($debug['status_call']['data'])) {
+            $statusData = $debug['status_call']['data'];
+        } else {
+            $statusError = 'Could not load status: ' . rackflow_debugCallSummary($debug['status_call']);
+        }
+        $debug['debug_call'] = rackflow_timedApiGet($apiConfig['url'], $apiConfig['key'], $basePath . '/debug', 15);
+        if ($debug['debug_call']['success'] && is_array($debug['debug_call']['data'])) {
+            $debug['debug_data'] = $debug['debug_call']['data'];
         }
     } else {
         $statusError = 'Link a RackFlow service to see live server status.';
     }
 
-    $out['RackFlow Server Status'] = rackflow_renderAdminStatusCard(
+    return rackflow_renderAdminStatusCard(
         $params,
         $serviceId,
         $statusData,
         $statusError,
-        $rackflowSvcId
+        $rackflowSvcId,
+        $debug
     );
-
-    return $out;
 }
 
 /**
@@ -4524,9 +4992,10 @@ function rackflow_AdminServicesTabFields(array $params)
  * @param array|null  $statusData    billing /status payload or null
  * @param string      $statusError   empty when $statusData is present
  * @param string      $rackflowSvcId linked RackFlow service id (display only)
+ * @param array       $debug         timed /status and /debug calls for the Debug panel
  * @return string HTML
  */
-function rackflow_renderAdminStatusCard(array $params, $serviceId, $statusData, $statusError, $rackflowSvcId)
+function rackflow_renderAdminStatusCard(array $params, $serviceId, $statusData, $statusError, $rackflowSvcId, array $debug = array())
 {
     $serviceType = rackflow_getConfiguredServiceType($params);
     $typeLabel = $serviceType === 'vm' ? 'Virtual machine' : ($serviceType === 'http_proxy' ? 'HTTP proxy' : 'Bare metal');
@@ -5007,6 +5476,8 @@ function rackflow_renderAdminStatusCard(array $params, $serviceId, $statusData, 
             . '</div>'
             . '</div>';
     }
+
+    $html .= rackflow_renderAdminDebugPanel($params, $serviceId, $rackflowSvcId, $serviceType, $statusData, $debug);
 
     $html .= '</div>'
         . '<p class="rf-as__foot">Reload the page to refresh live status after linking.</p>'

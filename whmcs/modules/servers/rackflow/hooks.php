@@ -2374,6 +2374,70 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
     font-size: 11px;
     color: var(--rf-muted);
   }
+  .rf-as__debug {
+    margin-top: 12px;
+    border: 1px dashed var(--rf-line);
+    border-radius: 10px;
+    background: #fff;
+  }
+  .rf-as__debug-summary {
+    padding: 10px 14px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--rf-muted);
+    cursor: pointer;
+  }
+  .rf-as__debug[open] .rf-as__debug-summary { border-bottom: 1px dashed var(--rf-line); }
+  .rf-as__debug-body { padding: 12px 14px; display: grid; gap: 14px; }
+  .rf-as__debug-section { min-width: 0; }
+  .rf-as__debug-title {
+    margin: 0 0 6px;
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--rf-muted);
+  }
+  .rf-as__debug-scroll { overflow-x: auto; padding-bottom: 4px; }
+  .rf-as__debug-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .rf-as__debug-table th,
+  .rf-as__debug-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--rf-line);
+    text-align: left;
+    vertical-align: top;
+    word-break: break-word;
+  }
+  .rf-as__debug-table tbody th {
+    width: 240px;
+    font-weight: 600;
+    color: var(--rf-muted);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  .rf-as__debug-table--list thead th {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--rf-muted);
+    white-space: nowrap;
+  }
+  .rf-as__debug-raw {
+    width: 100%;
+    min-height: 220px;
+    resize: vertical;
+    color: var(--rf-ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    padding: 8px 10px;
+    border: 1px solid var(--rf-line);
+    border-radius: 8px;
+    background: var(--rf-bg);
+  }
   /*
    * Keep the card in the form's fieldarea column so its left edge lines up
    * with Module Commands / inputs (not flush under the label column).
@@ -2415,12 +2479,8 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
 </style>
 <script>
 (function () {
-  function enhanceRackflowAdminService() {
-    var card = document.getElementById('rackflow-admin-status');
-    if (!card || card.dataset.rfBound === '1') { return; }
-    card.dataset.rfBound = '1';
-
-    var statusRow = card.closest('tr');
+  function decorateRackflowRows(el) {
+    var statusRow = el.closest('tr');
     if (statusRow) {
       statusRow.classList.add('rf-as-row');
       var statusLabel = statusRow.querySelector('td.fieldlabel, th.fieldlabel');
@@ -2440,6 +2500,78 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
         row.classList.add('rf-as-cf-hidden');
       }
     }
+  }
+
+  // Linked services render a placeholder server-side; fetch the live card
+  // (admin_link.php action=card) after page load, swap it in, then bind.
+  function loadRackflowAdminCard() {
+    var ph = document.getElementById('rackflow-admin-status-loading');
+    if (!ph) {
+      enhanceRackflowAdminService();
+      return;
+    }
+    if (ph.dataset.rfLoading === '1') { return; }
+    ph.dataset.rfLoading = '1';
+    decorateRackflowRows(ph);
+
+    var endpoint = ph.getAttribute('data-admin-link-url') || '';
+    var serviceId = parseInt(ph.getAttribute('data-serviceid') || '0', 10);
+    var note = document.getElementById('rf-as-loading-note');
+    var retryBtn = document.getElementById('rf-as-loading-retry');
+
+    function fail(text) {
+      if (note) { note.textContent = text; }
+      if (retryBtn) { retryBtn.hidden = false; }
+    }
+
+    function load() {
+      if (retryBtn) { retryBtn.hidden = true; }
+      if (note) { note.textContent = 'Loading live data from RackFlow…'; }
+      fetch(endpoint, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify({ action: 'card', serviceid: serviceId })
+      }).then(function (res) {
+        return res.json().catch(function () {
+          return { ok: false, error: 'Invalid response from server (' + res.status + ').' };
+        });
+      }).then(function (data) {
+        if (!data || !data.ok || typeof data.html !== 'string' || data.html === '') {
+          fail('Could not load RackFlow data: ' + ((data && data.error) ? data.error : 'unknown error'));
+          return;
+        }
+        var tmp = document.createElement('div');
+        tmp.innerHTML = data.html;
+        var parent = ph.parentNode;
+        while (tmp.firstChild) {
+          parent.insertBefore(tmp.firstChild, ph);
+        }
+        parent.removeChild(ph);
+        try {
+          enhanceRackflowAdminService();
+        } catch (err) {
+          if (window.console) { console.error('RackFlow admin card binding failed', err); }
+        }
+      }).catch(function () {
+        fail('Network error talking to WHMCS.');
+      });
+    }
+
+    if (retryBtn) { retryBtn.addEventListener('click', load); }
+    load();
+  }
+
+  function enhanceRackflowAdminService() {
+    var card = document.getElementById('rackflow-admin-status');
+    if (!card || card.dataset.rfBound === '1') { return; }
+    card.dataset.rfBound = '1';
+
+    decorateRackflowRows(card);
 
     var endpoint = card.getAttribute('data-admin-link-url') || '';
     var serviceId = parseInt(card.getAttribute('data-serviceid') || '0', 10);
@@ -3088,9 +3220,9 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', enhanceRackflowAdminService);
+    document.addEventListener('DOMContentLoaded', loadRackflowAdminCard);
   } else {
-    enhanceRackflowAdminService();
+    loadRackflowAdminCard();
   }
 })();
 </script>

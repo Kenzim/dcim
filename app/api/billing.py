@@ -57,6 +57,8 @@ from app.dao.ipam_dao import IPAMDAO
 from app.services.proxy_provisioning import assignment_payload
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
 from app.dao.installation_task_dao import InstallationTaskDAO
+from app.dao.server_activity_dao import ServerActivityDAO
+from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
 from app.dao.script_dao import ScriptDAO
 from app.dao.boot_task_dao import BootTaskDAO
 from app.dao.product_catalog_dao import ProductDAO
@@ -2186,6 +2188,224 @@ async def get_service_status(
         # Strategy actions for WHMCS admin/client button arrays
         "admin_actions": list_actions(db, service, "admin"),
         "client_actions": list_actions(db, service, "client"),
+    }
+
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _enum_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+def _not_before_service(created_at: Optional[datetime], service: Service) -> bool:
+    if created_at is None or service.created_at is None:
+        return True
+    a, b = created_at, service.created_at
+    if (a.tzinfo is None) != (b.tzinfo is None):
+        a, b = a.replace(tzinfo=None), b.replace(tzinfo=None)
+    return a >= b
+
+
+def _debug_server_payload(server: Server) -> dict:
+    plugin_config = server.plugin_config if isinstance(server.plugin_config, dict) else {}
+    return {
+        "id": server.id,
+        "name": server.name,
+        "uuid": server.uuid,
+        "server_ip": server.server_ip,
+        "enabled": server.enabled,
+        "plugin_name": server.plugin_name,
+        # Only the BMC address/port; never credentials from plugin_config.
+        "bmc_host": plugin_config.get("hostname") or plugin_config.get("host"),
+        "bmc_port": plugin_config.get("port"),
+        "location": {"id": server.location.id, "name": server.location.name} if server.location else None,
+        "rack": {"id": server.rack.id, "name": server.rack.name} if server.rack else None,
+        "rack_unit": server.rack_unit,
+        "rack_units": server.rack_units,
+        "server_groups": [{"id": g.id, "name": g.name} for g in (server.server_groups or [])],
+        "cpu_count": server.cpu_count,
+        "cpu_model": server.cpu_model,
+        "ram_gb": server.ram_gb,
+        "port_speed_mbps": server.port_speed_mbps,
+        "pxe_boot_mode": _enum_value(server.pxe_boot_mode),
+        "os_boot_mode": _enum_value(server.os_boot_mode),
+        "ipmi_proxy_enabled": bool(server.ipmi_proxy_enabled),
+        "ipmi_web_management_url": server.ipmi_web_management_url,
+        "ipmi_kvm_profile": server.ipmi_kvm_profile,
+        "sol_profile": server.sol_profile,
+        "virtual_media_profile": server.virtual_media_profile,
+        "kvm_ready": bool(kvm_ready(server)),
+        "sol_ready": bool(sol_ready(server)),
+        "virtual_media_ready": bool(virtual_media_ready(server)),
+        "tested_capabilities": server.tested_capabilities or [],
+    }
+
+
+def _debug_vm_payload(service: Service) -> Optional[dict]:
+    vm = service.vm
+    if vm is None:
+        return None
+    vm_ip_allocation_id, vm_ip_address = _billing_vm_ip_fields(service)
+    return {
+        "proxmox_cluster_id": vm.proxmox_cluster_id,
+        "proxmox_cluster_name": vm.proxmox_cluster.name if vm.proxmox_cluster else None,
+        "proxmox_node_name": vm.proxmox_node_name,
+        "proxmox_vmid": vm.proxmox_vmid,
+        "vm_template_id": vm.vm_template_id,
+        "vm_template_name": vm.vm_template.name if vm.vm_template else None,
+        "guest_state": _enum_value(vm.guest_state),
+        "guest_last_error": vm.guest_last_error,
+        "guest_last_transition_at": _iso(vm.guest_last_transition_at),
+        "vm_ip_allocation_id": vm_ip_allocation_id,
+        "vm_ip_address": vm_ip_address,
+    }
+
+
+def _debug_deployment_jobs(db: Session, service: Service, limit: int) -> list:
+    if service.service_type != ServiceType.VM:
+        return []
+    jobs = []
+    for job in VMDeploymentJobDAO.list_by_service(db, service.id, limit=limit):
+        jobs.append({
+            "id": job.id,
+            "strategy_name": job.strategy_name,
+            "status": _enum_value(job.status),
+            "current_step_index": job.current_step_index,
+            "attempt": job.attempt,
+            "max_attempts": job.max_attempts,
+            "error_message": job.error_message,
+            "next_run_at": _iso(job.next_run_at),
+            "created_at": _iso(job.created_at),
+            "started_at": _iso(job.started_at),
+            "finished_at": _iso(job.finished_at),
+            "steps": [
+                {
+                    "position": step.position,
+                    "name": step.name,
+                    "status": _enum_value(step.status),
+                    "attempt_count": step.attempt_count,
+                    "message": step.message,
+                    "started_at": _iso(step.started_at),
+                    "finished_at": _iso(step.finished_at),
+                }
+                for step in (job.steps or [])
+            ],
+        })
+    return jobs
+
+
+def _debug_activity(db: Session, service: Service, server: Optional[Server], limit: int) -> list:
+    entries = list(ServerActivityDAO.get_by_service(db, service.id, limit=limit))
+    if server is not None:
+        # Servers are reused across services: hide history from before this service existed.
+        entries.extend(
+            e for e in ServerActivityDAO.get_by_server(db, server.id, limit=limit)
+            if _not_before_service(e.created_at, service)
+        )
+    entries.sort(key=lambda e: (e.created_at, e.id), reverse=True)
+    # Activity ``details`` are omitted: they can carry template parameters.
+    return [
+        {
+            "id": e.id,
+            "created_at": _iso(e.created_at),
+            "event_type": _enum_value(e.event_type),
+            "action": e.action,
+            "status": _enum_value(e.status),
+            "message": e.message,
+            "source": e.source,
+            "scope": "server" if e.server_id is not None else "service",
+        }
+        for e in entries[:limit]
+    ]
+
+
+@router.get("/services/{service_id}/debug", status_code=status.HTTP_200_OK, responses=COMMON_ERROR_RESPONSES)
+async def get_service_debug(
+    service_id: int,
+    integration: BillingIntegrationDep,
+    db: DbDep,
+):
+    """
+    Operator diagnostics for a billing-owned service (WHMCS admin "Debug" panel).
+
+    Read-only and DB-only (no BMC/Proxmox calls). Never returns credentials:
+    plugin_config, service config values, OS passwords and activity details
+    are left out.
+    """
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
+    _assert_billing_owned_service(service, integration)
+
+    server = service_linked_server(db, service)
+    owner = service.owner_user
+
+    boot_task = None
+    installation_tasks = []
+    if server is not None:
+        bt = BootTaskDAO.get_active_by_server(db, server.id)
+        if bt is not None:
+            boot_task = {
+                "id": bt.id,
+                "boot_type": _enum_value(bt.boot_type),
+                "boot_method": bt.boot_method,
+                "status": _enum_value(bt.status),
+                "temp_os_id": bt.temp_os_id,
+                "description": bt.description,
+                "error_message": bt.error_message,
+                "created_at": _iso(bt.created_at),
+                "started_at": _iso(bt.started_at),
+                "completed_at": _iso(bt.completed_at),
+            }
+        server_tasks = [
+            t for t in InstallationTaskDAO.get_by_server(db, server.id)
+            if _not_before_service(t.created_at, service)
+        ]
+        for task in server_tasks[:5]:
+            installation_tasks.append({
+                "id": task.id,
+                "template_id": task.template_id,
+                "status": _enum_value(task.status),
+                "os_name": task.os_name,
+                "os_version": task.os_version,
+                "progress_percent": task.progress_percent,
+                "error_message": task.error_message,
+                "created_at": _iso(task.created_at),
+                "started_at": _iso(task.started_at),
+                "completed_at": _iso(task.completed_at),
+            })
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "service": {
+            "id": service.id,
+            "name": service.name,
+            "service_type": _enum_value(service.service_type),
+            "status": _enum_value(service.status),
+            "external_service_id": service.external_service_id,
+            "product_code": service.product_code,
+            "os_code": service.os_code,
+            "provisioning_source": _enum_value(service.provisioning_source),
+            "permission_set_id": service.permission_set_id,
+            "permission_overrides": service.permission_overrides or {},
+            "config_keys": sorted((service.config or {}).keys()) if isinstance(service.config, dict) else [],
+            "created_at": _iso(service.created_at),
+            "updated_at": _iso(service.updated_at),
+            "terminated_at": _iso(service.terminated_at),
+            "owner": {
+                "user_id": owner.id,
+                "external_user_id": owner.external_user_id,
+                "external_username": owner.external_username,
+            } if owner is not None else None,
+        },
+        "server": _debug_server_payload(server) if server is not None else None,
+        "vm": _debug_vm_payload(service),
+        "boot_task": boot_task,
+        "installation_tasks": installation_tasks,
+        "deployment_jobs": _debug_deployment_jobs(db, service, limit=5),
+        "activity": _debug_activity(db, service, server, limit=20),
     }
 
 

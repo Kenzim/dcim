@@ -6,7 +6,7 @@
  * so the browser never sees the billing API key.
  *
  * POST JSON body:
- *   action: search | unlink | link | adopt | set_vmid
+ *   action: card | search | unlink | link | adopt | set_vmid | rotate_proxy
  *   serviceid: WHMCS tblhosting.id
  *   …action-specific fields
  */
@@ -106,8 +106,21 @@ $params = array(
     'packageid' => (int)$hosting->packageid,
     'pid' => (int)$hosting->packageid,
     'serverid' => (int)$hosting->server,
-    'configoption1' => isset($product->configoption1) ? (string)$product->configoption1 : '',
 );
+for ($i = 1; $i <= 8; $i++) {
+    $col = 'configoption' . $i;
+    $params[$col] = isset($product->$col) ? (string)$product->$col : '';
+}
+
+// Lazy-loaded admin status card (see rackflow_AdminServicesTabFields). Runs before
+// the API config check so the card can still show its diagnostics when misconfigured.
+if ($action === 'card') {
+    $rfId = rackflow_getRackflowServiceId($params);
+    rackflow_admin_link_json(array(
+        'ok' => true,
+        'html' => rackflow_buildAdminStatusCard($params, $serviceId, !empty($rfId) ? (string)$rfId : ''),
+    ));
+}
 
 $apiConfig = rackflow_getApiConfig($params);
 $apiUrl = isset($apiConfig['url']) ? $apiConfig['url'] : '';
