@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     # Storage runner API: failed key checks allowed per source IP and window.
     storage_runner_auth_failures_per_ip: int = 20
     storage_runner_auth_failures_window_seconds: int = 300
+    # Storage SFTP: a source address is refused for ban_seconds after this
+    # many failed logins within the window (enforced by the storage runner).
+    storage_sftp_max_auth_failures: int = 10
+    storage_sftp_failure_window_seconds: int = 600
+    storage_sftp_ban_seconds: int = 900
 
     # Trust the X-Forwarded-For header when determining the caller's source IP.
     # This must ONLY be enabled when the app sits behind a trusted reverse proxy

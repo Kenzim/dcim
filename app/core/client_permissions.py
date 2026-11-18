@@ -144,7 +144,7 @@ PERMISSION_CATALOG: List[Dict] = [
     },
     {
         "key": PermissionKey.STORAGE_MANAGE_SHARES,
-        "label": "Create, change and delete storage shares",
+        "label": "Create, change and delete storage shares and SFTP users",
         "service_types": ["nfs_storage"],
     },
     {

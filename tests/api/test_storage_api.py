@@ -326,16 +326,21 @@ def test_runner_config_and_status_round_trip(client, world, admin, alice, bob):
     response = client.get(f"{RUNNER}/config", headers=_bearer(key))
     assert response.status_code == 200, response.text
     config = response.json()
-    assert set(config) == {"version", "node", "settings", "tenants"}
+    assert set(config) == {"version", "node", "settings", "sftp", "tenants"}
+    assert config["sftp"]["enabled"] is False and config["sftp"]["port"] == 2222
     assert [t["id"] for t in config["tenants"]] == [a_tenant.id]
     tenant = config["tenants"][0]
     assert set(tenant) == {
         "id", "state", "terminated_at", "destroy_after", "vlan", "network_cidr", "endpoint_ip",
-        "prefix_len", "size_bytes", "limits", "shares",
+        "prefix_len", "size_bytes", "limits", "shares", "sftp_users",
     }
+    assert tenant["sftp_users"] == []
     assert tenant["vlan"] == a_tenant.vlan and tenant["endpoint_ip"] == "10.0.0.254"
     assert tenant["shares"][0]["clients"] == ["10.0.0.5", "10.0.0.6"]
-    assert set(tenant["shares"][0]) == {"id", "name", "quota_bytes", "clients", "read_only", "state", "destroy_after"}
+    assert set(tenant["shares"][0]) == {
+        "id", "name", "quota_bytes", "clients", "read_only", "sftp", "state", "destroy_after"
+    }
+    assert tenant["shares"][0]["sftp"] == "off"
     share_id = tenant["shares"][0]["id"]
 
     status_response = client.post(

@@ -46,6 +46,7 @@ def from_billing_bare_metal(data, owner_user_id: int) -> ProvisionRequest:
         subnet_group_id=_as_int(cfg.get("subnet_group_id")),
         allocation_strategy=cfg.get("allocation_strategy"),
         size_gb=_as_int(cfg.get("size_gb")),
+        location_id=_as_int(cfg.get("location_id")),
         leave_pending_on_placement_error=False,
     )
 

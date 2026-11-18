@@ -13,11 +13,16 @@ from app.api.storage_common import (
     LinkBody,
     ShareCreate,
     ShareUpdate,
+    SftpUserCreate,
+    SftpUserUpdate,
+    _create_sftp_user,
     _create_share,
+    _delete_sftp_user,
     _delete_share,
     _link,
     _tenant,
     _tenant_out,
+    _update_sftp_user,
     _update_share,
 )
 from app.core.auth import get_current_user
@@ -28,6 +33,7 @@ from app.dao.storage_dao import StorageDAO
 from app.models.private_network import PrivateNetworkStatus
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.services.client_permission_resolver import require_client_permission
+from app.services.storage_service import StorageService
 
 UserDep = Annotated[dict, Depends(get_current_user)]
 
@@ -79,16 +85,27 @@ async def client_get_storage(service_id: int, auth: UserDep, db: DbDep):
 
 @client_router.get("/{service_id}/networks")
 async def client_linkable_networks(service_id: int, auth: UserDep, db: DbDep):
-    """The caller's networks this storage could be linked to."""
+    """The caller's networks this storage could be linked to.
+
+    Linking without a network creates one in the storage's location, so a
+    client with no network (and no servers) can still use storage.
+    """
     service = _client_service(db, auth, service_id, PermissionKey.SERVICE_VIEW)
-    node_locations = {
-        node.server.location_id for node in StorageDAO.list_nodes(db) if node.enabled and node.server is not None
-    }
+    tenant = _tenant(db, service)
+    node_locations = StorageService.storage_location_ids(db)
     out = []
     for network in PrivateNetworkDAO.list_networks(db, owner_user_id=service.owner_user_id):
         if network.status != PrivateNetworkStatus.ACTIVE:
             continue
         has_storage = StorageDAO.get_tenant_for_network(db, network.id) is not None
+        if has_storage:
+            reason = "Already has storage"
+        elif network.location_id not in node_locations:
+            reason = "Storage is not offered in this location"
+        elif tenant.location_id is not None and network.location_id != tenant.location_id:
+            reason = "This storage was ordered for another location"
+        else:
+            reason = None
         out.append(
             {
                 "id": network.id,
@@ -96,12 +113,8 @@ async def client_linkable_networks(service_id: int, auth: UserDep, db: DbDep):
                 "cidr": network.cidr,
                 "location_id": network.location_id,
                 "location_name": network.location.name if network.location else None,
-                "available": not has_storage and network.location_id in node_locations,
-                "reason": (
-                    "Already has storage"
-                    if has_storage
-                    else (None if network.location_id in node_locations else "Storage is not offered in this location")
-                ),
+                "available": reason is None,
+                "reason": reason,
             }
         )
     return out
@@ -110,7 +123,7 @@ async def client_linkable_networks(service_id: int, auth: UserDep, db: DbDep):
 @client_router.post("/{service_id}/link")
 async def client_link_storage(service_id: int, body: LinkBody, auth: UserDep, db: DbDep):
     service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
-    return await _link(db, service, body.network_id, None, staff=False)
+    return await _link(db, service, body, None, staff=False)
 
 
 @client_router.post("/{service_id}/shares", status_code=status.HTTP_201_CREATED)
@@ -129,3 +142,21 @@ async def client_update_share(service_id: int, share_id: int, body: ShareUpdate,
 async def client_delete_share(service_id: int, share_id: int, auth: UserDep, db: DbDep):
     service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
     return _delete_share(db, service, share_id, staff=False)
+
+
+@client_router.post("/{service_id}/sftp-users", status_code=status.HTTP_201_CREATED)
+async def client_create_sftp_user(service_id: int, body: SftpUserCreate, auth: UserDep, db: DbDep):
+    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    return _create_sftp_user(db, service, body, staff=False)
+
+
+@client_router.patch("/{service_id}/sftp-users/{user_id}")
+async def client_update_sftp_user(service_id: int, user_id: int, body: SftpUserUpdate, auth: UserDep, db: DbDep):
+    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    return _update_sftp_user(db, service, user_id, body, staff=False)
+
+
+@client_router.delete("/{service_id}/sftp-users/{user_id}")
+async def client_delete_sftp_user(service_id: int, user_id: int, auth: UserDep, db: DbDep):
+    service = _client_service(db, auth, service_id, PermissionKey.STORAGE_MANAGE_SHARES)
+    return _delete_sftp_user(db, service, user_id, staff=False)

@@ -18,10 +18,14 @@ async def storage_node(
     enabled: Optional[bool] = None,
     vlan_mode: Optional[Literal["switch", "preconfigured"]] = None,
     vlan_port_ids: Optional[List[int]] = None,
+    sftp_enabled: Optional[bool] = None,
+    sftp_host: Optional[str] = None,
+    sftp_port: Optional[int] = None,
 ) -> dict:
     """Storage nodes. list (or one by node_id, with its tenants and the switch ports that carry
     customer VLANs plus any problem), create (server_id; name, vlan_mode, vlan_port_ids optional;
-    the runner API key is returned once), update (name, enabled, vlan_mode, vlan_port_ids),
+    the runner API key is returned once), update (name, enabled, vlan_mode, vlan_port_ids;
+    sftp_enabled, sftp_host = public name clients connect to, sftp_port default 2222),
     vlan_ports (server_id: preview which switch ports would carry VLANs, before making it a node).
     vlan_mode: switch = Rackflow adds each customer VLAN to the node's switch ports through the
     switch plugin; preconfigured = the node already receives every VLAN (pre-trunked ports or a
@@ -61,11 +65,14 @@ async def storage_node(
             raise ValueError("Updating a storage node needs: node_id")
         changes = {
             k: v
-            for k, v in {"name": name, "enabled": enabled, "vlan_mode": vlan_mode, "vlan_port_ids": vlan_port_ids}.items()
+            for k, v in {
+                "name": name, "enabled": enabled, "vlan_mode": vlan_mode, "vlan_port_ids": vlan_port_ids,
+                "sftp_enabled": sftp_enabled, "sftp_host": sftp_host, "sftp_port": sftp_port,
+            }.items()
             if v is not None
         }
         if not changes:
-            raise ValueError("Updating a storage node needs at least one of: name, enabled, vlan_mode, vlan_port_ids")
+            raise ValueError("Updating a storage node needs at least one field to change")
         return await storage_api.update_node(node_id, storage_api.NodeUpdate(**changes), auth={}, db=db)
 
     return await run_tool(
@@ -116,7 +123,8 @@ async def delete_storage_node(node_id: int, confirm: bool = False) -> dict:
 @mcp.tool()
 async def storage(
     action: Literal[
-        "list", "view", "create", "link", "resize", "share_create", "share_update", "share_delete"
+        "list", "view", "create", "link", "resize", "share_create", "share_update", "share_delete",
+        "sftp_user_create", "sftp_user_update", "sftp_user_delete",
     ] = "list",
     service_id: Optional[int] = None,
     owner_user_id: Optional[int] = None,
@@ -124,22 +132,36 @@ async def storage(
     size_gb: Optional[int] = None,
     network_id: Optional[int] = None,
     node_id: Optional[int] = None,
+    location_id: Optional[int] = None,
     share_id: Optional[int] = None,
     quota_gb: Optional[int] = None,
     clients: Optional[List[str]] = None,
     all_clients: Optional[bool] = None,
     read_only: Optional[bool] = None,
+    sftp_access: Optional[Literal["off", "ro", "rw"]] = None,
+    user_id: Optional[int] = None,
+    public_keys: Optional[List[str]] = None,
+    allowed_ips: Optional[List[str]] = None,
+    new_password: bool = False,
+    enabled: Optional[bool] = None,
     confirm: bool = False,
 ) -> dict:
     """NFS storage services. list (optionally by owner_user_id), view (service_id): status is
     ready only when the node's network attachment is applied and the runner reports ready.
-    create (owner_user_id, name, size_gb; network_id and node_id optional), link (service_id,
-    network_id; node_id optional, default the least loaded node), resize (service_id, size_gb;
-    never below the shares' total quota), share_create (service_id, name, quota_gb; clients,
-    all_clients, read_only), share_update (service_id, share_id; quota_gb, clients, all_clients,
-    read_only), share_delete (service_id, share_id, confirm=true; data is destroyed after the grace period).
+    create (owner_user_id, name, size_gb; location_id, network_id, node_id optional), link
+    (service_id; network_id, or none to create a network for the owner; node_id optional, default
+    the least loaded node), resize (service_id, size_gb; never below the shares' total quota),
+    share_create (service_id, name, quota_gb; clients, all_clients, read_only, sftp_access
+    off/ro/rw), share_update (service_id, share_id; same fields), share_delete (service_id,
+    share_id, confirm=true; data is destroyed after the grace period). sftp_user_create
+    (service_id, name; public_keys and/or new_password=true, allowed_ips), sftp_user_update
+    (service_id, user_id; public_keys, new_password, allowed_ips, enabled), sftp_user_delete
+    (service_id, user_id, confirm=true). A generated password is returned once.
     """
-    args = {"action": action, "service_id": service_id, "share_id": share_id, "network_id": network_id}
+    args = {
+        "action": action, "service_id": service_id, "share_id": share_id, "network_id": network_id,
+        "user_id": user_id,
+    }
     if action in ("list", "view"):
 
         async def read(db, ctx):
@@ -156,16 +178,17 @@ async def storage(
             if owner_user_id is None or not name or size_gb is None:
                 raise ValueError("create needs: owner_user_id, name, size_gb")
             body = storage_api.StorageCreate(
-                owner_user_id=owner_user_id, name=name, size_gb=size_gb, network_id=network_id, node_id=node_id
+                owner_user_id=owner_user_id, name=name, size_gb=size_gb, network_id=network_id, node_id=node_id,
+                location_id=location_id,
             )
             return await storage_api.admin_create_storage(body, auth={}, db=db)
         if service_id is None:
             raise ValueError(f"{action} needs: service_id")
         if action == "link":
-            if network_id is None:
-                raise ValueError("link needs: network_id")
-            body = storage_api.AdminLinkBody(network_id=network_id, node_id=node_id)
+            body = storage_api.AdminLinkBody(network_id=network_id, node_id=node_id, location_id=location_id)
             return await storage_api.admin_link_storage(service_id, body, auth={}, db=db)
+        if action.startswith("sftp_user_"):
+            return await _sftp_user(db)
         if action == "resize":
             if size_gb is None:
                 raise ValueError("resize needs: size_gb")
@@ -181,6 +204,7 @@ async def storage(
                 clients=clients or [],
                 all_clients=bool(all_clients),
                 read_only=bool(read_only),
+                sftp_access=sftp_access or "off",
             )
             return await storage_api.admin_create_share(service_id, body, auth={}, db=db)
         if share_id is None:
@@ -189,17 +213,44 @@ async def storage(
             changes = {
                 k: v
                 for k, v in {
-                    "quota_gb": quota_gb, "clients": clients, "all_clients": all_clients, "read_only": read_only
+                    "quota_gb": quota_gb, "clients": clients, "all_clients": all_clients, "read_only": read_only,
+                    "sftp_access": sftp_access,
                 }.items()
                 if v is not None
             }
             if not changes:
-                raise ValueError("share_update needs at least one of: quota_gb, clients, all_clients, read_only")
+                raise ValueError(
+                    "share_update needs at least one of: quota_gb, clients, all_clients, read_only, sftp_access"
+                )
             body = storage_api.ShareUpdate(**changes)
             return await storage_api.admin_update_share(service_id, share_id, body, auth={}, db=db)
         return await storage_api.admin_delete_share(service_id, share_id, auth={}, db=db)
 
-    deleting = action == "share_delete"
+    async def _sftp_user(db):
+        if action == "sftp_user_create":
+            if not name:
+                raise ValueError("sftp_user_create needs: name")
+            body = storage_api.SftpUserCreate(
+                name=name, public_keys=public_keys or [], generate_password=new_password, allowed_ips=allowed_ips or []
+            )
+            return await storage_api.admin_create_sftp_user(service_id, body, auth={}, db=db)
+        if user_id is None:
+            raise ValueError(f"{action} needs: user_id")
+        if action == "sftp_user_update":
+            changes = {
+                k: v
+                for k, v in {"public_keys": public_keys, "allowed_ips": allowed_ips, "enabled": enabled}.items()
+                if v is not None
+            }
+            if new_password:
+                changes["generate_password"] = True
+            if not changes:
+                raise ValueError("sftp_user_update needs at least one of: public_keys, new_password, allowed_ips, enabled")
+            body = storage_api.SftpUserUpdate(**changes)
+            return await storage_api.admin_update_sftp_user(service_id, user_id, body, auth={}, db=db)
+        return await storage_api.admin_delete_sftp_user(service_id, user_id, auth={}, db=db)
+
+    deleting = action in ("share_delete", "sftp_user_delete")
     return await run_tool(
         "storage",
         "destructive" if deleting else "write",

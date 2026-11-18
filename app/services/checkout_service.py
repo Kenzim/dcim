@@ -613,6 +613,8 @@ class CheckoutService:
             subnet_id=_int("subnet_id"),
             subnet_group_id=_int("subnet_group_id"),
             allocation_strategy=keys.get("allocation_strategy"),
+            size_gb=_int("size_gb"),
+            location_id=_int("location_id"),
         )
         actor = ProvisioningActor(
             kind="commerce",

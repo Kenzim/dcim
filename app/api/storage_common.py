@@ -7,7 +7,7 @@ details are included.
 
 from __future__ import annotations
 
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.service import Service
 from app.models.storage import StorageShare, StorageTenant
+from app.services import storage_sftp
 from app.services.storage_service import (
     GIB,
     StorageError,
@@ -33,7 +34,15 @@ STORAGE_NOT_FOUND = "Storage not found"
 
 
 class LinkBody(BaseModel):
-    network_id: int
+    """Link to ``network_id``, or leave it out to create a new network (optional name and CIDR)."""
+
+    network_id: Optional[int] = None
+    network_name: Optional[str] = Field(None, max_length=64)
+    cidr: Optional[str] = Field(None, max_length=32)
+    location_id: Optional[int] = None
+
+
+SftpAccessValue = Literal["off", "ro", "rw"]
 
 
 class ShareCreate(BaseModel):
@@ -42,6 +51,7 @@ class ShareCreate(BaseModel):
     clients: List[str] = Field(default_factory=list, max_length=256)
     all_clients: bool = False
     read_only: bool = False
+    sftp_access: SftpAccessValue = "off"
 
 
 class ShareUpdate(BaseModel):
@@ -49,6 +59,24 @@ class ShareUpdate(BaseModel):
     clients: Optional[List[str]] = Field(None, max_length=256)
     all_clients: Optional[bool] = None
     read_only: Optional[bool] = None
+    sftp_access: Optional[SftpAccessValue] = None
+
+
+class SftpUserCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=32)
+    public_keys: List[str] = Field(default_factory=list, max_length=16)
+    password: Optional[str] = Field(None, max_length=200)
+    generate_password: bool = False
+    allowed_ips: List[str] = Field(default_factory=list, max_length=32)
+
+
+class SftpUserUpdate(BaseModel):
+    public_keys: Optional[List[str]] = Field(None, max_length=16)
+    password: Optional[str] = Field(None, max_length=200)
+    generate_password: bool = False
+    clear_password: bool = False
+    allowed_ips: Optional[List[str]] = Field(None, max_length=32)
+    enabled: Optional[bool] = None
 
 
 def _raise(exc: StorageError) -> None:
@@ -67,6 +95,7 @@ def _share_out(tenant: StorageTenant, share: StorageShare, storage_status: str, 
         "all_clients": bool(share.all_clients),
         "effective_clients": share_clients(tenant, share),
         "read_only": bool(share.read_only),
+        "sftp_access": share.sftp_access.value,
         "state": share.state.value,
         "status": share_status(share, storage_status),
         "destroy_after": iso_utc(share.destroy_after),
@@ -100,9 +129,12 @@ def _tenant_out(db: Session, tenant: StorageTenant, *, staff: bool) -> dict:
             else None
         ),
         "endpoint_ip": tenant.endpoint_ip,
+        "location_id": tenant.location_id,
+        "location_name": tenant.location.name if tenant.location is not None else None,
         "terminated_at": iso_utc(tenant.terminated_at),
         "destroy_after": iso_utc(tenant.destroy_after),
         "shares": [_share_out(tenant, s, status_value, staff=staff) for s in tenant.shares],
+        "sftp": storage_sftp.tenant_sftp_out(tenant, status_value, staff=staff),
     }
     if staff:
         attachment = storage_attachment(db, tenant)
@@ -131,9 +163,17 @@ def _tenant(db: Session, service: Service) -> StorageTenant:
         _raise(exc)
 
 
-async def _link(db: Session, service: Service, network_id: int, node_id: Optional[int], *, staff: bool) -> dict:
+async def _link(db: Session, service: Service, body: LinkBody, node_id: Optional[int], *, staff: bool) -> dict:
     try:
-        tenant = await StorageService.link_network(db, service, network_id, node_id=node_id)
+        tenant = await StorageService.link_network(
+            db,
+            service,
+            body.network_id,
+            node_id=node_id,
+            network_name=body.network_name,
+            cidr=body.cidr,
+            location_id=body.location_id,
+        )
     except StorageError as exc:
         _raise(exc)
     return _tenant_out(db, tenant, staff=staff)
@@ -150,6 +190,7 @@ def _create_share(db: Session, service: Service, body: ShareCreate, *, staff: bo
             clients=body.clients,
             all_clients=body.all_clients,
             read_only=body.read_only,
+            sftp_access=body.sftp_access,
         )
     except StorageError as exc:
         _raise(exc)
@@ -173,5 +214,46 @@ def _delete_share(db: Session, service: Service, share_id: int, *, staff: bool) 
         StorageService.delete_share(db, tenant, share_id)
     except StorageError as exc:
         _raise(exc)
+    db.refresh(tenant)
+    return _tenant_out(db, tenant, staff=staff)
+
+
+def _sftp_raise(exc: storage_sftp.SftpError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+def _with_password(out: dict, generated: Optional[str]) -> dict:
+    if generated is not None:
+        out["generated_password"] = generated
+    return out
+
+
+def _create_sftp_user(db: Session, service: Service, body: SftpUserCreate, *, staff: bool) -> dict:
+    """Create an SFTP user; a generated password is returned once as ``generated_password``."""
+    tenant = _tenant(db, service)
+    try:
+        _user, generated = storage_sftp.create_user(db, tenant, **body.model_dump())
+    except storage_sftp.SftpError as exc:
+        _sftp_raise(exc)
+    db.refresh(tenant)
+    return _with_password(_tenant_out(db, tenant, staff=staff), generated)
+
+
+def _update_sftp_user(db: Session, service: Service, user_id: int, body: SftpUserUpdate, *, staff: bool) -> dict:
+    tenant = _tenant(db, service)
+    try:
+        _user, generated = storage_sftp.update_user(db, tenant, user_id, **body.model_dump(exclude_unset=True))
+    except storage_sftp.SftpError as exc:
+        _sftp_raise(exc)
+    db.refresh(tenant)
+    return _with_password(_tenant_out(db, tenant, staff=staff), generated)
+
+
+def _delete_sftp_user(db: Session, service: Service, user_id: int, *, staff: bool) -> dict:
+    tenant = _tenant(db, service)
+    try:
+        storage_sftp.delete_user(db, tenant, user_id)
+    except storage_sftp.SftpError as exc:
+        _sftp_raise(exc)
     db.refresh(tenant)
     return _tenant_out(db, tenant, staff=staff)

@@ -322,12 +322,18 @@ _STORAGE_SCOPE = {
     "share_create": "write",
     "share_update": "write",
     "share_delete": "destructive",
+    "sftp_user_create": "write",
+    "sftp_user_update": "write",
+    "sftp_user_delete": "destructive",
 }
 
 
 @client_mcp.tool()
 async def storage(
-    action: Literal["list", "view", "networks", "link", "share_create", "share_update", "share_delete"] = "list",
+    action: Literal[
+        "list", "view", "networks", "link", "share_create", "share_update", "share_delete",
+        "sftp_user_create", "sftp_user_update", "sftp_user_delete",
+    ] = "list",
     service_id: Optional[int] = None,
     network_id: Optional[int] = None,
     share_id: Optional[int] = None,
@@ -336,15 +342,25 @@ async def storage(
     clients: Optional[list[str]] = None,
     all_clients: Optional[bool] = None,
     read_only: Optional[bool] = None,
+    sftp_access: Optional[Literal["off", "ro", "rw"]] = None,
+    user_id: Optional[int] = None,
+    public_keys: Optional[list[str]] = None,
+    allowed_ips: Optional[list[str]] = None,
+    new_password: bool = False,
+    enabled: Optional[bool] = None,
     confirm: bool = False,
 ) -> Any:
     """Your NFS storage. list, view (service_id): status is ready only once the storage is on
-    your network and set up; each share has its mount command and fstab line. networks
-    (service_id): your private networks it can be linked to. link (service_id, network_id).
-    share_create (service_id, name, quota_gb; clients = IPs on the network, all_clients to allow
-    every service attached to it, read_only), share_update (service_id, share_id; quota_gb,
-    clients, all_clients, read_only), share_delete (service_id, share_id, confirm=true; the data
-    is destroyed after a grace period).
+    your network and set up; each share has its mount command and fstab line; sftp has the
+    SFTP endpoint and users. networks (service_id): your private networks it can be linked to.
+    link (service_id; network_id, or none to create a network). share_create (service_id, name,
+    quota_gb; clients = IPs on the network, all_clients to allow every service attached to it,
+    read_only, sftp_access off/ro/rw), share_update (service_id, share_id; same fields),
+    share_delete (service_id, share_id, confirm=true; the data is destroyed after a grace
+    period). sftp_user_create (service_id, name; public_keys and/or new_password=true for a
+    generated password shown once; allowed_ips CIDRs), sftp_user_update (service_id, user_id;
+    public_keys, new_password, allowed_ips, enabled), sftp_user_delete (service_id, user_id,
+    confirm=true).
     """
     async def work(db: Session, ctx: ClientMcpAuthContext):
         auth = _auth(ctx)
@@ -356,9 +372,10 @@ async def storage(
         if action == "networks":
             return await storage_portal.client_linkable_networks(service_id, auth=auth, db=db)
         if action == "link":
-            _need("storage link", network_id=network_id)
-            body = storage_portal.LinkBody(network_id=network_id)
+            body = storage_portal.LinkBody(network_id=network_id, network_name=name)
             return await storage_portal.client_link_storage(service_id, body, auth=auth, db=db)
+        if action.startswith("sftp_user_"):
+            return await _storage_sftp_user(db, auth)
         if action == "share_create":
             _need("storage share_create", name=name, quota_gb=quota_gb)
             body = storage_portal.ShareCreate(
@@ -367,6 +384,7 @@ async def storage(
                 clients=clients or [],
                 all_clients=bool(all_clients),
                 read_only=bool(read_only),
+                sftp_access=sftp_access or "off",
             )
             return await storage_portal.client_create_share(service_id, body, auth=auth, db=db)
         _need(f"storage {action}", share_id=share_id)
@@ -374,21 +392,48 @@ async def storage(
             changes = {
                 key: value
                 for key, value in {
-                    "quota_gb": quota_gb, "clients": clients, "all_clients": all_clients, "read_only": read_only
+                    "quota_gb": quota_gb, "clients": clients, "all_clients": all_clients, "read_only": read_only,
+                    "sftp_access": sftp_access,
                 }.items()
                 if value is not None
             }
             if not changes:
-                raise ToolError("storage share_update needs at least one of: quota_gb, clients, all_clients, read_only")
+                raise ToolError(
+                    "storage share_update needs at least one of: quota_gb, clients, all_clients, read_only, sftp_access"
+                )
             body = storage_portal.ShareUpdate(**changes)
             return await storage_portal.client_update_share(service_id, share_id, body, auth=auth, db=db)
         return await storage_portal.client_delete_share(service_id, share_id, auth=auth, db=db)
+
+    async def _storage_sftp_user(db: Session, auth: dict):
+        if action == "sftp_user_create":
+            _need("storage sftp_user_create", name=name)
+            body = storage_portal.SftpUserCreate(
+                name=name, public_keys=public_keys or [], generate_password=new_password, allowed_ips=allowed_ips or []
+            )
+            return await storage_portal.client_create_sftp_user(service_id, body, auth=auth, db=db)
+        _need(f"storage {action}", user_id=user_id)
+        if action == "sftp_user_update":
+            changes = {
+                key: value
+                for key, value in {"public_keys": public_keys, "allowed_ips": allowed_ips, "enabled": enabled}.items()
+                if value is not None
+            }
+            if new_password:
+                changes["generate_password"] = True
+            if not changes:
+                raise ToolError(
+                    "storage sftp_user_update needs at least one of: public_keys, new_password, allowed_ips, enabled"
+                )
+            body = storage_portal.SftpUserUpdate(**changes)
+            return await storage_portal.client_update_sftp_user(service_id, user_id, body, auth=auth, db=db)
+        return await storage_portal.client_delete_sftp_user(service_id, user_id, auth=auth, db=db)
 
     return await run_client_tool(
         f"storage_{action}",
         _STORAGE_SCOPE[action],
         work,
-        confirm_required=action == "share_delete",
+        confirm_required=action in ("share_delete", "sftp_user_delete"),
         confirm=confirm,
-        args={"service_id": service_id, "share_id": share_id, "network_id": network_id},
+        args={"service_id": service_id, "share_id": share_id, "network_id": network_id, "user_id": user_id},
     )

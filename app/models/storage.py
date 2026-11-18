@@ -39,6 +39,12 @@ class ShareState(str, enum.Enum):
     DELETING = "deleting"
 
 
+class SftpAccess(str, enum.Enum):
+    OFF = "off"
+    READ_ONLY = "ro"
+    READ_WRITE = "rw"
+
+
 def _enum(enum_cls):
     return SQLEnum(enum_cls, native_enum=False, values_callable=lambda x: [e.value for e in x])
 
@@ -66,6 +72,15 @@ class StorageNode(Base):
     last_error = Column(Text, nullable=True)
     version_applied = Column(String(64), nullable=True)
     orphans = Column(JSON, nullable=True)
+    # Public SFTP endpoint served by the node's runner.
+    sftp_enabled = Column(Boolean, nullable=False, default=False)
+    sftp_host = Column(String(255), nullable=True)
+    sftp_port = Column(Integer, nullable=False, default=2222)
+    # Reported by the runner.
+    sftp_listening = Column(Boolean, nullable=True)
+    sftp_host_key = Column(Text, nullable=True)
+    sftp_host_key_fingerprint = Column(String(128), nullable=True)
+    sftp_error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -99,17 +114,26 @@ class StorageTenant(Base):
     destroy_after = Column(DateTime(timezone=True), nullable=True)
     runner_state = Column(String(16), nullable=True)
     runner_error = Column(Text, nullable=True)
+    sftp_state = Column(String(16), nullable=True)
+    sftp_error = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     service = relationship("Service")
     node = relationship("StorageNode")
     network = relationship("PrivateNetwork")
+    location = relationship("Location")
     shares = relationship(
         "StorageShare",
         back_populates="tenant",
         cascade="all, delete-orphan",
         order_by="StorageShare.id",
+    )
+    sftp_users = relationship(
+        "StorageSftpUser",
+        back_populates="tenant",
+        cascade="all, delete-orphan",
+        order_by="StorageSftpUser.id",
     )
 
 
@@ -125,6 +149,7 @@ class StorageShare(Base):
     # Allow every address attached to the network instead of ``clients``.
     all_clients = Column(Boolean, nullable=False, default=False)
     read_only = Column(Boolean, nullable=False, default=False)
+    sftp_access = Column(_enum(SftpAccess), nullable=False, default=SftpAccess.OFF)
     state = Column(_enum(ShareState), nullable=False, default=ShareState.ACTIVE, index=True)
     destroy_after = Column(DateTime(timezone=True), nullable=True)
     used_bytes = Column(BigInteger, nullable=True)
@@ -134,3 +159,30 @@ class StorageShare(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     tenant = relationship("StorageTenant", back_populates="shares")
+
+
+class StorageSftpUser(Base):
+    """An SFTP login for one storage service.
+
+    Only a bcrypt hash of the password is kept; the runner receives the hash
+    and the public keys, never the password.
+    """
+
+    __tablename__ = "storage_sftp_users"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_storage_sftp_user_name"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("storage_tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(32), nullable=False)
+    # [{"key": "ssh-ed25519 AAAA... comment", "fingerprint": "SHA256:..."}]
+    public_keys = Column(JSON, nullable=True)
+    password_hash = Column(String(255), nullable=True)
+    # CIDRs allowed to log in; empty means any address.
+    allowed_ips = Column(JSON, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    last_login_ip = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    tenant = relationship("StorageTenant", back_populates="sftp_users")

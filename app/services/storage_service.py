@@ -24,7 +24,8 @@ from app.dao.server_dao import ServerDAO
 from app.dao.storage_dao import StorageDAO
 from app.models.private_network import AttachmentState, PrivateNetworkAttachment, PrivateNetworkStatus
 from app.models.service import Service, ServiceStatus, ServiceType
-from app.models.storage import ShareState, StorageNode, StorageShare, StorageTenant, VlanMode
+from app.models.storage import SftpAccess, ShareState, StorageNode, StorageShare, StorageTenant, VlanMode
+from app.services import storage_sftp
 from app.services.private_network_service import (
     PrivateNetworkError,
     PrivateNetworkService,
@@ -39,6 +40,7 @@ MAX_SIZE_GB = 1024 * 1024
 MAX_SHARES_PER_STORAGE = 64
 MAX_CLIENTS_PER_SHARE = 256
 SHARE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+SFTP_HOST_RE = re.compile(r"^[a-z0-9.:-]+$")
 RUNNER_STATES = {"ready", "pending", "error", "suspended"}
 
 # Combined, customer-facing states.
@@ -219,8 +221,27 @@ class StorageNodeService:
         return node
 
     @staticmethod
+    def _sftp_host(value) -> Optional[str]:
+        host = str(value or "").strip().lower().rstrip(".")
+        if not host:
+            return None
+        if len(host) > 253 or not SFTP_HOST_RE.match(host):
+            raise StorageError("sftp_host must be a DNS name or an IP address")
+        return host
+
+    @staticmethod
     def update(db: Session, node_id: int, **changes) -> StorageNode:
         node = StorageNodeService.require(db, node_id)
+        sftp_host = StorageNodeService._sftp_host(changes["sftp_host"]) if "sftp_host" in changes else node.sftp_host
+        sftp_port = node.sftp_port
+        if changes.get("sftp_port") is not None:
+            sftp_port = int(changes["sftp_port"])
+            if not 1 <= sftp_port <= 65535 or sftp_port == 2049:
+                raise StorageError("sftp_port must be between 1 and 65535 and not 2049")
+        sftp_enabled = node.sftp_enabled if changes.get("sftp_enabled") is None else bool(changes["sftp_enabled"])
+        if sftp_enabled and not sftp_host:
+            raise StorageError("Set sftp_host (the public name clients connect to) before enabling SFTP")
+        node.sftp_host, node.sftp_port, node.sftp_enabled = sftp_host, sftp_port, sftp_enabled
         if changes.get("name") is not None:
             name = changes["name"].strip()
             if not name:
@@ -298,24 +319,85 @@ class StorageService:
         return min(candidates, key=lambda node: (counts.get(node.id, 0), node.id))
 
     @staticmethod
+    def storage_location_ids(db: Session) -> set:
+        """Locations with at least one enabled storage node."""
+        return {
+            node.server.location_id for node in StorageDAO.list_nodes(db) if node.enabled and node.server is not None
+        }
+
+    @staticmethod
+    def check_location(db: Session, location_id: int) -> int:
+        if location_id not in StorageService.storage_location_ids(db):
+            raise StorageError("Storage is not offered in this location", 409)
+        return location_id
+
+    @staticmethod
+    async def _create_network_for(
+        db: Session,
+        service: Service,
+        tenant: StorageTenant,
+        name: Optional[str],
+        cidr: Optional[str],
+        location_id: Optional[int],
+    ):
+        """A new private network for a client who links storage without choosing one."""
+        if tenant.location_id is not None:
+            if location_id is not None and location_id != tenant.location_id:
+                raise StorageError("This storage was ordered for another location", 409)
+            location_id = tenant.location_id
+        if location_id is None:
+            offered = StorageService.storage_location_ids(db)
+            if len(offered) != 1:
+                raise StorageError("Choose a location for the new network", 400)
+            location_id = next(iter(offered))
+        StorageService.check_location(db, location_id)
+        try:
+            return await PrivateNetworkService.create_network(
+                db,
+                owner_user_id=service.owner_user_id,
+                location_id=location_id,
+                name=(name or f"storage-{service.id}").strip()[:64],
+                cidr=cidr,
+            )
+        except PrivateNetworkError as exc:
+            raise StorageError(exc.message, exc.status_code) from exc
+
+    @staticmethod
     async def link_network(
-        db: Session, service: Service, network_id: int, *, node_id: Optional[int] = None
+        db: Session,
+        service: Service,
+        network_id: Optional[int],
+        *,
+        node_id: Optional[int] = None,
+        network_name: Optional[str] = None,
+        cidr: Optional[str] = None,
+        location_id: Optional[int] = None,
     ) -> StorageTenant:
-        """Place the storage on a node and attach that node to the network's reserved address."""
+        """Place the storage on a node and attach that node to the network's reserved address.
+
+        Without ``network_id`` a new private network is created for the owner
+        in the storage's location (chosen at order, or ``location_id``).
+        """
         tenant = StorageService.require_tenant(db, service)
         if service.status not in (ServiceStatus.PENDING, ServiceStatus.ACTIVE) or tenant.terminated_at:
             raise StorageError("Storage can only be linked while it is pending or active", 409)
         if tenant.network_id is not None:
             raise StorageError("This storage is already linked to a network", 409)
-        network = PrivateNetworkDAO.get_network(db, network_id)
+        if network_id is None:
+            network = await StorageService._create_network_for(db, service, tenant, network_name, cidr, location_id)
+        else:
+            network = PrivateNetworkDAO.get_network(db, network_id)
         if network is None or network.owner_user_id is None or network.owner_user_id != service.owner_user_id:
             raise StorageError("Private network not found", 404)
         if network.status != PrivateNetworkStatus.ACTIVE:
             raise StorageError("This network is being deleted", 409)
+        if tenant.location_id is not None and network.location_id != tenant.location_id:
+            raise StorageError("This storage was ordered for another location than the network's", 409)
         if StorageDAO.get_tenant_for_network(db, network.id) is not None:
             raise StorageError("This network already has storage", 409)
         node = StorageService.pick_node(db, network, node_id)
 
+        original_location_id = tenant.location_id
         tenant.network_id = network.id
         tenant.node_id = node.id
         tenant.location_id = network.location_id
@@ -334,8 +416,9 @@ class StorageService:
             await PrivateNetworkService.attach_storage(db, network.id, service.id, server_id=node.server_id)
         except PrivateNetworkError as exc:
             db.rollback()
-            for field in ("network_id", "node_id", "location_id", "vlan", "network_cidr", "endpoint_ip"):
+            for field in ("network_id", "node_id", "vlan", "network_cidr", "endpoint_ip"):
                 setattr(tenant, field, None)
+            tenant.location_id = original_location_id
             db.commit()
             raise StorageError(exc.message, exc.status_code) from exc
 
@@ -454,6 +537,13 @@ class StorageService:
             raise StorageError(f"Not enough unallocated space: {free_gb} GB left for this share", 409)
 
     @staticmethod
+    def _sftp_access(raw) -> SftpAccess:
+        try:
+            return storage_sftp.access_value(raw)
+        except storage_sftp.SftpError as exc:
+            raise StorageError(exc.message, exc.status_code) from exc
+
+    @staticmethod
     def require_share(tenant: StorageTenant, share_id: int) -> StorageShare:
         for share in tenant.shares:
             if share.id == share_id:
@@ -470,6 +560,7 @@ class StorageService:
         clients: Optional[List[str]] = None,
         all_clients: bool = False,
         read_only: bool = False,
+        sftp_access: Optional[str] = None,
     ) -> StorageShare:
         StorageService._require_writable(tenant)
         name = (name or "").strip()
@@ -490,6 +581,7 @@ class StorageService:
             clients=StorageService._validate_clients(tenant, clients),
             all_clients=bool(all_clients),
             read_only=bool(read_only),
+            sftp_access=StorageService._sftp_access(sftp_access),
             state=ShareState.ACTIVE,
         )
         db.add(share)
@@ -512,11 +604,13 @@ class StorageService:
         clients: Optional[List[str]] = None,
         all_clients: Optional[bool] = None,
         read_only: Optional[bool] = None,
+        sftp_access: Optional[str] = None,
     ) -> StorageShare:
         StorageService._require_writable(tenant)
         share = StorageService.require_share(tenant, share_id)
         if share.state != ShareState.ACTIVE:
             raise StorageError("This share is being deleted", 409)
+        access = StorageService._sftp_access(sftp_access) if sftp_access is not None else None
         if quota_gb is not None:
             quota_bytes = gb_to_bytes(_check_size_gb(quota_gb, "Quota"))
             if share.used_bytes is not None and quota_bytes < share.used_bytes:
@@ -530,6 +624,8 @@ class StorageService:
             share.all_clients = bool(all_clients)
         if read_only is not None:
             share.read_only = bool(read_only)
+        if access is not None:
+            share.sftp_access = access
         return StorageDAO.save(db, share)
 
     @staticmethod
@@ -555,10 +651,11 @@ def build_runner_config(db: Session, node: StorageNode) -> dict:
         if tenant.vlan is None or tenant.network_cidr is None:
             continue
         prefix = ipaddress.ip_network(tenant.network_cidr).prefixlen
+        state = runner_tenant_state(tenant)
         tenants.append(
             {
                 "id": tenant.id,
-                "state": runner_tenant_state(tenant),
+                "state": state,
                 "terminated_at": iso_utc(tenant.terminated_at),
                 "destroy_after": iso_utc(tenant.destroy_after),
                 "vlan": tenant.vlan,
@@ -574,16 +671,19 @@ def build_runner_config(db: Session, node: StorageNode) -> dict:
                         "quota_bytes": share.quota_bytes,
                         "clients": share_clients(tenant, share),
                         "read_only": bool(share.read_only),
+                        "sftp": share.sftp_access.value,
                         "state": share.state.value,
                         "destroy_after": iso_utc(share.destroy_after),
                     }
                     for share in tenant.shares
                 ],
+                "sftp_users": storage_sftp.runner_users(tenant, state, node),
             }
         )
     body = {
         "node": {"id": node.id, "name": node.name},
         "settings": {"destroy_grace_seconds": int(destroy_grace().total_seconds())},
+        "sftp": storage_sftp.runner_settings(node),
         "tenants": tenants,
     }
     version = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -609,6 +709,7 @@ def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip:
     node.free_bytes = free_bytes if isinstance(free_bytes, int) and free_bytes >= 0 else None
     node.last_error = _short(node_info.get("error"))
     node.orphans = [_short(name, 255) for name in (report.get("orphans") or [])[:500]]
+    storage_sftp.apply_node_status(node, report)
 
     tenants = {tenant.id: tenant for tenant in StorageDAO.tenants_for_node(db, node.id)}
     for entry in report.get("tenants") or []:
@@ -618,6 +719,7 @@ def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip:
         if entry.get("state") in RUNNER_STATES:
             tenant.runner_state = entry["state"]
         tenant.runner_error = _short(entry.get("error"))
+        storage_sftp.apply_tenant_status(tenant, entry)
         shares = {share.id: share for share in tenant.shares}
         for share_entry in entry.get("shares") or []:
             share = shares.get(share_entry.get("id"))
@@ -629,6 +731,7 @@ def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip:
             if isinstance(used, int) and used >= 0:
                 share.used_bytes = used
             share.runner_error = _short(share_entry.get("error"))
+    storage_sftp.apply_logins(tenants, report)
 
     destroyed_shares = set(report.get("destroyed_shares") or [])
     for tenant in tenants.values():

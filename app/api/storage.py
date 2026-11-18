@@ -14,12 +14,17 @@ from app.api.storage_common import (
     LinkBody,
     ShareCreate,
     ShareUpdate,
+    SftpUserCreate,
+    SftpUserUpdate,
+    _create_sftp_user,
     _create_share,
+    _delete_sftp_user,
     _delete_share,
     _link,
     _raise,
     _tenant,
     _tenant_out,
+    _update_sftp_user,
     _update_share,
 )
 from app.core.auth import require_admin
@@ -60,6 +65,9 @@ class NodeUpdate(BaseModel):
     enabled: Optional[bool] = None
     vlan_mode: Optional[str] = None
     vlan_port_ids: Optional[List[int]] = Field(None, max_length=16)
+    sftp_enabled: Optional[bool] = None
+    sftp_host: Optional[str] = Field(None, max_length=253)
+    sftp_port: Optional[int] = Field(None, ge=1, le=65535)
 
 
 class StorageCreate(BaseModel):
@@ -70,6 +78,7 @@ class StorageCreate(BaseModel):
     description: Optional[str] = None
     network_id: Optional[int] = None
     node_id: Optional[int] = None
+    location_id: Optional[int] = None
 
 
 class AdminLinkBody(LinkBody):
@@ -109,6 +118,12 @@ def _node_out(db: Session, node: StorageNode, counts: dict, *, detail: bool = Fa
         "orphans": list(node.orphans or []),
         "api_key_prefix": node.api_key_prefix,
         "live_tenants": counts.get(node.id, 0),
+        "sftp_enabled": bool(node.sftp_enabled),
+        "sftp_host": node.sftp_host,
+        "sftp_port": node.sftp_port,
+        "sftp_listening": node.sftp_listening,
+        "sftp_host_key_fingerprint": node.sftp_host_key_fingerprint,
+        "sftp_error": node.sftp_error,
     }
     if detail:
         out["config_version"] = build_runner_config(db, node)["version"]
@@ -228,12 +243,13 @@ async def admin_create_storage(data: StorageCreate, auth: AdminDep, db: DbDep):
             description=data.description,
             provisioning_source=infer_provisioning_source(db, data.owner_user_id),
             size_gb=data.size_gb,
+            location_id=data.location_id,
         )
         service = ProvisioningService.create(db, req, actor)
     except ProvisioningError as exc:
         raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
     if data.network_id is not None:
-        return await _link(db, service, data.network_id, data.node_id, staff=True)
+        return await _link(db, service, LinkBody(network_id=data.network_id), data.node_id, staff=True)
     return _tenant_out(db, _tenant(db, service), staff=True)
 
 
@@ -244,7 +260,7 @@ async def admin_get_storage(service_id: int, auth: AdminDep, db: DbDep):
 
 @admin_router.post("/services/{service_id}/link")
 async def admin_link_storage(service_id: int, body: AdminLinkBody, auth: AdminDep, db: DbDep):
-    return await _link(db, _admin_service(db, service_id), body.network_id, body.node_id, staff=True)
+    return await _link(db, _admin_service(db, service_id), body, body.node_id, staff=True)
 
 
 @admin_router.post("/services/{service_id}/resize")
@@ -286,3 +302,18 @@ async def admin_update_share(service_id: int, share_id: int, body: ShareUpdate, 
 @admin_router.delete("/services/{service_id}/shares/{share_id}")
 async def admin_delete_share(service_id: int, share_id: int, auth: AdminDep, db: DbDep):
     return _delete_share(db, _admin_service(db, service_id), share_id, staff=True)
+
+
+@admin_router.post("/services/{service_id}/sftp-users", status_code=status.HTTP_201_CREATED)
+async def admin_create_sftp_user(service_id: int, body: SftpUserCreate, auth: AdminDep, db: DbDep):
+    return _create_sftp_user(db, _admin_service(db, service_id), body, staff=True)
+
+
+@admin_router.patch("/services/{service_id}/sftp-users/{user_id}")
+async def admin_update_sftp_user(service_id: int, user_id: int, body: SftpUserUpdate, auth: AdminDep, db: DbDep):
+    return _update_sftp_user(db, _admin_service(db, service_id), user_id, body, staff=True)
+
+
+@admin_router.delete("/services/{service_id}/sftp-users/{user_id}")
+async def admin_delete_sftp_user(service_id: int, user_id: int, auth: AdminDep, db: DbDep):
+    return _delete_sftp_user(db, _admin_service(db, service_id), user_id, staff=True)

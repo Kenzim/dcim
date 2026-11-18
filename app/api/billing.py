@@ -46,6 +46,8 @@ from app.services.boot_launcher import release_boot_media, schedule_launch, vmed
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox
 from app.services.private_network_service import PrivateNetworkService
 from app.services.storage_service import GIB, StorageError, StorageService, tenant_status
+from app.services import storage_sftp
+from app.api.storage_common import _share_out
 from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.utils.shell_escape import shell_escape_double_quoted
@@ -2434,6 +2436,8 @@ def _billing_storage_summary(db: Session, service: Service) -> dict:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     status_value, status_detail = tenant_status(db, tenant)
     active = [share for share in tenant.shares if share.state.value == "active"]
+    live = tenant.terminated_at is None
+    sftp = storage_sftp.tenant_sftp_out(tenant, status_value, staff=False)
     return {
         "service_id": service.id,
         "status": status_value,
@@ -2442,10 +2446,29 @@ def _billing_storage_summary(db: Session, service: Service) -> dict:
         "allocated_gb": sum(share.quota_bytes for share in active) // GIB,
         "used_bytes": sum(share.used_bytes or 0 for share in active),
         "network_name": tenant.network.name if tenant.network else None,
-        "network_cidr": tenant.network_cidr if tenant.terminated_at is None else None,
-        "endpoint_ip": tenant.endpoint_ip if tenant.terminated_at is None else None,
+        "network_cidr": tenant.network_cidr if live else None,
+        "endpoint_ip": tenant.endpoint_ip if live else None,
+        "location_name": tenant.location.name if tenant.location is not None else None,
         "share_count": len(active),
         "linked": tenant.network_id is not None,
+        "shares": [
+            {
+                key: out[key]
+                for key in ("name", "quota_gb", "used_bytes", "read_only", "sftp_access", "mount_command", "fstab_line")
+            }
+            for out in (_share_out(tenant, share, status_value, staff=False) for share in active)
+        ],
+        "sftp": {
+            "available": sftp["available"],
+            "state": sftp["state"],
+            "host": sftp["host"],
+            "port": sftp["port"],
+            "host_key_fingerprint": sftp["host_key_fingerprint"],
+            "users": [
+                {"login": user["login"], "enabled": user["enabled"], "sftp_command": user["sftp_command"]}
+                for user in sftp["users"]
+            ],
+        },
     }
 
 

@@ -20,6 +20,8 @@ ALLOWED_PROVISION_KEYS = frozenset(
         "subnet_id",
         "subnet_group_id",
         "allocation_strategy",
+        "size_gb",
+        "location_id",
     }
 )
 
@@ -71,3 +73,4 @@ class ProvisionRequest:
     allocation_strategy: Optional[str] = None
     # NFS storage
     size_gb: Optional[int] = None
+    location_id: Optional[int] = None

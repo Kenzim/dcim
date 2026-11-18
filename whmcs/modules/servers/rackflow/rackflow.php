@@ -952,6 +952,10 @@ function rackflow_CreateAccount(array $params)
             if ($sizeGb !== null) {
                 $serviceConfig['size_gb'] = $sizeGb;
             }
+            $storageLocationId = rackflow_storageLocationIdFromOptions($params);
+            if ($storageLocationId !== null) {
+                $serviceConfig['location_id'] = $storageLocationId;
+            }
         }
 
         // Checkout OS / VM template (order form) overrides module default OS Code.
@@ -1365,6 +1369,28 @@ function rackflow_storageSizeGbFromOptions(array $params)
     }
     $size = (int)$m[1];
     return $size > 0 ? $size : null;
+}
+
+/**
+ * RackFlow location ID chosen on the order form for an nfs_storage service
+ * (configurable option "Storage Location", location_id or Location; the value
+ * before "|" is the RackFlow location ID, for example "1|London"), or null to
+ * let the client choose when linking a network.
+ *
+ * @param array $params common module parameters
+ * @return int|null
+ */
+function rackflow_storageLocationIdFromOptions(array $params)
+{
+    $raw = rackflow_configOptionValue($params, array('Storage Location', 'location_id', 'Location'));
+    if ($raw === null || $raw === '') {
+        return null;
+    }
+    if (!preg_match('/^\s*(\d+)/', (string)$raw, $m)) {
+        return null;
+    }
+    $id = (int)$m[1];
+    return $id > 0 ? $id : null;
 }
 
 /**
