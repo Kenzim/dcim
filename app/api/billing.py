@@ -57,6 +57,7 @@ from app.dao.service_dao import ServiceDAO
 from app.dao.vm_ip_allocation_dao import VMIPAllocationDAO
 from app.dao.ipam_dao import IPAMDAO
 from app.services.proxy_provisioning import assignment_payload
+from app.services.proxy_fast_path import FastPathError, ProxyAccessService
 from app.services.proxy_credentials import generate_proxy_password, generate_proxy_username
 from app.dao.installation_task_dao import InstallationTaskDAO
 from app.dao.server_activity_dao import ServerActivityDAO
@@ -2518,6 +2519,81 @@ async def rotate_proxy_credentials(
 
     logger.info("Billing API: rotated proxy credentials for service %s (%s IP(s))", service_id, len(rotated))
     return {"status": "ok", "proxy_assignments": rotated}
+
+
+# --- Proxy fast path (WHMCS proxy client area) ---
+
+
+class BillingFastPathToggle(BaseModel):
+    enabled: bool
+
+
+def _billing_fast_path_service(db: Session, service_id: int, integration: BillingIntegration) -> Service:
+    service = ServiceDAO.get_by_id(db, service_id)
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
+    _assert_billing_owned_service(service, integration)
+    if service.service_type != ServiceType.HTTP_PROXY:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a proxy service")
+    if service.owner_user_id is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Service has no owner")
+    require_client_permission(db, service, PermissionKey.PROXY_VIEW_CREDENTIALS)
+    return service
+
+
+def _billing_fast_path_view(db: Session, service: Service) -> dict:
+    """The owner's fast path overview, narrowed to the locations of this service's proxy IPs."""
+    overview = ProxyAccessService.overview(db, service.owner_user_id)
+    endpoints = [e for e in overview["endpoints"] if e["service_id"] == service.id]
+    wanted = {e["location_id"] for e in endpoints}
+    return {
+        "cidr": overview["cidr"],
+        "reserved_block": overview["reserved_block"],
+        "locations": [loc for loc in overview["locations"] if loc["location_id"] in wanted],
+        "endpoints": endpoints,
+    }
+
+
+@router.get("/services/{service_id}/proxy/fast-path", responses=COMMON_ERROR_RESPONSES)
+async def billing_proxy_fast_path(service_id: int, integration: BillingIntegrationDep, db: DbDep):
+    """Private proxy addresses of this service and whether the fast path is on in their locations."""
+    service = _billing_fast_path_service(db, service_id, integration)
+    return _billing_fast_path_view(db, service)
+
+
+@router.post("/services/{service_id}/proxy/fast-path", responses=COMMON_ERROR_RESPONSES)
+async def billing_proxy_fast_path_toggle(
+    service_id: int, body: BillingFastPathToggle, integration: BillingIntegrationDep, db: DbDep
+):
+    """Turn the owner's fast path on or off in every location of this service's proxy IPs.
+
+    Turning off is refused while the client's servers are still connected.
+    """
+    service = _billing_fast_path_service(db, service_id, integration)
+    view = _billing_fast_path_view(db, service)
+    if not view["locations"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="This service has no proxy IPs that can use the fast path"
+        )
+    try:
+        for loc in view["locations"]:
+            if body.enabled:
+                await ProxyAccessService.enable(db, owner_user_id=service.owner_user_id, location_id=loc["location_id"])
+            elif loc["network_id"] is not None:
+                await ProxyAccessService.disable(db, owner_user_id=service.owner_user_id, location_id=loc["location_id"])
+    except FastPathError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    db.expire_all()
+    log_server_activity_success(
+        db,
+        service_id=service.id,
+        event_type=ServerActivityEventType.SERVICE,
+        action="proxy_fast_path_on" if body.enabled else "proxy_fast_path_off",
+        source="billing_api",
+        message=f"Proxy fast path turned {'on' if body.enabled else 'off'} from billing",
+        details={"service_id": service.id, "integration_id": integration.id},
+    )
+    return _billing_fast_path_view(db, service)
 
 
 class StrategyActionRequest(BaseModel):

@@ -191,3 +191,53 @@ def test_billing_status_exposes_proxy_credentials_when_granted(client, db_sessio
     assert body["proxy_assignments"][0]["username"] == "wu"
     # Proxy has no linked rack Server; power controls must not be offered.
     assert body["power_available"] is False
+
+
+def test_billing_proxy_fast_path_view_and_toggle(client, db_session):
+    from app.dao.private_network_dao import PrivateNetworkDAO
+    from app.dao.proxy_runner_dao import ProxyRunnerDAO
+    from app.services.proxy_fast_path import pin_subnet
+
+    integration, key = _integration(db_session, name="whmcs-proxy-fast")
+    service = _proxy_service_for_billing(
+        db_session, integration, suffix="9", permission_overrides={PermissionKey.PROXY_VIEW_CREDENTIALS: True}
+    )
+    assignment = IPAMDAO.get_assignment_by_service(db_session, service.id)[0]
+    subnet = assignment.ip.subnet
+    headers = {"Authorization": f"Bearer {key}"}
+    url = f"/api/billing/services/{service.id}/proxy/fast-path"
+
+    assert client.get(url, headers=headers).json()["endpoints"] == []
+    refused = client.post(url, json={"enabled": True}, headers=headers)
+    assert refused.status_code == 409, refused.text
+
+    pool = PrivateNetworkDAO.create_pool(
+        db_session, location_id=subnet.location_id, vlan_start=2300, vlan_end=2309, bridge="vmbr0",
+        max_networks_per_client=1, max_networks_per_service=4,
+    )
+    pool.proxy_access_enabled = True
+    runner, _ = ProxyRunnerDAO.create(db_session, name="billing-fast", api_key="kbf")
+    runner.location_id = subnet.location_id
+    db_session.commit()
+    pin_subnet(db_session, subnet, runner.id)
+
+    view = client.get(url, headers=headers).json()
+    assert [(e["fast_path_ip"], e["active"]) for e in view["endpoints"]] == [("100.80.0.1", False)]
+    status_payload = client.get(f"/api/billing/services/{service.id}/status", headers=headers).json()
+    assert status_payload["proxy_assignments"][0]["fast_path"]["ip"] == "100.80.0.1"
+
+    on = client.post(url, json={"enabled": True}, headers=headers)
+    assert on.status_code == 200, on.text
+    assert on.json()["locations"][0]["enabled"] is True and on.json()["endpoints"][0]["active"] is True
+    off = client.post(url, json={"enabled": False}, headers=headers)
+    assert off.status_code == 200, off.text
+    assert off.json()["locations"][0]["enabled"] is False
+
+
+def test_billing_proxy_fast_path_needs_view_permission(client, db_session):
+    integration, key = _integration(db_session, name="whmcs-proxy-fast-denied")
+    service = _proxy_service_for_billing(
+        db_session, integration, suffix="10", permission_overrides={PermissionKey.PROXY_VIEW_CREDENTIALS: False}
+    )
+    resp = client.get(f"/api/billing/services/{service.id}/proxy/fast-path", headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 403, resp.text
