@@ -15,6 +15,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.orm import Session
 
 from app.api import commerce_client as commerce
+from app.api import private_networks as network_portal
 from app.api import services_client as portal
 from app.api import storage_client as storage_portal
 from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody
@@ -66,6 +67,8 @@ _ACTION_SCOPE = {
     "backup_restore": "destructive",
     "reinstall": "destructive",
     "run_action": "destructive",
+    "fast_path_on": "write",
+    "fast_path_off": "write",
 }
 
 
@@ -98,6 +101,26 @@ def _owned_service(db: Session, ctx: ClientMcpAuthContext, service_id: int):
     return service
 
 
+def _fast_path(overview: dict, service_id: Optional[int]) -> dict:
+    """The fast path overview, narrowed to one service's proxy IPs when service_id is given."""
+    if service_id is None:
+        return overview
+    endpoints = [e for e in overview["endpoints"] if e["service_id"] == service_id]
+    wanted = {e["location_id"] for e in endpoints}
+    return {
+        **overview,
+        "locations": [loc for loc in overview["locations"] if loc["location_id"] in wanted],
+        "endpoints": endpoints,
+    }
+
+
+def _fast_path_locations(overview: dict, service_id: int) -> list[int]:
+    locations = sorted({e["location_id"] for e in _fast_path(overview, service_id)["endpoints"]})
+    if not locations:
+        raise ToolError("This service has no proxy IPs that can use the fast path")
+    return locations
+
+
 def _console_url(response) -> str:
     location = response.headers.get("location", "")
     error = parse_qs(urlparse(location).query).get("e")
@@ -127,17 +150,20 @@ async def account(
 
 @client_mcp.tool()
 async def services(
-    view: Literal["list", "detail", "backups", "ssh_keys", "actions"] = "list",
+    view: Literal["list", "detail", "backups", "ssh_keys", "actions", "fast_path"] = "list",
     service_id: Optional[int] = None,
     service_type: Optional[str] = None,
 ) -> Any:
-    """Your services. list (service_type filters), detail, backups (VM), ssh_keys (VM), actions (plugin actions). All but list need service_id."""
+    """Your services. list (service_type filters), detail, backups (VM), ssh_keys (VM), actions (plugin actions).
+    fast_path: private proxy addresses per location and proxy IP (service_id optional). All others need service_id."""
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
         auth = _auth(ctx)
         if view == "list":
             rows = await portal.list_my_services(service_type, auth=auth, db=db)
             return [_pick(row.model_dump(), _LIST_FIELDS) for row in rows]
+        if view == "fast_path":
+            return _fast_path(await network_portal.client_fast_path(auth, db), service_id)
         _need(f"services view={view}", service_id=service_id)
         if view == "detail":
             row = await portal.client_get_service(service_id, auth, db)
@@ -169,6 +195,8 @@ async def service_action(
         "backup_restore",
         "reinstall",
         "run_action",
+        "fast_path_on",
+        "fast_path_off",
     ],
     confirm: bool = False,
     console_type: Optional[Literal["kvm", "sol", "vnc", "serial"]] = None,
@@ -185,6 +213,7 @@ async def service_action(
 
     write scope: power_on, power_off, reboot, reset, console (one-time browser link; console_type kvm/sol for servers, vnc/serial for VMs), backup_create (backup_mode, notes; suspend/stop interrupt the VM), set_ssh_keys (VM; replaces all keys, ssh_public_keys).
     destructive scope: backup_delete and backup_restore (volid, storage), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
+    write scope, proxies: fast_path_on and fast_path_off turn the private proxy network on or off in the locations of this proxy's IPs (for all your servers there).
     """
     min_scope = _ACTION_SCOPE[action]
     needs_confirm = action != "console" and not (action == "backup_create" and backup_mode == "snapshot")
@@ -224,6 +253,16 @@ async def service_action(
             ensure_server_unlocked(service_linked_server(db, service))
             body = portal.VmReinstallBody(vm_template_id=vm_template_id, ssh_public_keys=ssh_public_keys)
             return await portal.client_reinstall_vm(service_id, body, auth=auth, db=db)
+        if action in ("fast_path_on", "fast_path_off"):
+            overview = await network_portal.client_fast_path(auth, db)
+            enabled = {loc["location_id"] for loc in overview["locations"] if loc["network_id"] is not None}
+            for location_id in _fast_path_locations(overview, service_id):
+                if action == "fast_path_on":
+                    toggle = network_portal.FastPathToggle(location_id=location_id)
+                    await network_portal.client_fast_path_on(toggle, auth, db)
+                elif location_id in enabled:
+                    await network_portal.client_fast_path_off(location_id, auth, db)
+            return _fast_path(await network_portal.client_fast_path(auth, db), service_id)
         _need("run_action", name=name)
         body = portal.ClientStrategyActionBody(params=params or {})
         return await portal.client_run_strategy_action(service_id, name, body, auth, db)

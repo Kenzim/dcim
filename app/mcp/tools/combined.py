@@ -331,16 +331,25 @@ async def save_subnet(
     allocation_strategy: Optional[Literal["first_free", "least_recently_used", "spread_subnets"]] = None,
     max_resale_count: Optional[int] = None,
     enabled: Optional[bool] = None,
+    proxy_runner_id: Optional[int] = None,
+    clear_proxy_runner: bool = False,
 ) -> dict:
     """Create an IPAM subnet (no subnet_id; needs name, cidr) or update one.
 
     Create seeds every host address (max 4096), or only range_start..range_end, and refuses CIDRs that
     overlap an existing subnet. cidr, range_start, range_end and tags are set on create only.
     max_resale_count > 1 lets one IP be sold to that many different owners at once.
+    Update only: proxy_runner_id pins the subnet to the runner hosting it (proxy fast path; gives it a
+    private IP); clear_proxy_runner unpins it (the IP is kept).
     """
     if subnet_id is None:
         _require("Creating a subnet", name=name, cidr=cidr)
-        _reject("Creating a subnet", clear_location=clear_location or None)
+        _reject(
+            "Creating a subnet",
+            clear_location=clear_location or None,
+            proxy_runner_id=proxy_runner_id,
+            clear_proxy_runner=clear_proxy_runner or None,
+        )
         return await ipam_tools.create_subnet(
             name,
             cidr,
@@ -361,6 +370,8 @@ async def save_subnet(
         location_id=location_id,
         clear_location=clear_location,
         max_resale_count=max_resale_count,
+        proxy_runner_id=proxy_runner_id,
+        clear_proxy_runner=clear_proxy_runner,
     )
 
 
