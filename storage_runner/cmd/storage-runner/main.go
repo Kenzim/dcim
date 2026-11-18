@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,11 +17,12 @@ import (
 	"rackflow/storage_runner/internal/ganesha"
 	"rackflow/storage_runner/internal/netns"
 	"rackflow/storage_runner/internal/reconcile"
+	"rackflow/storage_runner/internal/sftp"
 	"rackflow/storage_runner/internal/state"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
-var version = "0.1.0"
+var version = "0.2.0"
 
 func main() {
 	host, err := config.FromEnv(os.Getenv)
@@ -50,6 +52,16 @@ func main() {
 		State:         store,
 		RunnerVersion: version,
 	}
+
+	hostKey, err := sftp.LoadOrCreateHostKey(filepath.Join(host.StateDir, "sftp_host_ed25519_key"))
+	if err != nil {
+		log.Fatalf("sftp host key: %v", err)
+	}
+	gateway := sftp.NewGateway(hostKey, &sftp.PodmanBackend{RemoteURL: host.PodmanRemoteURL, ServerPath: host.SFTPServerPath}, log.Printf)
+	defer gateway.Close()
+	r.SFTP = gateway
+	r.SFTPMounts = &sftp.KernelMounter{Cmd: cmd}
+	r.SFTPRuntime = &sftp.Podman{Cmd: cmd, RemoteURL: host.PodmanRemoteURL}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

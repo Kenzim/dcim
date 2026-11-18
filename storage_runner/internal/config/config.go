@@ -28,6 +28,11 @@ type Host struct {
 	LinkCIDR           netip.Prefix
 	StateDir           string
 	PodmanRemoteURL    string
+	// SFTP: the gateway's listen address (port from Rackflow), the back end
+	// image and the sftp-server path inside it.
+	SFTPListenAddr string
+	SFTPImage      string
+	SFTPServerPath string
 }
 
 const (
@@ -63,6 +68,9 @@ func FromEnv(getenv func(string) string) (Host, error) {
 		GaneshaImage:       get("GANESHA_IMAGE", ""),
 		StateDir:           get("STATE_DIR", DefaultStateDir),
 		PodmanRemoteURL:    get("PODMAN_REMOTE_URL", ""),
+		SFTPListenAddr:     get("SFTP_LISTEN_ADDR", "0.0.0.0"),
+		SFTPImage:          get("SFTP_IMAGE", ""),
+		SFTPServerPath:     get("SFTP_SERVER_PATH", "/usr/lib/ssh/sftp-server"),
 	}
 	for _, kv := range [][2]string{
 		{"RACKFLOW_URL", h.RackflowURL},

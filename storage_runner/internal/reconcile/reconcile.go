@@ -36,6 +36,7 @@ import (
 	"rackflow/storage_runner/internal/ganesha"
 	"rackflow/storage_runner/internal/names"
 	"rackflow/storage_runner/internal/netns"
+	"rackflow/storage_runner/internal/sftp"
 	"rackflow/storage_runner/internal/state"
 )
 
@@ -64,6 +65,12 @@ type Reconciler struct {
 	Now           func() time.Time
 	Logf          func(format string, args ...any)
 	RunnerVersion string
+
+	// SFTP is optional; without it SFTP stays off.
+	SFTP          *sftp.Gateway
+	SFTPMounts    sftp.Mounter
+	SFTPRuntime   sftp.Runtime
+	SFTPMountRoot string
 
 	lastApplied string
 	lastOrphans string
@@ -115,6 +122,7 @@ type pass struct {
 	subvols    map[string]bool
 	users      map[string]ceph.User
 	minimal    *string
+	sftp       *sftpPass
 }
 
 type tenantWork struct {
@@ -208,6 +216,7 @@ func (r *Reconciler) Once(ctx context.Context) error {
 	for _, w := range works {
 		p.applyNFS(w)
 	}
+	p.applySFTP(cfg, works)
 	for _, w := range works {
 		p.destroy(w)
 	}
@@ -216,8 +225,13 @@ func (r *Reconciler) Once(ctx context.Context) error {
 	st := p.baseStatus(cfg.Version)
 	p.fillStatus(&st, works)
 	st.Orphans = p.orphans(works)
+	p.fillSFTPStatus(&st)
 	r.lastApplied = cfg.Version
-	return r.post(ctx, st)
+	if err := r.post(ctx, st); err != nil {
+		return err
+	}
+	p.ackSFTP()
+	return nil
 }
 
 func (r *Reconciler) post(ctx context.Context, st api.Status) error {

@@ -92,6 +92,14 @@ type connInfo struct {
 	cred     string
 }
 
+// HostKey is the gateway's public host key.
+func (g *Gateway) HostKey() ssh.PublicKey {
+	if g.hostKey == nil {
+		return nil
+	}
+	return g.hostKey.PublicKey()
+}
+
 // SetClock replaces the clock, for tests.
 func (g *Gateway) SetClock(now func() time.Time) {
 	g.mu.Lock()
