@@ -35,7 +35,8 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | DHCP/TFTP/media runner containers | `dhcp_runner/main.py`, `tftp_runner/main.py`, `media_runner/main.py`, uplink in `runner_common/`, hub in `app/services/runners/` |
 | Proxy runner (IPAM sync) | `proxy_runner/main.py`, API `app/api/runner_proxy.py` |
 | NFS storage on private networks (`nfs_storage` services, storage nodes, shares) | Models `app/models/storage.py`, DAO `app/dao/storage_dao.py`, service `app/services/storage_service.py`, provisioning `app/services/provisioning/nfs_storage.py`; API `app/api/storage.py` (staff), `app/api/storage_client.py` (client), `app/api/storage_common.py` (shared shapes), runner API `app/api/runner_storage.py`; MCP `app/mcp/tools/storage.py` and the client `storage` tool; UI `StorageNodes.svelte`, `client/ClientStorage.svelte`, `components/storage/` |
-| Storage runner (per-customer NFS on CephFS) | `storage_runner/internal/reconcile/reconcile.go` (loop), drivers in `storage_runner/internal/{netns,firewall,ceph,ganesha}/` |
+| Storage runner (per-customer NFS on CephFS) | `storage_runner/internal/reconcile/reconcile.go` (loop), drivers in `storage_runner/internal/{netns,firewall,ceph,ganesha}/`, public SFTP gateway and per-tenant back ends in `storage_runner/internal/sftp/` |
+| Selling storage (WHMCS, store) | `docs/nfs-storage-billing.md`; WHMCS `rackflow_storageClientArea` and `clientarea_storage.tpl`, Module Settings storage panel in `hooks.php` (`storagePanelHtml`) |
 | Tests | Mirror path under `tests/` (`tests/api/`, `tests/dao/`, `tests/services/`, …) |
 | Install / Docker ops | `INSTALL.md`, `docker-compose.yml`, `Makefile`, `Dockerfile` |
 
@@ -162,7 +163,7 @@ All included from `app/main.py` under `/api`.
 | `vm_ip_allocations.py` | `/api/vm-ip-allocations` | Preallocated VM IPs |
 | `runner_proxy.py` | `/api/runner/proxy` | Config for proxy runner |
 | `storage.py` | `/api/admin/storage` | Storage nodes (key shown once, VLAN mode and ports, switch port preview) and nfs_storage services with shares |
-| `storage_client.py` | `/api/client/storage` | Client's own storage: link to a private network, share CRUD (permission `storage.manage_shares`) |
+| `storage_client.py` | `/api/client/storage` | Client's own storage: link to a private network (or create one on link), share CRUD with SFTP access mode, SFTP users (`/sftp-users`; permission `storage.manage_shares`) |
 | `runner_storage.py` | `/api/runner/storage` | Storage runner: `GET /config` (only that node's tenants), `POST /status`; bearer node key, failed keys rate-limited per IP |
 | `services_admin.py` | `/api/admin/services` | Admin service lifecycle (VM/bare-metal provision, ownership) |
 | `services_client.py` | `/api/services` | Client “my services” |
@@ -229,7 +230,8 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 | `service_resource.py` / `service_product_snapshot.py` | Service ↔ product resource helpers |
 | `reconciliation_jobs.py` | Background reconciliation loop (started in lifespan) |
 | `private_network_service.py` | Private networks: VLAN allocation, VM NIC and switch port attach/detach, terminate cleanup, repair. The last usable address of every network is reserved for storage (`storage_endpoint_ip`); `attach_storage` is the only way it is handed out. Storage attachments trunk the node's `vlan_port_ids` (or the PXE uplink), or make no switch calls in `preconfigured` VLAN mode |
-| `storage_service.py` | NFS storage: node CRUD, placement (least-loaded enabled node in the location), share validation and quotas, terminate and share delete with `storage_destroy_grace_seconds`, combined readiness (attachment applied and runner ready), runner config and status |
+| `storage_service.py` | NFS storage: node CRUD (including the public SFTP endpoint), placement (least-loaded enabled node in the location), location chosen at order or at link (a network is created on link when none is given), share validation and quotas, terminate and share delete with `storage_destroy_grace_seconds`, combined readiness (attachment applied and runner ready), runner config and status |
+| `storage_sftp.py` | Storage SFTP: users (bcrypt password hashes and public keys only), key and CIDR validation, logins `<name>.<service_id>`, client/staff views, the runner's `sftp`/`sftp_users` config and status. Design: `docs/nfs-storage-sftp.md`; selling and WHMCS setup: `docs/nfs-storage-billing.md` |
 | `plugin_sync.py` | Plugin DB sync (mostly no-op; plugins from disk) |
 | `cabling_graph_service.py` | Builds the cabling graph from batch queries in `app/dao/cabling_graph_dao.py`: nodes, ports, cables and end-to-end paths through patch panels. Link status comes from the switch end's stored `oper_status` and counts only while fresh (`STATUS_STALE_AFTER`, 15 minutes); older data is `stale`, never polled is `unknown` |
 | `cable_trace_service.py` | Follows a port through patch panels (front to rear) to the server or switch port at the far end; shared by the cable-run API, server and switch port views, bandwidth views, MCP and the graph |

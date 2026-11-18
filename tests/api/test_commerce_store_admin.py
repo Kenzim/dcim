@@ -245,3 +245,25 @@ def test_store_option_value_rejects_unknown_provision_key(
     )
     assert ok.status_code == 201, ok.text
     assert ok.json()["provision_key"] == "vm_template_id"
+
+    # Storage sizes and locations are sold as option values too.
+    for code, key, value in (("s500", "size_gb", "500"), ("london", "location_id", "1")):
+        storage_value = client.post(
+            f"/api/admin/store/options/{option_id}/values",
+            headers=_auth(token),
+            json={"code": code, "name": code, "provision_key": key, "provision_value": value},
+        )
+        assert storage_value.status_code == 201, storage_value.text
+
+
+def test_checkout_passes_storage_size_and_location_option_values():
+    from app.services.checkout_service import CheckoutService
+
+    keys = CheckoutService._provision_keys_from_item_config(
+        {
+            "size": {"provision_key": "size_gb", "provision_value": "500"},
+            "location": {"provision_key": "location_id", "provision_value": "3"},
+            "junk": {"provision_key": "not_allowed", "provision_value": "x"},
+        }
+    )
+    assert keys == {"size_gb": "500", "location_id": "3"}
