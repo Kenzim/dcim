@@ -66,6 +66,11 @@ Nothing here ever comes from Rackflow.
 | `SFTP_LISTEN_ADDR` | `0.0.0.0` | Address the public SFTP gateway listens on; the port comes from Rackflow (node SFTP settings) |
 | `SFTP_IMAGE` | empty | Image for the per-tenant SFTP back ends (see SFTP below). Needed only when Rackflow turns SFTP on; otherwise the node reports an SFTP error |
 | `SFTP_SERVER_PATH` | `/usr/lib/ssh/sftp-server` | Path of OpenSSH's `sftp-server` inside `SFTP_IMAGE` |
+| `CEPH_HA_POOL` | `rackflow_ha` | Replicated RADOS pool for failover leases, node records and Ganesha recovery databases (see Failover). Must exist; the runner never creates pools |
+| `SFTP_VIP_INTERFACE` | default-route interface | Host interface that carries the location's SFTP virtual IP while this node is SFTP master |
+
+The guard (`storage-runner guard`) reads only `PODMAN_REMOTE_URL` and, for tests,
+`LEASE_DEADLINE_DIR` (default `/run/rackflow-storage/leases`).
 
 Customer networks that overlap a Ceph public network or `LINK_CIDR` are
 rejected per tenant with a clear error.
@@ -99,7 +104,9 @@ rejected per tenant with a clear error.
   node error while it is off; tenants are still reconciled.
 - **Tools:** `iproute2` (`ip`, with JSON output), `nftables` (`nft`),
   `podman` (Docker cannot join a named network namespace by path, so podman
-  is the only runtime).
+  is the only runtime), and for failover `python3-rados` (the lease client;
+  `python3 -c 'import rados'` must work, same Ceph release as `ceph-common`)
+  and `iputils-arping` (`arping -U`, gratuitous ARP). Both are in the image.
 - **Host firewall:** the runner owns the table `inet rf-storage` only. nftables
   evaluates every table, so an accept in the runner's table does not override
   a drop elsewhere: if the host has its own `input` or `forward` policy of
@@ -199,6 +206,79 @@ Assumptions not yet checked on a real cluster: the kernel mount uses the tenant 
 `ceph.conf` (monitor addresses) and `mds_namespace=<CEPH_FS_NAME>`; the tenant's cephx caps (which
 Ganesha already uses) are enough for a kernel mount of its subvolume paths.
 
+## Failover (0.3.0)
+
+Design: `docs/nfs-storage-failover.md`. Failover is active only when the config from
+Rackflow has an `ha` block; without one (an older Rackflow) the runner behaves exactly as
+0.2.x: no leases, it serves the tenants in its own config.
+
+- **Leases:** every tenant has a RADOS cls_lock lease `tenant.<id>` (and each location with an
+  SFTP virtual IP one `sftp.<location_id>`) in pool `CEPH_HA_POOL`, namespace `rackflow-ha`.
+  A node serves a tenant, and changes its Ceph state (subvolumes, quotas, caps, destruction),
+  only while it holds the lease. With an `ha` block this holds even when `ha.enabled` is false;
+  then the runner only takes leases for tenants in its own config and releases leases of tenants
+  that leave it. Leases are renewed every `renew_seconds` (4); a node that cannot renew stops
+  serving `lease_seconds - stop_margin_seconds` (14 s) after the last successful renewal send,
+  measured on both `CLOCK_BOOTTIME` and the wall clock, and checked every 500 ms independently
+  of renewals. A Rackflow outage never stops serving or causes a failover: the last config is
+  kept in `STATE_DIR/config.json` (0600) and used while Rackflow is unreachable.
+- **Lease client:** a small Python helper embedded in the binary (`internal/lease/rados_helper.py`)
+  run as one long-lived `python3` child; it uses `CEPH_CONF` and `CEPH_KEYRING` (the admin key).
+  It talks JSON lines, has 8 s RADOS op timeouts, and is killed and restarted when it does not
+  answer within 10 s. Every node writes its record `node.<node_id>` (with an increasing `seq`)
+  on each renewal; peers judge a node alive by that record changing.
+- **Takeover:** a free lease is taken by the node at rank `r` of the tenant's `takeover_order`
+  after `r * rank_step_seconds` (plus another `lease_seconds` if the previous owner's record is
+  still fresh). Before serving, the new holder fences the previous one: a fresh record means a
+  tenant fence (MDS eviction of `client.rf-t<id>` sessions from host `rf-t<id>-nfs`); a stale
+  one a node fence (`ceph osd blocklist add <ip>:0/0 fence_seconds`, then eviction of every MDS
+  session from that address). A node fence is refused for the node's own address and any
+  mon, mgr, MDS or OSD address; a failed or refused fence means the lease is unlocked again and
+  nothing is served. A blocklisted node stops everything, reports `fenced` and `fenced_until`,
+  and takes nothing until the entry expires.
+- **Planned moves and draining:** the holder hands off (stop, `rf.released`, unlock) when the
+  config asks for a move to a node whose record is fresh; the target takes over at once with
+  no fence. A draining node hands off every lease, including the SFTP master lease.
+- **Tenant changes:** the VLAN interface gets the fixed MAC `02:52:46:xx:xx:xx` (tenant id as
+  24 bits) and a gratuitous ARP (`arping -U -c 3`) from the namespace after each takeover.
+  Ganesha runs with `--hostname rf-t<id>-nfs`, `RecoveryBackend = rados_ng` and a `RADOS_KV`
+  block (pool `CEPH_HA_POOL`, namespace and nodeid `rf-t<id>`, user `rf-t<id>`), with
+  `Lease_Lifetime`/`Grace_Period` from the config (30/45). The tenant's cephx user gains
+  `allow rw pool=<CEPH_HA_POOL> namespace=rf-t<id>`. Losing a lease sets the VLAN interface
+  down and stops the container (`podman stop -t 5`). Every node removes containers and
+  networks of tenants it does not hold. A terminated tenant is destroyed by its preferred node
+  after taking the lease (without serving), which then removes the lease object and the
+  `rf-t<id>` recovery namespace.
+- **SFTP:** with `sftp.virtual_ip` set, one node per location is SFTP master (lease
+  `sftp.<location_id>`, order `sftp.master_order`, only `master_eligible` nodes): it adds the
+  virtual IP to `SFTP_VIP_INTERFACE`, sends gratuitous ARP, and runs the gateway on VIP:port
+  and the back ends of every tenant. On loss or release it stops the gateway, removes the
+  virtual IP, stops the back ends and unmounts. Other nodes run no SFTP. With
+  `virtual_ip` null SFTP stays per node, for the tenants the node holds. When the config
+  carries `sftp.host_key`, it is written to `STATE_DIR/sftp_host_ed25519_key` (0600) and
+  used instead of the node's own key.
+- **Status:** an `ha` block (`lease_ok`, `fenced`, `fenced_until`, `sftp_master`,
+  `ha_active`), per tenant `serving`, `since` and `move_id`, and `events` (`takeover`,
+  `handoff`, `lost`, `fenced`, `sftp_master`), each sent until a status post carrying it
+  succeeds. Tenants are reported only by the node that serves them (or destroys them, or has
+  just stopped them, or serves their SFTP as master).
+- **Guard:** `rackflow-storage-guard.service` runs `storage-runner guard`, which every second
+  reads `/run/rackflow-storage/leases/*.json` (written by the runner on each renewal) and, once a
+  file's deadline (`lease_seconds - guard_margin_seconds` after the renewal send) passes on
+  either clock, sets the tenant's VLAN interface down and stops its container, or removes the
+  SFTP virtual IP. It needs neither Ceph nor Rackflow.
+
+### Upgrading from 0.2.x
+
+1. Create the pool once: `ceph osd pool create rackflow_ha 32 32 replicated` and
+   `ceph osd pool application enable rackflow_ha rados`.
+2. Install `python3-rados` and `iputils-arping` (or use the 0.3.0 image), the new binary,
+   the updated runner unit (`Type=notify`, `WatchdogSec=15`) and the guard unit.
+3. The first pass with an `ha` block restarts each tenant's Ganesha once (new hostname and
+   `rados_ng` recovery backend); clients see a short grace period. NFSv4 state from the old
+   local recovery directory is not carried over.
+4. Until Rackflow sends an `ha` block nothing changes.
+
 ## Safety rules
 
 - Nothing is destroyed unless the config lists it explicitly with a destroy
@@ -208,7 +288,8 @@ Ganesha already uses) are enough for a kernel mount of its subvolume paths.
   but not in the config are reported in `orphans`, never removed. Anything in
   the subvolume group that does not follow the `t<id>-s<id>` naming is also
   reported as an orphan.
-- If the config fetch fails, nothing changes and no status is posted. If the
+- If the config fetch fails, nothing changes and no status is posted (with
+  failover, the last saved config is applied instead, see Failover). If the
   config has zero tenants while the node has any, nothing changes; the status
   keeps the previous `version_applied`, sets a node error and lists the
   orphans.
@@ -247,13 +328,17 @@ install -m 0755 storage-runner /usr/local/bin/
 [Unit]
 Description=Rackflow storage runner
 After=network-online.target ceph.target
-Wants=network-online.target
+Wants=network-online.target rackflow-storage-guard.service
 
 [Service]
+Type=notify
 EnvironmentFile=/etc/rackflow/storage-runner.env
 ExecStart=/usr/local/bin/storage-runner
 Restart=always
-RestartSec=10
+RestartSec=2
+# The lease loop feeds the watchdog every renewal; a stuck runner is
+# restarted, and the guard stops its tenants if renewals stop meanwhile.
+WatchdogSec=15
 # podman's conmon for each tenant's Ganesha lives in this unit's cgroup. The
 # default KillMode would stop every tenant's NFS server whenever the runner
 # restarts; with process only the runner stops and the new one adopts them.
@@ -263,8 +348,28 @@ KillMode=process
 WantedBy=multi-user.target
 ```
 
+Both units are also in `systemd/`. The guard unit:
+
+```ini
+# /etc/systemd/system/rackflow-storage-guard.service
+[Unit]
+Description=Rackflow storage lease guard
+After=local-fs.target
+
+[Service]
+EnvironmentFile=-/etc/rackflow/storage-runner.env
+ExecStart=/usr/local/bin/storage-runner guard
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
 The image (`Dockerfile`, built in CI as `storage-runner`) contains the binary,
-`ceph-common`, `iproute2`, `nftables` and `podman`. In a container it needs
+`ceph-common`, `python3-rados`, `iputils-arping`, `iproute2`, `nftables` and
+`podman`. With failover it also needs `/run/rackflow-storage` shared with the
+host guard. In a container it needs
 the host network, `--privileged`, `/run/netns` shared with the host
 (`-v /run/netns:/run/netns:rshared`), `/etc/ceph` mounted, the host's podman
 socket with `PODMAN_REMOTE_URL`, and `STATE_DIR` bind-mounted at the **same
@@ -345,7 +450,13 @@ go test -race ./...
 ```
 
 Every host interaction is behind an interface with a real driver and a fake
-(`internal/netns`, `internal/firewall`, `internal/ceph`, `internal/ganesha`).
+(`internal/netns`, `internal/firewall`, `internal/ceph`, `internal/ganesha`,
+`internal/vip`, and `internal/lease`, whose `FakeCluster` models RADOS locks,
+the OSD clock, blocklists and partitions). `internal/lease` tests run several
+nodes against one fake pool with fake clocks (partitions, races, restarts,
+paused VMs, clock steps, fences, moves); `internal/reconcile/ha_test.go` does
+the same with whole reconcile passes. The Python helper can be checked with
+`python3 -m py_compile internal/lease/rados_helper.py`.
 `internal/reconcile` tests drive whole passes against the fakes and assert the
 exact action list; the driver tests assert the exact `ip`, `nft`, `ceph` and
 `podman` command lines.
@@ -366,5 +477,7 @@ reachable, local SSH and the veth host address are not, remote Ceph is
 forwarded and seen from the host's address (masqueraded), and a tenant
 outside the allowed set reaches nothing. It needs `python3` and `nsenter`.
 
-Not covered by any test: a real Ceph cluster, real podman and Ganesha, and
-real NFS clients. Those wait for the pilot.
+Not covered by any test: a real Ceph cluster (including the lease helper
+against real librados, blocklisting and MDS eviction), real podman and
+Ganesha (including `rados_ng` recovery), `arping`, and real NFS clients.
+Those wait for the pilot.
