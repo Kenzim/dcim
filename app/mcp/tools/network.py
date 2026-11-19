@@ -97,6 +97,33 @@ async def save_network_pool(location_id: int, settings: dict[str, Any]) -> dict:
     return await run_tool("save_network_pool", "write", work, args={"location_id": location_id, **settings})
 
 
+async def list_private_networks(location_id: Optional[int] = None) -> dict:
+    """Private networks with their attachments, members and pending invitations."""
+
+    async def work(db, ctx):
+        rows = await private_network_api.admin_list_networks(auth={}, db=db, location_id=location_id)
+        return {"private_networks": [row.model_dump(mode="json") for row in rows]}
+
+    return await run_tool("list_private_networks", "read", work, args={"location_id": location_id})
+
+
+async def remove_network_member(network_id: int, member_user_id: int, confirm: bool = False) -> dict:
+    """Remove a member from a shared private network: their servers are detached and they lose access."""
+
+    async def work(db, ctx):
+        await private_network_api.admin_remove_member(network_id, member_user_id, auth={}, db=db)
+        return {"removed": True, "network_id": network_id, "member_user_id": member_user_id}
+
+    return await run_tool(
+        "remove_network_member",
+        "destructive",
+        work,
+        destructive=True,
+        confirm=confirm,
+        args={"network_id": network_id, "member_user_id": member_user_id, "confirm": confirm},
+    )
+
+
 async def list_switch_plugins() -> dict:
     """Switch plugins with capabilities and the plugin_config fields each needs."""
 

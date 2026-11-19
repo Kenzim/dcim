@@ -7,8 +7,11 @@ from sqlalchemy.orm import Session, joinedload
 from app.models.private_network import (
     AttachmentState,
     NetworkKind,
+    InvitationStatus,
     PrivateNetwork,
     PrivateNetworkAttachment,
+    PrivateNetworkInvitation,
+    PrivateNetworkMember,
     PrivateNetworkPool,
     PrivateNetworkStatus,
     SegmentationType,
@@ -195,6 +198,98 @@ class PrivateNetworkDAO:
     def delete_attachment(db: Session, attachment: PrivateNetworkAttachment) -> None:
         db.delete(attachment)
         db.commit()
+
+    # --- members and invitations ---
+
+    @staticmethod
+    def get_member(db: Session, network_id: int, user_id: int) -> Optional[PrivateNetworkMember]:
+        return (
+            db.query(PrivateNetworkMember)
+            .filter(PrivateNetworkMember.network_id == network_id, PrivateNetworkMember.user_id == user_id)
+            .first()
+        )
+
+    @staticmethod
+    def count_members(db: Session, network_id: int) -> int:
+        return db.query(PrivateNetworkMember).filter(PrivateNetworkMember.network_id == network_id).count()
+
+    @staticmethod
+    def list_member_networks(db: Session, user_id: int) -> List[PrivateNetwork]:
+        """Standard networks the user has joined as a member (never ones they own)."""
+        return (
+            db.query(PrivateNetwork)
+            .options(joinedload(PrivateNetwork.attachments))
+            .join(PrivateNetworkMember, PrivateNetworkMember.network_id == PrivateNetwork.id)
+            .filter(
+                PrivateNetworkMember.user_id == user_id,
+                PrivateNetwork.kind == NetworkKind.STANDARD,
+            )
+            .order_by(PrivateNetwork.id)
+            .all()
+        )
+
+    @staticmethod
+    def list_member_user_networks(db: Session, user_id: int) -> List[PrivateNetworkMember]:
+        return db.query(PrivateNetworkMember).filter(PrivateNetworkMember.user_id == user_id).all()
+
+    @staticmethod
+    def list_networks_with_members(db: Session) -> List[PrivateNetwork]:
+        return (
+            db.query(PrivateNetwork)
+            .filter(PrivateNetwork.id.in_(db.query(PrivateNetworkMember.network_id)))
+            .order_by(PrivateNetwork.id)
+            .all()
+        )
+
+    @staticmethod
+    def get_invitation(db: Session, invitation_id: int) -> Optional[PrivateNetworkInvitation]:
+        return (
+            db.query(PrivateNetworkInvitation).filter(PrivateNetworkInvitation.id == invitation_id).first()
+        )
+
+    @staticmethod
+    def count_pending_invitations(db: Session, network_id: int) -> int:
+        return (
+            db.query(PrivateNetworkInvitation)
+            .filter(
+                PrivateNetworkInvitation.network_id == network_id,
+                PrivateNetworkInvitation.status == InvitationStatus.PENDING,
+            )
+            .count()
+        )
+
+    @staticmethod
+    def pending_invitations_for_user(db: Session, user_id: int) -> List[PrivateNetworkInvitation]:
+        return (
+            db.query(PrivateNetworkInvitation)
+            .filter(
+                PrivateNetworkInvitation.invitee_user_id == user_id,
+                PrivateNetworkInvitation.status == InvitationStatus.PENDING,
+            )
+            .order_by(PrivateNetworkInvitation.id)
+            .all()
+        )
+
+    @staticmethod
+    def pending_invitation_by_key(
+        db: Session, active_key: str
+    ) -> Optional[PrivateNetworkInvitation]:
+        return (
+            db.query(PrivateNetworkInvitation)
+            .filter(
+                PrivateNetworkInvitation.active_key == active_key,
+                PrivateNetworkInvitation.status == InvitationStatus.PENDING,
+            )
+            .first()
+        )
+
+    @staticmethod
+    def list_pending_invitations(db: Session) -> List[PrivateNetworkInvitation]:
+        return (
+            db.query(PrivateNetworkInvitation)
+            .filter(PrivateNetworkInvitation.status == InvitationStatus.PENDING)
+            .all()
+        )
 
     @staticmethod
     def wanted_states() -> tuple:

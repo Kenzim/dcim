@@ -6,7 +6,7 @@ A client (the **owner**) can invite other clients onto one of their private netw
 
 | Capability | Owner | Member | Anyone else |
 |---|---|---|---|
-| See the network (name, location, address range, storage address) | yes, plus VLAN ID | yes, without the VLAN ID | no |
+| See the network (name, location, address range, storage address) | yes, plus VLAN ID | yes, without the VLAN ID (see below) | no |
 | Attach and detach their own services | yes | yes (own services only) | no |
 | See shares open to the whole network, with mount lines | yes | yes (those shares only) | no |
 | Create and manage shares, SFTP logins, link or resize storage | yes | no | no |
@@ -16,6 +16,8 @@ A client (the **owner**) can invite other clients onto one of their private netw
 | Leave | n/a | yes | no |
 
 A member never sees the owner's other services, billing or personal details. The only thing about the owner they are shown is the owner's account username, as the display name ("shared by"). The owner sees each member's username and the addresses (and kind, VM or dedicated server) of the member's attached servers, but not the member's service names, MAC addresses or any other service.
+
+A member sees the VLAN ID (`server_vlan_id`) only while one of their own dedicated servers is attached, because the operating system on a dedicated server must tag that VLAN. A virtual machine needs no ID: the hypervisor tags its network card. Members never see switch state, errors or the owner's other attachments.
 
 Proxy access networks (`kind = proxy_access`) can never be shared: they have no members, invitations are refused, and the member routes never match them. Storage stays the owner's: linking, resizing and share management use the existing owner-only storage API, which is unchanged.
 

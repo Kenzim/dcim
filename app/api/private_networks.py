@@ -27,6 +27,7 @@ from app.services.private_network_service import (
     storage_endpoint_ip,
     validate_pool_range,
 )
+from app.services import private_network_sharing as sharing
 from app.services.proxy_fast_path import FastPathError, ProxyAccessService
 
 DbDep = Annotated[Session, Depends(get_db)]
@@ -52,6 +53,7 @@ class PoolCreate(BaseModel):
     enabled: bool = True
     max_networks_per_client: int = Field(5, ge=0, le=1000)
     max_networks_per_service: int = Field(4, ge=1, le=16)
+    max_members_per_network: int = Field(5, ge=0, le=100)
     reserved_cidrs: List[str] = Field(default_factory=list, max_length=256)
     proxy_access_enabled: bool = False
 
@@ -63,6 +65,7 @@ class PoolUpdate(BaseModel):
     enabled: Optional[bool] = None
     max_networks_per_client: Optional[int] = Field(None, ge=0, le=1000)
     max_networks_per_service: Optional[int] = Field(None, ge=1, le=16)
+    max_members_per_network: Optional[int] = Field(None, ge=0, le=100)
     reserved_cidrs: Optional[List[str]] = Field(None, max_length=256)
     proxy_access_enabled: Optional[bool] = None
 
@@ -77,6 +80,7 @@ class PoolResponse(BaseModel):
     bridge: str
     max_networks_per_client: int
     max_networks_per_service: int
+    max_members_per_network: int = 5
     reserved_cidrs: List[str] = []
     proxy_access_enabled: bool = False
     networks_in_use: int
@@ -140,6 +144,10 @@ class NetworkResponse(BaseModel):
     status: str
     created_at: Optional[datetime] = None
     attachments: List[AttachmentResponse]
+    # Owner and staff views of a network with sharing: members, pending invitations and the limit.
+    members: Optional[List[dict]] = None
+    invitations: Optional[List[dict]] = None
+    member_limit: Optional[int] = None
     # Staff only.
     owner_user_id: Optional[int] = None
     owner_username: Optional[str] = None
@@ -186,6 +194,7 @@ def _pool_out(db: Session, pool: PrivateNetworkPool) -> PoolResponse:
         bridge=pool.bridge,
         max_networks_per_client=pool.max_networks_per_client,
         max_networks_per_service=pool.max_networks_per_service,
+        max_members_per_network=pool.max_members_per_network,
         reserved_cidrs=list(pool.reserved_cidrs or []),
         proxy_access_enabled=bool(pool.proxy_access_enabled),
         networks_in_use=PrivateNetworkDAO.count_for_location(db, pool.location_id),
@@ -215,13 +224,25 @@ def _attachment_out(
     )
 
 
-def _network_out(network: PrivateNetwork, *, staff: bool) -> NetworkResponse:
+def _network_out(
+    network: PrivateNetwork, *, staff: bool, db: Optional[Session] = None, viewer_user_id: Optional[int] = None
+) -> NetworkResponse:
+    """A network as staff (everything) or as its owner (``viewer_user_id``: their own servers only)."""
     prefix_length = ipaddress.ip_network(network.cidr).prefixlen
     owner = network.owner_user if staff else None
     access = network.kind == NetworkKind.PROXY_ACCESS
-    # Clients see their own servers only, never the proxy runners in the network.
-    attachments = [a for a in network.attachments if staff or a.proxy_runner_id is None]
+    # Clients see their own servers only: never the proxy runners or the servers of members.
+    attachments = [
+        a
+        for a in network.attachments
+        if staff
+        or (a.proxy_runner_id is None and a.service is not None and a.service.owner_user_id == viewer_user_id)
+    ]
+    extras = {}
+    if db is not None and not access:
+        extras = sharing.owner_extras(db, network)
     return NetworkResponse(
+        **extras,
         kind=(network.kind or NetworkKind.STANDARD).value,
         id=network.id,
         name=network.name,
@@ -259,22 +280,28 @@ def _raise_fast_path(exc: FastPathError) -> None:
     raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 
-async def _attach(db: Session, network: PrivateNetwork, body: AttachBody, *, staff: bool) -> NetworkResponse:
+async def _attach(
+    db: Session, network: PrivateNetwork, body: AttachBody, *, staff: bool, user_id: Optional[int] = None
+) -> NetworkResponse:
     try:
-        await PrivateNetworkService.attach(db, network.id, body.service_id, ip_address=body.ip_address)
+        await PrivateNetworkService.attach(
+            db, network.id, body.service_id, ip_address=body.ip_address, acting_user_id=user_id
+        )
     except PrivateNetworkError as exc:
         _raise(exc)
-    return _network_out(PrivateNetworkDAO.get_network(db, network.id), staff=staff)
+    return _network_out(PrivateNetworkDAO.get_network(db, network.id), staff=staff, db=db, viewer_user_id=user_id)
 
 
-async def _detach(db: Session, network: PrivateNetwork, attachment_id: int, *, staff: bool) -> NetworkResponse:
+async def _detach(
+    db: Session, network: PrivateNetwork, attachment_id: int, *, staff: bool, user_id: Optional[int] = None
+) -> NetworkResponse:
     attachment = _attachment_of(network, attachment_id)
     try:
-        await PrivateNetworkService.detach(db, attachment.id)
+        await PrivateNetworkService.detach(db, attachment.id, acting_user_id=user_id)
     except PrivateNetworkError as exc:
         _raise(exc)
     db.expire_all()
-    return _network_out(PrivateNetworkDAO.get_network(db, network.id), staff=staff)
+    return _network_out(PrivateNetworkDAO.get_network(db, network.id), staff=staff, db=db, viewer_user_id=user_id)
 
 
 # --- admin: pools ---
@@ -343,7 +370,7 @@ async def admin_list_networks(
     location_id: Optional[int] = None,
 ):
     rows = PrivateNetworkDAO.list_networks(db, owner_user_id=owner_user_id, location_id=location_id)
-    return [_network_out(row, staff=True) for row in rows]
+    return [_network_out(row, staff=True, db=db) for row in rows]
 
 
 @admin_router.post("", response_model=NetworkResponse, status_code=status.HTTP_201_CREATED)
@@ -358,7 +385,7 @@ async def admin_create_network(data: AdminNetworkCreate, auth: AdminDep, db: DbD
             )
         except FastPathError as exc:
             _raise_fast_path(exc)
-        return _network_out(network, staff=True)
+        return _network_out(network, staff=True, db=db)
     try:
         network = await PrivateNetworkService.create_network(
             db,
@@ -370,12 +397,22 @@ async def admin_create_network(data: AdminNetworkCreate, auth: AdminDep, db: DbD
         )
     except PrivateNetworkError as exc:
         _raise(exc)
-    return _network_out(network, staff=True)
+    return _network_out(network, staff=True, db=db)
 
 
 @admin_router.get("/{network_id}", response_model=NetworkResponse)
 async def admin_get_network(network_id: int, auth: AdminDep, db: DbDep):
-    return _network_out(_admin_network(db, network_id), staff=True)
+    return _network_out(_admin_network(db, network_id), staff=True, db=db)
+
+
+@admin_router.delete("/{network_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_remove_member(network_id: int, user_id: int, auth: AdminDep, db: DbDep):
+    """Remove a member from a shared network: their servers are detached and they lose access."""
+    _admin_network(db, network_id)
+    try:
+        await sharing.remove_member(db, network_id, user_id, by="staff", actor_user_id=auth.get("user_id"))
+    except PrivateNetworkError as exc:
+        _raise(exc)
 
 
 @admin_router.delete("/{network_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -402,7 +439,7 @@ async def admin_sync_network(network_id: int, auth: AdminDep, db: DbDep):
         network = await PrivateNetworkService.sync_network(db, network_id)
     except PrivateNetworkError as exc:
         _raise(exc)
-    return _network_out(network, staff=True)
+    return _network_out(network, staff=True, db=db)
 
 
 @admin_router.post("/{network_id}/attachments", response_model=NetworkResponse)
@@ -441,7 +478,10 @@ def _client_network(db: Session, network_id: int, user_id: int) -> PrivateNetwor
 @client_router.get("", response_model=List[NetworkResponse])
 async def client_list_networks(auth: UserDep, db: DbDep):
     user_id = _client_user_id(auth)
-    return [_network_out(row, staff=False) for row in PrivateNetworkDAO.list_networks(db, owner_user_id=user_id)]
+    return [
+        _network_out(row, staff=False, db=db, viewer_user_id=user_id)
+        for row in PrivateNetworkDAO.list_networks(db, owner_user_id=user_id)
+    ]
 
 
 @client_router.get("/options", response_model=ClientOptionsResponse)
@@ -543,12 +583,13 @@ async def client_create_network(data: ClientNetworkCreate, auth: UserDep, db: Db
         )
     except PrivateNetworkError as exc:
         _raise(exc)
-    return _network_out(network, staff=False)
+    return _network_out(network, staff=False, db=db, viewer_user_id=user_id)
 
 
 @client_router.get("/{network_id}", response_model=NetworkResponse)
 async def client_get_network(network_id: int, auth: UserDep, db: DbDep):
-    return _network_out(_client_network(db, network_id, _client_user_id(auth)), staff=False)
+    user_id = _client_user_id(auth)
+    return _network_out(_client_network(db, network_id, user_id), staff=False, db=db, viewer_user_id=user_id)
 
 
 @client_router.delete("/{network_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -562,14 +603,16 @@ async def client_delete_network(network_id: int, auth: UserDep, db: DbDep):
 
 @client_router.post("/{network_id}/attachments", response_model=NetworkResponse)
 async def client_attach(network_id: int, body: AttachBody, auth: UserDep, db: DbDep):
-    network = _client_network(db, network_id, _client_user_id(auth))
-    return await _attach(db, network, body, staff=False)
+    user_id = _client_user_id(auth)
+    network = _client_network(db, network_id, user_id)
+    return await _attach(db, network, body, staff=False, user_id=user_id)
 
 
 @client_router.delete("/{network_id}/attachments/{attachment_id}", response_model=NetworkResponse)
 async def client_detach(network_id: int, attachment_id: int, auth: UserDep, db: DbDep):
-    network = _client_network(db, network_id, _client_user_id(auth))
+    user_id = _client_user_id(auth)
+    network = _client_network(db, network_id, user_id)
     attachment = _attachment_of(network, attachment_id)
     if attachment.proxy_runner_id is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found")
-    return await _detach(db, network, attachment_id, staff=False)
+    return await _detach(db, network, attachment_id, staff=False, user_id=user_id)

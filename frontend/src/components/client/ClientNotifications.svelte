@@ -79,6 +79,7 @@
   const GROUPS = [
     { title: 'Your account', keys: ['sign_in', 'failed_sign_in', 'two_factor', 'password', 'mcp_keys', 'sftp_login'] },
     { title: 'Your services', keys: ['service_suspended', 'service_terminated', 'storage_quota', 'backup', 'reinstall'] },
+    { title: 'Your networks', keys: ['network_sharing'] },
   ];
   $: byKey = prefs ? Object.fromEntries(prefs.catalogue.map((c) => [c.key, c])) : {};
 </script>

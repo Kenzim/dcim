@@ -156,12 +156,24 @@ def service_location_id(db: Session, service: Service) -> Optional[int]:
     return None
 
 
-def _pick_ip(network: PrivateNetwork, requested: Optional[str]) -> str:
+def listed_share_addresses(db: Session, network_id: int) -> set:
+    """Addresses listed by hand on any share of the storage linked to a network."""
+    tenant = StorageDAO.get_tenant_for_network(db, network_id)
+    out: set = set()
+    if tenant is None:
+        return out
+    for share in tenant.shares:
+        out.update(str(address) for address in (share.clients or []))
+    return out
+
+
+def _pick_ip(network: PrivateNetwork, requested: Optional[str], avoid: frozenset = frozenset()) -> str:
+    """An address for a new attachment. ``avoid`` holds addresses the caller must not be given."""
     if network.kind == NetworkKind.PROXY_ACCESS:
         return _pick_access_ip(network, requested)
     cidr = ipaddress.ip_network(network.cidr)
     endpoint = storage_endpoint_ip(network.cidr)
-    used = {a.ip_address for a in network.attachments if a.ip_address} | {endpoint}
+    used = {a.ip_address for a in network.attachments if a.ip_address} | {endpoint} | set(avoid)
     if requested:
         try:
             address = ipaddress.ip_address(requested.strip())
@@ -360,6 +372,21 @@ async def dry_run_uplink(
     return out
 
 
+def _owner_may_attach(db: Session, attachment: PrivateNetworkAttachment) -> bool:
+    """False when an attached service belongs to neither the network's owner nor a current member."""
+    service = attachment.service
+    network = attachment.network
+    if service is None or service.service_type == ServiceType.NFS_STORAGE:
+        return True
+    if service.owner_user_id == network.owner_user_id:
+        return True
+    return (
+        network.kind == NetworkKind.STANDARD
+        and service.owner_user_id is not None
+        and PrivateNetworkDAO.get_member(db, network.id, service.owner_user_id) is not None
+    )
+
+
 class PrivateNetworkService:
     # --- networks ---
 
@@ -485,8 +512,22 @@ class PrivateNetworkService:
                 raise PrivateNetworkError(
                     "Storage is linked to this network; terminate the storage service first", status_code=409
                 )
-            if any(a.proxy_runner_id is None for a in network.attachments):
+            # Members' servers do not block a delete: they leave with the network.
+            if any(
+                a.proxy_runner_id is None
+                and not (
+                    a.service is not None
+                    and a.service.service_type != ServiceType.NFS_STORAGE
+                    and a.service.owner_user_id != network.owner_user_id
+                )
+                for a in network.attachments
+            ):
                 raise PrivateNetworkError("Detach every service before deleting the network", status_code=409)
+            if network.members or network.invitations:
+                from app.services.private_network_sharing import end_sharing_locked
+
+                await end_sharing_locked(db, network, reason="network_deleted")
+                db.expire(network)
             network.status = PrivateNetworkStatus.DELETING
             PrivateNetworkDAO.save(db, network)
             # Proxy runners left in a proxy access network leave with it.
@@ -543,7 +584,9 @@ class PrivateNetworkService:
         service_id: int,
         *,
         ip_address: Optional[str] = None,
+        acting_user_id: Optional[int] = None,
     ) -> PrivateNetworkAttachment:
+        """Attach a service. ``acting_user_id`` (every client call) must own the service."""
         async with _ops_lock:
             network = PrivateNetworkService._require_network(db, network_id)
             if network.status != PrivateNetworkStatus.ACTIVE:
@@ -551,8 +594,16 @@ class PrivateNetworkService:
             service = ServiceDAO.get_by_id(db, service_id)
             if service is None:
                 raise PrivateNetworkError("Service not found", status_code=404)
-            # A network only ever joins services of the client who owns it.
-            if network.owner_user_id is None or service.owner_user_id != network.owner_user_id:
+            if acting_user_id is not None and service.owner_user_id != acting_user_id:
+                raise PrivateNetworkError("Service not found", status_code=404)
+            # A network joins services of the client who owns it and of its members only.
+            member = service.owner_user_id != network.owner_user_id
+            if network.owner_user_id is None or service.owner_user_id is None:
+                raise PrivateNetworkError("Service not found", status_code=404)
+            if member and not (
+                network.kind == NetworkKind.STANDARD
+                and PrivateNetworkDAO.get_member(db, network.id, service.owner_user_id) is not None
+            ):
                 raise PrivateNetworkError("Service not found", status_code=404)
             if service.service_type not in ATTACHABLE_TYPES:
                 raise PrivateNetworkError("This type of service cannot join a private network")
@@ -574,11 +625,16 @@ class PrivateNetworkService:
                     status_code=409,
                 )
 
+            # An address a share lists by hand is never handed to a member, so a member cannot
+            # take over an address the owner trusted.
+            avoid = (
+                frozenset(listed_share_addresses(db, network.id)) if member else frozenset()
+            )
             attachment = PrivateNetworkAttachment(
                 network_id=network.id,
                 service_id=service.id,
                 server_id=service.bare_metal.server_id if service.bare_metal else None,
-                ip_address=_pick_ip(network, ip_address),
+                ip_address=_pick_ip(network, ip_address, avoid),
                 state=AttachmentState.PENDING,
             )
             db.add(attachment)
@@ -634,13 +690,18 @@ class PrivateNetworkService:
             return attachment
 
     @staticmethod
-    async def detach(db: Session, attachment_id: int) -> bool:
-        """Remove an attachment. Returns False when cleanup failed and will be retried."""
+    async def detach(db: Session, attachment_id: int, *, acting_user_id: Optional[int] = None) -> bool:
+        """Remove an attachment. Returns False when cleanup failed and will be retried.
+
+        ``acting_user_id`` (every client call) must own the attached service.
+        """
         async with _ops_lock:
             attachment = PrivateNetworkDAO.get_attachment(db, attachment_id)
             if attachment is None:
                 raise PrivateNetworkError("Attachment not found", status_code=404)
             service = attachment.service
+            if acting_user_id is not None and (service is None or service.owner_user_id != acting_user_id):
+                raise PrivateNetworkError("Attachment not found", status_code=404)
             if (
                 service is not None
                 and service.service_type == ServiceType.NFS_STORAGE
@@ -830,6 +891,14 @@ class PrivateNetworkService:
         """
         counts = {"synced": 0, "applied": 0, "detached": 0, "deleted": 0, "failed": 0}
 
+        from app.services.private_network_sharing import reconcile_sharing
+
+        try:
+            counts["sharing"] = await reconcile_sharing(db)
+        except Exception:
+            logger.exception("Private network sharing repair failed")
+            db.rollback()
+
         for network_id in [n.id for n in PrivateNetworkDAO.list_unsynced(db)]:
             async with _ops_lock:
                 network = PrivateNetworkDAO.get_network(db, network_id)
@@ -855,7 +924,11 @@ class PrivateNetworkService:
                         or attachment.network.status != PrivateNetworkStatus.ACTIVE
                     )
                 else:
-                    gone = service.status == ServiceStatus.TERMINATED
+                    gone = (
+                        service.status == ServiceStatus.TERMINATED
+                        or attachment.network.status != PrivateNetworkStatus.ACTIVE
+                        or not _owner_may_attach(db, attachment)
+                    )
                 if gone or attachment.state == AttachmentState.DETACHING:
                     ok = await PrivateNetworkService._detach_locked(db, attachment)
                     counts["detached" if ok else "failed"] += 1
