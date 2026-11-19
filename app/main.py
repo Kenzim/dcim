@@ -460,7 +460,9 @@ api_router.include_router(virtual_media_api.servers_router, tags=["virtual-media
 
 # Private networks: admin management and the client portal surface
 from app.api import private_networks as private_networks_api
+from app.api import private_network_sharing as private_network_sharing_api
 api_router.include_router(private_networks_api.admin_router)
+api_router.include_router(private_network_sharing_api.client_router)
 api_router.include_router(private_networks_api.client_router)
 from app.api import storage as storage_api
 from app.api import storage_client as storage_client_api

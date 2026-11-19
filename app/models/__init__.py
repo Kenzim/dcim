@@ -51,6 +51,8 @@ from app.models.private_network import (
     PrivateNetworkPool,
     PrivateNetwork,
     PrivateNetworkAttachment,
+    PrivateNetworkInvitation,
+    PrivateNetworkMember,
 )
 from app.models.storage import (
     SftpAccess,

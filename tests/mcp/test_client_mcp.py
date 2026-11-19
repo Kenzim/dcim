@@ -713,17 +713,17 @@ async def test_fast_path_view_and_toggle_are_owner_scoped(db_session, as_client,
     view = await tools.services(view="fast_path", service_id=proxy.id)
     assert [(e["fast_path_ip"], e["active"]) for e in view["endpoints"]] == [("100.80.0.9", False)]
     with pytest.raises(ToolError, match="confirm"):
-        await tools.service_action(proxy.id, "fast_path_on")
-    on = await tools.service_action(proxy.id, "fast_path_on", confirm=True)
+        await tools.service_action(service_id=proxy.id, action="fast_path_on")
+    on = await tools.service_action(service_id=proxy.id, action="fast_path_on", confirm=True)
     assert on["endpoints"][0]["active"] is True and on["locations"][0]["enabled"] is True
 
     as_client(bob, ["read", "write"])
     assert (await tools.services(view="fast_path"))["endpoints"] == []
     with pytest.raises(ToolError, match="no proxy IPs"):
-        await tools.service_action(proxy.id, "fast_path_off", confirm=True)
+        await tools.service_action(service_id=proxy.id, action="fast_path_off", confirm=True)
 
     as_client(alice, ["read", "write"])
-    off = await tools.service_action(proxy.id, "fast_path_off", confirm=True)
+    off = await tools.service_action(service_id=proxy.id, action="fast_path_off", confirm=True)
     assert off["locations"][0]["enabled"] is False
-    again = await tools.service_action(proxy.id, "fast_path_off", confirm=True)
+    again = await tools.service_action(service_id=proxy.id, action="fast_path_off", confirm=True)
     assert again["locations"][0]["enabled"] is False

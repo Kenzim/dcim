@@ -218,6 +218,7 @@ Categories and their sources:
 | `storage_quota` | a share of theirs passes `storage_quota_percent` (default 90) of its quota; a client alert, so it opens once and closes when usage falls |
 | `backup` | a backup run of theirs finishes or fails |
 | `reinstall` | a reinstall of theirs finishes or fails |
+| `network_sharing` | an invitation to a shared private network, an answer to or a removal from one of theirs, or a shared network ending; fixed sentences only (`docs/private-network-sharing.md`) |
 
 Hooks: `AuditService.log` calls the client hook after it writes the audit row
 (fail-open, inside a savepoint). Service status changes are caught in one

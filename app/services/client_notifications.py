@@ -62,6 +62,11 @@ CATEGORY_LIST = (
     Category("storage_quota", "Storage nearly full", "A storage share of yours is close to its quota."),
     Category("backup", "Backups", "A backup of one of your services finished or failed."),
     Category("reinstall", "Installs and reinstalls", "An install or reinstall of one of your services finished or failed."),
+    Category(
+        "network_sharing",
+        "Shared private networks",
+        "An invitation to a shared private network, or a change to who is on a network you share.",
+    ),
 )
 CATEGORIES = {c.key: c for c in CATEGORY_LIST}
 
