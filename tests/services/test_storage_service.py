@@ -553,6 +553,7 @@ async def test_vlan_of_storage_awaiting_destruction_is_not_handed_out(env):
 
 @pytest.mark.asyncio
 async def test_status_updates_only_this_nodes_rows_and_destroys_only_marked_ones(env):
+    """Tenant state comes only from the serving node; destroyed ids count from any node of the location."""
     node, _, _, _, tenant = await _linked(env)
     other_node, _, _ = _node(env, "store-02")
     other_net = await _network(env, "other")
@@ -587,7 +588,7 @@ async def test_status_updates_only_this_nodes_rows_and_destroys_only_marked_ones
     assert tenant.runner_state == "ready" and StorageDAO.get_tenant(env.db, tenant.id) is not None
     assert StorageDAO.get_share(env.db, keep.id).used_bytes == 77
     assert StorageDAO.get_share(env.db, gone.id) is None
-    assert StorageDAO.get_share(env.db, foreign_id) is not None
+    assert StorageDAO.get_share(env.db, foreign_id) is None
     assert other_tenant.runner_state is None
 
 

@@ -81,6 +81,13 @@ class StorageNode(Base):
     sftp_host_key = Column(Text, nullable=True)
     sftp_host_key_fingerprint = Column(String(128), nullable=True)
     sftp_error = Column(Text, nullable=True)
+    # Failover (docs/nfs-storage-failover.md): a draining node serves nothing new and its tenants are
+    # moved away; ``ha_state`` and ``sftp_master`` are what the runner reported; ``healthy_since``
+    # is when the node last became healthy, for the return to preferred node rule.
+    draining = Column(Boolean, nullable=False, default=False)
+    ha_state = Column(JSON, nullable=True)
+    sftp_master = Column(Boolean, nullable=False, default=False)
+    healthy_since = Column(DateTime, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -116,11 +123,24 @@ class StorageTenant(Base):
     runner_error = Column(Text, nullable=True)
     sftp_state = Column(String(16), nullable=True)
     sftp_error = Column(Text, nullable=True)
+    # ``node_id`` is the preferred node. ``current_node_id`` is the node that reported serving the
+    # tenant, and ``current_since`` when that last changed. A planned move is pending while
+    # ``move_to_node_id`` is set.
+    current_node_id = Column(Integer, ForeignKey("storage_nodes.id", ondelete="SET NULL"), nullable=True, index=True)
+    current_since = Column(DateTime(timezone=True), nullable=True)
+    move_to_node_id = Column(Integer, ForeignKey("storage_nodes.id", ondelete="SET NULL"), nullable=True)
+    move_id = Column(String(32), nullable=True)
+    move_requested_at = Column(DateTime(timezone=True), nullable=True)
+    move_set_preferred = Column(Boolean, nullable=False, default=True)
+    last_failover_at = Column(DateTime(timezone=True), nullable=True)
+    last_failover_from_node_id = Column(Integer, ForeignKey("storage_nodes.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     service = relationship("Service")
-    node = relationship("StorageNode")
+    node = relationship("StorageNode", foreign_keys=[node_id])
+    current_node = relationship("StorageNode", foreign_keys=[current_node_id])
+    move_to_node = relationship("StorageNode", foreign_keys=[move_to_node_id])
     network = relationship("PrivateNetwork")
     location = relationship("Location")
     shares = relationship(
@@ -186,3 +206,47 @@ class StorageSftpUser(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     tenant = relationship("StorageTenant", back_populates="sftp_users")
+
+
+class StorageLocation(Base):
+    """Storage settings of one location: failover and the public SFTP endpoint shared by its nodes.
+
+    ``sftp_host_key`` is the sealed ed25519 private key every node of the location uses; it is
+    only ever sent to the location's runners and is never shown in an API.
+    """
+
+    __tablename__ = "storage_locations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="CASCADE"), nullable=False, unique=True)
+    ha_enabled = Column(Boolean, nullable=False, default=True)
+    auto_failback = Column(Boolean, nullable=False, default=True)
+    # Set by a rebalance while its moves are still being made, one at a time.
+    rebalancing = Column(Boolean, nullable=False, default=False)
+    sftp_enabled = Column(Boolean, nullable=False, default=False)
+    sftp_host = Column(String(255), nullable=True)
+    sftp_port = Column(Integer, nullable=False, default=2222)
+    # The virtual IP with its prefix length, for example ``203.0.113.10/24``.
+    sftp_virtual_ip = Column(String(64), nullable=True)
+    sftp_host_key = Column(Text, nullable=True)
+    sftp_host_key_public = Column(Text, nullable=True)
+    sftp_host_key_fingerprint = Column(String(128), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    location = relationship("Location")
+
+
+class StorageEvent(Base):
+    """A failover event: a takeover, hand-off, loss, fence, failed move or SFTP master change."""
+
+    __tablename__ = "storage_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("storage_tenants.id", ondelete="SET NULL"), nullable=True, index=True)
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True, index=True)
+    kind = Column(String(32), nullable=False)
+    node_id = Column(Integer, ForeignKey("storage_nodes.id", ondelete="SET NULL"), nullable=True)
+    from_node_id = Column(Integer, ForeignKey("storage_nodes.id", ondelete="SET NULL"), nullable=True)
+    detail = Column(Text, nullable=True)
