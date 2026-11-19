@@ -54,7 +54,6 @@ class PoolCreate(BaseModel):
     max_networks_per_service: int = Field(4, ge=1, le=16)
     reserved_cidrs: List[str] = Field(default_factory=list, max_length=256)
     proxy_access_enabled: bool = False
-    proxy_access_requires_product: bool = False
 
 
 class PoolUpdate(BaseModel):
@@ -66,7 +65,6 @@ class PoolUpdate(BaseModel):
     max_networks_per_service: Optional[int] = Field(None, ge=1, le=16)
     reserved_cidrs: Optional[List[str]] = Field(None, max_length=256)
     proxy_access_enabled: Optional[bool] = None
-    proxy_access_requires_product: Optional[bool] = None
 
 
 class PoolResponse(BaseModel):
@@ -81,7 +79,6 @@ class PoolResponse(BaseModel):
     max_networks_per_service: int
     reserved_cidrs: List[str] = []
     proxy_access_enabled: bool = False
-    proxy_access_requires_product: bool = False
     networks_in_use: int
     capacity: int
 
@@ -191,7 +188,6 @@ def _pool_out(db: Session, pool: PrivateNetworkPool) -> PoolResponse:
         max_networks_per_service=pool.max_networks_per_service,
         reserved_cidrs=list(pool.reserved_cidrs or []),
         proxy_access_enabled=bool(pool.proxy_access_enabled),
-        proxy_access_requires_product=bool(pool.proxy_access_requires_product),
         networks_in_use=PrivateNetworkDAO.count_for_location(db, pool.location_id),
         capacity=pool.vlan_end - pool.vlan_start + 1,
     )
@@ -358,7 +354,7 @@ async def admin_create_network(data: AdminNetworkCreate, auth: AdminDep, db: DbD
     if data.kind == NetworkKind.PROXY_ACCESS:
         try:
             network = await ProxyAccessService.enable(
-                db, owner_user_id=data.owner_user_id, location_id=data.location_id, check_entitlement=False
+                db, owner_user_id=data.owner_user_id, location_id=data.location_id, check_eligibility=False
             )
         except FastPathError as exc:
             _raise_fast_path(exc)

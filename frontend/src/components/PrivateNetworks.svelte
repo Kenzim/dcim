@@ -130,7 +130,6 @@
   function toggleProxyAccess(pool, field) {
     const labels = {
       proxy_access_enabled: ['Proxy fast path offered', 'Proxy fast path no longer offered'],
-      proxy_access_requires_product: ['Fast path now needs a product flagged proxy_fast_path', 'Fast path is free'],
     };
     const next = !pool[field];
     return run(
@@ -294,7 +293,7 @@
               <small class="reserved" title={pool.reserved_cidrs.join(', ')}>{pool.reserved_cidrs.length} reserved range{pool.reserved_cidrs.length === 1 ? '' : 's'}</small>
             {/if}
             {#if pool.proxy_access_enabled}
-              <small class="reserved">proxy fast path{pool.proxy_access_requires_product ? ' (product)' : ''}</small>
+              <small class="reserved">proxy fast path</small>
             {/if}
           </div>
           <div>{pool.enabled ? 'yes' : 'no'}</div>
@@ -309,14 +308,6 @@
               title="Let clients turn on a private network to the proxy runners in this location"
               on:click={() => toggleProxyAccess(pool, 'proxy_access_enabled')}
             >{pool.proxy_access_enabled ? 'Stop fast path' : 'Offer fast path'}</button>
-            {#if pool.proxy_access_enabled}
-              <button
-                class="tiny"
-                disabled={working}
-                title="Require an active product whose catalogue specs set proxy_fast_path: true"
-                on:click={() => toggleProxyAccess(pool, 'proxy_access_requires_product')}
-              >{pool.proxy_access_requires_product ? 'Make fast path free' : 'Sell fast path'}</button>
-            {/if}
             <button
               class="tiny danger"
               disabled={working || pool.networks_in_use > 0}

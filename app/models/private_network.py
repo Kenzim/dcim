@@ -70,10 +70,8 @@ class PrivateNetworkPool(Base):
     max_networks_per_service = Column(Integer, nullable=False, default=4)
     # Admin-only list of CIDRs that client networks may not overlap.
     reserved_cidrs = Column(JSON, nullable=True)
-    # Proxy fast path: clients may turn on a proxy access network here, and
-    # optionally only with a product flagged ``proxy_fast_path``.
+    # Proxy fast path: clients with a server and a proxy here may turn on a proxy access network.
     proxy_access_enabled = Column(Boolean, nullable=False, default=False)
-    proxy_access_requires_product = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

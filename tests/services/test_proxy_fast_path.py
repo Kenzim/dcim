@@ -13,7 +13,6 @@ from app.models.location import Location
 from app.models.network_port import NetworkPort
 from app.models.network_switch import NetworkSwitch
 from app.models.private_network import NetworkKind, PrivateNetworkStatus
-from app.models.product_catalog import Product, ProductFamily
 from app.models.proxy_runner import ProxyRunnerVlanMode
 from app.models.server import Server
 from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
@@ -23,6 +22,10 @@ from app.services import private_network_service as pns
 from app.services import proxy_fast_path as fp
 from app.services.private_network_service import PrivateNetworkError, PrivateNetworkService
 from app.services.proxy_fast_path import FastPathError, ProxyAccessService
+
+# Most tests turn the fast path on without setting up the client's server and proxy;
+# the eligibility test puts the real check back.
+_REAL_ELIGIBILITY = fp.eligibility_problem
 
 
 class FakeSwitch:
@@ -86,6 +89,7 @@ def env(db_session, monkeypatch):
     )
     pool.proxy_access_enabled = True
     db_session.commit()
+    monkeypatch.setattr(fp, "eligibility_problem", lambda *args, **kwargs: None)
     switches = {}
     proxmox = FakeProxmox()
     monkeypatch.setattr(pns, "_switch_plugin", lambda switch: switches.setdefault(switch.name, FakeSwitch()))
@@ -237,24 +241,61 @@ async def test_enable_refused_where_not_offered(env):
         await ProxyAccessService.enable(env.db, owner_user_id=env.alice.id, location_id=env.location.id)
 
 
-@pytest.mark.asyncio
-async def test_product_flag_gates_the_fast_path_when_required(env):
-    env.pool.proxy_access_requires_product = True
+def _dedicated(env, owner, location, name, *, status=ServiceStatus.ACTIVE):
+    server = Server(name=name, server_ip="10.71.0.1", location_id=location.id, plugin_name="ipmi", plugin_config={})
+    env.db.add(server)
     env.db.commit()
-    with pytest.raises(FastPathError) as exc:
-        await ProxyAccessService.enable(env.db, owner_user_id=env.alice.id, location_id=env.location.id)
-    assert exc.value.status_code == 402
+    return ServiceDAO.create_bare_metal(
+        env.db,
+        name=name,
+        server_id=server.id,
+        owner_user_id=owner.id,
+        service_type=ServiceType.BARE_METAL,
+        status=status,
+        provisioning_source=ProvisioningSource.INTERNAL,
+    )
 
-    family = ProductFamily(code="proxy-fam", name="Proxies", service_type="http_proxy", defaults={})
-    env.db.add(family)
-    env.db.flush()
-    env.db.add(Product(code="px-fast", name="Fast", family_id=family.id, overrides={"proxy_fast_path": True}))
-    env.db.commit()
-    service, _ = _proxy(env, env.alice, "px", _subnet(env, "a", "203.0.113.0/29"), username="alice1")
-    service.product_code = "px-fast"
-    env.db.commit()
+
+async def _refused(env, user):
+    with pytest.raises(FastPathError) as exc:
+        await ProxyAccessService.enable(env.db, owner_user_id=user.id, location_id=env.location.id)
+    assert exc.value.status_code == 409
+    return exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_fast_path_needs_a_server_and_a_fast_path_proxy_in_the_location(env, monkeypatch):
+    monkeypatch.setattr(fp, "eligibility_problem", _REAL_ELIGIBILITY)
+    runner = _runner(env, "here", location=env.location)
+    assert "an active server and an active proxy" in await _refused(env, env.alice)
+
+    # A proxy whose subnet is not served over the fast path does not count.
+    _proxy(env, env.alice, "px-plain", _subnet(env, "plain", "198.51.100.0/29"), username="alice0")
+    _dedicated(env, env.alice, env.location, "alice-bm")
+    assert await _refused(env, env.alice) == (
+        "The proxy fast path needs an active proxy served over the fast path in this location"
+    )
+
+    subnet = fp.pin_subnet(env.db, _subnet(env, "a", "203.0.113.0/29"), runner.id)
+    _proxy(env, env.alice, "px", subnet, username="alice1")
+    # Bob has a proxy, but his servers are elsewhere or suspended, and a proxy is not a server.
+    _proxy(env, env.bob, "px-bob", subnet, username="bob1")
+    _dedicated(env, env.bob, env.other, "bob-paris")
+    _dedicated(env, env.bob, env.location, "bob-held", status=ServiceStatus.SUSPENDED)
+    assert await _refused(env, env.bob) == "The proxy fast path needs an active server in this location"
+
+    view = ProxyAccessService.overview(env.db, env.bob.id)
+    assert [(loc["eligible"], loc["reason"]) for loc in view["locations"]] == [
+        (False, "The proxy fast path needs an active server in this location")
+    ]
     network = await ProxyAccessService.enable(env.db, owner_user_id=env.alice.id, location_id=env.location.id)
     assert network.kind == NetworkKind.PROXY_ACCESS
+    assert ProxyAccessService.overview(env.db, env.alice.id)["locations"][0]["eligible"] is True
+
+    staff = await ProxyAccessService.enable(
+        env.db, owner_user_id=env.bob.id, location_id=env.location.id, check_eligibility=False
+    )
+    assert staff.kind == NetworkKind.PROXY_ACCESS
 
 
 @pytest.mark.asyncio

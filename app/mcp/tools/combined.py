@@ -95,8 +95,7 @@ async def save_location(
     (0 clears it, falling back to PROXY_DEFAULT_PORT, 11080 by default).
     network_pool: create or update the location's private network pool; keys vlan_start,
     vlan_end (both needed to create), bridge, enabled, max_networks_per_client,
-    max_networks_per_service, reserved_cidrs (replaces), proxy_access_enabled,
-    proxy_access_requires_product.
+    max_networks_per_service, reserved_cidrs (replaces), proxy_access_enabled.
     """
     if location_id is None:
         _require("Creating a location", name=name)

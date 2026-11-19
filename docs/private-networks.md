@@ -38,7 +38,7 @@ Every network keeps its last usable address (for example `.254` on a /24) for an
 
 ## Proxy fast path
 
-A pool can offer the **proxy fast path** (`proxy_access_enabled`, optionally sold with `proxy_access_requires_product`). A client then turns on one proxy access network per location: a normal VLAN from the pool, but always `100.80.0.0/16`, outside the client's network limit, joined automatically by every proxy runner in the location and never linked to storage. Client servers attach as usual and get addresses from `100.80.16.1` up; `100.80.0.0/20` holds the private IPs of the proxy subnets. Full design and rollout: `docs/proxy-fast-path.md`.
+A pool can offer the **proxy fast path** (`proxy_access_enabled`; not sold, any client with an active server and proxy in the location may turn it on). A client then turns on one proxy access network per location: a normal VLAN from the pool, but always `100.80.0.0/16`, outside the client's network limit, joined automatically by every proxy runner in the location and never linked to storage. Client servers attach as usual and get addresses from `100.80.16.1` up; `100.80.0.0/20` holds the private IPs of the proxy subnets. Full design and rollout: `docs/proxy-fast-path.md`.
 
 ## NFS storage
 

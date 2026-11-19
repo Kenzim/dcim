@@ -212,8 +212,8 @@
               <div>
                 {#if !loc.available}
                   <small>No longer offered here</small>
-                {:else if loc.requires_product && !loc.entitled && !loc.enabled}
-                  <small>Needs a plan that includes the fast path</small>
+                {:else if !loc.eligible && !loc.enabled && loc.reason}
+                  <small>{loc.reason}.</small>
                 {/if}
               </div>
               <div class="row-end">
@@ -224,7 +224,7 @@
                     title={loc.servers_attached > 0 ? 'Disconnect your servers from the network first' : ''}
                     on:click={() => fastPathOff(loc)}
                   >Turn off</button>
-                {:else if loc.available && !loc.status && (loc.entitled || !loc.requires_product)}
+                {:else if loc.available && !loc.status && loc.eligible}
                   <Button size="small" disabled={working} on:click={() => fastPathOn(loc)}>Turn on</Button>
                 {/if}
               </div>

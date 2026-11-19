@@ -704,6 +704,10 @@ async def test_fast_path_view_and_toggle_are_owner_scoped(db_session, as_client,
         status=ServiceStatus.ACTIVE, provisioning_source=ProvisioningSource.INTERNAL,
     )
     IPAMDAO.assign_ip(db_session, proxy.id, subnet_id=subnet.id, username="ua", password="pa-secret")
+    box = _server(db_session, "a-box", "10.1.0.10")
+    box.location_id = location.id
+    db_session.commit()
+    _bm_service(db_session, alice, "a-bm", box)
 
     as_client(alice, ["read", "write"])
     view = await tools.services(view="fast_path", service_id=proxy.id)

@@ -59,19 +59,23 @@ def _config(client, name):
     return response.json()
 
 
-def _proxy(db, owner, location, subnet, name, username):
+def _service(db, owner, location, name, service_type):
     server = ServerDAO.create(
         db, name=f"{name}-srv", server_ip="10.60.0.1", location_id=location.id, plugin_name="ipmi", plugin_config={}
     )
-    service = ServiceDAO.create_bare_metal(
+    return ServiceDAO.create_bare_metal(
         db,
         name=name,
         server_id=server.id,
         owner_user_id=owner.id,
-        service_type=ServiceType.HTTP_PROXY,
+        service_type=service_type,
         status=ServiceStatus.ACTIVE,
         provisioning_source=ProvisioningSource.INTERNAL,
     )
+
+
+def _proxy(db, owner, location, subnet, name, username):
+    service = _service(db, owner, location, name, ServiceType.HTTP_PROXY)
     return service, IPAMDAO.assign_ip(db, service.id, subnet_id=subnet.id, username=username, password="secret-pw-1")
 
 
@@ -144,8 +148,14 @@ def test_client_turns_fast_path_on_and_off_and_never_sees_runners(client, db_ses
     view = client.get(f"{CLIENT}/fast-path", headers=alice_h).json()
     assert view["cidr"] == "100.80.0.0/16"
     assert view["locations"][0]["enabled"] is False
+    assert view["locations"][0]["eligible"] is False
+    assert view["locations"][0]["reason"] == "The proxy fast path needs an active server in this location"
     assert view["endpoints"][0]["fast_path_ip"] == "100.80.0.1" and view["endpoints"][0]["active"] is False
+    refused = client.post(f"{CLIENT}/fast-path", json={"location_id": location.id}, headers=alice_h)
+    assert refused.status_code == 409 and "active server" in refused.json()["detail"]
 
+    _service(db_session, alice, location, "alice-bm", ServiceType.BARE_METAL)
+    assert client.get(f"{CLIENT}/fast-path", headers=alice_h).json()["locations"][0]["eligible"] is True
     on = client.post(f"{CLIENT}/fast-path", json={"location_id": location.id}, headers=alice_h)
     assert on.status_code == 200, on.text
     assert on.json()["endpoints"][0]["active"] is True

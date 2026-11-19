@@ -5971,8 +5971,7 @@ function rackflow_proxyFastPathVarsFromView(array $view, $actionUrl)
     foreach ($locations as $loc) {
         if (!empty($loc['enabled'])) {
             $canDisable = true;
-        } elseif (!empty($loc['available']) && empty($loc['status'])
-            && (!empty($loc['entitled']) || empty($loc['requires_product']))) {
+        } elseif (!empty($loc['available']) && empty($loc['status']) && !empty($loc['eligible'])) {
             $canEnable = true;
         }
     }

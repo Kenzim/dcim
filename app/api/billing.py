@@ -2719,8 +2719,16 @@ async def billing_proxy_fast_path_toggle(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="This service has no proxy IPs that can use the fast path"
         )
+    if body.enabled:
+        eligible = [loc for loc in view["locations"] if loc["eligible"] or loc["enabled"]]
+        if not eligible:
+            reason = next((loc["reason"] for loc in view["locations"] if loc["reason"]), None)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=reason or "The proxy fast path is not available for this service",
+            )
     try:
-        for loc in view["locations"]:
+        for loc in eligible if body.enabled else view["locations"]:
             if body.enabled:
                 await ProxyAccessService.enable(db, owner_user_id=service.owner_user_id, location_id=loc["location_id"])
             elif loc["network_id"] is not None:

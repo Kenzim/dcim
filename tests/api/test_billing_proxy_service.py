@@ -6,6 +6,7 @@ from app.dao.user_dao import UserDAO
 from app.dao.ipam_dao import IPAMDAO
 from app.dao.location_dao import LocationDAO
 from app.dao.permission_set_dao import PermissionSetDAO
+from app.dao.server_dao import ServerDAO
 from app.dao.service_dao import ServiceDAO
 from app.core.client_permissions import PermissionKey
 from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
@@ -225,6 +226,18 @@ def test_billing_proxy_fast_path_view_and_toggle(client, db_session):
     assert [(e["fast_path_ip"], e["active"]) for e in view["endpoints"]] == [("100.80.0.1", False)]
     status_payload = client.get(f"/api/billing/services/{service.id}/status", headers=headers).json()
     assert status_payload["proxy_assignments"][0]["fast_path"]["ip"] == "100.80.0.1"
+
+    no_server = client.post(url, json={"enabled": True}, headers=headers)
+    assert no_server.status_code == 409, no_server.text
+    assert no_server.json()["detail"] == "The proxy fast path needs an active server in this location"
+    box = ServerDAO.create(
+        db_session, name="billing-fast-box", server_ip="10.61.0.1", location_id=subnet.location_id,
+        plugin_name="ipmi", plugin_config={},
+    )
+    ServiceDAO.create_bare_metal(
+        db_session, name="billing-fast-bm", server_id=box.id, owner_user_id=service.owner_user_id,
+        service_type=ServiceType.BARE_METAL, status=ServiceStatus.ACTIVE, provisioning_source=ProvisioningSource.BILLING,
+    )
 
     on = client.post(url, json={"enabled": True}, headers=headers)
     assert on.status_code == 200, on.text

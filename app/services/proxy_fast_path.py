@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import settings
 from app.dao.private_network_dao import PrivateNetworkDAO
-from app.dao.product_catalog_dao import ProductDAO
 from app.dao.service_dao import ServiceDAO
 from app.models.ipam import IPAddress, IPSubnet, ServiceIPAssignment
 from app.models.location import Location
@@ -39,9 +38,6 @@ from app.services.private_network_service import PrivateNetworkError, PrivateNet
 
 logger = logging.getLogger(__name__)
 
-# Catalogue flag (product overrides or family defaults) that entitles its owner
-# to the fast path when the location's pool requires a product.
-PRODUCT_FLAG = "proxy_fast_path"
 ACCESS_NETWORK_NAME = "Proxy fast path"
 
 
@@ -125,25 +121,36 @@ def subnet_fast_path(subnet: Optional[IPSubnet]) -> Optional[dict]:
     }
 
 
-# --- entitlement ---
+# --- eligibility ---
 
 
-def _service_grants_fast_path(db: Session, service: Service) -> bool:
-    product = ProductDAO.get_by_code(db, service.product_code) if service.product_code else None
-    if product is not None:
-        family = product.family
-        specs = {**((family.defaults if family else None) or {}), **(product.overrides or {})}
-    else:
-        specs = (service.product_snapshot or {}).get("effective_specs") or {}
-    return bool(specs.get(PRODUCT_FLAG))
+def _proxy_reaches(db: Session, service: Service, location_id: int) -> bool:
+    """True when one of the proxy service's IPs is served over the fast path in the location."""
+    for assignment in db.query(ServiceIPAssignment).filter(ServiceIPAssignment.service_id == service.id):
+        fast = subnet_fast_path(assignment.ip.subnet if assignment.ip else None)
+        if fast is not None and fast["location_id"] == location_id:
+            return True
+    return False
 
 
-def client_entitled(db: Session, user_id: int) -> bool:
-    """True when the client owns an active service whose product carries the fast path flag."""
-    return any(
-        service.status == ServiceStatus.ACTIVE and _service_grants_fast_path(db, service)
-        for service in ServiceDAO.get_by_owner_user(db, user_id)
-    )
+def eligibility_problem(db: Session, user_id: int, location_id: int) -> Optional[str]:
+    """None when the client may use the fast path in the location, else what they are missing.
+
+    The fast path is not sold: it comes with having an active server (VM or dedicated)
+    and an active proxy reachable over the fast path in the same location.
+    """
+    services = [s for s in ServiceDAO.get_by_owner_user(db, user_id) if s.status == ServiceStatus.ACTIVE]
+    missing = []
+    if not any(
+        s.service_type in (ServiceType.VM, ServiceType.BARE_METAL) and pn.service_location_id(db, s) == location_id
+        for s in services
+    ):
+        missing.append("an active server")
+    if not any(s.service_type == ServiceType.HTTP_PROXY and _proxy_reaches(db, s, location_id) for s in services):
+        missing.append("an active proxy served over the fast path")
+    if not missing:
+        return None
+    return f"The proxy fast path needs {' and '.join(missing)} in this location"
 
 
 def _location_offer(db: Session, location_id: int):
@@ -164,14 +171,16 @@ def _runners_in(db: Session, location_id: int) -> List[ProxyRunner]:
 class ProxyAccessService:
     @staticmethod
     async def enable(
-        db: Session, *, owner_user_id: int, location_id: int, check_entitlement: bool = True
+        db: Session, *, owner_user_id: int, location_id: int, check_eligibility: bool = True
     ) -> PrivateNetwork:
         """Turn the client's fast path on in a location: create the access network and join the runners."""
         pool = _location_offer(db, location_id)
         if pool is None:
             raise FastPathError("The proxy fast path is not available in this location", status_code=409)
-        if check_entitlement and pool.proxy_access_requires_product and not client_entitled(db, owner_user_id):
-            raise FastPathError("The proxy fast path needs a product that includes it", status_code=402)
+        if check_eligibility:
+            problem = eligibility_problem(db, owner_user_id, location_id)
+            if problem:
+                raise FastPathError(problem, status_code=409)
         existing = PrivateNetworkDAO.get_access_network(db, owner_user_id, location_id)
         if existing is not None:
             if existing.status != PrivateNetworkStatus.ACTIVE:
@@ -350,22 +359,20 @@ class ProxyAccessService:
         runner_locations = {
             location_id for (location_id,) in db.query(ProxyRunner.location_id).filter(ProxyRunner.location_id.isnot(None))
         }
-        entitled = None
         locations = []
         for pool in PrivateNetworkDAO.list_pools(db):
             offered = pool.enabled and pool.proxy_access_enabled and pool.location_id in runner_locations
             network = networks.get(pool.location_id)
             if not offered and network is None:
                 continue
-            if pool.proxy_access_requires_product and entitled is None:
-                entitled = client_entitled(db, user_id)
+            problem = eligibility_problem(db, user_id, pool.location_id) if offered else None
             locations.append(
                 {
                     "location_id": pool.location_id,
                     "location_name": pool.location.name if pool.location else str(pool.location_id),
                     "available": bool(offered),
-                    "requires_product": bool(pool.proxy_access_requires_product),
-                    "entitled": bool(entitled) if pool.proxy_access_requires_product else True,
+                    "eligible": bool(offered) and problem is None,
+                    "reason": problem,
                     "enabled": network is not None and network.status == PrivateNetworkStatus.ACTIVE,
                     "network_id": network.id if network is not None else None,
                     "status": network.status.value if network is not None else None,

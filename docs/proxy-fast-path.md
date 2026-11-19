@@ -30,7 +30,7 @@ Client servers use the prefix `/16`, so every proxy subnet IP is on-link and no 
 |---|---|
 | `proxy_runners` | `location_id` (nullable), `server_id` (nullable, the dedicated server the runner runs on), `vlan_mode` (`preconfigured` or `switch`, default `preconfigured`) |
 | `ip_subnets` | `proxy_runner_id` (nullable, the runner that hosts the subnet), `fast_path_ip` (nullable, unique) |
-| `private_network_pools` | `proxy_access_enabled` (default false), `proxy_access_requires_product` (default false) |
+| `private_network_pools` | `proxy_access_enabled` (default false) |
 | `private_networks` | `kind` (`standard` or `proxy_access`, default `standard`) |
 | `private_network_attachments` | `proxy_runner_id` (nullable): the attachment is a runner, not a client service |
 
@@ -43,7 +43,7 @@ A subnet may only be pinned to a runner that has a location. The fast path for t
 A `PrivateNetwork` of kind `proxy_access`, at most one per client per location:
 
 - **Turning it on:** the client turns it on per location in the portal (`/client/networks`), the WHMCS client area of a proxy service, or the client MCP. The location's pool must have `proxy_access_enabled`. It takes a VLAN from the pool like any private network but does not count towards the client's network limit. Its range is always `PROXY_ACCESS_CIDR`.
-- **Billing:** free by default. If the pool has `proxy_access_requires_product`, the client must own an active service whose catalogue product has the flag `proxy_fast_path: true` (in the product overrides or the family defaults). Kenzi can sell an add-on product, or include the fast path in a proxy plan, by setting that flag.
+- **Who may turn it on:** it is not sold. A client may turn it on in a location when they own an active server (VM or dedicated) in that location and an active proxy with at least one IP whose subnet is pinned to a runner there. Otherwise the request is refused with what is missing, and the overview reports `eligible: false` with the same `reason`. Staff can turn it on for any client. (An earlier pool switch, `proxy_access_requires_product`, and the catalogue flag `proxy_fast_path` were removed by migration `drop_proxy_access_requires_product`.)
 - **Runners join it:** every runner whose location is the network's location gets an attachment row (`proxy_runner_id` set, no service, no IP). In `switch` mode the VLAN is trunked on the runner server's uplink through the switch plugins, like a storage node. In `preconfigured` mode Rackflow makes no switch call, and the operator carries the pool's whole VLAN range to the runner once (for example a Proxmox NIC with `trunks=`, or a static trunk). The repair loop adds and removes runner attachments when runners or networks change.
 - **Client servers:** join with the normal attach call. VMs get a tagged NIC, dedicated servers get the VLAN on their switch ports. Addresses come from the client block.
 - **Turning it off:** refused while client servers are attached (detach them first, as with any network). Runner attachments are removed by Rackflow, then the VLAN is deleted.

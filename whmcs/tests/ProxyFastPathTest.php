@@ -37,7 +37,7 @@ final class ProxyFastPathTest extends TestCase
             'cidr' => '100.80.0.0/16',
             'locations' => array(
                 array('location_id' => 1, 'available' => true, 'enabled' => false, 'status' => null,
-                    'requires_product' => false, 'entitled' => true),
+                    'eligible' => true, 'reason' => null),
             ),
             'endpoints' => array(
                 array('fast_path_ip' => '100.80.0.1', 'port' => 11080, 'public_ip' => '203.0.113.2'),
@@ -52,15 +52,16 @@ final class ProxyFastPathTest extends TestCase
         $this->assertSame('100.80.0.0/16', $vars['rackflow_fast_path_cidr']);
     }
 
-    public function testProductGateAndEnabledLocation(): void
+    public function testIneligibleClientAndEnabledLocation(): void
     {
-        $gated = rackflow_proxyFastPathVarsFromView(array('locations' => array(
-            array('available' => true, 'enabled' => false, 'status' => null, 'requires_product' => true, 'entitled' => false),
+        $missing = rackflow_proxyFastPathVarsFromView(array('locations' => array(
+            array('available' => true, 'enabled' => false, 'status' => null, 'eligible' => false,
+                'reason' => 'The proxy fast path needs an active server in this location'),
         )), '/x');
-        $this->assertFalse($gated['rackflow_fast_path_can_enable']);
+        $this->assertFalse($missing['rackflow_fast_path_can_enable']);
 
         $on = rackflow_proxyFastPathVarsFromView(array('locations' => array(
-            array('available' => true, 'enabled' => true, 'status' => 'active', 'requires_product' => false, 'entitled' => true),
+            array('available' => true, 'enabled' => true, 'status' => 'active', 'eligible' => true, 'reason' => null),
         )), '/x');
         $this->assertFalse($on['rackflow_fast_path_can_enable']);
         $this->assertTrue($on['rackflow_fast_path_can_disable']);

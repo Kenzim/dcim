@@ -582,8 +582,8 @@ button.rf-ca__btn--danger:hover {
           <div class="rf-ca__action-copy">
             <p class="rf-ca__action-title">{$loc.location_name|escape}:
               {if $loc.enabled}On{elseif $loc.status == 'deleting'}Turning off{else}Off{/if}</p>
-            {if $loc.requires_product && !$loc.entitled && !$loc.enabled}
-            <p class="rf-ca__action-help">Needs a plan that includes private proxy access.</p>
+            {if !$loc.eligible && !$loc.enabled && $loc.reason}
+            <p class="rf-ca__action-help">{$loc.reason|escape}.</p>
             {/if}
             {if $loc.enabled && $loc.servers_attached > 0}
             <p class="rf-ca__action-help">{$loc.servers_attached|escape} server(s) connected. Disconnect them in the portal before turning this off.</p>
