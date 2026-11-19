@@ -435,13 +435,55 @@ def test_password_failure_stops_before_the_link_is_released():
     assert _vm_restore_state(ctx.service)["configure_error"].startswith("Secure Token")
 
 
-def test_configure_without_a_target_serial_leaves_opencore_as_restored():
+def test_configure_refuses_to_leave_the_source_identity_when_no_target_identity_was_recorded():
     plugin = FakeMac()
     ctx = Ctx(plugin, state={"target_identity": {"nets": {"net0": PUBLIC}, "config": {}}})
     with patch("app.services.deployment.guest_config.reboot_guest_and_wait_agent", AsyncMock()) as rebooted:
-        _run(ConfigureRestoredMacosGuestStep().execute(ctx))
+        with pytest.raises(DeploymentError, match="SMBIOS identity was not recorded"):
+            _run(ConfigureRestoredMacosGuestStep().execute(ctx))
     assert not any("PlistBuddy" in " ".join(c) for c in plugin.exec_calls)
     rebooted.assert_not_awaited()
+
+
+def test_target_without_an_smbios_serial_gets_a_fresh_identity_in_proxmox_and_opencore():
+    plugin = FakeMac({"net0": PUBLIC, "name": "mac-target", "smbios1": "uuid=11111111-2222-3333-4444-555555555555"})
+    ctx = Ctx(plugin)
+    _run(CaptureMacosIdentityStep().execute(ctx))
+    identity = _vm_restore_state(ctx.service)["target_identity"]
+    generated = identity["config"]["smbios1"]
+    assert identity["smbios_generated"] is True
+    fresh = smbios_from_smbios1(generated)
+    assert fresh is not None and fresh["SystemSerialNumber"] != "C02SOURCE001"
+
+    # The restore brings the source's identity; the target's fresh one replaces it in Proxmox ...
+    plugin.config.update({"net0": SOURCE_PUBLIC, "smbios1": SOURCE_SMBIOS})
+    _run(ReapplyMacosIdentityStep().execute(ctx))
+    payload, deleted = plugin.set_calls[0]
+    assert payload["smbios1"] == generated and "smbios1" not in deleted
+    assert plugin.config["smbios1"] == generated
+
+    # ... and in OpenCore on the disk.
+    with patch("app.services.deployment.guest_config.reboot_guest_and_wait_agent", AsyncMock()):
+        _run(ConfigureRestoredMacosGuestStep().execute(ctx))
+    script = next(" ".join(c) for c in plugin.exec_calls if any("PlistBuddy" in part for part in c))
+    assert fresh["SystemSerialNumber"] in script and fresh["SystemUUID"] in script
+    assert "C02SOURCE001" not in script and "99999999-8888" not in script
+
+
+def test_target_without_any_smbios1_also_gets_a_fresh_identity():
+    plugin = FakeMac({"net0": PUBLIC})
+    ctx = Ctx(plugin)
+    _run(CaptureMacosIdentityStep().execute(ctx))
+    identity = _vm_restore_state(ctx.service)["target_identity"]
+    assert smbios_from_smbios1(identity["config"]["smbios1"]) is not None
+
+
+def test_target_with_its_own_smbios_identity_is_not_given_a_new_one():
+    plugin = FakeMac({"net0": PUBLIC, "smbios1": TARGET_SMBIOS})
+    ctx = Ctx(plugin)
+    _run(CaptureMacosIdentityStep().execute(ctx))
+    identity = _vm_restore_state(ctx.service)["target_identity"]
+    assert identity["config"]["smbios1"] == TARGET_SMBIOS and "smbios_generated" not in identity
 
 
 def test_smbios_is_rebuilt_from_the_targets_smbios1_deterministically():
@@ -475,3 +517,103 @@ def test_release_is_skipped_when_no_link_was_held_and_repeats_safely():
     ctx = Ctx(plugin, state={"link_held": True})
     _run(ReleasePublicLinkStep().execute(ctx))
     assert plugin.set_calls == []
+
+
+# --- however the job fails, the restore is recorded as failed ---
+
+
+@pytest.mark.parametrize("name", ["restore_retained_backup_macos", "retry_restore_macos_configuration"])
+def test_a_failed_macos_restore_job_always_records_a_failed_restore(name):
+    ctx = Ctx(FakeMac(), state={"status": "restored", "identity_reapplied": True, "link_held": True})
+    job = SimpleNamespace(service=ctx.service, id=3, strategy_name=name)
+    get_deployment_strategy_registry().get(name).on_job_failed(None, job, "Exceeded max reclaim attempts (2)")
+    state = _vm_restore_state(ctx.service)
+    assert state["status"] == "failed" and state["error"] == "Exceeded max reclaim attempts (2)"
+    assert state["link_held"] is True and state["identity_reapplied"] is True
+    assert ctx.service.vm.guest_state.value == "error"
+    assert ctx.service.vm.guest_last_error == "Exceeded max reclaim attempts (2)"
+    assert ctx.service.config["vm_plan"] == {"strategy_name": "macos_guest_agent"}
+
+
+def test_a_failure_hook_keeps_the_more_specific_error_a_step_already_recorded():
+    ctx = Ctx(FakeMac(), state={"status": "failed", "error": "The macOS guest agent did not respond"})
+    macos_restore.record_restore_failure(ctx.service, "step 'wait_for_restored_guest_agent' failed")
+    assert _vm_restore_state(ctx.service)["error"] == "The macOS guest agent did not respond"
+
+
+def test_a_failure_hook_never_downgrades_a_finished_restore():
+    ctx = Ctx(FakeMac(), state={"status": "success"})
+    macos_restore.record_restore_failure(ctx.service, "late failure")
+    assert _vm_restore_state(ctx.service)["status"] == "success"
+    assert ctx.service.vm.guest_state is None
+
+
+def test_other_strategies_have_no_failure_hook_side_effects():
+    ctx = Ctx(FakeMac(), state={"status": "running"})
+    job = SimpleNamespace(service=ctx.service, id=3)
+    get_deployment_strategy_registry().get("restore_retained_backup").on_job_failed(None, job, "boom")
+    assert _vm_restore_state(ctx.service)["status"] == "running" and ctx.service.vm.guest_state is None
+
+
+def test_failure_to_connect_the_link_leaves_it_held_and_the_job_failure_is_recorded():
+    plugin = FakeMac({"net0": with_link_down(PUBLIC)})
+
+    async def refuse(payload, *, delete=None, vmid=None):
+        raise RuntimeError("proxmox unreachable")
+
+    plugin.set_qemu_config = refuse
+    ctx = Ctx(plugin, state={"link_held": True, "identity_reapplied": True, "status": "restored"})
+    with pytest.raises(RuntimeError, match="proxmox unreachable"):
+        _run(ReleasePublicLinkStep().execute(ctx))
+    assert _vm_restore_state(ctx.service)["link_held"] is True
+    macos_restore.record_restore_failure(ctx.service, "proxmox unreachable")
+    assert _vm_restore_state(ctx.service)["status"] == "failed"
+    assert "link_down" in plugin.config["net0"]
+
+
+# --- the window between the restore and the target's identity being put back ---
+
+
+def test_nothing_before_the_identity_is_put_back_can_start_the_vm():
+    steps = get_deployment_strategy_registry().get("restore_retained_backup_macos").steps()
+    names = [s.name for s in steps]
+    before = names[: names.index("reapply_target_network")]
+    assert before == ["stop_guest_for_restore", "capture_target_identity", "start_retained_restore", "wait_for_backup_restore"]
+    assert not any(type(s).__name__ in ("PowerOnStep", "FinalizeBackupRestoreStep") for s in steps[: len(before)])
+
+
+def test_the_restore_task_is_started_without_booting_the_vm_whatever_start_says():
+    from app.services.deployment.steps import StartRetainedRestoreStep
+
+    plugin = FakeMac({"net0": PUBLIC})
+    plugin.power = PowerState.OFF
+    calls = []
+
+    async def restore_backup(**kwargs):
+        calls.append(kwargs)
+        return "UPID:1"
+
+    plugin.restore_backup = restore_backup
+    ctx = Ctx(plugin, state={"start": True})
+    _run(StartRetainedRestoreStep().execute(ctx))
+    assert calls[0]["start"] is False and calls[0]["force"] is True
+    assert plugin.power == PowerState.OFF
+    assert ctx.service.vm.guest_state.value == "provisioning"
+
+
+@pytest.mark.parametrize(
+    ("state", "pending"),
+    [
+        ({"macos": True, "upid": "UPID:1", "status": "running"}, True),
+        ({"macos": True, "upid": "UPID:1", "status": "failed", "error": "x"}, True),
+        ({"macos": True, "carried_identity": True, "status": "queued"}, True),
+        ({"macos": True, "status": "queued"}, False),
+        ({"macos": True, "upid": "UPID:1", "identity_reapplied": True, "status": "failed"}, False),
+        ({"macos": True, "upid": "UPID:1", "status": "success"}, False),
+        ({"upid": "UPID:1", "status": "running"}, False),
+        ({}, False),
+    ],
+)
+def test_identity_is_pending_from_the_restore_until_it_is_put_back(state, pending):
+    ctx = Ctx(FakeMac(), state=state)
+    assert macos_restore.identity_restore_pending(ctx.service) is pending

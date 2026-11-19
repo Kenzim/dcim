@@ -21,6 +21,7 @@ from app.services.backup_slot_service import (
     iso_utc,
     slot_state,
 )
+from app.services.deployment import macos_restore
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +195,14 @@ def _enqueue(db: Session, target: Service, retained: RetainedBackup, *, start: b
         "status": "queued",
         "metadata_stale": False,
     }
+    if macos:
+        state["macos"] = True
+        previous = dict((target.config or {}).get("vm_restore") or {})
+        if macos_restore.identity_restore_pending(target) and previous.get("target_identity"):
+            # An earlier restore overwrote this VM's configuration before putting its identity back, so what is
+            # in Proxmox now is the source's. Keep what that restore recorded.
+            state["target_identity"] = previous["target_identity"]
+            state["carried_identity"] = True
     target.config = {**dict(target.config or {}), "vm_restore": state}
     if target.vm:
         target.vm.guest_state = VMGuestState.PROVISIONING
@@ -240,7 +249,7 @@ def enqueue_macos_restore_retry(db: Session, target: Service) -> dict[str, Any]:
     from app.services.deployment.registry import get_deployment_strategy_registry
 
     state = dict((target.config or {}).get("vm_restore") or {})
-    if state.get("status") != "failed" or not state.get("identity_reapplied"):
+    if not state.get("identity_reapplied") or state.get("status") == "success":
         raise BackupSlotError(
             "There is no macOS restore waiting for its guest configuration on this VM", 409
         )
@@ -249,25 +258,44 @@ def enqueue_macos_restore_retry(db: Session, target: Service) -> dict[str, Any]:
         raise BackupSlotError(
             f"Another deployment job is already active on this VM (job {existing.id}, {existing.strategy_name})", 409
         )
+    # The job goes first: if it cannot be created, the VM keeps its failed state.
+    strategy = get_deployment_strategy_registry().get(RETRY_RESTORE_MACOS_STRATEGY)
+    try:
+        job = VMDeploymentJobDAO.create_job(
+            db,
+            service_id=target.id,
+            strategy_name=strategy.name,
+            step_names=strategy.step_names(),
+            max_attempts=strategy.max_attempts,
+        )
+    except Exception:
+        db.rollback()
+        raise
     for key in ("error", "configure_attempts", "configure_error", "agent_wait_started"):
         state.pop(key, None)
-    state["status"] = "restored"
+    state.update({"status": "restored", "job_id": job.id})
     target.config = {**dict(target.config or {}), "vm_restore": state}
     if target.vm:
         target.vm.guest_state = VMGuestState.PROVISIONING
         target.vm.guest_last_error = None
     ServiceDAO.update(db, target)
-    strategy = get_deployment_strategy_registry().get(RETRY_RESTORE_MACOS_STRATEGY)
-    job = VMDeploymentJobDAO.create_job(
-        db,
-        service_id=target.id,
-        strategy_name=strategy.name,
-        step_names=strategy.step_names(),
-        max_attempts=strategy.max_attempts,
-    )
-    target.config = {**dict(target.config or {}), "vm_restore": {**state, "job_id": job.id}}
-    ServiceDAO.update(db, target)
     return {"status": "queued", "job_id": job.id, "target_service_id": target.id}
+
+
+def power_block_reason(service: Service, action: str) -> Optional[str]:
+    """Why a power action that can start the VM is refused now, or None.
+
+    Between the restore of a macOS backup and the target's own network identity being put back, the VM's
+    configuration is the source's, so starting it would bring the source's MAC address and SMBIOS identity up.
+    """
+    if action not in ("on", "reboot", "reset", "start"):
+        return None
+    if not macos_restore.identity_restore_pending(service):
+        return None
+    return (
+        "A backup restore onto this VM has not finished putting the VM's own network identity back, so it cannot "
+        "be started yet. Restore the backup again to complete it."
+    )
 
 
 async def restore_retained_onto(

@@ -11,13 +11,19 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.models.service_vm import VMGuestState
-from app.services.deployment.step import DeploymentStep, StepOutcome
+from app.services.deployment.step import DeploymentError, DeploymentStep, StepOutcome
 from app.services.deployment.steps import (
     CaptureTargetIdentityStep,
     ConfigureMacosGuestStep,
     ReapplyTargetNetworkStep,
     _vm_restore_state,
     _write_vm_restore_state,
+)
+from app.services.macos_smbios import (
+    DEFAULT_SMBIOS_MODEL,
+    generate_smbios,
+    smbios1_config_value,
+    smbios_from_smbios1,
 )
 
 # The VM's public network interface; extra interfaces (private networks) are never held down.
@@ -53,14 +59,37 @@ def _parse_time(value) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def record_restore_failure(service, message: str) -> None:
+    """Mark the restore failed and the VM errored. A restore that already finished is left alone."""
+    state = _vm_restore_state(service)
+    if not state or state.get("status") == "success":
+        return
+    state["status"] = "failed"
+    state["error"] = state.get("error") or message
+    service.config = {**dict(service.config or {}), "vm_restore": state}
+    if service.vm:
+        service.vm.guest_state = VMGuestState.ERROR
+        service.vm.guest_last_error = state["error"]
+
+
+def identity_restore_pending(service) -> bool:
+    """True while the VM's disk and Proxmox config may still be the source VM's, with the target's own
+    network identity (MAC addresses, SMBIOS) not yet put back. Booting then would bring up the source's identity."""
+    state = _vm_restore_state(service)
+    return bool(
+        state.get("macos")
+        and not state.get("identity_reapplied")
+        and state.get("status") != "success"
+        and (state.get("upid") or state.get("carried_identity"))
+    )
+
+
 def _fail_restore(ctx, message: str) -> StepOutcome:
     """Mark the restore failed and the VM errored, and stop the job."""
     state = _vm_restore_state(ctx.service)
-    state.update({"status": "failed", "error": message})
+    state["error"] = message
     _write_vm_restore_state(ctx, state)
-    if ctx.service.vm:
-        ctx.service.vm.guest_state = VMGuestState.ERROR
-        ctx.service.vm.guest_last_error = message
+    record_restore_failure(ctx.service, message)
     return StepOutcome.abort(message)
 
 
@@ -97,16 +126,33 @@ async def _agent_wait_outcome(ctx, *, retry_after: int, waiting_message: str) ->
 
 
 class CaptureMacosIdentityStep(CaptureTargetIdentityStep):
-    """Record the target's network interfaces, name and Proxmox identity settings before the restore."""
+    """Record the target's network interfaces, name and Proxmox identity settings before the restore.
 
-    def _capture(self, config: dict) -> dict:
-        identity = super()._capture(config)
+    A target without an SMBIOS serial and UUID gets a fresh identity, written to Proxmox with the rest and into
+    OpenCore later, so it never keeps the restored source's.
+    """
+
+    def _capture(self, config: dict, ctx=None) -> dict:
+        identity = super()._capture(config, ctx)
         public = identity["nets"].get(PUBLIC_NIC)
         if public:
             # A link left down by an earlier, failed restore is not the target's own setting.
             identity["nets"][PUBLIC_NIC] = without_link_down(public)
         identity["config"] = {k: str(config[k]) for k in MACOS_IDENTITY_KEYS if config.get(k) not in (None, "")}
+        if smbios_from_smbios1(identity["config"].get("smbios1")) is None:
+            model = str(self._smbios_model(ctx))
+            identity["config"]["smbios1"] = smbios1_config_value(generate_smbios(model))
+            identity["smbios_generated"] = True
         return identity
+
+    @staticmethod
+    def _smbios_model(ctx) -> str:
+        from app.services.deployment.guest_config import strategy_options_from_ctx
+
+        try:
+            return str(strategy_options_from_ctx(ctx).get("smbios_model") or DEFAULT_SMBIOS_MODEL)
+        except Exception:
+            return DEFAULT_SMBIOS_MODEL
 
 
 class ReapplyMacosIdentityStep(ReapplyTargetNetworkStep):
@@ -181,14 +227,12 @@ class ConfigureRestoredMacosGuestStep(ConfigureMacosGuestStep):
         if state.get("opencore_aligned"):
             return
         from app.services.deployment import guest_config
-        from app.services.macos_smbios import smbios_from_smbios1
 
-        model = str(opts.get("smbios_model") or "iMacPro1,1")
+        model = str(opts.get("smbios_model") or DEFAULT_SMBIOS_MODEL)
         captured = ((state.get("target_identity") or {}).get("config") or {}).get("smbios1")
         smbios = smbios_from_smbios1(captured, default_model=model)
         if smbios is None:
-            ctx.logger.info("Target VM had no SMBIOS serial; OpenCore identity left as restored")
-            return
+            raise DeploymentError("The target VM's SMBIOS identity was not recorded before the restore")
         await guest_config.apply_opencore_smbios(
             plugin,
             model=model,

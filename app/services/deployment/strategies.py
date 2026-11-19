@@ -26,6 +26,7 @@ from app.services.deployment.macos_restore import (
     ReapplyMacosIdentityStep,
     ReleasePublicLinkStep,
     WaitForRestoredGuestAgentStep,
+    record_restore_failure,
 )
 from app.services.deployment.step import DeploymentStep
 from app.services.deployment.steps import (
@@ -299,7 +300,18 @@ class RestoreRetainedBackupStrategy(DeploymentStrategy):
         ]
 
 
-class RestoreRetainedMacosBackupStrategy(DeploymentStrategy):
+class _MacosRestoreStrategy(DeploymentStrategy):
+    """Base of the macOS restore jobs: however such a job fails, the restore is recorded as failed and the VM errored."""
+
+    include_default_actions = False
+    mutates_provision_lifecycle = False
+    max_attempts = 2
+
+    def on_job_failed(self, db, job, message: str) -> None:
+        record_restore_failure(job.service, message)
+
+
+class RestoreRetainedMacosBackupStrategy(_MacosRestoreStrategy):
     """Runtime job: restore a retained macOS backup onto another macOS VM and give it its own identity.
 
     The target's network interfaces and Proxmox identity (SMBIOS, macOS arguments) are captured first and put
@@ -309,9 +321,6 @@ class RestoreRetainedMacosBackupStrategy(DeploymentStrategy):
     """
 
     name = "restore_retained_backup_macos"
-    include_default_actions = False
-    mutates_provision_lifecycle = False
-    max_attempts = 2
 
     def steps(self) -> List[DeploymentStep]:
         return [
@@ -329,13 +338,10 @@ class RestoreRetainedMacosBackupStrategy(DeploymentStrategy):
         ]
 
 
-class RetryRestoredMacosConfigurationStrategy(DeploymentStrategy):
+class RetryRestoredMacosConfigurationStrategy(_MacosRestoreStrategy):
     """Runtime job: redo the guest configuration of a macOS restore that stopped before finishing."""
 
     name = "retry_restore_macos_configuration"
-    include_default_actions = False
-    mutates_provision_lifecycle = False
-    max_attempts = 2
 
     def steps(self) -> List[DeploymentStep]:
         return [

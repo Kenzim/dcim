@@ -727,7 +727,7 @@ class CaptureTargetIdentityStep(DeploymentStep):
             return StepOutcome.skip("Target identity already captured")
         return StepOutcome.ready()
 
-    def _capture(self, config: dict) -> dict:
+    def _capture(self, config: dict, ctx=None) -> dict:
         return {
             "nets": {k: str(v) for k, v in config.items() if _NET_KEY.match(str(k))},
             "name": config.get("name"),
@@ -740,7 +740,7 @@ class CaptureTargetIdentityStep(DeploymentStep):
         except Exception as exc:
             raise DeploymentError(f"Could not read the target VM's configuration: {exc}") from exc
         state = _vm_restore_state(ctx.service)
-        state["target_identity"] = self._capture(config)
+        state["target_identity"] = self._capture(config, ctx)
         _write_vm_restore_state(ctx, state)
 
 

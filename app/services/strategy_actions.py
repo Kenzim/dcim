@@ -349,6 +349,9 @@ async def run_action(
     if action_name not in available:
         raise StrategyActionError(f"Action '{action_name}' is not available", 403)
 
+    if action_name == "retry_restore_configuration":
+        return _run_retry_restore_configuration(db, service)
+
     params = params or {}
     ctx = _ActionCtx(db, service)
     opts = strategy_options_from_ctx(ctx)
@@ -360,8 +363,6 @@ async def run_action(
         return await _run_reset_network(strategy, plugin, ctx, opts)
     if action_name == "randomize_smbios":
         return await _run_randomize_smbios(strategy, plugin, ctx, opts)
-    if action_name == "retry_restore_configuration":
-        return _run_retry_restore_configuration(db, service)
     raise StrategyActionError(f"Action '{action_name}' has no handler", 501)
 
 
