@@ -669,6 +669,49 @@ def vm_backup_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
     return out
 
 
+def client_storage_quota(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Client-audience: a share past the warning share of its quota (owner is told if opted in)."""
+    ratio = params["quota_percent"] / 100.0
+    rows = (
+        db.query(StorageShare, StorageTenant, Service)
+        .join(StorageTenant, StorageTenant.id == StorageShare.tenant_id)
+        .join(Service, Service.id == StorageTenant.service_id)
+        .filter(
+            StorageTenant.terminated_at.is_(None),
+            Service.owner_user_id.isnot(None),
+            Service.status != ServiceStatus.TERMINATED,
+            StorageShare.used_bytes.isnot(None),
+            StorageShare.quota_bytes > 0,
+        )
+        .all()
+    )
+    out = []
+    for share, _tenant, service in rows:
+        if getattr(share.state, "value", share.state) != "active":
+            continue
+        if share.used_bytes < share.quota_bytes * ratio:
+            continue
+        percent = min(999, int(share.used_bytes * 100 // share.quota_bytes))
+        out.append(
+            Finding(
+                "client_storage_quota",
+                "storage_share",
+                str(share.id),
+                f"{service.name}/{share.name}",
+                f"Storage share {share.name} is {percent}% full",
+                "",
+                details={
+                    "service_id": service.id,
+                    "service_name": service.name,
+                    "share_name": share.name,
+                    "percent": percent,
+                },
+                owner_user_id=service.owner_user_id,
+            )
+        )
+    return out
+
+
 # --------------------------------------------------------------------------- notifications
 
 
@@ -767,4 +810,5 @@ DETECTORS: dict[str, Detector] = {
     "private_network_error": private_network_error,
     "vm_backup_failed": vm_backup_failed,
     "notification_delivery_failing": notification_delivery_failing,
+    "client_storage_quota": client_storage_quota,
 }

@@ -61,9 +61,8 @@ def service(db_session):
     return row
 
 
-def test_every_catalogue_type_has_a_detector_except_client_ones():
-    staff = {k for k, v in CATALOGUE.items() if v.audience == "staff"}
-    assert staff == set(d.DETECTORS)
+def test_every_catalogue_type_has_a_detector():
+    assert set(CATALOGUE) == set(d.DETECTORS)
 
 
 # ---------------------------------------------------------------- storage

@@ -43,6 +43,9 @@ class AuditService:
             )
             db.add(row)
             db.flush()
+            from app.services.client_notifications import on_audit_event
+
+            on_audit_event(db, row)
         except Exception:
             logger.warning(
                 "Audit log failed for action=%s resource=%s:%s",

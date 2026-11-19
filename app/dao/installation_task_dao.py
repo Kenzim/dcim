@@ -96,6 +96,9 @@ class InstallationTaskDAO:
                     svc.status = ServiceStatus.ACTIVE
             if services:
                 db.commit()
+            from app.services.client_notifications import notify_install_finished
+
+            notify_install_finished(db, task, True)
         return task
 
     @staticmethod
@@ -109,6 +112,9 @@ class InstallationTaskDAO:
                 task.error_message = error_message
             db.commit()
             db.refresh(task)
+            from app.services.client_notifications import notify_install_finished
+
+            notify_install_finished(db, task, False)
         return task
 
     @staticmethod

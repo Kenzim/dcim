@@ -61,6 +61,17 @@ def _strategy_mutates_lifecycle(strategy: DeploymentStrategy | None) -> bool:
     return bool(getattr(strategy, "mutates_provision_lifecycle", True))
 
 
+def _notify_client(db: Session, job, *, ok: bool) -> None:
+    """Tell the owner (if opted in) that an install finished; never affects the job."""
+    from app.services.client_notifications import notify_job_finished
+
+    notify_job_finished(db, job, ok)
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+
+
 def _write_provision_summary(service, job, *, step_name, status, error=None) -> None:
     """Write the compatibility ``config.vm_provision`` summary derived from the job."""
     base = dict(service.config or {})
@@ -131,6 +142,7 @@ def _fail_job(db: Session, job, message: str, *, strategy: DeploymentStrategy | 
             service, job, status="failed", step_name=None, error=message
         )
     db.commit()
+    _notify_client(db, job, ok=False)
     logger.warning("Deployment job %s failed: %s", job.id, message)
 
 
@@ -263,6 +275,7 @@ async def _complete_job(
     else:
         _write_guest_password_apply(service, job, status="applied", step_name=None)
     db.commit()
+    _notify_client(db, job, ok=True)
     logger.info("Deployment job %s succeeded (service=%s)", job.id, job.service_id)
 
 

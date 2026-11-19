@@ -354,6 +354,9 @@ from app.api import client_mcp_keys as client_mcp_keys_api
 api_router.include_router(client_mcp_keys_api.router, tags=["client-mcp-keys"])
 api_router.include_router(client_mcp_keys_api.admin_router, tags=["client-mcp-keys-admin"])
 
+from app.api import client_notifications as client_notifications_api
+api_router.include_router(client_notifications_api.router, tags=["client-notifications"])
+
 # Include product catalog admin routes
 from app.api import product_catalog as product_catalog_api
 api_router.include_router(product_catalog_api.router, tags=["product-catalog"])

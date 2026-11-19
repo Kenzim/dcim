@@ -15,6 +15,7 @@ from app.mcp.tools import cabling as _cabling  # noqa: F401
 from app.mcp.tools import catalog_admin as _catalog_admin  # noqa: F401
 from app.mcp.tools import proxy_runners as _proxy_runners  # noqa: F401
 from app.mcp.tools import storage as _storage  # noqa: F401
+from app.mcp.tools import alerts as _alerts  # noqa: F401
 from app.mcp.tools import combined as _combined  # noqa: F401  (after the modules it dispatches to)
 
 

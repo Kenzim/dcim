@@ -21,7 +21,7 @@ import bcrypt
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.hazmat.primitives.serialization import load_ssh_public_key
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.core.config import settings
 from app.dao.storage_dao import StorageDAO
@@ -408,3 +408,8 @@ def apply_logins(tenants: dict, report: dict) -> None:
                 user.last_login_ip = str(ipaddress.ip_address(str(ip))) if ip else None
             except ValueError:
                 user.last_login_ip = None
+            session = object_session(user)
+            if session is not None:
+                from app.services.client_notifications import on_sftp_login
+
+                on_sftp_login(session, user.tenant, user, user.last_login_ip, at)

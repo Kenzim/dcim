@@ -26,6 +26,7 @@ from app.dao.commerce_dao import BillingAccountDAO
 from app.dao.service_dao import ServiceDAO
 from app.mcp.client.instance import client_mcp
 from app.mcp.client.runtime import run_client_tool
+from app.services import client_notifications
 from app.models.reseller import InvoiceStatus
 from app.models.service import ServiceType
 from app.models.support_ticket import TicketPriority, TicketStatus
@@ -136,20 +137,34 @@ def _console_url(response) -> str:
 
 @client_mcp.tool()
 async def account(
-    view: Literal["me", "profile", "activity"] = "me", limit: int = 25
+    view: Literal["me", "profile", "activity", "notifications"] = "me",
+    limit: int = 25,
+    notifications: Optional[dict] = None,
 ) -> Any:
-    """Your account: me (username, email), profile (billing details), activity (recent audit events)."""
+    """Your account: me (username, email), profile (billing details), activity (recent audit events),
+    notifications (your opt-in settings; pass notifications={"categories": {name: bool}, "email_enabled": bool} to change them)."""
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
         if view == "me":
             return {"id": ctx.user_id, "username": ctx.username, "email": ctx.email}
+        if view == "notifications":
+            if notifications is None:
+                return client_notifications.get_preferences(db, ctx.user_id)
+            unknown = set(notifications) - {"categories", "email_enabled"}
+            if unknown:
+                raise ToolError(f"notifications accepts only categories and email_enabled, not: {', '.join(sorted(unknown))}")
+            try:
+                return client_notifications.update_preferences(db, ctx.user_id, **notifications)
+            except client_notifications.PreferenceError as exc:
+                raise ToolError(str(exc)) from exc
         if view == "profile":
             return commerce.get_profile(_commerce_account(db, ctx), db)
         _commerce_account(db, ctx)
         rows = commerce.list_activity(min(max(limit, 1), 100), 0, auth=_auth(ctx), db=db)
         return [_pick(row, ("action", "resource_type", "resource_id", "created_at")) for row in rows]
 
-    return await run_client_tool("account", "read", work, args={"view": view})
+    scope = "write" if view == "notifications" and notifications is not None else "read"
+    return await run_client_tool("account", scope, work, args={"view": view})
 
 
 @client_mcp.tool()
