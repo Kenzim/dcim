@@ -39,7 +39,9 @@ func Render(c Config) (core, exports string) {
 	b.WriteString("}\n\n")
 	b.WriteString("NFSv4 {\n")
 	b.WriteString("\tRecoveryBackend = fs;\n")
-	b.WriteString("\tMinor_Versions = 1, 2;\n")
+	// NFS 4.2 is not offered: Ganesha's READ_PLUS replies over FSAL_CEPH make
+	// Linux clients fail reads with EIO. Clients negotiate down to 4.1.
+	b.WriteString("\tMinor_Versions = 1;\n")
 	b.WriteString("}\n\n")
 	b.WriteString("EXPORT_DEFAULTS {\n")
 	b.WriteString("\tAccess_Type = None;\n")

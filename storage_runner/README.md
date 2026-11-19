@@ -15,9 +15,12 @@ backed by erasure-coded CephFS. Each tenant gets:
   `client.rf-t<id>` whose caps cover only that tenant's subvolume paths and
   RADOS namespaces;
 - an NFS-Ganesha container `rf-t<id>-nfs` (podman) inside the namespace:
-  NFSv4 only, bound to the endpoint IP, one export per share at `/<share name>`,
+  NFS 4.1 only, bound to the endpoint IP, one export per share at `/<share name>`,
   access limited to the share's client IPs (RW or RO), with `root_squash` to
-  uid/gid 65534 (`nobody`/`nogroup`).
+  uid/gid 65534 (`nobody`/`nogroup`). NFS 4.2 is not offered because
+  Ganesha's READ_PLUS replies through the Ceph FSAL make Linux clients fail
+  reads with an I/O error; clients that mount with plain `nfs4` negotiate 4.1,
+  and an explicit `vers=4.2` mount is refused.
   Each share's top folder is created with mode `0777`, so any client user,
   including squashed root, can write without setting anything up. It has no
   sticky bit: with one, Linux clients' `fs.protected_regular` refuses root

@@ -21,7 +21,7 @@ func TestRender(t *testing.T) {
 			{ID: 7, Path: "/volumes/rackflow/t12-s7/c", Pseudo: "/closed"},
 		},
 	})
-	for _, want := range []string{"Protocols = 4;", "Bind_addr = 10.0.0.254;", "Enable_NLM = false;", "Access_Type = None;", "Squash = root_squash;"} {
+	for _, want := range []string{"Protocols = 4;", "Minor_Versions = 1;", "Bind_addr = 10.0.0.254;", "Enable_NLM = false;", "Access_Type = None;", "Squash = root_squash;"} {
 		if !strings.Contains(core, want) {
 			t.Errorf("core lacks %q", want)
 		}
