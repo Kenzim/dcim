@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"rackflow/storage_runner/internal/api"
@@ -34,10 +35,12 @@ import (
 	"rackflow/storage_runner/internal/config"
 	"rackflow/storage_runner/internal/firewall"
 	"rackflow/storage_runner/internal/ganesha"
+	"rackflow/storage_runner/internal/lease"
 	"rackflow/storage_runner/internal/names"
 	"rackflow/storage_runner/internal/netns"
 	"rackflow/storage_runner/internal/sftp"
 	"rackflow/storage_runner/internal/state"
+	"rackflow/storage_runner/internal/vip"
 )
 
 // DefaultDestroyGrace applies when the config does not carry destroy_grace_seconds.
@@ -72,8 +75,32 @@ type Reconciler struct {
 	SFTPRuntime   sftp.Runtime
 	SFTPMountRoot string
 
+	// Lease decides what this node may serve when the config has an ha
+	// block. Its Stop hook should be StopLease and its Changed hook Kick.
+	Lease *lease.Manager
+	// RunLease starts the lease loops on the first pass with an ha block;
+	// tests drive them by hand instead.
+	RunLease bool
+	// Hostname is this node's host name, as its kernel CephFS mounts report
+	// it to the MDS.
+	Hostname string
+	// VIP adds and removes the location's SFTP virtual IP.
+	VIP vip.Manager
+
 	lastApplied string
 	lastOrphans string
+
+	lastConfig      *api.Config
+	haTimings       *lease.Timings
+	leaseStarted    bool
+	destroyedLeases map[int64]bool
+	announced       map[int64]time.Time
+	vipIface        string
+	// serveMu orders starting to serve against StopLease, so nothing is
+	// started after the lease that allows it has ended.
+	serveMu  sync.Mutex
+	kick     chan struct{}
+	kickOnce sync.Once
 }
 
 func (r *Reconciler) logf(format string, args ...any) {
@@ -91,16 +118,19 @@ func (r *Reconciler) now() time.Time {
 	return time.Now().UTC()
 }
 
-// Loop runs a pass every interval until ctx is cancelled.
+// Loop runs a pass every interval, and at once after Kick, until ctx is
+// cancelled.
 func (r *Reconciler) Loop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	kick := r.kickCh()
 	for {
 		_ = r.Once(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-kick:
 		}
 	}
 }
@@ -123,6 +153,10 @@ type pass struct {
 	users      map[string]ceph.User
 	minimal    *string
 	sftp       *sftpPass
+	ha         *haPass
+	// sftpMaster is set when this node serves the location's SFTP on the
+	// virtual IP in this pass.
+	sftpMaster bool
 }
 
 type tenantWork struct {
@@ -138,6 +172,12 @@ type tenantWork struct {
 	userOK         bool
 	exportsCurrent bool
 	destroyed      bool
+	// held is set when this node may serve the tenant and change its Ceph
+	// state: it holds the tenant's lease, or the config has no ha block.
+	held bool
+	// hadLocal is set when a tenant this node does not hold had a container
+	// or network here that this pass removed.
+	hadLocal bool
 	// hold is set when an existing subvolume could not be described this
 	// pass (invalid share config or failed info). Caps are then never
 	// narrowed and Ganesha is left as it is, so access is not lost.
@@ -176,8 +216,17 @@ func (p *pass) nodeErr(format string, args ...any) {
 func (r *Reconciler) Once(ctx context.Context) error {
 	cfg, err := r.Source.Fetch(ctx)
 	if err != nil {
-		r.logf("config fetch failed, keeping current state: %v", err)
-		return fmt.Errorf("fetch config: %w", err)
+		saved := r.savedConfig()
+		if saved == nil || saved.HA == nil {
+			r.logf("config fetch failed, keeping current state: %v", err)
+			return fmt.Errorf("fetch config: %w", err)
+		}
+		// Leases keep running on the last config, so a Rackflow outage
+		// neither stops serving nor holds up a takeover.
+		r.logf("config fetch failed, applying the last config %s: %v", saved.Version, err)
+		cfg = saved
+	} else {
+		r.saveConfig(cfg)
 	}
 	p := &pass{
 		r:          r,
@@ -209,9 +258,11 @@ func (r *Reconciler) Once(ctx context.Context) error {
 	p.setGrace(cfg.Settings)
 
 	works := p.validate(cfg.Tenants)
+	p.setupHA(cfg, works)
 	for _, w := range works {
 		p.applyTenant(w)
 	}
+	p.dropUnlisted(works)
 	p.applyFirewall(works)
 	for _, w := range works {
 		p.applyNFS(w)
@@ -226,11 +277,15 @@ func (r *Reconciler) Once(ctx context.Context) error {
 	p.fillStatus(&st, works)
 	st.Orphans = p.orphans(works)
 	p.fillSFTPStatus(&st)
+	p.fillHAStatus(&st, works)
 	r.lastApplied = cfg.Version
 	if err := r.post(ctx, st); err != nil {
 		return err
 	}
 	p.ackSFTP()
+	if p.ha != nil {
+		r.Lease.AckEvents(len(st.Events))
+	}
 	return nil
 }
 
@@ -583,6 +638,10 @@ func (p *pass) tenantDir(id int64) string {
 // applyTenant is phase A: network and Ceph for live tenants, immediate
 // teardown of Ganesha and networking for terminated ones.
 func (p *pass) applyTenant(w *tenantWork) {
+	if !w.held {
+		p.dropLocal(w.t.ID, w)
+		return
+	}
 	if !w.valid {
 		return
 	}
@@ -608,7 +667,18 @@ func (p *pass) ensureTenant(w *tenantWork) {
 			NSAddr:   link.NS,
 			Routes:   r.Host.CephPublicNetworks,
 		}
-		changed, err := r.Net.Ensure(p.ctx, spec)
+		if p.ha != nil {
+			spec.MAC = netns.TenantMAC(id)
+		}
+		var changed bool
+		err := p.whileHolding(lease.TenantKey(id), func(ctx context.Context) error {
+			var err error
+			changed, err = r.Net.Ensure(ctx, spec)
+			if err == nil {
+				p.announce(ctx, w)
+			}
+			return err
+		})
 		if changed {
 			p.namespaces[id] = true
 			r.logf("tenant %d: network updated (%s)", id, spec)
@@ -640,6 +710,10 @@ func (p *pass) ensureStorage(w *tenantWork) {
 		w.fail("ceph unavailable: %v", p.cephErr)
 		return
 	}
+	if !p.mayChangeCeph(id) {
+		w.fail("lease lost during the pass")
+		return
+	}
 	var access []ceph.Access
 	for _, s := range w.shares {
 		if !s.valid {
@@ -651,7 +725,9 @@ func (p *pass) ensureStorage(w *tenantWork) {
 		switch s.s.State {
 		case api.ShareActive:
 			if !p.subvols[s.name] {
-				if err := r.Ceph.CreateSubvolume(p.ctx, s.name, s.s.QuotaBytes); err != nil {
+				if err := p.changeCeph(id, func(ctx context.Context) error {
+					return r.Ceph.CreateSubvolume(ctx, s.name, s.s.QuotaBytes)
+				}); err != nil {
 					s.err = fmt.Sprintf("create subvolume: %v", err)
 					continue
 				}
@@ -665,7 +741,9 @@ func (p *pass) ensureStorage(w *tenantWork) {
 				continue
 			}
 			if info.BytesQuota != s.s.QuotaBytes {
-				if err := r.Ceph.ResizeSubvolume(p.ctx, s.name, s.s.QuotaBytes); err != nil {
+				if err := p.changeCeph(id, func(ctx context.Context) error {
+					return r.Ceph.ResizeSubvolume(ctx, s.name, s.s.QuotaBytes)
+				}); err != nil {
 					s.err = fmt.Sprintf("resize subvolume: %v", err)
 				} else {
 					r.logf("tenant %d: resized subvolume %s from %d to %d bytes", id, s.name, info.BytesQuota, s.s.QuotaBytes)
@@ -708,9 +786,17 @@ func (p *pass) ensureUser(w *tenantWork, access []ceph.Access) {
 		return
 	}
 	caps := ceph.TenantCaps(access)
+	if p.ha != nil {
+		caps = ceph.WithRecovery(caps, r.Host.CephHAPool, names.CephUserID(w.t.ID))
+	}
 	switch {
 	case !has:
-		key, err := r.Ceph.CreateUser(p.ctx, entity, caps)
+		var key string
+		err := p.changeCeph(w.t.ID, func(ctx context.Context) error {
+			var err error
+			key, err = r.Ceph.CreateUser(ctx, entity, caps)
+			return err
+		})
 		if err != nil {
 			w.fail("create cephx user: %v", err)
 			return
@@ -718,7 +804,9 @@ func (p *pass) ensureUser(w *tenantWork, access []ceph.Access) {
 		p.users[entity] = ceph.User{Key: key, Caps: caps}
 		r.logf("tenant %d: created cephx user %s", w.t.ID, entity)
 	case existing.Caps != caps && !w.hold:
-		if err := r.Ceph.SetCaps(p.ctx, entity, caps); err != nil {
+		if err := p.changeCeph(w.t.ID, func(ctx context.Context) error {
+			return r.Ceph.SetCaps(ctx, entity, caps)
+		}); err != nil {
 			w.fail("update cephx caps: %v", err)
 			return
 		}
@@ -817,7 +905,7 @@ func (p *pass) applyFirewall(works []*tenantWork) {
 
 // applyNFS is phase C: run, reload or stop each tenant's Ganesha.
 func (p *pass) applyNFS(w *tenantWork) {
-	if !w.valid {
+	if !w.valid || !w.held {
 		return
 	}
 	_, running := p.containers[w.t.ID]
@@ -911,13 +999,27 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 		return err
 	}
 	keyring := fmt.Sprintf("[%s]\n\tkey = %s\n", entity, user.Key)
-	core, exp := ganesha.Render(ganesha.Config{
+	gcfg := ganesha.Config{
 		TenantID:   id,
 		BindAddr:   w.endpoint.Addr(),
 		UserID:     names.CephUserID(id),
 		Filesystem: r.Host.CephFSName,
 		Exports:    exports,
-	})
+	}
+	// hostname names this tenant's Ganesha to the MDS, so evictions can
+	// target it alone; without leases 0.2.x behaviour is kept.
+	hostname := ""
+	if p.ha != nil {
+		hostname = names.Container(id)
+		gcfg.RADOS = &ganesha.RADOSRecovery{
+			Pool:          r.Host.CephHAPool,
+			Namespace:     names.CephUserID(id),
+			NodeID:        names.CephUserID(id),
+			LeaseLifetime: p.ha.timings.NFSLeaseLifetime,
+			GracePeriod:   p.ha.timings.NFSGracePeriod,
+		}
+	}
+	core, exp := ganesha.Render(gcfg)
 
 	dir := p.tenantDir(id)
 	confDir := filepath.Join(dir, "ganesha")
@@ -947,6 +1049,9 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 	for _, m := range mounts {
 		fmt.Fprintf(h, "%s:%s:%v\x00", m.Source, m.Target, m.ReadOnly)
 	}
+	if hostname != "" {
+		fmt.Fprintf(h, "hostname:%s\x00", hostname)
+	}
 	spec := ganesha.Spec{
 		Name:     names.Container(id),
 		TenantID: id,
@@ -954,6 +1059,7 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 		Netns:    names.NetnsPath(id),
 		CoreHash: hex.EncodeToString(h.Sum(nil))[:32],
 		Mounts:   mounts,
+		Hostname: hostname,
 	}
 
 	confPath := filepath.Join(confDir, "ganesha.conf")
@@ -975,17 +1081,22 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 			}
 			delete(p.containers, id)
 		}
-		// A previous Ganesha for this tenant may still hold CephFS caps; the
-		// new one would stall until the MDS timed that session out.
-		if err := r.Ceph.EvictSessions(p.ctx, entity); err != nil {
-			r.logf("tenant %d: evict old cephfs sessions: %v", id, err)
-		}
-		if err := r.NFS.Run(p.ctx, spec); err != nil {
+		err := p.whileHolding(lease.TenantKey(id), func(ctx context.Context) error {
+			// A previous Ganesha for this tenant may still hold CephFS caps;
+			// the new one would stall until the MDS timed that session out.
+			// With leases only the tenant's Ganesha sessions are evicted, so
+			// the SFTP master's mounts of the same user survive.
+			if err := r.Ceph.EvictSessions(ctx, entity, hostname); err != nil {
+				r.logf("tenant %d: evict old cephfs sessions: %v", id, err)
+			}
+			return r.NFS.Run(ctx, spec)
+		})
+		if err != nil {
 			return err
 		}
 		p.containers[id] = ganesha.Container{Name: spec.Name, TenantID: id, Running: true, CoreHash: spec.CoreHash}
 		r.logf("tenant %d: nfs started with %d exports", id, len(exports))
-		_, err := writeIfChanged(appliedPath, confHash, 0o600)
+		_, err = writeIfChanged(appliedPath, confHash, 0o600)
 		return err
 	}
 	if _, err := writeIfChanged(confPath, conf, 0o644); err != nil {
@@ -994,7 +1105,7 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 	if applied, err := os.ReadFile(appliedPath); err == nil && bytes.Equal(applied, confHash) {
 		return nil
 	}
-	if err := r.NFS.Reload(p.ctx, cur.Name); err != nil {
+	if err := p.whileHolding(lease.TenantKey(id), func(ctx context.Context) error { return r.NFS.Reload(ctx, cur.Name) }); err != nil {
 		return err
 	}
 	r.logf("tenant %d: nfs exports reloaded (%d exports)", id, len(exports))
@@ -1020,7 +1131,7 @@ func (p *pass) shareDue(s api.Share, since time.Time) bool {
 // after both destroy checks pass and nothing serves the data any more.
 func (p *pass) destroy(w *tenantWork) {
 	r := p.r
-	if !w.valid {
+	if !w.valid || !w.held {
 		return
 	}
 	id := w.t.ID
@@ -1032,6 +1143,10 @@ func (p *pass) destroy(w *tenantWork) {
 			w.fail("destroy due but ceph unavailable: %v", p.cephErr)
 			return
 		}
+		if !p.mayChangeCeph(id) {
+			w.fail("destroy due but the lease was lost during the pass")
+			return
+		}
 		if _, ok := p.containers[id]; ok || p.namespaces[id] {
 			w.fail("destroy due but nfs or network still present")
 			return
@@ -1041,7 +1156,9 @@ func (p *pass) destroy(w *tenantWork) {
 			if s.s.ID <= 0 || !p.subvols[s.name] {
 				continue
 			}
-			if err := r.Ceph.RemoveSubvolume(p.ctx, s.name); err != nil {
+			if err := p.changeCeph(id, func(ctx context.Context) error {
+				return r.Ceph.RemoveSubvolume(ctx, s.name)
+			}); err != nil {
 				s.err = fmt.Sprintf("destroy subvolume: %v", err)
 				ok = false
 				continue
@@ -1052,7 +1169,9 @@ func (p *pass) destroy(w *tenantWork) {
 		}
 		entity := names.CephEntity(id)
 		if _, has := p.users[entity]; has {
-			if err := r.Ceph.RemoveUser(p.ctx, entity); err != nil {
+			if err := p.changeCeph(id, func(ctx context.Context) error {
+				return r.Ceph.RemoveUser(ctx, entity)
+			}); err != nil {
 				w.fail("remove cephx user: %v", err)
 				ok = false
 			} else {
@@ -1060,13 +1179,13 @@ func (p *pass) destroy(w *tenantWork) {
 				r.logf("tenant %d: removed cephx user %s", id, entity)
 			}
 		}
-		if ok {
+		if ok && p.destroyLease(w) {
 			w.destroyed = true
 			r.logf("tenant %d: destroyed", id)
 		}
 		return
 	}
-	if !p.cephOK || !w.exportsCurrent {
+	if !p.cephOK || !w.exportsCurrent || !p.mayChangeCeph(id) {
 		return
 	}
 	for _, s := range w.shares {
@@ -1078,7 +1197,9 @@ func (p *pass) destroy(w *tenantWork) {
 			continue
 		}
 		if p.subvols[s.name] {
-			if err := r.Ceph.RemoveSubvolume(p.ctx, s.name); err != nil {
+			if err := p.changeCeph(id, func(ctx context.Context) error {
+				return r.Ceph.RemoveSubvolume(ctx, s.name)
+			}); err != nil {
 				s.err = fmt.Sprintf("destroy subvolume: %v", err)
 				continue
 			}
@@ -1122,6 +1243,9 @@ func (p *pass) fillStatus(st *api.Status, works []*tenantWork) {
 	for _, w := range works {
 		if w.destroyed {
 			st.DestroyedTenants = append(st.DestroyedTenants, w.t.ID)
+			continue
+		}
+		if !p.reportTenant(w) {
 			continue
 		}
 		ts := api.TenantStatus{ID: w.t.ID}

@@ -107,10 +107,35 @@ _SPECS = (
     AlertTypeSpec(
         "storage_tenant_error",
         "Storage tenant or share error",
-        "A storage service or share is in an error state on its node.",
+        "A storage service or share is in an error state, or no node has served an active storage service while failover is active.",
         _W,
         "storage_tenant",
-        (_seconds("min_age_seconds", "Error present for", 300),),
+        (
+            _seconds("min_age_seconds", "Error present for", 300),
+            _seconds("unserved_after_seconds", "Not served by any node for", 120),
+        ),
+    ),
+    AlertTypeSpec(
+        "storage_tenant_failover",
+        "Storage tenant on another node after a failover",
+        "A storage service is served by a node other than its preferred node because of a failover.",
+        _W,
+        "storage_tenant",
+    ),
+    AlertTypeSpec(
+        "storage_location_degraded",
+        "Storage location degraded",
+        "A location with at least two enabled storage nodes has fewer than two healthy ones.",
+        _C,
+        "storage_location",
+    ),
+    AlertTypeSpec(
+        "storage_sftp_no_master",
+        "Storage SFTP has no master",
+        "A location whose SFTP is behind a virtual IP has no online node holding the SFTP master lease.",
+        _C,
+        "storage_location",
+        (_seconds("no_master_after_seconds", "No master for", 120),),
     ),
     AlertTypeSpec(
         "proxy_runner_offline",

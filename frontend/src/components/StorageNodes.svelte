@@ -7,6 +7,7 @@
   import StorageNodeVlanPorts from './storage/StorageNodeVlanPorts.svelte';
   import StorageNodeSftp from './storage/StorageNodeSftp.svelte';
   import StorageSftpPanel from './storage/StorageSftpPanel.svelte';
+  import StorageLocationPanel from './storage/StorageLocationPanel.svelte';
   import {
     listStorageNodes,
     getStorageNode,
@@ -20,6 +21,13 @@
     linkStorageService,
     resizeStorageService,
     getServers,
+    drainStorageNode,
+    listStorageLocations,
+    getStorageLocation,
+    updateStorageLocation,
+    setStorageLocationHostKey,
+    rebalanceStorageLocation,
+    moveStorageService,
   } from '../lib/api.js';
   import { STORAGE_STATUS_LABELS, formatBytes } from '../lib/storage.js';
 
@@ -41,6 +49,9 @@
 
   let linkForm = { network_id: '', node_id: '' };
   let resizeGb = '';
+  let locations = [];
+  let selectedLocation = null;
+  let moveForm = { node_id: '', set_preferred: true };
 
   function initialService() {
     const params = new URLSearchParams(window.location.search);
@@ -52,7 +63,7 @@
     loading = true;
     error = '';
     try {
-      [nodes, storages] = await Promise.all([listStorageNodes(), listStorageServices()]);
+      [nodes, storages, locations] = await Promise.all([listStorageNodes(), listStorageServices(), listStorageLocations()]);
     } catch (err) {
       error = err.message || 'Failed to load storage';
     } finally {
@@ -87,6 +98,7 @@
       selectedStorage = detail;
       resizeGb = detail.size_gb;
       linkForm = { network_id: '', node_id: '' };
+      moveForm = { node_id: '', set_preferred: true };
       tab = 'storage';
     }
   }
@@ -166,6 +178,68 @@
     }
   }
 
+  async function toggleDrain() {
+    const draining = !selectedNode.draining;
+    if (draining && !confirm(`Drain ${selectedNode.name}? Its storage moves to the other nodes one at a time.`)) return;
+    const out = await act(
+      () => drainStorageNode(selectedNode.id, draining),
+      draining ? 'Draining started.' : 'Node can take storage again.',
+    );
+    if (out) {
+      selectedNode = out;
+      await load();
+    }
+  }
+
+  async function openLocation(location) {
+    const detail = await act(() => getStorageLocation(location.location_id));
+    if (detail) selectedLocation = detail;
+  }
+
+  async function saveLocation(changes) {
+    const out = await act(() => updateStorageLocation(selectedLocation.location_id, changes), 'Location saved.');
+    if (out) {
+      selectedLocation = out;
+      await load();
+    }
+  }
+
+  async function locationHostKey(body) {
+    const out = await act(() => setStorageLocationHostKey(selectedLocation.location_id, body), 'Host key saved.');
+    if (out) {
+      selectedLocation = out;
+      await load();
+    }
+  }
+
+  async function rebalance() {
+    if (!confirm('Rebalance preferred nodes in this location? Storage then moves one at a time.')) return;
+    const out = await act(() => rebalanceStorageLocation(selectedLocation.location_id));
+    if (out) {
+      success = `Rebalance started: ${out.changed.length} storage service(s) get another preferred node.`;
+      const refreshed = await act(() => getStorageLocation(selectedLocation.location_id));
+      if (refreshed) selectedLocation = refreshed;
+      await load();
+    }
+  }
+
+  async function moveStorage() {
+    const out = await act(
+      () =>
+        moveStorageService(selectedStorage.service_id, {
+          node_id: Number(moveForm.node_id),
+          set_preferred: moveForm.set_preferred,
+        }),
+      'Move requested.',
+    );
+    if (out) {
+      selectedStorage = out;
+      await load();
+    }
+  }
+
+  const nodeLocation = (nodeId) => nodes.find((n) => n.id === nodeId)?.location_id;
+
   async function resize() {
     const out = await act(() => resizeStorageService(selectedStorage.service_id, Number(resizeGb)), 'Storage resized.');
     if (out) {
@@ -207,6 +281,7 @@
   <div class="tabs">
     <button class:active={tab === 'nodes'} on:click={() => (tab = 'nodes')}>Storage nodes</button>
     <button class:active={tab === 'storage'} on:click={() => (tab = 'storage')}>Storage services</button>
+    <button class:active={tab === 'locations'} on:click={() => (tab = 'locations')}>Locations</button>
     <span class="spacer"></span>
     {#if tab === 'nodes'}<Button size="small" on:click={openCreate}>Add storage node</Button>{/if}
     <Button variant="secondary" size="small" on:click={load} disabled={loading}>Refresh</Button>
@@ -217,7 +292,7 @@
   {:else if tab === 'nodes'}
     <div class="table">
       <div class="row head nodes">
-        <div>Name</div><div>Server / location</div><div>Status</div><div>VLANs</div><div>Runner</div><div>Ceph / free</div><div>Tenants</div>
+        <div>Name</div><div>Server / location</div><div>Status</div><div>VLANs</div><div>Runner</div><div>Ceph / free</div><div>Serving</div>
       </div>
       {#each nodes as node (node.id)}
         <button class="row nodes clickable" class:selected={selectedNode?.id === node.id} on:click={() => openNode(node)}>
@@ -228,11 +303,13 @@
               {!node.enabled ? 'Disabled' : node.online ? 'Online' : 'Offline'}
             </span>
             <small>{seen(node.last_seen_at)}</small>
+            {#if node.draining}<span class="badge warn">Draining</span>{/if}
+            {#if node.sftp_master}<span class="badge ok">SFTP master</span>{/if}
           </div>
           <div>{node.vlan_mode === 'preconfigured' ? 'Preconfigured' : 'Switch'}</div>
           <div class="mono">{node.runner_version || '—'}</div>
           <div>{node.ceph_ok == null ? '—' : node.ceph_ok ? 'OK' : 'Problem'}<small>{formatBytes(node.free_bytes)}</small></div>
-          <div>{node.live_tenants}</div>
+          <div>{node.serving_tenants.length}<small>{node.live_tenants} preferred</small></div>
         </button>
       {:else}
         <div class="empty">No storage nodes yet. Add one from a server, or from the server's page.</div>
@@ -247,6 +324,9 @@
             <Button size="small" variant="secondary" disabled={busy} on:click={() => saveNode({ enabled: !selectedNode.enabled })}>
               {selectedNode.enabled ? 'Disable' : 'Enable'}
             </Button>
+            <Button size="small" variant="secondary" disabled={busy} on:click={toggleDrain}>
+              {selectedNode.draining ? 'Undrain' : 'Drain'}
+            </Button>
             <Button size="small" variant="secondary" disabled={busy} on:click={rotate}>Rotate key</Button>
             <Button size="small" variant="danger" disabled={busy} on:click={removeNode}>Delete</Button>
           </div>
@@ -258,6 +338,13 @@
           {selectedNode.in_sync ? 'config applied' : 'config not yet applied'}
         </p>
         {#if selectedNode.last_error}<p class="err">Runner error: {selectedNode.last_error}</p>{/if}
+        <p class="meta">
+          Failover {selectedNode.ha_active ? 'active' : 'not active'} in this location ·
+          {#if selectedNode.ha_state}
+            lease client {selectedNode.ha_state.lease_ok === false ? 'unhealthy' : 'healthy'}{selectedNode.ha_state.fenced ? ' · fenced' : ''} ·
+          {/if}
+          {selectedNode.sftp_master ? 'SFTP master' : 'not the SFTP master'}{selectedNode.draining ? ' · draining' : ''}
+        </p>
 
         <StorageNodeVlanPorts
           node={selectedNode}
@@ -274,7 +361,28 @@
           <ul class="mono">{#each selectedNode.orphans as orphan}<li>{orphan}</li>{/each}</ul>
         {/if}
 
-        <h3>Storage on this node</h3>
+        <h3>Served by this node now</h3>
+        {#each selectedNode.serving_tenants as t (t.tenant_id)}
+          <div class="mini">
+            {#if t.service_id}
+              <button class="linkish" on:click={() => openStorage(t.service_id)}>{t.service_name}</button>
+            {/if}
+            {#if t.preferred_node_id !== selectedNode.id}<span class="badge warn">preferred elsewhere</span>{/if}
+          </div>
+        {:else}
+          <p class="hint">None.</p>
+        {/each}
+        {#if selectedNode.preferred_elsewhere.length}
+          <h3>Preferred here, served elsewhere</h3>
+          {#each selectedNode.preferred_elsewhere as t (t.tenant_id)}
+            <div class="mini">
+              <button class="linkish" on:click={() => openStorage(t.service_id)}>Service {t.service_id}</button>
+              <small>{t.current_node_id ? `served by ${nodes.find((n) => n.id === t.current_node_id)?.name || t.current_node_id}` : 'not served by any node'}</small>
+            </div>
+          {/each}
+        {/if}
+
+        <h3>Storage placed on this node</h3>
         {#each selectedNode.tenants as t (t.tenant_id)}
           <div class="mini">
             {#if t.service_id}
@@ -291,10 +399,38 @@
         {/each}
       </div>
     {/if}
+  {:else if tab === 'locations'}
+    <div class="table">
+      <div class="row head locs"><div>Location</div><div>Nodes</div><div>Failover</div><div>SFTP</div></div>
+      {#each locations as location (location.location_id)}
+        <button class="row locs clickable" class:selected={selectedLocation?.location_id === location.location_id} on:click={() => openLocation(location)}>
+          <div>{location.location_name || `Location ${location.location_id}`}</div>
+          <div>{location.nodes.length}</div>
+          <div><span class="badge" class:ok={location.ha_active}>{location.ha_active ? 'Active' : 'Not active'}</span></div>
+          <div>{location.sftp_enabled ? location.sftp_host || 'on' : 'Off'}<small>{location.sftp_virtual_ip || 'per node'}</small></div>
+        </button>
+      {:else}
+        <div class="empty">No locations with storage nodes.</div>
+      {/each}
+    </div>
+    {#if selectedLocation}
+      <div class="card">
+        <div class="card-head"><h2>{selectedLocation.location_name || `Location ${selectedLocation.location_id}`}</h2></div>
+        {#key selectedLocation.updated_at}
+          <StorageLocationPanel
+            location={selectedLocation}
+            disabled={busy}
+            on:save={(e) => saveLocation(e.detail)}
+            on:hostkey={(e) => locationHostKey(e.detail)}
+            on:rebalance={rebalance}
+          />
+        {/key}
+      </div>
+    {/if}
   {:else}
     <div class="table">
       <div class="row head storages">
-        <div>Service</div><div>Owner</div><div>Status</div><div>Network</div><div>Node</div><div>Size / used</div>
+        <div>Service</div><div>Owner</div><div>Status</div><div>Network</div><div>Preferred / current</div><div>Size / used</div>
       </div>
       {#each storages as s (s.tenant_id)}
         <button class="row storages clickable" class:selected={selectedStorage?.tenant_id === s.tenant_id} on:click={() => s.service_id && openStorage(s.service_id)}>
@@ -302,7 +438,7 @@
           <div>{s.owner_username || '—'}</div>
           <div><span class="badge" class:ok={s.status === 'ready'}>{STORAGE_STATUS_LABELS[s.status] || s.status}</span></div>
           <div class="mono">{s.network_cidr || '—'}{s.vlan ? ` (VLAN ${s.vlan})` : ''}</div>
-          <div>{s.node?.name || '—'}</div>
+          <div>{s.preferred_node?.name || s.node?.name || '—'}<small>{s.current_node ? (s.current_node.id === s.preferred_node?.id ? 'serving' : `on ${s.current_node.name}`) : 'not served'}{s.move ? ` · moving to ${s.move.to_node_name}` : ''}</small></div>
           <div>{s.size_gb} GB<small>{formatBytes(s.used_bytes)} used</small></div>
         </button>
       {:else}
@@ -323,7 +459,11 @@
             {#if selectedStorage.attachment_error}<small class="err">{selectedStorage.attachment_error}</small>{/if}</div>
           <div><span class="field">Runner</span>{selectedStorage.runner_state || 'not reported'}
             {#if selectedStorage.runner_error}<small class="err">{selectedStorage.runner_error}</small>{/if}</div>
-          <div><span class="field">Node</span>{selectedStorage.node?.name || '—'}</div>
+          <div><span class="field">Preferred node</span>{selectedStorage.preferred_node?.name || '—'}</div>
+          <div><span class="field">Current node</span>{selectedStorage.current_node?.name || 'not served'}
+            {#if selectedStorage.current_since}<small>since {seen(selectedStorage.current_since)}</small>{/if}</div>
+          {#if selectedStorage.move}<div><span class="field">Move</span>to {selectedStorage.move.to_node_name}<small>requested {seen(selectedStorage.move.requested_at)}</small></div>{/if}
+          {#if selectedStorage.last_failover_at}<div><span class="field">Last failover</span>{seen(selectedStorage.last_failover_at)}</div>{/if}
           <div><span class="field">Network</span>{selectedStorage.network ? `${selectedStorage.network.name} (VLAN ${selectedStorage.network.vlan_id})` : '—'}</div>
           <div><span class="field">Endpoint</span><span class="mono">{selectedStorage.endpoint_ip || '—'}</span></div>
           <div><span class="field">Owner</span>{selectedStorage.owner_username || '—'}</div>
@@ -339,6 +479,20 @@
               {#each nodes.filter((n) => n.enabled) as n (n.id)}<option value={n.id}>{n.name}</option>{/each}
             </select>
             <Button size="small" disabled={busy || !linkForm.network_id} on:click={link}>Link</Button>
+          </div>
+        {/if}
+
+        {#if selectedStorage.status !== 'terminated' && selectedStorage.status !== 'unlinked' && selectedStorage.node}
+          <h3>Move to another node</h3>
+          <div class="inline">
+            <select bind:value={moveForm.node_id}>
+              <option value="">Choose a node</option>
+              {#each nodes.filter((n) => n.enabled && !n.draining && n.location_id === nodeLocation(selectedStorage.node.id) && n.id !== selectedStorage.current_node?.id) as n (n.id)}
+                <option value={n.id}>{n.name}</option>
+              {/each}
+            </select>
+            <label class="check"><input type="checkbox" bind:checked={moveForm.set_preferred} /> Make it the preferred node</label>
+            <Button size="small" disabled={busy || !moveForm.node_id || !!selectedStorage.move} on:click={moveStorage}>Move</Button>
           </div>
         {/if}
 
@@ -423,6 +577,7 @@
   .table { display: flex; flex-direction: column; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 10px; overflow-x: auto; }
   .row { display: grid; gap: 10px; padding: 10px 14px; align-items: center; border: 0; border-bottom: 1px solid var(--border-color); font-size: 0.9rem; color: var(--text-primary); background: none; text-align: left; font: inherit; min-width: 760px; }
   .row.nodes { grid-template-columns: 1.1fr 1.3fr 1.2fr 0.9fr 0.8fr 0.9fr 0.5fr; }
+  .row.locs { grid-template-columns: 1.3fr 0.6fr 0.9fr 1.4fr; }
   .row.storages { grid-template-columns: 1.3fr 1fr 0.9fr 1.3fr 0.9fr 0.9fr; }
   .row:last-child { border-bottom: none; }
   .row.head { font-weight: 600; font-size: 0.8rem; color: var(--text-secondary); background: var(--bg-secondary); }
@@ -432,6 +587,7 @@
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; background: var(--bg-tertiary, var(--bg-secondary)); color: var(--text-secondary); }
   .badge.ok { background: var(--success-bg); color: var(--success-text); }
+  .badge.warn { background: var(--warning-bg, var(--bg-secondary)); color: var(--warning-text); }
   .card { border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-primary); padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; }
   .card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
   .card h2 { margin: 0; font-size: 1.15rem; }

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.service import Service
 from app.models.storage import StorageShare, StorageTenant
-from app.services import storage_sftp
+from app.services import storage_ha, storage_sftp
 from app.services.storage_service import (
     GIB,
     StorageError,
@@ -140,12 +140,18 @@ def _tenant_out(db: Session, tenant: StorageTenant, *, staff: bool) -> dict:
     if staff:
         attachment = storage_attachment(db, tenant)
         node = tenant.node
+        current = tenant.current_node
         owner = service.owner_user if service else None
         out.update(
             tenant_id=tenant.id,
             owner_user_id=service.owner_user_id if service else None,
             owner_username=owner.username if owner else None,
             node={"id": node.id, "name": node.name} if node else None,
+            preferred_node={"id": node.id, "name": node.name} if node else None,
+            current_node={"id": current.id, "name": current.name} if current else None,
+            current_since=iso_utc(tenant.current_since),
+            move=storage_ha.move_out(tenant),
+            last_failover_at=iso_utc(tenant.last_failover_at),
             vlan=tenant.vlan,
             network_cidr=tenant.network_cidr,
             attachment_state=attachment.state.value if attachment else None,

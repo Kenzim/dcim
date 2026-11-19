@@ -1,20 +1,20 @@
 package reconcile
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"rackflow/storage_runner/internal/api"
+	"rackflow/storage_runner/internal/lease"
 	"rackflow/storage_runner/internal/names"
 	"rackflow/storage_runner/internal/sftp"
 )
@@ -76,12 +76,15 @@ func (p *pass) applySFTP(cfg *api.Config, works []*tenantWork) {
 		return
 	}
 
+	p.applyHostKey(cfg)
+	mode := p.sftpModeFor(cfg)
+	p.sftpMaster = mode == sftpMaster
 	mounts, err := r.SFTPMounts.List(p.ctx)
 	if err == nil {
 		var containers []sftp.Container
 		containers, err = r.SFTPRuntime.List(p.ctx)
 		if err == nil {
-			p.sftpTenants(cfg, works, enabled, mounts, containers)
+			p.sftpTenants(cfg, works, enabled, mode, mounts, containers)
 		}
 	}
 	if err != nil {
@@ -95,21 +98,31 @@ func (p *pass) applySFTP(cfg *api.Config, works []*tenantWork) {
 
 	addr := ""
 	if enabled && sp.port > 0 {
-		host := r.Host.SFTPListenAddr
-		if host == "" {
-			host = "0.0.0.0"
-		}
-		addr = net.JoinHostPort(host, strconv.Itoa(sp.port))
+		addr = p.sftpListenAddr(cfg, mode, sp.port)
 	} else if enabled {
 		sp.errs = append(sp.errs, "sftp port is not set")
 	}
-	if err := r.SFTP.Listen(addr); err != nil {
+	if mode == sftpMaster && addr != "" {
+		if err := p.ensureVIP(cfg); err != nil {
+			sp.errs = append(sp.errs, fmt.Sprintf("sftp virtual ip: %v", err))
+			addr = ""
+		}
+	} else if p.ha != nil {
+		r.removeVIP(p.ctx, cfg)
+	}
+	listen := func() error { return r.SFTP.Listen(addr) }
+	if mode == sftpMaster && addr != "" {
+		listen = func() error {
+			return p.whileHolding(lease.SFTPKey(cfg.SFTP.LocationID), func(context.Context) error { return r.SFTP.Listen(addr) })
+		}
+	}
+	if err := listen(); err != nil {
 		sp.errs = append(sp.errs, fmt.Sprintf("sftp listen on %s: %v", addr, err))
 	}
 	sp.logins = r.SFTP.Logins()
 }
 
-func (p *pass) sftpTenants(cfg *api.Config, works []*tenantWork, enabled bool, mounts []sftp.Mount, containers []sftp.Container) {
+func (p *pass) sftpTenants(cfg *api.Config, works []*tenantWork, enabled bool, mode sftpMode, mounts []sftp.Mount, containers []sftp.Container) {
 	r := p.r
 	sp := p.sftp
 	imageMissing := enabled && r.Host.SFTPImage == ""
@@ -132,7 +145,16 @@ func (p *pass) sftpTenants(cfg *api.Config, works []*tenantWork, enabled bool, m
 		parsed, userErrs := parseSFTPUsers(w.t)
 		shares := sftpShares(w)
 		active := w.t.State == api.TenantActive
-		serve := enabled && !imageMissing && active && len(shares) > 0 && len(parsed) > 0
+		serve := enabled && !imageMissing && active && len(shares) > 0 && len(parsed) > 0 && p.sftpServes(mode, w)
+		if serve && !w.held {
+			// The SFTP master serves tenants whose NFS runs elsewhere; it
+			// only reads their subvolume paths and never changes Ceph.
+			for _, s := range shares {
+				if s.info == nil {
+					p.loadInfo(s)
+				}
+			}
+		}
 		if !serve {
 			msg := strings.Join(userErrs, "; ")
 			if err := p.sftpTeardown(w, mountsBy[id], containersBy[id]); err != nil {

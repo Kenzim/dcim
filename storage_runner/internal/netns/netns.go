@@ -26,6 +26,9 @@ type Spec struct {
 	HostAddr netip.Prefix // host end of the veth /30
 	NSAddr   netip.Prefix // namespace end of the veth /30
 	Routes   []netip.Prefix
+	// MAC is the fixed address of the VLAN interface; empty leaves the
+	// kernel's choice.
+	MAC string
 }
 
 func (s Spec) String() string {
@@ -33,8 +36,18 @@ func (s Spec) String() string {
 	for i, r := range s.Routes {
 		routes[i] = r.String()
 	}
-	return fmt.Sprintf("%s vlan=%d addr=%s host=%s ns=%s routes=%s",
+	out := fmt.Sprintf("%s vlan=%d addr=%s host=%s ns=%s routes=%s",
 		names.Namespace(s.TenantID), s.VLAN, s.Address, s.HostAddr, s.NSAddr, strings.Join(routes, ","))
+	if s.MAC != "" {
+		out += " mac=" + s.MAC
+	}
+	return out
+}
+
+// TenantMAC is the fixed MAC of a tenant's VLAN interface: 02:52:46 followed
+// by the tenant id as 24 bits, so every node presents the same address.
+func TenantMAC(tenant int64) string {
+	return fmt.Sprintf("02:52:46:%02x:%02x:%02x", byte(tenant>>16), byte(tenant>>8), byte(tenant))
 }
 
 type Manager interface {
@@ -46,6 +59,12 @@ type Manager interface {
 	Ensure(ctx context.Context, spec Spec) (changed bool, err error)
 	// Remove deletes the tenant's namespace, VLAN interface and veth.
 	Remove(ctx context.Context, tenant int64) error
+	// LinkDown sets the tenant's VLAN interface down, so the endpoint IP
+	// stops answering at once.
+	LinkDown(ctx context.Context, tenant int64) error
+	// Announce sends gratuitous ARP for addr from the tenant's VLAN
+	// interface, so switches and clients learn the new location.
+	Announce(ctx context.Context, tenant int64, addr netip.Addr) error
 }
 
 // IPRoute implements Manager with the iproute2 `ip` command.
@@ -58,6 +77,7 @@ type IPRoute struct {
 type ipLink struct {
 	IfName   string   `json:"ifname"`
 	Flags    []string `json:"flags"`
+	Address  string   `json:"address"`
 	LinkInfo *struct {
 		InfoKind string `json:"info_kind"`
 		InfoData *struct {
@@ -244,13 +264,22 @@ func (m *IPRoute) Ensure(ctx context.Context, s Spec) (bool, error) {
 				return changed, err
 			}
 		}
-		if err := run("link", "add", "link", m.ParentIface, "name", vlan, "type", "vlan", "id", strconv.Itoa(s.VLAN)); err != nil {
+		args := []string{"link", "add", "link", m.ParentIface, "name", vlan}
+		if s.MAC != "" {
+			args = append(args, "address", s.MAC)
+		}
+		if err := run(append(args, "type", "vlan", "id", strconv.Itoa(s.VLAN))...); err != nil {
 			return changed, err
 		}
 		if err := run("link", "set", vlan, "netns", ns); err != nil {
 			return changed, err
 		}
-		inner[vlan] = ipLink{IfName: vlan}
+		inner[vlan] = ipLink{IfName: vlan, Address: s.MAC}
+	}
+	if s.MAC != "" && !strings.EqualFold(inner[vlan].Address, s.MAC) {
+		if err := run("-n", ns, "link", "set", vlan, "address", s.MAC); err != nil {
+			return changed, err
+		}
 	}
 	if err := m.syncLink(ns, vlan, inner[vlan], s.Address, run); err != nil {
 		return changed, err
@@ -374,6 +403,17 @@ func (m *IPRoute) syncRoutes(ctx context.Context, ns, nv string, s Spec, run fun
 		}
 	}
 	return nil
+}
+
+func (m *IPRoute) LinkDown(ctx context.Context, tenant int64) error {
+	_, err := m.ip(ctx, "-n", names.Namespace(tenant), "link", "set", names.VLANIface(tenant), "down")
+	return err
+}
+
+func (m *IPRoute) Announce(ctx context.Context, tenant int64, addr netip.Addr) error {
+	_, err := m.Cmd.Run(ctx, nil, "ip", "netns", "exec", names.Namespace(tenant),
+		"arping", "-U", "-c", "3", "-I", names.VLANIface(tenant), addr.String())
+	return err
 }
 
 func (m *IPRoute) Remove(ctx context.Context, tenant int64) error {

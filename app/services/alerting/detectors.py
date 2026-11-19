@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.dao.runner_dao import RunnerDAO
+from app.dao.storage_dao import StorageDAO
 from app.models.alerting import NotificationDelivery, VmBackupRun
 from app.models.boot_task import BootTask, BootTaskStatus
 from app.models.commerce_email import EmailMessage, EmailMessageStatus
@@ -27,11 +28,12 @@ from app.models.proxy_runner import ProxyRunner
 from app.models.reseller import NotificationOutbox, NotificationOutboxStatus
 from app.models.runner import Runner
 from app.models.service import Service, ServiceStatus
-from app.models.storage import StorageNode, StorageShare, StorageTenant
+from app.models.storage import StorageEvent, StorageLocation, StorageNode, StorageShare, StorageTenant
 from app.models.switch_port import SwitchPort
 from app.models.vm_deployment_job import DeploymentJobStatus, VMDeploymentJob
 from app.services.alerting.catalogue import Finding, naive
 from app.services.alerting.scrub import scrub
+from app.services import storage_ha, storage_location
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +120,7 @@ def storage_node_error(db: Session, params: dict, now: datetime) -> list[Finding
         problems = []
         if node.last_error:
             problems.append(f"runner error: {scrub(node.last_error)}")
-        if node.sftp_enabled and node.sftp_listening is False:
+        if node.sftp_enabled and node.sftp_listening is False and (node.sftp_master or not storage_ha.sftp_uses_vip(db, node)):
             problems.append("the SFTP gateway is not listening")
         if node.sftp_enabled and node.sftp_error:
             problems.append(f"SFTP error: {scrub(node.sftp_error)}")
@@ -137,8 +139,55 @@ def storage_node_error(db: Session, params: dict, now: datetime) -> list[Finding
     return out
 
 
+def storage_sftp_no_master(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A location whose SFTP is behind a virtual IP has no online node reporting to be the master.
+
+    The time without a master counts from the latest of: the location settings change, the last
+    SFTP master event of the location and the last report of a node still marked master.
+    """
+    limit = params["no_master_after_seconds"]
+    out = []
+    rows = (
+        db.query(StorageLocation)
+        .filter(StorageLocation.sftp_enabled.is_(True), StorageLocation.sftp_virtual_ip.isnot(None))
+        .all()
+    )
+    for row in rows:
+        if not storage_ha.ha_active(db, row.location_id):
+            continue
+        nodes = [node for node in storage_location.location_nodes(db, row.location_id) if node.enabled]
+        if any(node.sftp_master and StorageDAO.is_online(node, now=now) for node in nodes):
+            continue
+        last_event = (
+            db.query(func.max(StorageEvent.at))
+            .filter(StorageEvent.location_id == row.location_id, StorageEvent.kind == "sftp_master")
+            .scalar()
+        )
+        marks = [naive(row.updated_at), naive(last_event)]
+        marks += [naive(node.last_seen_at) for node in nodes if node.sftp_master]
+        since = max((mark for mark in marks if mark is not None), default=None)
+        age = _age_seconds(since, now)
+        if age is not None and age < limit:
+            continue
+        label = row.location.name if row.location is not None else f"location {row.location_id}"
+        out.append(
+            Finding(
+                "storage_sftp_no_master",
+                "storage_location",
+                str(row.location_id),
+                label,
+                f"SFTP in {label} has no master node",
+                f"No storage node has held the SFTP virtual IP {row.sftp_virtual_ip} for {_human(age)}, "
+                "so SFTP is down for every customer in the location.",
+                details={"virtual_ip": row.sftp_virtual_ip, "nodes": [node.id for node in nodes]},
+            )
+        )
+    return out
+
+
 def storage_tenant_error(db: Session, params: dict, now: datetime) -> list[Finding]:
     min_age = params["min_age_seconds"]
+    unserved_after = params.get("unserved_after_seconds", 120)
     out = []
     tenants = (
         db.query(StorageTenant, Service)
@@ -154,6 +203,7 @@ def storage_tenant_error(db: Session, params: dict, now: datetime) -> list[Findi
     ):
         if getattr(share.state, "value", share.state) == "active":
             bad_shares.setdefault(share.tenant_id, []).append(share)
+    ha_by_location: dict[int | None, bool] = {}
     for tenant, service in tenants:
         problems = []
         if tenant.runner_state == "error" or tenant.runner_error:
@@ -162,10 +212,21 @@ def storage_tenant_error(db: Session, params: dict, now: datetime) -> list[Findi
             problems.append(f"SFTP: {scrub(tenant.sftp_error) or 'error state'}")
         for share in bad_shares.get(tenant.id, []):
             problems.append(f"share {share.name}: {scrub(share.runner_error) or 'error state'}")
-        if not problems:
-            continue
         age = _age_seconds(tenant.updated_at, now)
         if age is not None and age < min_age:
+            problems = []
+        if (
+            service.status == ServiceStatus.ACTIVE
+            and tenant.node_id is not None
+            and tenant.network_id is not None
+            and tenant.current_node_id is None
+        ):
+            if tenant.location_id not in ha_by_location:
+                ha_by_location[tenant.location_id] = storage_ha.ha_active(db, tenant.location_id)
+            unserved = _age_seconds(tenant.current_since or tenant.updated_at, now)
+            if ha_by_location[tenant.location_id] and unserved is not None and unserved >= unserved_after:
+                problems.append(f"no node has served it for {_human(unserved)}")
+        if not problems:
             continue
         out.append(
             Finding(
@@ -176,6 +237,78 @@ def storage_tenant_error(db: Session, params: dict, now: datetime) -> list[Findi
                 f"Storage service {service.name} is in error",
                 "; ".join(problems),
                 details={"service_id": service.id, "problems": problems},
+            )
+        )
+    return out
+
+
+def storage_tenant_failover(db: Session, params: dict, now: datetime) -> list[Finding]:
+    out = []
+    tenants = (
+        db.query(StorageTenant, Service)
+        .join(Service, Service.id == StorageTenant.service_id)
+        .filter(
+            StorageTenant.terminated_at.is_(None),
+            Service.status != ServiceStatus.TERMINATED,
+            StorageTenant.current_node_id.isnot(None),
+            StorageTenant.last_failover_at.isnot(None),
+        )
+        .all()
+    )
+    for tenant, service in tenants:
+        if tenant.current_node_id == tenant.node_id:
+            continue
+        failed_over = naive(tenant.last_failover_at)
+        since = naive(tenant.current_since)
+        if since is not None and failed_over < since:
+            continue
+        current, preferred = tenant.current_node, tenant.node
+        out.append(
+            Finding(
+                "storage_tenant_failover",
+                "storage_tenant",
+                str(tenant.id),
+                service.name,
+                f"Storage service {service.name} failed over to another node",
+                f"It is served by {current.name if current else 'another node'} instead of its preferred node "
+                f"{preferred.name if preferred else 'unknown'} since {_human(_age_seconds(failed_over, now))} ago.",
+                details={
+                    "service_id": service.id,
+                    "current_node_id": tenant.current_node_id,
+                    "preferred_node_id": tenant.node_id,
+                    "failed_over_at": _iso(failed_over),
+                },
+            )
+        )
+    return out
+
+
+def storage_location_degraded(db: Session, params: dict, now: datetime) -> list[Finding]:
+    out = []
+    by_location: dict[int, list[StorageNode]] = {}
+    for node in db.query(StorageNode).filter(StorageNode.enabled.is_(True)).all():
+        location_id = storage_location.node_location_id(node)
+        if location_id is not None:
+            by_location.setdefault(location_id, []).append(node)
+    for location_id, nodes in sorted(by_location.items()):
+        healthy = [node for node in nodes if storage_ha.node_healthy(node, now)]
+        if len(nodes) < 2 or len(healthy) >= 2:
+            continue
+        server = nodes[0].server
+        label = server.location.name if server is not None and server.location is not None else f"location {location_id}"
+        out.append(
+            Finding(
+                "storage_location_degraded",
+                "storage_location",
+                str(location_id),
+                label,
+                f"Storage in {label} has fewer than two healthy nodes",
+                f"{len(healthy)} of {len(nodes)} storage nodes are healthy (online, Ceph healthy, lease client "
+                "healthy, not fenced, not draining), so another failure would stop storage.",
+                details={
+                    "healthy_nodes": [n.id for n in healthy],
+                    "unhealthy_nodes": [n.id for n in nodes if n not in healthy],
+                },
             )
         )
     return out
@@ -795,6 +928,9 @@ DETECTORS: dict[str, Detector] = {
     "storage_node_ceph": storage_node_ceph,
     "storage_node_error": storage_node_error,
     "storage_tenant_error": storage_tenant_error,
+    "storage_tenant_failover": storage_tenant_failover,
+    "storage_location_degraded": storage_location_degraded,
+    "storage_sftp_no_master": storage_sftp_no_master,
     "proxy_runner_offline": proxy_runner_offline,
     "runner_offline": runner_offline,
     "pdu_poll_failed": pdu_poll_failed,

@@ -43,6 +43,7 @@ from app.services.provisioning import (
     ProvisionRequest,
     infer_provisioning_source,
 )
+from app.services import storage_ha, storage_location
 from app.services.storage_service import StorageError, StorageNodeService, StorageService, build_runner_config, iso_utc
 
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -68,6 +69,30 @@ class NodeUpdate(BaseModel):
     sftp_enabled: Optional[bool] = None
     sftp_host: Optional[str] = Field(None, max_length=253)
     sftp_port: Optional[int] = Field(None, ge=1, le=65535)
+
+
+class MoveBody(BaseModel):
+    node_id: int
+    set_preferred: bool = True
+
+
+class DrainBody(BaseModel):
+    draining: bool = True
+
+
+class LocationUpdate(BaseModel):
+    ha_enabled: Optional[bool] = None
+    auto_failback: Optional[bool] = None
+    sftp_enabled: Optional[bool] = None
+    sftp_host: Optional[str] = Field(None, max_length=253)
+    sftp_port: Optional[int] = Field(None, ge=1, le=65535)
+    # ``address/prefix``; null or an empty string clears it.
+    sftp_virtual_ip: Optional[str] = Field(None, max_length=64)
+
+
+class HostKeyBody(BaseModel):
+    generate: bool = False
+    private_key: Optional[str] = Field(None, max_length=8000)
 
 
 class StorageCreate(BaseModel):
@@ -124,6 +149,26 @@ def _node_out(db: Session, node: StorageNode, counts: dict, *, detail: bool = Fa
         "sftp_listening": node.sftp_listening,
         "sftp_host_key_fingerprint": node.sftp_host_key_fingerprint,
         "sftp_error": node.sftp_error,
+        "draining": bool(node.draining),
+        "sftp_master": bool(node.sftp_master),
+        "ha_state": node.ha_state,
+        "ha_active": storage_ha.ha_active(db, server.location_id if server else None),
+        "healthy": storage_ha.node_healthy(node),
+        "healthy_since": iso_utc(node.healthy_since),
+        "serving_tenants": [
+            {
+                "service_id": t.service_id,
+                "tenant_id": t.id,
+                "service_name": t.service.name if t.service else None,
+                "preferred_node_id": t.node_id,
+            }
+            for t in StorageDAO.tenants_served_by(db, node.id)
+        ],
+        "preferred_elsewhere": [
+            {"service_id": t.service_id, "tenant_id": t.id, "current_node_id": t.current_node_id}
+            for t in StorageDAO.tenants_preferred_on(db, node.id)
+            if t.current_node_id != node.id
+        ],
     }
     if detail:
         out["config_version"] = build_runner_config(db, node)["version"]
@@ -212,6 +257,71 @@ async def delete_node(node_id: int, auth: AdminDep, db: DbDep):
         _raise(exc)
 
 
+@admin_router.post("/nodes/{node_id}/drain")
+async def drain_node(node_id: int, body: DrainBody, auth: AdminDep, db: DbDep):
+    """Drain a node (its tenants move away one at a time) or, with ``draining`` false, undrain it."""
+    try:
+        node = storage_ha.set_draining(db, StorageNodeService.require(db, node_id), body.draining)
+    except StorageError as exc:
+        _raise(exc)
+    return _node_out(db, node, StorageDAO.live_tenant_counts(db), detail=True)
+
+
+@admin_router.get("/locations")
+async def list_locations(auth: AdminDep, db: DbDep):
+    """Locations that have a storage node, with their failover and SFTP settings."""
+    ids = sorted({storage_location.node_location_id(n) for n in StorageDAO.list_nodes(db)} - {None})
+    return [storage_location.location_out(db, storage_location.get_location(db, i), i) for i in ids]
+
+
+def _location_view(db: Session, location_id: int, warnings: Optional[List[str]] = None) -> dict:
+    out = storage_location.location_out(db, storage_location.get_location(db, location_id), location_id, warnings)
+    out["events"] = storage_ha.recent_events(db, location_id)
+    return out
+
+
+@admin_router.get("/locations/{location_id}")
+async def get_location(location_id: int, auth: AdminDep, db: DbDep):
+    try:
+        storage_location.require_storage_location(db, location_id)
+    except StorageError as exc:
+        _raise(exc)
+    return _location_view(db, location_id)
+
+
+@admin_router.patch("/locations/{location_id}")
+async def update_location(location_id: int, data: LocationUpdate, auth: AdminDep, db: DbDep):
+    """Failover and SFTP settings. A virtual IP inside an IPAM subnet is reserved there."""
+    try:
+        storage_location.require_storage_location(db, location_id)
+        _row, warnings = storage_location.update_location(db, location_id, **data.model_dump(exclude_unset=True))
+        storage_ha.advance_location(db, location_id)
+    except StorageError as exc:
+        db.rollback()
+        _raise(exc)
+    return _location_view(db, location_id, warnings)
+
+
+@admin_router.post("/locations/{location_id}/host-key")
+async def set_location_host_key(location_id: int, body: HostKeyBody, auth: AdminDep, db: DbDep):
+    """Generate or import the location's SFTP host key. Only the fingerprint is returned."""
+    try:
+        storage_location.require_storage_location(db, location_id)
+        storage_location.set_host_key(db, location_id, generate=body.generate, private_key=body.private_key)
+    except StorageError as exc:
+        _raise(exc)
+    return _location_view(db, location_id)
+
+
+@admin_router.post("/locations/{location_id}/rebalance")
+async def rebalance_location(location_id: int, auth: AdminDep, db: DbDep):
+    """Give each healthy node its fair share of tenants; tenants then move one at a time."""
+    try:
+        return storage_ha.rebalance(db, location_id)
+    except StorageError as exc:
+        _raise(exc)
+
+
 @admin_router.get("/servers/{server_id}/vlan-ports")
 async def server_vlan_ports(server_id: int, auth: AdminDep, db: DbDep):
     """The server's ports, and which switch ports would carry customer VLANs."""
@@ -261,6 +371,17 @@ async def admin_get_storage(service_id: int, auth: AdminDep, db: DbDep):
 @admin_router.post("/services/{service_id}/link")
 async def admin_link_storage(service_id: int, body: AdminLinkBody, auth: AdminDep, db: DbDep):
     return await _link(db, _admin_service(db, service_id), body, body.node_id, staff=True)
+
+
+@admin_router.post("/services/{service_id}/move")
+async def admin_move_storage(service_id: int, body: MoveBody, auth: AdminDep, db: DbDep):
+    """Hand the storage to another node of its location; by default that node becomes the preferred one."""
+    try:
+        tenant = _tenant(db, _admin_service(db, service_id))
+        storage_ha.request_move(db, tenant, body.node_id, set_preferred=body.set_preferred)
+    except StorageError as exc:
+        _raise(exc)
+    return _tenant_out(db, tenant, staff=True)
 
 
 @admin_router.post("/services/{service_id}/resize")

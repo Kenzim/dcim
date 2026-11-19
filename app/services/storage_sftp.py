@@ -27,6 +27,7 @@ from app.core.config import settings
 from app.dao.storage_dao import StorageDAO
 from app.models.service import ServiceStatus
 from app.models.storage import SftpAccess, StorageNode, StorageSftpUser, StorageTenant
+from app.services.storage_location import endpoint_for_tenant
 
 MAX_SFTP_USERS = 16
 MAX_KEYS_PER_USER = 16
@@ -267,9 +268,9 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
 
 
 def user_out(tenant: StorageTenant, user: StorageSftpUser) -> dict:
-    node = tenant.node
+    endpoint = endpoint_for_tenant(tenant)
     login = sftp_login(tenant, user)
-    command = f"sftp -P {node.sftp_port} {login}@{node.sftp_host}" if node_offers_sftp(node) else None
+    command = f"sftp -P {endpoint['port']} {login}@{endpoint['host']}" if endpoint else None
     return {
         "id": user.id,
         "name": user.name,
@@ -289,8 +290,8 @@ def user_out(tenant: StorageTenant, user: StorageSftpUser) -> dict:
 
 def tenant_sftp_out(tenant: StorageTenant, storage_status: str, *, staff: bool) -> dict:
     """The storage's SFTP endpoint, state and users."""
-    node = tenant.node
-    available = node_offers_sftp(node)
+    endpoint = endpoint_for_tenant(tenant)
+    available = endpoint is not None
     shares = [
         {"name": share.name, "access": share.sftp_access.value, "path": f"/{share.name}"}
         for share in tenant.shares
@@ -307,9 +308,9 @@ def tenant_sftp_out(tenant: StorageTenant, storage_status: str, *, staff: bool) 
     out = {
         "available": available,
         "state": state,
-        "host": node.sftp_host if available else None,
-        "port": node.sftp_port if available else None,
-        "host_key_fingerprint": node.sftp_host_key_fingerprint if available else None,
+        "host": endpoint["host"] if available else None,
+        "port": endpoint["port"] if available else None,
+        "host_key_fingerprint": endpoint["fingerprint"] if available else None,
         "shares": shares,
         "users": [user_out(tenant, user) for user in tenant.sftp_users],
     }

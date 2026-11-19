@@ -14,6 +14,8 @@ type Fake struct {
 	Rec        *record.Recorder
 	Fail       map[string]error // Run and Remove errors keyed by container name
 	ReloadFail map[string]error // Reload errors keyed by container name
+	// RunHook, when set, runs before Run and its error is returned instead.
+	RunHook func(ctx context.Context, s Spec) error
 
 	mu         sync.Mutex
 	containers map[string]Container
@@ -31,13 +33,33 @@ func (f *Fake) Seed(c Container) {
 	f.containers[c.Name] = c
 }
 
-// Stop marks a container as exited.
-func (f *Fake) Stop(name string) {
+// Exit marks a container as exited.
+func (f *Fake) Exit(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c := f.containers[name]
 	c.Running = false
 	f.containers[name] = c
+}
+
+// Running reports whether a container exists and runs.
+func (f *Fake) Running(name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.containers[name].Running
+}
+
+func (f *Fake) Stop(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.containers[name]
+	if !ok {
+		return fmt.Errorf("container %s not found", name)
+	}
+	c.Running = false
+	f.containers[name] = c
+	f.Rec.Add("nfs stop %s", name)
+	return nil
 }
 
 func (f *Fake) Spec(name string) (Spec, bool) {
@@ -65,7 +87,12 @@ func (f *Fake) List(context.Context) ([]Container, error) {
 	return out, nil
 }
 
-func (f *Fake) Run(_ context.Context, s Spec) error {
+func (f *Fake) Run(ctx context.Context, s Spec) error {
+	if f.RunHook != nil {
+		if err := f.RunHook(ctx, s); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.Fail[s.Name]; err != nil {
@@ -76,7 +103,11 @@ func (f *Fake) Run(_ context.Context, s Spec) error {
 	}
 	f.containers[s.Name] = Container{Name: s.Name, TenantID: s.TenantID, Running: true, CoreHash: s.CoreHash}
 	f.specs[s.Name] = s
-	f.Rec.Add("nfs run %s netns=%s image=%s", s.Name, s.Netns, s.Image)
+	if s.Hostname != "" {
+		f.Rec.Add("nfs run %s netns=%s image=%s hostname=%s", s.Name, s.Netns, s.Image, s.Hostname)
+	} else {
+		f.Rec.Add("nfs run %s netns=%s image=%s", s.Name, s.Netns, s.Image)
+	}
 	return nil
 }
 

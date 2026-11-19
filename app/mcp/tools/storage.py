@@ -11,8 +11,9 @@ from app.mcp.runtime import run_tool
 
 @mcp.tool()
 async def storage_node(
-    action: Literal["list", "create", "update", "vlan_ports"] = "list",
+    action: Literal["list", "create", "update", "vlan_ports", "drain", "undrain", "location", "rebalance"] = "list",
     node_id: Optional[int] = None,
+    location_id: Optional[int] = None,
     server_id: Optional[int] = None,
     name: Optional[str] = None,
     enabled: Optional[bool] = None,
@@ -21,19 +22,34 @@ async def storage_node(
     sftp_enabled: Optional[bool] = None,
     sftp_host: Optional[str] = None,
     sftp_port: Optional[int] = None,
+    sftp_virtual_ip: Optional[str] = None,
+    ha_enabled: Optional[bool] = None,
+    auto_failback: Optional[bool] = None,
 ) -> dict:
     """Storage nodes. list (or one by node_id, with its tenants and the switch ports that carry
     customer VLANs plus any problem), create (server_id; name, vlan_mode, vlan_port_ids optional;
     the runner API key is returned once), update (name, enabled, vlan_mode, vlan_port_ids;
     sftp_enabled, sftp_host = public name clients connect to, sftp_port default 2222),
-    vlan_ports (server_id: preview which switch ports would carry VLANs, before making it a node).
+    vlan_ports (server_id: preview which switch ports would carry VLANs, before making it a node),
+    drain / undrain (node_id: move its tenants away one at a time / allow it again), location
+    (location_id: view, or update sftp_enabled, sftp_host, sftp_port, sftp_virtual_ip as
+    address/prefix, "" clears it; ha_enabled, auto_failback), rebalance (location_id).
     vlan_mode: switch = Rackflow adds each customer VLAN to the node's switch ports through the
     switch plugin; preconfigured = the node already receives every VLAN (pre-trunked ports or a
     VLAN-aware bridge), so no switch calls are made. vlan_port_ids empty = the PXE uplink and its bond.
     """
-    if action in ("list", "vlan_ports"):
+    location_fields = {
+        "sftp_host": sftp_host, "sftp_port": sftp_port, "sftp_enabled": sftp_enabled,
+        "sftp_virtual_ip": sftp_virtual_ip, "ha_enabled": ha_enabled, "auto_failback": auto_failback,
+    }
+    location_changes = {k: v for k, v in location_fields.items() if v is not None}
+    if action in ("list", "vlan_ports") or (action == "location" and not location_changes):
 
         async def read(db, ctx):
+            if action == "location":
+                if location_id is None:
+                    raise ValueError("location needs: location_id")
+                return await storage_api.get_location(location_id, auth={}, db=db)
             if action == "vlan_ports":
                 if server_id is None:
                     raise ValueError("vlan_ports needs: server_id")
@@ -42,7 +58,9 @@ async def storage_node(
                 return await storage_api.get_node(node_id, auth={}, db=db)
             return {"nodes": await storage_api.list_nodes(auth={}, db=db, server_id=server_id)}
 
-        return await run_tool("storage_node", "read", read, args={"action": action, "node_id": node_id})
+        return await run_tool(
+            "storage_node", "read", read, args={"action": action, "node_id": node_id, "location_id": location_id}
+        )
 
     async def write(db, ctx):
         if action == "create":
@@ -61,6 +79,19 @@ async def storage_node(
             )
             out["note"] = "api_key is shown once; set it as the storage runner's API key."
             return out
+        if action in ("drain", "undrain"):
+            if node_id is None:
+                raise ValueError(f"{action} needs: node_id")
+            body = storage_api.DrainBody(draining=action == "drain")
+            return await storage_api.drain_node(node_id, body, auth={}, db=db)
+        if action in ("location", "rebalance"):
+            if location_id is None:
+                raise ValueError(f"{action} needs: location_id")
+            if action == "rebalance":
+                return await storage_api.rebalance_location(location_id, auth={}, db=db)
+            return await storage_api.update_location(
+                location_id, storage_api.LocationUpdate(**location_changes), auth={}, db=db
+            )
         if node_id is None:
             raise ValueError("Updating a storage node needs: node_id")
         changes = {
@@ -79,7 +110,10 @@ async def storage_node(
         "storage_node",
         "write",
         write,
-        args={"action": action, "node_id": node_id, "server_id": server_id, "enabled": enabled, "vlan_mode": vlan_mode},
+        args={
+            "action": action, "node_id": node_id, "server_id": server_id, "enabled": enabled, "vlan_mode": vlan_mode,
+            "location_id": location_id,
+        },
     )
 
 
@@ -124,7 +158,7 @@ async def delete_storage_node(node_id: int, confirm: bool = False) -> dict:
 async def storage(
     action: Literal[
         "list", "view", "create", "link", "resize", "share_create", "share_update", "share_delete",
-        "sftp_user_create", "sftp_user_update", "sftp_user_delete",
+        "sftp_user_create", "sftp_user_update", "sftp_user_delete", "move",
     ] = "list",
     service_id: Optional[int] = None,
     owner_user_id: Optional[int] = None,
@@ -156,7 +190,8 @@ async def storage(
     share_id, confirm=true; data is destroyed after the grace period). sftp_user_create
     (service_id, name; public_keys and/or new_password=true, allowed_ips), sftp_user_update
     (service_id, user_id; public_keys, new_password, allowed_ips, enabled), sftp_user_delete
-    (service_id, user_id, confirm=true). A generated password is returned once.
+    (service_id, user_id, confirm=true). A generated password is returned once. move (service_id,
+    node_id: hand it to another node of its location, which becomes its preferred node).
     """
     args = {
         "action": action, "service_id": service_id, "share_id": share_id, "network_id": network_id,
@@ -184,6 +219,11 @@ async def storage(
             return await storage_api.admin_create_storage(body, auth={}, db=db)
         if service_id is None:
             raise ValueError(f"{action} needs: service_id")
+        if action == "move":
+            if node_id is None:
+                raise ValueError("move needs: node_id")
+            body = storage_api.MoveBody(node_id=node_id)
+            return await storage_api.admin_move_storage(service_id, body, auth={}, db=db)
         if action == "link":
             body = storage_api.AdminLinkBody(network_id=network_id, node_id=node_id, location_id=location_id)
             return await storage_api.admin_link_storage(service_id, body, auth={}, db=db)

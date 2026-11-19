@@ -47,6 +47,9 @@ class _TenantReport(BaseModel):
     id: int
     state: Optional[str] = None
     error: Optional[str] = None
+    serving: Optional[bool] = None
+    since: Optional[str] = None
+    move_id: Optional[str] = None
     shares: List[_ShareReport] = Field(default_factory=list)
     sftp: Optional[_SftpReport] = None
 
@@ -65,6 +68,23 @@ class _SftpLogin(BaseModel):
     ip: Optional[str] = None
 
 
+class _HaReport(BaseModel):
+    lease_ok: Optional[bool] = None
+    fenced: Optional[bool] = None
+    fenced_until: Optional[str] = None
+    sftp_master: Optional[bool] = None
+    ha_active: Optional[bool] = None
+
+
+class _EventReport(BaseModel):
+    at: Optional[str] = None
+    kind: str
+    tenant_id: Optional[int] = None
+    from_node_id: Optional[int] = None
+    fence: Optional[str] = None
+    detail: Optional[str] = None
+
+
 class StatusReport(BaseModel):
     version_applied: Optional[str] = None
     runner_version: Optional[str] = None
@@ -74,6 +94,8 @@ class StatusReport(BaseModel):
     destroyed_shares: List[int] = Field(default_factory=list)
     orphans: List[str] = Field(default_factory=list)
     sftp: Optional[_NodeSftpReport] = None
+    ha: Optional[_HaReport] = None
+    events: List[_EventReport] = Field(default_factory=list, max_length=1000)
     sftp_logins: List[_SftpLogin] = Field(default_factory=list, max_length=10000)
 
 
@@ -135,7 +157,7 @@ async def get_storage_config(
     db: DbDep,
     authorization: Annotated[Optional[str], Header()] = None,
 ):
-    """Desired state for the calling node: only its own tenants, no credentials."""
+    """Desired state for the calling node (see ``build_runner_config`` for what depends on its version)."""
     node = authenticate_node(db, request, authorization)
     StorageDAO.touch_node(db, node, _client_ip(request))
     return build_runner_config(db, node)

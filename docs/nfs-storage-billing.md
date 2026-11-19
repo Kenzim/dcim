@@ -35,8 +35,9 @@ Storage ordered for a location can only be linked to a private network in that l
 ## Rackflow setup
 
 1. **Storage node:** in Admin, Storage, make a server a storage node and install the runner
-   (`storage_runner/README.md`). For SFTP, set the node's public host and port and turn SFTP on;
-   open that TCP port to the node from the internet.
+   (`storage_runner/README.md`). For SFTP, set the location's public host and port (and optionally a virtual IP) and turn SFTP on;
+   open that TCP port from the internet (`docs/nfs-storage-sftp.md`). Failover between nodes is in
+   `docs/nfs-storage-failover.md`.
 2. **Catalogue:** under Products, the storage family (service type `nfs_storage`) holds one product
    per default size, for example code `nfs-500` with `size_gb` 500. The code is what WHMCS sends.
 3. **Locations:** note the Rackflow location IDs of the locations with storage nodes, for the
