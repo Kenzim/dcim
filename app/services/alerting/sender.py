@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, settings
@@ -81,7 +81,8 @@ class DeliverySender:
             select(NotificationDelivery).where(available).order_by(NotificationDelivery.id).limit(batch_size)
         )
         rows = list(db.execute(self._locked(statement, db)).scalars())
-        expires = now + timedelta(seconds=max(60, int(self.config.alert_delivery_timeout_seconds * 4)))
+        # Long enough for a slow SMTP or HTTP call, short enough that a crashed worker's rows return soon.
+        expires = now + timedelta(seconds=max(300, int(self.config.alert_delivery_timeout_seconds * 6)))
         for row in rows:
             row.status = DeliveryStatus.SENDING
             row.claim_token = owner
@@ -162,39 +163,52 @@ class DeliverySender:
             row = db.get(NotificationDelivery, row_id)
             if row is None or row.claim_token != owner:
                 continue
-            row.attempts += 1
+            attempts = row.attempts + 1
+            outcome: dict = {"attempts": attempts}
+            failed_for_good = False
             try:
                 self._deliver(db, row)
             except SkipDelivery as exc:
-                row.status = DeliveryStatus.SKIPPED
-                row.error = str(exc)
-                row.next_attempt_at = None
+                outcome.update(status=DeliveryStatus.SKIPPED, error=str(exc), next_attempt_at=None)
             except PermanentFailure as exc:
-                row.status = DeliveryStatus.DEAD
-                row.error = scrub(exc, 200)
-                row.next_attempt_at = None
-                self._note_failure(db, row)
+                outcome.update(status=DeliveryStatus.DEAD, error=scrub(exc, 200), next_attempt_at=None)
+                failed_for_good = True
             except Exception as exc:  # noqa: BLE001 - any transport error is retried
                 detail = scrub(exc, 160)
-                row.error = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
-                if row.attempts >= self.config.alert_delivery_max_attempts:
-                    row.status = DeliveryStatus.DEAD
-                    row.next_attempt_at = None
-                    self._note_failure(db, row)
+                outcome["error"] = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+                if attempts >= self.config.alert_delivery_max_attempts:
+                    outcome.update(status=DeliveryStatus.DEAD, next_attempt_at=None)
+                    failed_for_good = True
                 else:
-                    row.status = DeliveryStatus.FAILED
-                    delay = min(3600, 60 * (2 ** min(row.attempts - 1, 6)))
-                    row.next_attempt_at = self.clock() + timedelta(seconds=delay)
+                    delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
+                    outcome.update(status=DeliveryStatus.FAILED, next_attempt_at=self.clock() + timedelta(seconds=delay))
             else:
-                row.status = DeliveryStatus.SENT
-                row.sent_at = self.clock()
-                row.error = None
-                row.next_attempt_at = None
+                outcome.update(status=DeliveryStatus.SENT, sent_at=self.clock(), error=None, next_attempt_at=None)
                 sent += 1
-            row.claim_token = None
-            row.claim_expires_at = None
-            db.commit()
+            if not self._record(db, row_id, owner, outcome):
+                sent -= 1 if outcome["status"] == DeliveryStatus.SENT else 0
+                continue
+            if failed_for_good:
+                self._note_failure(db, row)
+                db.commit()
         return sent
+
+    @staticmethod
+    def _record(db: Session, row_id: int, owner: str, outcome: dict) -> bool:
+        """Write the outcome only while this worker still holds the claim.
+
+        When the claim expired during a slow send and another worker took the row over, that
+        worker records the result; writing ours as well would overwrite it.
+        """
+        result = db.execute(
+            update(NotificationDelivery)
+            .where(NotificationDelivery.id == row_id, NotificationDelivery.claim_token == owner)
+            .values(claim_token=None, claim_expires_at=None, **outcome)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        db.expire_all()
+        return result.rowcount == 1
 
     @staticmethod
     def _note_failure(db: Session, row: NotificationDelivery) -> None:

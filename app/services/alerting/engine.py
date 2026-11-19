@@ -93,6 +93,18 @@ class _Cycle:
         self.silences = active_silences(db, now)
         self.result = CycleResult()
 
+    # ---- rollback support ----------------------------------------------
+
+    def mark(self) -> tuple[int, int, int, int, int]:
+        r = self.result
+        return (len(r.notices), r.opened, r.reopened, r.resolved, r.refreshed)
+
+    def restore(self, mark: tuple[int, int, int, int, int]) -> None:
+        """Forget the notices and counts of a type whose changes were rolled back."""
+        r = self.result
+        del r.notices[mark[0]:]
+        r.opened, r.reopened, r.resolved, r.refreshed = mark[1:]
+
     # ---- notices -------------------------------------------------------
 
     def notify(self, alert: Alert, event: str) -> bool:
@@ -304,6 +316,7 @@ def run_cycle(
             cycle.result.skipped_types.append(alert_type)
             continue
         savepoint = db.begin_nested()
+        mark = cycle.mark()
         try:
             if not setting.enabled:
                 close_disabled(cycle, alert_type)
@@ -313,6 +326,7 @@ def run_cycle(
             savepoint.commit()
         except Exception:  # noqa: BLE001 - one broken detector must not stop the others
             savepoint.rollback()
+            cycle.restore(mark)
             logger.exception("Alert detector %s failed", alert_type)
             cycle.result.failed_types.append(alert_type)
 

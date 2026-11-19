@@ -137,6 +137,15 @@ def test_admin_action_on_a_client_notifies_that_client_only(db_session, alice, b
     assert "admin" not in out[0].payload["text"].lower().replace("administr", "")
 
 
+def test_staff_action_does_not_leak_the_staff_members_address(db_session, alice, test_admin_user):
+    opt_in(db_session, alice, "two_factor", webhook=True)
+    AuditService.log(db_session, actor_user_id=test_admin_user.id, subject_user_id=alice.id,
+                     action="require_2fa_changed", ip="198.51.100.77", user_agent="StaffBrowser/9")
+    db_session.commit()
+    blob = json.dumps([r.payload for r in rows(db_session)])
+    assert rows(db_session) and "198.51.100.77" not in blob and "StaffBrowser" not in blob
+
+
 def test_audit_hook_failure_never_breaks_logging(db_session, alice, monkeypatch):
     from app.models.commerce_audit import UserAuditEvent
 

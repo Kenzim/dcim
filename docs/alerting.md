@@ -64,7 +64,7 @@ All tables are new. Nothing existing changes shape.
   with only a type mutes a whole alert type for a period.
 - `alert_type_settings`: one row per alert type that has been changed from the
   defaults: `alert_type`, `enabled`, `severity` (override), `params` (JSON),
-  `reminder_interval_seconds` (override).
+  `reminder_interval_seconds` and `hold_down_seconds` (overrides).
 - `alert_channels`: `name`, `kind` (`email`, `webhook`, `discord`, `slack`),
   `enabled`, `min_severity`, `alert_types` (JSON list, empty means all),
   `send_resolved`, `config` (JSON; secrets sealed with the existing Fernet
@@ -82,8 +82,7 @@ All tables are new. Nothing existing changes shape.
   (JSON map of category to boolean), `webhook_url` and `webhook_secret`
   (sealed), `webhook_error`, `updated_at`.
 - `vm_backup_runs`: `service_id`, `upid`, `status` (`running`, `succeeded`,
-  `failed`), `started_at`, `finished_at`, `error` (internal only),
-  `notified`. This is the one signal recorded for the first time, because a
+  `failed`), `started_at`, `finished_at`, `error` (internal only). This is the one signal recorded for the first time, because a
   Proxmox backup outcome is not stored anywhere today.
 
 Global tuning lives in `system_settings` under the key `alerting`
@@ -146,7 +145,7 @@ UI (Alerts, Settings). Defaults:
 |---|---|---|---|
 | `storage_node_offline` | critical | enabled storage node, no runner contact | `offline_after_seconds` 300 |
 | `storage_node_ceph` | critical | online node reports `ceph_ok` false | none |
-| `storage_node_error` | warning | node `last_error`, SFTP gateway error or not listening | none |
+| `storage_node_error` | warning | online node with `last_error`, or an enabled SFTP gateway that is not listening or reports an error | `offline_after_seconds` 300 (a node past this is left to `storage_node_offline`) |
 | `storage_tenant_error` | warning | tenant or share runner state `error` | `min_age_seconds` 300 |
 | `proxy_runner_offline` | warning | enabled proxy runner with no phone-home | `offline_after_seconds` 300 |
 | `runner_offline` | critical | enabled DHCP, TFTP or media runner offline (Redis online key and `last_seen_at`) | `offline_after_seconds` 300 |
@@ -160,9 +159,10 @@ UI (Alerts, Settings). Defaults:
 | `boot_task_stuck` | warning | boot task pending too long | `pending_after_minutes` 30, `max_age_hours` 72 |
 | `install_failed` | warning | latest install task of a server failed recently | `lookback_hours` 24 |
 | `install_stuck` | warning | install task in progress too long | `stuck_after_minutes` 120 |
-| `private_network_error` | warning | attachment in `error`, or a detach that keeps failing | `min_age_minutes` 10 |
+| `private_network_error` | warning | attachment in `error`, a detach that keeps failing, or an attach still pending after `min_age_minutes` | `min_age_minutes` 10 |
 | `vm_backup_failed` | warning | a recorded VM backup run failed recently | `lookback_hours` 24 |
-| `notification_delivery_failing` | warning | outbox rows failing or stuck, or alert deliveries giving up | `failed_threshold` 3, `window_minutes` 60, `queued_after_minutes` 30 |
+| `notification_delivery_failing` | warning | billing outbox, account email or alert deliveries failing, or queued and unsent (queue checks only while SMTP is on) | `failed_threshold` 3, `window_minutes` 60, `queued_after_minutes` 30 |
+| `client_storage_quota` | info, client audience | a share of a client's storage at or above `quota_percent` of its quota; never shown in the staff list, it only feeds the client's `storage_quota` notice | `quota_percent` 90 |
 
 Resource keys: `storage_node`, `storage_tenant`, `proxy_runner`, `runner`,
 `pdu`, `power_feed`, `switch`, `deployment_job`, `boot_task`,
@@ -275,7 +275,10 @@ state), `GET /{id}`, `POST /{id}/acknowledge`, `POST /{id}/unacknowledge`,
 `POST /evaluate`.
 
 **Client API** (client session): `GET /api/client/notifications`,
-`PUT /api/client/notifications`, `POST /webhook/secret`, `POST /test`.
+`PUT /api/client/notifications` (categories, email switch, `webhook_url`,
+`regenerate_secret`; a new signing secret is in that response only) and
+`POST /api/client/notifications/test`. Changes are written to the client's
+audit log as `notification_prefs_changed`.
 
 **Staff MCP.** One new tool, `alerts`, with `action` of `list`, `get`,
 `acknowledge`, `unacknowledge`, `silence`, `unsilence` and `silences`.
@@ -287,7 +290,10 @@ change report and the ledger.
 **Worker.** `python -m app.workers.alerts`, or in the app process with
 `RUN_ALERT_WORKER=true` (the default for the app, because runner connection
 state lives in the web process and Redis). Settings: `ALERT_WORKER_INTERVAL_SECONDS`
-(60), `ALERT_WORKER_LEASE_SECONDS` (180), `ALERT_DELIVERY_MAX_ATTEMPTS` (8).
+(60), `ALERT_WORKER_LEASE_SECONDS` (180), `ALERT_DELIVERY_MAX_ATTEMPTS` (8),
+`ALERT_DELIVERY_BATCH_SIZE` (50), `ALERT_DELIVERY_TIMEOUT_SECONDS` (10). Delivery
+runs every 15 seconds; evaluation, backup polling and pruning run on the
+lease holder only.
 
 ## Not built
 

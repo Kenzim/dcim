@@ -394,3 +394,16 @@ def test_uses_users_table_for_recipients(db_session, test_admin_user):
     alerts_admin.set_recipient(db_session, test_admin_user.id, enabled=True, min_severity="warning")
     rows = alerts_admin.list_recipients(db_session)
     assert rows[0]["enabled"] is True
+
+
+def test_failing_detector_leaves_no_notices_behind(db_session, source, channel):
+    """A detector that opens an alert and then raises must not queue a notice for the rolled-back alert."""
+
+    def half_done(db, params, now):
+        db.add(Alert(alert_type=TYPE, resource_type="storage_node", resource_id="9", severity="critical",
+                     title="x", state="open", active_key="k9", opened_at=now, last_seen_at=now, details={}))
+        raise RuntimeError("boom")
+
+    result = run_cycle(db_session, now=T0, detectors={TYPE: half_done}, only_types=[TYPE])
+    assert result.failed_types == [TYPE] and result.notices == []
+    assert db_session.query(Alert).count() == 0 and deliveries(db_session) == []

@@ -346,13 +346,16 @@ def on_audit_event(db: Session, row: UserAuditEvent) -> int:
             return 0
         category, message = mapped
     with db.begin_nested():
+        # The address and browser belong to whoever made the request. When staff acted on the
+        # account they are the staff member's, so only the client's own actions carry them.
+        own_action = row.actor_user_id == user_id
         return notify(
             db,
             user_id,
             category,
             message,
             event_key=f"audit:{row.id}",
-            data={"ip": row.ip, "user_agent": row.user_agent},
+            data={"ip": row.ip, "user_agent": row.user_agent} if own_action else None,
             when=utcnow(),
         )
 

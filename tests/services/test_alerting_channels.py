@@ -426,3 +426,19 @@ async def test_backup_watch_closes_runs(db_session, monkeypatch):
     late = await backup_watch.poll_running(db_session, now=datetime.utcnow() + timedelta(hours=7))
     db_session.refresh(running)
     assert late == 1 and running.status == "failed"
+
+
+def test_lost_claim_does_not_overwrite_the_new_owners_result(db_session):
+    row = queue_one(db_session, kind="webhook", config={"url": seal("https://hooks.example.com/in")})
+
+    def takeover(url, body, headers, **kw):
+        # Another worker takes the row over and records success while this send is in flight.
+        db_session.query(NotificationDelivery).filter(NotificationDelivery.id == row.id).update(
+            {"claim_token": "w2", "status": "sent", "attempts": 5}
+        )
+        db_session.commit()
+        return safe_http.HttpResult(500, "")
+
+    assert make_sender(http_post=takeover).send_batch(db_session, owner="w1") == 0
+    db_session.refresh(row)
+    assert row.status == "sent" and row.attempts == 5 and row.claim_token == "w2"
