@@ -614,6 +614,14 @@ Runner (0.3.0):
   record is fresh.
 - Additions: a `version` subcommand, `LEASE_DEADLINE_DIR` for the guard, and unit files in
   `storage_runner/systemd/` (the runner unit is `Type=notify`, `WatchdogSec=15`, `RestartSec=2`).
+- Every start of serving (namespace and interface, gratuitous ARP, Ganesha start or reload, VIP,
+  gateway listen) and every Ceph change for a tenant (subvolume create, resize and removal, cephx
+  user create, caps and removal) runs under one lock with a fresh check that the lease is held,
+  and with a time limit of `stop_margin_seconds - 1` (5 s by default). Losing a lease waits for
+  that lock, so the stop always happens before the OSD lets the lease go; a start or Ceph call
+  that takes longer is abandoned and retried on the next pass.
+- Guard deadline files are written only under the lease manager's lock for a lease that is still
+  held, and removed only for the generation that is being stopped.
 
 Rackflow:
 - `storage_locations.rebalancing` keeps a rebalance going one move at a time across passes; it is

@@ -19,6 +19,7 @@ import (
 
 	"rackflow/storage_runner/internal/api"
 	"rackflow/storage_runner/internal/ceph"
+	"rackflow/storage_runner/internal/ganesha"
 	"rackflow/storage_runner/internal/lease"
 	"rackflow/storage_runner/internal/record"
 	"rackflow/storage_runner/internal/vip"
@@ -606,6 +607,52 @@ func TestHAOneNodeLocation(t *testing.T) {
 	c.run(time.Minute)
 	if !n1.serving(12) || len(c.pool.Blocklist()) != 0 {
 		t.Fatal("one-node location lost its tenant over a restart")
+	}
+}
+
+func TestHAHangingStartDoesNotHoldUpStopLease(t *testing.T) {
+	c := newHACluster(t)
+	n1 := c.add(1)
+	cfg := haCfgFor(n1, "v1", []int64{1}, haTenant(n1))
+	cfg.HA.Nodes = []api.HANode{{ID: 1, Name: "stor-01"}}
+	cfg.HA.LeaseSeconds, cfg.HA.RenewSeconds, cfg.HA.StopMarginSeconds = 20, 4, 2
+	started := make(chan struct{})
+	n1.nfs.RunHook = func(ctx context.Context, _ ganesha.Spec) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	n1.src.set(cfg)
+	passDone := make(chan error, 1)
+	go func() { passDone <- n1.r.Once(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pass never started ganesha")
+	}
+	begin := time.Now()
+	n1.r.StopLease(lease.TenantKey(12), lease.GuardInfo{})
+	// holdBound is stop margin less one second: 1 s here.
+	if waited := time.Since(begin); waited > 3*time.Second {
+		t.Fatalf("StopLease waited %s behind a hanging ganesha start", waited)
+	}
+	select {
+	case <-passDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pass did not return after its hold bound")
+	}
+	if n1.nfs.Has("rf-t12-nfs") {
+		t.Fatal("a ganesha start that timed out left a container")
+	}
+}
+
+func TestHoldBound(t *testing.T) {
+	for stop, want := range map[time.Duration]time.Duration{6 * time.Second: 5 * time.Second, 2 * time.Second: time.Second, time.Second: time.Second} {
+		tm := lease.DefaultTimings()
+		tm.StopMargin = stop
+		if got := holdBound(tm); got != want {
+			t.Errorf("holdBound(stop margin %s) = %s, want %s", stop, got, want)
+		}
 	}
 }
 

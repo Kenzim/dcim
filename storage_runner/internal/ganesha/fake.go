@@ -14,6 +14,8 @@ type Fake struct {
 	Rec        *record.Recorder
 	Fail       map[string]error // Run and Remove errors keyed by container name
 	ReloadFail map[string]error // Reload errors keyed by container name
+	// RunHook, when set, runs before Run and its error is returned instead.
+	RunHook func(ctx context.Context, s Spec) error
 
 	mu         sync.Mutex
 	containers map[string]Container
@@ -85,7 +87,12 @@ func (f *Fake) List(context.Context) ([]Container, error) {
 	return out, nil
 }
 
-func (f *Fake) Run(_ context.Context, s Spec) error {
+func (f *Fake) Run(ctx context.Context, s Spec) error {
+	if f.RunHook != nil {
+		if err := f.RunHook(ctx, s); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.Fail[s.Name]; err != nil {

@@ -414,6 +414,11 @@ func (m *Manager) renew(ctx context.Context, k Key, h held, ident Identity, t Ti
 		cur := m.leases[k]
 		if cur == nil || cur.gen != h.gen || cur.releasing {
 			m.mu.Unlock()
+			if h.cookie != cookie {
+				// The re-take by tag above may have created an entry for a
+				// lease that was lost or released meanwhile.
+				m.unlock(cctx, k, cookie)
+			}
 			return
 		}
 		cur.cookie = cookie
@@ -484,15 +489,15 @@ func (m *Manager) lose(k Key, gen int64, why string) {
 	}
 	m.mu.Unlock()
 	m.logf("lease: lost %s: %s", k, why)
-	m.stop(k, h.guard)
+	m.stop(k, gen, h.guard)
 	m.changed()
 }
 
-func (m *Manager) stop(k Key, g GuardInfo) {
+func (m *Manager) stop(k Key, gen int64, g GuardInfo) {
 	if m.Stop != nil {
 		m.Stop(k, g)
 	}
-	m.removeDeadline(k)
+	m.removeDeadlineFor(k, gen)
 }
 
 func (m *Manager) enterFenced(ctx context.Context, cause error) {
@@ -583,6 +588,18 @@ func (m *Manager) removeDeadline(k Key) {
 	if err := os.Remove(m.deadlinePath(k)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		m.logf("lease: remove deadline file %s: %v", k, err)
 	}
+}
+
+// removeDeadlineFor removes the deadline file of lease generation gen,
+// unless the lease has been taken again since (another generation is held);
+// gen 0 removes it only when the key is not held at all.
+func (m *Manager) removeDeadlineFor(k Key, gen int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cur := m.leases[k]; cur != nil && cur.gen != gen {
+		return
+	}
+	m.removeDeadline(k)
 }
 
 func (m *Manager) loadLeftovers() {
@@ -919,7 +936,7 @@ func (m *Manager) acquire(ctx context.Context, w Want, t Timings) {
 			delete(m.leases, k)
 		}
 		m.mu.Unlock()
-		m.removeDeadline(k)
+		m.removeDeadlineFor(k, gen)
 		cctx, cancel := m.callCtx(ctx)
 		m.unlock(cctx, k, cookie)
 		cancel()
@@ -1089,7 +1106,7 @@ func (m *Manager) release(ctx context.Context, k Key, gen int64, why string, to 
 	}
 	m.mu.Unlock()
 	m.logf("lease: releasing %s: %s", k, why)
-	m.stop(k, guard)
+	m.stop(k, gen, guard)
 	cctx, cancel := m.callCtx(ctx)
 	if err := m.Store.SetXattr(cctx, k.Object(), XattrReleased, token); err != nil {
 		m.logf("lease: mark %s released: %v", k, err)
@@ -1157,7 +1174,7 @@ func (m *Manager) Remove(ctx context.Context, k Key, recoveryNS string) error {
 	}
 	m.desired.Wants = wants
 	m.mu.Unlock()
-	m.removeDeadline(k)
+	m.removeDeadlineFor(k, 0)
 	return nil
 }
 

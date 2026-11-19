@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -112,7 +113,7 @@ func (p *pass) applySFTP(cfg *api.Config, works []*tenantWork) {
 	listen := func() error { return r.SFTP.Listen(addr) }
 	if mode == sftpMaster && addr != "" {
 		listen = func() error {
-			return p.whileHolding(lease.SFTPKey(cfg.SFTP.LocationID), func() error { return r.SFTP.Listen(addr) })
+			return p.whileHolding(lease.SFTPKey(cfg.SFTP.LocationID), func(context.Context) error { return r.SFTP.Listen(addr) })
 		}
 	}
 	if err := listen(); err != nil {

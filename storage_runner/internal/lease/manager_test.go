@@ -639,6 +639,46 @@ func TestRenewDuringReleaseWritesNoDeadlineFile(t *testing.T) {
 	}
 }
 
+func TestOldGenerationStopKeepsNewDeadlineFile(t *testing.T) {
+	s := newSim(t, 1)
+	n := s.nodes[1]
+	n.m.DeadlineDir = t.TempDir()
+	s.mustServe(tenant42, 1, 10*time.Second)
+	n.m.mu.Lock()
+	gen := n.m.leases[tenant42].gen
+	n.m.mu.Unlock()
+	// A stop for an older generation arrives after the lease was taken again.
+	n.m.stop(tenant42, gen-1, GuardInfo{})
+	if _, err := os.Stat(n.m.deadlinePath(tenant42)); err != nil {
+		t.Fatalf("an old generation's stop removed the held lease's deadline file: %v", err)
+	}
+	n.m.stop(tenant42, gen, GuardInfo{})
+	if _, err := os.Stat(n.m.deadlinePath(tenant42)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the held generation's stop left its deadline file: %v", err)
+	}
+}
+
+func TestRetakeByTagDuringReleaseLeavesNoLock(t *testing.T) {
+	s := newSim(t, 1)
+	n := s.nodes[1]
+	s.mustServe(tenant42, 1, 10*time.Second)
+	n.m.mu.Lock()
+	h := *n.m.leases[tenant42]
+	n.m.leases[tenant42].releasing = true
+	ident := n.m.ident
+	n.m.mu.Unlock()
+	// The release has unlocked the lease; a renewal from a restarted lease
+	// client (different cookie) then re-takes it by tag.
+	if err := n.client.Unlock(context.Background(), tenant42.Object(), h.cookie); err != nil {
+		t.Fatal(err)
+	}
+	ident.Instance = "client.99999"
+	n.m.renew(context.Background(), tenant42, h, ident, DefaultTimings())
+	if l := s.cluster.Lockers(tenant42.Object()); len(l.Lockers) != 0 {
+		t.Fatalf("a re-take during release left a lock entry: %+v", l)
+	}
+}
+
 func TestPlannedMoveHandsOffWithoutFence(t *testing.T) {
 	s := newSim(t, 1, 2, 3)
 	s.mustServe(tenant42, 1, 10*time.Second)

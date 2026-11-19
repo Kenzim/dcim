@@ -671,11 +671,11 @@ func (p *pass) ensureTenant(w *tenantWork) {
 			spec.MAC = netns.TenantMAC(id)
 		}
 		var changed bool
-		err := p.whileHolding(lease.TenantKey(id), func() error {
+		err := p.whileHolding(lease.TenantKey(id), func(ctx context.Context) error {
 			var err error
-			changed, err = r.Net.Ensure(p.ctx, spec)
+			changed, err = r.Net.Ensure(ctx, spec)
 			if err == nil {
-				p.announce(w)
+				p.announce(ctx, w)
 			}
 			return err
 		})
@@ -725,7 +725,9 @@ func (p *pass) ensureStorage(w *tenantWork) {
 		switch s.s.State {
 		case api.ShareActive:
 			if !p.subvols[s.name] {
-				if err := r.Ceph.CreateSubvolume(p.ctx, s.name, s.s.QuotaBytes); err != nil {
+				if err := p.changeCeph(id, func(ctx context.Context) error {
+					return r.Ceph.CreateSubvolume(ctx, s.name, s.s.QuotaBytes)
+				}); err != nil {
 					s.err = fmt.Sprintf("create subvolume: %v", err)
 					continue
 				}
@@ -739,7 +741,9 @@ func (p *pass) ensureStorage(w *tenantWork) {
 				continue
 			}
 			if info.BytesQuota != s.s.QuotaBytes {
-				if err := r.Ceph.ResizeSubvolume(p.ctx, s.name, s.s.QuotaBytes); err != nil {
+				if err := p.changeCeph(id, func(ctx context.Context) error {
+					return r.Ceph.ResizeSubvolume(ctx, s.name, s.s.QuotaBytes)
+				}); err != nil {
 					s.err = fmt.Sprintf("resize subvolume: %v", err)
 				} else {
 					r.logf("tenant %d: resized subvolume %s from %d to %d bytes", id, s.name, info.BytesQuota, s.s.QuotaBytes)
@@ -787,7 +791,12 @@ func (p *pass) ensureUser(w *tenantWork, access []ceph.Access) {
 	}
 	switch {
 	case !has:
-		key, err := r.Ceph.CreateUser(p.ctx, entity, caps)
+		var key string
+		err := p.changeCeph(w.t.ID, func(ctx context.Context) error {
+			var err error
+			key, err = r.Ceph.CreateUser(ctx, entity, caps)
+			return err
+		})
 		if err != nil {
 			w.fail("create cephx user: %v", err)
 			return
@@ -795,7 +804,9 @@ func (p *pass) ensureUser(w *tenantWork, access []ceph.Access) {
 		p.users[entity] = ceph.User{Key: key, Caps: caps}
 		r.logf("tenant %d: created cephx user %s", w.t.ID, entity)
 	case existing.Caps != caps && !w.hold:
-		if err := r.Ceph.SetCaps(p.ctx, entity, caps); err != nil {
+		if err := p.changeCeph(w.t.ID, func(ctx context.Context) error {
+			return r.Ceph.SetCaps(ctx, entity, caps)
+		}); err != nil {
 			w.fail("update cephx caps: %v", err)
 			return
 		}
@@ -1070,15 +1081,15 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 			}
 			delete(p.containers, id)
 		}
-		err := p.whileHolding(lease.TenantKey(id), func() error {
+		err := p.whileHolding(lease.TenantKey(id), func(ctx context.Context) error {
 			// A previous Ganesha for this tenant may still hold CephFS caps;
 			// the new one would stall until the MDS timed that session out.
 			// With leases only the tenant's Ganesha sessions are evicted, so
 			// the SFTP master's mounts of the same user survive.
-			if err := r.Ceph.EvictSessions(p.ctx, entity, hostname); err != nil {
+			if err := r.Ceph.EvictSessions(ctx, entity, hostname); err != nil {
 				r.logf("tenant %d: evict old cephfs sessions: %v", id, err)
 			}
-			return r.NFS.Run(p.ctx, spec)
+			return r.NFS.Run(ctx, spec)
 		})
 		if err != nil {
 			return err
@@ -1094,7 +1105,7 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 	if applied, err := os.ReadFile(appliedPath); err == nil && bytes.Equal(applied, confHash) {
 		return nil
 	}
-	if err := p.whileHolding(lease.TenantKey(id), func() error { return r.NFS.Reload(p.ctx, cur.Name) }); err != nil {
+	if err := p.whileHolding(lease.TenantKey(id), func(ctx context.Context) error { return r.NFS.Reload(ctx, cur.Name) }); err != nil {
 		return err
 	}
 	r.logf("tenant %d: nfs exports reloaded (%d exports)", id, len(exports))
@@ -1145,7 +1156,9 @@ func (p *pass) destroy(w *tenantWork) {
 			if s.s.ID <= 0 || !p.subvols[s.name] {
 				continue
 			}
-			if err := r.Ceph.RemoveSubvolume(p.ctx, s.name); err != nil {
+			if err := p.changeCeph(id, func(ctx context.Context) error {
+				return r.Ceph.RemoveSubvolume(ctx, s.name)
+			}); err != nil {
 				s.err = fmt.Sprintf("destroy subvolume: %v", err)
 				ok = false
 				continue
@@ -1156,7 +1169,9 @@ func (p *pass) destroy(w *tenantWork) {
 		}
 		entity := names.CephEntity(id)
 		if _, has := p.users[entity]; has {
-			if err := r.Ceph.RemoveUser(p.ctx, entity); err != nil {
+			if err := p.changeCeph(id, func(ctx context.Context) error {
+				return r.Ceph.RemoveUser(ctx, entity)
+			}); err != nil {
 				w.fail("remove cephx user: %v", err)
 				ok = false
 			} else {
@@ -1182,7 +1197,9 @@ func (p *pass) destroy(w *tenantWork) {
 			continue
 		}
 		if p.subvols[s.name] {
-			if err := r.Ceph.RemoveSubvolume(p.ctx, s.name); err != nil {
+			if err := p.changeCeph(id, func(ctx context.Context) error {
+				return r.Ceph.RemoveSubvolume(ctx, s.name)
+			}); err != nil {
 				s.err = fmt.Sprintf("destroy subvolume: %v", err)
 				continue
 			}

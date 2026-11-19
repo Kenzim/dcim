@@ -214,19 +214,38 @@ func (p *pass) setupHA(cfg *api.Config, works []*tenantWork) {
 	}
 }
 
-// whileHolding runs fn, which starts serving what lease k covers, only if
-// this node holds k; StopLease waits for it, so serving never outlives the
-// lease.
-func (p *pass) whileHolding(k lease.Key, fn func() error) error {
+// whileHolding runs fn, which starts serving what lease k covers or changes
+// the tenant's Ceph state, only if this node holds k. StopLease waits for it,
+// so serving never outlives the lease; fn's context ends after holdBound so
+// that wait stays inside the stop margin.
+func (p *pass) whileHolding(k lease.Key, fn func(ctx context.Context) error) error {
 	if p.ha == nil {
-		return fn()
+		return fn(p.ctx)
 	}
 	p.r.serveMu.Lock()
 	defer p.r.serveMu.Unlock()
 	if !p.r.Lease.Holds(k) {
 		return errNotHolder
 	}
-	return fn()
+	ctx, cancel := context.WithTimeout(p.ctx, holdBound(p.ha.timings))
+	defer cancel()
+	return fn(ctx)
+}
+
+// holdBound is how long whileHolding may keep StopLease waiting: a second
+// less than the stop margin, so a lost lease is stopped before the OSD lets
+// it go.
+func holdBound(t lease.Timings) time.Duration {
+	if b := t.StopMargin - time.Second; b >= time.Second {
+		return b
+	}
+	return time.Second
+}
+
+// changeCeph runs fn, which changes a tenant's Ceph state (subvolumes,
+// quotas, caps, destruction), only while this node holds the tenant's lease.
+func (p *pass) changeCeph(id int64, fn func(ctx context.Context) error) error {
+	return p.whileHolding(lease.TenantKey(id), fn)
 }
 
 // mayChangeCeph says whether this node may change a tenant's Ceph state
@@ -237,7 +256,7 @@ func (p *pass) mayChangeCeph(id int64) bool {
 
 // announce sends gratuitous ARP for the tenant's endpoint once per lease
 // acquisition, so switches and clients move to this node at once.
-func (p *pass) announce(w *tenantWork) {
+func (p *pass) announce(ctx context.Context, w *tenantWork) {
 	if p.ha == nil {
 		return
 	}
@@ -250,7 +269,7 @@ func (p *pass) announce(w *tenantWork) {
 	if cur, ok := r.announced[id]; ok && cur.Equal(since) {
 		return
 	}
-	if err := r.Net.Announce(p.ctx, id, w.endpoint.Addr()); err != nil {
+	if err := r.Net.Announce(ctx, id, w.endpoint.Addr()); err != nil {
 		r.logf("tenant %d: gratuitous arp: %v", id, err)
 		return
 	}

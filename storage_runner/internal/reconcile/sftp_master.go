@@ -153,19 +153,19 @@ func (p *pass) ensureVIP(cfg *api.Config) error {
 	if err != nil {
 		return err
 	}
-	return p.whileHolding(lease.SFTPKey(cfg.SFTP.LocationID), func() error {
-		has, err := r.VIP.Has(p.ctx, iface, vip)
+	return p.whileHolding(lease.SFTPKey(cfg.SFTP.LocationID), func(ctx context.Context) error {
+		has, err := r.VIP.Has(ctx, iface, vip)
 		if err != nil {
 			return err
 		}
 		if has {
 			return nil
 		}
-		if err := r.VIP.Add(p.ctx, iface, vip); err != nil {
+		if err := r.VIP.Add(ctx, iface, vip); err != nil {
 			return err
 		}
 		r.logf("sftp: virtual ip %s added on %s", vip, iface)
-		if err := r.VIP.Announce(p.ctx, iface, vip.Addr()); err != nil {
+		if err := r.VIP.Announce(ctx, iface, vip.Addr()); err != nil {
 			r.logf("sftp: gratuitous arp for %s: %v", vip.Addr(), err)
 		}
 		return nil
