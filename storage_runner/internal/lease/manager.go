@@ -89,8 +89,9 @@ type Manager struct {
 	CallTimeout time.Duration
 	Logf        func(format string, args ...any)
 	// Stop stops serving a lease now (section 5.6 steps 1 and 2, or the
-	// SFTP gateway, VIP and back ends) and returns once that is done.
-	Stop func(Key)
+	// SFTP gateway, VIP and back ends) and returns once that is done. g is
+	// what the lease's deadline file names.
+	Stop func(k Key, g GuardInfo)
 	// Changed is called after a lease is gained or lost.
 	Changed func()
 	// Alive is called after every renewal tick (the systemd watchdog).
@@ -481,13 +482,13 @@ func (m *Manager) lose(k Key, gen int64, why string) {
 	}
 	m.mu.Unlock()
 	m.logf("lease: lost %s: %s", k, why)
-	m.stop(k)
+	m.stop(k, h.guard)
 	m.changed()
 }
 
-func (m *Manager) stop(k Key) {
+func (m *Manager) stop(k Key, g GuardInfo) {
 	if m.Stop != nil {
-		m.Stop(k)
+		m.Stop(k, g)
 	}
 	m.removeDeadline(k)
 }
@@ -1069,14 +1070,14 @@ func (m *Manager) release(ctx context.Context, k Key, gen int64, why string, to 
 		return
 	}
 	h.releasing = true
-	token, cookie := h.token, h.cookie
+	token, cookie, guard := h.token, h.cookie, h.guard
 	m.released[k] = token
 	if moveID != "" {
 		m.handedOff[k] = moveID
 	}
 	m.mu.Unlock()
 	m.logf("lease: releasing %s: %s", k, why)
-	m.stop(k)
+	m.stop(k, guard)
 	cctx, cancel := m.callCtx(ctx)
 	if err := m.Store.SetXattr(cctx, k.Object(), XattrReleased, token); err != nil {
 		m.logf("lease: mark %s released: %v", k, err)

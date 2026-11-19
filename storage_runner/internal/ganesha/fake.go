@@ -96,7 +96,11 @@ func (f *Fake) Run(_ context.Context, s Spec) error {
 	}
 	f.containers[s.Name] = Container{Name: s.Name, TenantID: s.TenantID, Running: true, CoreHash: s.CoreHash}
 	f.specs[s.Name] = s
-	f.Rec.Add("nfs run %s netns=%s image=%s", s.Name, s.Netns, s.Image)
+	if s.Hostname != "" {
+		f.Rec.Add("nfs run %s netns=%s image=%s hostname=%s", s.Name, s.Netns, s.Image, s.Hostname)
+	} else {
+		f.Rec.Add("nfs run %s netns=%s image=%s", s.Name, s.Netns, s.Image)
+	}
 	return nil
 }
 

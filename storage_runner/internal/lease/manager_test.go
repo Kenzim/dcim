@@ -114,7 +114,7 @@ func (s *sim) newManager(n *tnode) *Manager {
 		Node:        NodeInfo{ID: n.id, LocationID: 1, Name: fmt.Sprintf("stor-%02d", n.id), Hostname: fmt.Sprintf("stor-%02d", n.id)},
 		CallTimeout: 50 * time.Millisecond,
 	}
-	m.Stop = func(k Key) {
+	m.Stop = func(k Key, _ GuardInfo) {
 		n.mu.Lock()
 		defer n.mu.Unlock()
 		if n.serving[k] {

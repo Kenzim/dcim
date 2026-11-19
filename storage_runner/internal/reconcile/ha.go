@@ -201,8 +201,16 @@ func (p *pass) setupHA(cfg *api.Config, works []*tenantWork) {
 			go r.Lease.Run(p.ctx)
 		}
 	}
+	// A lease about to be handed off is not served or acted on any more.
+	releasing := map[lease.Key]bool{}
+	for _, want := range d.Wants {
+		if want.Release || (d.Draining && want.Key.Kind == lease.KindTenant) {
+			releasing[want.Key] = true
+		}
+	}
 	for _, w := range works {
-		w.held = r.Lease.Holds(lease.TenantKey(w.t.ID))
+		k := lease.TenantKey(w.t.ID)
+		w.held = r.Lease.Holds(k) && !releasing[k]
 	}
 }
 
@@ -319,7 +327,7 @@ func (p *pass) dropUnlisted(works []*tenantWork) {
 // VLAN interface goes down and its Ganesha stops; for the SFTP master lease
 // the gateway stops and the virtual IP is removed. The lease manager calls
 // it when a lease is lost or released.
-func (r *Reconciler) StopLease(k lease.Key) {
+func (r *Reconciler) StopLease(k lease.Key, g lease.GuardInfo) {
 	r.serveMu.Lock()
 	defer r.serveMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -336,7 +344,7 @@ func (r *Reconciler) StopLease(k lease.Key) {
 			r.logf("tenant %d: lease ended; nfs stopped", id)
 		}
 	case lease.KindSFTP:
-		r.stopSFTPMaster(ctx)
+		r.stopSFTPMaster(ctx, g)
 	}
 	r.Kick()
 }

@@ -199,13 +199,19 @@ func (r *Reconciler) removeVIP(ctx context.Context, cfg *api.Config) {
 
 // stopSFTPMaster stops serving SFTP as master: the gateway stops listening,
 // the virtual IP goes, and every back end and mount is removed.
-func (r *Reconciler) stopSFTPMaster(ctx context.Context) {
+func (r *Reconciler) stopSFTPMaster(ctx context.Context, g lease.GuardInfo) {
 	if r.SFTP != nil {
 		if err := r.SFTP.Listen(""); err != nil {
 			r.logf("sftp: stop gateway: %v", err)
 		}
 	}
-	r.removeVIP(ctx, r.lastConfig)
+	if vip, err := netip.ParsePrefix(g.VIP); err == nil && g.VIPInterface != "" && r.VIP != nil {
+		if err := r.VIP.Remove(ctx, g.VIPInterface, vip); err != nil {
+			r.logf("sftp: remove virtual ip %s: %v", vip, err)
+		} else {
+			r.logf("sftp: virtual ip %s removed from %s", vip, g.VIPInterface)
+		}
+	}
 	if r.SFTPRuntime != nil {
 		if ctrs, err := r.SFTPRuntime.List(ctx); err == nil {
 			for _, c := range ctrs {
