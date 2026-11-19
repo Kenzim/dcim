@@ -243,12 +243,12 @@ def notify(
     safe = {k: v for k, v in (data or {}).items() if k in _ALLOWED_DATA and v not in (None, "")}
     limit = get_global_settings(db)["client_rate_limit_per_hour"]
     cat = CATEGORIES[category]
-    queued = 0
+    new_rows: list[NotificationDelivery] = []
 
     email_on = True if row is None else bool(row.email_enabled)
     if email_on and _valid_email(user.email):
         if _within_rate(db, user_id, ChannelKind.EMAIL, now, limit):
-            db.add(
+            new_rows.append(
                 NotificationDelivery(
                     idempotency_key=f"c:{event_key}:{category}:email"[:255],
                     audience=AlertAudience.CLIENT,
@@ -261,7 +261,6 @@ def notify(
                     next_attempt_at=now,
                 )
             )
-            queued += 1
         else:
             logger.info("Client notification rate limit reached for user %s (email)", user_id)
     if row is not None and row.webhook_url:
@@ -275,7 +274,7 @@ def notify(
                 "sent_at": now.isoformat() + "Z",
                 "data": safe,
             }
-            db.add(
+            new_rows.append(
                 NotificationDelivery(
                     idempotency_key=f"c:{event_key}:{category}:webhook"[:255],
                     audience=AlertAudience.CLIENT,
@@ -288,12 +287,29 @@ def notify(
                     next_attempt_at=now,
                 )
             )
-            queued += 1
         else:
             logger.info("Client notification rate limit reached for user %s (webhook)", user_id)
-    if queued and flush:
-        db.flush()
-    return queued
+    if not new_rows:
+        return 0
+    # The same event can be reported twice (an installer posting completion again, for
+    # example). Skip notices already queued, and flush in a savepoint so a race on the
+    # unique key never leaves the caller's session needing a rollback.
+    existing = {
+        key
+        for (key,) in db.query(NotificationDelivery.idempotency_key).filter(
+            NotificationDelivery.idempotency_key.in_([r.idempotency_key for r in new_rows])
+        )
+    }
+    new_rows = [r for r in new_rows if r.idempotency_key not in existing]
+    if not new_rows:
+        return 0
+    if flush:
+        with db.begin_nested():
+            db.add_all(new_rows)
+            db.flush()
+    else:
+        db.add_all(new_rows)
+    return len(new_rows)
 
 
 def send_test(db: Session, user_id: int) -> int:

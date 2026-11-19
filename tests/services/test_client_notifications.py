@@ -243,6 +243,22 @@ def test_backup_and_install_notifications(db_session, alice, bob):
     assert [r.event for r in out] == ["backup", "reinstall"] and {r.user_id for r in out} == {alice.id}
 
 
+def test_a_repeated_event_queues_once_and_leaves_the_session_usable(db_session, alice):
+    from app.models.vm_deployment_job import DeploymentJobStatus, VMDeploymentJob
+
+    opt_in(db_session, alice, "reinstall", webhook=True)
+    svc = make_vm(db_session, alice, "alice-vm")
+    job = VMDeploymentJob(service_id=svc.id, strategy_name="reinstall_vm", status=DeploymentJobStatus.SUCCEEDED,
+                          finished_at=datetime.utcnow())
+    db_session.add(job)
+    db_session.commit()
+    assert cn.notify_job_finished(db_session, job, True) == 2
+    assert cn.notify_job_finished(db_session, job, True) == 0
+    svc.name = "renamed"
+    db_session.commit()
+    assert sorted(r.channel_kind for r in rows(db_session, alice)) == ["email", "webhook"]
+
+
 def test_rate_limit_per_client_and_channel(db_session, alice, bob, monkeypatch):
     from app.services.alerting import catalogue
 
