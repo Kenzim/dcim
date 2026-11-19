@@ -77,6 +77,7 @@ func (p *pass) applySFTP(cfg *api.Config, works []*tenantWork) {
 
 	p.applyHostKey(cfg)
 	mode := p.sftpModeFor(cfg)
+	p.sftpMaster = mode == sftpMaster
 	mounts, err := r.SFTPMounts.List(p.ctx)
 	if err == nil {
 		var containers []sftp.Container

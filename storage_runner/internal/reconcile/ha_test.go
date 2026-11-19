@@ -530,6 +530,9 @@ func TestHASFTPMasterElectionAndVIP(t *testing.T) {
 	if st.HA == nil || !st.HA.SFTPMaster || n1.status().HA.SFTPMaster {
 		t.Fatalf("sftp_master flags wrong: %+v / %+v", st.HA, n1.status().HA)
 	}
+	if ts := tenantStatus(t, st, 12); ts.Serving == nil || *ts.Serving || ts.SFTP == nil {
+		t.Fatalf("sftp master's entry for a tenant served elsewhere: %+v", ts)
+	}
 	key, err := loginAt(n2.sftpEnv, "127.0.0.3", 12)
 	if err != nil {
 		t.Fatalf("login on the virtual ip: %v", err)
@@ -586,4 +589,49 @@ func TestHASFTPWithoutVIPIsPerNode(t *testing.T) {
 func backEnds(n *haNode) int {
 	ctrs, _ := n.rt.List(context.Background())
 	return len(ctrs)
+}
+
+func TestHAOneNodeLocation(t *testing.T) {
+	c := newHACluster(t)
+	n1 := c.add(1)
+	cfg := haCfgFor(n1, "v1", []int64{1}, haTenant(n1))
+	cfg.HA.Nodes = []api.HANode{{ID: 1, Name: "stor-01"}}
+	n1.src.set(cfg)
+	c.run(time.Minute)
+	if !n1.serving(12) {
+		t.Fatal("one-node location does not serve")
+	}
+	n1.restart()
+	n1.once()
+	c.run(time.Minute)
+	if !n1.serving(12) || len(c.pool.Blocklist()) != 0 {
+		t.Fatal("one-node location lost its tenant over a restart")
+	}
+}
+
+func TestHADrainingNodeHandsOffSFTPMaster(t *testing.T) {
+	c := newHACluster(t)
+	n1, n2 := c.add(1), c.add(2)
+	n2.port = n1.port
+	vipPfx := netip.MustParsePrefix("127.0.0.3/8")
+	for _, n := range c.nodes {
+		n.src.set(sftpHACfg(n, "v1", []int64{1, 2}, haTenant(n)))
+	}
+	c.run(10 * time.Second)
+	if !n1.vip.Present("eno1", vipPfx) {
+		t.Fatal("node 1 is not sftp master")
+	}
+	cfg := sftpHACfg(n1, "v2", []int64{1, 2}, haTenant(n1))
+	cfg.HA.Draining = true
+	n1.src.set(cfg)
+	if !c.until(time.Minute, func() bool { return n2.vip.Present("eno1", vipPfx) && n2.serving(12) }) {
+		t.Fatal("draining node did not hand off the sftp master role and its tenant")
+	}
+	if n1.vip.Present("eno1", vipPfx) || n1.serving(12) || len(c.pool.Blocklist()) != 0 {
+		t.Fatal("drain left the old node serving or fenced it")
+	}
+	c.run(time.Minute)
+	if n1.vip.Present("eno1", vipPfx) || n1.serving(12) {
+		t.Fatal("draining node took something back")
+	}
 }

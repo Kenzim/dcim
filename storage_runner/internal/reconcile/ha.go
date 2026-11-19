@@ -413,8 +413,16 @@ func (p *pass) fillHAStatus(st *api.Status, works []*tenantWork) {
 
 // reportTenant says whether a tenant gets an entry in the status: with
 // leases only tenants this node serves, is destroying, or has just stopped
-// serving.
+// serving, and on the SFTP master every tenant whose SFTP it serves (with
+// serving false when its NFS runs elsewhere).
 func (p *pass) reportTenant(w *tenantWork) bool {
-	return p.ha == nil || w.held || w.hadLocal
+	if p.ha == nil || w.held || w.hadLocal {
+		return true
+	}
+	if p.sftpMaster && p.sftp != nil {
+		_, ok := p.sftp.tenants[w.t.ID]
+		return ok
+	}
+	return false
 }
 

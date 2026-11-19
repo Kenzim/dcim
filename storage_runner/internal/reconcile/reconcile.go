@@ -154,6 +154,9 @@ type pass struct {
 	minimal    *string
 	sftp       *sftpPass
 	ha         *haPass
+	// sftpMaster is set when this node serves the location's SFTP on the
+	// virtual IP in this pass.
+	sftpMaster bool
 }
 
 type tenantWork struct {

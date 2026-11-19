@@ -242,7 +242,7 @@ func eventKinds(m *Manager) []string {
 	return out
 }
 
-func TestPreferredNodeAcquiresAndHolds(t *testing.T) {
+func TestHolderPartitionedFromPeersKeepsServing(t *testing.T) {
 	s := newSim(t, 1, 2, 3)
 	if d := s.mustServe(tenant42, 1, 10*time.Second); d > 6*time.Second {
 		t.Fatalf("took %s to acquire", d)
