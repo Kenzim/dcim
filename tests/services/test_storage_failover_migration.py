@@ -49,12 +49,12 @@ def _run(engine, step):
             step()
 
 
-def test_single_head_chained_after_alerting():
+def test_single_head_chained_after_private_network_sharing():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == ["storage_failover"]
-    assert script.get_revision("storage_failover").down_revision == "alerting_tables"
+    assert script.get_revision("storage_failover").down_revision == "add_private_network_sharing"
 
 
 def test_upgrade_seeds_locations_and_downgrade_removes_everything(tmp_path):
