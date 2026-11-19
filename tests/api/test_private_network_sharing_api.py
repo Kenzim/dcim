@@ -779,3 +779,25 @@ def test_removed_members_address_leaves_restricted_shares(client, world, alice, 
     assert client.delete(f"{CLIENT}/{network['id']}/members/{bob.id}", headers=alice.headers).status_code == 204
     shown = client.get(f"{STORAGE}/{storage['service_id']}", headers=alice.headers).json()
     assert shown["shares"][0]["clients"] == ["10.0.0.50"]
+
+
+def test_member_sees_the_vlan_id_only_for_their_own_dedicated_server(client, world, alice, bob, db_session):
+    network = _network(client, alice, world)
+    joined = _join(client, alice, bob, network)
+    assert joined["server_vlan_id"] is None
+    service = ServiceDAO.create_bare_metal(
+        db_session,
+        name="bob-dedi",
+        server_id=world.server.id,
+        owner_user_id=bob.id,
+        provisioning_source=ProvisioningSource.INTERNAL,
+        status=ServiceStatus.ACTIVE,
+    )
+    attached = client.post(
+        f"{CLIENT}/shared/{network['id']}/attachments", headers=bob.headers, json={"service_id": service.id}
+    )
+    assert attached.status_code == 200, attached.text
+    body = attached.json()
+    assert body["server_vlan_id"] == 2000 and "switch_synced" not in body and body["attachments"][0]["last_error"] is None
+    owner_view = client.get(f"{CLIENT}/{network['id']}", headers=alice.headers).json()
+    assert owner_view["attachments"] == [] and owner_view["members"][0]["servers"][0]["kind"] == "bare_metal"
