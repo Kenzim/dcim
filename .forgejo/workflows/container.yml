@@ -2,7 +2,7 @@
 #
 # Unique images:
 #   app, bandwidth-poller, dhcp-runner, tftp-runner, media-runner, proxy-runner,
-#   ipmi-proxy-runner, storage-runner
+#   proxy-runner-fastpath, ipmi-proxy-runner, storage-runner
 #
 # Worker services (deployment-worker, usdt-watcher, recurring-billing-worker,
 # notification-worker) run the `app` image directly; no alias repositories.
@@ -53,6 +53,10 @@ jobs:
             context: proxy_runner
             dockerfile: proxy_runner/Dockerfile
             target: ""
+          - image_suffix: proxy-runner-fastpath
+            context: proxy_runner
+            dockerfile: proxy_runner/Dockerfile
+            target: fastpath
           - image_suffix: ipmi-proxy-runner
             context: ipmi_proxy_runner
             dockerfile: ipmi_proxy_runner/Dockerfile

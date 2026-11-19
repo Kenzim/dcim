@@ -63,7 +63,7 @@ Fast-path credentials never enter the public credential store: a public connecti
 
 - Host networking, and root with `CAP_NET_ADMIN` and `CAP_SYS_ADMIN` (or `privileged: true`).
 - `/run/netns` shared with the host: `-v /run/netns:/run/netns:rshared`.
-- The `fastpath` image target, which includes `ip` and `nft` (`docker build --target fastpath`). The default target stays the distroless non-root image.
+- The `fastpath` image target, which includes `ip` and `nft` (`docker build --target fastpath`). CI publishes it as `dcim-proxy-runner-fastpath`. The default target, `dcim-proxy-runner`, stays the distroless non-root image.
 - The parent interface must carry the location pool's VLANs: either preconfigured once (runner VLAN mode `preconfigured`) or trunked by Rackflow on the runner server's switch ports (mode `switch`).
 
 **Inspecting:**
