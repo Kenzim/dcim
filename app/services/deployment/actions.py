@@ -78,4 +78,16 @@ RANDOMIZE_SMBIOS_ACTION = StrategyAction(
     params_schema={},
 )
 
+RETRY_RESTORE_CONFIGURATION_ACTION = StrategyAction(
+    name="retry_restore_configuration",
+    label="Retry restore configuration",
+    description=(
+        "Finish a restore of another VM's macOS backup that stopped before the guest was configured: "
+        "boot the VM, apply its own address and password, then connect its public network interface."
+    ),
+    admin=True,
+    client_eligible=False,
+    params_schema={},
+)
+
 DEFAULT_GUEST_ACTIONS = (CHANGE_PASSWORD_ACTION, RESET_NETWORK_ACTION)

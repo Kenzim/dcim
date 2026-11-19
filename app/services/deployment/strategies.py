@@ -11,6 +11,7 @@ from typing import List, Sequence
 from app.services.deployment.actions import (
     OptionField,
     RANDOMIZE_SMBIOS_ACTION,
+    RETRY_RESTORE_CONFIGURATION_ACTION,
     StrategyAction,
 )
 
@@ -19,6 +20,13 @@ _LABEL_NETWORK_MODE = "Network mode"
 _HELP_NETWORK_MODE = "static uses Rackflow VM IP allocation; dhcp leaves DHCP."
 _LABEL_CLIENT_ACTIONS = "Client-visible actions"
 _HELP_CLIENT_ACTIONS = "Action names end-users may invoke (also gated by permissions)."
+from app.services.deployment.macos_restore import (
+    CaptureMacosIdentityStep,
+    ConfigureRestoredMacosGuestStep,
+    ReapplyMacosIdentityStep,
+    ReleasePublicLinkStep,
+    WaitForRestoredGuestAgentStep,
+)
 from app.services.deployment.step import DeploymentStep
 from app.services.deployment.steps import (
     ApplyGuestPasswordStep,
@@ -180,7 +188,7 @@ class MacosGuestAgentStrategy(DeploymentStrategy):
         ]
 
     def extra_actions(self) -> Sequence[StrategyAction]:
-        return (RANDOMIZE_SMBIOS_ACTION,)
+        return (RANDOMIZE_SMBIOS_ACTION, RETRY_RESTORE_CONFIGURATION_ACTION)
 
 
 class WindowsGuestAgentStrategy(DeploymentStrategy):
@@ -287,5 +295,53 @@ class RestoreRetainedBackupStrategy(DeploymentStrategy):
             ReapplyTargetNetworkStep(),
             ConfigureSizingStep(),
             ReapplyCloudInitStep(),
+            FinalizeBackupRestoreStep(),
+        ]
+
+
+class RestoreRetainedMacosBackupStrategy(DeploymentStrategy):
+    """Runtime job: restore a retained macOS backup onto another macOS VM and give it its own identity.
+
+    The target's network interfaces and Proxmox identity (SMBIOS, macOS arguments) are captured first and put
+    back after the restore, with the public interface link down. The guest is then booted, and its own address,
+    DNS and password are applied through the guest agent before the link is brought up. Failures raise an
+    error on the VM and leave the link down; ``retry_restore_macos_configuration`` redoes the configuration.
+    """
+
+    name = "restore_retained_backup_macos"
+    include_default_actions = False
+    mutates_provision_lifecycle = False
+    max_attempts = 2
+
+    def steps(self) -> List[DeploymentStep]:
+        return [
+            StopGuestForRestoreStep(),
+            CaptureMacosIdentityStep(),
+            StartRetainedRestoreStep(),
+            WaitForBackupRestoreStep(),
+            ReapplyMacosIdentityStep(),
+            ConfigureSizingStep(),
+            PowerOnStep(),
+            WaitForRestoredGuestAgentStep(),
+            ConfigureRestoredMacosGuestStep(),
+            ReleasePublicLinkStep(),
+            FinalizeBackupRestoreStep(),
+        ]
+
+
+class RetryRestoredMacosConfigurationStrategy(DeploymentStrategy):
+    """Runtime job: redo the guest configuration of a macOS restore that stopped before finishing."""
+
+    name = "retry_restore_macos_configuration"
+    include_default_actions = False
+    mutates_provision_lifecycle = False
+    max_attempts = 2
+
+    def steps(self) -> List[DeploymentStep]:
+        return [
+            PowerOnStep(),
+            WaitForRestoredGuestAgentStep(),
+            ConfigureRestoredMacosGuestStep(),
+            ReleasePublicLinkStep(),
             FinalizeBackupRestoreStep(),
         ]

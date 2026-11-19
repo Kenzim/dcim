@@ -727,6 +727,12 @@ class CaptureTargetIdentityStep(DeploymentStep):
             return StepOutcome.skip("Target identity already captured")
         return StepOutcome.ready()
 
+    def _capture(self, config: dict) -> dict:
+        return {
+            "nets": {k: str(v) for k, v in config.items() if _NET_KEY.match(str(k))},
+            "name": config.get("name"),
+        }
+
     async def execute(self, ctx) -> None:
         plugin = ctx.get_plugin()
         try:
@@ -734,10 +740,7 @@ class CaptureTargetIdentityStep(DeploymentStep):
         except Exception as exc:
             raise DeploymentError(f"Could not read the target VM's configuration: {exc}") from exc
         state = _vm_restore_state(ctx.service)
-        state["target_identity"] = {
-            "nets": {k: str(v) for k, v in config.items() if _NET_KEY.match(str(k))},
-            "name": config.get("name"),
-        }
+        state["target_identity"] = self._capture(config)
         _write_vm_restore_state(ctx, state)
 
 
@@ -789,20 +792,24 @@ class ReapplyTargetNetworkStep(DeploymentStep):
             return StepOutcome.failed("Target identity was not captured before the restore")
         return StepOutcome.ready()
 
+    def _identity_changes(self, identity: dict, restored: dict) -> tuple[dict, list]:
+        """The config keys to write and the restored keys to drop."""
+        wanted = dict(identity.get("nets") or {})
+        stale = sorted(k for k in restored if _NET_KEY.match(str(k)) and k not in wanted)
+        return dict(wanted), stale
+
     async def execute(self, ctx) -> None:
         identity = _vm_restore_state(ctx.service)["target_identity"]
         plugin = ctx.get_plugin()
-        wanted = dict(identity.get("nets") or {})
         restored = await plugin.get_qemu_config()
-        stale = sorted(k for k in restored if _NET_KEY.match(str(k)) and k not in wanted)
-        payload = dict(wanted)
+        payload, stale = self._identity_changes(identity, restored)
         name = identity.get("name") or (ctx.service.name or "")[:90]
         if name:
             payload["name"] = name
         try:
             await plugin.set_qemu_config(payload, delete=stale or None)
         except Exception as exc:
-            raise DeploymentError(f"Could not re-apply the target's network interfaces: {exc}") from exc
+            raise DeploymentError(f"Could not re-apply the target's network interfaces and identity settings: {exc}") from exc
 
 
 class ReapplyCloudInitStep(DeploymentStep):

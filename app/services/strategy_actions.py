@@ -320,6 +320,17 @@ async def _run_randomize_smbios(
     return {"status": "ok", "action": "randomize_smbios", "smbios": sm}
 
 
+def _run_retry_restore_configuration(db: Session, service: Service) -> Dict[str, Any]:
+    from app.services.backup_slot_service import BackupSlotError
+    from app.services.retained_restore_service import enqueue_macos_restore_retry
+
+    try:
+        result = enqueue_macos_restore_retry(db, service)
+    except BackupSlotError as exc:
+        raise StrategyActionError(str(exc), exc.status_code) from exc
+    return {"action": "retry_restore_configuration", **result}
+
+
 async def run_action(
     db: Session,
     service: Service,
@@ -349,6 +360,8 @@ async def run_action(
         return await _run_reset_network(strategy, plugin, ctx, opts)
     if action_name == "randomize_smbios":
         return await _run_randomize_smbios(strategy, plugin, ctx, opts)
+    if action_name == "retry_restore_configuration":
+        return _run_retry_restore_configuration(db, service)
     raise StrategyActionError(f"Action '{action_name}' has no handler", 501)
 
 

@@ -49,6 +49,48 @@ def generate_smbios(model: str = _DEFAULT_SMBIOS_MODEL) -> Dict[str, str]:
     }
 
 
+def smbios_from_smbios1(smbios1: Optional[str], *, default_model: str = _DEFAULT_SMBIOS_MODEL) -> Optional[Dict[str, str]]:
+    """Rebuild PlatformInfo Generic fields from a Proxmox ``smbios1`` value.
+
+    The serial, UUID and product name come from ``smbios1``. ``smbios1`` carries no board serial or ROM, so
+    those are derived from the serial and UUID: the same VM always gets the same values. Returns None when
+    ``smbios1`` has no serial or UUID.
+    """
+    import base64
+    import hashlib
+
+    from app.services.vm_identity_stamp import parse_smbios1_fields
+
+    fields = parse_smbios1_fields(smbios1)
+    encoded = fields.get("base64") in ("1", "true", "True")
+
+    def text(key: str) -> str:
+        raw = fields.get(key) or ""
+        if not raw or not encoded:
+            return raw
+        try:
+            return base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            return raw
+
+    serial = text("serial").strip()
+    smuuid = (fields.get("uuid") or "").strip().upper()
+    if not serial or not smuuid:
+        return None
+    product = text("product").strip() or default_model
+    digest = hashlib.sha256(f"{smuuid}:{serial}".encode("utf-8")).digest()
+    alphabet = string.ascii_uppercase + string.digits
+    mlb_prefix = _MODEL_PREFIXES.get(product, ("C02", "C02"))[1]
+    mlb = mlb_prefix + "".join(alphabet[b % len(alphabet)] for b in digest[: 17 - len(mlb_prefix)])
+    return {
+        "SystemProductName": product,
+        "SystemSerialNumber": serial,
+        "MLB": mlb,
+        "SystemUUID": smuuid,
+        "ROM_HEX": digest[-6:].hex().upper(),
+    }
+
+
 def smbios1_config_value(sm: Dict[str, str], *, sku: Optional[str] = None) -> str:
     """Build Proxmox ``smbios1`` config string (base64-encoded fields).
 

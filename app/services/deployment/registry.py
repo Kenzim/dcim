@@ -10,6 +10,8 @@ from app.services.deployment.strategies import (
     MacosGuestAgentStrategy,
     RestoreBackupStrategy,
     RestoreRetainedBackupStrategy,
+    RestoreRetainedMacosBackupStrategy,
+    RetryRestoredMacosConfigurationStrategy,
     WindowsGuestAgentStrategy,
 )
 from app.services.deployment.strategy import DeploymentStrategy
@@ -25,6 +27,8 @@ class DeploymentStrategyRegistry:
         self.register(ApplyGuestPasswordStrategy())
         self.register(RestoreBackupStrategy())
         self.register(RestoreRetainedBackupStrategy())
+        self.register(RestoreRetainedMacosBackupStrategy())
+        self.register(RetryRestoredMacosConfigurationStrategy())
 
     def register(self, strategy: DeploymentStrategy) -> None:
         if not strategy.name:
