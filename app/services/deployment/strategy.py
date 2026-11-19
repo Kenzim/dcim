@@ -34,6 +34,9 @@ class DeploymentStrategy(ABC):
         """Return a fresh ordered list of step instances for this strategy."""
         raise NotImplementedError
 
+    def on_job_failed(self, db, job, message: str) -> None:
+        """Called by the runner when a job of this strategy fails for good, before the failure is committed."""
+
     def step_names(self) -> List[str]:
         return [s.name for s in self.steps()]
 

@@ -123,7 +123,7 @@ if ($op === 'retain') {
             'confirm_data_loss' => !empty($_POST['confirm_data_loss']) && (string)$_POST['confirm_data_loss'] !== '0',
             'start' => true,
         ), $audience);
-        $message = 'Restore started. The VM keeps its address and login details.';
+        $message = 'Restore started. The VM keeps its address and login details. A Mac may take several minutes longer while it is set up again.';
     }
 }
 

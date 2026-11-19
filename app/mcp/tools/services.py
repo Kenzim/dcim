@@ -344,7 +344,9 @@ async def restore_backup(
 ) -> dict:
     """Restore a VM backup (enqueued). retain/release/resize manage backup slots: retain needs slot_service_id
     (confirm=true replaces its backup); release and resize take the slot as service_id. A backup held in a slot
-    restores onto any VM of its client and replaces that VM's data.
+    restores onto any VM of its client of the same type (cloud-init Linux or macOS) and replaces that VM's data.
+    A macOS restore gives the target its own address and password through the guest agent; staff retry a stalled one
+    with run_action retry_restore_configuration.
     """
     if action == "restore" and not volid:
         raise ValueError("restore needs: volid")

@@ -141,6 +141,11 @@ def _fail_job(db: Session, job, message: str, *, strategy: DeploymentStrategy | 
         _write_guest_password_apply(
             service, job, status="failed", step_name=None, error=message
         )
+    if strategy is not None:
+        try:
+            strategy.on_job_failed(db, job, message)
+        except Exception:
+            logger.exception("Failure hook of strategy %s crashed (job=%s)", job.strategy_name, job.id)
     db.commit()
     _notify_client(db, job, ok=False)
     logger.warning("Deployment job %s failed: %s", job.id, message)

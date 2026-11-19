@@ -50,6 +50,7 @@ from app.services.provisioning.adapters import from_billing_bare_metal, from_bil
 from app.services.client_permission_resolver import require_client_permission
 from app.services.client_portal_service import mint_sso_ticket
 from app.services.private_network_service import PrivateNetworkService
+from app.services.retained_restore_service import power_block_reason
 from app.services import backup_slot_service
 from app.services.storage_service import StorageService
 from app.services.reseller_billing_service import (
@@ -852,6 +853,9 @@ async def power_service(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Server is administratively disabled",
             )
+        blocked = power_block_reason(service, action)
+        if blocked:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
     plugin, _ = await _billing_get_plugin_instance(db, service)
     try:
         if action == "on":

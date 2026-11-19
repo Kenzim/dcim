@@ -46,6 +46,7 @@ from app.services.proxmox_placement import (
     resolve_proxmox_plugin_for_service,
 )
 from app.services.ipmi_kvm.bmc_tls import ssl_context_for_verify
+from app.services.retained_restore_service import power_block_reason
 from app.services.vm_guest_credentials import session_guest_fields
 from app.services.vm_vnc_ticket_service import (
     get_ws_session,
@@ -226,6 +227,9 @@ async def console_power_action(body: VmVncPowerRequest, db: DbDep):
         update_ws_session_node(body.token, node)
 
     action = (body.action or "").strip().lower()
+    blocked = power_block_reason(service, action)
+    if blocked:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
     try:
         if action == "on":
             ok = await plugin.power_on()

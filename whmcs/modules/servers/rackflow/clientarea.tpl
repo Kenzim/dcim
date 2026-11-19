@@ -821,7 +821,7 @@ button.rf-ca__btn--danger:hover {
           </select>
           <button type="button" class="rf-ca__btn rf-ca__btn--ghost" data-rf-slot-op="restore">Restore onto...</button>
         </div>
-        <p class="rf-ca__slot-warning">Restoring replaces everything on the chosen VM. Its address, size and login details stay as they are.</p>
+        <p class="rf-ca__slot-warning">Restoring replaces everything on the chosen VM. Its address, size and login details stay as they are. A backup can only be restored onto the same type of VM. On a Mac, Apple account sign-ins may need redoing, because they are tied to the VM's serial number.</p>
         {/if}
         <div class="rf-ca__slot-form">
           <button type="button" class="rf-ca__btn rf-ca__btn--danger" data-rf-slot-op="release" data-rf-confirm-text="Delete the backup kept in this slot? This cannot be undone.">Release and delete backup</button>
