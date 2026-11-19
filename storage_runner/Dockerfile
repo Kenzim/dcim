@@ -20,7 +20,8 @@ RUN set -eu; \
     apt-get install -y --no-install-recommends ca-certificates; \
     echo "deb [signed-by=/etc/apt/keyrings/ceph.asc] https://download.ceph.com/debian-tentacle bookworm main" > /etc/apt/sources.list.d/ceph.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ceph-common iproute2 nftables podman; \
+    apt-get install -y --no-install-recommends ceph-common python3-rados iputils-arping iproute2 nftables podman; \
+    python3 -c 'import rados'; \
     v="$(dpkg-query -W -f='${Version}' ceph-common)"; \
     if ! dpkg --compare-versions "$v" ge "${CEPH_MIN_VERSION}"; then \
         echo "ceph-common $v is older than ${CEPH_MIN_VERSION}" >&2; exit 1; \

@@ -119,6 +119,7 @@ type Manager struct {
 	events      []api.Event
 	gen         int64
 	loaded      bool
+	running     bool
 }
 
 type held struct {
@@ -1162,8 +1163,18 @@ func (m *Manager) Sync(ctx context.Context) {
 	m.PollTick(ctx)
 }
 
+// Running reports whether Run has started.
+func (m *Manager) Running() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.running
+}
+
 // Run drives the three loops until ctx ends.
 func (m *Manager) Run(ctx context.Context) {
+	m.mu.Lock()
+	m.running = true
+	m.mu.Unlock()
 	var wg sync.WaitGroup
 	loop := func(every func() time.Duration, fn func()) {
 		defer wg.Done()
