@@ -23,6 +23,9 @@ class GigabyteVirtualMediaProfile(AsrockRackVirtualMediaProfile):
     # Redfish InsertMedia refuses HTTP images (task error 403) but mounts nfs:// URLs.
     mounts_nfs = True
 
+    def uefi_loader(self, server: Server) -> str:
+        return "ipxe"
+
     @asynccontextmanager
     async def _session(self, server: Server) -> AsyncIterator[tuple[httpx.AsyncClient, str]]:
         """Redfish rejects the web-session headers (401) but accepts basic auth."""

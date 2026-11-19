@@ -11,7 +11,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # -----------------------------------------------------------------------------
-# Stage: ipxe – virtual-media boot ISO template (boot_media/rackflow-vmedia.iso)
+# Stage: ipxe – virtual-media boot ISO templates (boot_media/rackflow-vmedia*.iso)
 # Rebuilt only when the build script, netboot script or placeholder change.
 # -----------------------------------------------------------------------------
 FROM debian:bookworm-slim AS ipxe
@@ -57,7 +57,7 @@ COPY tftp/ ./tftp/
 COPY runner_common/ ./runner_common/
 COPY app/plugins/ ./app/plugins/
 COPY boot_media/placeholder.ipxe ./boot_media/
-COPY --from=ipxe /build/boot_media/rackflow-vmedia.iso ./boot_media/
+COPY --from=ipxe /build/boot_media/rackflow-vmedia.iso /build/boot_media/rackflow-vmedia-snp.iso ./boot_media/
 
 # Application code and migrations (change frequently)
 COPY app/ ./app/

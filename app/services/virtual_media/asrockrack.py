@@ -123,6 +123,11 @@ class AsrockRackVirtualMediaProfile(VirtualMediaProfile):
     display_name = "ASRockRack (AMI MegaRAC virtual media)"
     mounts_nfs = True
 
+    def uefi_loader(self, server: Server) -> str:
+        """iPXE's own Intel driver never transmits on the boards' onboard X550; the
+        firmware's UEFI network driver does, and UEFI PXE already relies on it."""
+        return "snp"
+
     def _headers(self, origin: str, cookie: str, csrf: str) -> dict[str, str]:
         return {
             "Origin": origin,

@@ -189,7 +189,7 @@ def _bytes_range_response(request: Request, data: bytes, filename: str) -> Respo
 def _serve_boot_iso(request: Request, token_data: dict, name: str) -> Response:
     """Stamp the pending vmedia boot task's nonce into the template ISO."""
     from app.core.database import SessionLocal
-    from app.services.virtual_media.boot_iso import build_boot_iso, pending_boot_args
+    from app.services.virtual_media.boot_iso import build_boot_iso, pending_boot_args, uefi_loader_for
 
     try:
         server_id = int(token_data.get("server_id") or 0)
@@ -198,6 +198,7 @@ def _serve_boot_iso(request: Request, token_data: dict, name: str) -> Response:
     db = SessionLocal()
     try:
         args = pending_boot_args(db, server_id)
+        loader = uefi_loader_for(db, server_id) if args is not None else "ipxe"
     except VirtualMediaUnavailable as exc:
         raise virtual_media_http_error(exc) from exc
     finally:
@@ -206,7 +207,7 @@ def _serve_boot_iso(request: Request, token_data: dict, name: str) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending boot for this image")
     base_url, nonce = args
     try:
-        data = build_boot_iso(base_url, nonce)
+        data = build_boot_iso(base_url, nonce, loader)
     except VirtualMediaUnavailable as exc:
         raise virtual_media_http_error(exc) from exc
     return _bytes_range_response(request, data, name)

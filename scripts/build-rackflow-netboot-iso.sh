@@ -5,6 +5,11 @@
 #                                   ISO9660 + UEFI ESP); Rackflow stamps each boot's
 #                                   nonce/URL over the placeholder at serve time. HTTPS,
 #                                   trusting ISRG Root X1/X2 (+ RACKFLOW_IPXE_EXTRA_TRUST).
+#                                   UEFI image ipxe.efi (iPXE's own NIC drivers).
+#   boot_media/rackflow-vmedia-snp.iso  The same template with snp.efi as the UEFI image: it
+#                                   drives NICs through the firmware's UEFI network driver.
+#                                   Used by profiles whose NICs iPXE's own drivers cannot
+#                                   drive (ASRock Rack onboard X550).
 #   isos/rackflow-netboot.iso       Legacy netboot ISO that DHCP/autoboots into PXE.
 set -euo pipefail
 
@@ -13,6 +18,7 @@ NETBOOT_SCRIPT="${ROOT}/scripts/rackflow-netboot.ipxe"
 NETBOOT_OUT="${ROOT}/isos/rackflow-netboot.iso"
 PLACEHOLDER="${ROOT}/boot_media/placeholder.ipxe"
 VMEDIA_OUT="${ROOT}/boot_media/rackflow-vmedia.iso"
+VMEDIA_SNP_OUT="${ROOT}/boot_media/rackflow-vmedia-snp.iso"
 PLACEHOLDER_MARKER="#RACKFLOW-VMEDIA-CONFIG-v1"
 WORKDIR="${ROOT}/.cursor/ipxe-build"
 SRC="${WORKDIR}/ipxe/src"
@@ -61,17 +67,20 @@ cat >"${SRC}/config/local/general.h" <<'EOF'
 EOF
 
 # Virtual-media template: no embedded script; autoexec.ipxe placeholder is stamped per boot.
-make -C "$SRC" -j"$(nproc)" bin/ipxe.lkrn bin-x86_64-efi/ipxe.efi TRUST="$TRUST" EMBED=
+make -C "$SRC" -j"$(nproc)" bin/ipxe.lkrn bin-x86_64-efi/ipxe.efi bin-x86_64-efi/snp.efi TRUST="$TRUST" EMBED=
 "$SRC/util/genfsimg" -o "$VMEDIA_OUT" -s "$PLACEHOLDER" "${SRC}/bin/ipxe.lkrn" "${SRC}/bin-x86_64-efi/ipxe.efi"
-copies="$(grep -c -a -F "$PLACEHOLDER_MARKER" "$VMEDIA_OUT" || true)"
-if [ "$copies" -lt 2 ]; then
-    echo "expected the placeholder in both the BIOS and UEFI images, found ${copies}" >&2
-    exit 1
-fi
-ls -l "$VMEDIA_OUT"
+"$SRC/util/genfsimg" -o "$VMEDIA_SNP_OUT" -s "$PLACEHOLDER" "${SRC}/bin/ipxe.lkrn" "${SRC}/bin-x86_64-efi/snp.efi"
+for iso in "$VMEDIA_OUT" "$VMEDIA_SNP_OUT"; do
+    copies="$(grep -c -a -F "$PLACEHOLDER_MARKER" "$iso" || true)"
+    if [ "$copies" -lt 2 ]; then
+        echo "expected the placeholder in both the BIOS and UEFI images of ${iso}, found ${copies}" >&2
+        exit 1
+    fi
+    ls -l "$iso"
+done
 
 # Legacy netboot ISO: same binaries with the netboot script embedded.
 make -C "$SRC" -j"$(nproc)" bin/ipxe.lkrn bin-x86_64-efi/ipxe.efi TRUST="$TRUST" EMBED="$NETBOOT_SCRIPT"
 "$SRC/util/genfsimg" -o "$NETBOOT_OUT" "${SRC}/bin/ipxe.lkrn" "${SRC}/bin-x86_64-efi/ipxe.efi"
 ls -l "$NETBOOT_OUT"
-echo "Wrote $VMEDIA_OUT and $NETBOOT_OUT"
+echo "Wrote $VMEDIA_OUT, $VMEDIA_SNP_OUT and $NETBOOT_OUT"

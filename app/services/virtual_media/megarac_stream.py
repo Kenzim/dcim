@@ -79,6 +79,12 @@ class MegaracStreamVirtualMediaProfile(GigabyteVirtualMediaProfile):
             return await super().set_boot_once(server, uefi)
         return None
 
+    def uefi_loader(self, server: Server) -> str:
+        """Gigabyte keeps ``ipxe.efi``; ASRock Rack needs ``snp.efi`` (see the asrockrack profile)."""
+        if (getattr(server, "ipmi_kvm_profile", None) or "").strip() == "gigabyte":
+            return super().uefi_loader(server)
+        return "snp"
+
 
 async def _resume_one(server_id: int, record: dict) -> bool:
     """Restart the stream recorded for ``server_id``. False means try again later."""

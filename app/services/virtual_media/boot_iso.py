@@ -5,6 +5,10 @@ carries ``boot_media/placeholder.ipxe`` as ``autoexec.ipxe`` twice: once in the
 ISO9660 tree (BIOS) and once inside the FAT ESP image (UEFI). Both copies are
 stored uncompressed, so a boot ISO is produced by overwriting every placeholder
 block with a same-length script. Nothing else in the image moves.
+
+``boot_media/rackflow-vmedia-snp.iso`` is the same template with ``snp.efi`` as the
+UEFI program instead of ``ipxe.efi``; the server's virtual-media profile picks one
+(``VirtualMediaProfile.uefi_loader``).
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ from app.services.virtual_media.base import VirtualMediaUnavailable
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _BOOT_MEDIA_DIR = _REPO_ROOT / "boot_media"
 TEMPLATE_ISO = _BOOT_MEDIA_DIR / "rackflow-vmedia.iso"
+TEMPLATE_ISO_SNP = _BOOT_MEDIA_DIR / "rackflow-vmedia-snp.iso"
 PLACEHOLDER = _BOOT_MEDIA_DIR / "placeholder.ipxe"
 BOOT_ISO_PREFIX = "rfboot-"
 
@@ -70,6 +75,20 @@ def pending_boot_args(db, server_id: int) -> Optional[tuple[str, str]]:
     return boot_base_url(db, pxe_port.pxe_ip if pxe_port else None), task.pxe_nonce
 
 
+def uefi_loader_for(db, server_id: int) -> str:
+    """UEFI program on the server's boot CD: its virtual-media profile's choice, else ``ipxe``."""
+    from app.dao.server_dao import ServerDAO
+    from app.services.virtual_media.registry import profile_for_server
+
+    server = ServerDAO.get_by_id(db, server_id) if server_id else None
+    if server is None:
+        return "ipxe"
+    try:
+        return profile_for_server(server).uefi_loader(server)
+    except VirtualMediaUnavailable:
+        return "ipxe"
+
+
 def vmedia_boot_available() -> bool:
     try:
         _explicit_boot_base_url()
@@ -100,23 +119,31 @@ shell
 """
 
 
-def _load_template() -> tuple[bytes, bytes]:
+def _template_path(uefi_loader: str) -> Path:
+    if uefi_loader == "ipxe":
+        return TEMPLATE_ISO
+    if uefi_loader == "snp":
+        return TEMPLATE_ISO_SNP
+    raise VirtualMediaUnavailable(f"Unknown UEFI boot program '{uefi_loader}'")
+
+
+def _load_template(path: Path) -> tuple[bytes, bytes]:
     try:
-        mtime = (TEMPLATE_ISO.stat().st_mtime_ns, PLACEHOLDER.stat().st_mtime_ns)
+        mtime = (path.stat().st_mtime_ns, PLACEHOLDER.stat().st_mtime_ns)
     except FileNotFoundError as exc:
         raise VirtualMediaUnavailable(
-            "Virtual-media boot ISO template is missing; run scripts/build-rackflow-netboot-iso.sh"
+            f"Virtual-media boot ISO template {path.name} is missing; run scripts/build-rackflow-netboot-iso.sh"
         ) from exc
-    if _template_cache.get("mtime") != mtime:
-        _template_cache.update(
-            mtime=mtime, iso=TEMPLATE_ISO.read_bytes(), placeholder=PLACEHOLDER.read_bytes()
-        )
-    return _template_cache["iso"], _template_cache["placeholder"]
+    cached = _template_cache.get(path)
+    if cached is None or cached[0] != mtime:
+        cached = (mtime, path.read_bytes(), PLACEHOLDER.read_bytes())
+        _template_cache[path] = cached
+    return cached[1], cached[2]
 
 
-def stamp_boot_iso(script: str) -> bytes:
+def stamp_boot_iso(script: str, uefi_loader: str = "ipxe") -> bytes:
     """Return the template ISO with every placeholder replaced by ``script``."""
-    iso, placeholder = _load_template()
+    iso, placeholder = _load_template(_template_path(uefi_loader))
     payload = script.encode("ascii")
     if len(payload) + 1 > len(placeholder):
         raise VirtualMediaUnavailable("Boot script does not fit in the ISO placeholder")
@@ -126,5 +153,5 @@ def stamp_boot_iso(script: str) -> bytes:
     return iso.replace(placeholder, payload)
 
 
-def build_boot_iso(base_url: str, nonce: str) -> bytes:
-    return stamp_boot_iso(render_boot_script(base_url, nonce))
+def build_boot_iso(base_url: str, nonce: str, uefi_loader: str = "ipxe") -> bytes:
+    return stamp_boot_iso(render_boot_script(base_url, nonce), uefi_loader)

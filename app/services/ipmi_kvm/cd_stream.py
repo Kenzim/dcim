@@ -212,16 +212,17 @@ def boot_image_url(filename: str) -> str:
 def _stamp_pending_boot_iso(server_id: int) -> bytes:
     from app.core.database import SessionLocal
     from app.services.virtual_media.base import VirtualMediaUnavailable
-    from app.services.virtual_media.boot_iso import build_boot_iso, pending_boot_args
+    from app.services.virtual_media.boot_iso import build_boot_iso, pending_boot_args, uefi_loader_for
 
     db = SessionLocal()
     try:
         args = pending_boot_args(db, server_id)
+        loader = uefi_loader_for(db, server_id) if args is not None else "ipxe"
     finally:
         db.close()
     if args is None:
         raise VirtualMediaUnavailable("No pending boot for this image")
-    return build_boot_iso(*args)
+    return build_boot_iso(*args, uefi_loader=loader)
 
 
 async def open_source(server_id: int, url: str) -> Any:

@@ -95,3 +95,8 @@ class VirtualMediaProfile(ABC):
         """Boot the virtual CD on the next start. None means "not supported here":
         the launcher then uses the IPMI ``chassis bootdev cdrom`` override."""
         return None
+
+    def uefi_loader(self, server: Server) -> str:
+        """UEFI program on the boot CD: ``ipxe`` (iPXE's own NIC drivers) or ``snp``
+        (the firmware's UEFI network driver)."""
+        return "ipxe"

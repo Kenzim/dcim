@@ -103,6 +103,59 @@ def test_stamp_with_lan_http_chain_url(fake_template):
     assert stamped.count(b"chain http://10.0.0.1:8000/api/servers/interaction/pxe?mac=${netX/mac}&t=N0NCE") == 2
 
 
+def test_snp_loader_stamps_the_snp_template(fake_template, tmp_path, monkeypatch):
+    snp_path = tmp_path / "rackflow-vmedia-snp.iso"
+    snp_path.write_bytes(b"SNPHEAD" + REAL_PLACEHOLDER + b"MIDDLE" + REAL_PLACEHOLDER + b"SNPTAIL")
+    monkeypatch.setattr(boot_iso, "TEMPLATE_ISO_SNP", snp_path)
+    snp = boot_iso.build_boot_iso("http://10.0.0.1:8000", "N0NCE", "snp")
+    assert snp.startswith(b"SNPHEAD#!ipxe\n") and snp.count(b"&t=N0NCE") == 2
+    default = boot_iso.build_boot_iso("http://10.0.0.1:8000", "N0NCE")
+    assert default.startswith(b"HEAD#!ipxe\n")
+
+
+def test_missing_snp_template_is_reported_not_swapped(fake_template, tmp_path, monkeypatch):
+    monkeypatch.setattr(boot_iso, "TEMPLATE_ISO_SNP", tmp_path / "missing-snp.iso")
+    with pytest.raises(VirtualMediaUnavailable, match="missing-snp.iso is missing"):
+        boot_iso.build_boot_iso("http://10.0.0.1:8000", "n", "snp")
+
+
+def test_unknown_uefi_loader_is_refused(fake_template):
+    with pytest.raises(VirtualMediaUnavailable, match="Unknown UEFI boot program"):
+        boot_iso.build_boot_iso("http://10.0.0.1:8000", "n", "snponly")
+
+
+@pytest.mark.parametrize(
+    ("profile", "kvm_profile", "expected"),
+    [
+        ("asrockrack", "asrockrack", "snp"),
+        ("megarac_stream", "asrockrack", "snp"),
+        ("megarac_stream", "gigabyte", "ipxe"),
+        ("gigabyte", "gigabyte", "ipxe"),
+        ("supermicro", "supermicro", "ipxe"),
+    ],
+)
+def test_uefi_loader_follows_the_virtual_media_profile(monkeypatch, profile, kvm_profile, expected):
+    from types import SimpleNamespace
+
+    from app.dao.server_dao import ServerDAO
+
+    server = SimpleNamespace(id=5, virtual_media_profile=profile, ipmi_kvm_profile=kvm_profile)
+    monkeypatch.setattr(ServerDAO, "get_by_id", staticmethod(lambda db, server_id: server))
+    assert boot_iso.uefi_loader_for("DB", 5) == expected
+
+
+def test_uefi_loader_defaults_to_ipxe_without_a_profile(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.dao.server_dao import ServerDAO
+
+    server = SimpleNamespace(id=5, virtual_media_profile=None, ipmi_kvm_profile=None)
+    monkeypatch.setattr(ServerDAO, "get_by_id", staticmethod(lambda db, server_id: server))
+    assert boot_iso.uefi_loader_for("DB", 5) == "ipxe"
+    monkeypatch.setattr(ServerDAO, "get_by_id", staticmethod(lambda db, server_id: None))
+    assert boot_iso.uefi_loader_for("DB", 5) == "ipxe"
+
+
 def test_boot_iso_filename_is_unguessable():
     a, b = boot_iso.boot_iso_filename(), boot_iso.boot_iso_filename()
     assert a != b
