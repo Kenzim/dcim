@@ -42,6 +42,8 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
 
 
 def _naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
@@ -164,11 +166,11 @@ def record_event(
     return event
 
 
-def _takeover_already_reported(db: Session, tenant: StorageTenant, node_id: int, now: datetime) -> bool:
+def _event_already_recorded(db: Session, kind: str, tenant: StorageTenant, node_id: int, now: datetime) -> bool:
     cutoff = now - EVENT_DEDUPE_WINDOW
     rows = (
         db.query(StorageEvent)
-        .filter(StorageEvent.tenant_id == tenant.id, StorageEvent.kind == "takeover", StorageEvent.node_id == node_id)
+        .filter(StorageEvent.tenant_id == tenant.id, StorageEvent.kind == kind, StorageEvent.node_id == node_id)
         .all()
     )
     return any(_aware(row.at) >= cutoff for row in rows)
@@ -273,16 +275,17 @@ def _complete_move(db: Session, tenant: StorageTenant, node: StorageNode, at: da
     if tenant.move_set_preferred:
         tenant.node_id = node.id
     clear_move(tenant)
-    record_event(
-        db,
-        kind="handoff",
-        location_id=tenant.location_id,
-        tenant_id=tenant.id,
-        node_id=node.id,
-        from_node_id=previous,
-        detail=f"planned move {move_id} finished",
-        at=at,
-    )
+    if not _event_already_recorded(db, "handoff", tenant, node.id, _now()):
+        record_event(
+            db,
+            kind="handoff",
+            location_id=tenant.location_id,
+            tenant_id=tenant.id,
+            node_id=node.id,
+            from_node_id=previous,
+            detail=f"planned move {move_id} finished",
+            at=at,
+        )
 
 
 def expire_moves(db: Session, location_id: int, now: Optional[datetime] = None) -> int:
@@ -710,7 +713,7 @@ def note_serving(db: Session, node: StorageNode, tenant: StorageTenant, entry: d
     elif previous is not None or node.id != tenant.node_id:
         tenant.last_failover_at = at
         tenant.last_failover_from_node_id = previous
-        if not _takeover_already_reported(db, tenant, node.id, now):
+        if not _event_already_recorded(db, "takeover", tenant, node.id, now):
             record_event(
                 db,
                 kind="takeover",

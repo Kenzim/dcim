@@ -83,6 +83,15 @@ def ensure_location(db: Session, location_id: int) -> StorageLocation:
     return row
 
 
+def adopt_node_sftp(db: Session, node: StorageNode) -> None:
+    """A node that turns SFTP on in a location whose settings do not offer it yet gives them its host name and port."""
+    row = get_location(db, node_location_id(node))
+    if row is None or not node.sftp_enabled or not node.sftp_host or (row.sftp_enabled and row.sftp_host):
+        return
+    row.sftp_enabled, row.sftp_host = True, node.sftp_host
+    row.sftp_port = node.sftp_port or 2222
+
+
 # --- the virtual IP and IPAM ---
 
 
@@ -183,10 +192,8 @@ def _fingerprint(public_line: str) -> str:
     return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
 
 
-def _key_parts(key: ed25519.Ed25519PrivateKey) -> Tuple[str, str, str]:
-    private = key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()).decode("ascii")
-    public = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
-    return private, public, _fingerprint(public)
+def _public_line(key: ed25519.Ed25519PrivateKey) -> str:
+    return key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
 
 
 def set_host_key(db: Session, location_id: int, *, generate: bool = False, private_key: Optional[str] = None) -> StorageLocation:
@@ -195,6 +202,7 @@ def set_host_key(db: Session, location_id: int, *, generate: bool = False, priva
         raise StorageError("Give either generate=true or a private_key to import")
     if generate:
         key = ed25519.Ed25519PrivateKey.generate()
+        private = key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()).decode("ascii")
     else:
         try:
             key = load_ssh_private_key(str(private_key).strip().encode("utf-8"), password=None)
@@ -202,7 +210,9 @@ def set_host_key(db: Session, location_id: int, *, generate: bool = False, priva
             raise StorageError("The private key is not a valid unencrypted OpenSSH private key") from None
         if not isinstance(key, ed25519.Ed25519PrivateKey):
             raise StorageError("Only an ed25519 host key is supported")
-    private, public, fingerprint = _key_parts(key)
+        private = str(private_key).strip() + "\n"
+    public = _public_line(key)
+    fingerprint = _fingerprint(public)
     row = ensure_location(db, location_id)
     row.sftp_host_key = sealed.seal(private)
     row.sftp_host_key_public = public

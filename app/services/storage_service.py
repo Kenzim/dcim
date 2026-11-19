@@ -243,6 +243,7 @@ class StorageNodeService:
             node.vlan_mode = StorageNodeService._mode(changes["vlan_mode"])
         if changes.get("vlan_port_ids") is not None:
             node.vlan_port_ids = StorageNodeService._validate_ports(db, node.server_id, changes["vlan_port_ids"])
+        storage_location.adopt_node_sftp(db, node)
         return StorageDAO.save(db, node)
 
     @staticmethod
@@ -766,7 +767,7 @@ def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip:
             storage_ha.note_not_serving(tenant, node)
         if node.sftp_master if vip else serving:
             storage_sftp.apply_tenant_status(tenant, entry)
-    storage_sftp.apply_logins(in_location, report)
+    storage_sftp.apply_logins(tenants, report)
 
     destroyed_shares = set(report.get("destroyed_shares") or [])
     for tenant in in_location.values():
