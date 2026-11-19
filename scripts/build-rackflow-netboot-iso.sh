@@ -6,6 +6,9 @@
 #                                   nonce/URL over the placeholder at serve time. HTTPS,
 #                                   trusting ISRG Root X1/X2 (+ RACKFLOW_IPXE_EXTRA_TRUST).
 #   isos/rackflow-netboot.iso       Legacy netboot ISO that DHCP/autoboots into PXE.
+# The UEFI image is snp.efi: it drives every NIC through the firmware's own UEFI network
+# driver, the same one the UEFI PXE path (snponly.efi) relies on. snponly.efi would only
+# use the device it was loaded from, which here is the CD, so it would find no network.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -61,8 +64,8 @@ cat >"${SRC}/config/local/general.h" <<'EOF'
 EOF
 
 # Virtual-media template: no embedded script; autoexec.ipxe placeholder is stamped per boot.
-make -C "$SRC" -j"$(nproc)" bin/ipxe.lkrn bin-x86_64-efi/ipxe.efi TRUST="$TRUST" EMBED=
-"$SRC/util/genfsimg" -o "$VMEDIA_OUT" -s "$PLACEHOLDER" "${SRC}/bin/ipxe.lkrn" "${SRC}/bin-x86_64-efi/ipxe.efi"
+make -C "$SRC" -j"$(nproc)" bin/ipxe.lkrn bin-x86_64-efi/snp.efi TRUST="$TRUST" EMBED=
+"$SRC/util/genfsimg" -o "$VMEDIA_OUT" -s "$PLACEHOLDER" "${SRC}/bin/ipxe.lkrn" "${SRC}/bin-x86_64-efi/snp.efi"
 copies="$(grep -c -a -F "$PLACEHOLDER_MARKER" "$VMEDIA_OUT" || true)"
 if [ "$copies" -lt 2 ]; then
     echo "expected the placeholder in both the BIOS and UEFI images, found ${copies}" >&2
@@ -71,7 +74,7 @@ fi
 ls -l "$VMEDIA_OUT"
 
 # Legacy netboot ISO: same binaries with the netboot script embedded.
-make -C "$SRC" -j"$(nproc)" bin/ipxe.lkrn bin-x86_64-efi/ipxe.efi TRUST="$TRUST" EMBED="$NETBOOT_SCRIPT"
-"$SRC/util/genfsimg" -o "$NETBOOT_OUT" "${SRC}/bin/ipxe.lkrn" "${SRC}/bin-x86_64-efi/ipxe.efi"
+make -C "$SRC" -j"$(nproc)" bin/ipxe.lkrn bin-x86_64-efi/snp.efi TRUST="$TRUST" EMBED="$NETBOOT_SCRIPT"
+"$SRC/util/genfsimg" -o "$NETBOOT_OUT" "${SRC}/bin/ipxe.lkrn" "${SRC}/bin-x86_64-efi/snp.efi"
 ls -l "$NETBOOT_OUT"
 echo "Wrote $VMEDIA_OUT and $NETBOOT_OUT"
