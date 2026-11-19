@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.dao.storage_dao import ONLINE_THRESHOLD, StorageDAO
 from app.models.storage import StorageEvent, StorageLocation, StorageNode, StorageTenant
 from app.services import storage_location
+from app.services.alerting.scrub import scrub
 from app.services.storage_errors import StorageError
 
 logger = logging.getLogger(__name__)
@@ -604,9 +605,9 @@ def _record_reported_event(
     tenant_id = raw.get("tenant_id")
     if kind not in EVENT_KINDS or (tenant_id is not None and tenant_id not in tenants):
         return
-    detail = _short(raw.get("detail"), 1800)
-    if raw.get("fence"):
-        detail = f"fence: {_short(raw['fence'], 40)}" + (f"; {detail}" if detail else "")
+    detail = scrub(raw.get("detail"), 1800)
+    if raw.get("fence") in ("tenant", "node"):
+        detail = f"fence: {raw['fence']}" + (f"; {detail}" if detail else "")
     from_node = raw.get("from_node_id")
     record_event(
         db,
