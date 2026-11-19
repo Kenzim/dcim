@@ -172,8 +172,12 @@ stdout. One helper process is one RADOS client instance. It sets `rados_osd_op_t
 kills and restarts a helper that does not answer (section 3.1 makes that safe).
 
 The helper provides: `lock_shared` (with optional `must_renew`), `unlock`, `break_lock`,
-`list_lockers`, `get_xattrs`, `set_xattr`, `write_full`, `read`, `remove`, its own address, and
-`blocklist_add` / `blocklist_ls`. MDS commands (`client ls`, `client evict`) and `ceph osd dump`
+`list_lockers`, `get_xattrs`, `set_xattr`, `write_full`, `read`, `remove`, `purge` (removes a
+tenant's recovery namespace after destruction), its own address, and `blocklist_add` /
+`blocklist_ls`. The Reef (Ceph 18) Python binding has no `list_lockers` or `break_lock`, so for
+those two the helper falls back to `rados lock info` and `rados lock break`; nodes therefore also
+need the `rados` command (`ceph-common`). The helper authenticates with the node's existing admin
+key (`CEPH_CONF`, `CEPH_KEYRING`). MDS commands (`client ls`, `client evict`) and `ceph osd dump`
 style lookups use the existing `ceph` CLI wrapper.
 
 Everything above the helper is behind a Go interface with an in-memory fake that models the OSD
@@ -443,9 +447,10 @@ Rackflow owns placement; runners own failover.
 Rollout order:
 1. Create the `rackflow_ha` pool on the Ceph cluster.
 2. Deploy the app (migration `storage_failover`). Nothing changes on nodes: all report < 0.3.0.
-3. On each node in turn: install `iputils-arping`, set `CEPH_HA_POOL` (and
-   `SFTP_VIP_INTERFACE` if needed), install the guard unit, replace the runner binary with 0.3.0,
-   restart. Each tenant pauses once (about 10 s).
+3. On each node in turn: install `iputils-arping` and `python3-rados` (`ceph-common` provides the
+   `rados` command), set `CEPH_HA_POOL` (and `SFTP_VIP_INTERFACE` if needed), install the guard
+   unit and the updated runner unit from `storage_runner/systemd/`, replace the runner binary with
+   0.3.0, restart. Each tenant pauses once (about 10 s).
 4. Set the location's SFTP host name, VIP and host key (import the current node's key to avoid a
    host key change), and point DNS at the VIP. Until then SFTP keeps working per node.
 5. HA becomes active automatically once the last node in the location runs 0.3.0. Check the
@@ -586,5 +591,64 @@ migration.
 What cannot be tested without real hardware: real `cls_lock` timing and OSD clock behaviour,
 blocklist propagation, MDS eviction and Ganesha reclaim reset with `rados_ng`, client pauses with
 real hard mounts, gratuitous ARP through Proxmox bridges and switches, the VIP on the public
-network. A dev pilot needs three storage node VMs on the Ceph test cluster (section 13 of the
-report back to Kenzi lists the details).
+network. A dev pilot needs three storage node VMs on the Ceph test cluster; section 14 lists what
+it needs.
+
+## 13. Details settled during the build
+
+These refine the sections above; where they differ, this section is what the code does.
+
+Runner (0.3.0):
+- Timing validation also requires `guard_margin_seconds < lease_seconds`.
+- Events carry `fence`: null when no fence was needed, otherwise `"tenant"` or `"node"`.
+- The SFTP master reports an entry with `serving: false` for each tenant whose SFTP back end it
+  runs while that tenant's NFS is on another node. Rackflow takes SFTP state from it and ignores it
+  for the current node. A node reports a tenant it has just stopped serving, or is destroying, once
+  with `serving: false`.
+- If the `ha` block disappears from the config, the runner releases all leases and returns to
+  legacy mode. An `ha` block without `node.id` makes the runner serve nothing and report a node error.
+- The SFTP tenant-level fence evicts sessions of every tenant cephx user from the old master's
+  hostname (taken from its node record).
+- After a Ceph-wide outage the previous holder (named by `rf.owner`, not released) re-takes at once
+  without a fence; other nodes wait their rank delay plus another `lease_seconds` while that node's
+  record is fresh.
+- Additions: a `version` subcommand, `LEASE_DEADLINE_DIR` for the guard, and unit files in
+  `storage_runner/systemd/` (the runner unit is `Type=notify`, `WatchdogSec=15`, `RestartSec=2`).
+
+Rackflow:
+- `storage_locations.rebalancing` keeps a rebalance going one move at a time across passes; it is
+  cleared, with any pending moves, when HA stops being active in the location.
+- A status entry without `serving` (runner older than 0.3.0) counts as serving only from the
+  tenant's preferred node.
+- Once a location has a settings row it is authoritative for the customer-facing SFTP host and
+  port and for the runner's SFTP `enabled` and `port`. Location `sftp_port` refuses 2049.
+- VIP checks: an address already used by another location is refused; an address inside a
+  subnet's CIDR that is not one of its seeded IPAM addresses is accepted with a warning and no
+  reservation.
+- `storage_node_error` does not flag a non-master node for not listening when the location uses a
+  VIP. `storage_sftp_no_master` (section 11.5) covers a location without a master.
+- Extra admin output: `GET /admin/storage/locations`, the last 30 events in the location view,
+  and per node `healthy`, `healthy_since` and `preferred_elsewhere`.
+
+## 14. Dev pilot
+
+What the unit tests cannot show needs a pilot on the Ceph test cluster, with no production
+tenants:
+- **Three storage node VMs** in one location (Debian 13, Ceph 20 client tools, `python3-rados`,
+  `iputils-arping`, podman, runner 0.3.0 and its two units), each on a different hypervisor if
+  possible so a hypervisor failure can be tried. Each needs the Ceph admin keyring, a public NIC
+  and a NIC carrying the customer VLANs (trunk), on the same bridges and VLANs on every
+  hypervisor, with the Proxmox firewall MAC filter off on the trunk NIC.
+- **One or two client VMs** on a test private VLAN, mounting NFS 4.1 with hard mounts, running a
+  steady writer (for example `fio` or a loop writing and checksumming files) and holding a POSIX
+  lock, to measure pauses and check data and lock survival.
+- **Ceph**: a `rackflow_ha` pool (small, replicated), and a CephFS the nodes already use.
+- **Public network**: one spare address in the nodes' public subnet for the SFTP VIP, reserved in
+  IPAM, and a test DNS name pointing at it.
+- **A dev Rackflow** (app with migration `storage_failover`) that the three runners report to.
+
+Tests to run: stop the runner process; kill a node VM hard; cut a node from Ceph only (firewall
+the Ceph public network); cut it from peers only; pause a VM for 60 s; planned move, drain and
+return; SFTP master failover with a running transfer; Rackflow stopped for an hour; the upgrade
+from 0.2.2 with a live client. For each: the measured client pause, that only one node ever
+served, the blocklist entries, and that locks and data survived.
