@@ -605,6 +605,7 @@ async def test_start_hub_retries_hello_on_timeout(monkeypatch):
     monkeypatch.setattr(hub_mod, "_load_server", lambda _sid: object())
     monkeypatch.setattr(hub_mod, "prefetch_decode_worker", _prefetch)
     monkeypatch.setattr(hub_mod.KvmHub, "start", _start)
+    monkeypatch.setattr(hub_mod, "_preferred_hello", {})
     hub = await hub_mod.start_hub(99, profile, "secret")
     try:
         assert profile.handshake_calls == 2
@@ -612,5 +613,13 @@ async def test_start_hub_retries_hello_on_timeout(monkeypatch):
         assert profile.stops == 1
         assert profile.logouts == 0
         assert hub.upstream is not None
+    finally:
+        hub_mod._hubs.pop(99, None)
+
+    # The variant that validated is tried first on the next connect.
+    hub = await hub_mod.start_hub(99, profile, "secret")
+    try:
+        assert profile.hellos[2:] == [b"long-hello"]
+        assert profile.handshake_calls == 3
     finally:
         hub_mod._hubs.pop(99, None)

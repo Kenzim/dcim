@@ -103,6 +103,11 @@ class IpmiKvmProfile(ABC):
         del auth
         return b""
 
+    def bmc_packet_replies(self, auth: BmcKvmAuth, packet_type: int) -> list[bytes]:
+        """Frames the BMC expects in reply to one of its IVTP packets."""
+        del auth, packet_type
+        return []
+
     async def logout(self, auth: BmcKvmAuth) -> None:
         """Best-effort BMC web session teardown. Default is a no-op."""
         del auth

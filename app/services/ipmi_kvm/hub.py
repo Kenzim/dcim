@@ -79,6 +79,8 @@ _WS_RECEIVE = "websocket.receive"
 
 _hubs: dict[int, "KvmHub"] = {}
 _start_locks: dict[int, asyncio.Lock] = {}
+# Index of the hello variant that last validated per server, tried first next time.
+_preferred_hello: dict[int, int] = {}
 _splice_server = None
 _splice_lock: Optional[asyncio.Lock] = None
 _server_asset_events: dict[int, asyncio.Event] = {}
@@ -298,6 +300,8 @@ class KvmHub:
                 packets, tail = iter_packets(self._leftover)
                 self._join_packets = packets
                 self._bmc_buf.feed(tail)
+                for pkt in packets:
+                    await self._send_bmc_replies(packet_type(pkt))
             self._leftover = b""
         self._tasks = [
             asyncio.create_task(self._bmc_loop(), name=f"kvm-bmc-{self.server_id}"),
@@ -428,9 +432,22 @@ class KvmHub:
                 return
         await self._broadcast(data)
 
+    async def _send_bmc_replies(self, typ: int) -> bool:
+        fn = getattr(self.profile, "bmc_packet_replies", None)
+        if not callable(fn):
+            return True
+        for frame in fn(self.auth, typ) or []:
+            try:
+                await self.upstream.send(frame)
+            except Exception:  # noqa: BLE001
+                return False
+        return True
+
     async def _dispatch_bmc_packet(self, pkt: bytes) -> bool:
         """Handle one BMC packet. Returns False when the dispatch loop should stop."""
         typ = packet_type(pkt)
+        if not await self._send_bmc_replies(typ):
+            return False
         if typ in _INTERNAL_TYPES:
             return True
         if typ == IVTP_KEEPALIVE:
@@ -673,7 +690,13 @@ async def _connect_handshake(
     hellos: list[Optional[bytes]],
 ) -> tuple[Any, Any, bytes]:
     last_exc: Optional[BaseException] = None
-    for hello_i, hello in enumerate(hellos):
+    order = list(range(len(hellos)))
+    preferred = _preferred_hello.get(server_id)
+    if preferred is not None and preferred in order:
+        order.remove(preferred)
+        order.insert(0, preferred)
+    for pos, hello_i in enumerate(order):
+        hello = hellos[hello_i]
         cm = profile.open_upstream(auth)
         upstream = None
         try:
@@ -682,11 +705,13 @@ async def _connect_handshake(
                 leftover = await profile.handshake(upstream, auth)
             else:
                 leftover = await profile.handshake(upstream, auth, hello=hello)
+            if len(hellos) > 1:
+                _preferred_hello[server_id] = hello_i
             return cm, upstream, leftover
         except Exception as exc:  # noqa: BLE001
             await _close_kvm_attempt(profile, cm, upstream)
             last_exc = exc
-            more_hellos = hello_i < len(hellos) - 1
+            more_hellos = pos < len(order) - 1
             if (
                 isinstance(exc, IpmiKvmUnavailable)
                 and _is_handshake_timeout(exc)

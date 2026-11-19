@@ -15,6 +15,7 @@ from app.services.ipmi_kvm.hub import (
     IVTP_MAX_SESSION,
     IVTP_STOP,
     KvmHub,
+    _hubs,
     keepalive_frame,
 )
 
@@ -77,6 +78,42 @@ async def test_dispatch_bmc_packet_active_requests_full():
     ) as request_full:
         assert await hub._dispatch_bmc_packet(pkt) is True
     request_full.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_bmc_packet_sends_profile_replies():
+    hub, upstream, profile = _make_hub()
+    profile.bmc_packet_replies = lambda _auth, typ: [b"reply"] if typ == 0x35 else []
+    with patch.object(hub, "_broadcast", new=AsyncMock()):
+        assert await hub._dispatch_bmc_packet(ivtp(0x35, 1)) is True
+        assert await hub._dispatch_bmc_packet(ivtp(0x14, 0, b"\x00")) is True
+    upstream.send.assert_awaited_once_with(b"reply")
+
+
+@pytest.mark.asyncio
+async def test_start_answers_packets_in_handshake_leftover():
+    profile = SimpleNamespace(
+        id="test-profile",
+        packet_mode="ivtp",
+        stop_frame=lambda: ivtp(IVTP_STOP, 0),
+        bmc_packet_replies=lambda _auth, typ: [b"reply"] if typ == 0x35 else [],
+    )
+    upstream = AsyncMock()
+    leftover = ivtp(0x13, 0, b"\x01\x00") + ivtp(0x14, 0, b"\x00") + ivtp(0x35, 1)
+    hub = KvmHub(43, profile, object(), upstream, leftover=leftover)
+    with patch.object(KvmHub, "_bmc_loop", new=AsyncMock()), patch.object(
+        KvmHub, "_heartbeat_loop", new=AsyncMock()
+    ), patch.object(KvmHub, "_keepalive_loop", new=AsyncMock()), patch.object(
+        KvmHub, "_full_loop", new=AsyncMock()
+    ), patch("app.services.ipmi_kvm.hub._signal_server_asset_activity"):
+        try:
+            await hub.start()
+            upstream.send.assert_awaited_once_with(b"reply")
+            assert len(hub._join_packets) == 3
+        finally:
+            for task in hub._tasks:
+                task.cancel()
+            _hubs.pop(43, None)
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,10 @@ _IVTP_VALIDATED = 0x13
 _IVTP_RESUME = 0x06
 _IVTP_STOP = 0x08
 _IVTP_MAX_SESSION = 0x16
+_IVTP_GET_WEB_TOKEN = 0x15
+_IVTP_MEDIA_LICENSE_STATUS = 0x35
 _IVTP_CONN_COMPLETE = 0x3A
+_WEB_TOKEN_LEN = 35
 _SSI_HASH = 129
 _IP_LEN = 65
 _USER_LEN = 129
@@ -54,6 +57,12 @@ def validate_payload_with_server_ip(
 ) -> bytes:
     """438-byte MegaRAC H5 validate body (official H5Viewer: includes server_ip)."""
     return validate_payload(token, client_ip, username) + cstring(server_ip, _IP_LEN)
+
+
+def web_token_frame(cookie: str) -> bytes:
+    """CMD_GET_WEB_TOKEN carrying the web session cookie in a fixed 35-byte field."""
+    payload = (cookie or "").encode("utf-8")[:_WEB_TOKEN_LEN].ljust(_WEB_TOKEN_LEN, b"\x00")
+    return ivtp(_IVTP_GET_WEB_TOKEN, 0, payload)
 
 
 def initial_client_frame(token: str, client_ip: str, username: str) -> bytes:
@@ -224,6 +233,13 @@ class AsrockRackKvmProfile(IpmiKvmProfile):
         if self.include_server_ip_in_validate:
             return [long, short]
         return [short, long]
+
+    def bmc_packet_replies(self, auth: BmcKvmAuth, packet_type: int) -> list[bytes]:
+        # Some MegaRAC firmware sends no video until the viewer answers the
+        # media licence status with the web session cookie, as H5Viewer does.
+        if packet_type == _IVTP_MEDIA_LICENSE_STATUS:
+            return [web_token_frame(auth.cookie)]
+        return []
 
     def open_upstream(self, auth: BmcKvmAuth):
         parsed = urlparse(auth.origin)

@@ -11,6 +11,7 @@ from app.services.ipmi_kvm.asrockrack import (
     initial_client_frame_with_server_ip,
     validate_payload,
     validate_payload_with_server_ip,
+    web_token_frame,
 )
 from app.services.ipmi_kvm.bmc_tls import bmc_ssl_context
 from app.services.ipmi_kvm.base import BmcKvmAuth, IpmiKvmUnavailable
@@ -74,6 +75,22 @@ def test_hello_frame_attempts_order():
     assert [len(f) for f in giga] == [462, 397]
     assert asrock[0] == AsrockRackKvmProfile().hello_frame(auth)
     assert giga[0] == GigabyteKvmProfile().hello_frame(auth)
+
+
+def test_media_licence_status_is_answered_with_web_token():
+    profile = AsrockRackKvmProfile()
+    auth = _auth(cookie="q" * 30)
+    [reply] = profile.bmc_packet_replies(auth, 0x35)
+    typ, size, status = struct.unpack_from("<HIH", reply)
+    assert (typ, size, status) == (0x15, 35, 0)
+    assert reply[8:] == b"q" * 30 + b"\x00" * 5
+    assert reply == web_token_frame(auth.cookie)
+    assert profile.bmc_packet_replies(auth, 0x14) == []
+    assert GigabyteKvmProfile().bmc_packet_replies(auth, 0x35) == [reply]
+
+
+def test_web_token_frame_truncates_long_cookie():
+    assert len(web_token_frame("x" * 50)) == 8 + 35
 
 
 def test_registry_lists_gigabyte():
