@@ -266,7 +266,7 @@ func TestCreateTenant(t *testing.T) {
 		"ip -n pf-n7 addr add 100.80.0.1/16 dev pf-v7",
 		"ip -n pf-n7 addr add 100.80.0.2/16 dev pf-v7",
 		"ip -n pf-n7 link set pf-v7 up",
-		"ip netns exec pf-n7 nft -f -",
+		"ip netns exec pf-n7 nft -f /dev/stdin",
 		"listen pf-n7:11080",
 	})
 	if f.rulesets["pf-n7"] != RenderRuleset(11080) {
@@ -328,7 +328,7 @@ func TestAddressVLANAndPortChanges(t *testing.T) {
 		"ip -n pf-n7 -d -o link show dev pf-v7",
 		"ip -n pf-n7 -4 -o addr show dev pf-v7",
 		"ip -n pf-n7 link set pf-v7 up",
-		"ip netns exec pf-n7 nft -f -",
+		"ip netns exec pf-n7 nft -f /dev/stdin",
 		"close listener pf-n7:11080",
 		"listen pf-n7:11081",
 	})

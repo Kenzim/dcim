@@ -258,7 +258,8 @@ func (m *Manager) ensure(cfg Config, t Tenant, hasNamespace bool) error {
 	}
 	ruleset := RenderRuleset(cfg.Port)
 	if st.ruleset != ruleset {
-		if _, err := m.run(ruleset, "ip", "netns", "exec", ns, "nft", "-f", "-"); err != nil {
+		// nft before 0.9 (Ubuntu 18.04 ships 0.8.2) does not read "-" as stdin; /dev/stdin works on all versions.
+		if _, err := m.run(ruleset, "ip", "netns", "exec", ns, "nft", "-f", "/dev/stdin"); err != nil {
 			return err
 		}
 		st.ruleset = ruleset
