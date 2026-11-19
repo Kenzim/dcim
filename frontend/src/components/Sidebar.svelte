@@ -1,4 +1,6 @@
 <script>
+  import { onMount, onDestroy } from 'svelte';
+  import { getAlertSummary } from '../lib/api.js';
   import { logout } from '../stores/auth.js';
   import { navigate } from '../lib/router.js';
   import { currentRoute } from '../lib/router.js';
@@ -10,6 +12,29 @@
   function handleKeydown(e) {
     if (e.key === 'Escape') closeSidebar();
   }
+
+  let alertCount = 0;
+  let alertCritical = 0;
+  let alertTimer = null;
+
+  async function refreshAlertCount() {
+    try {
+      const summary = await getAlertSummary();
+      alertCount = summary.active || 0;
+      alertCritical = summary.by_severity?.critical || 0;
+    } catch {
+      // The badge is advisory; ignore failures.
+    }
+  }
+
+  onMount(() => {
+    refreshAlertCount();
+    alertTimer = setInterval(refreshAlertCount, 60000);
+  });
+  onDestroy(() => {
+    if (alertTimer) clearInterval(alertTimer);
+  });
+  $: if ($currentRoute) refreshAlertCount();
 
   async function handleLogout() {
     try {
@@ -34,6 +59,7 @@
   $: isPluginsActive = currentPath.startsWith('/admin/plugins');
   $: isOSTemplatesActive = currentPath.startsWith('/admin/os-templates');
   $: isBillingIntegrationsActive = currentPath.startsWith('/admin/billing-integrations');
+  $: isAlertsActive = currentPath.startsWith('/admin/alerts');
   $: isMcpKeysActive = currentPath.startsWith('/admin/mcp-keys');
   $: isBillingActive = currentPath === '/admin/billing' || currentPath.startsWith('/admin/billing/');
   $: isResellersActive = currentPath.startsWith('/admin/resellers');
@@ -340,6 +366,17 @@
           </a>
         </li>
         <li class="nav-item">
+          <a href="/admin/alerts" class="nav-link" class:active={isAlertsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+            </svg>
+            <span>Alerts</span>
+            {#if alertCount > 0}
+              <span class="nav-badge" class:nav-badge-critical={alertCritical > 0} aria-label="{alertCount} active alerts">{alertCount > 99 ? '99+' : alertCount}</span>
+            {/if}
+          </a>
+        </li>
+        <li class="nav-item">
           <a href="/admin/mcp-keys" class="nav-link" class:active={isMcpKeysActive}>
             <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
@@ -639,6 +676,22 @@
 
   .nav-item {
     margin: 0;
+  }
+
+  .nav-badge {
+    margin-left: auto;
+    min-width: 20px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--warning-color, #f59e0b);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    text-align: center;
+    line-height: 18px;
+  }
+  .nav-badge-critical {
+    background: var(--danger-color, #dc2626);
   }
 
   .nav-link {

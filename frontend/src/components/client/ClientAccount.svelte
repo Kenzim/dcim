@@ -3,6 +3,7 @@
   import { Alert, Button, Spinner, Tabs } from '../ui/index.js';
   import TwoFactorPanel from '../TwoFactorPanel.svelte';
   import ClientMcpKeys from './ClientMcpKeys.svelte';
+  import ClientNotifications from './ClientNotifications.svelte';
   import {
     clientCommerceDiscordAuthorizeUrl,
     clientCommerceDiscordUnlink,
@@ -103,7 +104,7 @@
   <div class="page-head">
     <div>
       <h1 id="account-title">Account</h1>
-      <p class="sub">Billing profile, security, activity, and MCP keys.</p>
+      <p class="sub">Billing profile, security, activity, notifications, and MCP keys.</p>
     </div>
   </div>
 
@@ -112,6 +113,7 @@
       { id: 'profile', label: 'Profile' },
       { id: 'activity', label: 'Activity' },
       { id: 'security', label: 'Security' },
+      { id: 'notifications', label: 'Notifications' },
       { id: 'mcp', label: 'MCP keys' },
     ]}
     bind:active={tab}
@@ -122,6 +124,8 @@
 
   {#if tab === 'mcp'}
     <ClientMcpKeys {impersonating} />
+  {:else if tab === 'notifications'}
+    <ClientNotifications {impersonating} />
   {:else if loading}
     <div class="state"><Spinner /><span>Loading…</span></div>
   {:else if tab === 'profile'}

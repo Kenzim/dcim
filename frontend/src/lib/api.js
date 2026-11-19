@@ -5026,3 +5026,87 @@ export const clientReleaseSlotBackup = (slotId) =>
   backupSlotRequest(`/${slotId}/release`, { method: 'POST', errorMessage: 'Failed to release the backup' });
 export const clientRestoreSlotBackup = (slotId, data) =>
   backupSlotRequest(`/${slotId}/restore`, { method: 'POST', body: data, errorMessage: 'Failed to restore the backup' });
+
+// --- Alerts (staff) ---
+
+async function alertsRequest(path, { method = 'GET', body, errorMessage } = {}) {
+  const options = { method, credentials: 'include' };
+  if (body !== undefined) {
+    options.headers = { 'Content-Type': 'application/json' };
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(`${API_BASE}/admin/alerts${path}`, options);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    let message = errorMessage;
+    if (typeof detail === 'string' && detail) message = detail;
+    else if (Array.isArray(detail) && detail.length) {
+      const msgs = detail.map((item) => item?.msg || item?.message).filter(Boolean);
+      if (msgs.length) message = msgs.join('; ');
+    }
+    throw new Error(message);
+  }
+  return response.json();
+}
+
+function alertQuery(params = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+  });
+  const text = query.toString();
+  return text ? `?${text}` : '';
+}
+
+export const getAlerts = (params) => alertsRequest(alertQuery(params), { errorMessage: 'Failed to load alerts' });
+export const getAlertSummary = () => alertsRequest('/summary', { errorMessage: 'Failed to load alert summary' });
+export const getAlert = (id) => alertsRequest(`/${id}`, { errorMessage: 'Failed to load alert' });
+export const acknowledgeAlert = (id, note) =>
+  alertsRequest(`/${id}/acknowledge`, { method: 'POST', body: { note: note || null }, errorMessage: 'Failed to acknowledge alert' });
+export const unacknowledgeAlert = (id) =>
+  alertsRequest(`/${id}/unacknowledge`, { method: 'POST', errorMessage: 'Failed to clear acknowledgement' });
+export const silenceAlert = (id, durationMinutes, reason) =>
+  alertsRequest(`/${id}/silence`, {
+    method: 'POST',
+    body: { duration_minutes: durationMinutes, reason: reason || null },
+    errorMessage: 'Failed to silence alert',
+  });
+export const evaluateAlertsNow = () => alertsRequest('/evaluate', { method: 'POST', errorMessage: 'Failed to run the checks' });
+export const getAlertSilences = () => alertsRequest('/silences', { errorMessage: 'Failed to load silences' });
+export const createAlertSilence = (data) =>
+  alertsRequest('/silences', { method: 'POST', body: data, errorMessage: 'Failed to create silence' });
+export const deleteAlertSilence = (id) =>
+  alertsRequest(`/silences/${id}`, { method: 'DELETE', errorMessage: 'Failed to remove silence' });
+export const getAlertTypes = () => alertsRequest('/types', { errorMessage: 'Failed to load alert types' });
+export const updateAlertType = (type, data) =>
+  alertsRequest(`/types/${type}`, { method: 'PUT', body: data, errorMessage: 'Failed to save alert type' });
+export const updateAlertSettings = (settings) =>
+  alertsRequest('/settings', { method: 'PUT', body: { settings }, errorMessage: 'Failed to save alert settings' });
+export const getAlertChannels = () => alertsRequest('/channels', { errorMessage: 'Failed to load channels' });
+export const createAlertChannel = (data) =>
+  alertsRequest('/channels', { method: 'POST', body: data, errorMessage: 'Failed to create channel' });
+export const updateAlertChannel = (id, data) =>
+  alertsRequest(`/channels/${id}`, { method: 'PUT', body: data, errorMessage: 'Failed to save channel' });
+export const deleteAlertChannel = (id) =>
+  alertsRequest(`/channels/${id}`, { method: 'DELETE', errorMessage: 'Failed to delete channel' });
+export const testAlertChannel = (id) =>
+  alertsRequest(`/channels/${id}/test`, { method: 'POST', errorMessage: 'Failed to test channel' });
+export const getAlertRecipients = () => alertsRequest('/recipients', { errorMessage: 'Failed to load recipients' });
+export const saveAlertRecipients = (recipients) =>
+  alertsRequest('/recipients', { method: 'PUT', body: { recipients }, errorMessage: 'Failed to save recipients' });
+export const getAlertDeliveries = (params) =>
+  alertsRequest(`/deliveries${alertQuery(params)}`, { errorMessage: 'Failed to load deliveries' });
+
+// --- Client notification preferences ---
+
+export const clientGetNotifications = () =>
+  clientMcpKeysRequest('/client/notifications', { errorMessage: 'Failed to load notification settings' });
+export const clientSaveNotifications = (data) =>
+  clientMcpKeysRequest('/client/notifications', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+    errorMessage: 'Failed to save notification settings',
+  });
+export const clientTestNotification = () =>
+  clientMcpKeysRequest('/client/notifications/test', { method: 'POST', errorMessage: 'Failed to send a test notification' });
