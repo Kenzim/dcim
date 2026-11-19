@@ -4929,6 +4929,96 @@ export function clientDetachPrivateNetwork(networkId, attachmentId) {
   });
 }
 
+export function removePrivateNetworkMember(networkId, userId) {
+  return privateNetworkRequest(`/${networkId}/members/${userId}`, {
+    method: 'DELETE',
+    errorMessage: 'Failed to remove member',
+  });
+}
+
+// --- Private network sharing: invitations, members and networks shared with the client ---
+
+export function clientNetworkInvitations() {
+  return privateNetworkRequest('/invitations', { client: true, errorMessage: 'Failed to load invitations' });
+}
+
+export function clientAcceptNetworkInvitation(invitationId) {
+  return privateNetworkRequest(`/invitations/${invitationId}/accept`, {
+    client: true,
+    method: 'POST',
+    errorMessage: 'Failed to accept the invitation',
+  });
+}
+
+export function clientDeclineNetworkInvitation(invitationId) {
+  return privateNetworkRequest(`/invitations/${invitationId}/decline`, {
+    client: true,
+    method: 'POST',
+    errorMessage: 'Failed to decline the invitation',
+  });
+}
+
+export function clientInviteToNetwork(networkId, invitee) {
+  return privateNetworkRequest(`/${networkId}/invitations`, {
+    client: true,
+    method: 'POST',
+    body: { invitee },
+    errorMessage: 'Failed to send the invitation',
+  });
+}
+
+export function clientCancelNetworkInvitation(networkId, invitationId) {
+  return privateNetworkRequest(`/${networkId}/invitations/${invitationId}`, {
+    client: true,
+    method: 'DELETE',
+    errorMessage: 'Failed to cancel the invitation',
+  });
+}
+
+export function clientRemoveNetworkMember(networkId, userId) {
+  return privateNetworkRequest(`/${networkId}/members/${userId}`, {
+    client: true,
+    method: 'DELETE',
+    errorMessage: 'Failed to remove the member',
+  });
+}
+
+export function clientSharedNetworks() {
+  return privateNetworkRequest('/shared', { client: true, errorMessage: 'Failed to load shared networks' });
+}
+
+export function clientSharedNetworkStorage(networkId) {
+  return privateNetworkRequest(`/shared/${networkId}/storage`, {
+    client: true,
+    errorMessage: 'Failed to load the storage of this network',
+  });
+}
+
+export function clientSharedAttach(networkId, data) {
+  return privateNetworkRequest(`/shared/${networkId}/attachments`, {
+    client: true,
+    method: 'POST',
+    body: data,
+    errorMessage: 'Failed to attach service',
+  });
+}
+
+export function clientSharedDetach(networkId, attachmentId) {
+  return privateNetworkRequest(`/shared/${networkId}/attachments/${attachmentId}`, {
+    client: true,
+    method: 'DELETE',
+    errorMessage: 'Failed to detach service',
+  });
+}
+
+export function clientLeaveSharedNetwork(networkId) {
+  return privateNetworkRequest(`/shared/${networkId}/leave`, {
+    client: true,
+    method: 'POST',
+    errorMessage: 'Failed to leave the network',
+  });
+}
+
 // --- Proxy fast path: per-location access network and private proxy addresses ---
 
 export function clientFastPath() {

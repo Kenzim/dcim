@@ -56,12 +56,15 @@ async def lookup(
         "switch_plugins",
         "subnet_groups",
         "network_pools",
+        "private_networks",
     ],
     location_id: Optional[int] = None,
 ) -> dict:
-    """List reference data. location_id filters racks. network_pools: private network VLAN pools."""
+    """List reference data. location_id filters racks and private_networks. network_pools: private network VLAN pools. private_networks: client networks with attachments, members and invitations."""
     if kind == "racks":
         return await inventory_tools.list_racks(location_id=location_id)
+    if kind == "private_networks":
+        return await network_tools.list_private_networks(location_id=location_id)
     _reject(f"lookup {kind}", location_id=location_id)
     handlers = {
         "locations": inventory_tools.list_locations,
@@ -95,7 +98,7 @@ async def save_location(
     (0 clears it, falling back to PROXY_DEFAULT_PORT, 11080 by default).
     network_pool: create or update the location's private network pool; keys vlan_start,
     vlan_end (both needed to create), bridge, enabled, max_networks_per_client,
-    max_networks_per_service, reserved_cidrs (replaces), proxy_access_enabled.
+    max_networks_per_service, max_members_per_network (0 turns sharing off), reserved_cidrs (replaces), proxy_access_enabled.
     """
     if location_id is None:
         _require("Creating a location", name=name)
@@ -458,7 +461,7 @@ async def save_switch(
 
 @mcp.tool()
 async def switch_action(
-    action: Literal["test", "regenerate_ports", "update_port", "detect_vpc", "vlan_dry_run"],
+    action: Literal["test", "regenerate_ports", "update_port", "detect_vpc", "vlan_dry_run", "network_member_remove"],
     switch_id: Optional[int] = None,
     plugin_name: Optional[str] = None,
     plugin_config: Optional[dict] = None,
@@ -469,13 +472,19 @@ async def switch_action(
     vlan_id: Optional[int] = None,
     network_id: Optional[int] = None,
     remove: bool = False,
+    member_user_id: Optional[int] = None,
+    confirm: bool = False,
 ) -> dict:
     """test: probe a switch (switch_id, or plugin_name + plugin_config before adding; read-only on the device).
     regenerate_ports: rebuild the port list (cabled ports kept). update_port: set a port's speed/description.
     detect_vpc: read every switch's Cisco vPC state (read-only) and record vPC peers (shown as `vpc` on switches).
     vlan_dry_run: exact switch commands for carrying vlan_id (or a private network_id) on server_id's uplink,
     including both vPC peers; remove=true for detaching. Nothing is sent to the switches.
+    network_member_remove: take member_user_id off the shared private network network_id and detach their servers (switch VLAN removal included); needs confirm=true.
     """
+    if action == "network_member_remove":
+        _require("Removing a network member", network_id=network_id, member_user_id=member_user_id)
+        return await network_tools.remove_network_member(network_id, member_user_id, confirm=confirm)
     if action == "test":
         return await network_tools.test_switch_connection(
             switch_id=switch_id, plugin_name=plugin_name, plugin_config=plugin_config

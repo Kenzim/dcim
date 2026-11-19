@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.dao.runner_dao import RunnerDAO
+from app.dao.storage_dao import StorageDAO
 from app.models.alerting import NotificationDelivery, VmBackupRun
 from app.models.boot_task import BootTask, BootTaskStatus
 from app.models.commerce_email import EmailMessage, EmailMessageStatus
@@ -27,7 +28,7 @@ from app.models.proxy_runner import ProxyRunner
 from app.models.reseller import NotificationOutbox, NotificationOutboxStatus
 from app.models.runner import Runner
 from app.models.service import Service, ServiceStatus
-from app.models.storage import StorageNode, StorageShare, StorageTenant
+from app.models.storage import StorageEvent, StorageLocation, StorageNode, StorageShare, StorageTenant
 from app.models.switch_port import SwitchPort
 from app.models.vm_deployment_job import DeploymentJobStatus, VMDeploymentJob
 from app.services.alerting.catalogue import Finding, naive
@@ -135,6 +136,52 @@ def storage_node_error(db: Session, params: dict, now: datetime) -> list[Finding
                     details={"problems": problems},
                 )
             )
+    return out
+
+
+def storage_sftp_no_master(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A location whose SFTP is behind a virtual IP has no online node reporting to be the master.
+
+    The time without a master counts from the latest of: the location settings change, the last
+    SFTP master event of the location and the last report of a node still marked master.
+    """
+    limit = params["no_master_after_seconds"]
+    out = []
+    rows = (
+        db.query(StorageLocation)
+        .filter(StorageLocation.sftp_enabled.is_(True), StorageLocation.sftp_virtual_ip.isnot(None))
+        .all()
+    )
+    for row in rows:
+        if not storage_ha.ha_active(db, row.location_id):
+            continue
+        nodes = [node for node in storage_location.location_nodes(db, row.location_id) if node.enabled]
+        if any(node.sftp_master and StorageDAO.is_online(node, now=now) for node in nodes):
+            continue
+        last_event = (
+            db.query(func.max(StorageEvent.at))
+            .filter(StorageEvent.location_id == row.location_id, StorageEvent.kind == "sftp_master")
+            .scalar()
+        )
+        marks = [naive(row.updated_at), naive(last_event)]
+        marks += [naive(node.last_seen_at) for node in nodes if node.sftp_master]
+        since = max((mark for mark in marks if mark is not None), default=None)
+        age = _age_seconds(since, now)
+        if age is not None and age < limit:
+            continue
+        label = row.location.name if row.location is not None else f"location {row.location_id}"
+        out.append(
+            Finding(
+                "storage_sftp_no_master",
+                "storage_location",
+                str(row.location_id),
+                label,
+                f"SFTP in {label} has no master node",
+                f"No storage node has held the SFTP virtual IP {row.sftp_virtual_ip} for {_human(age)}, "
+                "so SFTP is down for every customer in the location.",
+                details={"virtual_ip": row.sftp_virtual_ip, "nodes": [node.id for node in nodes]},
+            )
+        )
     return out
 
 
@@ -883,6 +930,7 @@ DETECTORS: dict[str, Detector] = {
     "storage_tenant_error": storage_tenant_error,
     "storage_tenant_failover": storage_tenant_failover,
     "storage_location_degraded": storage_location_degraded,
+    "storage_sftp_no_master": storage_sftp_no_master,
     "proxy_runner_offline": proxy_runner_offline,
     "runner_offline": runner_offline,
     "pdu_poll_failed": pdu_poll_failed,

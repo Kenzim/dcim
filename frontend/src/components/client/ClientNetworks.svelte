@@ -8,6 +8,17 @@
     clientDeletePrivateNetwork,
     clientAttachPrivateNetwork,
     clientDetachPrivateNetwork,
+    clientNetworkInvitations,
+    clientAcceptNetworkInvitation,
+    clientDeclineNetworkInvitation,
+    clientInviteToNetwork,
+    clientCancelNetworkInvitation,
+    clientRemoveNetworkMember,
+    clientSharedNetworks,
+    clientSharedNetworkStorage,
+    clientSharedAttach,
+    clientSharedDetach,
+    clientLeaveSharedNetwork,
     clientFastPath,
     clientFastPathOn,
     clientFastPathOff,
@@ -17,6 +28,12 @@
   const emptyCreateForm = () => ({ location_id: '', name: '', cidr: '' });
 
   let networks = [];
+  let invitations = [];
+  let shared = [];
+  // Shared network id -> its storage address and open shares
+  let sharedStorage = {};
+  // Owned network id -> address or username being invited
+  let inviteForms = {};
   let fastPath = { cidr: '', locations: [], endpoints: [] };
   let options = { default_cidr: '', locations: [], services: [] };
   let loading = true;
@@ -50,7 +67,16 @@
 
   async function load() {
     try {
-      [networks, options] = await Promise.all([clientListPrivateNetworks(), clientPrivateNetworkOptions()]);
+      [networks, options, invitations, shared] = await Promise.all([
+        clientListPrivateNetworks(),
+        clientPrivateNetworkOptions(),
+        clientNetworkInvitations(),
+        clientSharedNetworks(),
+      ]);
+      const storages = await Promise.all(
+        shared.map((n) => clientSharedNetworkStorage(n.id).catch(() => ({ linked: false, shares: [] }))),
+      );
+      sharedStorage = Object.fromEntries(shared.map((n, i) => [n.id, storages[i]]));
       try {
         fastPath = await clientFastPath();
       } catch {
@@ -112,6 +138,57 @@
   function detach(network, attachment) {
     if (!confirm(`Disconnect ${attachment.service_name || 'this service'} from ${network.name}?`)) return null;
     return run(() => clientDetachPrivateNetwork(network.id, attachment.id), 'Service disconnected.');
+  }
+
+  async function submitInvite(network) {
+    const who = (inviteForms[network.id] || '').trim();
+    const sent = await run(
+      () => clientInviteToNetwork(network.id, who),
+      'Invitation sent. If the address or username belongs to a client who can join, they will see it in their portal.',
+    );
+    if (sent) inviteForms = { ...inviteForms, [network.id]: '' };
+  }
+
+  function cancelInvite(network, invitation) {
+    return run(() => clientCancelNetworkInvitation(network.id, invitation.id), 'Invitation cancelled.');
+  }
+
+  function removeMember(network, member) {
+    const warning = `Remove ${member.username || 'this member'} from ${network.name}? Their servers are taken off the network at once.`;
+    if (!confirm(warning)) return null;
+    return run(() => clientRemoveNetworkMember(network.id, member.user_id), 'Member removed.');
+  }
+
+  function answer(invitation, accept) {
+    return run(
+      () => (accept ? clientAcceptNetworkInvitation(invitation.id) : clientDeclineNetworkInvitation(invitation.id)),
+      accept ? 'You joined the network.' : 'Invitation declined.',
+    );
+  }
+
+  async function submitSharedAttach(network) {
+    const key = `s${network.id}`;
+    const form = attachForm(key);
+    const attached = await run(
+      () =>
+        clientSharedAttach(network.id, {
+          service_id: Number(form.service_id),
+          ip_address: form.ip_address.trim() || null,
+        }),
+      'Service connected.',
+    );
+    if (attached) attachForms = { ...attachForms, [key]: { service_id: '', ip_address: '' } };
+  }
+
+  function sharedDetach(network, attachment) {
+    if (!confirm(`Disconnect ${attachment.service_name || 'this service'} from ${network.name}?`)) return null;
+    return run(() => clientSharedDetach(network.id, attachment.id), 'Service disconnected.');
+  }
+
+  function leave(network) {
+    const warning = `Leave ${network.name}? Your servers on it are taken off the network and you lose access to its storage.`;
+    if (!confirm(warning)) return null;
+    return run(() => clientLeaveSharedNetwork(network.id), 'You left the network.');
   }
 
   function removeNetwork(network) {
@@ -261,7 +338,30 @@
       </div>
     {/if}
 
-    {#if networks.length === 0 && !showCreate}
+    {#if invitations.length > 0}
+      <div class="panel">
+        <h2>Invitations</h2>
+        <p class="hint">Other clients have invited you to join their private networks. Joining lets you connect your own servers and reach the storage they share on it.</p>
+        <div class="rows">
+          {#each invitations as invitation (invitation.id)}
+            <div class="row">
+              <div>
+                <span>{invitation.network_name}</span>
+                <small>from {invitation.owner}</small>
+              </div>
+              <div>{invitation.location_name}</div>
+              <div><small>Expires {invitation.expires_at ? new Date(invitation.expires_at).toLocaleDateString() : ''}</small></div>
+              <div class="row-end">
+                <Button size="small" disabled={working} on:click={() => answer(invitation, true)}>Accept</Button>
+                <button class="link" disabled={working} on:click={() => answer(invitation, false)}>Decline</button>
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if networks.length === 0 && shared.length === 0 && !showCreate}
       <div class="empty">
         <h2>No private networks yet</h2>
         {#if options.locations.length === 0}
@@ -373,6 +473,175 @@
             <p class="hint">You have no other active services in {network.location_name} to connect.</p>
           {/if}
         {/if}
+
+        {#if network.kind !== 'proxy_access' && network.status === 'active'}
+          <div class="sharing">
+            <h3>Members and invitations</h3>
+            <p class="hint">
+              Invite another client by email address or username. Members can connect their own servers in {network.location_name}
+              to this network, and reach any storage share open to the whole network. They cannot change the network, its storage
+              or see your other services.
+            </p>
+            {#if network.members?.length}
+              <div class="rows">
+                {#each network.members as member (member.user_id)}
+                  <div class="row">
+                    <div><span>{member.username}</span></div>
+                    <div>
+                      {#if member.servers.length}
+                        {#each member.servers as server}<span class="mono">{server.ip_address}</span> <small>{typeLabel(server.kind)}</small>{/each}
+                      {:else}
+                        <small>No servers connected</small>
+                      {/if}
+                    </div>
+                    <div><small>Joined {member.joined_at ? new Date(member.joined_at).toLocaleDateString() : ''}</small></div>
+                    <div class="row-end">
+                      <button class="link" disabled={working} on:click={() => removeMember(network, member)}>Remove</button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+            {#if network.invitations?.length}
+              <div class="rows">
+                {#each network.invitations as invitation (invitation.id)}
+                  <div class="row">
+                    <div><span>{invitation.invitee}</span></div>
+                    <div><span class="badge warn">Invited</span></div>
+                    <div><small>Expires {invitation.expires_at ? new Date(invitation.expires_at).toLocaleDateString() : ''}</small></div>
+                    <div class="row-end">
+                      <button class="link" disabled={working} on:click={() => cancelInvite(network, invitation)}>Cancel</button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+            {#if network.member_limit > 0}
+              <div class="invite">
+                <input
+                  value={inviteForms[network.id] || ''}
+                  on:input={(e) => (inviteForms = { ...inviteForms, [network.id]: e.target.value })}
+                  placeholder="Email address or username"
+                  aria-label="Client to invite"
+                />
+                <Button size="small" disabled={working || !(inviteForms[network.id] || '').trim()} on:click={() => submitInvite(network)}>
+                  Invite
+                </Button>
+              </div>
+              <p class="hint">
+                {(network.members || []).length} member{(network.members || []).length === 1 ? '' : 's'} and
+                {(network.invitations || []).length} pending, up to {network.member_limit} in all. You are always told an invitation was sent,
+                whether or not the address matches an account.
+              </p>
+            {:else}
+              <p class="hint">Sharing is not available in this location.</p>
+            {/if}
+          </div>
+        {/if}
+      </article>
+    {/each}
+
+    {#if shared.length > 0}
+      <h2 class="section">Shared with me</h2>
+    {/if}
+    {#each shared as network (network.id)}
+      {@const candidates = attachableServices(network)}
+      {@const form = attachForm(`s${network.id}`)}
+      {@const storage = sharedStorage[network.id] || { linked: false, shares: [] }}
+      <article class="panel">
+        <div class="head">
+          <div>
+            <h2>{network.name}</h2>
+            <p>
+              Shared by {network.owner || 'another client'} · {network.location_name} · <span class="mono">{network.cidr}</span>
+            </p>
+          </div>
+          <Button variant="danger" size="small" disabled={working} on:click={() => leave(network)}>Leave</Button>
+        </div>
+
+        {#if network.attachments.length === 0}
+          <p class="none">None of your services are connected.</p>
+        {:else}
+          <div class="rows">
+            {#each network.attachments as attachment (attachment.id)}
+              <div class="row">
+                <div>
+                  <a href={`/client/services/${attachment.service_id}`}>{attachment.service_name}</a>
+                  <small>{typeLabel(attachment.service_type)}</small>
+                </div>
+                <div>
+                  <span class="mono">{attachment.ip_address}/{attachment.prefix_length}</span>
+                  {#if attachment.mac_address}<small class="mono">{attachment.mac_address}</small>{/if}
+                </div>
+                <div>
+                  <span class="badge" class:ok={attachment.state === 'active'} class:warn={attachment.state !== 'active'}>
+                    {STATE_LABELS[attachment.state] || attachment.state}
+                  </span>
+                </div>
+                <div class="row-end">
+                  {#if attachment.state !== 'detaching'}
+                    <button class="link" disabled={working} on:click={() => sharedDetach(network, attachment)}>Disconnect</button>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+          <p class="hint">
+            Set each address inside the operating system. On a virtual machine, use the extra network card with the MAC address shown.
+            {#if network.server_vlan_id}
+              On a dedicated server, add a VLAN interface with ID {network.server_vlan_id} on the main network card and give it the address shown.
+            {/if}
+          </p>
+        {/if}
+
+        {#if network.status === 'active'}
+          {#if candidates.length > 0}
+            <div class="attach">
+              <select
+                value={form.service_id}
+                on:change={(e) => setAttachField(`s${network.id}`, 'service_id', e.target.value)}
+                aria-label="Service to connect"
+              >
+                <option value="">Connect a service</option>
+                {#each candidates as service (service.service_id)}
+                  <option value={service.service_id}>{service.name} ({typeLabel(service.service_type)})</option>
+                {/each}
+              </select>
+              <input
+                value={form.ip_address}
+                on:input={(e) => setAttachField(`s${network.id}`, 'ip_address', e.target.value)}
+                placeholder="Address (optional)"
+                aria-label="Private address"
+              />
+              <Button size="small" disabled={working || !form.service_id} on:click={() => submitSharedAttach(network)}>
+                Connect
+              </Button>
+            </div>
+          {:else if network.attachments.length === 0}
+            <p class="hint">You have no other active services in {network.location_name} to connect.</p>
+          {/if}
+        {/if}
+
+        {#if storage.linked}
+          <div class="sharing">
+            <h3>Storage on this network</h3>
+            <p class="hint">
+              Storage address <span class="mono">{storage.endpoint_ip}</span>. These shares are open to every server on the network.
+              Mount them from a server you have connected above.
+            </p>
+            {#each storage.shares as share (share.id)}
+              <div class="mount">
+                <div><strong>{share.name}</strong> {#if share.read_only}<small>read only</small>{/if}</div>
+                <code>{share.mount_command}</code>
+                <button class="link plain" on:click={() => copy(share.mount_command)}>Copy</button>
+                <code>{share.fstab_line}</code>
+                <button class="link plain" on:click={() => copy(share.fstab_line)}>Copy</button>
+              </div>
+            {:else}
+              <p class="none">No shares are open to the whole network.</p>
+            {/each}
+          </div>
+        {/if}
       </article>
     {/each}
   {/if}
@@ -424,6 +693,14 @@
   .row small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-tertiary); }
   .row a { color: var(--portal-accent); font-weight: 600; text-decoration: none; }
   .row-end { text-align: right; }
+  .sharing { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-color); }
+  .sharing h3 { margin: 0 0 4px; font-size: 15px; }
+  .section { margin: 24px 0 12px; font-size: 20px; }
+  .invite { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-top: 14px; }
+  .mount { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; margin-top: 10px; font-size: 13px; }
+  .mount > div { grid-column: 1 / -1; }
+  .mount code { overflow-x: auto; white-space: nowrap; padding: 6px 8px; border-radius: 6px; background: var(--bg-secondary, rgba(127, 127, 127, 0.1)); }
+  .link.plain { color: var(--portal-accent); }
   .attach { display: grid; grid-template-columns: 1.4fr 1fr auto; gap: 8px; align-items: center; margin-top: 14px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .badge {

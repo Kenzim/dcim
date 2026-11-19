@@ -27,8 +27,9 @@ Dedicated servers also need what Rackflow already records: a port marked as the 
 
 | Setting | Default | Where |
 |---|---|---|
-| Networks per client per location | 5 | Pool |
-| Networks per service | 4 | Pool |
+| Networks per client per location | 5 | Pool (counts only networks the client owns) |
+| Networks per service | 4 | Pool (owned or shared networks) |
+| Members per network | 5 (0 turns sharing off) | Pool (`max_members_per_network`; members plus pending invitations) |
 | Address range | `10.0.0.0/24`; any private IPv4 range from /16 to /29 | Chosen per network |
 | Networks per location | Size of the pool's VLAN range | Pool |
 
@@ -46,9 +47,13 @@ An `nfs_storage` service is linked to exactly one of the owner's networks (in th
 
 Storage is kept while the client has no servers: terminating, suspending or letting every server expire only detaches those servers, never the storage node's attachment, and never deletes the network. Shares can also be reached over SFTP from outside our network; see `docs/nfs-storage-sftp.md`.
 
+## Sharing a network with other clients
+
+The owner can invite other clients (same reseller scope) onto a standard network. A member attaches their own VMs and dedicated servers in the same location, takes addresses from the same range, and can mount any share open to the whole network; they cannot manage the network or its storage. Removing a member, a member leaving, deleting the network, or the owner being gone for 30 days detaches the members' servers. Proxy access networks are never shared. Roles, lifecycle rules, endpoints and the security model are in `docs/private-network-sharing.md`.
+
 ## What the client does
 
-The portal page is `/client/networks`. After connecting a service, the client sets the address inside the operating system:
+The portal page is `/client/networks`; it also lists invitations, the networks shared with the client ("Shared with me") and, per owned network, its members and invitations. After connecting a service, the client sets the address inside the operating system:
 
 - **Virtual machine:** configure the new network card (the portal shows its MAC address). Templates that use cloud-init apply the address on the next reboot.
 - **Dedicated server:** add a VLAN interface with the network's VLAN ID on the main network card and give it the address shown.
@@ -57,7 +62,7 @@ The portal page is `/client/networks`. After connecting a service, the client se
 
 - **Terminate:** terminating a service through the billing API, the reseller API or admin delete detaches it from all its networks straight away. A service terminated by the commerce lifecycle worker (non-payment) is detached by the repair loop, within about five minutes.
 - **Reuse gate:** a dedicated server is not offered for a new order while any attachment row still points at it, so a recycled server cannot land in the previous client's network. If a switch is unreachable, the attachment stays in `detaching` with the error shown on the admin page.
-- **Repair loop:** the reconciliation loop (`app/services/reconciliation_jobs.py`) retries failed attaches and detaches, re-adds a VM network card lost in a rebuild, puts back a VLAN removed from a port by hand, and finishes network deletes.
+- **Repair loop:** the reconciliation loop (`app/services/reconciliation_jobs.py`) retries failed attaches and detaches, re-adds a VM network card lost in a rebuild, puts back a VLAN removed from a port by hand, and finishes network deletes. It also runs the sharing repair: expires and prunes invitations, removes members who are no longer eligible, detaches any attachment whose service belongs to neither the owner nor a member, and winds up networks whose owner is gone.
 - **VLAN reuse:** VLAN IDs are handed out in rotation, so a released ID is not reused until the pool wraps round.
 - **Force delete:** deleting a network with "skip switches" drops the record without contacting the switches. Use it only for a switch that is gone for good.
 
@@ -74,13 +79,13 @@ The portal page is `/client/networks`. After connecting a service, the client se
 
 | Layer | Path |
 |---|---|
-| Models | `app/models/private_network.py`, `proxmox_clusters.location_id` |
-| Migration | `alembic/versions/add_private_networks.py` |
+| Models | `app/models/private_network.py` (including `PrivateNetworkMember`, `PrivateNetworkInvitation`), `proxmox_clusters.location_id` |
+| Migration | `alembic/versions/add_private_networks.py`, `alembic/versions/add_private_network_sharing.py` |
 | DAO | `app/dao/private_network_dao.py` |
-| Service | `app/services/private_network_service.py` |
-| API | `app/api/private_networks.py` (`/api/admin/private-networks`, `/api/client/private-networks`) |
+| Service | `app/services/private_network_service.py`, `app/services/private_network_sharing.py` |
+| API | `app/api/private_networks.py` (`/api/admin/private-networks`, `/api/client/private-networks`), `app/api/private_network_sharing.py` (invitations, members, `/shared`) |
 | Switch drivers | `app/plugins/nxos.py`, `app/plugins/qnap_qss.py` |
 | Hypervisor | `attach_private_nic` / `detach_private_nic` in `app/plugins/proxmox.py` |
 | Admin UI | `frontend/src/components/PrivateNetworks.svelte` |
 | Client UI | `frontend/src/components/client/ClientNetworks.svelte` |
-| Tests | `tests/services/test_private_network_service.py`, `tests/api/test_private_networks_api.py`, `tests/plugins/test_nxos.py`, `tests/plugins/test_qnap_qss.py`, `tests/plugins/test_proxmox_private_nic.py` |
+| Tests | `tests/services/test_private_network_service.py`, `tests/services/test_private_network_sharing.py`, `tests/api/test_private_networks_api.py`, `tests/api/test_private_network_sharing_api.py`, `tests/mcp/test_private_network_sharing_mcp.py`, `tests/plugins/test_nxos.py`, `tests/plugins/test_qnap_qss.py`, `tests/plugins/test_proxmox_private_nic.py` |

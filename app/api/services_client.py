@@ -68,6 +68,7 @@ from app.services.vm_backup_service import (
     restore_service_backup,
 )
 from app.models.service_vm import VMGuestState
+from app.services.retained_restore_service import power_block_reason
 from app.services.vm_strategy_executor import provision_vm_service_async
 import asyncio
 import logging
@@ -415,6 +416,9 @@ def _validate_client_power_action(service, action: str, server) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Cannot '{action}' an administratively disabled server",
         )
+    blocked = power_block_reason(service, action)
+    if blocked:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
 
 
 async def _run_client_power_action(plugin, action: str) -> bool:

@@ -320,6 +320,17 @@ async def _run_randomize_smbios(
     return {"status": "ok", "action": "randomize_smbios", "smbios": sm}
 
 
+def _run_retry_restore_configuration(db: Session, service: Service) -> Dict[str, Any]:
+    from app.services.backup_slot_service import BackupSlotError
+    from app.services.retained_restore_service import enqueue_macos_restore_retry
+
+    try:
+        result = enqueue_macos_restore_retry(db, service)
+    except BackupSlotError as exc:
+        raise StrategyActionError(str(exc), exc.status_code) from exc
+    return {"action": "retry_restore_configuration", **result}
+
+
 async def run_action(
     db: Session,
     service: Service,
@@ -337,6 +348,9 @@ async def run_action(
     available = {a["name"] for a in list_actions(db, service, audience)}
     if action_name not in available:
         raise StrategyActionError(f"Action '{action_name}' is not available", 403)
+
+    if action_name == "retry_restore_configuration":
+        return _run_retry_restore_configuration(db, service)
 
     params = params or {}
     ctx = _ActionCtx(db, service)

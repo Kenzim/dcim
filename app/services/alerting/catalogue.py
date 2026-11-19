@@ -130,6 +130,14 @@ _SPECS = (
         "storage_location",
     ),
     AlertTypeSpec(
+        "storage_sftp_no_master",
+        "Storage SFTP has no master",
+        "A location whose SFTP is behind a virtual IP has no online node holding the SFTP master lease.",
+        _C,
+        "storage_location",
+        (_seconds("no_master_after_seconds", "No master for", 120),),
+    ),
+    AlertTypeSpec(
         "proxy_runner_offline",
         "Proxy runner offline",
         "An enabled proxy runner has stopped phoning home.",

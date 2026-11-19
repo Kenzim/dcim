@@ -567,6 +567,9 @@ move is a failover (`last_failover_at`, an event and an alert).
   draining).
 - `storage_tenant_error` also fires for an active, linked tenant that no node has served for more
   than two minutes while HA is active.
+- `storage_sftp_no_master` (critical): a location whose SFTP is behind a virtual IP, with HA
+  active, has had no online node reporting to be the SFTP master for two minutes
+  (`no_master_after_seconds`).
 
 ## 12. Testing
 

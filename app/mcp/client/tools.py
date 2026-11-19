@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.dao.commerce_dao import BillingAccountDAO
 from app.dao.service_dao import ServiceDAO
 from app.mcp.client.instance import client_mcp
+from app.mcp.client.networks import NETWORK_SCOPE, network_action, networks_view
 from app.mcp.client.runtime import run_client_tool
 from app.services import client_notifications
 from app.models.reseller import InvoiceStatus
@@ -74,6 +75,7 @@ _ACTION_SCOPE = {
     "run_action": "destructive",
     "fast_path_on": "write",
     "fast_path_off": "write",
+    "network": "write",
 }
 
 
@@ -169,12 +171,13 @@ async def account(
 
 @client_mcp.tool()
 async def services(
-    view: Literal["list", "detail", "backups", "ssh_keys", "actions", "fast_path"] = "list",
+    view: Literal["list", "detail", "backups", "ssh_keys", "actions", "fast_path", "networks"] = "list",
     service_id: Optional[int] = None,
     service_type: Optional[str] = None,
 ) -> Any:
     """Your services. list (service_type filters), detail, backups (a VM's backups and your backup slots, or a backup_slot service's retained backup and the VMs it can be restored onto), ssh_keys (VM), actions (plugin actions).
-    fast_path: private proxy addresses per location and proxy IP (service_id optional). All others need service_id."""
+    fast_path: private proxy addresses per location and proxy IP (service_id optional).
+    networks (no service_id): your private networks with members and invitations, networks shared with you with their open shares, and invitations to answer. All others need service_id."""
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
         auth = _auth(ctx)
@@ -183,6 +186,8 @@ async def services(
             return [_pick(row.model_dump(), _LIST_FIELDS) for row in rows]
         if view == "fast_path":
             return _fast_path(await network_portal.client_fast_path(auth, db), service_id)
+        if view == "networks":
+            return await networks_view(db, ctx)
         _need(f"services view={view}", service_id=service_id)
         if view == "detail":
             row = await portal.client_get_service(service_id, auth, db)
@@ -204,8 +209,8 @@ async def services(
 
 @client_mcp.tool()
 async def service_action(
-    service_id: int,
     action: Literal[
+        "network",
         "power_on",
         "power_off",
         "reboot",
@@ -222,6 +227,7 @@ async def service_action(
         "fast_path_on",
         "fast_path_off",
     ],
+    service_id: Optional[int] = None,
     confirm: bool = False,
     console_type: Optional[Literal["kvm", "sol", "vnc", "serial"]] = None,
     backup_mode: Literal["snapshot", "suspend", "stop"] = "snapshot",
@@ -238,14 +244,24 @@ async def service_action(
     """Act on one of your services; confirm=true required except console.
 
     write scope: power_on, power_off, reboot, reset, console (one-time browser link; console_type kvm/sol for servers, vnc/serial for VMs), backup_create (backup_mode, notes; suspend/stop interrupt the VM), set_ssh_keys (VM; replaces all keys, ssh_public_keys), backup_retain (service_id=VM, volid, slot_service_id; keeps that backup in your backup slot; replace=true swaps out what the slot holds).
-    destructive scope: backup_delete and backup_restore (volid, storage; a volid held in a backup slot restores onto service_id, any of your VMs, and replaces everything on it), backup_release (service_id=backup_slot; deletes its retained backup), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
+    destructive scope: backup_delete and backup_restore (volid, storage; a volid held in a backup slot restores onto service_id, any of your VMs of the same type (cloud-init Linux or macOS), and replaces everything on it; on macOS, Apple account sign-ins may need redoing because they are tied to the VM's serial number), backup_release (service_id=backup_slot; deletes its retained backup), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
     write scope, proxies: fast_path_on and fast_path_off turn the private proxy network on or off in the locations of this proxy's IPs (for all your servers there).
+    network (service_id only for attach): name = attach, detach, invite, invitation_cancel, member_remove, leave, invitation_accept or invitation_decline; params = network_id plus attach: service_id (or here), ip_address; detach: attachment_id; invite: invitee (email or username); invitation_cancel: invitation_id; member_remove: member_user_id; invitation_accept and invitation_decline: invitation_id only. Write: attach, invite, invitation_cancel, invitation_accept, invitation_decline. Destructive: detach, member_remove, leave. Members attach and detach their own services; the rest is owner-only.
     """
-    min_scope = _ACTION_SCOPE[action]
+    if action == "network":
+        if name not in NETWORK_SCOPE:
+            raise ToolError(f"network needs name, one of: {', '.join(NETWORK_SCOPE)}")
+        min_scope = NETWORK_SCOPE[name]
+    else:
+        if service_id is None:
+            raise ToolError(f"{action} needs: service_id")
+        min_scope = _ACTION_SCOPE[action]
     needs_confirm = action != "console" and not (action == "backup_create" and backup_mode == "snapshot")
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
         auth = _auth(ctx)
+        if action == "network":
+            return await network_action(db, ctx, name, service_id=service_id, params=params)
         if action in ("power_on", "power_off", "reboot", "reset"):
             verb = {"power_on": "on", "power_off": "off"}.get(action, action)
             return await portal.client_power_service(service_id, PowerAction(action=verb), auth, db)
@@ -305,7 +321,14 @@ async def service_action(
         work,
         confirm_required=needs_confirm,
         confirm=confirm,
-        args={"service_id": service_id, "action": action, "console_type": console_type, "volid": volid, "name": name},
+        args={
+            "service_id": service_id,
+            "action": action,
+            "console_type": console_type,
+            "volid": volid,
+            "name": name,
+            **({"network_id": params.get("network_id")} if action == "network" and params else {}),
+        },
     )
 
 

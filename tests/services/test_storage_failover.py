@@ -713,6 +713,56 @@ def test_location_degraded_alert(world):
     assert len(run_alert(world.db, "storage_location_degraded")) == 1
 
 
+def _vip_location(world, age_seconds=600):
+    storage_location.update_location(
+        world.db, world.location.id, sftp_enabled=True, sftp_host="files.example.com", sftp_virtual_ip="198.51.100.9/24"
+    )
+    row = storage_location.get_location(world.db, world.location.id)
+    row.updated_at = datetime.utcnow() - timedelta(seconds=age_seconds)
+    world.db.commit()
+    return row
+
+
+def test_sftp_no_master_alert_fires_without_an_online_master(world):
+    a, b = world.node(sftp=True), world.node(sftp=True)
+    _vip_location(world)
+    found = run_alert(world.db, "storage_sftp_no_master")
+    assert len(found) == 1 and found[0].resource_type == "storage_location"
+    assert found[0].resource_id == str(world.location.id)
+    assert CATALOGUE["storage_sftp_no_master"].severity == "critical"
+
+    a.sftp_master = True
+    world.db.commit()
+    assert run_alert(world.db, "storage_sftp_no_master") == []
+
+    # The master stops reporting: the alert waits for the threshold from its last report.
+    a.last_seen_at = datetime.utcnow() - timedelta(seconds=200)
+    world.db.commit()
+    assert len(run_alert(world.db, "storage_sftp_no_master")) == 1
+    a.last_seen_at = datetime.utcnow() - timedelta(seconds=30)
+    world.db.commit()
+    assert run_alert(world.db, "storage_sftp_no_master") == []
+    assert b.sftp_master is False
+
+
+def test_sftp_no_master_alert_waits_after_a_master_change_and_needs_a_vip_and_ha(world):
+    a, b = world.node(sftp=True), world.node(sftp=True)
+    _vip_location(world)
+    a.sftp_master = True
+    world.db.commit()
+    send(world.db, a, report(a))  # a reports it is no longer master: an sftp_master event now
+    assert a.sftp_master is False
+    assert run_alert(world.db, "storage_sftp_no_master") == []
+    assert len(run_alert(world.db, "storage_sftp_no_master", now=datetime.utcnow() + timedelta(seconds=180))) == 1
+
+    b.runner_version = "0.2.2"
+    world.db.commit()
+    assert run_alert(world.db, "storage_sftp_no_master", now=datetime.utcnow() + timedelta(seconds=180)) == []
+    b.runner_version = "0.3.0"
+    storage_location.update_location(world.db, world.location.id, sftp_virtual_ip="")
+    assert run_alert(world.db, "storage_sftp_no_master", now=datetime.utcnow() + timedelta(seconds=180)) == []
+
+
 def test_location_with_one_node_is_never_degraded(world):
     a = world.node()
     a.last_seen_at = datetime.utcnow() - timedelta(hours=1)

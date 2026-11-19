@@ -17,6 +17,7 @@
     syncPrivateNetwork,
     attachPrivateNetwork,
     detachPrivateNetwork,
+    removePrivateNetworkMember,
   } from '../lib/api.js';
 
   const ATTACHABLE_TYPES = ['vm', 'bare_metal'];
@@ -27,6 +28,7 @@
     bridge: 'vmbr0',
     max_networks_per_client: 5,
     max_networks_per_service: 4,
+    max_members_per_network: 5,
     reserved_cidrs: '',
   });
   const parseCidrList = (text) => text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
@@ -110,6 +112,7 @@
           bridge: poolForm.bridge.trim(),
           max_networks_per_client: Number(poolForm.max_networks_per_client),
           max_networks_per_service: Number(poolForm.max_networks_per_service),
+          max_members_per_network: Number(poolForm.max_members_per_network),
           reserved_cidrs: parseCidrList(poolForm.reserved_cidrs),
         }),
       'Pool created',
@@ -158,6 +161,23 @@
       () => updatePrivateNetworkPool(pool.id, { max_networks_per_client: parsed }),
       `Limit for ${pool.location_name} set to ${parsed} networks per client`,
     );
+  }
+
+  function updateMemberLimit(pool, value) {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed === pool.max_members_per_network) return null;
+    return run(
+      () => updatePrivateNetworkPool(pool.id, { max_members_per_network: parsed }),
+      `Sharing in ${pool.location_name} set to ${parsed} members per network`,
+    );
+  }
+
+  function removeMember(network, member) {
+    const warning =
+      `Remove ${member.username || `user #${member.user_id}`} from ${network.name}?\n\n` +
+      'Their servers are taken off the network at once.';
+    if (!confirm(warning)) return null;
+    return run(() => removePrivateNetworkMember(network.id, member.user_id), 'Member removed');
   }
 
   function removePool(pool) {
@@ -269,7 +289,7 @@
     <div class="table">
       <div class="row head pool-row">
         <div>Location</div><div>VLAN range</div><div>Bridge</div><div>In use</div><div>Per client</div>
-        <div>Per service</div><div>Enabled</div><div>Actions</div>
+        <div>Per service</div><div>Members</div><div>Enabled</div><div>Actions</div>
       </div>
       {#each pools as pool (pool.id)}
         <div class="row pool-row">
@@ -295,6 +315,17 @@
             {#if pool.proxy_access_enabled}
               <small class="reserved">proxy fast path</small>
             {/if}
+          </div>
+          <div>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              class="limit-input"
+              value={pool.max_members_per_network}
+              title="Other clients one network can have as members. 0 turns sharing off in this location."
+              on:change={(e) => updateMemberLimit(pool, e.target.value)}
+            />
           </div>
           <div>{pool.enabled ? 'yes' : 'no'}</div>
           <div class="row-actions">
@@ -377,6 +408,34 @@
                   Drop record without touching the switches
                 </button>
               {/if}
+            {/if}
+
+            {#if network.members?.length || network.invitations?.length}
+              <div class="table">
+                <div class="row head member-row">
+                  <div>Member</div><div>Servers</div><div>Joined</div><div>Actions</div>
+                </div>
+                {#each network.members || [] as member (member.user_id)}
+                  <div class="row member-row">
+                    <div>
+                      <button class="link-btn" on:click={() => navigate(`/admin/users/${member.user_id}`)}>
+                        {member.username || `#${member.user_id}`}
+                      </button>
+                    </div>
+                    <div class="mono">
+                      {member.servers.length ? member.servers.map((s) => `${s.ip_address} (${s.kind})`).join(', ') : 'none attached'}
+                    </div>
+                    <div>{member.joined_at ? new Date(member.joined_at).toLocaleDateString() : ''}</div>
+                    <div>
+                      <button class="tiny danger" disabled={working} on:click={() => removeMember(network, member)}>Remove</button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+              <p class="hint">
+                {(network.members || []).length} of {network.member_limit} members.
+                {#if network.invitations?.length}{network.invitations.length} invitation{network.invitations.length === 1 ? '' : 's'} pending.{/if}
+              </p>
             {/if}
 
             <div class="table">
@@ -469,6 +528,10 @@
           <input type="number" min="1" max="16" bind:value={poolForm.max_networks_per_service} />
         </label>
       </div>
+      <label class="field-label">Members per network
+        <input type="number" min="0" max="100" bind:value={poolForm.max_members_per_network} />
+      </label>
+      <p class="hint">Other clients a network owner can invite onto one network. 0 turns sharing off in this location.</p>
       <label class="field-label">Reserved ranges
         <textarea rows="3" bind:value={poolForm.reserved_cidrs} placeholder="10.16.0.0/12"></textarea>
       </label>
@@ -560,7 +623,8 @@
     font-size: 0.9rem;
   }
   .row.head { font-weight: 600; color: var(--text-secondary); }
-  .pool-row { grid-template-columns: 1.2fr 1.1fr 0.8fr 0.8fr 0.8fr 0.8fr 0.6fr 1.2fr; min-width: 820px; }
+  .pool-row { grid-template-columns: 1.2fr 1.1fr 0.8fr 0.8fr 0.8fr 0.8fr 0.8fr 0.6fr 1.2fr; min-width: 900px; }
+  .member-row { grid-template-columns: 1.2fr 2.4fr 0.8fr 0.7fr; min-width: 560px; }
   .network-row { grid-template-columns: 1.4fr 1.1fr 1fr 0.6fr 1.1fr 0.6fr 1fr 1.1fr; min-width: 880px; }
   .attachment-row { grid-template-columns: 1.5fr 0.8fr 1.1fr 1.2fr 1.3fr 0.7fr; min-width: 760px; }
   .detail {

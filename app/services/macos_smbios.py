@@ -11,12 +11,12 @@ import string
 import uuid
 from typing import Dict, Optional
 
-_DEFAULT_SMBIOS_MODEL = "iMacPro1,1"
+DEFAULT_SMBIOS_MODEL = "iMacPro1,1"
 
 
 # Model → serial/board prefixes commonly used with OpenCore GenSMBIOS.
 _MODEL_PREFIXES = {
-    _DEFAULT_SMBIOS_MODEL: ("C02", "C02"),
+    DEFAULT_SMBIOS_MODEL: ("C02", "C02"),
     "MacPro7,1": ("F5K", "F5K"),
     "iMac19,1": ("C02", "C02"),
     "MacBookPro16,1": ("C02", "C02"),
@@ -28,12 +28,12 @@ def _rand_alnum(n: int) -> str:
     return "".join(random.choice(alphabet) for _ in range(n))
 
 
-def generate_smbios(model: str = _DEFAULT_SMBIOS_MODEL) -> Dict[str, str]:
+def generate_smbios(model: str = DEFAULT_SMBIOS_MODEL) -> Dict[str, str]:
     """Return PlatformInfo Generic fields for OpenCore + Proxmox smbios1.
 
     Keys: SystemProductName, SystemSerialNumber, MLB, SystemUUID, ROM_HEX
     """
-    product = (model or _DEFAULT_SMBIOS_MODEL).strip() or _DEFAULT_SMBIOS_MODEL
+    product = (model or DEFAULT_SMBIOS_MODEL).strip() or DEFAULT_SMBIOS_MODEL
     serial_prefix, mlb_prefix = _MODEL_PREFIXES.get(product, ("C02", "C02"))
     # 12-char serial (prefix + body), 17-char MLB — GenSMBIOS-shaped.
     serial = f"{serial_prefix}{_rand_alnum(12 - len(serial_prefix))}"
@@ -46,6 +46,48 @@ def generate_smbios(model: str = _DEFAULT_SMBIOS_MODEL) -> Dict[str, str]:
         "MLB": mlb,
         "SystemUUID": smuuid,
         "ROM_HEX": rom_hex,
+    }
+
+
+def smbios_from_smbios1(smbios1: Optional[str], *, default_model: str = DEFAULT_SMBIOS_MODEL) -> Optional[Dict[str, str]]:
+    """Rebuild PlatformInfo Generic fields from a Proxmox ``smbios1`` value.
+
+    The serial, UUID and product name come from ``smbios1``. ``smbios1`` carries no board serial or ROM, so
+    those are derived from the serial and UUID: the same VM always gets the same values. Returns None when
+    ``smbios1`` has no serial or UUID.
+    """
+    import base64
+    import hashlib
+
+    from app.services.vm_identity_stamp import parse_smbios1_fields
+
+    fields = parse_smbios1_fields(smbios1)
+    encoded = fields.get("base64") in ("1", "true", "True")
+
+    def text(key: str) -> str:
+        raw = fields.get(key) or ""
+        if not raw or not encoded:
+            return raw
+        try:
+            return base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            return raw
+
+    serial = text("serial").strip()
+    smuuid = (fields.get("uuid") or "").strip().upper()
+    if not serial or not smuuid:
+        return None
+    product = text("product").strip() or default_model
+    digest = hashlib.sha256(f"{smuuid}:{serial}".encode("utf-8")).digest()
+    alphabet = string.ascii_uppercase + string.digits
+    mlb_prefix = _MODEL_PREFIXES.get(product, ("C02", "C02"))[1]
+    mlb = mlb_prefix + "".join(alphabet[b % len(alphabet)] for b in digest[: 17 - len(mlb_prefix)])
+    return {
+        "SystemProductName": product,
+        "SystemSerialNumber": serial,
+        "MLB": mlb,
+        "SystemUUID": smuuid,
+        "ROM_HEX": digest[-6:].hex().upper(),
     }
 
 

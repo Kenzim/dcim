@@ -99,9 +99,12 @@ def world(db_session):
         user.set_password("secret123")
         db_session.add(user)
         users[name] = user
-    db_session.add(
-        VMTemplate(code="debian-13", name="Debian 13", os_type="Linux - Cloudinit", proxmox_template_name="deb13")
-    )
+    for code, label, os_type in (
+        ("debian-13", "Debian 13", "Linux - Cloudinit"),
+        ("macos-14", "macOS 14", "macOS - Guest agent"),
+        ("win-2022", "Windows 2022", "Windows - Guest agent"),
+    ):
+        db_session.add(VMTemplate(code=code, name=label, os_type=os_type, proxmox_template_name=code))
     db_session.commit()
 
     def vm(owner, name, vmid, strategy="cloudinit_clone"):
@@ -494,8 +497,111 @@ async def test_restore_refused_for_guest_agent_target_or_backup(world, db_sessio
     volid = world.pbs.add(5100, "a")
     await slots.retain_from_vm(db_session, world.slot1, world.vm1, volid=volid)
     agent_vm = world.vm(world.users["alice"], "agent-vm", 5102, strategy="guest_agent")
-    with pytest.raises(BackupSlotError, match="not set up through cloud-init"):
+    with pytest.raises(BackupSlotError, match="a cloud-init Linux VM but 'agent-vm' is a guest-agent Linux VM"):
         await slots.restore_from_slot(db_session, world.slot1, agent_vm, confirm_data_loss=True)
+
+
+async def _retain_macos_backup(world, db_session, vmid=5300, name="mac-a"):
+    mac_source = world.vm(world.users["alice"], name, vmid, strategy="macos_guest_agent")
+    volid = world.pbs.add(vmid, "a", notes="rf1:tpl=macos-14;svc=1")
+    await slots.retain_from_vm(db_session, world.slot1, mac_source, volid=volid)
+    return mac_source, volid
+
+
+@pytest.mark.asyncio
+async def test_macos_backup_restores_onto_another_macos_vm_with_the_macos_job(world, db_session):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+
+    mac_source, volid = await _retain_macos_backup(world, db_session)
+    mac_target = world.vm(world.users["alice"], "mac-b", 5301, strategy="macos_guest_agent")
+    with pytest.raises(BackupSlotError, match="replaces everything on that VM") as err:
+        await slots.restore_from_slot(db_session, world.slot1, mac_target)
+    assert "Apple account sign-ins" in err.value.message
+    out = await slots.restore_from_slot(db_session, world.slot1, mac_target, confirm_data_loss=True, start=False)
+    assert out["status"] == "queued" and out["start"] is True
+    state = _reload(db_session, mac_target).config["vm_restore"]
+    assert state["source_service_id"] == mac_source.id and state["start"] is True
+    job = VMDeploymentJobDAO.get_by_id(db_session, out["job_id"])
+    assert job.strategy_name == "restore_retained_backup_macos"
+
+
+@pytest.mark.asyncio
+async def test_macos_backup_is_refused_onto_a_cloudinit_or_windows_vm(world, db_session):
+    await _retain_macos_backup(world, db_session)
+    with pytest.raises(BackupSlotError, match="a macOS VM but 'vm-two' is a cloud-init Linux VM"):
+        await slots.restore_from_slot(db_session, world.slot1, world.vm2, confirm_data_loss=True)
+    win_vm = world.vm(world.users["alice"], "win-vm", 5302, strategy="windows_guest_agent")
+    with pytest.raises(BackupSlotError, match="a macOS VM but 'win-vm' is a Windows VM"):
+        await slots.restore_from_slot(db_session, world.slot1, win_vm, confirm_data_loss=True)
+
+
+@pytest.mark.asyncio
+async def test_cloudinit_backup_is_refused_onto_a_macos_vm(world, db_session):
+    volid = world.pbs.add(5100, "a")
+    await slots.retain_from_vm(db_session, world.slot1, world.vm1, volid=volid)
+    mac_target = world.vm(world.users["alice"], "mac-b", 5301, strategy="macos_guest_agent")
+    with pytest.raises(BackupSlotError, match="a cloud-init Linux VM but 'mac-b' is a macOS VM") as err:
+        await slots.restore_from_slot(db_session, world.slot1, mac_target, confirm_data_loss=True)
+    assert err.value.status_code == 409
+    assert world.pbs.restore_calls == []
+
+
+@pytest.mark.asyncio
+async def test_windows_backup_is_still_refused_onto_another_vm(world, db_session):
+    win_source = world.vm(world.users["alice"], "win-a", 5303, strategy="windows_guest_agent")
+    volid = world.pbs.add(5303, "a", notes="rf1:tpl=win-2022;svc=1")
+    await slots.retain_from_vm(db_session, world.slot1, win_source, volid=volid)
+    win_target = world.vm(world.users["alice"], "win-b", 5304, strategy="windows_guest_agent")
+    with pytest.raises(BackupSlotError, match="a Windows VM, which can only be restored onto the VM it came from"):
+        await slots.restore_from_slot(db_session, world.slot1, win_target, confirm_data_loss=True)
+
+
+@pytest.mark.asyncio
+async def test_macos_backup_onto_the_same_vm_takes_the_ordinary_restore(world, db_session):
+    mac_source, volid = await _retain_macos_backup(world, db_session)
+    retained = RetainedBackupDAO.get_by_volid(db_session, volid)
+    with patch(
+        "app.services.vm_backup_service.enqueue_restore_backup_job", return_value={"job_id": 9, "async": True}
+    ) as enqueue:
+        out = await restore_retained_onto(db_session, retained, mac_source)
+    assert out["job_id"] == 9
+    assert enqueue.call_args.kwargs["volid"] == volid
+
+
+@pytest.mark.asyncio
+async def test_running_macos_restore_blocks_purging_the_backup(world, db_session):
+    _mac_source, volid = await _retain_macos_backup(world, db_session)
+    mac_target = world.vm(world.users["alice"], "mac-b", 5301, strategy="macos_guest_agent")
+    await slots.restore_from_slot(db_session, world.slot1, mac_target, confirm_data_loss=True)
+    retained = RetainedBackupDAO.get_by_volid(db_session, volid)
+    assert slots._restore_in_progress(db_session, retained.id) is True
+
+
+@pytest.mark.asyncio
+async def test_macos_restore_retry_needs_a_failed_restore_and_queues_the_retry_job(world, db_session):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.models.vm_deployment_job import DeploymentJobStatus
+    from app.services.retained_restore_service import enqueue_macos_restore_retry
+
+    await _retain_macos_backup(world, db_session)
+    mac_target = world.vm(world.users["alice"], "mac-b", 5301, strategy="macos_guest_agent")
+    out = await slots.restore_from_slot(db_session, world.slot1, mac_target, confirm_data_loss=True)
+    with pytest.raises(BackupSlotError, match="no macOS restore waiting"):
+        enqueue_macos_restore_retry(db_session, mac_target)
+
+    first = VMDeploymentJobDAO.get_by_id(db_session, out["job_id"])
+    first.status = DeploymentJobStatus.FAILED
+    state = dict(mac_target.config["vm_restore"])
+    state.update({"status": "failed", "error": "boom", "identity_reapplied": True, "configure_attempts": 3})
+    mac_target.config = {**mac_target.config, "vm_restore": state}
+    db_session.commit()
+
+    retry = enqueue_macos_restore_retry(db_session, mac_target)
+    job = VMDeploymentJobDAO.get_by_id(db_session, retry["job_id"])
+    assert job.strategy_name == "retry_restore_macos_configuration"
+    state = _reload(db_session, mac_target).config["vm_restore"]
+    assert state["status"] == "restored" and "error" not in state and "configure_attempts" not in state
+    assert state["identity_reapplied"] is True and state["job_id"] == retry["job_id"]
 
 
 @pytest.mark.asyncio
@@ -541,3 +647,252 @@ async def test_vm_restore_route_dispatches_retained_volids(world, db_session):
         db_session, world.vm2, volid=volid.split(":", 1)[1], storage=STORAGE, confirm_data_loss=True
     )
     assert out["kind"] == "retained"
+
+
+# --- macOS restore: failure recording, retry gate, power guard ---
+
+
+async def _queued_macos_restore(world, db_session):
+    await _retain_macos_backup(world, db_session)
+    target = world.vm(world.users["alice"], "mac-b", 5301, strategy="macos_guest_agent")
+    out = await slots.restore_from_slot(db_session, world.slot1, target, confirm_data_loss=True)
+    return target, out["job_id"]
+
+
+def _set_restore_state(db, service, **changes):
+    state = {**dict(service.config["vm_restore"]), **changes}
+    service.config = {**service.config, "vm_restore": state}
+    db.commit()
+
+
+def _fail_job_for_real(db, job_id, message="step failed"):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.services.deployment import runner
+
+    job = VMDeploymentJobDAO.get_by_id(db, job_id)
+    with patch("app.services.client_notifications.notify_job_finished"):
+        runner._fail_job(db, job, message)
+    db.expire_all()
+
+
+@pytest.mark.asyncio
+async def test_macos_job_failing_for_any_reason_records_a_failed_restore_and_errors_the_vm(world, db_session):
+    from app.models.service_vm import VMGuestState
+    from app.services.retained_restore_service import enqueue_macos_restore_retry
+
+    target, job_id = await _queued_macos_restore(world, db_session)
+    _set_restore_state(
+        db_session, target, status="restored", identity_reapplied=True, link_held=True, upid="UPID:restore"
+    )
+    _fail_job_for_real(db_session, job_id, "Exceeded max reclaim attempts (2)")
+    target = _reload(db_session, target)
+    state = target.config["vm_restore"]
+    assert state["status"] == "failed" and state["error"] == "Exceeded max reclaim attempts (2)"
+    assert state["link_held"] is True
+    assert target.vm.guest_state == VMGuestState.ERROR
+    assert target.vm.guest_last_error == "Exceeded max reclaim attempts (2)"
+    assert enqueue_macos_restore_retry(db_session, target)["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_retry_is_accepted_whatever_state_a_dead_job_left_behind(world, db_session):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.models.vm_deployment_job import DeploymentJobStatus
+    from app.services.retained_restore_service import enqueue_macos_restore_retry
+
+    target, job_id = await _queued_macos_restore(world, db_session)
+    _set_restore_state(db_session, target, status="running", identity_reapplied=True, link_held=True)
+    VMDeploymentJobDAO.get_by_id(db_session, job_id).status = DeploymentJobStatus.FAILED
+    db_session.commit()
+    assert enqueue_macos_restore_retry(db_session, _reload(db_session, target))["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_retry_is_refused_while_a_job_is_active_or_the_restore_is_finished_or_never_got_far(world, db_session):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.models.vm_deployment_job import DeploymentJobStatus
+    from app.services.retained_restore_service import enqueue_macos_restore_retry
+
+    target, job_id = await _queued_macos_restore(world, db_session)
+    _set_restore_state(db_session, target, status="failed", error="x", identity_reapplied=True)
+    with pytest.raises(BackupSlotError, match="Another deployment job is already active") as err:
+        enqueue_macos_restore_retry(db_session, target)
+    assert err.value.status_code == 409
+
+    VMDeploymentJobDAO.get_by_id(db_session, job_id).status = DeploymentJobStatus.FAILED
+    db_session.commit()
+    _set_restore_state(db_session, target, status="success")
+    with pytest.raises(BackupSlotError, match="no macOS restore waiting"):
+        enqueue_macos_restore_retry(db_session, target)
+    _set_restore_state(db_session, target, status="failed", identity_reapplied=False)
+    with pytest.raises(BackupSlotError, match="no macOS restore waiting"):
+        enqueue_macos_restore_retry(db_session, target)
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_enqueue_leaves_the_failed_state_untouched(world, db_session):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.models.service_vm import VMGuestState
+    from app.models.vm_deployment_job import DeploymentJobStatus
+    from app.services.retained_restore_service import enqueue_macos_restore_retry
+
+    target, job_id = await _queued_macos_restore(world, db_session)
+    VMDeploymentJobDAO.get_by_id(db_session, job_id).status = DeploymentJobStatus.FAILED
+    _set_restore_state(
+        db_session, target, status="failed", error="boom", identity_reapplied=True, configure_attempts=3
+    )
+    target.vm.guest_state = VMGuestState.ERROR
+    target.vm.guest_last_error = "boom"
+    db_session.commit()
+    before = dict(_reload(db_session, target).config["vm_restore"])
+
+    with patch.object(VMDeploymentJobDAO, "create_job", side_effect=RuntimeError("database is down")):
+        with pytest.raises(RuntimeError, match="database is down"):
+            enqueue_macos_restore_retry(db_session, target)
+    target = _reload(db_session, target)
+    assert target.config["vm_restore"] == before
+    assert target.vm.guest_state == VMGuestState.ERROR and target.vm.guest_last_error == "boom"
+    assert enqueue_macos_restore_retry(db_session, target)["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_retry_action_is_for_staff_only_and_queues_the_retry_job(world, db_session):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.models.vm_deployment_job import DeploymentJobStatus
+    from app.services.strategy_actions import StrategyActionError, list_actions, run_action
+
+    target, job_id = await _queued_macos_restore(world, db_session)
+    VMDeploymentJobDAO.get_by_id(db_session, job_id).status = DeploymentJobStatus.FAILED
+    _set_restore_state(db_session, target, status="failed", error="boom", identity_reapplied=True)
+
+    assert "retry_restore_configuration" not in {a["name"] for a in list_actions(db_session, target, "client")}
+    assert "retry_restore_configuration" in {a["name"] for a in list_actions(db_session, target, "admin")}
+    with pytest.raises(StrategyActionError) as refused:
+        await run_action(db_session, target, "retry_restore_configuration", {}, "client")
+    assert refused.value.status_code == 403
+    assert _reload(db_session, target).config["vm_restore"]["status"] == "failed"
+
+    result = await run_action(db_session, target, "retry_restore_configuration", {}, "admin")
+    assert result["action"] == "retry_restore_configuration" and result["status"] == "queued"
+    job = VMDeploymentJobDAO.get_by_id(db_session, result["job_id"])
+    assert job.strategy_name == "retry_restore_macos_configuration"
+
+
+@pytest.mark.asyncio
+async def test_retry_action_reports_a_refusal_as_a_conflict(world, db_session):
+    from app.services.strategy_actions import StrategyActionError, run_action
+
+    target, _job_id = await _queued_macos_restore(world, db_session)
+    with pytest.raises(StrategyActionError, match="no macOS restore waiting") as err:
+        await run_action(db_session, target, "retry_restore_configuration", {}, "admin")
+    assert err.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_vm_cannot_be_started_between_the_restore_and_its_identity_being_put_back(world, db_session):
+    from fastapi import HTTPException
+
+    from app.api.services_client import _validate_client_power_action
+    from app.services.retained_restore_service import power_block_reason
+
+    target, job_id = await _queued_macos_restore(world, db_session)
+    # Before the restore task has run, the VM is still the target's own.
+    assert power_block_reason(target, "on") is None
+    _set_restore_state(db_session, target, status="running", upid="UPID:restore")
+    for action in ("on", "reboot", "reset"):
+        assert "has not finished putting the VM's own network identity back" in power_block_reason(target, action)
+    assert power_block_reason(target, "off") is None
+    with pytest.raises(HTTPException) as err:
+        _validate_client_power_action(target, "on", None)
+    assert err.value.status_code == 409
+
+    # The job failing leaves it blocked: the source's identity is still what Proxmox holds.
+    _fail_job_for_real(db_session, job_id, "Restore task failed")
+    failed = _reload(db_session, target)
+    assert failed.config["vm_restore"]["status"] == "failed"
+    assert power_block_reason(failed, "on") is not None
+
+    # Once the target's identity is back the VM may be started again, held link or not.
+    _set_restore_state(db_session, failed, identity_reapplied=True, link_held=True)
+    assert power_block_reason(_reload(db_session, target), "on") is None
+
+
+@pytest.mark.asyncio
+async def test_restoring_again_after_an_interrupted_restore_keeps_the_targets_own_identity(world, db_session):
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.models.vm_deployment_job import DeploymentJobStatus
+
+    target, job_id = await _queued_macos_restore(world, db_session)
+    own = {"nets": {"net0": "e1000=AA:BB:CC:00:00:02,bridge=vmbr0"}, "name": "mac-b", "config": {"smbios1": "x"}}
+    _set_restore_state(db_session, target, status="running", upid="UPID:restore", target_identity=own)
+    _fail_job_for_real(db_session, job_id, "Restore task failed")
+    assert VMDeploymentJobDAO.get_by_id(db_session, job_id).status == DeploymentJobStatus.FAILED
+
+    await slots.restore_from_slot(db_session, world.slot1, _reload(db_session, target), confirm_data_loss=True)
+    state = _reload(db_session, target).config["vm_restore"]
+    assert state["target_identity"] == own and state["carried_identity"] is True
+    assert "upid" not in state and state["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_restoring_after_a_clean_failure_captures_the_identity_afresh(world, db_session):
+    target, job_id = await _queued_macos_restore(world, db_session)
+    _set_restore_state(db_session, target, status="queued", target_identity={"nets": {}, "name": "mac-b"})
+    _fail_job_for_real(db_session, job_id, "Could not stop the guest")
+    await slots.restore_from_slot(db_session, world.slot1, _reload(db_session, target), confirm_data_loss=True)
+    state = _reload(db_session, target).config["vm_restore"]
+    assert "target_identity" not in state and "carried_identity" not in state
+
+
+@pytest.mark.asyncio
+async def test_cloudinit_restore_state_carries_no_macos_markers(world, db_session):
+    volid = world.pbs.add(5100, "a")
+    await slots.retain_from_vm(db_session, world.slot1, world.vm1, volid=volid)
+    await slots.restore_from_slot(db_session, world.slot1, world.vm2, confirm_data_loss=True)
+    state = _reload(db_session, world.vm2).config["vm_restore"]
+    assert "macos" not in state and "carried_identity" not in state
+
+
+# --- guest type matching, one case per mismatch ---
+
+
+@pytest.mark.parametrize(
+    ("backup_os", "target_strategy", "message"),
+    [
+        ("Linux - Cloudinit", "macos_guest_agent", "a cloud-init Linux VM but 'tgt' is a macOS VM"),
+        ("Linux - Cloudinit", "windows_guest_agent", "a cloud-init Linux VM but 'tgt' is a Windows VM"),
+        ("Linux - Cloudinit", "guest_agent", "a cloud-init Linux VM but 'tgt' is a guest-agent Linux VM"),
+        ("macOS - Guest agent", "cloudinit_clone", "a macOS VM but 'tgt' is a cloud-init Linux VM"),
+        ("macOS - Guest agent", "windows_guest_agent", "a macOS VM but 'tgt' is a Windows VM"),
+        ("macOS - Guest agent", "guest_agent", "a macOS VM but 'tgt' is a guest-agent Linux VM"),
+        ("macOS - Guest agent", None, "a macOS VM but 'tgt' is an unidentified VM"),
+        ("Windows - Guest agent", "windows_guest_agent", "a Windows VM, which can only be restored onto the VM it came from"),
+        ("Windows - Guest agent", "macos_guest_agent", "a Windows VM, which can only be restored onto the VM it came from"),
+        ("Linux - Guest agent", "guest_agent", "a guest-agent Linux VM, which can only be restored onto the VM it came from"),
+        (None, "macos_guest_agent", "an unidentified VM, which can only be restored onto the VM it came from"),
+    ],
+)
+def test_guest_type_mismatches_are_refused_with_a_message_naming_both_types(backup_os, target_strategy, message):
+    from types import SimpleNamespace
+
+    from app.services.retained_restore_service import _check_guest_types_match
+
+    target = SimpleNamespace(
+        name="tgt", config={"vm_plan": {"strategy_name": target_strategy}} if target_strategy else {}
+    )
+    with pytest.raises(BackupSlotError, match=message) as err:
+        _check_guest_types_match(target, SimpleNamespace(os_type=backup_os))
+    assert err.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("backup_os", "target_strategy"),
+    [("Linux - Cloudinit", "cloudinit_clone"), ("macOS - Guest agent", "macos_guest_agent")],
+)
+def test_matching_restorable_guest_types_are_accepted(backup_os, target_strategy):
+    from types import SimpleNamespace
+
+    from app.services.retained_restore_service import _check_guest_types_match
+
+    target = SimpleNamespace(name="tgt", config={"vm_plan": {"strategy_name": target_strategy}})
+    _check_guest_types_match(target, SimpleNamespace(os_type=backup_os))

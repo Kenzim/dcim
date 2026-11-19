@@ -1,9 +1,9 @@
 """Restore a retained backup onto one of the client's VMs (restore, clone or move).
 
-The restore runs as the durable ``restore_retained_backup`` deployment job, which
-overwrites the target's disks, then puts the target's own identity back (network
-interfaces and MAC addresses, name, size, address, credentials). Everything is
-checked before the job is queued so a refusal never leaves a VM half restored.
+The restore runs as the durable ``restore_retained_backup`` deployment job (``restore_retained_backup_macos``
+for macOS), which overwrites the target's disks, then puts the target's own identity back (network
+interfaces and MAC addresses, name, size, address, credentials; for macOS also its SMBIOS identity, through
+the guest agent). Everything is checked before the job is queued so a refusal never leaves a VM half restored.
 """
 
 from __future__ import annotations
@@ -21,13 +21,35 @@ from app.services.backup_slot_service import (
     iso_utc,
     slot_state,
 )
+from app.services.deployment import macos_restore
 
 logger = logging.getLogger(__name__)
 
 RESTORE_RETAINED_STRATEGY = "restore_retained_backup"
-# Only guests configured through cloud-init can be restored onto another VM: their address and credentials
-# are re-applied from the target's record. Guest-agent guests need their own set-up steps after a restore.
+RESTORE_RETAINED_MACOS_STRATEGY = "restore_retained_backup_macos"
+RESTORE_RETAINED_STRATEGIES = (RESTORE_RETAINED_STRATEGY, RESTORE_RETAINED_MACOS_STRATEGY)
+RETRY_RESTORE_MACOS_STRATEGY = "retry_restore_macos_configuration"
 _CLOUDINIT_STRATEGY = "cloudinit_clone"
+_MACOS_STRATEGY = "macos_guest_agent"
+# Guest types that can be restored onto another VM, and the job that does it. Cloud-init guests get their
+# address and credentials back through cloud-init; macOS guests through the guest agent after boot. Other
+# guest-agent guests (Windows, Linux) are not covered: a restored Windows guest would also carry the source's
+# computer name and machine SID, which the guest-agent set-up does not change.
+_RESTORE_JOBS = {
+    _CLOUDINIT_STRATEGY: RESTORE_RETAINED_STRATEGY,
+    _MACOS_STRATEGY: RESTORE_RETAINED_MACOS_STRATEGY,
+}
+_GUEST_LABELS = {
+    _CLOUDINIT_STRATEGY: "a cloud-init Linux",
+    _MACOS_STRATEGY: "a macOS",
+    "guest_agent": "a guest-agent Linux",
+    "windows_guest_agent": "a Windows",
+}
+
+
+_MACOS_NOTE = (
+    "Apple account sign-ins inside macOS may need redoing, because they are tied to the VM's serial number. "
+)
 
 
 def data_loss_message(target: Service, retained: RetainedBackup) -> str:
@@ -35,6 +57,7 @@ def data_loss_message(target: Service, retained: RetainedBackup) -> str:
     return (
         f"Restoring '{label}' onto '{target.name}' replaces everything on that VM: its disks, files and installed "
         "system are lost and cannot be recovered. Its network address, size and login credentials stay as they are. "
+        f"{_MACOS_NOTE if _target_strategy_name(target) == _MACOS_STRATEGY else ''}"
         "Send confirm_data_loss=true to go ahead."
     )
 
@@ -74,17 +97,32 @@ def _check_target(target: Service, retained: RetainedBackup, *, staff: bool) -> 
     if retained.resource_type != "vm":
         raise BackupSlotError("This retained backup is not a VM backup")
     if retained.source_service_id != target.id:
-        if _backup_strategy_name(retained) != _CLOUDINIT_STRATEGY:
-            raise BackupSlotError(
-                "This backup's guest type is not set up through cloud-init (or could not be identified), "
-                "so it can only be restored onto the VM it came from",
-                409,
-            )
-        if _target_strategy_name(target) != _CLOUDINIT_STRATEGY:
-            raise BackupSlotError(
-                "The target VM is not set up through cloud-init; restoring another VM's backup onto it is not supported",
-                409,
-            )
+        _check_guest_types_match(target, retained)
+
+
+def _guest_label(strategy_name: Optional[str]) -> str:
+    return _GUEST_LABELS.get(strategy_name or "", "an unidentified")
+
+
+def _check_guest_types_match(target: Service, retained: RetainedBackup) -> None:
+    backup_strategy = _backup_strategy_name(retained)
+    target_strategy = _target_strategy_name(target)
+    if backup_strategy not in _RESTORE_JOBS:
+        raise BackupSlotError(
+            f"This backup is of {_guest_label(backup_strategy)} VM, which can only be restored onto the VM it "
+            "came from. Only cloud-init Linux and macOS backups can be restored onto another VM.",
+            409,
+        )
+    if target_strategy != backup_strategy:
+        raise BackupSlotError(
+            f"This backup is of {_guest_label(backup_strategy)} VM but '{target.name}' is "
+            f"{_guest_label(target_strategy)} VM. A backup can only be restored onto the same type of VM.",
+            409,
+        )
+
+
+def _restore_job_name(target: Service) -> str:
+    return _RESTORE_JOBS.get(_target_strategy_name(target) or "", RESTORE_RETAINED_STRATEGY)
 
 
 async def _check_placement(db: Session, target: Service, retained: RetainedBackup) -> Any:
@@ -141,18 +179,30 @@ def _enqueue(db: Session, target: Service, retained: RetainedBackup, *, start: b
             f"Another deployment job is already active on this VM (job {existing.id}, "
             f"{existing.strategy_name}). Wait for it to finish before restoring."
         )
-    strategy = get_deployment_strategy_registry().get(RESTORE_RETAINED_STRATEGY)
+    strategy = get_deployment_strategy_registry().get(_restore_job_name(target))
+    macos = strategy.name == RESTORE_RETAINED_MACOS_STRATEGY
+    # A macOS guest has to boot for its own address to be set, so it always starts.
+    start = True if macos else bool(start)
     state: dict[str, Any] = {
         "volid": retained.volid,
         "storage": retained.storage,
         "kind": "retained",
         "retained_backup_id": retained.id,
-        "start": bool(start),
+        "source_service_id": retained.source_service_id,
+        "start": start,
         "vm_template_id": retained.vm_template_id,
         "notes": retained.notes or retained.rf_token,
         "status": "queued",
         "metadata_stale": False,
     }
+    if macos:
+        state["macos"] = True
+        previous = dict((target.config or {}).get("vm_restore") or {})
+        if macos_restore.identity_restore_pending(target) and previous.get("target_identity"):
+            # An earlier restore overwrote this VM's configuration before putting its identity back, so what is
+            # in Proxmox now is the source's. Keep what that restore recorded.
+            state["target_identity"] = previous["target_identity"]
+            state["carried_identity"] = True
     target.config = {**dict(target.config or {}), "vm_restore": state}
     if target.vm:
         target.vm.guest_state = VMGuestState.PROVISIONING
@@ -169,7 +219,7 @@ def _enqueue(db: Session, target: Service, retained: RetainedBackup, *, start: b
     ServiceDAO.update(db, target)
     logger.info(
         "Enqueued %s job %s: retained backup %s onto service %s",
-        RESTORE_RETAINED_STRATEGY,
+        strategy.name,
         job.id,
         retained.id,
         target.id,
@@ -181,10 +231,71 @@ def _enqueue(db: Session, target: Service, retained: RetainedBackup, *, start: b
         "kind": "retained",
         "retained_backup_id": retained.id,
         "target_service_id": target.id,
-        "start": bool(start),
+        "start": start,
         "async": True,
         "waited": False,
     }
+
+
+def enqueue_macos_restore_retry(db: Session, target: Service) -> dict[str, Any]:
+    """Queue the guest configuration of a macOS restore that stopped before it finished.
+
+    The VM keeps the restored disk; the job boots it, waits for the guest agent, applies the target's own
+    network and password again, connects the public network interface and finishes the restore.
+    """
+    from app.dao.service_dao import ServiceDAO
+    from app.dao.vm_deployment_job_dao import VMDeploymentJobDAO
+    from app.models.service_vm import VMGuestState
+    from app.services.deployment.registry import get_deployment_strategy_registry
+
+    state = dict((target.config or {}).get("vm_restore") or {})
+    if not state.get("identity_reapplied") or state.get("status") == "success":
+        raise BackupSlotError(
+            "There is no macOS restore waiting for its guest configuration on this VM", 409
+        )
+    existing = VMDeploymentJobDAO.get_active_for_service(db, target.id)
+    if existing is not None:
+        raise BackupSlotError(
+            f"Another deployment job is already active on this VM (job {existing.id}, {existing.strategy_name})", 409
+        )
+    # The job goes first: if it cannot be created, the VM keeps its failed state.
+    strategy = get_deployment_strategy_registry().get(RETRY_RESTORE_MACOS_STRATEGY)
+    try:
+        job = VMDeploymentJobDAO.create_job(
+            db,
+            service_id=target.id,
+            strategy_name=strategy.name,
+            step_names=strategy.step_names(),
+            max_attempts=strategy.max_attempts,
+        )
+    except Exception:
+        db.rollback()
+        raise
+    for key in ("error", "configure_attempts", "configure_error", "agent_wait_started"):
+        state.pop(key, None)
+    state.update({"status": "restored", "job_id": job.id})
+    target.config = {**dict(target.config or {}), "vm_restore": state}
+    if target.vm:
+        target.vm.guest_state = VMGuestState.PROVISIONING
+        target.vm.guest_last_error = None
+    ServiceDAO.update(db, target)
+    return {"status": "queued", "job_id": job.id, "target_service_id": target.id}
+
+
+def power_block_reason(service: Service, action: str) -> Optional[str]:
+    """Why a power action that can start the VM is refused now, or None.
+
+    Between the restore of a macOS backup and the target's own network identity being put back, the VM's
+    configuration is the source's, so starting it would bring the source's MAC address and SMBIOS identity up.
+    """
+    if action not in ("on", "reboot", "reset", "start"):
+        return None
+    if not macos_restore.identity_restore_pending(service):
+        return None
+    return (
+        "A backup restore onto this VM has not finished putting the VM's own network identity back, so it cannot "
+        "be started yet. Restore the backup again to complete it."
+    )
 
 
 async def restore_retained_onto(

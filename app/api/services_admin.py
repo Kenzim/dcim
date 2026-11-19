@@ -34,6 +34,7 @@ from app.services.provisioning import (
 )
 from app.services.vmid_allocator import reserve_vmid_aligned_with_proxmox, reserve_vmid_for_service
 from app.services.private_network_service import PrivateNetworkService
+from app.services.retained_restore_service import power_block_reason
 from app.services import backup_slot_service
 from app.services.storage_service import StorageService
 from app.services.server_activity_logger import (
@@ -897,6 +898,9 @@ async def admin_vm_power_action(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
     plugin, _cid, _node, _vmid = await _admin_get_vm_plugin(db, service)
     action = (body.action or "").strip().lower()
+    blocked = power_block_reason(service, action)
+    if blocked:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
     log_server_activity_attempt(
         db,
         service_id=service.id,

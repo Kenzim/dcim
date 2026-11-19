@@ -308,12 +308,12 @@ async def _drop_volume(plugin, storage: str, volid: str) -> None:
 def _restore_in_progress(db: Session, retained_id: int) -> bool:
     """True while a restore job reading this retained backup has not finished."""
     from app.models.vm_deployment_job import TERMINAL_JOB_STATUSES, VMDeploymentJob
-    from app.services.retained_restore_service import RESTORE_RETAINED_STRATEGY
+    from app.services.retained_restore_service import RESTORE_RETAINED_STRATEGIES
 
     jobs = (
         db.query(VMDeploymentJob)
         .filter(
-            VMDeploymentJob.strategy_name == RESTORE_RETAINED_STRATEGY,
+            VMDeploymentJob.strategy_name.in_(RESTORE_RETAINED_STRATEGIES),
             VMDeploymentJob.status.notin_(list(TERMINAL_JOB_STATUSES)),
         )
         .all()

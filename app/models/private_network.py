@@ -45,6 +45,14 @@ class AttachmentState(str, enum.Enum):
     DETACHING = "detaching"
 
 
+class InvitationStatus(str, enum.Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
 def _enum(enum_cls):
     return SQLEnum(enum_cls, native_enum=False, values_callable=lambda x: [e.value for e in x])
 
@@ -72,6 +80,8 @@ class PrivateNetworkPool(Base):
     reserved_cidrs = Column(JSON, nullable=True)
     # Proxy fast path: clients with a server and a proxy here may turn on a proxy access network.
     proxy_access_enabled = Column(Boolean, nullable=False, default=False)
+    # Members (other clients) one network can have; 0 turns sharing off in this location.
+    max_members_per_network = Column(Integer, nullable=False, default=5, server_default="5")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -96,6 +106,8 @@ class PrivateNetwork(Base):
     # False until the segment exists on every managed switch in the location.
     switch_synced = Column(Boolean, nullable=False, default=False)
     last_error = Column(Text, nullable=True)
+    # Shared networks only: when the owner was first seen with no live service.
+    owner_gone_since = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -106,6 +118,18 @@ class PrivateNetwork(Base):
         back_populates="network",
         cascade="all, delete-orphan",
         order_by="PrivateNetworkAttachment.id",
+    )
+    members = relationship(
+        "PrivateNetworkMember",
+        back_populates="network",
+        cascade="all, delete-orphan",
+        order_by="PrivateNetworkMember.id",
+    )
+    invitations = relationship(
+        "PrivateNetworkInvitation",
+        back_populates="network",
+        cascade="all, delete-orphan",
+        order_by="PrivateNetworkInvitation.id",
     )
 
 
@@ -146,3 +170,47 @@ class PrivateNetworkAttachment(Base):
     service = relationship("Service")
     server = relationship("Server")
     proxy_runner = relationship("ProxyRunner")
+
+
+class PrivateNetworkMember(Base):
+    """A client other than the owner who may attach their own services to a network."""
+
+    __tablename__ = "private_network_members"
+    __table_args__ = (UniqueConstraint("network_id", "user_id", name="uq_private_network_member"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    network_id = Column(
+        Integer, ForeignKey("private_networks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    invited_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    joined_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    network = relationship("PrivateNetwork", back_populates="members")
+    user = relationship("User", foreign_keys=[user_id])
+
+
+class PrivateNetworkInvitation(Base):
+    """An owner's invitation. ``invitee_user_id`` is empty when what the owner typed matched no eligible client."""
+
+    __tablename__ = "private_network_invitations"
+    __table_args__ = (UniqueConstraint("active_key", name="uq_private_network_invitation_active"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    network_id = Column(
+        Integer, ForeignKey("private_networks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    inviter_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    invitee_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    # What the owner typed (email or username), lower-cased. Shown to the owner only.
+    invitee_label = Column(String(255), nullable=False)
+    status = Column(_enum(InvitationStatus), nullable=False, default=InvitationStatus.PENDING, index=True)
+    # Set only while pending: one pending invitation per network and invitee.
+    active_key = Column(String(300), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    responded_at = Column(DateTime(timezone=True), nullable=True)
+
+    network = relationship("PrivateNetwork", back_populates="invitations")
+    inviter = relationship("User", foreign_keys=[inviter_user_id])
+    invitee = relationship("User", foreign_keys=[invitee_user_id])

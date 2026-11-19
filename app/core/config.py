@@ -425,6 +425,10 @@ class Settings(BaseSettings):
     # The first /20 holds one private IP per pinned proxy subnet; client servers
     # get the rest. Must not change once access networks exist.
     proxy_access_cidr: str = "100.80.0.0/16"
+    # Private network sharing: how long an invitation can be answered, and how long a
+    # network with members is kept after its owner has no live service.
+    private_network_invitation_days: int = 14
+    private_network_owner_gone_grace_days: int = 30
     # Shared secret the ipmi_proxy_runner edge presents to the runner API (Bearer).
     ipmi_proxy_runner_api_key: Optional[str] = None
     # One-time launch ticket lifetime (seconds). Kept short: the ticket is only used

@@ -537,14 +537,18 @@ async def apply_opencore_smbios(
     oc_disk: Optional[str] = None,
     cfg_path: str = "/Volumes/OPENCORE/EFI/OC/config.plist",
     sku: Optional[str] = None,
+    smbios: Optional[Dict[str, str]] = None,
+    update_proxmox: bool = True,
 ) -> Dict[str, str]:
     """Patch OpenCore PlatformInfo via guest-exec and align Proxmox smbios1.
 
     Preserves an existing smbios1 ``sku`` (RackFlow rf1 token) unless ``sku``
-    is passed explicitly.
+    is passed explicitly. ``smbios`` supplies the identity to write instead of a
+    generated one; ``update_proxmox=False`` leaves ``smbios1`` untouched (the
+    caller already holds the matching Proxmox value).
     """
-    sm = generate_smbios(model)
-    preserved_sku = await _resolve_preserved_smbios_sku(plugin, sku)
+    sm = smbios or generate_smbios(model)
+    preserved_sku = await _resolve_preserved_smbios_sku(plugin, sku) if update_proxmox else None
     disk_id = await _resolve_opencore_disk_id(plugin, oc_disk)
     mount = await plugin.guest_exec([_DISKUTIL_BIN, "mount", disk_id])
     if mount.get("exitcode") not in (0, None):
@@ -562,7 +566,8 @@ async def apply_opencore_smbios(
         await plugin.guest_exec([_DISKUTIL_BIN, "unmount", disk_id])
     except Exception as exc:
         logger.warning("OpenCore unmount failed: %s", exc)
-    await plugin.update_smbios1(smbios1_config_value(sm, sku=preserved_sku))
+    if update_proxmox:
+        await plugin.update_smbios1(smbios1_config_value(sm, sku=preserved_sku))
     return sm
 
 

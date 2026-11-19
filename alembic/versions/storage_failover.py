@@ -5,7 +5,7 @@ Adds the failover columns to storage tenants and nodes, the per-location storage
 failover event log. See docs/nfs-storage-failover.md.
 
 Revision ID: storage_failover
-Revises: alerting_tables
+Revises: add_private_network_sharing
 Create Date: 2026-11-19 20:00:00.000000
 """
 
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "storage_failover"
-down_revision: Union[str, Sequence[str], None] = "alerting_tables"
+down_revision: Union[str, Sequence[str], None] = "add_private_network_sharing"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -149,6 +149,7 @@ from app.services.strategy_actions import (
 )
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
 import logging
+from app.services.retained_restore_service import power_block_reason
 from app.services.server_lock import ensure_server_unlocked
 import os
 
@@ -1952,6 +1953,9 @@ async def power_control(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Cannot '{action}' an administratively disabled server",
                 )
+            blocked = power_block_reason(service, action)
+            if blocked:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
 
         plugin_instance, _srv = await _billing_get_plugin_instance(db, service)
         if not plugin_instance:

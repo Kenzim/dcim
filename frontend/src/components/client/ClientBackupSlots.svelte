@@ -67,7 +67,8 @@
     if (
       !confirm(
         `Restore this backup onto ${target?.name || 'the chosen VM'}? Everything on that VM is replaced and cannot be recovered. ` +
-          'Its address, size and login details stay as they are.'
+          'Its address, size and login details stay as they are. A backup can only be restored onto the same type of VM. ' +
+          'On a Mac, Apple account sign-ins may need redoing, because they are tied to the VM\'s serial number.'
       )
     )
       return;
@@ -135,7 +136,7 @@
                 Restore
               </Button>
             </div>
-            <p class="warn">Restoring replaces everything on the chosen VM. Its address, size and login details stay as they are.</p>
+            <p class="warn">Restoring replaces everything on the chosen VM. Its address, size and login details stay as they are. A backup can only be restored onto the same type of VM. On a Mac, Apple account sign-ins may need redoing, because they are tied to the VM's serial number.</p>
           {:else if slot.status === 'active'}
             <p class="hint">You have no active VM to restore onto.</p>
           {/if}
