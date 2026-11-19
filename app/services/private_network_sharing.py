@@ -497,7 +497,16 @@ def _server_kind(service: Optional[Service]) -> str:
     return service.service_type.value if service is not None else "unknown"
 
 
-def owner_extras(db: Session, network: PrivateNetwork) -> dict:
+def display_name(user: Optional[User]) -> Optional[str]:
+    """The name another client sees. A username that is an email address (accounts created from a billing system) is cut to its first two characters."""
+    if user is None or not user.username:
+        return None
+    if "@" in user.username:
+        return user.username.split("@", 1)[0][:2] + "…"
+    return user.username
+
+
+def owner_extras(db: Session, network: PrivateNetwork, *, staff: bool = False) -> dict:
     """Members (with the addresses of their attached servers) and pending invitations, for the owner."""
     members = []
     for member in network.members:
@@ -511,7 +520,9 @@ def owner_extras(db: Session, network: PrivateNetwork) -> dict:
         members.append(
             {
                 "user_id": member.user_id,
-                "username": member.user.username if member.user is not None else None,
+                "username": (member.user.username if staff else display_name(member.user))
+                if member.user is not None
+                else None,
                 "joined_at": member.joined_at,
                 "servers": servers,
             }
@@ -550,7 +561,7 @@ def pending_invitations_out(db: Session, user_id: int) -> List[dict]:
                 "network_name": network.name,
                 "location_id": network.location_id,
                 "location_name": network.location.name if network.location is not None else None,
-                "owner": owner.username,
+                "owner": display_name(owner),
                 "created_at": inv.created_at,
                 "expires_at": inv.expires_at,
             }

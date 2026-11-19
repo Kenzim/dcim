@@ -119,7 +119,7 @@ def _shared_out(network: PrivateNetwork, user_id: int) -> SharedNetworkResponse:
         cidr=network.cidr,
         storage_endpoint_ip=storage_endpoint_ip(network.cidr),
         status=network.status.value,
-        owner=owner.username if owner is not None else None,
+        owner=sharing.display_name(owner),
         attachments=[_attachment_out(a, prefix_length, staff=False) for a in own],
     )
 

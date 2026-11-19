@@ -240,7 +240,7 @@ def _network_out(
     ]
     extras = {}
     if db is not None and not access:
-        extras = sharing.owner_extras(db, network)
+        extras = sharing.owner_extras(db, network, staff=staff)
     return NetworkResponse(
         **extras,
         kind=(network.kind or NetworkKind.STANDARD).value,

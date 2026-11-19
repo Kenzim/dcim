@@ -159,3 +159,24 @@ async def test_member_row_is_unique_per_network_and_user(db_session, world):
     # Bob is already a member, so a second invitation to him is stored but never shown or accepted.
     await sharing.invite(db_session, network.id, alice.id, "bob")
     assert PrivateNetworkDAO.pending_invitations_for_user(db_session, bob.id) == []
+
+
+@pytest.mark.asyncio
+async def test_email_style_usernames_are_masked_for_other_clients_but_not_staff(db_session, world):
+    alice = _user(db_session, "alice.smith@example.com")
+    bob = _user(db_session, "bob")
+    network = await _network(db_session, alice, world)
+    await sharing.invite(db_session, network.id, alice.id, "bob")
+    shown = sharing.pending_invitations_out(db_session, bob.id)[0]
+    assert shown["owner"] == "al\u2026" and "example.com" not in str(shown)
+
+    await sharing.respond(db_session, PrivateNetworkDAO.pending_invitations_for_user(db_session, bob.id)[0].id, bob.id, True)
+    carol = _user(db_session, "carol@example.com")
+    db_session.add(PrivateNetworkMember(network_id=network.id, user_id=carol.id))
+    db_session.commit()
+    db_session.expire_all()
+    network = PrivateNetworkDAO.get_network(db_session, network.id)
+    names = {m["user_id"]: m["username"] for m in sharing.owner_extras(db_session, network)["members"]}
+    assert names[carol.id] == "ca\u2026" and names[bob.id] == "bob"
+    staff_names = {m["user_id"]: m["username"] for m in sharing.owner_extras(db_session, network, staff=True)["members"]}
+    assert staff_names[carol.id] == "carol@example.com"

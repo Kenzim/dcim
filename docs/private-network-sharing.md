@@ -57,7 +57,7 @@ An attachment has no new column. Whose attachment it is follows from `service.ow
 
 | Event | What happens |
 |---|---|
-| Owner removes a member, or staff do | The member row is deleted first, so the member loses visibility and every member route fails at once. Then all attachments of the member's services are detached (including the switch VLAN removal) and the member's addresses are taken off the network's restricted shares. If a switch cannot be reached the attachment stays `detaching` and the repair loop retries; the member cannot see or change it meanwhile. The member is notified. |
+| Owner removes a member, or staff do | The member row is deleted first, so the member loses visibility and every member route fails at once. Then all attachments of the member's services are detached (including the switch VLAN removal) and the member's addresses are taken off the network's restricted shares. If a switch or hypervisor cannot be reached the attachment stays `detaching` and the repair loop retries; the member cannot see or change it meanwhile, but until the detach succeeds the member's server is still on the network at layer 2, so a share open to the whole network can still be mounted from it. Restricted shares no longer list its address at once. Staff see the attachment and its error on the admin page. The member is notified. |
 | Member leaves | Same as removal, started by the member. The owner is notified. |
 | Owner cancels a pending invitation | The invitation becomes `cancelled` and disappears for the invitee. |
 | Invitee accepts or declines | Accepting re-checks eligibility, expiry and the member limit. The owner is notified. |
@@ -87,3 +87,7 @@ An attachment has no new column. Whose attachment it is follows from `service.ow
 ## Tests
 
 Owner-only actions are tried as a member and as an unrelated client through the client API and the client MCP; member actions are tried as an unrelated client; a removed member is checked to have no attachments and no access straight away. See `tests/api/test_private_network_sharing_api.py`, `tests/services/test_private_network_sharing.py` and `tests/mcp/test_private_network_sharing_mcp.py`.
+
+## Names shown to other clients
+
+There is no separate display name, so members and invitees see the username. A username that is an email address (accounts created from a billing system often have one) is cut to its first two characters and an ellipsis, so one client never learns another's email address. Staff see the real username.
