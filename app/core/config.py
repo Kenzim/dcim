@@ -105,6 +105,16 @@ class Settings(BaseSettings):
     notification_worker_batch_size: int = 100
     run_notification_outbox_worker: bool = False
 
+    # Alerting. The worker runs in the API process by default because runner
+    # connection state lives in the web process and Redis; a lease row keeps
+    # replicas from evaluating at the same time.
+    run_alert_worker: bool = True
+    alert_worker_interval_seconds: int = 60
+    alert_worker_lease_seconds: int = 180
+    alert_delivery_max_attempts: int = 8
+    alert_delivery_batch_size: int = 50
+    alert_delivery_timeout_seconds: float = 10.0
+
     # Standard-library SMTP delivery for the durable notification outbox.
     smtp_enabled: bool = False
     smtp_host: Optional[str] = None
@@ -317,6 +327,11 @@ class Settings(BaseSettings):
             "notification_worker_interval_seconds",
             "notification_worker_lease_seconds",
             "notification_worker_batch_size",
+            "alert_worker_interval_seconds",
+            "alert_worker_lease_seconds",
+            "alert_delivery_max_attempts",
+            "alert_delivery_batch_size",
+            "alert_delivery_timeout_seconds",
             "smtp_timeout_seconds",
         )
         if any(float(getattr(self, name)) <= 0 for name in positive_fields):

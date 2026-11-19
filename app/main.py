@@ -53,6 +53,11 @@ def _start_background_workers() -> list[asyncio.Task]:
 
         tasks.append(asyncio.create_task(run_notification_outbox_worker()))
         logger.info("In-process notification outbox worker enabled")
+    if settings.run_alert_worker:
+        from app.workers.alerts import run_alert_worker
+
+        tasks.append(asyncio.create_task(run_alert_worker()))
+        logger.info("In-process alert worker enabled")
     return tasks
 
 
@@ -339,6 +344,10 @@ api_router.include_router(billing_admin_api.router, tags=["billing-admin"])
 # Include MCP API key admin routes (works even when /mcp is disabled)
 from app.api import mcp_keys_admin as mcp_keys_admin_api
 api_router.include_router(mcp_keys_admin_api.router, tags=["mcp-admin"])
+
+# Alerts: staff list, acknowledge, silence, channels, settings
+from app.api import alerts as alerts_api
+api_router.include_router(alerts_api.router, tags=["alerts-admin"])
 
 # Client MCP keys: client portal (own keys) and staff view/revoke
 from app.api import client_mcp_keys as client_mcp_keys_api

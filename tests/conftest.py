@@ -21,6 +21,8 @@ os.environ["DISABLE_PUBLIC_API_DOCS"] = "false"
 os.environ["MCP_ENABLED"] = "false"
 # Same for the client MCP at /client-mcp.
 os.environ["CLIENT_MCP_ENABLED"] = "false"
+# The alert worker loop must not start inside TestClient lifespans.
+os.environ["RUN_ALERT_WORKER"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient

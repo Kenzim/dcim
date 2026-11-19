@@ -259,3 +259,25 @@ __all__ += [
     "WebhookDeliveryStatus",
 ]
 
+
+from app.models.alerting import (  # noqa: E402
+    Alert,
+    AlertChannel,
+    AlertRecipient,
+    AlertSilence,
+    AlertTypeSetting,
+    ClientNotificationPref,
+    NotificationDelivery,
+    VmBackupRun,
+)
+
+__all__ += [
+    "Alert",
+    "AlertChannel",
+    "AlertRecipient",
+    "AlertSilence",
+    "AlertTypeSetting",
+    "ClientNotificationPref",
+    "NotificationDelivery",
+    "VmBackupRun",
+]

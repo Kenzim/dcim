@@ -429,8 +429,16 @@ async def create_client_backup(
         notes=stamped_notes,
         mode=mode or "snapshot",
     )
+    from app.services.alerting import backup_watch
+
+    run = backup_watch.record_started(db, service.id, str(upid))
     if wait:
-        await plugin.wait_for_proxmox_task(upid, timeout=3600.0)
+        try:
+            await plugin.wait_for_proxmox_task(upid, timeout=3600.0)
+        except Exception as exc:
+            backup_watch.finish(db, run, ok=False, error=str(exc))
+            raise
+        backup_watch.finish(db, run, ok=True)
     return {
         "upid": upid,
         "storage": settings.client_storage,
