@@ -8,8 +8,8 @@
 #                                   UEFI image ipxe.efi (iPXE's own NIC drivers).
 #   boot_media/rackflow-vmedia-snp.iso  The same template with snp.efi as the UEFI image: it
 #                                   drives NICs through the firmware's UEFI network driver.
-#                                   Used by profiles whose NICs iPXE's own drivers cannot
-#                                   drive (ASRock Rack onboard X550).
+#                                   Used by profiles whose NICs iPXE's own drivers do not
+#                                   reliably bring up (ASRock Rack onboard X550).
 #   isos/rackflow-netboot.iso       Legacy netboot ISO that DHCP/autoboots into PXE.
 set -euo pipefail
 

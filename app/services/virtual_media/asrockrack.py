@@ -124,8 +124,9 @@ class AsrockRackVirtualMediaProfile(VirtualMediaProfile):
     mounts_nfs = True
 
     def uefi_loader(self, server: Server) -> str:
-        """iPXE's own Intel driver never transmits on the boards' onboard X550; the
-        firmware's UEFI network driver does, and UEFI PXE already relies on it."""
+        """iPXE's own Intel driver is unreliable on the boards' onboard X550 (on server 5 it
+        sent no DHCP after loading in 3 of 4 boots); the firmware's UEFI network driver,
+        which UEFI PXE already relies on, booted every time."""
         return "snp"
 
     def _headers(self, origin: str, cookie: str, csrf: str) -> dict[str, str]:
