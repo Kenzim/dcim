@@ -96,6 +96,8 @@ type Manager struct {
 	// Alive is called after every renewal tick (the systemd watchdog).
 	Alive func()
 
+	// pollMu serialises PollTick, which the reconciler also calls.
+	pollMu      sync.Mutex
 	mu          sync.Mutex
 	desired     Desired
 	haveDesired bool
@@ -652,6 +654,8 @@ func (m *Manager) eligible() bool {
 // re-takes leases still carrying this node's tag and acquires free leases
 // when it is this node's turn.
 func (m *Manager) PollTick(ctx context.Context) {
+	m.pollMu.Lock()
+	defer m.pollMu.Unlock()
 	m.mu.Lock()
 	m.init()
 	if !m.loaded {
@@ -1131,9 +1135,30 @@ func (m *Manager) Remove(ctx context.Context, k Key, recoveryNS string) error {
 	delete(m.watch, k)
 	delete(m.released, k)
 	delete(m.handedOff, k)
+	// Until the next config arrives, polling must not re-create the object.
+	wants := m.desired.Wants[:0:0]
+	for _, w := range m.desired.Wants {
+		if w.Key != k {
+			wants = append(wants, w)
+		}
+	}
+	m.desired.Wants = wants
 	m.mu.Unlock()
 	m.removeDeadline(k)
 	return nil
+}
+
+// Sync makes sure a client instance is known, then runs one poll, so a
+// freshly started runner re-takes its own leases before it decides what to
+// serve.
+func (m *Manager) Sync(ctx context.Context) {
+	m.mu.Lock()
+	known := m.ident.Instance != ""
+	m.mu.Unlock()
+	if !known {
+		m.RenewTick(ctx)
+	}
+	m.PollTick(ctx)
 }
 
 // Run drives the three loops until ctx ends.

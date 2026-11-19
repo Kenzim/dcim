@@ -15,6 +15,19 @@ type Config struct {
 	UserID     string // cephx id without "client."
 	Filesystem string
 	Exports    []Export
+	// RADOS keeps NFSv4 client recovery state in RADOS, so a Ganesha started
+	// on another node runs the grace period for the same clients. Nil keeps
+	// recovery state in the container's local recovery directory.
+	RADOS *RADOSRecovery
+}
+
+// RADOSRecovery configures the rados_ng recovery backend.
+type RADOSRecovery struct {
+	Pool          string
+	Namespace     string
+	NodeID        string
+	LeaseLifetime int64
+	GracePeriod   int64
 }
 
 type Export struct {
@@ -38,11 +51,28 @@ func Render(c Config) (core, exports string) {
 	b.WriteString("\tEnable_RQUOTA = false;\n")
 	b.WriteString("}\n\n")
 	b.WriteString("NFSv4 {\n")
-	b.WriteString("\tRecoveryBackend = fs;\n")
+	if c.RADOS != nil {
+		b.WriteString("\tRecoveryBackend = rados_ng;\n")
+	} else {
+		b.WriteString("\tRecoveryBackend = fs;\n")
+	}
 	// NFS 4.2 is not offered: Ganesha's READ_PLUS replies over FSAL_CEPH make
 	// Linux clients fail reads with EIO. Clients negotiate down to 4.1.
 	b.WriteString("\tMinor_Versions = 1;\n")
+	if r := c.RADOS; r != nil {
+		fmt.Fprintf(&b, "\tLease_Lifetime = %d;\n", r.LeaseLifetime)
+		fmt.Fprintf(&b, "\tGrace_Period = %d;\n", r.GracePeriod)
+	}
 	b.WriteString("}\n\n")
+	if r := c.RADOS; r != nil {
+		b.WriteString("RADOS_KV {\n")
+		fmt.Fprintf(&b, "\tceph_conf = %q;\n", CephDir+"/ceph.conf")
+		fmt.Fprintf(&b, "\tuserid = %q;\n", c.UserID)
+		fmt.Fprintf(&b, "\tpool = %q;\n", r.Pool)
+		fmt.Fprintf(&b, "\tnamespace = %q;\n", r.Namespace)
+		fmt.Fprintf(&b, "\tnodeid = %q;\n", r.NodeID)
+		b.WriteString("}\n\n")
+	}
 	b.WriteString("EXPORT_DEFAULTS {\n")
 	b.WriteString("\tAccess_Type = None;\n")
 	b.WriteString("\tSquash = root_squash;\n")

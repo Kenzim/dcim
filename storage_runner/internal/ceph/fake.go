@@ -230,6 +230,10 @@ func (f *Fake) EvictSessions(_ context.Context, entity, hostname string) error {
 	if err != nil {
 		return err
 	}
+	if hostname == "" {
+		f.Rec.Add("ceph evict %s", entity)
+		return nil
+	}
 	f.Rec.Add("ceph evict %s hostname=%s", entity, hostname)
 	return nil
 }

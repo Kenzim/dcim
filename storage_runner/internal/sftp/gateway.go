@@ -94,10 +94,19 @@ type connInfo struct {
 
 // HostKey is the gateway's public host key.
 func (g *Gateway) HostKey() ssh.PublicKey {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.hostKey == nil {
 		return nil
 	}
 	return g.hostKey.PublicKey()
+}
+
+// SetHostKey replaces the host key for new connections.
+func (g *Gateway) SetHostKey(key ssh.Signer) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.hostKey = key
 }
 
 // SetClock replaces the clock, for tests.
@@ -469,7 +478,9 @@ func (g *Gateway) serverConfig(ip netip.Addr, failed *bool) *ssh.ServerConfig {
 			g.Logf("sftp: auth user=%s ip=%s method=%s result=%s", meta.User(), ip, method, result)
 		},
 	}
+	g.mu.Lock()
 	cfg.AddHostKey(g.hostKey)
+	g.mu.Unlock()
 	return cfg
 }
 

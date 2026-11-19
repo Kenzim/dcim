@@ -84,6 +84,16 @@ func TenantCaps(access []Access) Caps {
 	return c
 }
 
+// WithRecovery adds read-write access to a RADOS namespace (Ganesha's
+// rados_ng recovery database) to caps that already grant data access.
+func WithRecovery(c Caps, pool, namespace string) Caps {
+	if c.OSD == "" {
+		return c
+	}
+	c.OSD += ", allow rw pool=" + pool + " namespace=" + namespace
+	return c
+}
+
 type Cluster interface {
 	// Check verifies the EC pool and file system and returns the EC pool's free
 	// bytes, capped by what is left under the pool's quota when it has one.
@@ -355,9 +365,10 @@ func (c *CLI) mdsRanks(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// EvictSessions evicts entity's sessions whose client hostname is hostname,
-// on each active rank, so a dead Ganesha's caps are released at once;
-// otherwise the MDS makes its successor wait for session_autoclose. The
+// EvictSessions evicts entity's sessions whose client hostname is hostname
+// (every session of entity when hostname is empty), on each active rank,
+// so a dead Ganesha's caps are released at once; otherwise the MDS makes
+// its successor wait for session_autoclose. The
 // hostname filter spares the same user's sessions from other hosts (the SFTP
 // master's kernel mounts).
 func (c *CLI) EvictSessions(ctx context.Context, entity, hostname string) error {
@@ -366,8 +377,12 @@ func (c *CLI) EvictSessions(ctx context.Context, entity, hostname string) error 
 		return err
 	}
 	authName := strings.TrimPrefix(entity, "client.")
+	args := []string{"client", "evict", "auth_name=" + authName}
+	if hostname != "" {
+		args = append(args, "client_metadata.hostname="+hostname)
+	}
 	for _, target := range ranks {
-		if _, err := c.ceph(ctx, "tell", target, "client", "evict", "auth_name="+authName, "client_metadata.hostname="+hostname); err != nil {
+		if _, err := c.ceph(ctx, append([]string{"tell", target}, args...)...); err != nil {
 			return fmt.Errorf("evict %s@%s on %s: %w", entity, hostname, target, err)
 		}
 	}

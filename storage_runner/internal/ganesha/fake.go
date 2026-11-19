@@ -31,13 +31,33 @@ func (f *Fake) Seed(c Container) {
 	f.containers[c.Name] = c
 }
 
-// Stop marks a container as exited.
-func (f *Fake) Stop(name string) {
+// Exit marks a container as exited.
+func (f *Fake) Exit(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c := f.containers[name]
 	c.Running = false
 	f.containers[name] = c
+}
+
+// Running reports whether a container exists and runs.
+func (f *Fake) Running(name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.containers[name].Running
+}
+
+func (f *Fake) Stop(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.containers[name]
+	if !ok {
+		return fmt.Errorf("container %s not found", name)
+	}
+	c.Running = false
+	f.containers[name] = c
+	f.Rec.Add("nfs stop %s", name)
+	return nil
 }
 
 func (f *Fake) Spec(name string) (Spec, bool) {

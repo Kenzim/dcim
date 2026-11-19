@@ -33,6 +33,12 @@ type Host struct {
 	SFTPListenAddr string
 	SFTPImage      string
 	SFTPServerPath string
+	// CephHAPool holds the failover leases, node records and Ganesha
+	// recovery databases.
+	CephHAPool string
+	// SFTPVIPInterface carries the location's SFTP virtual IP; empty means
+	// the interface of the default route.
+	SFTPVIPInterface string
 }
 
 const (
@@ -40,6 +46,7 @@ const (
 	DefaultGroup        = "rackflow"
 	DefaultLinkCIDR     = "169.254.128.0/17"
 	DefaultStateDir     = "/var/lib/rackflow-storage-runner"
+	DefaultHAPool       = "rackflow_ha"
 )
 
 var (
@@ -71,6 +78,8 @@ func FromEnv(getenv func(string) string) (Host, error) {
 		SFTPListenAddr:     get("SFTP_LISTEN_ADDR", "0.0.0.0"),
 		SFTPImage:          get("SFTP_IMAGE", ""),
 		SFTPServerPath:     get("SFTP_SERVER_PATH", "/usr/lib/ssh/sftp-server"),
+		CephHAPool:         get("CEPH_HA_POOL", DefaultHAPool),
+		SFTPVIPInterface:   get("SFTP_VIP_INTERFACE", ""),
 	}
 	for _, kv := range [][2]string{
 		{"RACKFLOW_URL", h.RackflowURL},
@@ -94,10 +103,14 @@ func FromEnv(getenv func(string) string) (Host, error) {
 	if h.ParentIface != "" && !ifaceRe.MatchString(h.ParentIface) {
 		errs = append(errs, fmt.Errorf("PARENT_IFACE %q is not a valid interface name", h.ParentIface))
 	}
+	if h.SFTPVIPInterface != "" && !ifaceRe.MatchString(h.SFTPVIPInterface) {
+		errs = append(errs, fmt.Errorf("SFTP_VIP_INTERFACE %q is not a valid interface name", h.SFTPVIPInterface))
+	}
 	for _, kv := range [][2]string{
 		{"CEPH_FS_NAME", h.CephFSName},
 		{"CEPH_EC_POOL", h.CephECPool},
 		{"CEPH_SUBVOLUME_GROUP", h.CephSubvolumeGroup},
+		{"CEPH_HA_POOL", h.CephHAPool},
 	} {
 		if kv[1] != "" && !cephNameRe.MatchString(kv[1]) {
 			errs = append(errs, fmt.Errorf("%s %q may only contain letters, digits, '.', '_' and '-'", kv[0], kv[1]))
