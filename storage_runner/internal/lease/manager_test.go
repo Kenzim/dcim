@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -584,6 +585,58 @@ func TestFenceFailureServesNothing(t *testing.T) {
 	s.fencer.mu.Unlock()
 	s.mustServe(tenant42, 2, time.Minute)
 	s.noOverlap()
+}
+
+func TestTenantFenceWithoutEntitiesServesNothing(t *testing.T) {
+	s := newSim(t, 1, 2)
+	s.mustServe(tenant42, 1, 10*time.Second)
+	s.wants = func(n *tnode) []Want {
+		w := tenantWant(tenant42, s.order, n.id)
+		if n.id == 2 {
+			w.FenceEntities = nil
+		}
+		return []Want{w}
+	}
+	n1 := s.nodes[1]
+	n1.client.Before = func(op, oid string) error {
+		if op == "lock" {
+			return ErrTimeout
+		}
+		return nil
+	}
+	s.run(2 * time.Minute)
+	if s.nodes[2].isServing(tenant42) {
+		t.Fatal("node 2 served after a tenant fence that evicted nothing")
+	}
+	s.noOverlap()
+}
+
+func TestRenewDuringReleaseWritesNoDeadlineFile(t *testing.T) {
+	s := newSim(t, 1)
+	n := s.nodes[1]
+	n.m.DeadlineDir = t.TempDir()
+	s.mustServe(tenant42, 1, 10*time.Second)
+	path := n.m.deadlinePath(tenant42)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("no deadline file while serving: %v", err)
+	}
+	n.m.mu.Lock()
+	h := *n.m.leases[tenant42]
+	n.m.leases[tenant42].releasing = true
+	ident := n.m.ident
+	n.m.mu.Unlock()
+	n.m.removeDeadline(tenant42)
+	n.m.renew(context.Background(), tenant42, h, ident, DefaultTimings())
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a renewal during release re-created the deadline file: %v", err)
+	}
+	n.m.mu.Lock()
+	delete(n.m.leases, tenant42)
+	n.m.mu.Unlock()
+	n.m.renew(context.Background(), tenant42, h, ident, DefaultTimings())
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a renewal after the lease was dropped re-created the deadline file: %v", err)
+	}
 }
 
 func TestPlannedMoveHandsOffWithoutFence(t *testing.T) {

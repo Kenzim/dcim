@@ -412,15 +412,16 @@ func (m *Manager) renew(ctx context.Context, k Key, h held, ident Identity, t Ti
 	case err == nil:
 		m.mu.Lock()
 		cur := m.leases[k]
-		if cur == nil || cur.gen != h.gen {
+		if cur == nil || cur.gen != h.gen || cur.releasing {
 			m.mu.Unlock()
 			return
 		}
 		cur.cookie = cookie
 		m.setDeadline(cur, sendWall, sendBoot, t)
-		guard := cur.guard
+		// Written under m.mu so a lose or release cannot remove the file
+		// between the check above and the write.
+		m.writeDeadline(k, cur.guard, sendWall, sendBoot, t)
 		m.mu.Unlock()
-		m.writeDeadline(k, guard, sendWall, sendBoot, t)
 	case errors.Is(err, ErrBusy), errors.Is(err, ErrNotFound), errors.Is(err, ErrBlocklisted):
 		m.lose(k, h.gen, "renewal refused: "+err.Error())
 		if errors.Is(err, ErrBlocklisted) {
@@ -553,6 +554,9 @@ func (m *Manager) deadlinePath(k Key) string {
 	return filepath.Join(m.DeadlineDir, k.Object()+".json")
 }
 
+// writeDeadline writes the guard's deadline file. Callers hold m.mu and have
+// checked that the lease is still held, so a write never follows the
+// removal done after a lease is dropped from m.leases.
 func (m *Manager) writeDeadline(k Key, g GuardInfo, sendWall time.Time, sendBoot time.Duration, t Timings) {
 	if m.DeadlineDir == "" {
 		return
@@ -862,8 +866,8 @@ func (m *Manager) ownEntries(ctx context.Context, w Want, d Desired) {
 	m.setDeadline(h, sendWall, sendBoot, d.Timings)
 	m.leases[k] = h
 	delete(m.released, k)
-	m.mu.Unlock()
 	m.writeDeadline(k, w.Guard, sendWall, sendBoot, d.Timings)
+	m.mu.Unlock()
 	m.logf("lease: re-took %s by tag", k)
 	m.changed()
 }
@@ -905,8 +909,8 @@ func (m *Manager) acquire(ctx context.Context, w Want, t Timings) {
 	h := &held{gen: gen, token: token, cookie: cookie, guard: w.Guard}
 	m.setDeadline(h, sendWall, sendBoot, t)
 	m.leases[k] = h
-	m.mu.Unlock()
 	m.writeDeadline(k, w.Guard, sendWall, sendBoot, t)
+	m.mu.Unlock()
 
 	abort := func(why string) {
 		m.logf("lease: not serving %s: %s", k, why)
@@ -994,6 +998,13 @@ func (m *Manager) tenantFence(ctx context.Context, w Want, prev int64) error {
 		if host == "" {
 			return fmt.Errorf("node %d has no hostname in its record", prev)
 		}
+	}
+	if len(w.FenceEntities) == 0 {
+		if k := w.Key; k.Kind != KindSFTP {
+			return fmt.Errorf("no cephx user to evict for %s", k)
+		}
+		m.logf("lease: SFTP fence of node %d: no tenant mounts to evict", prev)
+		return nil
 	}
 	for _, entity := range w.FenceEntities {
 		if err := m.Fencer.EvictSessions(ctx, entity, host); err != nil {
