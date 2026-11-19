@@ -1,0 +1,18 @@
+[Unit]
+Description=Rackflow storage runner
+After=network-online.target ceph.target
+Wants=network-online.target rackflow-storage-guard.service
+
+[Service]
+Type=notify
+EnvironmentFile=/etc/rackflow/storage-runner.env
+ExecStart=/usr/local/bin/storage-runner
+Restart=always
+RestartSec=2
+WatchdogSec=15
+# podman's conmon for each tenant's Ganesha lives in this unit's cgroup; with
+# KillMode=process a runner restart leaves the tenants' NFS servers running.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

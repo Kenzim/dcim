@@ -467,7 +467,7 @@ func TestEndpointChangeRestarts(t *testing.T) {
 func TestStoppedContainerIsRestarted(t *testing.T) {
 	e := newEnv(t)
 	e.apply(cfgOf("v1", basic()))
-	e.nfs.Stop("rf-t12-nfs")
+	e.nfs.Exit("rf-t12-nfs")
 	expect(t, e.apply(cfgOf("v1", basic())), []string{"nfs rm rf-t12-nfs", evict12, run12})
 }
 

@@ -35,8 +35,39 @@ type Config struct {
 	Node     Node     `json:"node"`
 	Settings Settings `json:"settings"`
 	// SFTP is the node's public SFTP endpoint; nil (older Rackflow) means off.
-	SFTP    *SFTPSettings `json:"sftp,omitempty"`
-	Tenants []Tenant      `json:"tenants"`
+	SFTP *SFTPSettings `json:"sftp,omitempty"`
+	// HA is the failover block; nil (older Rackflow) means no leases at all.
+	HA      *HA      `json:"ha,omitempty"`
+	Tenants []Tenant `json:"tenants"`
+}
+
+// HA configures leases and failover (docs/nfs-storage-failover.md 11.2).
+// Timings are seconds; zero means the default.
+type HA struct {
+	Enabled            bool     `json:"enabled"`
+	LeaseSeconds       int64    `json:"lease_seconds"`
+	RenewSeconds       int64    `json:"renew_seconds"`
+	StopMarginSeconds  int64    `json:"stop_margin_seconds"`
+	GuardMarginSeconds int64    `json:"guard_margin_seconds"`
+	PollSeconds        int64    `json:"poll_seconds"`
+	RankStepSeconds    int64    `json:"rank_step_seconds"`
+	FenceSeconds       int64    `json:"fence_seconds"`
+	NFSLeaseLifetime   int64    `json:"nfs_lease_lifetime"`
+	NFSGracePeriod     int64    `json:"nfs_grace_period"`
+	Draining           bool     `json:"draining"`
+	Nodes              []HANode `json:"nodes"`
+}
+
+type HANode struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Draining bool   `json:"draining"`
+}
+
+// Move is a planned hand-off of a tenant to another node.
+type Move struct {
+	ID       string `json:"id"`
+	ToNodeID int64  `json:"to_node_id"`
 }
 
 // SFTPSettings configures the node's SFTP front end.
@@ -46,6 +77,16 @@ type SFTPSettings struct {
 	MaxAuthFailures      int   `json:"max_auth_failures"`
 	FailureWindowSeconds int64 `json:"failure_window_seconds"`
 	BanSeconds           int64 `json:"ban_seconds"`
+
+	LocationID int64 `json:"location_id"`
+	// VirtualIP is the location's SFTP address with prefix ("203.0.113.10/24");
+	// nil means SFTP is served per node.
+	VirtualIP *string `json:"virtual_ip"`
+	// HostKey is the location's OpenSSH ed25519 private key; empty means the
+	// node keeps its own key.
+	HostKey        string  `json:"host_key"`
+	MasterEligible bool    `json:"master_eligible"`
+	MasterOrder    []int64 `json:"master_order"`
 }
 
 // SFTPUser is one login of a tenant. Rackflow sends only a bcrypt hash of
@@ -66,8 +107,9 @@ const (
 )
 
 type Node struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	LocationID int64  `json:"location_id"`
 }
 
 type Settings struct {
@@ -87,6 +129,10 @@ type Tenant struct {
 	Limits       *Limits    `json:"limits"`
 	Shares       []Share    `json:"shares"`
 	SFTPUsers    []SFTPUser `json:"sftp_users,omitempty"`
+
+	PreferredNodeID int64   `json:"preferred_node_id"`
+	TakeoverOrder   []int64 `json:"takeover_order"`
+	Move            *Move   `json:"move"`
 }
 
 // Limits are parsed but not enforced yet.
@@ -125,6 +171,38 @@ type Status struct {
 	Orphans          []string       `json:"orphans"`
 	SFTP             *SFTPStatus    `json:"sftp,omitempty"`
 	SFTPLogins       []SFTPLogin    `json:"sftp_logins"`
+	// HA and Events are sent only when the config had an ha block.
+	HA     *HAStatus `json:"ha,omitempty"`
+	Events []Event   `json:"events,omitempty"`
+}
+
+// HAStatus is the node's lease state.
+type HAStatus struct {
+	LeaseOK     bool       `json:"lease_ok"`
+	Fenced      bool       `json:"fenced"`
+	FencedUntil *time.Time `json:"fenced_until"`
+	SFTPMaster  bool       `json:"sftp_master"`
+	HAActive    bool       `json:"ha_active"`
+}
+
+// Event kinds.
+const (
+	EventTakeover   = "takeover"
+	EventHandoff    = "handoff"
+	EventLost       = "lost"
+	EventFenced     = "fenced"
+	EventSFTPMaster = "sftp_master"
+)
+
+// Event is a lease change, sent until a status post carrying it succeeds.
+type Event struct {
+	At         time.Time `json:"at"`
+	Kind       string    `json:"kind"`
+	TenantID   *int64    `json:"tenant_id"`
+	FromNodeID *int64    `json:"from_node_id"`
+	// Fence is "tenant" or "node", nil when no fence was needed.
+	Fence  *string `json:"fence"`
+	Detail string  `json:"detail"`
 }
 
 // SFTPStatus reports the node's SFTP front end.
@@ -169,6 +247,10 @@ type TenantStatus struct {
 	Error  *string       `json:"error"`
 	Shares []ShareStatus `json:"shares"`
 	SFTP   *TenantSFTP   `json:"sftp,omitempty"`
+	// Serving, Since and MoveID are sent only when the config had an ha block.
+	Serving *bool      `json:"serving,omitempty"`
+	Since   *time.Time `json:"since,omitempty"`
+	MoveID  string     `json:"move_id,omitempty"`
 }
 
 type ShareStatus struct {

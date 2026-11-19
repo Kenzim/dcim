@@ -39,6 +39,9 @@ type Spec struct {
 	Netns    string // path of the named network namespace
 	CoreHash string
 	Mounts   []Mount
+	// Hostname is the container's host name, which Ganesha's CephFS client
+	// reports to the MDS; empty leaves podman's default.
+	Hostname string
 }
 
 type Container struct {
@@ -53,6 +56,8 @@ type Runtime interface {
 	List(ctx context.Context) ([]Container, error)
 	Run(ctx context.Context, spec Spec) error
 	Remove(ctx context.Context, name string) error
+	// Stop stops a container, waiting at most 5 s before killing it.
+	Stop(ctx context.Context, name string) error
 	// Reload makes Ganesha re-read its exports.
 	Reload(ctx context.Context, name string) error
 }
@@ -119,6 +124,9 @@ func RunArgs(spec Spec) []string {
 		"--label", LabelTenant + "=" + strconv.FormatInt(spec.TenantID, 10),
 		"--label", LabelCoreHash + "=" + spec.CoreHash,
 	}
+	if spec.Hostname != "" {
+		args = append(args, "--hostname", spec.Hostname)
+	}
 	for _, m := range spec.Mounts {
 		v := m.Source + ":" + m.Target
 		if m.ReadOnly {
@@ -140,6 +148,11 @@ func (p *Podman) Run(ctx context.Context, spec Spec) error {
 
 func (p *Podman) Remove(ctx context.Context, name string) error {
 	_, err := p.podman(ctx, "rm", "-f", name)
+	return err
+}
+
+func (p *Podman) Stop(ctx context.Context, name string) error {
+	_, err := p.podman(ctx, "stop", "-t", "5", name)
 	return err
 }
 
