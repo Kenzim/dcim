@@ -3,6 +3,7 @@ package ceph
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -177,15 +178,15 @@ func TestTenantCaps(t *testing.T) {
 func TestEvictSessionsEveryActiveRank(t *testing.T) {
 	s := execx.NewScript().
 		On(pre+"fs get cephfs --format json", `{"mdsmap":{"in":[0,1],"max_mds":2}}`).
-		On(pre+"tell mds.cephfs:0 client evict auth_name=rf-t12", "").
-		On(pre+"tell mds.cephfs:1 client evict auth_name=rf-t12", "")
-	if err := cli(s).EvictSessions(context.Background(), "client.rf-t12"); err != nil {
+		On(pre+"tell mds.cephfs:0 client evict auth_name=rf-t12 client_metadata.hostname=rf-t12-nfs", "").
+		On(pre+"tell mds.cephfs:1 client evict auth_name=rf-t12 client_metadata.hostname=rf-t12-nfs", "")
+	if err := cli(s).EvictSessions(context.Background(), "client.rf-t12", "rf-t12-nfs"); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		pre + "fs get cephfs --format json",
-		pre + "tell mds.cephfs:0 client evict auth_name=rf-t12",
-		pre + "tell mds.cephfs:1 client evict auth_name=rf-t12",
+		pre + "tell mds.cephfs:0 client evict auth_name=rf-t12 client_metadata.hostname=rf-t12-nfs",
+		pre + "tell mds.cephfs:1 client evict auth_name=rf-t12 client_metadata.hostname=rf-t12-nfs",
 	}
 	if got := s.Lines(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls:\n%s", strings.Join(got, "\n"))
@@ -193,8 +194,44 @@ func TestEvictSessionsEveryActiveRank(t *testing.T) {
 
 	s = execx.NewScript().
 		On(pre+"fs get cephfs --format json", `{"mdsmap":{"in":[0]}}`).
-		Fail(pre+"tell mds.cephfs:0 client evict auth_name=rf-t12", errors.New("EPERM"))
-	if err := cli(s).EvictSessions(context.Background(), "client.rf-t12"); err == nil || !strings.Contains(err.Error(), "mds.cephfs:0") {
+		Fail(pre+"tell mds.cephfs:0 client evict auth_name=rf-t12 client_metadata.hostname=rf-t12-nfs", errors.New("EPERM"))
+	if err := cli(s).EvictSessions(context.Background(), "client.rf-t12", "rf-t12-nfs"); err == nil || !strings.Contains(err.Error(), "mds.cephfs:0") {
 		t.Fatalf("err %v", err)
+	}
+}
+
+func TestEvictAddrSessions(t *testing.T) {
+	s := execx.NewScript().
+		On(pre+"fs get cephfs --format json", `{"mdsmap":{"in":[0]}}`).
+		On(pre+"tell mds.cephfs:0 client ls --format json", `[
+			{"id":4101,"inst":"client.4101 v1:10.0.0.5:0/111"},
+			{"id":4102,"inst":"client.4102 v1:10.0.0.6:0/222"},
+			{"id":4103,"inst":"client.4103 10.0.0.5:0/333"}]`)
+	n, err := cli(s).EvictAddrSessions(context.Background(), netip.MustParseAddr("10.0.0.5"))
+	if err != nil || n != 2 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	lines := strings.Join(s.Lines(), "\n")
+	if !strings.Contains(lines, "client evict id=4101") || !strings.Contains(lines, "client evict id=4103") || strings.Contains(lines, "id=4102") {
+		t.Fatalf("calls:\n%s", lines)
+	}
+}
+
+func TestDaemonAddrs(t *testing.T) {
+	s := execx.NewScript().
+		On(pre+"mon dump --format json", `{"mons":[{"name":"a","public_addrs":{"addrvec":[{"type":"v2","addr":"10.1.0.1:3300","nonce":0}]},"addr":"10.1.0.1:6789/0"}]}`).
+		On(pre+"mgr dump --format json", `{"active_addrs":{"addrvec":[{"addr":"10.1.0.2:6800"}]},"standbys":[]}`).
+		On(pre+"fs dump --format json", `{"standbys":[{"addr":"10.1.0.3:6801/9"}],"filesystems":[{"mdsmap":{"info":{"gid_1":{"addrs":{"addrvec":[{"addr":"10.1.0.4:6800"}]}}}}}]}`).
+		On(pre+"osd dump --format json", `{"epoch":7,"osds":[{"osd":0,"public_addr":"10.1.0.5:6802/1","cluster_addr":"10.2.0.5:6803/1","heartbeat_front_addr":"0.0.0.0:0/0"}],"blocklist":{"10.0.0.9:0/0":"x"}}`)
+	addrs, err := cli(s).DaemonAddrs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, a := range addrs {
+		got = append(got, a.String())
+	}
+	if strings.Join(got, ",") != "10.1.0.1,10.1.0.2,10.1.0.3,10.1.0.4,10.1.0.5,10.2.0.5" {
+		t.Fatalf("addrs %v", got)
 	}
 }

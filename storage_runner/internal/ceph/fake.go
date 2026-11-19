@@ -3,6 +3,7 @@ package ceph
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sort"
 	"sync"
 
@@ -18,6 +19,10 @@ type Fake struct {
 	FreeBytes int64
 	Fail      map[string]error // create errors keyed by subvolume name or entity
 	InfoFail  map[string]error // SubvolumeInfo errors keyed by subvolume name
+	// Daemons are the Ceph daemon addresses DaemonAddrs returns.
+	Daemons    []netip.Addr
+	DaemonsErr error
+	EvictErr   error
 
 	mu         sync.Mutex
 	groupPool  string
@@ -218,9 +223,39 @@ func (f *Fake) RemoveUser(_ context.Context, entity string) error {
 	return nil
 }
 
-func (f *Fake) EvictSessions(_ context.Context, entity string) error {
-	f.Rec.Add("ceph evict %s", entity)
+func (f *Fake) EvictSessions(_ context.Context, entity, hostname string) error {
+	f.mu.Lock()
+	err := f.EvictErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	f.Rec.Add("ceph evict %s hostname=%s", entity, hostname)
 	return nil
+}
+
+func (f *Fake) EvictAddrSessions(_ context.Context, ip netip.Addr) (int, error) {
+	f.mu.Lock()
+	err := f.EvictErr
+	f.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	f.Rec.Add("ceph evict addr=%s", ip)
+	return 0, nil
+}
+
+func (f *Fake) DaemonAddrs(context.Context) ([]netip.Addr, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]netip.Addr(nil), f.Daemons...), f.DaemonsErr
+}
+
+// SetEvictErr makes every eviction fail with err (nil to succeed again).
+func (f *Fake) SetEvictErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.EvictErr = err
 }
 
 func (f *Fake) MinimalConf(context.Context) (string, error) {

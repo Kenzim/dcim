@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,8 +101,13 @@ type Cluster interface {
 	CreateUser(ctx context.Context, entity string, caps Caps) (key string, err error)
 	SetCaps(ctx context.Context, entity string, caps Caps) error
 	RemoveUser(ctx context.Context, entity string) error
-	// EvictSessions ends every MDS session of entity on each active rank.
-	EvictSessions(ctx context.Context, entity string) error
+	// EvictSessions ends the MDS sessions of entity from clients whose
+	// hostname is hostname, on each active rank.
+	EvictSessions(ctx context.Context, entity, hostname string) error
+	// EvictAddrSessions ends every MDS session from address ip.
+	EvictAddrSessions(ctx context.Context, ip netip.Addr) (int, error)
+	// DaemonAddrs lists the addresses of every mon, mgr, MDS and OSD.
+	DaemonAddrs(ctx context.Context) ([]netip.Addr, error)
 	MinimalConf(ctx context.Context) (string, error)
 }
 
@@ -332,25 +339,120 @@ func (c *CLI) RemoveUser(ctx context.Context, entity string) error {
 	return err
 }
 
-// EvictSessions evicts entity's sessions so a dead Ganesha's caps are released
-// at once; otherwise the MDS makes its successor wait for session_autoclose.
-func (c *CLI) EvictSessions(ctx context.Context, entity string) error {
+func (c *CLI) mdsRanks(ctx context.Context) ([]string, error) {
 	var fs struct {
 		MDSMap struct {
 			In []int `json:"in"`
 		} `json:"mdsmap"`
 	}
 	if err := c.cephJSON(ctx, &fs, "fs", "get", c.FS); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(fs.MDSMap.In))
+	for _, rank := range fs.MDSMap.In {
+		out = append(out, fmt.Sprintf("mds.%s:%d", c.FS, rank))
+	}
+	return out, nil
+}
+
+// EvictSessions evicts entity's sessions whose client hostname is hostname,
+// on each active rank, so a dead Ganesha's caps are released at once;
+// otherwise the MDS makes its successor wait for session_autoclose. The
+// hostname filter spares the same user's sessions from other hosts (the SFTP
+// master's kernel mounts).
+func (c *CLI) EvictSessions(ctx context.Context, entity, hostname string) error {
+	ranks, err := c.mdsRanks(ctx)
+	if err != nil {
 		return err
 	}
 	authName := strings.TrimPrefix(entity, "client.")
-	for _, rank := range fs.MDSMap.In {
-		target := fmt.Sprintf("mds.%s:%d", c.FS, rank)
-		if _, err := c.ceph(ctx, "tell", target, "client", "evict", "auth_name="+authName); err != nil {
-			return fmt.Errorf("evict %s on %s: %w", entity, target, err)
+	for _, target := range ranks {
+		if _, err := c.ceph(ctx, "tell", target, "client", "evict", "auth_name="+authName, "client_metadata.hostname="+hostname); err != nil {
+			return fmt.Errorf("evict %s@%s on %s: %w", entity, hostname, target, err)
 		}
 	}
 	return nil
+}
+
+// EvictAddrSessions evicts, on each active rank, every session whose client
+// address is ip, and returns how many it evicted.
+func (c *CLI) EvictAddrSessions(ctx context.Context, ip netip.Addr) (int, error) {
+	ranks, err := c.mdsRanks(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, target := range ranks {
+		var sessions []struct {
+			ID   int64  `json:"id"`
+			Inst string `json:"inst"`
+		}
+		if err := c.cephJSON(ctx, &sessions, "tell", target, "client", "ls"); err != nil {
+			return n, fmt.Errorf("client ls on %s: %w", target, err)
+		}
+		for _, s := range sessions {
+			if a, ok := firstIPv4(s.Inst); !ok || a != ip {
+				continue
+			}
+			if _, err := c.ceph(ctx, "tell", target, "client", "evict", "id="+strconv.FormatInt(s.ID, 10)); err != nil {
+				return n, fmt.Errorf("evict client %d on %s: %w", s.ID, target, err)
+			}
+			n++
+		}
+	}
+	return n, nil
+}
+
+var ipv4Re = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+`)
+
+func firstIPv4(s string) (netip.Addr, bool) {
+	m := ipv4Re.FindStringSubmatch(s)
+	if m == nil {
+		return netip.Addr{}, false
+	}
+	a, err := netip.ParseAddr(m[1])
+	return a, err == nil
+}
+
+// collectAddrs adds every IPv4 address found in string values under keys
+// that contain "addr".
+func collectAddrs(v any, underAddr bool, out map[netip.Addr]bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			collectAddrs(e, underAddr || strings.Contains(k, "addr"), out)
+		}
+	case []any:
+		for _, e := range x {
+			collectAddrs(e, underAddr, out)
+		}
+	case string:
+		if underAddr {
+			for _, m := range ipv4Re.FindAllStringSubmatch(x, -1) {
+				if a, err := netip.ParseAddr(m[1]); err == nil && !a.IsUnspecified() {
+					out[a] = true
+				}
+			}
+		}
+	}
+}
+
+// DaemonAddrs returns the addresses of every monitor, manager, MDS and OSD.
+func (c *CLI) DaemonAddrs(ctx context.Context) ([]netip.Addr, error) {
+	found := map[netip.Addr]bool{}
+	for _, args := range [][]string{{"mon", "dump"}, {"mgr", "dump"}, {"fs", "dump"}, {"osd", "dump"}} {
+		var v any
+		if err := c.cephJSON(ctx, &v, args...); err != nil {
+			return nil, err
+		}
+		collectAddrs(v, false, found)
+	}
+	out := make([]netip.Addr, 0, len(found))
+	for a := range found {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Less(out[j]) })
+	return out, nil
 }
 
 func (c *CLI) MinimalConf(ctx context.Context) (string, error) {
