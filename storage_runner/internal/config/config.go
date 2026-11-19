@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"rackflow/storage_runner/internal/names"
 )
 
 type Host struct {
@@ -39,6 +41,9 @@ type Host struct {
 	// SFTPVIPInterface carries the location's SFTP virtual IP; empty means
 	// the interface of the default route.
 	SFTPVIPInterface string
+	// CephUserPrefix starts each tenant's cephx user name; a second Rackflow
+	// on the same Ceph cluster needs its own prefix and its own HA pool.
+	CephUserPrefix string
 }
 
 const (
@@ -51,7 +56,9 @@ const (
 
 var (
 	cephNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
-	ifaceRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,14}$`)
+	// The prefix ends in a letter or '-' so the tenant id after it is unambiguous.
+	userPrefixRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,14}[a-z-])?$`)
+	ifaceRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,14}$`)
 )
 
 // FromEnv builds the host config; getenv is os.Getenv in production.
@@ -80,6 +87,7 @@ func FromEnv(getenv func(string) string) (Host, error) {
 		SFTPServerPath:     get("SFTP_SERVER_PATH", "/usr/lib/ssh/sftp-server"),
 		CephHAPool:         get("CEPH_HA_POOL", DefaultHAPool),
 		SFTPVIPInterface:   get("SFTP_VIP_INTERFACE", ""),
+		CephUserPrefix:     get("CEPH_USER_PREFIX", names.DefaultCephUserPrefix),
 	}
 	for _, kv := range [][2]string{
 		{"RACKFLOW_URL", h.RackflowURL},
@@ -115,6 +123,12 @@ func FromEnv(getenv func(string) string) (Host, error) {
 		if kv[1] != "" && !cephNameRe.MatchString(kv[1]) {
 			errs = append(errs, fmt.Errorf("%s %q may only contain letters, digits, '.', '_' and '-'", kv[0], kv[1]))
 		}
+	}
+
+	if !userPrefixRe.MatchString(h.CephUserPrefix) {
+		errs = append(errs, fmt.Errorf("CEPH_USER_PREFIX %q must be 1-16 lower-case letters, digits or '-', starting with a letter and ending in a letter or '-'", h.CephUserPrefix))
+	} else if h.CephUserPrefix != names.DefaultCephUserPrefix && h.CephHAPool == DefaultHAPool {
+		errs = append(errs, fmt.Errorf("CEPH_USER_PREFIX %q is for a second Rackflow on a shared Ceph cluster, which also needs its own CEPH_HA_POOL (not %q)", h.CephUserPrefix, DefaultHAPool))
 	}
 
 	nets, err := parseNetworks(get("CEPH_PUBLIC_NETWORKS", ""))

@@ -38,3 +38,22 @@ func TestParsersOnlyMatchRunnerNames(t *testing.T) {
 		}
 	}
 }
+
+func TestCephUserPrefix(t *testing.T) {
+	SetCephUserPrefix("rfdev-t")
+	defer SetCephUserPrefix(DefaultCephUserPrefix)
+	if CephEntity(12) != "client.rfdev-t12" || CephUserID(12) != "rfdev-t12" {
+		t.Fatalf("entity %s user %s", CephEntity(12), CephUserID(12))
+	}
+	// Another installation's users on the same cluster are never matched.
+	for s, want := range map[string]int64{"client.rfdev-t12": 12, "client.rf-t12": 0, "client.rfdev-t": 0, "client.rfdev-tx": 0} {
+		got, ok := ParseCephEntity(s)
+		if (want != 0) != ok || got != want {
+			t.Errorf("ParseCephEntity(%q) = %d %v", s, got, ok)
+		}
+	}
+	// Host-local names keep their fixed prefix.
+	if Namespace(12) != "rf-t12" || Container(12) != "rf-t12-nfs" {
+		t.Fatalf("namespace %s container %s", Namespace(12), Container(12))
+	}
+}

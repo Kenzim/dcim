@@ -29,7 +29,7 @@ func TestDefaults(t *testing.T) {
 	}
 	if h.RackflowURL != "https://rackflow.example.com" || h.PollInterval != 30*time.Second ||
 		h.CephSubvolumeGroup != "rackflow" || h.LinkCIDR.String() != "169.254.128.0/17" ||
-		h.StateDir != DefaultStateDir {
+		h.StateDir != DefaultStateDir || h.CephUserPrefix != "rf-t" {
 		t.Fatalf("host %+v", h)
 	}
 	if len(h.CephPublicNetworks) != 2 || h.CephPublicNetworks[0].String() != "10.10.0.0/24" {
@@ -49,6 +49,11 @@ func TestOverrides(t *testing.T) {
 	if h, _ := FromEnv(envOf(m)); h.PollInterval != 45*time.Second {
 		t.Fatalf("interval %s", h.PollInterval)
 	}
+	m["CEPH_USER_PREFIX"] = "rfdev-t"
+	m["CEPH_HA_POOL"] = "rackflow_dev_ha"
+	if h, err := FromEnv(envOf(m)); err != nil || h.CephUserPrefix != "rfdev-t" || h.CephHAPool != "rackflow_dev_ha" {
+		t.Fatalf("h=%+v err=%v", h, err)
+	}
 }
 
 func TestErrors(t *testing.T) {
@@ -66,6 +71,9 @@ func TestErrors(t *testing.T) {
 		"RACKFLOW_URL is required":   func(m map[string]string) { delete(m, "RACKFLOW_URL") },
 		"CEPH_EC_POOL is required":   func(m map[string]string) { delete(m, "CEPH_EC_POOL") },
 		"POLL_INTERVAL must be posi": func(m map[string]string) { m["POLL_INTERVAL"] = "0" },
+		"CEPH_USER_PREFIX \"rf-t1\"": func(m map[string]string) { m["CEPH_USER_PREFIX"] = "rf-t1" },
+		"CEPH_USER_PREFIX \"Dev\"":   func(m map[string]string) { m["CEPH_USER_PREFIX"] = "Dev" },
+		"its own CEPH_HA_POOL":       func(m map[string]string) { m["CEPH_USER_PREFIX"] = "rfdev-t" },
 	}
 	for want, mutate := range cases {
 		m := minimal()

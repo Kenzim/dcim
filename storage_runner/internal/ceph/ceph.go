@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"rackflow/storage_runner/internal/execx"
+	"rackflow/storage_runner/internal/names"
 )
 
 type SubvolumeInfo struct {
@@ -317,7 +318,7 @@ func (c *CLI) Users(ctx context.Context) (map[string]User, error) {
 	}
 	out := map[string]User{}
 	for _, e := range dump.AuthDump {
-		if !strings.HasPrefix(e.Entity, "client.rf-t") {
+		if _, ok := names.ParseCephEntity(e.Entity); !ok {
 			continue
 		}
 		out[e.Entity] = User{Key: e.Key, Caps: Caps{Mon: e.Caps["mon"], MDS: e.Caps["mds"], OSD: e.Caps["osd"]}}

@@ -17,6 +17,7 @@ import (
 	"rackflow/storage_runner/internal/firewall"
 	"rackflow/storage_runner/internal/ganesha"
 	"rackflow/storage_runner/internal/lease"
+	"rackflow/storage_runner/internal/names"
 	"rackflow/storage_runner/internal/netns"
 	"rackflow/storage_runner/internal/reconcile"
 	"rackflow/storage_runner/internal/sftp"
@@ -25,7 +26,7 @@ import (
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
-var version = "0.3.0"
+var version = "0.3.1"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -48,6 +49,7 @@ func runRunner() {
 	if err != nil {
 		log.Fatalf("storage runner config: %v", err)
 	}
+	names.SetCephUserPrefix(host.CephUserPrefix)
 	store, err := state.Open(host.StateDir, host.LinkCIDR)
 	if err != nil {
 		log.Fatalf("state: %v", err)
@@ -124,8 +126,8 @@ func runRunner() {
 		}
 	}()
 
-	log.Printf("storage runner %s: node interface %s, fs %s, EC pool %s, HA pool %s, polling every %s",
-		version, host.ParentIface, host.CephFSName, host.CephECPool, host.CephHAPool, host.PollInterval)
+	log.Printf("storage runner %s: node interface %s, fs %s, EC pool %s, HA pool %s, cephx users client.%s<id>, polling every %s",
+		version, host.ParentIface, host.CephFSName, host.CephECPool, host.CephHAPool, host.CephUserPrefix, host.PollInterval)
 	r.Loop(ctx, host.PollInterval)
 	_ = notifier.Notify("STOPPING=1")
 	log.Printf("storage runner stopped")

@@ -20,17 +20,38 @@ func VLANIface(tenant int64) string  { return fmt.Sprintf("rf-v%d", tenant) }
 func HostVeth(tenant int64) string   { return fmt.Sprintf("rf-h%d", tenant) }
 func NSVeth(tenant int64) string     { return fmt.Sprintf("rf-n%d", tenant) }
 func Container(tenant int64) string  { return fmt.Sprintf("rf-t%d-nfs", tenant) }
-func CephUserID(tenant int64) string { return fmt.Sprintf("rf-t%d", tenant) }
+func CephUserID(tenant int64) string { return fmt.Sprintf("%s%d", cephUserPrefix, tenant) }
 func CephEntity(tenant int64) string { return "client." + CephUserID(tenant) }
 func TenantDir(tenant int64) string  { return fmt.Sprintf("t%d", tenant) }
 func NetnsPath(tenant int64) string  { return NetnsDir + "/" + Namespace(tenant) }
+
+// DefaultCephUserPrefix names tenant cephx users client.rf-t<id>.
+const DefaultCephUserPrefix = "rf-t"
+
+// cephUserPrefix starts every tenant cephx user name. cephx users are
+// cluster-wide, so two Rackflow installations sharing one Ceph cluster need
+// different prefixes. It is set once at start-up, before any other use.
+var (
+	cephUserPrefix = DefaultCephUserPrefix
+	entityRe       = entityRegexp(DefaultCephUserPrefix)
+)
+
+// SetCephUserPrefix changes the tenant cephx user prefix. Call it only at
+// start-up, before anything else in the runner runs.
+func SetCephUserPrefix(prefix string) {
+	cephUserPrefix = prefix
+	entityRe = entityRegexp(prefix)
+}
+
+func entityRegexp(prefix string) *regexp.Regexp {
+	return regexp.MustCompile(`^client\.` + regexp.QuoteMeta(prefix) + `([1-9][0-9]{0,10})$`)
+}
 
 // Subvolume is the CephFS subvolume name of a share.
 func Subvolume(tenant, share int64) string { return fmt.Sprintf("t%d-s%d", tenant, share) }
 
 var (
 	namespaceRe = regexp.MustCompile(`^rf-t([1-9][0-9]{0,10})$`)
-	entityRe    = regexp.MustCompile(`^client\.rf-t([1-9][0-9]{0,10})$`)
 	containerRe = regexp.MustCompile(`^rf-t([1-9][0-9]{0,10})-nfs$`)
 	subvolumeRe = regexp.MustCompile(`^t([1-9][0-9]{0,17})-s([1-9][0-9]{0,17})$`)
 )

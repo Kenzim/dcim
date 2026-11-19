@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"rackflow/storage_runner/internal/execx"
+	"rackflow/storage_runner/internal/names"
 )
 
 const pre = "ceph --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.admin.keyring "
@@ -159,6 +160,18 @@ func TestUsersOnlyRunnerOwned(t *testing.T) {
 		{"entity":"osd.0","key":"C","caps":{}}]}`)
 	users, err := (&CLI{Cmd: s}).Users(context.Background())
 	if err != nil || len(users) != 1 || users["client.rf-t12"].Caps.MDS != "allow rw path=/x" {
+		t.Fatalf("users=%+v err=%v", users, err)
+	}
+}
+
+func TestUsersWithPrefixSkipOtherInstallation(t *testing.T) {
+	names.SetCephUserPrefix("rfdev-t")
+	defer names.SetCephUserPrefix(names.DefaultCephUserPrefix)
+	s := execx.NewScript().On("ceph auth ls --format json", `{"auth_dump":[
+		{"entity":"client.rf-t12","key":"B","caps":{"mon":"allow r"}},
+		{"entity":"client.rfdev-t12","key":"D","caps":{"mon":"allow r"}}]}`)
+	users, err := (&CLI{Cmd: s}).Users(context.Background())
+	if err != nil || len(users) != 1 || users["client.rfdev-t12"].Key != "D" {
 		t.Fatalf("users=%+v err=%v", users, err)
 	}
 }
