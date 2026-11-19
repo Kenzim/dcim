@@ -113,22 +113,29 @@ On NX-OS 10.x (switches 1, 5, 6) `nxapi ssl protocols TLSv1.2 TLSv1.3` is also a
 
 ### 2. A least-privilege role and account
 
-The role allows only the commands the plugin sends. NX-OS checks rules from the highest number down.
+The role allows only the commands the plugin sends, including the restore commands it sends on detach and rollback. NX-OS checks rules from the highest number down. Commands inside a configuration sub-mode only match when the rule spells out the whole mode path (`configure terminal ; interface * ; ...`); a bare `switchport ...` rule never matches, and the switch answers "% Permission denied for the role" as soon as the account enters an interface.
 
 ```
 role name rackflow-vlan
   description Rackflow private network VLANs
+  rule 250 deny command configure terminal ; no vlan <PROTECTED>
+  rule 247 deny command configure terminal ; vlan <PROTECTED>
   rule 200 permit command copy running-config startup-config
   rule 190 permit command configure terminal
   rule 185 permit command end
-  rule 180 permit command vlan *
-  rule 175 permit command no vlan *
-  rule 170 permit command name *
-  rule 165 permit command interface *
-  rule 160 permit command switchport trunk allowed vlan *
-  rule 155 permit command switchport trunk native vlan *
-  rule 150 permit command switchport mode trunk
-  rule 145 permit command spanning-tree port type edge trunk
+  rule 180 permit command configure terminal ; vlan *
+  rule 178 permit command configure terminal ; vlan * ; name *
+  rule 175 permit command configure terminal ; no vlan *
+  rule 165 permit command configure terminal ; interface *
+  rule 160 permit command configure terminal ; interface * ; switchport trunk allowed vlan *
+  rule 155 permit command configure terminal ; interface * ; switchport trunk native vlan *
+  rule 150 permit command configure terminal ; interface * ; switchport mode trunk
+  rule 144 permit command configure terminal ; interface * ; switchport mode access
+  rule 140 permit command configure terminal ; interface * ; switchport access vlan *
+  rule 135 permit command configure terminal ; interface * ; no switchport trunk native vlan
+  rule 130 permit command configure terminal ; interface * ; no switchport trunk allowed vlan
+  rule 128 permit command configure terminal ; interface * ; spanning-tree port type *
+  rule 126 permit command configure terminal ; interface * ; no spanning-tree port type
   rule 120 permit command show running-config interface *
   rule 115 permit command show running-config vlan *
   rule 110 permit command show vlan brief
@@ -136,16 +143,18 @@ role name rackflow-vlan
   rule 100 permit command show port-channel summary *
   rule 95 permit command show hostname
   vlan policy deny
-    permit vlan <POOL>
+    permit vlan <ACCESS VLANS>,<POOL>
   interface policy deny
     permit interface <SERVER PORTS>
 ```
+
+`<ACCESS VLANS>` are the access VLANs already on the permitted server ports (an access port converted to a trunk keeps its access VLAN as the native VLAN, so the account must be allowed to name it). `<PROTECTED>` are those same VLANs plus VLAN 1: the deny rules (one per VLAN, numbered above 200) stop the account creating, renaming or deleting them, while the VLAN policy still lets it use them on a trunk.
 
 `<SERVER PORTS>` per switch, from the survey (only server-facing ports, never uplinks, the peer-link or `mgmt0`):
 
 | Switch | Interface policy |
 |---|---|
-| 1 uplink switch rack2 | `permit interface ethernet 1/1-44` (Eth1/45-54, including the `port-channel1` members, stay denied) |
+| 1 uplink switch rack2 | Applied 19 Nov 2026: `permit interface ethernet 1/1-16, ethernet 1/18-20, ethernet 1/22-42`. Eth1/17 (cluster trunk), Eth1/21, 1/43 and 1/44 (management VLAN 291), Eth1/45-54, `port-channel1` and `mgmt0` stay denied. VLAN policy `1,733,750,3000-3099` |
 | 5 25G-UPLINK-SW1 | `permit interface ethernet 1/1-25` and the host port-channels `port-channel101-126` |
 | 6 25G-UPLINK-SW2 | `permit interface ethernet 1/1-25` and `port-channel101-126` |
 | 7, 8 Ceph | `permit interface ethernet 1/1-24` and `port-channel101-125` |
@@ -159,24 +168,35 @@ Notes on the role:
 - Not verified on these releases: whether the interface policy accepts port-channel ranges. If the switch rejects `permit interface port-channel101-126`, or the account cannot change a host port-channel, permit the port-channels one by one or drop the interface policy and rely on Rackflow's own checks (it only touches interfaces reached from a server's recorded cables).
 - Check how the switch stored it with `show role name rackflow-vlan`, and test the account (step 3) with a dry run, then one real attachment, before relying on it.
 
-Then the account:
+Then the account. Do not call it `rackflow`: on these switches a local user `rackflow` may already exist as the SNMPv3 monitoring user, and `username rackflow ...` would overwrite its password and role and break monitoring. Check with `show user-account` first.
 
 ```
-username rackflow password 0 <PASSWORD> role rackflow-vlan
+username rackflow-nxapi password 0 <PASSWORD> role rackflow-vlan
 ```
 
-If the switches authenticate through TACACS+ or RADIUS, create the account and role there instead and map it to `rackflow-vlan`.
+NX-OS creates a matching SNMPv3 user for every local login; that is expected. If the switches authenticate through TACACS+ or RADIUS, create the account and role there instead and map it to `rackflow-vlan`.
+
+If NX-API is reached on an SVI rather than `mgmt0`, restrict it to the Rackflow VM with an inbound access list on that SVI, as on switch 1 (`Vlan291`):
+
+```
+ip access-list RACKFLOW-NXAPI-IN
+  10 permit tcp <RACKFLOW VM>/32 <SWITCH>/32 eq 443
+  20 deny tcp any <SWITCH>/32 eq 443
+  30 permit ip any any
+interface Vlan291
+  ip access-group RACKFLOW-NXAPI-IN in
+```
 
 ### 3. Verify
 
 From the Rackflow VM (read-only):
 
 ```
-curl -sk -u rackflow https://<switch>/ins -H 'content-type: application/json-rpc' \
+curl -sk -u rackflow-nxapi https://<switch>/ins -H 'content-type: application/json-rpc' \
   -d '[{"jsonrpc":"2.0","method":"cli","params":{"cmd":"show vpc brief","version":1},"id":1}]'
 ```
 
-On the switch: `show nxapi` (HTTPS enabled, port 443, HTTP disabled), `show user-account rackflow`, `show role name rackflow-vlan`.
+On the switch: `show nxapi` (HTTPS enabled, port 443, HTTP disabled), `show user-account rackflow-nxapi`, `show role name rackflow-vlan`. Then, as `rackflow-nxapi`, check that entering a permitted interface and re-applying its current access VLAN is accepted, and that an uplink, `mgmt0`, a protected VLAN and `show running-config` are refused.
 
 ### 4. Move the switch in Rackflow
 
