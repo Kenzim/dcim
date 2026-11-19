@@ -151,8 +151,8 @@ async def storage(
     create (owner_user_id, name, size_gb; location_id, network_id, node_id optional), link
     (service_id; network_id, or none to create a network for the owner; node_id optional, default
     the least loaded node), resize (service_id, size_gb; never below the shares' total quota),
-    share_create (service_id, name, quota_gb; clients, all_clients, read_only, sftp_access
-    off/ro/rw), share_update (service_id, share_id; same fields), share_delete (service_id,
+    share_create (service_id, name, quota_gb; whole network unless clients are listed; all_clients,
+    read_only, sftp_access off/ro/rw), share_update (service_id, share_id; same fields), share_delete (service_id,
     share_id, confirm=true; data is destroyed after the grace period). sftp_user_create
     (service_id, name; public_keys and/or new_password=true, allowed_ips), sftp_user_update
     (service_id, user_id; public_keys, new_password, allowed_ips, enabled), sftp_user_delete
@@ -202,7 +202,7 @@ async def storage(
                 name=name,
                 quota_gb=quota_gb,
                 clients=clients or [],
-                all_clients=bool(all_clients),
+                all_clients=all_clients,
                 read_only=bool(read_only),
                 sftp_access=sftp_access or "off",
             )

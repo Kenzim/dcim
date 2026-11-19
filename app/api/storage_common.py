@@ -49,7 +49,8 @@ class ShareCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=32)
     quota_gb: int = Field(..., ge=1)
     clients: List[str] = Field(default_factory=list, max_length=256)
-    all_clients: bool = False
+    # Omitted: the whole network, unless clients are listed.
+    all_clients: Optional[bool] = None
     read_only: bool = False
     sftp_access: SftpAccessValue = "off"
 

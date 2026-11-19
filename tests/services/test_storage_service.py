@@ -33,6 +33,7 @@ from app.services.storage_service import (
     StorageService,
     apply_runner_status,
     build_runner_config,
+    share_clients,
     tenant_status,
 )
 
@@ -405,7 +406,8 @@ async def _linked(env, size_gb=100):
 async def test_share_quota_and_client_validation(env):
     _, _, _, _, tenant = await _linked(env, size_gb=100)
     share = StorageService.create_share(env.db, tenant, name="data", quota_gb=60, clients=["10.0.0.5", "10.0.0.5"])
-    assert share.clients == ["10.0.0.5"]
+    assert share.clients == ["10.0.0.5"] and not share.all_clients
+    assert share_clients(tenant, share) == ["10.0.0.5"]
     with pytest.raises(StorageError, match="Not enough"):
         StorageService.create_share(env.db, tenant, name="more", quota_gb=41)
     with pytest.raises(StorageError, match="already exists"):
@@ -416,7 +418,8 @@ async def test_share_quota_and_client_validation(env):
     for bad_ip in ("10.0.1.5", "10.0.0.254", "10.0.0.0", "10.0.0.255", "nope"):
         with pytest.raises(StorageError):
             StorageService.create_share(env.db, tenant, name="x", quota_gb=1, clients=[bad_ip])
-    StorageService.create_share(env.db, tenant, name="more", quota_gb=40)
+    more = StorageService.create_share(env.db, tenant, name="more", quota_gb=40)
+    assert more.all_clients and share_clients(tenant, more) == ["10.0.0.0/24"]
 
     share.used_bytes = 30 * GIB + 1
     env.db.commit()
@@ -470,7 +473,7 @@ async def test_config_lists_only_this_nodes_tenants_and_follows_the_lifecycle(en
     other_net = await _network(env, "other")
     other_tenant = await StorageService.link_network(env.db, _storage(env, "other"), other_net.id, node_id=other_node.id)
     StorageService.create_share(env.db, tenant, name="data", quota_gb=10, clients=["10.0.0.5"])
-    StorageService.create_share(env.db, tenant, name="all", quota_gb=10, all_clients=True)
+    StorageService.create_share(env.db, tenant, name="all", quota_gb=10)
 
     config = build_runner_config(env.db, node)
     assert [t["id"] for t in config["tenants"]] == [tenant.id]
@@ -481,7 +484,7 @@ async def test_config_lists_only_this_nodes_tenants_and_follows_the_lifecycle(en
     assert entry["size_bytes"] == 100 * GIB and entry["limits"] is None
     assert [s["name"] for s in entry["shares"]] == ["data", "all"]
     assert entry["shares"][0]["clients"] == ["10.0.0.5"]
-    assert entry["shares"][1]["clients"] == []
+    assert entry["shares"][1]["clients"] == ["10.0.0.0/24"]
     assert config["settings"]["destroy_grace_seconds"] == 7 * 24 * 3600
     assert config["version"] == build_runner_config(env.db, node)["version"]
     assert "key" not in str(config).lower() and "password" not in str(config).lower()

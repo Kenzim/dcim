@@ -159,17 +159,13 @@ def share_status(share: StorageShare, storage_status: str) -> str:
 
 
 def share_clients(tenant: StorageTenant, share: StorageShare) -> List[str]:
-    """The addresses a share is exported to."""
+    """The addresses a share is exported to: the whole private network, or the listed addresses."""
     if not share.all_clients:
         return list(share.clients or [])
-    network = tenant.network
-    if network is None:
+    cidr = tenant.network_cidr or (tenant.network.cidr if tenant.network is not None else None)
+    if not cidr:
         return list(share.clients or [])
-    endpoint = tenant.endpoint_ip or storage_endpoint_ip(network.cidr)
-    return sorted(
-        {a.ip_address for a in network.attachments if a.ip_address and a.ip_address != endpoint},
-        key=ipaddress.ip_address,
-    )
+    return [str(ipaddress.ip_network(cidr, strict=False))]
 
 
 # --- nodes ---
@@ -565,11 +561,14 @@ class StorageService:
         name: str,
         quota_gb: int,
         clients: Optional[List[str]] = None,
-        all_clients: bool = False,
+        all_clients: Optional[bool] = None,
         read_only: bool = False,
         sftp_access: Optional[str] = None,
     ) -> StorageShare:
+        """A share is open to the whole private network unless addresses are listed."""
         StorageService._require_writable(tenant)
+        if all_clients is None:
+            all_clients = not clients
         name = (name or "").strip()
         if not SHARE_NAME_RE.match(name):
             raise StorageError(

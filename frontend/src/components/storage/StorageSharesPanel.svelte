@@ -19,7 +19,7 @@
   let editForm = {};
 
   function emptyForm() {
-    return { name: '', quota_gb: '', clients: '', all_clients: false, read_only: false, sftp_access: 'off' };
+    return { name: '', quota_gb: '', clients: '', all_clients: true, read_only: false, sftp_access: 'off' };
   }
 
   $: writable = storage && (storage.status === 'ready' || storage.status === 'provisioning' || storage.status === 'error');
@@ -151,7 +151,7 @@
         <textarea rows="3" bind:value={form.clients} disabled={form.all_clients} placeholder="10.0.0.5&#10;10.0.0.6"></textarea>
       </label>
       <small>Addresses on {storage.network?.cidr || 'the network'}, one per line or comma separated.</small>
-      <label class="check"><input type="checkbox" bind:checked={form.all_clients} /> Allow every service attached to this network</label>
+      <label class="check"><input type="checkbox" bind:checked={form.all_clients} /> Allow the whole network</label>
       <label class="check"><input type="checkbox" bind:checked={form.read_only} /> Read only</label>
       <label>SFTP access
         <select bind:value={form.sftp_access}>
@@ -199,7 +199,7 @@
         <p class="clients">
           Clients:
           {#if share.all_clients}
-            every attached service
+            the whole network
             {#if share.effective_clients.length}(<span class="mono">{share.effective_clients.join(', ')}</span>){/if}
           {:else if share.clients.length}
             <span class="mono">{share.clients.join(', ')}</span>
@@ -215,7 +215,7 @@
             <label>Client addresses
               <textarea rows="3" bind:value={editForm.clients} disabled={editForm.all_clients}></textarea>
             </label>
-            <label class="check"><input type="checkbox" bind:checked={editForm.all_clients} /> Allow every service attached to this network</label>
+            <label class="check"><input type="checkbox" bind:checked={editForm.all_clients} /> Allow the whole network</label>
             <label class="check"><input type="checkbox" bind:checked={editForm.read_only} /> Read only</label>
             <label>SFTP access
               <select bind:value={editForm.sftp_access}>

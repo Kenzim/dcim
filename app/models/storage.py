@@ -146,8 +146,8 @@ class StorageShare(Base):
     name = Column(String(32), nullable=False)
     quota_bytes = Column(BigInteger, nullable=False)
     clients = Column(JSON, nullable=True)
-    # Allow every address attached to the network instead of ``clients``.
-    all_clients = Column(Boolean, nullable=False, default=False)
+    # Export to the whole private network instead of ``clients``.
+    all_clients = Column(Boolean, nullable=False, default=True)
     read_only = Column(Boolean, nullable=False, default=False)
     sftp_access = Column(_enum(SftpAccess), nullable=False, default=SftpAccess.OFF)
     state = Column(_enum(ShareState), nullable=False, default=ShareState.ACTIVE, index=True)

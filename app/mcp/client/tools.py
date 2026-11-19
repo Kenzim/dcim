@@ -410,8 +410,8 @@ async def storage(
     your network and set up; each share has its mount command and fstab line; sftp has the
     SFTP endpoint and users. networks (service_id): your private networks it can be linked to.
     link (service_id; network_id, or none to create a network). share_create (service_id, name,
-    quota_gb; clients = IPs on the network, all_clients to allow every service attached to it,
-    read_only, sftp_access off/ro/rw), share_update (service_id, share_id; same fields),
+    quota_gb; open to your whole private network unless you list clients = IPs on it,
+    all_clients, read_only, sftp_access off/ro/rw), share_update (service_id, share_id; same fields),
     share_delete (service_id, share_id, confirm=true; the data is destroyed after a grace
     period). sftp_user_create (service_id, name; public_keys and/or new_password=true for a
     generated password shown once; allowed_ips CIDRs), sftp_user_update (service_id, user_id;
@@ -438,7 +438,7 @@ async def storage(
                 name=name,
                 quota_gb=quota_gb,
                 clients=clients or [],
-                all_clients=bool(all_clients),
+                all_clients=all_clients,
                 read_only=bool(read_only),
                 sftp_access=sftp_access or "off",
             )
