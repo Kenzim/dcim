@@ -4980,6 +4980,19 @@ export const deleteStorageNode = (id) =>
   storageRequest(`/nodes/${id}`, { method: 'DELETE', errorMessage: 'Failed to delete storage node' });
 export const getServerVlanPorts = (serverId) =>
   storageRequest(`/servers/${serverId}/vlan-ports`, { errorMessage: 'Failed to load VLAN ports' });
+export const drainStorageNode = (id, draining) =>
+  storageRequest(`/nodes/${id}/drain`, { method: 'POST', body: { draining }, errorMessage: 'Failed to change draining' });
+export const listStorageLocations = () => storageRequest('/locations', { errorMessage: 'Failed to load storage locations' });
+export const getStorageLocation = (id) =>
+  storageRequest(`/locations/${id}`, { errorMessage: 'Failed to load storage location' });
+export const updateStorageLocation = (id, data) =>
+  storageRequest(`/locations/${id}`, { method: 'PATCH', body: data, errorMessage: 'Failed to update storage location' });
+export const setStorageLocationHostKey = (id, data) =>
+  storageRequest(`/locations/${id}/host-key`, { method: 'POST', body: data, errorMessage: 'Failed to set the host key' });
+export const rebalanceStorageLocation = (id) =>
+  storageRequest(`/locations/${id}/rebalance`, { method: 'POST', errorMessage: 'Failed to rebalance storage' });
+export const moveStorageService = (id, data) =>
+  storageRequest(`/services/${id}/move`, { method: 'POST', body: data, errorMessage: 'Failed to move storage' });
 export const listStorageServices = () => storageRequest('/services', { errorMessage: 'Failed to load storage' });
 export const getStorageService = (id) => storageRequest(`/services/${id}`, { errorMessage: 'Failed to load storage' });
 export const linkStorageService = (id, data) =>

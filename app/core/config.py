@@ -54,6 +54,21 @@ class Settings(BaseSettings):
     storage_sftp_max_auth_failures: int = 10
     storage_sftp_failure_window_seconds: int = 600
     storage_sftp_ban_seconds: int = 900
+    # NFS storage failover (docs/nfs-storage-failover.md): timings sent to the
+    # runners, how long a planned move may stay pending, how long a node must
+    # have been healthy before a tenant returns to it, and how long events are kept.
+    storage_ha_lease_seconds: int = 20
+    storage_ha_renew_seconds: int = 4
+    storage_ha_stop_margin_seconds: int = 6
+    storage_ha_guard_margin_seconds: int = 3
+    storage_ha_poll_seconds: int = 2
+    storage_ha_rank_step_seconds: int = 6
+    storage_ha_fence_seconds: int = 600
+    storage_ha_nfs_lease_lifetime: int = 30
+    storage_ha_nfs_grace_period: int = 45
+    storage_move_timeout_seconds: int = 600
+    storage_return_after_seconds: int = 900
+    storage_events_keep_days: int = 90
 
     # Trust the X-Forwarded-For header when determining the caller's source IP.
     # This must ONLY be enabled when the app sits behind a trusted reverse proxy

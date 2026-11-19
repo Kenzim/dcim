@@ -172,6 +172,36 @@ class StorageDAO:
         )
 
     @staticmethod
+    def tenants_for_location(db: Session, location_id: int) -> List[StorageTenant]:
+        """Every tenant placed in the location, terminated ones awaiting destruction included."""
+        return (
+            db.query(StorageTenant)
+            .options(joinedload(StorageTenant.shares), joinedload(StorageTenant.service))
+            .filter(StorageTenant.location_id == location_id, StorageTenant.node_id.isnot(None))
+            .order_by(StorageTenant.id)
+            .all()
+        )
+
+    @staticmethod
+    def tenants_preferred_on(db: Session, node_id: int) -> List[StorageTenant]:
+        return (
+            db.query(StorageTenant)
+            .filter(StorageTenant.node_id == node_id, StorageTenant.terminated_at.is_(None))
+            .order_by(StorageTenant.id)
+            .all()
+        )
+
+    @staticmethod
+    def tenants_served_by(db: Session, node_id: int) -> List[StorageTenant]:
+        return (
+            db.query(StorageTenant)
+            .options(joinedload(StorageTenant.service))
+            .filter(StorageTenant.current_node_id == node_id)
+            .order_by(StorageTenant.id)
+            .all()
+        )
+
+    @staticmethod
     def list_tenants(db: Session, *, owner_user_id: Optional[int] = None) -> List[StorageTenant]:
         from app.models.service import Service
 

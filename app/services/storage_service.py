@@ -25,7 +25,9 @@ from app.dao.storage_dao import StorageDAO
 from app.models.private_network import AttachmentState, NetworkKind, PrivateNetworkAttachment, PrivateNetworkStatus
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.models.storage import SftpAccess, ShareState, StorageNode, StorageShare, StorageTenant, VlanMode
-from app.services import storage_sftp
+from app.services import storage_ha, storage_location, storage_sftp
+from app.services.storage_errors import StorageError
+from app.services.storage_location import normalise_host
 from app.services.private_network_service import (
     PrivateNetworkError,
     PrivateNetworkService,
@@ -45,7 +47,6 @@ RESERVED_SHARE_NAMES = frozenset({
     "bin", "boot", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32", "media", "mnt",
     "opt", "proc", "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var",
 })
-SFTP_HOST_RE = re.compile(r"^[a-z0-9.:-]+$")
 RUNNER_STATES = {"ready", "pending", "error", "suspended"}
 
 # Combined, customer-facing states.
@@ -56,13 +57,6 @@ STATUS_ERROR = "error"
 STATUS_SUSPENDED = "suspended"
 STATUS_TERMINATED = "terminated"
 STATUS_DELETING = "deleting"
-
-
-class StorageError(Exception):
-    def __init__(self, message: str, status_code: int = 400):
-        super().__init__(message)
-        self.message = message
-        self.status_code = status_code
 
 
 def _now() -> datetime:
@@ -223,12 +217,7 @@ class StorageNodeService:
 
     @staticmethod
     def _sftp_host(value) -> Optional[str]:
-        host = str(value or "").strip().lower().rstrip(".")
-        if not host:
-            return None
-        if len(host) > 253 or not SFTP_HOST_RE.match(host):
-            raise StorageError("sftp_host must be a DNS name or an IP address")
-        return host
+        return normalise_host(value)
 
     @staticmethod
     def update(db: Session, node_id: int, **changes) -> StorageNode:
@@ -254,6 +243,7 @@ class StorageNodeService:
             node.vlan_mode = StorageNodeService._mode(changes["vlan_mode"])
         if changes.get("vlan_port_ids") is not None:
             node.vlan_port_ids = StorageNodeService._validate_ports(db, node.server_id, changes["vlan_port_ids"])
+        storage_location.adopt_node_sftp(db, node)
         return StorageDAO.save(db, node)
 
     @staticmethod
@@ -300,7 +290,7 @@ class StorageService:
         candidates = []
         for node in StorageDAO.list_nodes(db):
             server = node.server
-            if not node.enabled or server is None or server.location_id != network.location_id:
+            if not node.enabled or node.draining or server is None or server.location_id != network.location_id:
                 continue
             if StorageDAO.undestroyed_vlan_on_node(db, node.id, network.segment_id, network.location_id):
                 continue
@@ -309,7 +299,7 @@ class StorageService:
             chosen = next((node for node in candidates if node.id == node_id), None)
             if chosen is None:
                 raise StorageError(
-                    "That storage node is not available for this network (disabled, another location, "
+                    "That storage node is not available for this network (disabled, draining, another location, "
                     "or already serving this VLAN)",
                     409,
                 )
@@ -480,6 +470,7 @@ class StorageService:
         tenant.terminated_at = now
         tenant.destroy_after = now + destroy_grace()
         tenant.network_id = None
+        storage_ha.clear_move(tenant)
         db.commit()
 
     @staticmethod
@@ -652,48 +643,65 @@ class StorageService:
 # --- runner ---
 
 
+def _tenant_config(tenant: StorageTenant, node: StorageNode) -> dict:
+    state = runner_tenant_state(tenant)
+    return {
+        "id": tenant.id,
+        "state": state,
+        "terminated_at": iso_utc(tenant.terminated_at),
+        "destroy_after": iso_utc(tenant.destroy_after),
+        "vlan": tenant.vlan,
+        "network_cidr": tenant.network_cidr,
+        "endpoint_ip": tenant.endpoint_ip,
+        "prefix_len": ipaddress.ip_network(tenant.network_cidr).prefixlen,
+        "size_bytes": tenant.size_bytes,
+        "limits": tenant.limits,
+        "shares": [
+            {
+                "id": share.id,
+                "name": share.name,
+                "quota_bytes": share.quota_bytes,
+                "clients": share_clients(tenant, share),
+                "read_only": bool(share.read_only),
+                "sftp": share.sftp_access.value,
+                "state": share.state.value,
+                "destroy_after": iso_utc(share.destroy_after),
+            }
+            for share in tenant.shares
+        ],
+        "sftp_users": storage_sftp.runner_users(tenant, state, node),
+    }
+
+
 def build_runner_config(db: Session, node: StorageNode) -> dict:
-    """Desired state for one node: only its own tenants, and no credentials."""
+    """Desired state for one node.
+
+    A runner older than 0.3.0 gets only its preferred tenants and no failover keys. A newer one
+    also gets the failover settings, and with failover active every tenant of the location.
+    Credentials: SFTP password hashes and public keys, and the location's SFTP host key (only
+    to its own nodes); never a password.
+    """
+    context = storage_ha.ha_context(db, node) if storage_ha.supports_ha(node) else None
+    source = context.tenants(db) if context is not None else StorageDAO.tenants_for_node(db, node.id)
     tenants = []
-    for tenant in StorageDAO.tenants_for_node(db, node.id):
+    for tenant in source:
         if tenant.vlan is None or tenant.network_cidr is None:
             continue
-        prefix = ipaddress.ip_network(tenant.network_cidr).prefixlen
-        state = runner_tenant_state(tenant)
-        tenants.append(
-            {
-                "id": tenant.id,
-                "state": state,
-                "terminated_at": iso_utc(tenant.terminated_at),
-                "destroy_after": iso_utc(tenant.destroy_after),
-                "vlan": tenant.vlan,
-                "network_cidr": tenant.network_cidr,
-                "endpoint_ip": tenant.endpoint_ip,
-                "prefix_len": prefix,
-                "size_bytes": tenant.size_bytes,
-                "limits": tenant.limits,
-                "shares": [
-                    {
-                        "id": share.id,
-                        "name": share.name,
-                        "quota_bytes": share.quota_bytes,
-                        "clients": share_clients(tenant, share),
-                        "read_only": bool(share.read_only),
-                        "sftp": share.sftp_access.value,
-                        "state": share.state.value,
-                        "destroy_after": iso_utc(share.destroy_after),
-                    }
-                    for share in tenant.shares
-                ],
-                "sftp_users": storage_sftp.runner_users(tenant, state, node),
-            }
-        )
+        entry = _tenant_config(tenant, node)
+        if context is not None:
+            entry.update(context.tenant_extras(tenant))
+        tenants.append(entry)
+    sftp = storage_sftp.runner_settings(node)
     body = {
         "node": {"id": node.id, "name": node.name},
         "settings": {"destroy_grace_seconds": int(destroy_grace().total_seconds())},
-        "sftp": storage_sftp.runner_settings(node),
+        "sftp": sftp,
         "tenants": tenants,
     }
+    if context is not None:
+        body["node"] = context.node_block()
+        body["ha"] = context.ha_block()
+        body["sftp"] = context.sftp_block(sftp)
     version = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {"version": version, **body}
 
@@ -705,7 +713,13 @@ def _short(value, limit: int = 2000) -> Optional[str]:
 
 
 def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip: Optional[str]) -> None:
-    """Record a runner report. Ids that are not on this node are ignored."""
+    """Record a runner report.
+
+    Per-tenant state, shares and used bytes are taken only from the node that serves the tenant
+    (SFTP state from the SFTP master when the location has a virtual IP). Ids of tenants outside
+    the node's location are ignored; ``destroyed_*`` ids are accepted from any node of the location.
+    """
+    previous_seen = node.last_seen_at
     node.last_seen_at = _now().replace(tzinfo=None)
     if client_ip:
         node.last_seen_ip = client_ip[:64]
@@ -719,36 +733,56 @@ def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip:
     node.orphans = [_short(name, 255) for name in (report.get("orphans") or [])[:500]]
     storage_sftp.apply_node_status(node, report)
 
-    tenants = {tenant.id: tenant for tenant in StorageDAO.tenants_for_node(db, node.id)}
+    location_id = storage_location.node_location_id(node)
+    own = {tenant.id: tenant for tenant in StorageDAO.tenants_for_node(db, node.id)}
+    in_location = dict(own)
+    if location_id is not None:
+        in_location.update({tenant.id: tenant for tenant in StorageDAO.tenants_for_location(db, location_id)})
+    tenants = in_location if storage_ha.supports_ha(node) else own
+    storage_ha.apply_node_report(db, node, report, previous_seen, in_location)
+    vip = storage_ha.sftp_uses_vip(db, node)
+
     for entry in report.get("tenants") or []:
         tenant = tenants.get(entry.get("id"))
         if tenant is None:
             continue
-        if entry.get("state") in RUNNER_STATES:
-            tenant.runner_state = entry["state"]
-        tenant.runner_error = _short(entry.get("error"))
-        storage_sftp.apply_tenant_status(tenant, entry)
-        shares = {share.id: share for share in tenant.shares}
-        for share_entry in entry.get("shares") or []:
-            share = shares.get(share_entry.get("id"))
-            if share is None:
-                continue
-            if share_entry.get("state") in RUNNER_STATES:
-                share.runner_state = share_entry["state"]
-            used = share_entry.get("used_bytes")
-            if isinstance(used, int) and used >= 0:
-                share.used_bytes = used
-            share.runner_error = _short(share_entry.get("error"))
+        serving = storage_ha.entry_serving(node, tenant, entry)
+        if serving:
+            if entry.get("state") in RUNNER_STATES:
+                tenant.runner_state = entry["state"]
+            tenant.runner_error = _short(entry.get("error"))
+            shares = {share.id: share for share in tenant.shares}
+            for share_entry in entry.get("shares") or []:
+                share = shares.get(share_entry.get("id"))
+                if share is None:
+                    continue
+                if share_entry.get("state") in RUNNER_STATES:
+                    share.runner_state = share_entry["state"]
+                used = share_entry.get("used_bytes")
+                if isinstance(used, int) and used >= 0:
+                    share.used_bytes = used
+                share.runner_error = _short(share_entry.get("error"))
+            storage_ha.note_serving(db, node, tenant, entry)
+        else:
+            storage_ha.note_not_serving(tenant, node)
+        if node.sftp_master if vip else serving:
+            storage_sftp.apply_tenant_status(tenant, entry)
     storage_sftp.apply_logins(tenants, report)
 
     destroyed_shares = set(report.get("destroyed_shares") or [])
-    for tenant in tenants.values():
+    for tenant in in_location.values():
         for share in list(tenant.shares):
             if share.id in destroyed_shares and share.state == ShareState.DELETING:
                 tenant.shares.remove(share)
                 db.delete(share)
     for tenant_id in set(report.get("destroyed_tenants") or []):
-        tenant = tenants.get(tenant_id)
+        tenant = in_location.get(tenant_id)
         if tenant is not None and tenant.terminated_at is not None:
             db.delete(tenant)
     db.commit()
+    if location_id is not None:
+        try:
+            storage_ha.advance_location(db, location_id)
+        except Exception:
+            logger.exception("Storage: could not advance moves in location %s", location_id)
+            db.rollback()

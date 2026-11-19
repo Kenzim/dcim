@@ -73,6 +73,21 @@ async def _reconcile_private_networks() -> None:
         logger.warning("Private network reconciliation failed: %s", exc)
 
 
+async def _reconcile_storage_failover() -> None:
+    """Forget the current node of tenants whose node went offline, finish or time out moves, start
+    drains, rebalance steps and returns to the preferred node, and prune old failover events."""
+    from app.services import storage_ha
+
+    try:
+        db = SessionLocal()
+        try:
+            storage_ha.reconcile(db)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Storage failover reconciliation failed: %s", exc)
+
+
 async def _reconcile_backup_slots() -> None:
     """Start the grace period of slots terminated elsewhere, and delete backups whose grace has passed."""
     from app.services import backup_slot_service
@@ -100,5 +115,6 @@ async def run_reconciliation_jobs(interval_seconds: int = 300) -> None:
         except Exception as exc:
             logger.warning("Reconciliation cycle failed: %s", exc)
         await _reconcile_private_networks()
+        await _reconcile_storage_failover()
         await _reconcile_backup_slots()
         await asyncio.sleep(max(30, interval_seconds))

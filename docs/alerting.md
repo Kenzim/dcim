@@ -146,7 +146,9 @@ UI (Alerts, Settings). Defaults:
 | `storage_node_offline` | critical | enabled storage node, no runner contact | `offline_after_seconds` 300 |
 | `storage_node_ceph` | critical | online node reports `ceph_ok` false | none |
 | `storage_node_error` | warning | online node with `last_error`, or an enabled SFTP gateway that is not listening or reports an error | `offline_after_seconds` 300 (a node past this is left to `storage_node_offline`) |
-| `storage_tenant_error` | warning | tenant or share runner state `error` | `min_age_seconds` 300 |
+| `storage_tenant_error` | warning | tenant or share runner state `error`, or an active linked tenant that no node has served for longer than `unserved_after_seconds` while failover is active in its location | `min_age_seconds` 300, `unserved_after_seconds` 120 |
+| `storage_tenant_failover` | warning | a tenant is served by a node other than its preferred node because of a failover (not a planned move or drain); resolves when it is back on its preferred node or staff make the current node preferred | none |
+| `storage_location_degraded` | critical | a location with at least two enabled storage nodes has fewer than two healthy ones (online, Ceph healthy, lease client healthy, not fenced, not draining) | none |
 | `proxy_runner_offline` | warning | enabled proxy runner with no phone-home | `offline_after_seconds` 300 |
 | `runner_offline` | critical | enabled DHCP, TFTP or media runner offline (Redis online key and `last_seen_at`) | `offline_after_seconds` 300 |
 | `pdu_poll_failed` | warning | enabled metered PDU with a poll error, or no successful poll | `stale_after_seconds` 600 |

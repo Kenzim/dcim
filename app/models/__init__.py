@@ -55,6 +55,8 @@ from app.models.private_network import (
 from app.models.storage import (
     SftpAccess,
     ShareState,
+    StorageEvent,
+    StorageLocation,
     StorageNode,
     StorageSftpUser,
     StorageShare,
@@ -171,7 +173,7 @@ from app.models.commerce_webhook import (
 
 __all__ = ["User", "Server", "Category", "Location", "Rack", "NetworkSwitch", "Disk", "DiskType", "BootTask", "BootType", "BootTaskStatus", "InstallationTask", "InstallationStatus", "BillingIntegration", "McpApiKey", "Service", "ServiceBareMetal", "ServiceVm", "ServiceStatus", "ServiceType", "ProvisioningSource", "Script", "NetworkPort", "SwitchPort", "CableRun", "SwitchLldpNeighbor", "PatchPanel", "PatchPanelPort", "ServerGroup", "server_group_association", "SwitchBandwidthSample", "DHCPConfigModel", "TFTPConfigModel", "ServiceInstance", "Runner", "ProxyRunner", "ProxySubnetGroup", "ProxySubnetGroupMember", "Asset", "AssetLabel", "ServerActivity", "ServerActivityEventType", "ServerActivityStatus", "HardwareDetectionReport", "HardwareDetectionReportStatus", "ServerCapability", "ProductFamily", "Product", "VMTemplate", "ProductVMTemplate", "ProxmoxCluster", "ProxmoxNode", "ProxmoxStorage", "ProxmoxTemplate", "ProxmoxCapacitySnapshot", "IPSubnet", "IPAddress", "ServiceIPAssignment", "ServiceIPAssignmentHistory", "FamilyVMConfig", "ProductVMConfig", "VMIPAllocation", "vm_ip_allocation_cluster_association", "VMIDReservation", "PermissionSet", "VMDeploymentJob", "VMDeploymentJobStep", "DeploymentJobStatus", "DeploymentStepStatus"]
 __all__ += ["PowerFeed", "Pdu", "PduInlet", "PduOutlet", "ServerPowerInput"]
-__all__ += ["StorageNode", "StorageTenant", "StorageShare", "StorageSftpUser", "ShareState", "SftpAccess", "VlanMode"]
+__all__ += ["StorageNode", "StorageLocation", "StorageEvent", "StorageTenant", "StorageShare", "StorageSftpUser", "ShareState", "SftpAccess", "VlanMode"]
 __all__ += ["BackupSlot", "RetainedBackup"]
 __all__ += [
     "ResellerGroup",
