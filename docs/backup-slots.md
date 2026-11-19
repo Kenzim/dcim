@@ -33,11 +33,23 @@ Checks before anything is queued (a refusal never leaves a VM half restored):
 - The slot is active (staff may restore from a suspended slot).
 - The target is in the same Proxmox cluster as the backup, and the backup storage is active on the target's node.
 - The target's primary disk is at least as large as the backed-up disk.
-- Both the backup's guest type and the target are set up through cloud-init. Guest-agent guests (Windows and macOS) can only be restored onto the VM they came from, because their address and credentials are applied by their own set-up steps.
+- The backup's guest type and the target's match, and are either cloud-init Linux or macOS (guest agent). Anything else (Windows, guest-agent Linux) can only be restored onto the VM it came from: a restored Windows guest would also carry the source's computer name and machine SID, which the guest-agent set-up does not change. A mismatch (for example a Linux backup onto a macOS VM) is refused with a message naming both types.
 - No other deployment job is active on the target.
 - The client confirmed that the target's data is replaced (`confirm_data_loss=true`). Without it the API answers 409 with a plain explanation.
 
 Job steps: stop the guest, capture the target's own network interfaces and name, restore the archive into the target's VMID, wait for the task, put the target's interfaces back (so the MAC addresses, bridges and VLAN tags are the target's, and any interface only the source had is removed), set CPU and memory from the target's product, re-apply the target's static address (or DHCP), DNS and credentials through cloud-init, then power on and mark the VM ready.
+
+### macOS targets
+
+A macOS target runs the `restore_retained_backup_macos` job instead, because its address, password and Mac identity are not set through cloud-init. Its address, DNS and password live inside the macOS disk, and its Mac identity (SMBIOS serial and UUID) lives in the VM's Proxmox config and in OpenCore on the disk.
+
+Job steps: stop the guest; capture the target's network interfaces and name plus `smbios1`, `args` and `vmgenid`; restore the archive; wait for the task; put the target's interfaces and those three settings back (settings that already match are not rewritten, because `args` can only be written by a root account), with the public interface (`net0`) set `link_down=1`; set CPU and memory; power on; wait for the guest agent; run the existing macOS guest configuration with the target's values; connect the public interface; finalise.
+
+The guest configuration step reuses `ConfigureMacosGuestStep`. It differs in two ways: the OpenCore PlatformInfo is rewritten from the target's own `smbios1` (serial, UUID and model; the board serial and ROM are derived from them, so they are stable), then the guest reboots; and the password change also tries the source VM's stored passwords (only when that VM belongs to the same client), because the restored guest still has the source's password. The address, gateway and DNS come from the target's IP allocation (or DHCP, as the template says). Private network interfaces keep the target's MAC addresses and are never held down. macOS has no SSH key or hostname set-up in Rackflow, so neither is applied.
+
+Failure handling. The public interface stays disconnected from the restore until the guest has its own address, so the source VM's address is never live on the public network. If the guest agent does not answer within 15 minutes of the restore, or the guest configuration fails three times, the job fails, the VM is marked errored with the reason, and the interface stays disconnected. Staff then fix the cause and run the VM action `retry_restore_configuration`, which queues `retry_restore_macos_configuration` (power on, wait for the agent, configure, connect the interface, finalise). That action is refused unless the restore got as far as putting the target's identity back.
+
+A macOS restore always starts the VM, whatever `start` says, because the guest has to boot to be configured. Apple account sign-ins inside macOS may need redoing on the target, because they are tied to the VM's serial number; the portal, WHMCS client area and MCP descriptions say so.
 
 Restoring onto the same VM takes the ordinary restore path and needs no confirmation, as before. Restoring a volume id that sits in a slot through the VM's own restore route goes through the same checks.
 
@@ -65,11 +77,11 @@ Restoring onto the same VM takes the ordinary restore path and needs no confirma
 - **Billing API (WHMCS):** `GET /api/billing/services/{id}/backup-slot`, `GET .../backup-slots` (on a VM service), `POST .../backup-slot/resize|retain|release|restore`. All take `audience=client|admin`.
 - **VM backups:** list items carry `retained`, `retained_backup_id`, `slot_service_id`, `protected`; a retained backup has `deletable=false` and is hidden from any other VM that later reuses the VMID.
 - **MCP, staff (no new tools):** `service_info(view="backups")` on a slot shows the retained backup and restore targets, and on a VM adds `slots`; `restore_backup(action="retain"|"release"|"resize"|"restore")`; `provision(kind="backup_slot", owner_user_id, size_gb)`.
-- **MCP, client (no new tools):** `services(view="backups")` on a slot or a VM; `service_action` with `backup_retain`, `backup_release` and `backup_restore` (a retained volume id restores onto any of the client's VMs; `confirm=true` is the data-loss confirmation).
+- **MCP, client (no new tools):** `services(view="backups")` on a slot or a VM; `service_action` with `backup_retain`, `backup_release` and `backup_restore` (a retained volume id restores onto any of the client's VMs of the same type; `confirm=true` is the data-loss confirmation).
 
 ## Not covered
 
 - Bare metal (no image capture).
-- Restoring another VM's backup onto a guest-agent (Windows or macOS) target.
+- Restoring another VM's backup onto a Windows or guest-agent Linux target, or onto a VM of a different type.
 - Restoring across Proxmox clusters.
 - Billing for slots beyond the catalogue price: WHMCS owns invoicing.
