@@ -573,7 +573,7 @@ button.rf-ca__btn--danger:hover {
             </p>
           </div>
           {if $rackflow_fast_path_lines}
-          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-fast-path-copy">Copy addresses</button>
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-fast-path-copy">{if $rackflow_fast_path_has_credentials}Copy all fast path (ip:port:user:pass){else}Copy addresses{/if}</button>
           {/if}
         </div>
         <textarea id="rackflow-fast-path-lines" class="rf-ca__sr-only" readonly aria-hidden="true">{$rackflow_fast_path_lines|escape}</textarea>
@@ -594,7 +594,7 @@ button.rf-ca__btn--danger:hover {
         {foreach from=$rackflow_fast_path_endpoints item=ep}
         <div class="rf-ca__action">
           <div class="rf-ca__action-copy">
-            <p class="rf-ca__action-title"><code>{$ep.fast_path_ip|escape}:{$ep.port|escape}</code></p>
+            <p class="rf-ca__action-title"><code>{if $ep.line}{$ep.line|escape}{else}{$ep.fast_path_ip|escape}:{$ep.port|escape}{/if}</code></p>
             <p class="rf-ca__action-help">For <code>{$ep.public_ip|escape}</code>{if !$ep.active} (turn private access on to use it){/if}</p>
           </div>
         </div>

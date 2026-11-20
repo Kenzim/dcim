@@ -712,10 +712,14 @@ async def test_fast_path_view_and_toggle_are_owner_scoped(db_session, as_client,
     as_client(alice, ["read", "write"])
     view = await tools.services(view="fast_path", service_id=proxy.id)
     assert [(e["fast_path_ip"], e["active"]) for e in view["endpoints"]] == [("100.80.0.9", False)]
+    # The MCP never returns proxy credentials, with or without a service filter.
+    for narrowed in (view, await tools.services(view="fast_path")):
+        assert "pa-secret" not in str(narrowed) and not {"endpoint", "http_url", "socks5_url"} & set(narrowed["endpoints"][0])
     with pytest.raises(ToolError, match="confirm"):
         await tools.service_action(service_id=proxy.id, action="fast_path_on")
     on = await tools.service_action(service_id=proxy.id, action="fast_path_on", confirm=True)
     assert on["endpoints"][0]["active"] is True and on["locations"][0]["enabled"] is True
+    assert "pa-secret" not in str(on)
 
     as_client(bob, ["read", "write"])
     assert (await tools.services(view="fast_path"))["endpoints"] == []

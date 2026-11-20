@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { Alert, Button, Spinner } from '../ui/index.js';
   import { getClientProxyCredentials, rotateClientProxyCredentials } from '../../lib/api.js';
+  import { copyText } from '../../lib/copyText.js';
 
   /** http_proxy service id. */
   export let serviceId;
@@ -17,6 +18,7 @@
   let message = '';
   let error = '';
   let copyAllMsg = '';
+  let copyFastMsg = '';
 
   onMount(async () => {
     try {
@@ -43,30 +45,30 @@
     return assignments.map(endpointLine).filter(Boolean).join('\n');
   }
 
-  async function copyAllEndpoints() {
-    const text = allEndpointLines();
+  // Fast path: the same login as the public path, with the private address of the IP's subnet as host.
+  $: fastAssignments = assignments.filter((a) => a.fast_path);
+  $: fastLines = fastAssignments
+    .filter((a) => a.fast_path.active && a.fast_path.endpoint)
+    .map((a) => a.fast_path.endpoint)
+    .join('\n');
+  $: fastOffLocations = [
+    ...new Set(fastAssignments.filter((a) => !a.fast_path.active).map((a) => a.fast_path.location_name)),
+  ];
+
+  async function copyLines(text, setMsg) {
     if (!text) return;
-    copyAllMsg = '';
+    setMsg('');
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly', '');
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      }
-      copyAllMsg = 'Copied';
-      setTimeout(() => { copyAllMsg = ''; }, 2000);
+      await copyText(text);
+      setMsg('Copied');
+      setTimeout(() => setMsg(''), 2000);
     } catch (e) {
       error = e.message || 'Failed to copy';
     }
   }
+
+  const copyAllEndpoints = () => copyLines(allEndpointLines(), (m) => { copyAllMsg = m; });
+  const copyAllFastPath = () => copyLines(fastLines, (m) => { copyFastMsg = m; });
 
   async function rotate() {
     if (busy) return;
@@ -93,9 +95,16 @@
       <p class="muted">HTTP and SOCKS5 use the same IP/port with these credentials.</p>
     </div>
     {#if !loading && assignments.length > 0}
-      <Button variant="secondary" disabled={busy} on:click={copyAllEndpoints}>
-        {copyAllMsg || 'Copy all (ip:port:user:pass)'}
-      </Button>
+      <div class="head-actions">
+        <Button variant="secondary" disabled={busy} on:click={copyAllEndpoints}>
+          {copyAllMsg || 'Copy all (ip:port:user:pass)'}
+        </Button>
+        {#if fastLines}
+          <Button variant="secondary" disabled={busy} on:click={copyAllFastPath}>
+            {copyFastMsg || 'Copy all fast path (ip:port:user:pass)'}
+          </Button>
+        {/if}
+      </div>
     {/if}
   </header>
 
@@ -105,6 +114,12 @@
     <p class="muted">{unavailable ? 'Credentials unavailable.' : 'No IP assigned yet — contact support.'}</p>
   {:else}
     {#if error}<Alert type="error">{error}</Alert>{/if}
+    {#if fastOffLocations.length > 0}
+      <p class="fast-note">
+        Private fast path addresses are available in {fastOffLocations.join(', ')}.
+        <a href="/client/networks">Turn the fast path on</a> on the Networks page to use them.
+      </p>
+    {/if}
     <ul class="assignments">
       {#each assignments as a}
         <li class="assignment">
@@ -122,6 +137,14 @@
           </div>
           {#if a.http_url}<div class="row"><span class="label">HTTP</span><code class="small">{a.http_url}</code></div>{/if}
           {#if a.socks5_url}<div class="row"><span class="label">SOCKS5</span><code class="small">{a.socks5_url}</code></div>{/if}
+          {#if a.fast_path?.active}
+            <div class="row">
+              <span class="label">Fast path</span>
+              <code>{a.fast_path.ip}:{a.fast_path.port}</code>
+            </div>
+            {#if a.fast_path.http_url}<div class="row"><span class="label">Fast HTTP</span><code class="small">{a.fast_path.http_url}</code></div>{/if}
+            {#if a.fast_path.socks5_url}<div class="row"><span class="label">Fast SOCKS5</span><code class="small">{a.fast_path.socks5_url}</code></div>{/if}
+          {/if}
         </li>
       {/each}
     </ul>
@@ -150,6 +173,16 @@
   }
   .panel-head p {
     margin: 0;
+  }
+  .head-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .fast-note {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--text-secondary);
   }
   .muted {
     color: var(--text-tertiary);
@@ -184,7 +217,7 @@
     font-size: 13px;
   }
   .label {
-    width: 76px;
+    width: 96px;
     flex-shrink: 0;
     font-size: 11px;
     font-weight: 700;

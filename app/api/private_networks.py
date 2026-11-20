@@ -549,8 +549,11 @@ def _storage_location_ids(db, user_id: int) -> set:
 
 @client_router.get("/fast-path")
 async def client_fast_path(auth: UserDep, db: DbDep):
-    """Proxy fast path: where it is offered, where it is on, and the private address of each proxy IP."""
-    return ProxyAccessService.overview(db, _client_user_id(auth))
+    """Proxy fast path: where it is offered, where it is on, and the private address of each proxy IP.
+
+    Endpoints carry copyable lines with credentials only for proxies whose permissions include
+    ``proxy.view_credentials``."""
+    return ProxyAccessService.overview(db, _client_user_id(auth), with_credentials=True)
 
 
 @client_router.post("/fast-path")
@@ -560,7 +563,7 @@ async def client_fast_path_on(data: FastPathToggle, auth: UserDep, db: DbDep):
         await ProxyAccessService.enable(db, owner_user_id=user_id, location_id=data.location_id)
     except FastPathError as exc:
         _raise_fast_path(exc)
-    return ProxyAccessService.overview(db, user_id)
+    return ProxyAccessService.overview(db, user_id, with_credentials=True)
 
 
 @client_router.delete("/fast-path/{location_id}")
@@ -571,7 +574,7 @@ async def client_fast_path_off(location_id: int, auth: UserDep, db: DbDep):
     except FastPathError as exc:
         _raise_fast_path(exc)
     db.expire_all()
-    return ProxyAccessService.overview(db, user_id)
+    return ProxyAccessService.overview(db, user_id, with_credentials=True)
 
 
 @client_router.post("", response_model=NetworkResponse, status_code=status.HTTP_201_CREATED)

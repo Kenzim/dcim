@@ -2691,7 +2691,7 @@ def _billing_fast_path_service(db: Session, service_id: int, integration: Billin
 
 def _billing_fast_path_view(db: Session, service: Service) -> dict:
     """The owner's fast path overview, narrowed to the locations of this service's proxy IPs."""
-    overview = ProxyAccessService.overview(db, service.owner_user_id)
+    overview = ProxyAccessService.overview(db, service.owner_user_id, with_credentials=True)
     endpoints = [e for e in overview["endpoints"] if e["service_id"] == service.id]
     wanted = {e["location_id"] for e in endpoints}
     return {

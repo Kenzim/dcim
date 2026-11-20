@@ -1,6 +1,7 @@
 """Proxy fast path over HTTP: runner placement, subnet pinning, runner config and the client surface."""
 import pytest
 
+from app.core.client_permissions import PermissionKey
 from app.dao.ipam_dao import IPAMDAO
 from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.proxy_runner_dao import ProxyRunnerDAO
@@ -194,3 +195,62 @@ def test_proxy_assignment_payload_carries_fast_path(client, db_session, location
     assert fast["http_url"] == "http://alice1:secret-pw-1@100.80.0.7:11080"
     assert fast["endpoint"] == "100.80.0.7:11080:alice1:secret-pw-1"
     assert fast["active"] is False
+
+
+def test_client_fast_path_lines_carry_credentials_only_with_view_permission(client, db_session, location):
+    runner = _runner(db_session, "r1")
+    runner.location_id = location.id
+    db_session.commit()
+    subnet = IPAMDAO.create_subnet(db_session, name="a", cidr="203.0.113.0/29", location_id=location.id)
+    subnet.proxy_runner_id, subnet.fast_path_ip = runner.id, "100.80.0.1"
+    db_session.commit()
+    alice = _user(db_session, "alice")
+    allowed, _ = _proxy(db_session, alice, location, subnet, "px-allowed", "alice1")
+    denied, _ = _proxy(db_session, alice, location, subnet, "px-denied", "alice2")
+    denied.permission_overrides = {PermissionKey.PROXY_VIEW_CREDENTIALS: False}
+    ServiceDAO.update(db_session, denied)
+    _service(db_session, alice, location, "alice-bm", ServiceType.BARE_METAL)
+    headers = _login(client, "alice", "secret123")
+
+    def endpoints():
+        view = client.get(f"{CLIENT}/fast-path", headers=headers).json()
+        return {e["service_id"]: e for e in view["endpoints"]}
+
+    by_service = endpoints()
+    assert by_service[allowed.id]["endpoint"] == "100.80.0.1:11080:alice1:secret-pw-1"
+    assert by_service[allowed.id]["http_url"] == "http://alice1:secret-pw-1@100.80.0.1:11080"
+    assert by_service[allowed.id]["socks5_url"] == "socks5://alice1:secret-pw-1@100.80.0.1:11080"
+    # Without the permission the address stays, the credential lines are absent and no secret is in the body.
+    assert by_service[denied.id]["fast_path_ip"] == "100.80.0.1"
+    assert [by_service[denied.id][k] for k in ("endpoint", "http_url", "socks5_url")] == [None, None, None]
+    body = client.get(f"{CLIENT}/fast-path", headers=headers).text
+    assert "alice2" not in body
+
+    # The on and off responses are filtered the same way.
+    on = client.post(f"{CLIENT}/fast-path", json={"location_id": location.id}, headers=headers)
+    assert on.status_code == 200, on.text
+    assert "alice2" not in on.text and "alice1:secret-pw-1" in on.text
+    off = client.delete(f"{CLIENT}/fast-path/{location.id}", headers=headers)
+    assert off.status_code == 200, off.text
+    assert "alice2" not in off.text
+
+
+def test_fast_path_line_matches_public_line_with_host_swapped(client, db_session, location):
+    from app.services.proxy_provisioning import assignment_payload
+
+    runner = _runner(db_session, "r1")
+    runner.location_id = location.id
+    db_session.commit()
+    subnet = IPAMDAO.create_subnet(db_session, name="a", cidr="203.0.113.0/29", location_id=location.id)
+    subnet.proxy_runner_id, subnet.fast_path_ip = runner.id, "100.80.0.1"
+    db_session.commit()
+    alice = _user(db_session, "alice")
+    service, assignment = _proxy(db_session, alice, location, subnet, "px", "alice1")
+    payload = assignment_payload(assignment)
+    public_host, fast_host = f"{payload['ip_address']}:{payload['port']}", "100.80.0.1:11080"
+    assert payload["endpoint"].replace(public_host, fast_host) == payload["fast_path"]["endpoint"]
+    assert payload["http_url"].replace(public_host, fast_host) == payload["fast_path"]["http_url"]
+
+    headers = _login(client, "alice", "secret123")
+    line = client.get(f"{CLIENT}/fast-path", headers=headers).json()["endpoints"][0]["endpoint"]
+    assert line == payload["fast_path"]["endpoint"]

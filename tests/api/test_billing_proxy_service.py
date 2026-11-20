@@ -224,6 +224,7 @@ def test_billing_proxy_fast_path_view_and_toggle(client, db_session):
 
     view = client.get(url, headers=headers).json()
     assert [(e["fast_path_ip"], e["active"]) for e in view["endpoints"]] == [("100.80.0.1", False)]
+    assert view["endpoints"][0]["endpoint"] == f"100.80.0.1:11080:{assignment.username}:{assignment.password}"
     status_payload = client.get(f"/api/billing/services/{service.id}/status", headers=headers).json()
     assert status_payload["proxy_assignments"][0]["fast_path"]["ip"] == "100.80.0.1"
 
