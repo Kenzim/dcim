@@ -39,6 +39,67 @@ type Config struct {
 	// HA is the failover block; nil (older Rackflow) means no leases at all.
 	HA      *HA      `json:"ha,omitempty"`
 	Tenants []Tenant `json:"tenants"`
+	// Networks are the private networks whose presence this node may
+	// serve (docs/private-network-dhcp.md 4.4); absent before 0.4.0.
+	Networks []Network `json:"networks,omitempty"`
+}
+
+// Network is one private network that needs a presence: its storage
+// address answered by one node, with DHCP.
+type Network struct {
+	ID              int64   `json:"id"`
+	VLAN            int     `json:"vlan"`
+	NetworkCIDR     string  `json:"network_cidr"`
+	EndpointIP      string  `json:"endpoint_ip"`
+	PrefixLen       int     `json:"prefix_len"`
+	PreferredNodeID int64   `json:"preferred_node_id"`
+	TakeoverOrder   []int64 `json:"takeover_order"`
+	DHCP            *DHCP   `json:"dhcp"`
+}
+
+// DHCP is the DHCP block of a network or tenant.
+type DHCP struct {
+	Enabled      bool              `json:"enabled"`
+	LeaseSeconds int64             `json:"lease_seconds"`
+	Reservations []DHCPReservation `json:"reservations"`
+	// Range nil means no dynamic range.
+	Range   *DHCPRange  `json:"range"`
+	Leases  []DHCPLease `json:"leases"`
+	Options DHCPOptions `json:"options"`
+}
+
+type DHCPReservation struct {
+	MAC string `json:"mac"`
+	IP  string `json:"ip"`
+}
+
+type DHCPRange struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// DHCPLease is a dynamic lease, in the config (seed) and in the status.
+// Hostname is null when the client sent none.
+type DHCPLease struct {
+	MAC       string    `json:"mac"`
+	IP        string    `json:"ip"`
+	ExpiresAt Timestamp `json:"expires_at"`
+	Hostname  *string   `json:"hostname"`
+}
+
+// DHCPOptions are the owner's options; null or empty means not sent.
+type DHCPOptions struct {
+	Router     *string     `json:"router"`
+	DNSServers []string    `json:"dns_servers"`
+	Domain     *string     `json:"domain"`
+	MTU        *int        `json:"mtu"`
+	Routes     []DHCPRoute `json:"routes"`
+	NTPServers []string    `json:"ntp_servers"`
+}
+
+type DHCPRoute struct {
+	Destination string `json:"destination"`
+	Gateway     string `json:"gateway"`
 }
 
 // HA configures leases and failover (docs/nfs-storage-failover.md 11.2).
@@ -133,6 +194,11 @@ type Tenant struct {
 	PreferredNodeID int64   `json:"preferred_node_id"`
 	TakeoverOrder   []int64 `json:"takeover_order"`
 	Move            *Move   `json:"move"`
+
+	// NetworkID names the private network this tenant is the presence of;
+	// with DHCP the tenant serves DHCP for it. Both are absent before 0.4.0.
+	NetworkID *int64 `json:"network_id,omitempty"`
+	DHCP      *DHCP  `json:"dhcp,omitempty"`
 }
 
 // Limits are parsed but not enforced yet.
@@ -174,6 +240,24 @@ type Status struct {
 	// HA and Events are sent only when the config had an ha block.
 	HA     *HAStatus `json:"ha,omitempty"`
 	Events []Event   `json:"events,omitempty"`
+	// Networks lists the presences this node serves or has just stopped
+	// serving.
+	Networks []NetworkStatus `json:"networks,omitempty"`
+}
+
+// NetworkStatus reports one network presence.
+type NetworkStatus struct {
+	ID      int64       `json:"id"`
+	Serving bool        `json:"serving"`
+	Since   *time.Time  `json:"since"`
+	Error   *string     `json:"error"`
+	Leases  []DHCPLease `json:"leases"`
+}
+
+// TenantDHCP reports the DHCP server a tenant runs for its network.
+type TenantDHCP struct {
+	Error  *string     `json:"error"`
+	Leases []DHCPLease `json:"leases"`
 }
 
 // HAStatus is the node's lease state.
@@ -196,10 +280,12 @@ const (
 
 // Event is a lease change, sent until a status post carrying it succeeds.
 type Event struct {
-	At         time.Time `json:"at"`
-	Kind       string    `json:"kind"`
-	TenantID   *int64    `json:"tenant_id"`
-	FromNodeID *int64    `json:"from_node_id"`
+	At       time.Time `json:"at"`
+	Kind     string    `json:"kind"`
+	TenantID *int64    `json:"tenant_id"`
+	// NetworkID is set instead of TenantID for a network presence.
+	NetworkID  *int64 `json:"network_id,omitempty"`
+	FromNodeID *int64 `json:"from_node_id"`
 	// Fence is "tenant" or "node", nil when no fence was needed.
 	Fence  *string `json:"fence"`
 	Detail string  `json:"detail"`
@@ -251,6 +337,8 @@ type TenantStatus struct {
 	Serving *bool      `json:"serving,omitempty"`
 	Since   *time.Time `json:"since,omitempty"`
 	MoveID  string     `json:"move_id,omitempty"`
+	// DHCP is sent for a tenant with a network_id that this node serves.
+	DHCP *TenantDHCP `json:"dhcp,omitempty"`
 }
 
 type ShareStatus struct {
@@ -270,6 +358,14 @@ func (s Status) MarshalJSON() ([]byte, error) {
 	for i := range p.Tenants {
 		if p.Tenants[i].Shares == nil {
 			p.Tenants[i].Shares = []ShareStatus{}
+		}
+		if d := p.Tenants[i].DHCP; d != nil && d.Leases == nil {
+			d.Leases = []DHCPLease{}
+		}
+	}
+	for i := range p.Networks {
+		if p.Networks[i].Leases == nil {
+			p.Networks[i].Leases = []DHCPLease{}
 		}
 	}
 	if p.DestroyedTenants == nil {
