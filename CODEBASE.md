@@ -389,6 +389,8 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 
 Client portal (commerce always on; no public storefront): `/client/billing`, `/client/checkout`, `/client/support`, `/client/account`, `/client/networks`, `/client/storage` — see `frontend/src/components/client/Client*.svelte`. Coexistence notes: `docs/commerce-whmcs-coexistence.md`.
 
+Client portal shell: `client/ClientShell.svelte` (left sidebar built on the admin sidebar tokens `--admin-sidebar-*`; drawer plus slim top bar under 768px; impersonation banner above both).
+
 Shared chrome: `Sidebar.svelte`, `PageHeader.svelte`, `ServerControlsPanel.svelte`, `CodeEditor.svelte`.
 
 ### UI kit — `frontend/src/components/ui/`
