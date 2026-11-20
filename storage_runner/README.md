@@ -40,6 +40,11 @@ Every pass it posts a status report back to Rackflow.
   (`ready`, `pending`, `error`, `suspended`) with `used_bytes`, and the lists
   `destroyed_tenants`, `destroyed_shares` and `orphans`.
 
+From 0.4.0 the config may also carry `networks` and per-tenant `network_id` and
+`dhcp`, and the status then carries `networks` and per-tenant `dhcp`; see
+"Private network presences and DHCP (0.4.0)" below. A config without those keys
+is handled exactly as by 0.3.3.
+
 `RACKFLOW_URL` must be `https://` (plain `http://` only for loopback). The
 types live in `internal/api/types.go`.
 
@@ -342,6 +347,55 @@ Rackflow has an `ha` block; without one (an older Rackflow) the runner behaves e
    local recovery directory is not carried over.
 4. Until Rackflow sends an `ha` block nothing changes.
 
+## Private network presences and DHCP (0.4.0)
+
+Design: `docs/private-network-dhcp.md` (sections 2, 3 and 4.4 to 4.5 are the runner's part).
+
+- **Config:** `networks` lists the private networks whose presence this node may serve:
+  `id`, `vlan`, `network_cidr`, `endpoint_ip`, `prefix_len`, `preferred_node_id`,
+  `takeover_order` and `dhcp`. A tenant may carry `network_id` (the network it is the
+  storage of) and the same `dhcp` block: `enabled`, `lease_seconds`, `reservations`
+  (`mac`, `ip`), `range` (`start`, `end`, or null for none), `leases` (seed of dynamic leases:
+  `mac`, `ip`, `expires_at`) and `options` (`router`, `dns_servers`, `domain`, `mtu`,
+  `routes` of `destination` and `gateway`, `ntp_servers`; null or empty means not sent).
+- **Presence:** namespace `rf-p<id>` with only a VLAN interface `rf-w<id>` on `PARENT_IFACE`,
+  fixed MAC `02:52:4e:xx:xx:xx` (network id as 24 bits), the endpoint address with the
+  prefix length, link up, and a gratuitous ARP after each takeover. No veth, routes,
+  firewall entry, container or Ceph state. Presences are adopted after a restart and
+  `rf-p*` namespaces not in the config are removed. A presence is never created on a VLAN
+  used by a non-terminated tenant in the config or by a tenant namespace still on the node;
+  that is reported as the network's error, and an existing presence on such a VLAN is
+  removed before the tenant's network is set up.
+- **Leases:** with an `ha` block a presence is served under lease `net.<id>` (rank from its
+  `takeover_order`, like a tenant); without one by the node whose config lists it. A presence
+  is never fenced: its takeover waits the rank delay (plus `lease_seconds` while the previous
+  owner's record is fresh) and skips both fences. The guard sets `rf-w<id>` down at the
+  deadline. A tenant with `network_id` is not acquired while `net.<network_id>` has any
+  locker (`Want.Defer`). Draining releases presences like tenants. Events for a presence
+  carry `network_id` instead of `tenant_id`.
+- **DHCP (`internal/dhcp`):** an in-process DHCPv4 server, one UDP socket per served presence
+  or tenant, opened inside the namespace and bound to `0.0.0.0:67` on the VLAN interface
+  (`SO_BINDTODEVICE`, `SO_BROADCAST`). The server id is the presence's or tenant's address.
+  Relayed requests and disabled DHCP are ignored; a reserved MAC gets its address; any other
+  MAC gets a dynamic address only when a range is set, else no reply at all. REQUEST is
+  answered with ACK or NAK per RFC 2131 4.3.2, INFORM with options only, RELEASE frees a
+  dynamic lease and DECLINE quarantines the address for 10 minutes. Options 1, 51, 58, 59
+  and 54 are always sent; 3, 6, 15, 26, 42 and 121 only when configured (121 then also
+  carries `0.0.0.0/0` via the router when both are set). A dynamic address not already
+  leased is probed first (`arping -D -c 2 -w 1` in the namespace) and quarantined if it
+  answers. Dynamic leases live in memory and in `STATE_DIR/dhcp/<net|tenant>-<id>.json`,
+  seeded from the config's `leases` and that file at start. Config changes swap the table
+  without closing the socket. A server starts only while its lease is held and stops when
+  the lease is lost or released, together with the link going down. DHCP never changes a
+  tenant's Ganesha config or container.
+- **Status:** `networks` has an entry (`id`, `serving`, `since`, `error`, `leases` of `mac`,
+  `ip`, `expires_at`, `hostname`) for each presence the node serves, one `serving: false`
+  entry after it stops, and a `serving: false` entry with the reason for a network this node
+  could serve but cannot (invalid config or a VLAN conflict). A served tenant with
+  `network_id` gets `dhcp` (`error`, `leases`).
+- **Upgrade:** nothing to install beyond the 0.4.0 binary; `arping` is already required.
+  Until Rackflow sends `networks` or `network_id` nothing changes.
+
 ## Safety rules
 
 - Nothing is destroyed unless the config lists it explicitly with a destroy
@@ -530,9 +584,16 @@ throwaway user and network namespace, never directly on a host:
 ```sh
 go test -c -tags sandbox -o /tmp/netns.test ./internal/netns/
 go test -c -tags sandbox -o /tmp/fw.test ./internal/firewall/
+go test -c -tags sandbox -o /tmp/dhcp.test ./internal/dhcp/
 unshare -rnm sh -c 'mount -t tmpfs none /run && /tmp/netns.test -test.run Sandbox -test.v'
 unshare -rnm sh -c 'mount -t tmpfs none /run && /tmp/fw.test -test.run Sandbox -test.v'
+unshare -rnm sh -c 'mount -t tmpfs none /run && /tmp/dhcp.test -test.run Sandbox -test.v'
 ```
+
+The DHCP sandbox test opens the real server socket inside a namespace and gets
+an OFFER over a veth pair. `internal/dhcp` unit tests cover the packet rules
+with a fake prober and clock; `internal/reconcile/network_test.go` covers
+presences, tenant DHCP and presence failover against the fakes.
 
 The firewall sandbox test builds two tenants with the real `ip` driver,
 applies the real ruleset and sends TCP connections: local Ceph ports are
@@ -542,5 +603,5 @@ outside the allowed set reaches nothing. It needs `python3` and `nsenter`.
 
 Not covered by any test: a real Ceph cluster (including the lease helper
 against real librados, blocklisting and MDS eviction), real podman and
-Ganesha (including `rados_ng` recovery), `arping`, and real NFS clients.
-Those wait for the pilot.
+Ganesha (including `rados_ng` recovery), `arping`, real NFS clients and real
+DHCP clients. Those wait for the pilot.

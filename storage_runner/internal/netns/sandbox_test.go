@@ -8,6 +8,7 @@ package netns
 
 import (
 	"context"
+	"net/netip"
 	"os/exec"
 	"strings"
 	"testing"
@@ -72,5 +73,47 @@ func TestSandboxEnsureAndRemove(t *testing.T) {
 	}
 	if out := sh(t, "ip", "netns", "list"); strings.Contains(out, "rf-t12") {
 		t.Errorf("namespace left: %s", out)
+	}
+}
+
+func TestSandboxPresenceEnsureAndRemove(t *testing.T) {
+	sh(t, "ip", "link", "add", "trunk1", "type", "dummy")
+	sh(t, "ip", "link", "set", "trunk1", "up")
+	m := &IPRoute{Cmd: execx.Exec{}, ParentIface: "trunk1"}
+	ctx := context.Background()
+	spec := PresenceSpec{NetworkID: 6, VLAN: 3921, Address: netip.MustParsePrefix("10.0.0.254/24"), MAC: PresenceMAC(6)}
+
+	if changed, err := m.EnsurePresence(ctx, spec); err != nil || !changed {
+		t.Fatalf("first ensure changed=%v err=%v", changed, err)
+	}
+	if changed, err := m.EnsurePresence(ctx, spec); err != nil || changed {
+		t.Fatalf("second ensure changed=%v err=%v", changed, err)
+	}
+	inner := sh(t, "ip", "-n", "rf-p6", "-d", "addr", "show")
+	for _, want := range []string{"rf-w6@", "vlan protocol 802.1Q id 3921", "10.0.0.254/24", "02:52:4e:00:00:06"} {
+		if !strings.Contains(inner, want) {
+			t.Errorf("namespace lacks %q:\n%s", want, inner)
+		}
+	}
+	if routes := sh(t, "ip", "-n", "rf-p6", "route", "show"); strings.TrimSpace(routes) != "10.0.0.0/24 dev rf-w6 proto kernel scope link src 10.0.0.254" {
+		t.Errorf("routes:\n%s", routes)
+	}
+	if err := m.PresenceLinkDown(ctx, 6); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := m.EnsurePresence(ctx, spec); err != nil || !changed {
+		t.Fatalf("ensure after link down changed=%v err=%v", changed, err)
+	}
+	if ids, err := m.Presences(ctx); err != nil || len(ids) != 1 || ids[0] != 6 {
+		t.Fatalf("presences %v err %v", ids, err)
+	}
+	if err := m.RemovePresence(ctx, 6); err != nil {
+		t.Fatal(err)
+	}
+	if out := sh(t, "ip", "netns", "list"); strings.Contains(out, "rf-p6") {
+		t.Errorf("namespace left: %s", out)
+	}
+	if out := sh(t, "ip", "link", "show"); strings.Contains(out, "rf-") {
+		t.Errorf("leftover links:\n%s", out)
 	}
 }

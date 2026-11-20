@@ -125,10 +125,14 @@ type Kind string
 const (
 	KindTenant Kind = "tenant"
 	KindSFTP   Kind = "sftp"
+	// KindNet is a network presence (docs/private-network-dhcp.md 2.4). It
+	// has no Ceph state and is never fenced.
+	KindNet Kind = "net"
 )
 
-// Key names one lease: a tenant (ID is the tenant id) or a location's SFTP
-// master (ID is the location id).
+// Key names one lease: a tenant (ID is the tenant id), a location's SFTP
+// master (ID is the location id) or a network presence (ID is the network
+// id).
 type Key struct {
 	Kind Kind
 	ID   int64
@@ -136,6 +140,7 @@ type Key struct {
 
 func TenantKey(id int64) Key     { return Key{KindTenant, id} }
 func SFTPKey(location int64) Key { return Key{KindSFTP, location} }
+func NetKey(network int64) Key   { return Key{KindNet, network} }
 
 // Object is the RADOS object of the lease.
 func (k Key) Object() string { return string(k.Kind) + "." + strconv.FormatInt(k.ID, 10) }
@@ -144,7 +149,7 @@ func (k Key) String() string { return k.Object() }
 
 // ParseKey reads an object name back into a Key.
 func ParseKey(s string) (Key, bool) {
-	for _, kind := range []Kind{KindTenant, KindSFTP} {
+	for _, kind := range []Kind{KindTenant, KindSFTP, KindNet} {
 		prefix := string(kind) + "."
 		if len(s) > len(prefix) && s[:len(prefix)] == prefix {
 			id, err := strconv.ParseInt(s[len(prefix):], 10, 64)
