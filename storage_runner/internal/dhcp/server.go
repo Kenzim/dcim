@@ -65,6 +65,9 @@ type Server struct {
 	offers     map[string]offer
 	quarantine map[netip.Addr]time.Time
 	lastErr    string
+	// loadErr is a lease file problem found at start, reported for the
+	// server's lifetime so it is not hidden by the next successful write.
+	loadErr string
 }
 
 // NewServer returns a server for t, seeding its leases from the lease file
@@ -79,7 +82,14 @@ func NewServer(t *Table, path string, probe Prober, now func() time.Time) *Serve
 	if path != "" {
 		file, err := readLeaseFile(path)
 		if err != nil {
-			s.lastErr = err.Error()
+			// Keep an unreadable file for inspection instead of overwriting
+			// it with the next write.
+			aside := fmt.Sprintf("%s.corrupt-%d", path, now().Unix())
+			if rerr := os.Rename(path, aside); rerr == nil {
+				s.loadErr = fmt.Sprintf("%v; moved to %s", err, aside)
+			} else {
+				s.loadErr = fmt.Sprintf("%v; could not move it aside: %v", err, rerr)
+			}
 		}
 		seed = append(seed, file...)
 	}
@@ -185,7 +195,14 @@ func (s *Server) leaseListLocked() []api.DHCPLease {
 func (s *Server) Err() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.lastErr
+	switch {
+	case s.loadErr == "":
+		return s.lastErr
+	case s.lastErr == "":
+		return s.loadErr
+	default:
+		return s.loadErr + "; " + s.lastErr
+	}
 }
 
 func (s *Server) logf(f string, a ...any) {
@@ -218,8 +235,9 @@ func (s *Server) pruneLocked() {
 	}
 }
 
-// Handle answers one received message. ok is false when nothing is sent.
-func (s *Server) Handle(ctx context.Context, b []byte) (reply []byte, dst netip.AddrPort, ok bool) {
+// Handle answers one received message from src, the packet's IPv4 source
+// address. ok is false when nothing is sent.
+func (s *Server) Handle(ctx context.Context, b []byte, src netip.Addr) (reply []byte, dst netip.AddrPort, ok bool) {
 	req, err := Parse(b)
 	if err != nil || req.Op != 1 || req.HType != 1 || req.HLen != 6 {
 		return nil, dst, false
@@ -243,7 +261,7 @@ func (s *Server) Handle(ctx context.Context, b []byte) (reply []byte, dst netip.
 	case Inform:
 		return s.inform(t, req)
 	case Release:
-		s.release(t, req)
+		s.release(t, req, src)
 	case Decline:
 		s.decline(t, req)
 	}
@@ -481,8 +499,13 @@ func (s *Server) inform(t *Table, req *Packet) ([]byte, netip.AddrPort, bool) {
 	return s.reply(t, req, Ack, netip.Addr{})
 }
 
-func (s *Server) release(t *Table, req *Packet) {
+// release frees a dynamic lease. A client releases from its leased address
+// (RFC 2131 4.4.6), so a RELEASE sent from any other source is ignored.
+func (s *Server) release(t *Table, req *Packet, src netip.Addr) {
 	if sid := req.AddrOption(OptServerID); sid.IsValid() && sid != t.ServerID {
+		return
+	}
+	if !src.IsValid() || src.Unmap() != req.CIAddr {
 		return
 	}
 	mac := req.MAC()
@@ -505,12 +528,20 @@ func (s *Server) decline(t *Table, req *Packet) {
 	mac := req.MAC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Only the client that was offered or holds the address may decline it,
+	// so a stray DECLINE cannot take addresses out of the range.
+	declined := false
 	if l := s.leases[mac]; l != nil && l.IP == ip {
 		delete(s.leases, mac)
 		s.persistLocked()
+		declined = true
 	}
 	if o, ok := s.offers[mac]; ok && o.ip == ip {
 		delete(s.offers, mac)
+		declined = true
+	}
+	if !declined {
+		return
 	}
 	s.quarantine[ip] = s.Now().Add(QuarantineTime)
 	s.logf("dhcp: %s declined %s, quarantined", mac, ip)
@@ -609,7 +640,7 @@ func (s *Server) Serve(ctx context.Context, conn net.PacketConn) {
 	defer stop()
 	buf := make([]byte, 1500)
 	for {
-		n, _, err := conn.ReadFrom(buf)
+		n, from, err := conn.ReadFrom(buf)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
@@ -622,7 +653,11 @@ func (s *Server) Serve(ctx context.Context, conn net.PacketConn) {
 			}
 			continue
 		}
-		out, dst, ok := s.Handle(ctx, buf[:n])
+		var src netip.Addr
+		if ua, isUDP := from.(*net.UDPAddr); isUDP {
+			src = ua.AddrPort().Addr().Unmap()
+		}
+		out, dst, ok := s.Handle(ctx, buf[:n], src)
 		if !ok || ctx.Err() != nil {
 			continue
 		}

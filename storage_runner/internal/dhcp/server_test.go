@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -85,6 +86,18 @@ type msg struct {
 	requested netip.Addr
 	sid       netip.Addr
 	hostname  string
+	// src is the packet's source address; unset means ciaddr, or 0.0.0.0.
+	src netip.Addr
+}
+
+func (m msg) source() netip.Addr {
+	if m.src.IsValid() {
+		return m.src
+	}
+	if m.ciaddr.IsValid() {
+		return m.ciaddr
+	}
+	return zeroIP
 }
 
 func (m msg) bytes() []byte {
@@ -113,7 +126,7 @@ func (m msg) bytes() []byte {
 // send handles m and returns the parsed reply, nil when none.
 func (e *env) send(m msg) (*Packet, netip.AddrPort) {
 	e.t.Helper()
-	out, dst, ok := e.srv.Handle(context.Background(), m.bytes())
+	out, dst, ok := e.srv.Handle(context.Background(), m.bytes(), m.source())
 	if !ok {
 		return nil, dst
 	}
@@ -339,8 +352,10 @@ func TestDynamicAllocationSkipsTakenAddresses(t *testing.T) {
 			ExpiresAt: api.Timestamp{Time: time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)}}},
 	}
 	e := newEnv(t, c, "")
-	// macC declines .102 (quarantined); .103 answers the probe.
+	// macC is offered .102 and declines it (quarantined); .103 answers the probe.
+	e.expect(msg{typ: Discover, mac: macC}, Offer, "10.0.0.102")
 	e.send(msg{typ: Decline, mac: macC, sid: serverIP, requested: ip("10.0.0.102")})
+	e.probe.calls = nil
 	e.probe.inUse[ip("10.0.0.103")] = true
 
 	off := e.expect(msg{typ: Discover, mac: macD}, Offer, "10.0.0.104")
@@ -412,6 +427,49 @@ func TestReleaseInformAndExpiry(t *testing.T) {
 	e.clock.t = e.clock.t.Add(601 * time.Second)
 	if len(e.srv.Leases()) != 0 {
 		t.Fatal("expired lease not pruned")
+	}
+}
+
+func TestSpoofedReleaseAndStrayDeclineAreIgnored(t *testing.T) {
+	e := newEnv(t, &api.DHCP{Enabled: true, LeaseSeconds: 600, Range: &api.DHCPRange{Start: "10.0.0.100", End: "10.0.0.101"}}, "")
+	a := e.lease(macB, "")
+	// A RELEASE naming macB's lease but sent from another address frees nothing.
+	e.send(msg{typ: Release, mac: macB, ciaddr: a, sid: serverIP, src: ip("10.0.0.7")})
+	if len(e.srv.Leases()) != 1 {
+		t.Fatal("a RELEASE from another source freed the lease")
+	}
+	// A DECLINE from a client that was neither offered nor holds the address
+	// does not quarantine it.
+	e.send(msg{typ: Decline, mac: macC, sid: serverIP, requested: ip("10.0.0.101")})
+	e.expect(msg{typ: Discover, mac: macD}, Offer, "10.0.0.101")
+	// Nor does it touch another client's lease.
+	e.send(msg{typ: Decline, mac: macC, sid: serverIP, requested: a})
+	if l := e.srv.Leases(); len(l) != 1 || l[0].MAC != macB {
+		t.Fatalf("leases after a stray DECLINE %+v", l)
+	}
+}
+
+func TestCorruptLeaseFileIsMovedAside(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "net-6.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &api.DHCP{Enabled: true, LeaseSeconds: 3600, Range: &api.DHCPRange{Start: "10.0.0.100", End: "10.0.0.110"}}
+	e := newEnv(t, c, path)
+	if !strings.Contains(e.srv.Err(), "moved to") {
+		t.Fatalf("error %q", e.srv.Err())
+	}
+	aside, _ := filepath.Glob(path + ".corrupt-*")
+	if len(aside) != 1 {
+		t.Fatalf("corrupt copies %v", aside)
+	}
+	if b, _ := os.ReadFile(aside[0]); string(b) != "{not json" {
+		t.Fatalf("corrupt copy holds %q", b)
+	}
+	e.lease(macB, "")
+	if got, err := readLeaseFile(path); err != nil || len(got) != 1 {
+		t.Fatalf("new file %+v, %v", got, err)
 	}
 }
 

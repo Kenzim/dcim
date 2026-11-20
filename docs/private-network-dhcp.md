@@ -137,7 +137,10 @@ Messages: `DISCOVER` gets `OFFER`; `REQUEST` gets `ACK`, or `NAK` when a known c
 or a dynamic client) asks for an address that is not the one it would get (RFC 2131 4.3.2: selecting
 with another server's identifier is ignored; init-reboot and renewing requests are checked against
 the table); `INFORM` from a reserved or leased address gets `ACK` with options and no address;
-`RELEASE` frees a dynamic lease; `DECLINE` quarantines a dynamic address for 10 minutes.
+`RELEASE` frees a dynamic lease only when sent from the leased address itself; `DECLINE` quarantines a
+dynamic address for 10 minutes only when it comes from the client that was offered or holds that
+address. An unreadable lease file is renamed to `<file>.corrupt-<unix time>` and reported in the
+DHCP error rather than overwritten.
 Replies go unicast to `ciaddr` when it is set, else broadcast to `255.255.255.255:68` on the
 interface. The server identifier is the endpoint address.
 
