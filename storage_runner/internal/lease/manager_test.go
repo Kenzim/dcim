@@ -325,6 +325,33 @@ func TestHolderPartitionedFromCephFailsOver(t *testing.T) {
 	s.noOverlap()
 }
 
+func TestRangeFenceBlocksTheNodeAndIsSeenOnReturn(t *testing.T) {
+	s := newSim(t, 1, 2, 3)
+	for _, n := range s.nodes {
+		n.m.RangeFence = true
+	}
+	s.mustServe(tenant42, 1, 10*time.Second)
+	s.run(3 * time.Second)
+	n1 := s.nodes[1]
+	n1.client.SetPartition(PartitionFail)
+	s.until(time.Minute, func() bool { return !n1.isServing(tenant42) })
+	s.mustServe(tenant42, 2, time.Minute)
+	s.noOverlap()
+	if bl := s.cluster.Blocklist(); len(bl) != 1 || bl[0].Addr != "10.0.0.1/32" {
+		t.Fatalf("blocklist %+v", bl)
+	}
+	n1.client.SetPartition(Connected)
+	s.run(10 * time.Second)
+	if st := n1.m.Status(); !st.Fenced || st.FencedUntil == nil || n1.isServing(tenant42) {
+		t.Fatalf("old holder does not see its /32 fence: %+v", st)
+	}
+	s.run(11 * time.Minute)
+	if st := n1.m.Status(); st.Fenced || !st.LeaseOK {
+		t.Fatalf("after the range expired: %+v", st)
+	}
+	s.noOverlap()
+}
+
 func TestHangingCephCallsStopAtDeadline(t *testing.T) {
 	s := newSim(t, 1, 2)
 	s.mustServe(tenant42, 1, 10*time.Second)

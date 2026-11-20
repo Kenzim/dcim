@@ -167,8 +167,8 @@ func FromEnv(getenv func(string) string) (Host, error) {
 	switch {
 	case h.CephScopedKey && h.CephName == "":
 		errs = append(errs, errors.New("CEPH_SCOPED_KEY needs CEPH_NAME: client.admin is not a scoped key"))
-	case h.CephScopedKey && (h.CephRecoveryName == "" || h.CephRecoveryKeyring == ""):
-		errs = append(errs, errors.New("CEPH_SCOPED_KEY needs CEPH_RECOVERY_NAME and CEPH_RECOVERY_KEYRING"))
+	case h.CephScopedKey && h.CephHAPool != "" && (h.CephRecoveryName == "" || h.CephRecoveryKeyring == ""):
+		errs = append(errs, errors.New("CEPH_SCOPED_KEY with CEPH_HA_POOL needs CEPH_RECOVERY_NAME and CEPH_RECOVERY_KEYRING"))
 	case !h.CephScopedKey && (h.CephRecoveryName != "" || h.CephRecoveryKeyring != ""):
 		errs = append(errs, errors.New("CEPH_RECOVERY_NAME and CEPH_RECOVERY_KEYRING are only used with CEPH_SCOPED_KEY=true"))
 	}
