@@ -65,6 +65,8 @@ type Manager interface {
 	// Announce sends gratuitous ARP for addr from the tenant's VLAN
 	// interface, so switches and clients learn the new location.
 	Announce(ctx context.Context, tenant int64, addr netip.Addr) error
+
+	PresenceManager
 }
 
 // IPRoute implements Manager with the iproute2 `ip` command.

@@ -86,13 +86,13 @@ func Parse(b []byte) (*Packet, error) {
 	}
 	p := &Packet{
 		Op: b[0], HType: b[1], HLen: b[2], Hops: b[3],
-		XID:    binary.BigEndian.Uint32(b[4:8]),
-		Secs:   binary.BigEndian.Uint16(b[8:10]),
-		Flags:  binary.BigEndian.Uint16(b[10:12]),
-		CIAddr: addr4(b[12:16]),
-		YIAddr: addr4(b[16:20]),
-		SIAddr: addr4(b[20:24]),
-		GIAddr: addr4(b[24:28]),
+		XID:     binary.BigEndian.Uint32(b[4:8]),
+		Secs:    binary.BigEndian.Uint16(b[8:10]),
+		Flags:   binary.BigEndian.Uint16(b[10:12]),
+		CIAddr:  addr4(b[12:16]),
+		YIAddr:  addr4(b[16:20]),
+		SIAddr:  addr4(b[20:24]),
+		GIAddr:  addr4(b[24:28]),
 		Options: map[byte][]byte{},
 	}
 	copy(p.CHAddr[:], b[28:44])

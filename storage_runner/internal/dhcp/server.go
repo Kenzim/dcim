@@ -25,7 +25,7 @@ const (
 	offerHold = time.Minute
 	// maxProbes bounds the duplicate address probes per DISCOVER; each
 	// takes about a second.
-	maxProbes = 3
+	maxProbes  = 3
 	clientPort = 68
 )
 

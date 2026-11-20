@@ -93,7 +93,7 @@ func tenantGuard(id int64) lease.GuardInfo {
 // setupHA hands the lease part of the config to the lease manager and
 // records which tenants this node may serve in this pass. Without an ha
 // block every valid tenant in the config is served, as before leases.
-func (p *pass) setupHA(cfg *api.Config, works []*tenantWork) {
+func (p *pass) setupHA(cfg *api.Config, works []*tenantWork, nets []*netWork) {
 	r := p.r
 	if cfg.HA == nil {
 		if r.leaseStarted {
@@ -102,6 +102,10 @@ func (p *pass) setupHA(cfg *api.Config, works []*tenantWork) {
 		}
 		for _, w := range works {
 			w.held = true
+		}
+		// Without leases a network is served by the node it is listed for.
+		for _, nw := range nets {
+			nw.held = true
 		}
 		return
 	}
@@ -173,6 +177,7 @@ func (p *pass) setupHA(cfg *api.Config, works []*tenantWork) {
 			} else {
 				want.Acquire, want.Rank = true, 0
 			}
+			want.Defer = tenantDefer(w.t)
 			if mv := w.t.Move; mv != nil && mv.ToNodeID != 0 {
 				want.MoveTo, want.MoveID = mv.ToNodeID, mv.ID
 				if mv.ToNodeID == me {
@@ -185,6 +190,7 @@ func (p *pass) setupHA(cfg *api.Config, works []*tenantWork) {
 	if sw, ok := p.sftpWant(cfg); ok {
 		d.Wants = append(d.Wants, sw)
 	}
+	d.Wants = append(d.Wants, netWants(cfg, nets)...)
 	r.Lease.SetDesired(d)
 	if !r.leaseStarted {
 		if r.Lease.Stop == nil {
@@ -204,13 +210,17 @@ func (p *pass) setupHA(cfg *api.Config, works []*tenantWork) {
 	// A lease about to be handed off is not served or acted on any more.
 	releasing := map[lease.Key]bool{}
 	for _, want := range d.Wants {
-		if want.Release || (d.Draining && want.Key.Kind == lease.KindTenant) {
+		if want.Release || (d.Draining && (want.Key.Kind == lease.KindTenant || want.Key.Kind == lease.KindNet)) {
 			releasing[want.Key] = true
 		}
 	}
 	for _, w := range works {
 		k := lease.TenantKey(w.t.ID)
 		w.held = r.Lease.Holds(k) && !releasing[k]
+	}
+	for _, nw := range nets {
+		k := lease.NetKey(nw.n.ID)
+		nw.held = r.Lease.Holds(k) && !releasing[k]
 	}
 }
 
@@ -303,6 +313,7 @@ func (p *pass) dropLocal(id int64, w *tenantWork) {
 		r.logf("tenant %d: not held here; nfs removed", id)
 	}
 	if p.namespaces[id] || linked {
+		p.stopDHCP(names.TenantDHCPKey(id))
 		if err := r.Net.Remove(p.ctx, id); err != nil {
 			fail("remove network of a tenant not held here: %v", err)
 			return
@@ -343,9 +354,10 @@ func (p *pass) dropUnlisted(works []*tenantWork) {
 }
 
 // StopLease stops serving what a lease covered, at once: for a tenant its
-// VLAN interface goes down and its Ganesha stops; for the SFTP master lease
-// the gateway stops and the virtual IP is removed. The lease manager calls
-// it when a lease is lost or released.
+// VLAN interface goes down and its Ganesha and DHCP server stop; for a
+// network presence its interface goes down and its DHCP server stops; for
+// the SFTP master lease the gateway stops and the virtual IP is removed. The
+// lease manager calls it when a lease is lost or released.
 func (r *Reconciler) StopLease(k lease.Key, g lease.GuardInfo) {
 	r.serveMu.Lock()
 	defer r.serveMu.Unlock()
@@ -354,6 +366,9 @@ func (r *Reconciler) StopLease(k lease.Key, g lease.GuardInfo) {
 	switch k.Kind {
 	case lease.KindTenant:
 		id := k.ID
+		if r.DHCP != nil {
+			r.DHCP.Stop(names.TenantDHCPKey(id))
+		}
 		if err := r.Net.LinkDown(ctx, id); err != nil {
 			r.logf("tenant %d: lease ended; set interface down: %v", id, err)
 		}
@@ -364,6 +379,16 @@ func (r *Reconciler) StopLease(k lease.Key, g lease.GuardInfo) {
 		}
 	case lease.KindSFTP:
 		r.stopSFTPMaster(ctx, g)
+	case lease.KindNet:
+		id := k.ID
+		if r.DHCP != nil {
+			r.DHCP.Stop(names.NetworkDHCPKey(id))
+		}
+		if err := r.Net.PresenceLinkDown(ctx, id); err != nil {
+			r.logf("network %d: lease ended; set interface down: %v", id, err)
+		} else {
+			r.logf("network %d: lease ended; presence down", id)
+		}
 	}
 	r.Kick()
 }

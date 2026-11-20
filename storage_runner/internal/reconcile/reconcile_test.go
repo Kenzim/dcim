@@ -125,6 +125,9 @@ func (e *env) restart() {
 	if err != nil {
 		e.t.Fatal(err)
 	}
+	if e.r != nil && e.r.DHCP != nil {
+		e.r.DHCP.StopAll()
+	}
 	e.r = &Reconciler{
 		Host:          e.host(),
 		Source:        e.src,
@@ -137,6 +140,7 @@ func (e *env) restart() {
 		Logf:          e.t.Logf,
 		RunnerVersion: "0.1.0",
 	}
+	e.r.DHCP = e.newDHCPPool()
 }
 
 func (e *env) apply(cfg *api.Config) []string {
