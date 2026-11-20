@@ -299,6 +299,27 @@ Client API (owner only, owner routes; a network that is not yours is "not found"
 - `POST /api/client/private-networks/{id}/dhcp/reservations` `{mac, ip, label}`;
   `PATCH .../reservations/{reservation_id}`; `DELETE .../reservations/{reservation_id}`.
 
+The GET response (and the PATCH and reservation responses, which return the same object):
+
+```json
+{
+  "network_id": 6, "available": true, "served": true, "serving_node": "stor-a",
+  "enabled": true, "lease_seconds": 86400, "lease_seconds_default": 86400, "lease_seconds_set": null,
+  "range_start": "10.0.0.100", "range_end": "10.0.0.199",
+  "gateway": null, "dns_servers": [], "domain": null, "mtu": null, "routes": [], "ntp_servers": [],
+  "endpoint_ip": "10.0.0.254",
+  "reservations": [{"id": 1, "mac": "aa:bb:cc:00:00:01", "ip": "10.0.0.20", "label": "router", "created_at": "..."}],
+  "automatic": [{"attachment_id": 9, "ip": "10.0.0.1", "macs": ["bc:24:11:00:00:01"], "label": "vm-1 (service 12)"}],
+  "leases": [{"mac": "bc:24:11:00:00:09", "ip": "10.0.0.100", "hostname": "nas", "expires_at": "..."}],
+  "warnings": [],
+  "error": null
+}
+```
+
+`available` false means the location has no storage node or not every node is on 0.4.0; settings can
+still be saved and apply once it is. `automatic` lists only the owner's own attachments plus, for
+members' attachments, the address and `"label": "member attachment"` without MACs.
+
 Members: `GET /shared/{id}` gains `dhcp`: `enabled`, `served`, `lease_seconds`, `gateway`,
 `dns_servers`, `domain`, `mtu`, `routes`, `ntp_servers`. No range, reservations or leases; their
 own attachments' addresses are already shown.
