@@ -1242,9 +1242,9 @@
   .backup-jobs {
     margin: 8px 0;
     padding: 8px 10px;
-    border: 1px solid #e6d59a;
+    border: 1px solid color-mix(in srgb, var(--warning-color) 40%, var(--border-color));
     border-radius: 8px;
-    background: #fff9e8;
+    background: var(--warning-bg);
   }
   .backup-create {
     display: flex;
@@ -1255,7 +1255,18 @@
   .backup-create input {
     flex: 1 1 160px;
     min-width: 140px;
-    padding: 0.35rem 0.5rem;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font: inherit;
+  }
+  .backup-create input::placeholder { color: var(--text-tertiary); }
+  .backup-create input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 20%, transparent);
   }
   .backup-list {
     list-style: none;
@@ -1268,37 +1279,36 @@
     display: flex;
     flex-wrap: wrap;
     justify-content: space-between;
+    align-items: center;
     gap: 8px;
     padding: 10px 12px;
     border: 1px solid var(--border-color);
+    border-left-width: 3px;
     border-radius: 8px;
     background: var(--bg-secondary);
+    color: var(--text-primary);
   }
-  .backup-list li.backup-kind-platform {
-    background: #eef4fb;
-    border-color: #c5d7eb;
-  }
-  .backup-list li.backup-kind-client {
-    background: #eef8f3;
-    border-color: #b9dcc9;
-  }
+  .backup-list li.backup-kind-platform { border-left-color: var(--info-color); }
+  .backup-list li.backup-kind-client { border-left-color: var(--success-color); }
   .backup-list li.backup-running {
-    border-color: #e6d59a;
-    background: #fff9e8;
+    border-color: color-mix(in srgb, var(--warning-color) 40%, var(--border-color));
+    border-left-color: var(--warning-color);
+    background: var(--warning-bg);
   }
   .warn-label {
     text-transform: uppercase;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.04em;
-    color: #7a5b00;
+    color: var(--warning-color);
   }
   .backup-meta {
     display: flex;
     flex-wrap: wrap;
     gap: 8px 12px;
-    align-items: baseline;
+    align-items: center;
     font-size: 13px;
+    color: var(--text-secondary);
   }
   .kind-pill {
     display: inline-flex;
@@ -1310,14 +1320,15 @@
     letter-spacing: 0.02em;
     text-transform: none;
   }
-  .kind-platform { background: #d9e7f7; color: #1f4b7a; }
-  .kind-client { background: #d5ebe0; color: #1f5c40; }
+  .kind-pill { background: var(--bg-tertiary); color: var(--text-secondary); }
+  .kind-platform { background: var(--info-bg); color: var(--info-color); }
+  .kind-client { background: var(--success-bg); color: var(--success-color); }
   .backup-template {
     display: inline-flex;
     align-items: center;
     padding: 2px 8px;
     border-radius: 6px;
-    background: rgba(28, 36, 48, 0.06);
+    background: var(--bg-tertiary);
     color: var(--text-secondary);
     font-size: 12px;
     font-weight: 600;
