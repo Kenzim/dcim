@@ -429,6 +429,8 @@ class Settings(BaseSettings):
     # network with members is kept after its owner has no live service.
     private_network_invitation_days: int = 14
     private_network_owner_gone_grace_days: int = 30
+    # Default DHCP lease time on private networks; owners may set 300 to 604800 s per network.
+    private_network_dhcp_lease_seconds: int = 86400
     # Shared secret the ipmi_proxy_runner edge presents to the runner API (Bearer).
     ipmi_proxy_runner_api_key: Optional[str] = None
     # One-time launch ticket lifetime (seconds). Kept short: the ticket is only used

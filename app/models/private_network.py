@@ -108,11 +108,36 @@ class PrivateNetwork(Base):
     last_error = Column(Text, nullable=True)
     # Shared networks only: when the owner was first seen with no live service.
     owner_gone_since = Column(DateTime(timezone=True), nullable=True)
+    # DHCP served by the network's storage presence (docs/private-network-dhcp.md).
+    dhcp_enabled = Column(Boolean, nullable=False, default=True, server_default="1")
+    dhcp_range_start = Column(String(15), nullable=True)
+    dhcp_range_end = Column(String(15), nullable=True)
+    # Null means the PRIVATE_NETWORK_DHCP_LEASE_SECONDS default.
+    dhcp_lease_seconds = Column(Integer, nullable=True)
+    # {gateway, dns_servers, domain, mtu, routes: [{destination, gateway}], ntp_servers}
+    dhcp_options = Column(JSON, nullable=True)
+    # The storage node that reports serving the network presence, and since when.
+    presence_node_id = Column(Integer, ForeignKey("storage_nodes.id", ondelete="SET NULL"), nullable=True)
+    presence_since = Column(DateTime(timezone=True), nullable=True)
+    dhcp_error = Column(String(2000), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     owner_user = relationship("User", foreign_keys=[owner_user_id])
     location = relationship("Location")
+    presence_node = relationship("StorageNode", foreign_keys=[presence_node_id])
+    dhcp_reservations = relationship(
+        "PrivateNetworkDhcpReservation",
+        back_populates="network",
+        cascade="all, delete-orphan",
+        order_by="PrivateNetworkDhcpReservation.id",
+    )
+    dhcp_leases = relationship(
+        "PrivateNetworkDhcpLease",
+        back_populates="network",
+        cascade="all, delete-orphan",
+        order_by="PrivateNetworkDhcpLease.id",
+    )
     attachments = relationship(
         "PrivateNetworkAttachment",
         back_populates="network",
@@ -214,3 +239,46 @@ class PrivateNetworkInvitation(Base):
     network = relationship("PrivateNetwork", back_populates="invitations")
     inviter = relationship("User", foreign_keys=[inviter_user_id])
     invitee = relationship("User", foreign_keys=[invitee_user_id])
+
+
+class PrivateNetworkDhcpReservation(Base):
+    """An owner's DHCP reservation: this MAC always gets this address on the network."""
+
+    __tablename__ = "private_network_dhcp_reservations"
+    __table_args__ = (
+        UniqueConstraint("network_id", "mac", name="uq_private_network_dhcp_reservation_mac"),
+        UniqueConstraint("network_id", "ip", name="uq_private_network_dhcp_reservation_ip"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    network_id = Column(
+        Integer, ForeignKey("private_networks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Lower case, colon separated.
+    mac = Column(String(17), nullable=False)
+    ip = Column(String(15), nullable=False)
+    label = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    network = relationship("PrivateNetwork", back_populates="dhcp_reservations")
+
+
+class PrivateNetworkDhcpLease(Base):
+    """A dynamic DHCP lease reported by the storage node serving the network."""
+
+    __tablename__ = "private_network_dhcp_leases"
+    __table_args__ = (UniqueConstraint("network_id", "mac", name="uq_private_network_dhcp_lease_mac"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    network_id = Column(
+        Integer, ForeignKey("private_networks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    mac = Column(String(17), nullable=False)
+    ip = Column(String(15), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    hostname = Column(String(64), nullable=True)
+    node_id = Column(Integer, ForeignKey("storage_nodes.id", ondelete="SET NULL"), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    network = relationship("PrivateNetwork", back_populates="dhcp_leases")

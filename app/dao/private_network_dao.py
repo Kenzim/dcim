@@ -10,6 +10,8 @@ from app.models.private_network import (
     InvitationStatus,
     PrivateNetwork,
     PrivateNetworkAttachment,
+    PrivateNetworkDhcpLease,
+    PrivateNetworkDhcpReservation,
     PrivateNetworkInvitation,
     PrivateNetworkMember,
     PrivateNetworkPool,
@@ -290,6 +292,57 @@ class PrivateNetworkDAO:
             .filter(PrivateNetworkInvitation.status == InvitationStatus.PENDING)
             .all()
         )
+
+    # --- DHCP ---
+
+    @staticmethod
+    def get_dhcp_reservation(
+        db: Session, network_id: int, reservation_id: int
+    ) -> Optional[PrivateNetworkDhcpReservation]:
+        return (
+            db.query(PrivateNetworkDhcpReservation)
+            .filter(
+                PrivateNetworkDhcpReservation.id == reservation_id,
+                PrivateNetworkDhcpReservation.network_id == network_id,
+            )
+            .first()
+        )
+
+    @staticmethod
+    def list_dhcp_reservations(db: Session, network_id: int) -> List[PrivateNetworkDhcpReservation]:
+        return (
+            db.query(PrivateNetworkDhcpReservation)
+            .filter(PrivateNetworkDhcpReservation.network_id == network_id)
+            .order_by(PrivateNetworkDhcpReservation.id)
+            .all()
+        )
+
+    @staticmethod
+    def list_dhcp_leases(db: Session, network_id: int) -> List[PrivateNetworkDhcpLease]:
+        return (
+            db.query(PrivateNetworkDhcpLease)
+            .filter(PrivateNetworkDhcpLease.network_id == network_id)
+            .order_by(PrivateNetworkDhcpLease.id)
+            .all()
+        )
+
+    @staticmethod
+    def list_presence_networks(db: Session, location_id: int) -> List[PrivateNetwork]:
+        """Active standard networks of a location, the candidates for a storage presence."""
+        return (
+            db.query(PrivateNetwork)
+            .filter(
+                PrivateNetwork.location_id == location_id,
+                PrivateNetwork.kind == NetworkKind.STANDARD,
+                PrivateNetwork.status == PrivateNetworkStatus.ACTIVE,
+            )
+            .order_by(PrivateNetwork.id)
+            .all()
+        )
+
+    @staticmethod
+    def networks_with_presence_on(db: Session, node_id: int) -> List[PrivateNetwork]:
+        return db.query(PrivateNetwork).filter(PrivateNetwork.presence_node_id == node_id).all()
 
     @staticmethod
     def wanted_states() -> tuple:
