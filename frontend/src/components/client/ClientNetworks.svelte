@@ -23,6 +23,7 @@
     clientFastPathOn,
     clientFastPathOff,
   } from '../../lib/api.js';
+  import { copyText } from '../../lib/copyText.js';
 
   const STATE_LABELS = { pending: 'Connecting', active: 'Connected', error: 'Being retried', detaching: 'Disconnecting' };
   const emptyCreateForm = () => ({ location_id: '', name: '', cidr: '' });
@@ -209,13 +210,26 @@
   }
 
   async function copy(text) {
+    error = '';
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       success = 'Copied.';
     } catch {
       error = 'Clipboard unavailable';
     }
   }
+
+  // ip:port:user:pass when the client may see the credentials, else just ip:port.
+  const endpointLine = (ep) => ep.endpoint || `${ep.fast_path_ip}:${ep.port}`;
+
+  function locationLines(loc) {
+    const lines = fastPath.endpoints
+      .filter((ep) => ep.location_id === loc.location_id && ep.active)
+      .map(endpointLine);
+    return [...new Set(lines)];
+  }
+
+  $: withCredentials = fastPath.endpoints.some((ep) => ep.endpoint);
 
   onMount(load);
 </script>
@@ -294,6 +308,11 @@
                 {/if}
               </div>
               <div class="row-end">
+                {#if loc.enabled && locationLines(loc).length > 0}
+                  <button class="link plain copy-all" on:click={() => copy(locationLines(loc).join('\n'))}>
+                    Copy all ({withCredentials ? 'ip:port:user:pass' : 'ip:port'})
+                  </button>
+                {/if}
                 {#if loc.enabled}
                   <button
                     class="link"
@@ -325,14 +344,15 @@
                   <span class="badge" class:ok={ep.active}>{ep.active ? 'Ready' : 'Turn on in this location'}</span>
                 </div>
                 <div class="row-end">
-                  <button class="link" on:click={() => copy(`${ep.fast_path_ip}:${ep.port}`)}>Copy</button>
+                  <button class="link plain" on:click={() => copy(endpointLine(ep))}>Copy</button>
                 </div>
               </div>
             {/each}
           </div>
           <p class="hint">
             Proxy IPs in the same subnet share one private address; your username and password pick which public IP
-            is used.
+            is used.{#if withCredentials} Copy gives <span class="mono">ip:port:user:pass</span>, the public line with the
+            private address as host.{/if}
           </p>
         {/if}
       </div>
@@ -701,6 +721,7 @@
   .mount > div { grid-column: 1 / -1; }
   .mount code { overflow-x: auto; white-space: nowrap; padding: 6px 8px; border-radius: 6px; background: var(--bg-secondary, rgba(127, 127, 127, 0.1)); }
   .link.plain { color: var(--portal-accent); }
+  .copy-all { margin-right: 14px; }
   .attach { display: grid; grid-template-columns: 1.4fr 1fr auto; gap: 8px; align-items: center; margin-top: 14px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .badge {

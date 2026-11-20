@@ -5918,6 +5918,7 @@ function rackflow_proxyFastPathEmptyVars()
         'rackflow_fast_path_locations' => array(),
         'rackflow_fast_path_endpoints' => array(),
         'rackflow_fast_path_lines' => '',
+        'rackflow_fast_path_has_credentials' => false,
         'rackflow_fast_path_can_enable' => false,
         'rackflow_fast_path_can_disable' => false,
         'rackflow_fast_path_action_url' => '',
@@ -5975,17 +5976,28 @@ function rackflow_proxyFastPathVarsFromView(array $view, $actionUrl)
             $canEnable = true;
         }
     }
+    // The billing API only fills "endpoint" (ip:port:user:pass) when the client may view credentials;
+    // without it the line stays ip:port.
     $lines = array();
-    foreach ($endpoints as $ep) {
-        if (!empty($ep['fast_path_ip']) && !empty($ep['port'])) {
-            $lines[(string)$ep['fast_path_ip'] . ':' . (string)$ep['port']] = true;
+    $hasCredentials = false;
+    foreach ($endpoints as $i => $ep) {
+        if (empty($ep['fast_path_ip']) || empty($ep['port'])) {
+            continue;
         }
+        $line = (string)$ep['fast_path_ip'] . ':' . (string)$ep['port'];
+        if (!empty($ep['endpoint'])) {
+            $line = (string)$ep['endpoint'];
+            $hasCredentials = true;
+        }
+        $endpoints[$i]['line'] = $line;
+        $lines[$line] = true;
     }
     $vars['rackflow_fast_path_available'] = true;
     $vars['rackflow_fast_path_cidr'] = isset($view['cidr']) ? (string)$view['cidr'] : '';
     $vars['rackflow_fast_path_locations'] = $locations;
     $vars['rackflow_fast_path_endpoints'] = $endpoints;
     $vars['rackflow_fast_path_lines'] = implode("\n", array_keys($lines));
+    $vars['rackflow_fast_path_has_credentials'] = $hasCredentials;
     $vars['rackflow_fast_path_can_enable'] = $canEnable;
     $vars['rackflow_fast_path_can_disable'] = $canDisable;
     $vars['rackflow_fast_path_action_url'] = (string)$actionUrl;

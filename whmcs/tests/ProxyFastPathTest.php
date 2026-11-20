@@ -52,6 +52,38 @@ final class ProxyFastPathTest extends TestCase
         $this->assertSame('100.80.0.0/16', $vars['rackflow_fast_path_cidr']);
     }
 
+    public function testEndpointsWithCredentialsBecomeCopyableLines(): void
+    {
+        $vars = rackflow_proxyFastPathVarsFromView(array(
+            'locations' => array(
+                array('location_id' => 1, 'available' => true, 'enabled' => true, 'status' => 'active',
+                    'eligible' => true, 'reason' => null),
+            ),
+            'endpoints' => array(
+                array('fast_path_ip' => '100.80.0.1', 'port' => 11080, 'endpoint' => '100.80.0.1:11080:u1:p1'),
+                array('fast_path_ip' => '100.80.0.1', 'port' => 11080, 'endpoint' => '100.80.0.1:11080:u2:p2'),
+            ),
+        ), '/x');
+        $this->assertTrue($vars['rackflow_fast_path_has_credentials']);
+        $this->assertSame("100.80.0.1:11080:u1:p1\n100.80.0.1:11080:u2:p2", $vars['rackflow_fast_path_lines']);
+        $this->assertSame('100.80.0.1:11080:u2:p2', $vars['rackflow_fast_path_endpoints'][1]['line']);
+    }
+
+    public function testEndpointsWithoutCredentialsKeepIpAndPort(): void
+    {
+        $vars = rackflow_proxyFastPathVarsFromView(array(
+            'locations' => array(
+                array('location_id' => 1, 'available' => true, 'enabled' => true, 'status' => 'active',
+                    'eligible' => true, 'reason' => null),
+            ),
+            'endpoints' => array(
+                array('fast_path_ip' => '100.80.0.1', 'port' => 11080, 'endpoint' => null),
+            ),
+        ), '/x');
+        $this->assertFalse($vars['rackflow_fast_path_has_credentials']);
+        $this->assertSame('100.80.0.1:11080', $vars['rackflow_fast_path_lines']);
+    }
+
     public function testIneligibleClientAndEnabledLocation(): void
     {
         $missing = rackflow_proxyFastPathVarsFromView(array('locations' => array(

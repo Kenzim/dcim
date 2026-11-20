@@ -28,6 +28,7 @@ from app.mcp.client.instance import client_mcp
 from app.mcp.client.networks import NETWORK_SCOPE, network_action, networks_view
 from app.mcp.client.runtime import run_client_tool
 from app.services import client_notifications
+from app.services.proxy_fast_path import CREDENTIAL_FIELDS
 from app.models.reseller import InvoiceStatus
 from app.models.service import ServiceType
 from app.models.support_ticket import TicketPriority, TicketStatus
@@ -109,10 +110,14 @@ def _owned_service(db: Session, ctx: ClientMcpAuthContext, service_id: int):
 
 
 def _fast_path(overview: dict, service_id: Optional[int]) -> dict:
-    """The fast path overview, narrowed to one service's proxy IPs when service_id is given."""
+    """The fast path overview without credentials, narrowed to one service's proxy IPs when service_id is given."""
+    endpoints = [
+        {k: v for k, v in e.items() if k not in CREDENTIAL_FIELDS}
+        for e in overview["endpoints"]
+        if service_id is None or e["service_id"] == service_id
+    ]
     if service_id is None:
-        return overview
-    endpoints = [e for e in overview["endpoints"] if e["service_id"] == service_id]
+        return {**overview, "endpoints": endpoints}
     wanted = {e["location_id"] for e in endpoints}
     return {
         **overview,

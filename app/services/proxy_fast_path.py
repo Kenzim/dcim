@@ -32,13 +32,18 @@ from app.models.private_network import (
     PrivateNetworkStatus,
 )
 from app.models.proxy_runner import ProxyRunner
+from app.core.client_permissions import PermissionKey
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.services import private_network_service as pn
+from app.services.client_permission_resolver import has_client_permission
 from app.services.private_network_service import PrivateNetworkError, PrivateNetworkService
 
 logger = logging.getLogger(__name__)
 
 ACCESS_NETWORK_NAME = "Proxy fast path"
+
+# Endpoint fields of the overview that carry a proxy username and password.
+CREDENTIAL_FIELDS = ("endpoint", "http_url", "socks5_url")
 
 
 class FastPathError(Exception):
@@ -350,8 +355,13 @@ class ProxyAccessService:
         }
 
     @staticmethod
-    def overview(db: Session, user_id: int) -> dict:
-        """Where the client can use the fast path, whether it is on, and the address of each proxy IP."""
+    def overview(db: Session, user_id: int, *, with_credentials: bool = False) -> dict:
+        """Where the client can use the fast path, whether it is on, and the address of each proxy IP.
+
+        With ``with_credentials`` each endpoint also carries ready-to-paste lines (``endpoint`` is
+        ``private_ip:port:user:pass``, plus ``http_url`` and ``socks5_url``), but only for services whose
+        owner holds ``proxy.view_credentials``; the fields are None otherwise, and always None without the flag.
+        """
         networks = {
             network.location_id: network
             for network in PrivateNetworkDAO.list_access_networks(db, owner_user_id=user_id)
@@ -386,6 +396,9 @@ class ProxyAccessService:
         for service in ServiceDAO.get_by_owner_user(db, user_id):
             if service.service_type != ServiceType.HTTP_PROXY or service.status == ServiceStatus.TERMINATED:
                 continue
+            may_see_credentials = with_credentials and has_client_permission(
+                db, service, PermissionKey.PROXY_VIEW_CREDENTIALS
+            )
             for a in (
                 db.query(ServiceIPAssignment)
                 .filter(ServiceIPAssignment.service_id == service.id)
@@ -406,6 +419,11 @@ class ProxyAccessService:
                         "location_id": fast["location_id"],
                         "location_name": fast["location_name"],
                         "active": fast["location_id"] in active,
+                        **(
+                            _credential_lines(fast, a.username, a.password)
+                            if may_see_credentials
+                            else dict.fromkeys(CREDENTIAL_FIELDS)
+                        ),
                     }
                 )
         return {
@@ -414,6 +432,17 @@ class ProxyAccessService:
             "locations": locations,
             "endpoints": endpoints,
         }
+
+
+def _credential_lines(fast: dict, username: Optional[str], password: Optional[str]) -> dict:
+    """Copyable lines for one fast path address: ``ip:port:user:pass`` and the two proxy URLs."""
+    creds = f"{username}:{password}@" if username and password else ""
+    host = f"{fast['ip']}:{fast['port']}"
+    return {
+        "endpoint": f"{host}:{username}:{password}" if username and password else None,
+        "http_url": f"http://{creds}{host}",
+        "socks5_url": f"socks5://{creds}{host}",
+    }
 
 
 def assignment_fast_path(assignment: ServiceIPAssignment) -> Optional[dict]:
@@ -425,16 +454,11 @@ def assignment_fast_path(assignment: ServiceIPAssignment) -> Optional[dict]:
     service = assignment.service
     owner = service.owner_user_id if service is not None else None
     active = db is not None and fast["location_id"] in ProxyAccessService.active_locations(db, owner)
-    username, password = assignment.username, assignment.password
-    creds = f"{username}:{password}@" if username and password else ""
-    host = f"{fast['ip']}:{fast['port']}"
     return {
         "ip": fast["ip"],
         "port": fast["port"],
         "location_id": fast["location_id"],
         "location_name": fast["location_name"],
         "active": active,
-        "http_url": f"http://{creds}{host}",
-        "socks5_url": f"socks5://{creds}{host}",
-        "endpoint": f"{host}:{username}:{password}" if username and password else None,
+        **_credential_lines(fast, assignment.username, assignment.password),
     }
