@@ -270,6 +270,10 @@ Built per network on every config request:
 "gateway": "10.0.0.1"}`. A tenant without `network_id` (terminated, or an older Rackflow) serves no
 DHCP and has no `Defer`.
 
+A 0.4.0 or later runner always gets the `networks` key; it is empty while presence is not active in
+its location (2.5), so a downgrade elsewhere in the location makes it drop its presences at once.
+Tenant `network_id` and `dhcp` are sent only while presence is active.
+
 ### 4.5 Runner status additions
 
 ```json
@@ -327,12 +331,18 @@ own attachments' addresses are already shown.
 Staff API: the same `dhcp` routes under `/api/admin/private-networks/{id}/dhcp`, and the network
 output gains `presence` (`node_id`, `node_name`, `since`, `dhcp_error`) and `dhcp_warnings`.
 
+Response codes: the reservation `POST` answers 201, `PATCH` and `DELETE` 200, all with the GET
+object. A proxy access network answers 409 on every `dhcp` route. The staff `presence` names the
+node answering the network: the network presence holder, or the linked storage's current node
+(`since` is then the tenant's `current_since`); it is null on proxy access networks. The staff view of
+the GET object lists MACs and labels for every attachment, members' included.
+
 Client MCP: `services view="networks"` includes each owned network's `dhcp` and each shared
 network's member view; `service_action action="network"` gains sub-actions `dhcp_get`, `dhcp_set`
 (params as the PATCH body plus `network_id`), `dhcp_reservation_add`, `dhcp_reservation_update`,
 `dhcp_reservation_remove` (`reservation_id`). Scopes: `dhcp_get` read, the others write, remove
-destructive. No new tool. Staff MCP: `lookup kind="private_networks"` shows presence and DHCP
-summary; no new tool.
+destructive. No new tool; `dhcp_get` needs no `confirm`. Staff MCP: `lookup kind="private_networks"`
+shows presence and DHCP summary; no new tool.
 
 Audit log: `private_network.dhcp_update` (changed fields), `private_network.dhcp_reservation_add`,
 `.dhcp_reservation_update`, `.dhcp_reservation_remove`, with actor, network id and the MAC and IP.

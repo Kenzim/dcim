@@ -51,12 +51,17 @@ Storage is kept while the client has no servers: terminating, suspending or lett
 
 The owner can invite other clients (same reseller scope) onto a standard network. A member attaches their own VMs and dedicated servers in the same location, takes addresses from the same range, and can mount any share open to the whole network; they cannot manage the network or its storage. Removing a member, a member leaving, deleting the network, or the owner being gone for 30 days detaches the members' servers. Proxy access networks are never shared. Roles, lifecycle rules, endpoints and the security model are in `docs/private-network-sharing.md`.
 
+## Storage presence and DHCP
+
+In a location with storage nodes that all run storage runner 0.4.0 or later, every standard network is answered on its storage address by one storage node (the linked storage, or a lightweight network presence), which also serves DHCP: each attachment gets exactly the address Rackflow assigned, keyed by its MAC. The owner can switch DHCP off, add MAC reservations, a dynamic range and a few options (gateway, DNS, domain, lease time, MTU, static routes, NTP); members see the effective settings. Owner reservations and the dynamic range are never handed to new attachments. Cloud-init VMs keep their static address. Design, runner contract and endpoints: `docs/private-network-dhcp.md`.
+
 ## What the client does
 
-The portal page is `/client/networks`; it also lists invitations, the networks shared with the client ("Shared with me") and, per owned network, its members and invitations. After connecting a service, the client sets the address inside the operating system:
+The portal page is `/client/networks`; it also lists invitations, the networks shared with the client ("Shared with me") and, per owned network, its members and invitations. After connecting a service, the client brings up the new interface inside the operating system:
 
-- **Virtual machine:** configure the new network card (the portal shows its MAC address). Templates that use cloud-init apply the address on the next reboot.
-- **Dedicated server:** add a VLAN interface with the network's VLAN ID on the main network card and give it the address shown.
+- **Virtual machine:** the new network card gets its address by DHCP where the location has storage nodes (on a Linux server, turn on DHCP for the interface). Templates that use cloud-init also apply the address on the next reboot.
+- **Dedicated server:** add a VLAN interface with the network's VLAN ID on the main network card (or the bond); it asks for its address with that card's MAC, which Rackflow knows, so DHCP works. An interface with its own MAC needs a reservation or the address shown, set by hand.
+- **When DHCP does not apply** (no storage node in the location, DHCP switched off for the network, or every storage node of the location down), the address shown is set by hand.
 
 ## Cleanup and repair
 
