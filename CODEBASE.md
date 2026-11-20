@@ -573,6 +573,7 @@ MCP tools live in `app/mcp/tools/` and call DAOs/services/plugins directly (not 
 ## Docs already in-repo
 
 - `INSTALL.md` — install, Docker, initial admin, DHCP/TFTP runners
+- `docs/deploy-runbook.md` — handing production deploys and infrastructure work to the `sauce-complex-deploy` agent: request template, deploy procedure, owner-confirmation list, how to check production when a Forge request id is unknown
 - `os_templates/README.md` — template format
 - `isos/README.md` — ISO notes
 - `tests/SECURITY_TESTS.md` — security test guidance
