@@ -24,6 +24,19 @@ func healthy() *execx.Script {
 		On(pre+"df detail --format json", `{"pools":[{"name":"cephfs_data","stats":{"max_avail":1}},{"name":"ec","stats":{"max_avail":5000,"stored":100,"quota_bytes":0}}]}`)
 }
 
+func TestNamedEntity(t *testing.T) {
+	named := "ceph --conf /etc/ceph/ceph.conf --name client.rackflow-dev-runner --keyring /etc/ceph/dev.keyring "
+	s := execx.NewScript().
+		On(named+"osd pool get ec allow_ec_overwrites --format json", `{"allow_ec_overwrites":true}`).
+		On(named+"fs ls --format json", `[{"name":"cephfs","data_pools":["ec"]}]`).
+		On(named+"df detail --format json", `{"pools":[{"name":"ec","stats":{"max_avail":7,"stored":0,"quota_bytes":0}}]}`)
+	c := &CLI{Cmd: s, FS: "cephfs", SubvolumeGroup: "rackflow", ECPool: "ec", Conf: "/etc/ceph/ceph.conf",
+		Keyring: "/etc/ceph/dev.keyring", Name: "client.rackflow-dev-runner"}
+	if free, err := c.Check(context.Background()); err != nil || free != 7 {
+		t.Fatalf("free=%d err=%v", free, err)
+	}
+}
+
 func TestCheckPoolQuota(t *testing.T) {
 	cases := map[string]struct {
 		stats string

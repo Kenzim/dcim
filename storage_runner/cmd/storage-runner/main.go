@@ -26,7 +26,7 @@ import (
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
-var version = "0.3.1"
+var version = "0.3.2"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -62,10 +62,11 @@ func runRunner() {
 		ECPool:         host.CephECPool,
 		Conf:           host.CephConf,
 		Keyring:        host.CephKeyring,
+		Name:           host.CephName,
 	}
 	hostname, _ := os.Hostname()
 
-	helper := &lease.Helper{Conf: host.CephConf, Keyring: host.CephKeyring, Pool: host.CephHAPool, Logf: log.Printf}
+	helper := &lease.Helper{Conf: host.CephConf, Keyring: host.CephKeyring, Name: host.CephName, Pool: host.CephHAPool, Logf: log.Printf}
 	defer helper.Close()
 	notifier := lease.NotifierFromEnv()
 	leases := &lease.Manager{

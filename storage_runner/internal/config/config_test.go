@@ -54,6 +54,10 @@ func TestOverrides(t *testing.T) {
 	if h, err := FromEnv(envOf(m)); err != nil || h.CephUserPrefix != "rfdev-t" || h.CephHAPool != "rackflow_dev_ha" {
 		t.Fatalf("h=%+v err=%v", h, err)
 	}
+	m["CEPH_NAME"] = "client.rackflow-dev-runner"
+	if h, err := FromEnv(envOf(m)); err != nil || h.CephName != "client.rackflow-dev-runner" {
+		t.Fatalf("h=%+v err=%v", h, err)
+	}
 }
 
 func TestErrors(t *testing.T) {
@@ -74,6 +78,8 @@ func TestErrors(t *testing.T) {
 		"CEPH_USER_PREFIX \"rf-t1\"": func(m map[string]string) { m["CEPH_USER_PREFIX"] = "rf-t1" },
 		"CEPH_USER_PREFIX \"Dev\"":   func(m map[string]string) { m["CEPH_USER_PREFIX"] = "Dev" },
 		"its own CEPH_HA_POOL":       func(m map[string]string) { m["CEPH_USER_PREFIX"] = "rfdev-t" },
+		"cephx client entity":        func(m map[string]string) { m["CEPH_NAME"] = "rackflow-runner" },
+		"tenant prefix":              func(m map[string]string) { m["CEPH_NAME"] = "client.rf-t9" },
 	}
 	for want, mutate := range cases {
 		m := minimal()

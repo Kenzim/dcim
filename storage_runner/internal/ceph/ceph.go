@@ -130,12 +130,16 @@ type CLI struct {
 	ECPool         string
 	Conf           string
 	Keyring        string
+	Name           string // cephx entity of Keyring; empty for client.admin
 }
 
 func (c *CLI) ceph(ctx context.Context, args ...string) ([]byte, error) {
 	var base []string
 	if c.Conf != "" {
 		base = append(base, "--conf", c.Conf)
+	}
+	if c.Name != "" {
+		base = append(base, "--name", c.Name)
 	}
 	if c.Keyring != "" {
 		base = append(base, "--keyring", c.Keyring)

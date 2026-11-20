@@ -68,6 +68,7 @@ Nothing here ever comes from Rackflow.
 | `SFTP_SERVER_PATH` | `/usr/lib/ssh/sftp-server` | Path of OpenSSH's `sftp-server` inside `SFTP_IMAGE` |
 | `CEPH_HA_POOL` | `rackflow_ha` | Replicated RADOS pool for failover leases, node records and Ganesha recovery databases (see Failover). Must exist; the runner never creates pools |
 | `SFTP_VIP_INTERFACE` | default-route interface | Host interface that carries the location's SFTP virtual IP while this node is SFTP master |
+| `CEPH_NAME` | (`client.admin`) | cephx entity of `CEPH_KEYRING`, passed to `ceph --name` and the lease helper. Set it when the node's key is not `client.admin`, e.g. `client.rackflow-dev-runner`. It must not start with `client.<CEPH_USER_PREFIX>`, because the runner treats those users as tenants' |
 | `CEPH_USER_PREFIX` | `rf-t` | Start of each tenant's cephx user name (`client.<prefix><id>`). cephx users, and the objects in `CEPH_HA_POOL`, are cluster-wide, so a second Rackflow installation on the same Ceph cluster must set its own prefix (e.g. `rfdev-t`), its own `CEPH_HA_POOL` and its own file system. The runner refuses a non-default prefix with the default HA pool |
 
 The guard (`storage-runner guard`) reads only `PODMAN_REMOTE_URL` and, for tests,

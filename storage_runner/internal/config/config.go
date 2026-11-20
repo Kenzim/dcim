@@ -26,10 +26,13 @@ type Host struct {
 	CephPublicNetworks []netip.Prefix
 	CephConf           string
 	CephKeyring        string
-	GaneshaImage       string
-	LinkCIDR           netip.Prefix
-	StateDir           string
-	PodmanRemoteURL    string
+	// CephName is the node's own cephx entity (client.<id>); empty means
+	// client.admin.
+	CephName        string
+	GaneshaImage    string
+	LinkCIDR        netip.Prefix
+	StateDir        string
+	PodmanRemoteURL string
 	// SFTP: the gateway's listen address (port from Rackflow), the back end
 	// image and the sftp-server path inside it.
 	SFTPListenAddr string
@@ -58,6 +61,7 @@ var (
 	cephNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 	// The prefix ends in a letter or '-' so the tenant id after it is unambiguous.
 	userPrefixRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,14}[a-z-])?$`)
+	cephEntityRe = regexp.MustCompile(`^client\.[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 	ifaceRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,14}$`)
 )
 
@@ -79,6 +83,7 @@ func FromEnv(getenv func(string) string) (Host, error) {
 		CephSubvolumeGroup: get("CEPH_SUBVOLUME_GROUP", DefaultGroup),
 		CephConf:           get("CEPH_CONF", ""),
 		CephKeyring:        get("CEPH_KEYRING", ""),
+		CephName:           get("CEPH_NAME", ""),
 		GaneshaImage:       get("GANESHA_IMAGE", ""),
 		StateDir:           get("STATE_DIR", DefaultStateDir),
 		PodmanRemoteURL:    get("PODMAN_REMOTE_URL", ""),
@@ -129,6 +134,14 @@ func FromEnv(getenv func(string) string) (Host, error) {
 		errs = append(errs, fmt.Errorf("CEPH_USER_PREFIX %q must be 1-16 lower-case letters, digits or '-', starting with a letter and ending in a letter or '-'", h.CephUserPrefix))
 	} else if h.CephUserPrefix != names.DefaultCephUserPrefix && h.CephHAPool == DefaultHAPool {
 		errs = append(errs, fmt.Errorf("CEPH_USER_PREFIX %q is for a second Rackflow on a shared Ceph cluster, which also needs its own CEPH_HA_POOL (not %q)", h.CephUserPrefix, DefaultHAPool))
+	}
+	if h.CephName != "" {
+		if !cephEntityRe.MatchString(h.CephName) {
+			errs = append(errs, fmt.Errorf("CEPH_NAME %q must be a cephx client entity such as client.rackflow-runner", h.CephName))
+		} else if strings.HasPrefix(h.CephName, "client."+h.CephUserPrefix) {
+			// The runner treats every client.<prefix>* user as a tenant's and removes unknown ones.
+			errs = append(errs, fmt.Errorf("CEPH_NAME %q must not start with the tenant prefix client.%s", h.CephName, h.CephUserPrefix))
+		}
 	}
 
 	nets, err := parseNetworks(get("CEPH_PUBLIC_NETWORKS", ""))
