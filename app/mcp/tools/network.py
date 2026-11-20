@@ -17,7 +17,9 @@ from app.dao.private_network_dao import PrivateNetworkDAO
 from app.dao.switch_port_dao import SwitchPortDAO
 from app.mcp.instance import mcp
 from app.mcp.runtime import redact, run_tool
+from app.models.private_network import NetworkKind
 from app.plugins.switch_registry import get_switch_registry
+from app.services import private_network_dhcp
 from app.services.aggregate_bandwidth_service import get_aggregate_monitored_bandwidth
 
 _MASK = "***"
@@ -98,11 +100,18 @@ async def save_network_pool(location_id: int, settings: dict[str, Any]) -> dict:
 
 
 async def list_private_networks(location_id: Optional[int] = None) -> dict:
-    """Private networks with their attachments, members and pending invitations."""
+    """Private networks with their attachments, members, pending invitations, storage presence and DHCP summary."""
 
     async def work(db, ctx):
         rows = await private_network_api.admin_list_networks(auth={}, db=db, location_id=location_id)
-        return {"private_networks": [row.model_dump(mode="json") for row in rows]}
+        out = []
+        for row in rows:
+            item = row.model_dump(mode="json")
+            network = PrivateNetworkDAO.get_network(db, row.id)
+            if network is not None and network.kind == NetworkKind.STANDARD:
+                item["dhcp"] = private_network_dhcp.summary(db, network)
+            out.append(item)
+        return {"private_networks": out}
 
     return await run_tool("list_private_networks", "read", work, args={"location_id": location_id})
 

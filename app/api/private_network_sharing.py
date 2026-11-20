@@ -30,6 +30,7 @@ from app.dao.storage_dao import StorageDAO
 from app.models.private_network import NetworkKind, PrivateNetwork, PrivateNetworkInvitation
 from app.models.service import ServiceType
 from app.models.storage import ShareState
+from app.services import private_network_dhcp
 from app.services import private_network_sharing as sharing
 from app.services.audit_service import AuditService
 from app.services.private_network_service import PrivateNetworkError, PrivateNetworkService, storage_endpoint_ip
@@ -74,6 +75,8 @@ class SharedNetworkResponse(BaseModel):
     owner: Optional[str] = None
     role: str = "member"
     attachments: List[AttachmentResponse]
+    # GET /shared/{id} only: the network's effective DHCP settings.
+    dhcp: Optional[dict] = None
 
 
 class SharedShare(BaseModel):
@@ -101,7 +104,7 @@ def _invitation_out(invitation: PrivateNetworkInvitation) -> InvitationOut:
     )
 
 
-def _shared_out(network: PrivateNetwork, user_id: int) -> SharedNetworkResponse:
+def _shared_out(network: PrivateNetwork, user_id: int, db: Optional[Session] = None) -> SharedNetworkResponse:
     prefix_length = ipaddress.ip_network(network.cidr).prefixlen
     own = [
         a
@@ -121,6 +124,7 @@ def _shared_out(network: PrivateNetwork, user_id: int) -> SharedNetworkResponse:
         status=network.status.value,
         owner=sharing.display_name(owner),
         attachments=[_attachment_out(a, prefix_length, staff=False) for a in own],
+        dhcp=private_network_dhcp.member_view(db, network) if db is not None else None,
     )
 
 
@@ -192,7 +196,7 @@ async def shared_with_me(auth: UserDep, db: DbDep):
 @client_router.get("/shared/{network_id}", response_model=SharedNetworkResponse)
 async def shared_network(network_id: int, auth: UserDep, db: DbDep):
     user_id = _client_user_id(auth)
-    return _shared_out(_member_network(db, user_id, network_id), user_id)
+    return _shared_out(_member_network(db, user_id, network_id), user_id, db)
 
 
 @client_router.get("/shared/{network_id}/storage", response_model=SharedStorage)
