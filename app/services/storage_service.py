@@ -778,6 +778,7 @@ def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip:
             storage_ha.note_serving(db, node, tenant, entry)
             private_network_dhcp.apply_tenant_report(db, node, tenant, entry)
         else:
+            private_network_dhcp.tenant_not_serving(tenant, node)
             storage_ha.note_not_serving(tenant, node)
         if node.sftp_master if vip else serving:
             storage_sftp.apply_tenant_status(tenant, entry)

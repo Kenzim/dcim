@@ -781,6 +781,23 @@ def clear_presence(network: PrivateNetwork) -> None:
     network.dhcp_error = None
 
 
+def _takes_over(network: PrivateNetwork, since: Optional[datetime], now: datetime) -> bool:
+    """Whether a node reporting ``serving`` since ``since`` replaces the recorded holder.
+
+    The lease lets only one node serve at a time, so a newer ``since`` is a takeover. An older
+    or missing one is a stale report from a node that lost the lease, unless the recorded holder
+    is disabled or offline.
+    """
+    holder = network.presence_node
+    if holder is None:
+        return True
+    naive = now.astimezone(timezone.utc).replace(tzinfo=None)
+    if not holder.enabled or not StorageDAO.is_online(holder, now=naive):
+        return True
+    current = _aware(network.presence_since)
+    return since is not None and current is not None and since > current
+
+
 def apply_network_reports(db: Session, node: StorageNode, report: dict, now: Optional[datetime] = None) -> None:
     """``networks`` of a status report: who serves each network presence, its error and leases."""
     entries = report.get("networks")
@@ -798,6 +815,8 @@ def apply_network_reports(db: Session, node: StorageNode, report: dict, now: Opt
         if serving is True:
             if network.presence_node_id != node.id:
                 since = storage_ha._parse_time(entry.get("since"))
+                if not _takes_over(network, since, now):
+                    continue
                 network.presence_node_id = node.id
                 network.presence_since = since if since is not None and since <= now else now
             network.dhcp_error = _short(entry.get("error"))
@@ -822,6 +841,13 @@ def apply_tenant_report(
         return
     network.dhcp_error = _short(block.get("error"))
     replace_leases(db, network, node, block.get("leases"), now)
+
+
+def tenant_not_serving(tenant: StorageTenant, node: StorageNode) -> None:
+    """The node that served a tenant stopped: its DHCP error no longer describes the network."""
+    network = tenant.network
+    if network is not None and tenant.current_node_id == node.id:
+        network.dhcp_error = None
 
 
 def reconcile(db: Session, nodes_by_id: Dict[int, StorageNode], now: Optional[datetime] = None) -> int:
@@ -866,6 +892,7 @@ def owner_view(db: Session, network: PrivateNetwork, *, staff: bool = False, now
     served, node = _served(db, network, available)
     automatic = []
     visible_macs = {r.mac for r in network.dhcp_reservations}
+    member_macs: set = set()
     for item in table.automatic:
         attachment = item["attachment"]
         service = attachment.service
@@ -876,6 +903,7 @@ def owner_view(db: Session, network: PrivateNetwork, *, staff: bool = False, now
                 {"attachment_id": attachment.id, "ip": item["ip"], "macs": item["macs"], "label": label}
             )
         else:
+            member_macs.update(item["macs"])
             automatic.append(
                 {"attachment_id": attachment.id, "ip": item["ip"], "macs": [], "label": MEMBER_ATTACHMENT}
             )
@@ -911,6 +939,7 @@ def owner_view(db: Session, network: PrivateNetwork, *, staff: bool = False, now
         "leases": [
             {"mac": row.mac, "ip": row.ip, "hostname": row.hostname, "expires_at": _iso(row.expires_at)}
             for row in _live_leases(network, now)
+            if row.mac not in member_macs or row.mac in visible_macs
         ],
         "warnings": notes,
         "error": network.dhcp_error,

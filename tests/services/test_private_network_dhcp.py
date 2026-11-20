@@ -572,6 +572,44 @@ def test_status_serving_true_false_and_leases(world):
     assert network.presence_node_id is None and network.dhcp_error == "VLAN 3000 is used by tenant 4"
 
 
+def test_stale_serving_report_does_not_take_the_presence_back(world):
+    old, new = world.node(), world.node()
+    network = world.network(3000)
+    t0 = _now() - timedelta(minutes=10)
+    t1 = _now() - timedelta(minutes=1)
+    apply_runner_status(world.db, old, _report(old, networks=[{"id": network.id, "serving": True, "since": _z(t0)}]),
+                        "10.0.0.1")
+    # A takeover reports a later since and becomes the holder.
+    apply_runner_status(world.db, new, _report(new, networks=[{"id": network.id, "serving": True, "since": _z(t1)}]),
+                        "10.0.0.2")
+    world.db.refresh(network)
+    assert network.presence_node_id == new.id
+    # A late report from the node that lost the lease changes nothing, leases included.
+    stale = {"id": network.id, "serving": True, "since": _z(t0), "leases": [
+        {"mac": "aa:bb:cc:00:00:01", "ip": "10.0.0.101", "expires_at": _z(_now() + timedelta(hours=1))}]}
+    apply_runner_status(world.db, old, _report(old, networks=[stale]), "10.0.0.1")
+    world.db.refresh(network)
+    assert network.presence_node_id == new.id and network.dhcp_leases == []
+    # Once the holder is offline, the other node's report is accepted.
+    new.last_seen_at = datetime.utcnow() - timedelta(hours=1)
+    world.db.commit()
+    apply_runner_status(world.db, old, _report(old, networks=[stale]), "10.0.0.1")
+    world.db.refresh(network)
+    assert network.presence_node_id == old.id and [r.mac for r in network.dhcp_leases] == ["aa:bb:cc:00:00:01"]
+
+
+def test_tenant_dhcp_error_cleared_when_its_node_stops_serving(world):
+    node, other = world.node(), world.node()
+    network = world.network(3000)
+    tenant = world.tenant(network, node, current=node)
+    network.dhcp_error = "bad range"
+    world.db.commit()
+    dhcp.tenant_not_serving(tenant, other)
+    assert network.dhcp_error == "bad range"
+    dhcp.tenant_not_serving(tenant, node)
+    assert network.dhcp_error is None
+
+
 def test_presence_cleared_when_the_node_goes_offline_and_leases_pruned(world):
     node = world.node()
     network = world.network(3000)
@@ -639,6 +677,13 @@ def test_owner_and_member_views(world):
                                     "label": "member attachment"}
     staff = dhcp.owner_view(world.db, network, staff=True)
     assert {a["attachment_id"]: a for a in staff["automatic"]}[theirs.id]["macs"] == ["bc:24:11:aa:bb:02"]
+    # A lease held by a member device's MAC is hidden from the owner, shown to staff.
+    world.db.add(PrivateNetworkDhcpLease(network_id=network.id, mac="bc:24:11:aa:bb:02", ip="10.0.0.120",
+                                         expires_at=datetime.utcnow() + timedelta(hours=1), hostname="theirs"))
+    world.db.commit()
+    world.db.refresh(network)
+    assert dhcp.owner_view(world.db, network)["leases"] == []
+    assert [lease["hostname"] for lease in dhcp.owner_view(world.db, network, staff=True)["leases"]] == ["theirs"]
 
     member_view = dhcp.member_view(world.db, network)
     assert set(member_view) == {"enabled", "served", "lease_seconds", "gateway", "dns_servers", "domain", "mtu",
