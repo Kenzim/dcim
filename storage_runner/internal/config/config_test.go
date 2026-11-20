@@ -55,7 +55,14 @@ func TestOverrides(t *testing.T) {
 		t.Fatalf("h=%+v err=%v", h, err)
 	}
 	m["CEPH_NAME"] = "client.rackflow-dev-runner"
-	if h, err := FromEnv(envOf(m)); err != nil || h.CephName != "client.rackflow-dev-runner" {
+	if h, err := FromEnv(envOf(m)); err != nil || h.CephName != "client.rackflow-dev-runner" || h.CephScopedKey {
+		t.Fatalf("h=%+v err=%v", h, err)
+	}
+	m["CEPH_SCOPED_KEY"] = "true"
+	m["CEPH_RECOVERY_NAME"] = "client.rackflow-dev-recovery"
+	m["CEPH_RECOVERY_KEYRING"] = "/etc/ceph/ceph.client.rackflow-dev-recovery.keyring"
+	if h, err := FromEnv(envOf(m)); err != nil || !h.CephScopedKey || h.CephRecoveryName != "client.rackflow-dev-recovery" ||
+		h.CephRecoveryKeyring != "/etc/ceph/ceph.client.rackflow-dev-recovery.keyring" {
 		t.Fatalf("h=%+v err=%v", h, err)
 	}
 }
@@ -80,6 +87,17 @@ func TestErrors(t *testing.T) {
 		"its own CEPH_HA_POOL":       func(m map[string]string) { m["CEPH_USER_PREFIX"] = "rfdev-t" },
 		"cephx client entity":        func(m map[string]string) { m["CEPH_NAME"] = "rackflow-runner" },
 		"tenant prefix":              func(m map[string]string) { m["CEPH_NAME"] = "client.rf-t9" },
+		"must be true or false":      func(m map[string]string) { m["CEPH_SCOPED_KEY"] = "maybe" },
+		"client.admin is not a scop": func(m map[string]string) { m["CEPH_SCOPED_KEY"] = "true" },
+		"needs CEPH_RECOVERY_NAME": func(m map[string]string) {
+			m["CEPH_SCOPED_KEY"], m["CEPH_NAME"] = "true", "client.rackflow-node"
+			m["CEPH_USER_PREFIX"], m["CEPH_HA_POOL"] = "rfdev-t", "rackflow_dev_ha"
+		},
+		"only used with CEPH_SCOPED": func(m map[string]string) { m["CEPH_RECOVERY_NAME"] = "client.rackflow-recovery" },
+		"must differ from CEPH_NAME": func(m map[string]string) {
+			m["CEPH_SCOPED_KEY"], m["CEPH_NAME"] = "true", "client.rackflow-node"
+			m["CEPH_RECOVERY_NAME"], m["CEPH_RECOVERY_KEYRING"] = "client.rf-t-rec", "/k"
+		},
 	}
 	for want, mutate := range cases {
 		m := minimal()

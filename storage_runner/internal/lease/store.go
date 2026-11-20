@@ -106,6 +106,19 @@ func AddrIP(s string) (netip.Addr, bool) {
 	return a, true
 }
 
+// blockedIP returns the address a blocklist entry covers whole: an address
+// entry ("10.0.0.5:0/0" or with a port and nonce) or a single-address range
+// ("10.0.0.5/32", "2001:db8::5/128").
+func blockedIP(s string) (netip.Addr, bool) {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		if p.Bits() != p.Addr().BitLen() {
+			return netip.Addr{}, false
+		}
+		return p.Addr(), true
+	}
+	return AddrIP(s)
+}
+
 // Kind is what a lease is for.
 type Kind string
 

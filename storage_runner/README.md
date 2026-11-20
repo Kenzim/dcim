@@ -70,6 +70,9 @@ Nothing here ever comes from Rackflow.
 | `SFTP_VIP_INTERFACE` | default-route interface | Host interface that carries the location's SFTP virtual IP while this node is SFTP master |
 | `CEPH_NAME` | (`client.admin`) | cephx entity of `CEPH_KEYRING`, passed to `ceph --name` and the lease helper. Set it when the node's key is not `client.admin`, e.g. `client.rackflow-dev-runner`. It must not start with `client.<CEPH_USER_PREFIX>`, because the runner treats those users as tenants' |
 | `CEPH_USER_PREFIX` | `rf-t` | Start of each tenant's cephx user name (`client.<prefix><id>`). cephx users, and the objects in `CEPH_HA_POOL`, are cluster-wide, so a second Rackflow installation on the same Ceph cluster must set its own prefix (e.g. `rfdev-t`), its own `CEPH_HA_POOL` and its own file system. The runner refuses a non-default prefix with the default HA pool |
+| `CEPH_SCOPED_KEY` | `false` | `true` when `CEPH_NAME` is a least-privilege key (see [Least-privilege node key](#least-privilege-node-key)) rather than `client.admin`. The runner then never runs `auth ls`, `auth get-or-create`, `auth caps` or MDS commands: it reads each tenant user with `auth get`, grants subvolumes with `ceph fs subvolume authorize`/`deauthorize`, skips MDS session evictions and fences with `/32` blocklist ranges. Needs `CEPH_NAME` |
+| `CEPH_RECOVERY_NAME` | empty | With `CEPH_SCOPED_KEY` and HA: the cephx login every tenant's Ganesha uses for its recovery database in `CEPH_HA_POOL` (the mgr cannot grant tenant users that pool). Must differ from `CEPH_NAME` and not start with the tenant prefix |
+| `CEPH_RECOVERY_KEYRING` | empty | Keyring holding `CEPH_RECOVERY_NAME`'s key; the runner copies that one key into each tenant's Ganesha keyring directory |
 
 The guard (`storage-runner guard`) reads only `PODMAN_REMOTE_URL` and, for tests,
 `LEASE_DEADLINE_DIR` (default `/run/rackflow-storage/leases`).
@@ -80,8 +83,9 @@ rejected per tenant with a clear error.
 ## Host prerequisites
 
 - **Ceph:** `ceph-common` (the `ceph` CLI) and an admin keyring
-  (`CEPH_KEYRING`). The node needs `ceph` admin rights to manage subvolumes and
-  `ceph auth`. **Version:** clusters on Ceph 20.2.4 or newer accept only
+  (`CEPH_KEYRING`), or a least-privilege key with `CEPH_SCOPED_KEY=true`
+  (see below). With an admin key the node manages subvolumes and
+  `ceph auth` directly. **Version:** clusters on Ceph 20.2.4 or newer accept only
   aes256k cephx keys, which older clients cannot use, so both `ceph-common`
   on the node (or in the runner image) and the Ganesha image (its
   `libcephfs2`) must be Ceph 20.2.4+ for such clusters. The runner image
@@ -114,6 +118,63 @@ rejected per tenant with a clear error.
   a drop elsewhere: if the host has its own `input` or `forward` policy of
   `drop`, allow `iifname "rf-h*"` to the Ceph networks on the Ceph ports there
   too, or tenants will not reach Ceph.
+
+## Least-privilege node key
+
+Production runs as `client.admin`. A node that shares a Ceph cluster it does
+not own (dev Rackflow on production Ceph) uses a scoped key instead and sets
+`CEPH_SCOPED_KEY=true`. Tested on Ceph 20.2.1 (tentacle). Replace `FS`,
+`EC`, `HA`, `GROUP`, `PREFIX` (the `CEPH_USER_PREFIX`) and `NODES` (a regex
+alternation of the Ceph public addresses of this installation's storage
+nodes, dots escaped):
+
+```sh
+ceph auth get-or-create client.<node> \
+  mon 'allow service mon r, allow service osd r, allow command "mgr dump", allow command "config generate-minimal-conf", allow command df with detail=detail, allow command "fs dump", allow command "fs ls", allow command "auth get" with entity regex "^client\.PREFIX[1-9][0-9]*$", allow command "auth rm" with entity regex "^client\.PREFIX[1-9][0-9]*$", allow command "osd blocklist" with range=range blocklistop=add addr regex "^(NODES)/32$"' \
+  mgr 'allow command "fs subvolumegroup ls" with vol_name=FS, allow command "fs subvolumegroup info" with vol_name=FS group_name=GROUP, allow command "fs subvolumegroup create" with vol_name=FS group_name=GROUP pool_layout=EC, allow command "fs subvolume ls" with vol_name=FS group_name=GROUP, allow command "fs subvolume create" with vol_name=FS group_name=GROUP pool_layout=EC, allow command "fs subvolume resize" with vol_name=FS group_name=GROUP, allow command "fs subvolume info" with vol_name=FS group_name=GROUP, allow command "fs subvolume rm" with vol_name=FS group_name=GROUP, allow command "fs subvolume authorize" with vol_name=FS group_name=GROUP auth_id regex "^PREFIX[1-9][0-9]*$" access_level=rw, allow command "fs subvolume deauthorize" with vol_name=FS group_name=GROUP auth_id regex "^PREFIX[1-9][0-9]*$"' \
+  osd 'allow rwx pool=HA namespace=rackflow-ha, allow rw pool=HA namespace=PREFIX*'
+ceph auth get-or-create client.<recovery> \
+  mon 'allow service mon r, allow service osd r' \
+  osd 'allow rw pool=HA namespace=PREFIX*'
+```
+
+Why it looks like this:
+
+- **No `auth ls`.** It prints every login's secret, `client.admin`'s too. The
+  runner looks up only the tenants in its config or on its disk, one
+  `auth get` each, limited by the regex to its own prefix.
+- **No `auth get-or-create` or `auth caps`.** MonCap can constrain the caps
+  argument (`with ... caps_mon="allow r"`), but Ceph checks the last value of
+  a repeated cap type and stores the first, so
+  `auth get-or-create client.X mon 'allow *' mon 'allow r'` passes the check
+  and creates an `allow *` login. Any key allowed either command can make
+  itself admin. Instead the mgr's `fs subvolume authorize` writes the caps
+  (mds `allow rw path=<subvolume>`, osd on the subvolume's pool namespace,
+  mon `allow r`), and the grant pins the file system, group, user regex and
+  `access_level=rw`. `--allow_existing_id` lets it adopt users made by an
+  admin-key runner; the runner authorizes a path before deauthorizing it so
+  the mgr knows the grant.
+- **Recovery login.** The mgr grants nothing on the HA pool, so tenants'
+  Ganesha opens its recovery database as `CEPH_RECOVERY_NAME`, which can
+  reach only the `PREFIX*` namespaces of the HA pool. Every tenant's
+  container holds this key, so one tenant could read or damage another
+  tenant's NFS grace records (not its data).
+- **No MDS caps.** `mds 'allow * fsname=FS'` still lets `tell mds.*` reach
+  every file system's MDS, including other installations', so the key has
+  none: session evictions are skipped. A fenced node's clients are cut off by
+  the blocklist instead, and a reclaiming Ganesha still evicts its old
+  sessions itself.
+- **Fencing.** `osd blocklist add` has no pool or file system scope, and the
+  address form with nonce `0` blocks a whole IP that a regex cannot pin
+  safely. The grant allows only the range form with a `/32` of a listed
+  node, so the key can fence this installation's storage nodes and nothing
+  else (not remove entries, not `/24`, not other addresses). Add a node's
+  address to the regex when you add the node.
+- **Reads it keeps.** `allow service mon r` (needed for the mgr map) also
+  allows `config dump`, which shows the cluster's non-secret config
+  database; `allow service osd r` (needed for the OSD map) allows
+  `osd pool get` on every pool. Neither reveals keys or `config-key`
+  values.
 
 ## Network and firewall
 
