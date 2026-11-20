@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import Button from './ui/Button.svelte';
+  import PrivateNetworkDhcp from './PrivateNetworkDhcp.svelte';
   import { navigate } from '../lib/router.js';
   import {
     getLocations,
@@ -33,6 +34,7 @@
   });
   const parseCidrList = (text) => text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
   const emptyNetworkForm = () => ({ owner_user_id: '', location_id: '', name: '', cidr: '' });
+  const hasDhcpIssue = (n) => Boolean(n.presence?.dhcp_error) || (n.dhcp_warnings || []).length > 0;
 
   let loading = false;
   let working = false;
@@ -387,6 +389,7 @@
             {:else}
               <span class="badge ok">active</span>
             {/if}
+            {#if hasDhcpIssue(network)}<span class="badge warn" title="Open the network for the DHCP details">DHCP issue</span>{/if}
           </div>
           <div class="row-actions">
             <button class="tiny" disabled={working} on:click={() => resync(network)}>Sync</button>
@@ -408,6 +411,23 @@
                   Drop record without touching the switches
                 </button>
               {/if}
+            {/if}
+
+            {#if network.kind !== 'proxy_access' && network.presence}
+              <p class="hint">
+                {#if network.presence.node_name}
+                  Presence: answered by <strong>{network.presence.node_name}</strong>{#if network.presence.since}
+                    since {new Date(network.presence.since).toLocaleString()}{/if}.
+                {:else}
+                  Presence: no storage node is answering this network.
+                {/if}
+              </p>
+              {#if network.presence.dhcp_error}
+                <p class="error small">DHCP error from the node: {network.presence.dhcp_error}</p>
+              {/if}
+              {#each network.dhcp_warnings || [] as warning}
+                <p class="warning small">{warning}</p>
+              {/each}
             {/if}
 
             {#if network.members?.length || network.invitations?.length}
@@ -494,6 +514,10 @@
                 Only services in {network.location_name} can join. A VM gets an extra network card tagged with VLAN
                 {network.vlan_id}; a dedicated server gets the VLAN tagged on its uplink port.
               </p>
+            {/if}
+
+            {#if network.kind !== 'proxy_access' && network.status === 'active'}
+              <PrivateNetworkDhcp networkId={network.id} admin />
             {/if}
           </div>
         {/if}
@@ -671,6 +695,8 @@
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .error { color: var(--danger-color); margin: 0; }
   .error.small { font-size: 0.8rem; margin-top: 4px; }
+  .warning { color: var(--warning-color, #b7791f); margin: 0; }
+  .warning.small { font-size: 0.8rem; }
   .success { color: var(--success-color, #2e7d32); }
   .overlay {
     position: fixed;
