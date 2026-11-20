@@ -565,6 +565,11 @@ def test_status_serving_true_false_and_leases(world):
     apply_runner_status(world.db, node, _report(node, networks=[{"id": network.id, "serving": False}]), "10.0.0.1")
     world.db.refresh(network)
     assert network.presence_node_id is None and network.presence_since is None and network.dhcp_error is None
+    # Nobody serves it: a node that cannot create the presence reports why.
+    clash = {"id": network.id, "serving": False, "since": None, "error": "VLAN 3000 is used by tenant 4", "leases": []}
+    apply_runner_status(world.db, other, _report(other, networks=[clash]), "10.0.0.2")
+    world.db.refresh(network)
+    assert network.presence_node_id is None and network.dhcp_error == "VLAN 3000 is used by tenant 4"
 
 
 def test_presence_cleared_when_the_node_goes_offline_and_leases_pruned(world):

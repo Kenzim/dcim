@@ -804,6 +804,10 @@ def apply_network_reports(db: Session, node: StorageNode, report: dict, now: Opt
             replace_leases(db, network, node, entry.get("leases"), now)
         elif serving is False and network.presence_node_id == node.id:
             clear_presence(network)
+            network.dhcp_error = _short(entry.get("error"))
+        elif serving is False and network.presence_node_id is None and entry.get("error"):
+            # A node that should serve the presence but cannot (VLAN clash, bad config) says why.
+            network.dhcp_error = _short(entry.get("error"))
 
 
 def apply_tenant_report(
