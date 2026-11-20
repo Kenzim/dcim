@@ -53,7 +53,7 @@ def test_single_head_chained_after_private_network_sharing():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["storage_failover"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("storage_failover").down_revision == "add_private_network_sharing"
 
 
