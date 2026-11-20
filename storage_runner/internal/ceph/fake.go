@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 
 	"rackflow/storage_runner/internal/record"
@@ -23,8 +24,12 @@ type Fake struct {
 	Daemons    []netip.Addr
 	DaemonsErr error
 	EvictErr   error
+	// Scoped makes Users return only the entities asked for, as a scoped
+	// key's auth get does.
+	Scoped bool
 
 	mu         sync.Mutex
+	authorized map[string]bool // entity+"/"+subvolume known to the mgr
 	groupPool  string
 	groupSet   bool
 	subvolumes map[string]*SubvolumeInfo
@@ -42,6 +47,7 @@ func NewFake(rec *record.Recorder, group, pool string) *Fake {
 		InfoFail:   map[string]error{},
 		subvolumes: map[string]*SubvolumeInfo{},
 		users:      map[string]User{},
+		authorized: map[string]bool{},
 	}
 }
 
@@ -176,14 +182,103 @@ func (f *Fake) RemoveSubvolume(_ context.Context, name string) error {
 	return nil
 }
 
-func (f *Fake) Users(context.Context) (map[string]User, error) {
+func (f *Fake) Users(_ context.Context, entities []string) (map[string]User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make(map[string]User, len(f.users))
+	if f.Scoped {
+		for _, e := range entities {
+			if u, ok := f.users[e]; ok {
+				out[e] = u
+			}
+		}
+		return out, nil
+	}
 	for k, v := range f.users {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// Authorize adds the subvolume's grants the way the mgr does: appended
+// with "," and not repeated, creating the user with mon "allow r".
+func (f *Fake) Authorize(_ context.Context, entity, subvolume string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[entity]; err != nil {
+		return err
+	}
+	sv, ok := f.subvolumes[subvolume]
+	if !ok {
+		return fmt.Errorf("subvolume %s not found", subvolume)
+	}
+	u, ok := f.users[entity]
+	if !ok {
+		f.keys++
+		u = User{Key: fmt.Sprintf("KEY%d", f.keys), Caps: Caps{Mon: "allow r"}}
+	}
+	u.Caps.MDS = addGrant(u.Caps.MDS, "allow rw path="+sv.Path)
+	u.Caps.OSD = addGrant(u.Caps.OSD, "allow rw pool="+sv.DataPool+" namespace="+sv.PoolNamespace)
+	f.users[entity] = u
+	f.authorized[entity+"/"+subvolume] = true
+	f.Rec.Add("ceph authorize %s %s", entity, subvolume)
+	return nil
+}
+
+// Deauthorize removes the subvolume's grants; like the mgr it refuses a
+// subvolume it did not authorize and removes a user left with no caps
+// beyond mon.
+func (f *Fake) Deauthorize(_ context.Context, entity, subvolume string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sv, ok := f.subvolumes[subvolume]
+	if !ok {
+		return fmt.Errorf("subvolume %s not found", subvolume)
+	}
+	if !f.authorized[entity+"/"+subvolume] {
+		return fmt.Errorf("Error ENOENT: auth ID: %s doesn't exist", entity)
+	}
+	delete(f.authorized, entity+"/"+subvolume)
+	u := f.users[entity]
+	u.Caps.MDS = dropGrant(u.Caps.MDS, "allow rw path="+sv.Path)
+	u.Caps.OSD = dropGrant(u.Caps.OSD, "allow rw pool="+sv.DataPool+" namespace="+sv.PoolNamespace)
+	if u.Caps.MDS == "" && u.Caps.OSD == "" {
+		delete(f.users, entity)
+	} else {
+		f.users[entity] = u
+	}
+	f.Rec.Add("ceph deauthorize %s %s", entity, subvolume)
+	return nil
+}
+
+func splitGrants(caps string) []string {
+	var out []string
+	for _, g := range strings.Split(caps, ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+func addGrant(caps, grant string) string {
+	gs := splitGrants(caps)
+	for _, g := range gs {
+		if g == grant {
+			return caps
+		}
+	}
+	return strings.Join(append(gs, grant), ",")
+}
+
+func dropGrant(caps, grant string) string {
+	var keep []string
+	for _, g := range splitGrants(caps) {
+		if g != grant {
+			keep = append(keep, g)
+		}
+	}
+	return strings.Join(keep, ",")
 }
 
 func (f *Fake) CreateUser(_ context.Context, entity string, caps Caps) (string, error) {

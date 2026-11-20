@@ -83,6 +83,9 @@ type Manager struct {
 	Clock   Clock
 	Node    NodeInfo
 	Version string
+	// RangeFence fences a node with a /32 blocklist range instead of an
+	// address entry with nonce 0, for keys allowed only the range form.
+	RangeFence bool
 	// DeadlineDir is where the guard's deadline files go; empty for none.
 	DeadlineDir string
 	// CallTimeout bounds each Store call; default 10 s.
@@ -531,7 +534,7 @@ func (m *Manager) enterFenced(ctx context.Context, cause error) {
 	if err == nil {
 		if ip, ok := AddrIP(ident.Addr); ok {
 			for _, e := range entries {
-				if eip, ok := AddrIP(e.Addr); ok && eip == ip && !e.Until.IsZero() {
+				if eip, ok := blockedIP(e.Addr); ok && eip == ip && !e.Until.IsZero() {
 					u := e.Until
 					if until == nil || u.After(*until) {
 						until = &u
@@ -1065,6 +1068,9 @@ func (m *Manager) nodeFence(ctx context.Context, k Key, prev int64, prevToken st
 		}
 	}
 	entry := ip.String() + ":0/0"
+	if m.RangeFence {
+		entry = ip.String() + "/32"
+	}
 	cctx, cancel := m.callCtx(ctx)
 	defer cancel()
 	present := false

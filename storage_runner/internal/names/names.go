@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // MaxTenantID keeps "rf-h<id>" within the 15-character Linux interface name limit.
@@ -63,6 +64,23 @@ func parseID(re *regexp.Regexp, s string) (int64, bool) {
 	}
 	id, err := strconv.ParseInt(m[1], 10, 64)
 	return id, err == nil
+}
+
+// SubvolumeOfPath returns the runner-named subvolume of group whose path
+// (as ceph fs subvolume getpath prints it) is path.
+func SubvolumeOfPath(group, path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/volumes/"+group+"/")
+	if !ok {
+		return "", false
+	}
+	name, uuid, ok := strings.Cut(rest, "/")
+	if !ok || uuid == "" || strings.Contains(uuid, "/") {
+		return "", false
+	}
+	if _, _, ok := ParseSubvolume(name); !ok {
+		return "", false
+	}
+	return name, true
 }
 
 func ParseNamespace(s string) (int64, bool)  { return parseID(namespaceRe, s) }

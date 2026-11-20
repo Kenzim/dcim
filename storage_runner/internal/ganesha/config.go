@@ -23,6 +23,9 @@ type Config struct {
 
 // RADOSRecovery configures the rados_ng recovery backend.
 type RADOSRecovery struct {
+	// UserID is the cephx id (without "client.") the recovery database is
+	// opened with; empty uses the tenant's own Config.UserID.
+	UserID        string
 	Pool          string
 	Namespace     string
 	NodeID        string
@@ -67,7 +70,11 @@ func Render(c Config) (core, exports string) {
 	if r := c.RADOS; r != nil {
 		b.WriteString("RADOS_KV {\n")
 		fmt.Fprintf(&b, "\tceph_conf = %q;\n", CephDir+"/ceph.conf")
-		fmt.Fprintf(&b, "\tuserid = %q;\n", c.UserID)
+		userID := c.UserID
+		if r.UserID != "" {
+			userID = r.UserID
+		}
+		fmt.Fprintf(&b, "\tuserid = %q;\n", userID)
 		fmt.Fprintf(&b, "\tpool = %q;\n", r.Pool)
 		fmt.Fprintf(&b, "\tnamespace = %q;\n", r.Namespace)
 		fmt.Fprintf(&b, "\tnodeid = %q;\n", r.NodeID)

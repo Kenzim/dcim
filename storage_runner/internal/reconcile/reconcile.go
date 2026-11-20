@@ -238,7 +238,7 @@ func (r *Reconciler) Once(ctx context.Context) error {
 		users:      map[string]ceph.User{},
 	}
 	p.checkCeph()
-	if err := p.inventory(); err != nil {
+	if err := p.inventory(cfg); err != nil {
 		p.nodeErr("inventory: %v", err)
 		r.logf("cannot list host state, changing nothing: %v", err)
 		return r.post(ctx, p.baseStatus(r.lastApplied))
@@ -341,7 +341,7 @@ func (p *pass) checkCeph() {
 	p.free = free
 }
 
-func (p *pass) inventory() error {
+func (p *pass) inventory(cfg *api.Config) error {
 	r := p.r
 	ids, err := r.Net.Tenants(p.ctx)
 	if err != nil {
@@ -368,13 +368,37 @@ func (p *pass) inventory() error {
 	for _, s := range subs {
 		p.subvols[s] = true
 	}
-	users, err := r.Ceph.Users(p.ctx)
+	users, err := r.Ceph.Users(p.ctx, p.userCandidates(cfg))
 	if err != nil {
 		p.cephDown(err)
 		return nil
 	}
 	p.users = users
 	return nil
+}
+
+// userCandidates names the cephx users a scoped key looks up, since it
+// cannot list them: every tenant in the config or with something on this
+// node. A user of a tenant that has neither is not seen.
+func (p *pass) userCandidates(cfg *api.Config) []string {
+	if !p.r.Host.CephScopedKey {
+		return nil
+	}
+	set := map[int64]bool{}
+	for _, t := range cfg.Tenants {
+		if t.ID > 0 {
+			set[t.ID] = true
+		}
+	}
+	for _, id := range p.hostTenants() {
+		set[id] = true
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, names.CephEntity(id))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // hostTenants lists every tenant with something on this node.
@@ -785,6 +809,10 @@ func (p *pass) ensureUser(w *tenantWork, access []ceph.Access) {
 		w.userOK = true
 		return
 	}
+	if r.Host.CephScopedKey {
+		p.ensureUserScoped(w, access)
+		return
+	}
 	caps := ceph.TenantCaps(access)
 	if p.ha != nil {
 		caps = ceph.WithRecovery(caps, r.Host.CephHAPool, names.CephUserID(w.t.ID))
@@ -813,6 +841,88 @@ func (p *pass) ensureUser(w *tenantWork, access []ceph.Access) {
 		existing.Caps = caps
 		p.users[entity] = existing
 		r.logf("tenant %d: updated caps of %s", w.t.ID, entity)
+	}
+	w.userOK = true
+}
+
+// ensureUserScoped grants and revokes subvolumes through the mgr, which
+// writes the caps itself, and then reads the user back for its key. A path
+// the mgr did not grant (a user created before the key was scoped) is
+// authorized first so the mgr knows it and will revoke it.
+func (p *pass) ensureUserScoped(w *tenantWork, access []ceph.Access) {
+	r := p.r
+	entity := names.CephEntity(w.t.ID)
+	existing := p.users[entity]
+	want := map[string]bool{}
+	for _, a := range access {
+		want[a.Path] = true
+	}
+	have := map[string]bool{}
+	for _, path := range ceph.AuthorizedPaths(existing.Caps.MDS) {
+		have[path] = true
+	}
+	var grant, revoke []string
+	for _, s := range w.shares {
+		if s.info != nil && want[s.info.Path] && !have[s.info.Path] {
+			grant = append(grant, s.name)
+		}
+	}
+	if !w.hold {
+		for path := range have {
+			if want[path] {
+				continue
+			}
+			name, ok := names.SubvolumeOfPath(r.Host.CephSubvolumeGroup, path)
+			if !ok || !p.subvols[name] {
+				r.logf("tenant %d: %s keeps access to %s, which is not a subvolume of group %s", w.t.ID, entity, path, r.Host.CephSubvolumeGroup)
+				continue
+			}
+			revoke = append(revoke, name)
+		}
+	}
+	sort.Strings(grant)
+	sort.Strings(revoke)
+	if len(grant) == 0 && len(revoke) == 0 {
+		w.userOK = true
+		return
+	}
+	err := p.changeCeph(w.t.ID, func(ctx context.Context) error {
+		for _, name := range grant {
+			if err := r.Ceph.Authorize(ctx, entity, name); err != nil {
+				return fmt.Errorf("authorize %s: %w", name, err)
+			}
+		}
+		for _, name := range revoke {
+			if err := r.Ceph.Authorize(ctx, entity, name); err != nil {
+				return fmt.Errorf("authorize %s before revoking it: %w", name, err)
+			}
+			if err := r.Ceph.Deauthorize(ctx, entity, name); err != nil {
+				return fmt.Errorf("deauthorize %s: %w", name, err)
+			}
+		}
+		return nil
+	})
+	users, rerr := r.Ceph.Users(p.ctx, []string{entity})
+	if rerr == nil {
+		if u, ok := users[entity]; ok {
+			p.users[entity] = u
+		} else {
+			delete(p.users, entity)
+		}
+	}
+	switch {
+	case err != nil:
+		w.fail("update cephx access: %v", err)
+		return
+	case rerr != nil:
+		w.fail("read cephx user: %v", rerr)
+		return
+	}
+	if len(grant) > 0 {
+		r.logf("tenant %d: authorized %s for %s", w.t.ID, entity, strings.Join(grant, ", "))
+	}
+	if len(revoke) > 0 {
+		r.logf("tenant %d: deauthorized %s for %s", w.t.ID, entity, strings.Join(revoke, ", "))
 	}
 	w.userOK = true
 }
@@ -999,6 +1109,7 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 		return err
 	}
 	keyring := fmt.Sprintf("[%s]\n\tkey = %s\n", entity, user.Key)
+	recoveryKeyring := ""
 	gcfg := ganesha.Config{
 		TenantID:   id,
 		BindAddr:   w.endpoint.Addr(),
@@ -1018,6 +1129,16 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 			LeaseLifetime: p.ha.timings.NFSLeaseLifetime,
 			GracePeriod:   p.ha.timings.NFSGracePeriod,
 		}
+		// The mgr grants tenant users no access to the HA pool, so with a
+		// scoped key the recovery database uses the shared recovery login.
+		if r.Host.CephScopedKey {
+			recKey, err := ceph.ReadKeyring(r.Host.CephRecoveryKeyring, r.Host.CephRecoveryName)
+			if err != nil {
+				return fmt.Errorf("recovery keyring: %w", err)
+			}
+			gcfg.RADOS.UserID = strings.TrimPrefix(r.Host.CephRecoveryName, "client.")
+			recoveryKeyring = fmt.Sprintf("[%s]\n\tkey = %s\n", r.Host.CephRecoveryName, recKey)
+		}
 	}
 	core, exp := ganesha.Render(gcfg)
 
@@ -1036,13 +1157,22 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 	if _, err := writeIfChanged(filepath.Join(cephDir, "ceph."+entity+".keyring"), []byte(keyring), 0o600); err != nil {
 		return err
 	}
+	if recoveryKeyring != "" {
+		if _, err := writeIfChanged(filepath.Join(cephDir, "ceph."+r.Host.CephRecoveryName+".keyring"), []byte(recoveryKeyring), 0o600); err != nil {
+			return err
+		}
+	}
 	mounts := []ganesha.Mount{
 		{Source: confDir, Target: ganesha.ConfDir, ReadOnly: true},
 		{Source: cephDir, Target: ganesha.CephDir, ReadOnly: true},
 		{Source: recDir, Target: ganesha.RecoveryDir},
 	}
 	h := sha256.New()
-	for _, part := range []string{r.Host.GaneshaImage, names.NetnsPath(id), core, cephConf, keyring} {
+	parts := []string{r.Host.GaneshaImage, names.NetnsPath(id), core, cephConf, keyring}
+	if recoveryKeyring != "" {
+		parts = append(parts, recoveryKeyring)
+	}
+	for _, part := range parts {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}

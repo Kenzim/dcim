@@ -47,6 +47,17 @@ type Host struct {
 	// CephUserPrefix starts each tenant's cephx user name; a second Rackflow
 	// on the same Ceph cluster needs its own prefix and its own HA pool.
 	CephUserPrefix string
+	// CephScopedKey is set when the node's key is a least-privilege one
+	// (see the README) rather than client.admin: tenant users are read one
+	// by one, access is granted with ceph fs subvolume authorize, MDS
+	// evictions are skipped and fencing uses /32 blocklist ranges.
+	CephScopedKey bool
+	// CephRecoveryName and CephRecoveryKeyring are the login that tenants'
+	// Ganesha uses for its recovery database in CephHAPool when
+	// CephScopedKey is set, because the mgr writes tenant caps without a
+	// grant on that pool.
+	CephRecoveryName    string
+	CephRecoveryKeyring string
 }
 
 const (
@@ -75,24 +86,33 @@ func FromEnv(getenv func(string) string) (Host, error) {
 	}
 	var errs []error
 	h := Host{
-		RackflowURL:        strings.TrimRight(get("RACKFLOW_URL", ""), "/"),
-		RunnerKey:          get("RUNNER_KEY", ""),
-		ParentIface:        get("PARENT_IFACE", ""),
-		CephFSName:         get("CEPH_FS_NAME", ""),
-		CephECPool:         get("CEPH_EC_POOL", ""),
-		CephSubvolumeGroup: get("CEPH_SUBVOLUME_GROUP", DefaultGroup),
-		CephConf:           get("CEPH_CONF", ""),
-		CephKeyring:        get("CEPH_KEYRING", ""),
-		CephName:           get("CEPH_NAME", ""),
-		GaneshaImage:       get("GANESHA_IMAGE", ""),
-		StateDir:           get("STATE_DIR", DefaultStateDir),
-		PodmanRemoteURL:    get("PODMAN_REMOTE_URL", ""),
-		SFTPListenAddr:     get("SFTP_LISTEN_ADDR", "0.0.0.0"),
-		SFTPImage:          get("SFTP_IMAGE", ""),
-		SFTPServerPath:     get("SFTP_SERVER_PATH", "/usr/lib/ssh/sftp-server"),
-		CephHAPool:         get("CEPH_HA_POOL", DefaultHAPool),
-		SFTPVIPInterface:   get("SFTP_VIP_INTERFACE", ""),
-		CephUserPrefix:     get("CEPH_USER_PREFIX", names.DefaultCephUserPrefix),
+		RackflowURL:         strings.TrimRight(get("RACKFLOW_URL", ""), "/"),
+		RunnerKey:           get("RUNNER_KEY", ""),
+		ParentIface:         get("PARENT_IFACE", ""),
+		CephFSName:          get("CEPH_FS_NAME", ""),
+		CephECPool:          get("CEPH_EC_POOL", ""),
+		CephSubvolumeGroup:  get("CEPH_SUBVOLUME_GROUP", DefaultGroup),
+		CephConf:            get("CEPH_CONF", ""),
+		CephKeyring:         get("CEPH_KEYRING", ""),
+		CephName:            get("CEPH_NAME", ""),
+		GaneshaImage:        get("GANESHA_IMAGE", ""),
+		StateDir:            get("STATE_DIR", DefaultStateDir),
+		PodmanRemoteURL:     get("PODMAN_REMOTE_URL", ""),
+		SFTPListenAddr:      get("SFTP_LISTEN_ADDR", "0.0.0.0"),
+		SFTPImage:           get("SFTP_IMAGE", ""),
+		SFTPServerPath:      get("SFTP_SERVER_PATH", "/usr/lib/ssh/sftp-server"),
+		CephHAPool:          get("CEPH_HA_POOL", DefaultHAPool),
+		SFTPVIPInterface:    get("SFTP_VIP_INTERFACE", ""),
+		CephUserPrefix:      get("CEPH_USER_PREFIX", names.DefaultCephUserPrefix),
+		CephRecoveryName:    get("CEPH_RECOVERY_NAME", ""),
+		CephRecoveryKeyring: get("CEPH_RECOVERY_KEYRING", ""),
+	}
+	switch v := strings.ToLower(get("CEPH_SCOPED_KEY", "false")); v {
+	case "1", "true", "yes":
+		h.CephScopedKey = true
+	case "0", "false", "no":
+	default:
+		errs = append(errs, fmt.Errorf("CEPH_SCOPED_KEY %q must be true or false", v))
 	}
 	for _, kv := range [][2]string{
 		{"RACKFLOW_URL", h.RackflowURL},
@@ -141,6 +161,22 @@ func FromEnv(getenv func(string) string) (Host, error) {
 		} else if strings.HasPrefix(h.CephName, "client."+h.CephUserPrefix) {
 			// The runner treats every client.<prefix>* user as a tenant's and removes unknown ones.
 			errs = append(errs, fmt.Errorf("CEPH_NAME %q must not start with the tenant prefix client.%s", h.CephName, h.CephUserPrefix))
+		}
+	}
+
+	switch {
+	case h.CephScopedKey && h.CephName == "":
+		errs = append(errs, errors.New("CEPH_SCOPED_KEY needs CEPH_NAME: client.admin is not a scoped key"))
+	case h.CephScopedKey && (h.CephRecoveryName == "" || h.CephRecoveryKeyring == ""):
+		errs = append(errs, errors.New("CEPH_SCOPED_KEY needs CEPH_RECOVERY_NAME and CEPH_RECOVERY_KEYRING"))
+	case !h.CephScopedKey && (h.CephRecoveryName != "" || h.CephRecoveryKeyring != ""):
+		errs = append(errs, errors.New("CEPH_RECOVERY_NAME and CEPH_RECOVERY_KEYRING are only used with CEPH_SCOPED_KEY=true"))
+	}
+	if h.CephRecoveryName != "" {
+		if !cephEntityRe.MatchString(h.CephRecoveryName) {
+			errs = append(errs, fmt.Errorf("CEPH_RECOVERY_NAME %q must be a cephx client entity such as client.rackflow-recovery", h.CephRecoveryName))
+		} else if strings.HasPrefix(h.CephRecoveryName, "client."+h.CephUserPrefix) || h.CephRecoveryName == h.CephName {
+			errs = append(errs, fmt.Errorf("CEPH_RECOVERY_NAME %q must differ from CEPH_NAME and not start with the tenant prefix client.%s", h.CephRecoveryName, h.CephUserPrefix))
 		}
 	}
 

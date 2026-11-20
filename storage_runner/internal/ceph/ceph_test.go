@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -171,7 +173,7 @@ func TestUsersOnlyRunnerOwned(t *testing.T) {
 		{"entity":"client.admin","key":"A","caps":{"mon":"allow *"}},
 		{"entity":"client.rf-t12","key":"B","caps":{"mon":"allow r","mds":"allow rw path=/x","osd":"allow rw pool=ec"}},
 		{"entity":"osd.0","key":"C","caps":{}}]}`)
-	users, err := (&CLI{Cmd: s}).Users(context.Background())
+	users, err := (&CLI{Cmd: s}).Users(context.Background(), nil)
 	if err != nil || len(users) != 1 || users["client.rf-t12"].Caps.MDS != "allow rw path=/x" {
 		t.Fatalf("users=%+v err=%v", users, err)
 	}
@@ -183,9 +185,77 @@ func TestUsersWithPrefixSkipOtherInstallation(t *testing.T) {
 	s := execx.NewScript().On("ceph auth ls --format json", `{"auth_dump":[
 		{"entity":"client.rf-t12","key":"B","caps":{"mon":"allow r"}},
 		{"entity":"client.rfdev-t12","key":"D","caps":{"mon":"allow r"}}]}`)
-	users, err := (&CLI{Cmd: s}).Users(context.Background())
+	users, err := (&CLI{Cmd: s}).Users(context.Background(), nil)
 	if err != nil || len(users) != 1 || users["client.rfdev-t12"].Key != "D" {
 		t.Fatalf("users=%+v err=%v", users, err)
+	}
+}
+
+func TestScopedUsersReadEachEntity(t *testing.T) {
+	s := execx.NewScript().
+		On(pre+"auth get client.rf-t12 --format json", `[{"entity":"client.rf-t12","key":"B","caps":{"mon":"allow r","mds":"allow rw path=/x"}}]`).
+		Fail(pre+"auth get client.rf-t13 --format json", errors.New("ceph auth get client.rf-t13: Error ENOENT: failed to find client.rf-t13 in keyring"))
+	c := cli(s)
+	c.Scoped = true
+	users, err := c.Users(context.Background(), []string{"client.rf-t12", "client.admin", "client.rf-t13", "client.rf-t12"})
+	if err != nil || len(users) != 1 || users["client.rf-t12"].Key != "B" || users["client.rf-t12"].Caps.MDS != "allow rw path=/x" {
+		t.Fatalf("users=%+v err=%v", users, err)
+	}
+	for _, l := range s.Lines() {
+		if strings.Contains(l, "auth ls") || strings.Contains(l, "auth get client.admin") {
+			t.Fatalf("scoped key ran %q", l)
+		}
+	}
+	if n := len(s.Lines()); n != 2 {
+		t.Fatalf("calls %v", s.Lines())
+	}
+
+	s = execx.NewScript().Fail(pre+"auth get client.rf-t12 --format json", errors.New("Error EACCES: access denied"))
+	c = cli(s)
+	c.Scoped = true
+	if _, err := c.Users(context.Background(), []string{"client.rf-t12"}); err == nil {
+		t.Fatal("EACCES taken for a missing user")
+	}
+}
+
+func TestScopedAuthorizeAndNoEvictions(t *testing.T) {
+	s := execx.NewScript().
+		On(pre+"fs subvolume authorize cephfs t12-s5 rf-t12 --group_name rackflow --access_level rw --allow_existing_id", "").
+		On(pre+"fs subvolume deauthorize cephfs t12-s5 rf-t12 --group_name rackflow", "")
+	c := cli(s)
+	c.Scoped = true
+	ctx := context.Background()
+	if err := c.Authorize(ctx, "client.rf-t12", "t12-s5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Deauthorize(ctx, "client.rf-t12", "t12-s5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.EvictSessions(ctx, "client.rf-t12", "rf-t12-nfs"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.EvictAddrSessions(ctx, netip.MustParseAddr("10.0.0.5")); n != 0 || err != nil {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if n := len(s.Lines()); n != 2 {
+		t.Fatalf("calls %v", s.Lines())
+	}
+}
+
+func TestAuthorizedPathsAndReadKeyring(t *testing.T) {
+	got := AuthorizedPaths("allow rw path=/volumes/rackflow/t3-s1/a,allow rw path=/volumes/rackflow/t3-s2/b, allow r")
+	if strings.Join(got, " ") != "/volumes/rackflow/t3-s1/a /volumes/rackflow/t3-s2/b" {
+		t.Fatalf("paths %v", got)
+	}
+	path := filepath.Join(t.TempDir(), "k")
+	if err := os.WriteFile(path, []byte("[client.a]\n\tkey = AAA\n[client.rec]\n\tkey = BBB==\n\tcaps osd = \"allow\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := ReadKeyring(path, "client.rec"); err != nil || k != "BBB==" {
+		t.Fatalf("key %q err %v", k, err)
+	}
+	if _, err := ReadKeyring(path, "client.other"); err == nil {
+		t.Fatal("missing entity read")
 	}
 }
 

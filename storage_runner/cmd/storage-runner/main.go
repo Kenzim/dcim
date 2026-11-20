@@ -63,6 +63,7 @@ func runRunner() {
 		Conf:           host.CephConf,
 		Keyring:        host.CephKeyring,
 		Name:           host.CephName,
+		Scoped:         host.CephScopedKey,
 	}
 	hostname, _ := os.Hostname()
 
@@ -74,6 +75,7 @@ func runRunner() {
 		Fencer:      cephCLI,
 		Clock:       lease.SystemClock{},
 		Version:     version,
+		RangeFence:  host.CephScopedKey,
 		DeadlineDir: lease.DefaultDeadlineDir,
 		Logf:        log.Printf,
 		Alive:       func() { _ = notifier.Notify("WATCHDOG=1") },

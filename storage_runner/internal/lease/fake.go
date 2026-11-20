@@ -132,7 +132,7 @@ func (c *FakeCluster) blocked(addr string) bool {
 		return false
 	}
 	now := c.now()
-	for _, k := range []string{ip + ":0/0", ip + ":" + rest} {
+	for _, k := range []string{ip + ":0/0", ip + "/32", ip + ":" + rest} {
 		if until, ok := c.blocklist[k]; ok && now.Before(until) {
 			return true
 		}

@@ -138,15 +138,36 @@ def make_ops(cluster, ioctx, cfg):
             other.close()
 
     def blocklist_add(r):
-        mon(cluster, {"prefix": "osd blocklist", "blocklistop": "add",
-                      "addr": r["addr"], "expire": float(r["expire"])})
+        cmd = {"prefix": "osd blocklist", "blocklistop": "add",
+               "addr": r["addr"], "expire": float(r["expire"])}
+        # "10.0.0.5/32" (no port) is a CIDR range entry.
+        if ":" not in r["addr"] and "/" in r["addr"]:
+            cmd["range"] = "range"
+        mon(cluster, cmd)
 
     def blocklist_ls(r):
-        out = mon(cluster, {"prefix": "osd blocklist ls", "format": "json"})
-        data = json.loads(out or b"[]")
-        if isinstance(data, dict):
-            data = data.get("blocklist", [])
-        return [{"addr": e.get("addr", ""), "until": e.get("until", "")} for e in data]
+        # Recent releases print the address entries and the range entries
+        # as two JSON arrays one after the other.
+        out = (mon(cluster, {"prefix": "osd blocklist ls", "format": "json"}) or b"").decode("utf-8", "replace")
+        decoder = json.JSONDecoder()
+        entries, pos = [], 0
+        while True:
+            while pos < len(out) and out[pos].isspace():
+                pos += 1
+            if pos >= len(out):
+                break
+            data, pos = decoder.raw_decode(out, pos)
+            if isinstance(data, dict):
+                data = data.get("blocklist", [])
+            for e in data:
+                if "range" in e:
+                    # Ceph prints a range as "10.0.0.5:0/32".
+                    ip, _, rest = e.get("range", "").partition(":")
+                    bits = rest.partition("/")[2]
+                    entries.append({"addr": ip + "/" + bits, "until": e.get("until", "")})
+                else:
+                    entries.append({"addr": e.get("addr", ""), "until": e.get("until", "")})
+        return entries
 
     return {
         "lock_shared": lock_shared,

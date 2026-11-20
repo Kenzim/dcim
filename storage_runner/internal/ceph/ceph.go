@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -95,6 +96,42 @@ func WithRecovery(c Caps, pool, namespace string) Caps {
 	return c
 }
 
+// AuthorizedPaths returns the paths named by the path= grants of MDS caps.
+func AuthorizedPaths(mds string) []string {
+	var out []string
+	for _, m := range pathGrantRe.FindAllStringSubmatch(mds, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+var pathGrantRe = regexp.MustCompile(`\bpath=([^,\s]+)`)
+
+// ReadKeyring returns the key of entity from a keyring file.
+func ReadKeyring(path, entity string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	in := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			in = strings.TrimSpace(line[1:len(line)-1]) == entity
+			continue
+		}
+		if !in {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "key" {
+			if v = strings.TrimSpace(v); v != "" {
+				return v, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%s has no key for %s", path, entity)
+}
+
 type Cluster interface {
 	// Check verifies the EC pool and file system and returns the EC pool's free
 	// bytes, capped by what is left under the pool's quota when it has one.
@@ -107,15 +144,27 @@ type Cluster interface {
 	ResizeSubvolume(ctx context.Context, name string, size int64) error
 	SubvolumeInfo(ctx context.Context, name string) (SubvolumeInfo, error)
 	RemoveSubvolume(ctx context.Context, name string) error
-	// Users returns runner-owned users (client.rf-t*) by entity.
-	Users(ctx context.Context) (map[string]User, error)
+	// Users returns runner-owned users (client.rf-t*) by entity. With a
+	// scoped key only the given entities are looked up, one by one;
+	// otherwise every runner-owned user is listed.
+	Users(ctx context.Context, entities []string) (map[string]User, error)
 	CreateUser(ctx context.Context, entity string, caps Caps) (key string, err error)
 	SetCaps(ctx context.Context, entity string, caps Caps) error
 	RemoveUser(ctx context.Context, entity string) error
+	// Authorize gives entity read-write access to a subvolume through the
+	// mgr (ceph fs subvolume authorize), which creates the user if needed
+	// and writes the caps itself. Used with a scoped key instead of
+	// CreateUser and SetCaps.
+	Authorize(ctx context.Context, entity, subvolume string) error
+	// Deauthorize removes entity's access to a subvolume; the mgr removes
+	// the user once it has no caps left.
+	Deauthorize(ctx context.Context, entity, subvolume string) error
 	// EvictSessions ends the MDS sessions of entity from clients whose
-	// hostname is hostname, on each active rank.
+	// hostname is hostname, on each active rank. A scoped key has no MDS
+	// caps, so it does nothing.
 	EvictSessions(ctx context.Context, entity, hostname string) error
-	// EvictAddrSessions ends every MDS session from address ip.
+	// EvictAddrSessions ends every MDS session from address ip; a scoped
+	// key does nothing.
 	EvictAddrSessions(ctx context.Context, ip netip.Addr) (int, error)
 	// DaemonAddrs lists the addresses of every mon, mgr, MDS and OSD.
 	DaemonAddrs(ctx context.Context) ([]netip.Addr, error)
@@ -131,6 +180,11 @@ type CLI struct {
 	Conf           string
 	Keyring        string
 	Name           string // cephx entity of Keyring; empty for client.admin
+	// Scoped is set when the key may not run auth ls, auth get-or-create,
+	// auth caps or MDS commands (CEPH_SCOPED_KEY): users are read one by
+	// one with auth get, access is granted by the mgr, and nothing is
+	// evicted through the MDS.
+	Scoped bool
 }
 
 func (c *CLI) ceph(ctx context.Context, args ...string) ([]byte, error) {
@@ -309,7 +363,10 @@ func (c *CLI) RemoveSubvolume(ctx context.Context, name string) error {
 	return err
 }
 
-func (c *CLI) Users(ctx context.Context) (map[string]User, error) {
+func (c *CLI) Users(ctx context.Context, entities []string) (map[string]User, error) {
+	if c.Scoped {
+		return c.getUsers(ctx, entities)
+	}
 	var dump struct {
 		AuthDump []struct {
 			Entity string            `json:"entity"`
@@ -328,6 +385,41 @@ func (c *CLI) Users(ctx context.Context) (map[string]User, error) {
 		out[e.Entity] = User{Key: e.Key, Caps: Caps{Mon: e.Caps["mon"], MDS: e.Caps["mds"], OSD: e.Caps["osd"]}}
 	}
 	return out, nil
+}
+
+// getUsers reads each runner-owned entity with auth get, skipping those
+// that do not exist.
+func (c *CLI) getUsers(ctx context.Context, entities []string) (map[string]User, error) {
+	out := map[string]User{}
+	seen := map[string]bool{}
+	for _, entity := range entities {
+		if _, ok := names.ParseCephEntity(entity); !ok || seen[entity] {
+			continue
+		}
+		seen[entity] = true
+		var res []struct {
+			Entity string            `json:"entity"`
+			Key    string            `json:"key"`
+			Caps   map[string]string `json:"caps"`
+		}
+		if err := c.cephJSON(ctx, &res, "auth", "get", entity); err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			return nil, err
+		}
+		for _, e := range res {
+			if e.Entity == entity {
+				out[entity] = User{Key: e.Key, Caps: Caps{Mon: e.Caps["mon"], MDS: e.Caps["mds"], OSD: e.Caps["osd"]}}
+			}
+		}
+	}
+	return out, nil
+}
+
+// isNotFound reports a ceph command that failed with ENOENT.
+func isNotFound(err error) bool {
+	return strings.Contains(err.Error(), "ENOENT")
 }
 
 func (c *CLI) CreateUser(ctx context.Context, entity string, caps Caps) (string, error) {
@@ -354,6 +446,20 @@ func (c *CLI) RemoveUser(ctx context.Context, entity string) error {
 	return err
 }
 
+// Authorize uses --allow_existing_id so users created by CreateUser before
+// the key was scoped can be given further subvolumes.
+func (c *CLI) Authorize(ctx context.Context, entity, subvolume string) error {
+	_, err := c.ceph(ctx, "fs", "subvolume", "authorize", c.FS, subvolume, strings.TrimPrefix(entity, "client."),
+		"--group_name", c.SubvolumeGroup, "--access_level", "rw", "--allow_existing_id")
+	return err
+}
+
+func (c *CLI) Deauthorize(ctx context.Context, entity, subvolume string) error {
+	_, err := c.ceph(ctx, "fs", "subvolume", "deauthorize", c.FS, subvolume, strings.TrimPrefix(entity, "client."),
+		"--group_name", c.SubvolumeGroup)
+	return err
+}
+
 func (c *CLI) mdsRanks(ctx context.Context) ([]string, error) {
 	var fs struct {
 		MDSMap struct {
@@ -377,6 +483,9 @@ func (c *CLI) mdsRanks(ctx context.Context) ([]string, error) {
 // hostname filter spares the same user's sessions from other hosts (the SFTP
 // master's kernel mounts).
 func (c *CLI) EvictSessions(ctx context.Context, entity, hostname string) error {
+	if c.Scoped {
+		return nil
+	}
 	ranks, err := c.mdsRanks(ctx)
 	if err != nil {
 		return err
@@ -397,6 +506,9 @@ func (c *CLI) EvictSessions(ctx context.Context, entity, hostname string) error 
 // EvictAddrSessions evicts, on each active rank, every session whose client
 // address is ip, and returns how many it evicted.
 func (c *CLI) EvictAddrSessions(ctx context.Context, ip netip.Addr) (int, error) {
+	if c.Scoped {
+		return 0, nil
+	}
 	ranks, err := c.mdsRanks(ctx)
 	if err != nil {
 		return 0, err
