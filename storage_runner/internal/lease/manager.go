@@ -1069,7 +1069,7 @@ func (m *Manager) nodeFence(ctx context.Context, k Key, prev int64, prevToken st
 	}
 	entry := ip.String() + ":0/0"
 	if m.RangeFence {
-		entry = ip.String() + "/32"
+		entry = netip.PrefixFrom(ip, ip.BitLen()).String()
 	}
 	cctx, cancel := m.callCtx(ctx)
 	defer cancel()

@@ -10,6 +10,7 @@ one slow object does not hold up the others.
 """
 
 import base64
+import ipaddress
 import json
 import os
 import subprocess
@@ -140,9 +141,13 @@ def make_ops(cluster, ioctx, cfg):
     def blocklist_add(r):
         cmd = {"prefix": "osd blocklist", "blocklistop": "add",
                "addr": r["addr"], "expire": float(r["expire"])}
-        # "10.0.0.5/32" (no port) is a CIDR range entry.
-        if ":" not in r["addr"] and "/" in r["addr"]:
+        # A CIDR such as "10.0.0.5/32" is a range entry; "10.0.0.5:0/0"
+        # (address:port/nonce) is not.
+        try:
+            ipaddress.ip_network(r["addr"])
             cmd["range"] = "range"
+        except ValueError:
+            pass
         mon(cluster, cmd)
 
     def blocklist_ls(r):
@@ -161,9 +166,10 @@ def make_ops(cluster, ioctx, cfg):
                 data = data.get("blocklist", [])
             for e in data:
                 if "range" in e:
-                    # Ceph prints a range as "10.0.0.5:0/32".
-                    ip, _, rest = e.get("range", "").partition(":")
-                    bits = rest.partition("/")[2]
+                    # Ceph prints a range as "10.0.0.5:0/32" (address,
+                    # nonce, prefix length).
+                    head, _, bits = e.get("range", "").rpartition("/")
+                    ip = head.rpartition(":")[0].strip("[]")
                     entries.append({"addr": ip + "/" + bits, "until": e.get("until", "")})
                 else:
                     entries.append({"addr": e.get("addr", ""), "until": e.get("until", "")})
