@@ -10,7 +10,6 @@ from app.models.private_network import (
     InvitationStatus,
     PrivateNetwork,
     PrivateNetworkAttachment,
-    PrivateNetworkDhcpLease,
     PrivateNetworkDhcpReservation,
     PrivateNetworkInvitation,
     PrivateNetworkMember,
@@ -309,24 +308,6 @@ class PrivateNetworkDAO:
         )
 
     @staticmethod
-    def list_dhcp_reservations(db: Session, network_id: int) -> List[PrivateNetworkDhcpReservation]:
-        return (
-            db.query(PrivateNetworkDhcpReservation)
-            .filter(PrivateNetworkDhcpReservation.network_id == network_id)
-            .order_by(PrivateNetworkDhcpReservation.id)
-            .all()
-        )
-
-    @staticmethod
-    def list_dhcp_leases(db: Session, network_id: int) -> List[PrivateNetworkDhcpLease]:
-        return (
-            db.query(PrivateNetworkDhcpLease)
-            .filter(PrivateNetworkDhcpLease.network_id == network_id)
-            .order_by(PrivateNetworkDhcpLease.id)
-            .all()
-        )
-
-    @staticmethod
     def list_presence_networks(db: Session, location_id: int) -> List[PrivateNetwork]:
         """Active standard networks of a location, the candidates for a storage presence."""
         return (
@@ -339,10 +320,6 @@ class PrivateNetworkDAO:
             .order_by(PrivateNetwork.id)
             .all()
         )
-
-    @staticmethod
-    def networks_with_presence_on(db: Session, node_id: int) -> List[PrivateNetwork]:
-        return db.query(PrivateNetwork).filter(PrivateNetwork.presence_node_id == node_id).all()
 
     @staticmethod
     def wanted_states() -> tuple:
