@@ -5019,6 +5019,58 @@ export function clientLeaveSharedNetwork(networkId) {
   });
 }
 
+export function clientSharedNetwork(networkId) {
+  return privateNetworkRequest(`/shared/${networkId}`, {
+    client: true,
+    errorMessage: 'Failed to load the network',
+  });
+}
+
+// --- Private network DHCP: owner (client routes) and staff (admin routes) ---
+// Every call returns the full DHCP object. Pass { admin: true } for the staff routes.
+
+export function getPrivateNetworkDhcp(networkId, { admin = false } = {}) {
+  return privateNetworkRequest(`/${networkId}/dhcp`, {
+    client: !admin,
+    errorMessage: 'Failed to load the DHCP settings',
+  });
+}
+
+export function updatePrivateNetworkDhcp(networkId, data, { admin = false } = {}) {
+  return privateNetworkRequest(`/${networkId}/dhcp`, {
+    client: !admin,
+    method: 'PATCH',
+    body: data,
+    errorMessage: 'Failed to save the DHCP settings',
+  });
+}
+
+export function addPrivateNetworkDhcpReservation(networkId, data, { admin = false } = {}) {
+  return privateNetworkRequest(`/${networkId}/dhcp/reservations`, {
+    client: !admin,
+    method: 'POST',
+    body: data,
+    errorMessage: 'Failed to add the reservation',
+  });
+}
+
+export function updatePrivateNetworkDhcpReservation(networkId, reservationId, data, { admin = false } = {}) {
+  return privateNetworkRequest(`/${networkId}/dhcp/reservations/${reservationId}`, {
+    client: !admin,
+    method: 'PATCH',
+    body: data,
+    errorMessage: 'Failed to update the reservation',
+  });
+}
+
+export function removePrivateNetworkDhcpReservation(networkId, reservationId, { admin = false } = {}) {
+  return privateNetworkRequest(`/${networkId}/dhcp/reservations/${reservationId}`, {
+    client: !admin,
+    method: 'DELETE',
+    errorMessage: 'Failed to remove the reservation',
+  });
+}
+
 // --- Proxy fast path: per-location access network and private proxy addresses ---
 
 export function clientFastPath() {

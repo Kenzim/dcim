@@ -15,6 +15,7 @@
     clientCancelNetworkInvitation,
     clientRemoveNetworkMember,
     clientSharedNetworks,
+    clientSharedNetwork,
     clientSharedNetworkStorage,
     clientSharedAttach,
     clientSharedDetach,
@@ -23,6 +24,7 @@
     clientFastPathOn,
     clientFastPathOff,
   } from '../../lib/api.js';
+  import PrivateNetworkDhcp from '../PrivateNetworkDhcp.svelte';
   import { copyText } from '../../lib/copyText.js';
 
   const STATE_LABELS = { pending: 'Connecting', active: 'Connected', error: 'Being retried', detaching: 'Disconnecting' };
@@ -33,6 +35,8 @@
   let shared = [];
   // Shared network id -> its storage address and open shares
   let sharedStorage = {};
+  // Shared network id -> the effective DHCP settings the owner has set
+  let sharedDhcp = {};
   // Owned network id -> address or username being invited
   let inviteForms = {};
   let fastPath = { cidr: '', locations: [], endpoints: [] };
@@ -74,10 +78,16 @@
         clientNetworkInvitations(),
         clientSharedNetworks(),
       ]);
-      const storages = await Promise.all(
-        shared.map((n) => clientSharedNetworkStorage(n.id).catch(() => ({ linked: false, shares: [] }))),
+      const details = await Promise.all(
+        shared.map((n) =>
+          Promise.all([
+            clientSharedNetworkStorage(n.id).catch(() => ({ linked: false, shares: [] })),
+            clientSharedNetwork(n.id).catch(() => null),
+          ]),
+        ),
       );
-      sharedStorage = Object.fromEntries(shared.map((n, i) => [n.id, storages[i]]));
+      sharedStorage = Object.fromEntries(shared.map((n, i) => [n.id, details[i][0]]));
+      sharedDhcp = Object.fromEntries(shared.map((n, i) => [n.id, details[i][1]?.dhcp || null]));
       try {
         fastPath = await clientFastPath();
       } catch {
@@ -230,6 +240,13 @@
   }
 
   $: withCredentials = fastPath.endpoints.some((ep) => ep.endpoint);
+
+  const list = (items) => (items || []).join(', ');
+  const leaseText = (seconds) => {
+    if (seconds % 86400 === 0) return `${seconds / 86400} day${seconds === 86400 ? '' : 's'}`;
+    if (seconds % 3600 === 0) return `${seconds / 3600} hour${seconds === 3600 ? '' : 's'}`;
+    return `${seconds} seconds`;
+  };
 
   onMount(load);
 </script>
@@ -459,11 +476,36 @@
               </div>
             {/each}
           </div>
-          <p class="hint">
-            Set each address inside the operating system. On a virtual machine, use the extra network card with the MAC
-            address shown; machines installed from our templates usually apply the address on their next reboot. On a dedicated server,
-            add a VLAN interface with ID {network.vlan_id} on the main network card and give it the address shown.
-          </p>
+          {#if network.kind === 'proxy_access'}
+            <p class="hint">
+              Set each address inside the operating system. On a virtual machine, use the extra network card with the MAC
+              address shown. On a dedicated server, add a VLAN interface with ID {network.vlan_id} on the main network card
+              and give it the address shown.
+            </p>
+          {:else}
+            <div class="hint">
+              Where the location has storage, your machines get these addresses by DHCP:
+              <ul>
+                <li>
+                  <strong>Virtual machine:</strong> the new network card (the MAC address shown) gets its address by DHCP.
+                  Windows and most desktop systems pick it up at once. On a Linux server, turn on DHCP for the new interface,
+                  for example with <code>dhclient</code>, a netplan entry or NetworkManager. Templates with cloud-init also
+                  get the address written on their next reboot.
+                </li>
+                <li>
+                  <strong>Dedicated server:</strong> add a VLAN interface with ID {network.vlan_id} on the main network card
+                  (or the bond) and set it to DHCP. It asks with that card's MAC address, which we know, so it gets the
+                  address shown. An interface with its own MAC address needs a reservation (see DHCP below) or the address
+                  shown, set by hand.
+                </li>
+                <li>
+                  <strong>When DHCP does not apply:</strong> the location has no storage node, DHCP is switched off for this
+                  network, or every storage node of the location is down. Then set the address shown inside the operating
+                  system by hand.
+                </li>
+              </ul>
+            </div>
+          {/if}
         {/if}
 
         {#if network.status === 'active'}
@@ -495,6 +537,8 @@
         {/if}
 
         {#if network.kind !== 'proxy_access' && network.status === 'active'}
+          <PrivateNetworkDhcp networkId={network.id} />
+
           <div class="sharing">
             <h3>Members and invitations</h3>
             <p class="hint">
@@ -606,12 +650,30 @@
               </div>
             {/each}
           </div>
-          <p class="hint">
-            Set each address inside the operating system. On a virtual machine, use the extra network card with the MAC address shown.
-            {#if network.server_vlan_id}
-              On a dedicated server, add a VLAN interface with ID {network.server_vlan_id} on the main network card and give it the address shown.
-            {/if}
-          </p>
+          <div class="hint">
+            Where the location has storage, your machines get these addresses by DHCP:
+            <ul>
+              <li>
+                <strong>Virtual machine:</strong> the new network card (the MAC address shown) gets its address by DHCP.
+                Windows and most desktop systems pick it up at once. On a Linux server, turn on DHCP for the new interface,
+                for example with <code>dhclient</code>, a netplan entry or NetworkManager. Templates with cloud-init also get
+                the address written on their next reboot.
+              </li>
+              {#if network.server_vlan_id}
+                <li>
+                  <strong>Dedicated server:</strong> add a VLAN interface with ID {network.server_vlan_id} on the main network
+                  card (or the bond) and set it to DHCP. It asks with that card's MAC address, which we know, so it gets the
+                  address shown. An interface with its own MAC address needs the network owner to reserve an address for it,
+                  or the address shown, set by hand.
+                </li>
+              {/if}
+              <li>
+                <strong>When DHCP does not apply:</strong> the location has no storage node, the owner has switched DHCP off
+                for this network, or every storage node of the location is down. Then set the address shown inside the
+                operating system by hand.
+              </li>
+            </ul>
+          </div>
         {/if}
 
         {#if network.status === 'active'}
@@ -640,6 +702,40 @@
           {:else if network.attachments.length === 0}
             <p class="hint">You have no other active services in {network.location_name} to connect.</p>
           {/if}
+        {/if}
+
+        {#if sharedDhcp[network.id]}
+          {@const dhcp = sharedDhcp[network.id]}
+          <div class="sharing">
+            <h3>DHCP</h3>
+            <p class="hint first">
+              {#if !dhcp.enabled}
+                The owner has switched DHCP off on this network. Set the address shown inside the operating system by hand.
+              {:else if dhcp.served}
+                DHCP is on and being served. These are the settings the network owner has chosen; they only apply to machines
+                that use DHCP.
+              {:else}
+                DHCP is on, but is not being served right now: the location may have no storage node yet, or its storage
+                nodes are being upgraded or are down. Until it is, set the address shown by hand.
+              {/if}
+            </p>
+            {#if dhcp.enabled}
+              <dl class="settings">
+                <dt>Lease time</dt><dd>{leaseText(dhcp.lease_seconds)}</dd>
+                {#if dhcp.gateway}<dt>Gateway</dt><dd class="mono">{dhcp.gateway}</dd>{/if}
+                {#if dhcp.dns_servers?.length}<dt>DNS servers</dt><dd class="mono">{list(dhcp.dns_servers)}</dd>{/if}
+                {#if dhcp.domain}<dt>Search domain</dt><dd>{dhcp.domain}</dd>{/if}
+                {#if dhcp.mtu}<dt>MTU</dt><dd>{dhcp.mtu}</dd>{/if}
+                {#if dhcp.ntp_servers?.length}<dt>NTP servers</dt><dd class="mono">{list(dhcp.ntp_servers)}</dd>{/if}
+                {#if dhcp.routes?.length}
+                  <dt>Static routes</dt>
+                  <dd class="mono">
+                    {#each dhcp.routes as route}<div>{route.destination} via {route.gateway}</div>{/each}
+                  </dd>
+                {/if}
+              </dl>
+            {/if}
+          </div>
         {/if}
 
         {#if storage.linked}
@@ -736,6 +832,12 @@
   .badge.warn { color: var(--warning-color, #b7791f); border-color: var(--warning-color, #b7791f); }
   .link { background: none; border: none; padding: 0; color: var(--danger-color); cursor: pointer; font-weight: 600; font-size: 13px; }
   .link:disabled { opacity: 0.5; cursor: default; }
+  .hint ul { margin: 6px 0 0; padding-left: 20px; }
+  .hint li { margin-bottom: 4px; }
+  .hint.first { margin-top: 0; }
+  .settings { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 10px 0 0; font-size: 13px; }
+  .settings dt { color: var(--text-tertiary); }
+  .settings dd { margin: 0; }
   .hint, .none { margin: 12px 0 0; font-size: 13px; color: var(--text-tertiary); line-height: 1.5; }
   .none { margin-top: 0; }
   label { display: grid; gap: 6px; margin: 14px 0; font-size: 13px; font-weight: 600; }
