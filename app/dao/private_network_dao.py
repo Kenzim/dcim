@@ -10,6 +10,7 @@ from app.models.private_network import (
     InvitationStatus,
     PrivateNetwork,
     PrivateNetworkAttachment,
+    PrivateNetworkDhcpReservation,
     PrivateNetworkInvitation,
     PrivateNetworkMember,
     PrivateNetworkPool,
@@ -288,6 +289,35 @@ class PrivateNetworkDAO:
         return (
             db.query(PrivateNetworkInvitation)
             .filter(PrivateNetworkInvitation.status == InvitationStatus.PENDING)
+            .all()
+        )
+
+    # --- DHCP ---
+
+    @staticmethod
+    def get_dhcp_reservation(
+        db: Session, network_id: int, reservation_id: int
+    ) -> Optional[PrivateNetworkDhcpReservation]:
+        return (
+            db.query(PrivateNetworkDhcpReservation)
+            .filter(
+                PrivateNetworkDhcpReservation.id == reservation_id,
+                PrivateNetworkDhcpReservation.network_id == network_id,
+            )
+            .first()
+        )
+
+    @staticmethod
+    def list_presence_networks(db: Session, location_id: int) -> List[PrivateNetwork]:
+        """Active standard networks of a location, the candidates for a storage presence."""
+        return (
+            db.query(PrivateNetwork)
+            .filter(
+                PrivateNetwork.location_id == location_id,
+                PrivateNetwork.kind == NetworkKind.STANDARD,
+                PrivateNetwork.status == PrivateNetworkStatus.ACTIVE,
+            )
+            .order_by(PrivateNetwork.id)
             .all()
         )
 

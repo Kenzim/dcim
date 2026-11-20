@@ -27,6 +27,7 @@ from app.services.private_network_service import (
     storage_endpoint_ip,
     validate_pool_range,
 )
+from app.services import private_network_dhcp as dhcp
 from app.services import private_network_sharing as sharing
 from app.services.proxy_fast_path import FastPathError, ProxyAccessService
 
@@ -153,6 +154,42 @@ class NetworkResponse(BaseModel):
     owner_username: Optional[str] = None
     switch_synced: Optional[bool] = None
     last_error: Optional[str] = None
+    # Staff only: the storage node answering the network and the DHCP reservation conflicts.
+    presence: Optional[dict] = None
+    dhcp_warnings: Optional[List[str]] = None
+
+
+class DhcpRoute(BaseModel):
+    destination: str
+    gateway: str
+
+
+class DhcpSettingsBody(BaseModel):
+    """Only the fields sent are changed. Both range ends null removes the range; lease_seconds
+    null uses the default."""
+
+    enabled: Optional[bool] = None
+    range_start: Optional[str] = Field(None, max_length=15)
+    range_end: Optional[str] = Field(None, max_length=15)
+    lease_seconds: Optional[int] = None
+    gateway: Optional[str] = Field(None, max_length=15)
+    dns_servers: Optional[List[str]] = Field(None, max_length=16)
+    domain: Optional[str] = Field(None, max_length=253)
+    mtu: Optional[int] = None
+    routes: Optional[List[DhcpRoute]] = Field(None, max_length=64)
+    ntp_servers: Optional[List[str]] = Field(None, max_length=16)
+
+
+class DhcpReservationBody(BaseModel):
+    mac: str = Field(..., max_length=32)
+    ip: str = Field(..., max_length=15)
+    label: Optional[str] = Field(None, max_length=200)
+
+
+class DhcpReservationUpdate(BaseModel):
+    mac: Optional[str] = Field(None, max_length=32)
+    ip: Optional[str] = Field(None, max_length=15)
+    label: Optional[str] = Field(None, max_length=200)
 
 
 class ClientLocationOption(BaseModel):
@@ -241,6 +278,8 @@ def _network_out(
     extras = {}
     if db is not None and not access:
         extras = sharing.owner_extras(db, network, staff=staff)
+        if staff:
+            extras.update(dhcp.staff_fields(db, network))
     return NetworkResponse(
         **extras,
         kind=(network.kind or NetworkKind.STANDARD).value,
@@ -619,3 +658,142 @@ async def client_detach(network_id: int, attachment_id: int, auth: UserDep, db: 
     if attachment.proxy_runner_id is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found")
     return await _detach(db, network, attachment_id, staff=False, user_id=user_id)
+
+
+# --- DHCP (owner and staff; docs/private-network-dhcp.md section 4.6) ---
+
+
+def _dhcp_network(network: PrivateNetwork) -> PrivateNetwork:
+    if network.kind != NetworkKind.STANDARD:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="DHCP is not available on a proxy access network"
+        )
+    return network
+
+
+async def dhcp_update(
+    db: Session, network: PrivateNetwork, changes: dict, *, staff: bool, actor_user_id: Optional[int]
+) -> dict:
+    try:
+        network = await dhcp.update_settings(db, _dhcp_network(network), changes, actor_user_id=actor_user_id)
+    except PrivateNetworkError as exc:
+        _raise(exc)
+    return dhcp.owner_view(db, network, staff=staff)
+
+
+async def dhcp_reservation_add(
+    db: Session, network: PrivateNetwork, body: DhcpReservationBody, *, staff: bool, actor_user_id: Optional[int]
+) -> dict:
+    try:
+        await dhcp.add_reservation(
+            db, _dhcp_network(network), body.mac, body.ip, body.label, actor_user_id=actor_user_id
+        )
+    except PrivateNetworkError as exc:
+        _raise(exc)
+    return dhcp.owner_view(db, network, staff=staff)
+
+
+async def dhcp_reservation_update(
+    db: Session,
+    network: PrivateNetwork,
+    reservation_id: int,
+    changes: dict,
+    *,
+    staff: bool,
+    actor_user_id: Optional[int],
+) -> dict:
+    try:
+        await dhcp.update_reservation(
+            db, _dhcp_network(network), reservation_id, changes, actor_user_id=actor_user_id
+        )
+    except PrivateNetworkError as exc:
+        _raise(exc)
+    return dhcp.owner_view(db, network, staff=staff)
+
+
+async def dhcp_reservation_remove(
+    db: Session, network: PrivateNetwork, reservation_id: int, *, staff: bool, actor_user_id: Optional[int]
+) -> dict:
+    try:
+        await dhcp.remove_reservation(db, _dhcp_network(network), reservation_id, actor_user_id=actor_user_id)
+    except PrivateNetworkError as exc:
+        _raise(exc)
+    return dhcp.owner_view(db, network, staff=staff)
+
+
+@client_router.get("/{network_id}/dhcp")
+async def client_dhcp_get(network_id: int, auth: UserDep, db: DbDep):
+    """DHCP settings, reservations and leases of a network you own."""
+    network = _client_network(db, network_id, _client_user_id(auth))
+    return dhcp.owner_view(db, _dhcp_network(network))
+
+
+@client_router.patch("/{network_id}/dhcp")
+async def client_dhcp_update(network_id: int, body: DhcpSettingsBody, auth: UserDep, db: DbDep):
+    user_id = _client_user_id(auth)
+    network = _client_network(db, network_id, user_id)
+    return await dhcp_update(db, network, body.model_dump(exclude_unset=True), staff=False, actor_user_id=user_id)
+
+
+@client_router.post("/{network_id}/dhcp/reservations", status_code=status.HTTP_201_CREATED)
+async def client_dhcp_reservation_add(network_id: int, body: DhcpReservationBody, auth: UserDep, db: DbDep):
+    user_id = _client_user_id(auth)
+    network = _client_network(db, network_id, user_id)
+    return await dhcp_reservation_add(db, network, body, staff=False, actor_user_id=user_id)
+
+
+@client_router.patch("/{network_id}/dhcp/reservations/{reservation_id}")
+async def client_dhcp_reservation_update(
+    network_id: int, reservation_id: int, body: DhcpReservationUpdate, auth: UserDep, db: DbDep
+):
+    user_id = _client_user_id(auth)
+    network = _client_network(db, network_id, user_id)
+    changes = body.model_dump(exclude_unset=True)
+    return await dhcp_reservation_update(db, network, reservation_id, changes, staff=False, actor_user_id=user_id)
+
+
+@client_router.delete("/{network_id}/dhcp/reservations/{reservation_id}")
+async def client_dhcp_reservation_remove(network_id: int, reservation_id: int, auth: UserDep, db: DbDep):
+    user_id = _client_user_id(auth)
+    network = _client_network(db, network_id, user_id)
+    return await dhcp_reservation_remove(db, network, reservation_id, staff=False, actor_user_id=user_id)
+
+
+def _staff_id(auth: dict) -> Optional[int]:
+    user_id = auth.get("user_id")
+    return int(user_id) if user_id else None
+
+
+@admin_router.get("/{network_id}/dhcp")
+async def admin_dhcp_get(network_id: int, auth: AdminDep, db: DbDep):
+    return dhcp.owner_view(db, _dhcp_network(_admin_network(db, network_id)), staff=True)
+
+
+@admin_router.patch("/{network_id}/dhcp")
+async def admin_dhcp_update(network_id: int, body: DhcpSettingsBody, auth: AdminDep, db: DbDep):
+    network = _admin_network(db, network_id)
+    changes = body.model_dump(exclude_unset=True)
+    return await dhcp_update(db, network, changes, staff=True, actor_user_id=_staff_id(auth))
+
+
+@admin_router.post("/{network_id}/dhcp/reservations", status_code=status.HTTP_201_CREATED)
+async def admin_dhcp_reservation_add(network_id: int, body: DhcpReservationBody, auth: AdminDep, db: DbDep):
+    network = _admin_network(db, network_id)
+    return await dhcp_reservation_add(db, network, body, staff=True, actor_user_id=_staff_id(auth))
+
+
+@admin_router.patch("/{network_id}/dhcp/reservations/{reservation_id}")
+async def admin_dhcp_reservation_update(
+    network_id: int, reservation_id: int, body: DhcpReservationUpdate, auth: AdminDep, db: DbDep
+):
+    network = _admin_network(db, network_id)
+    changes = body.model_dump(exclude_unset=True)
+    return await dhcp_reservation_update(
+        db, network, reservation_id, changes, staff=True, actor_user_id=_staff_id(auth)
+    )
+
+
+@admin_router.delete("/{network_id}/dhcp/reservations/{reservation_id}")
+async def admin_dhcp_reservation_remove(network_id: int, reservation_id: int, auth: AdminDep, db: DbDep):
+    network = _admin_network(db, network_id)
+    return await dhcp_reservation_remove(db, network, reservation_id, staff=True, actor_user_id=_staff_id(auth))

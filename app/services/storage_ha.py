@@ -500,6 +500,9 @@ def reconcile(db: Session, now: Optional[datetime] = None) -> dict:
             tenant.current_node_id = None
             tenant.current_since = now
             counts["cleared"] += 1
+    from app.services import private_network_dhcp
+
+    counts["presences_cleared"] = private_network_dhcp.reconcile(db, by_id, now)
     db.commit()
     for location_id in sorted({storage_location.node_location_id(node) for node in nodes} - {None}):
         if advance_location(db, location_id, now):

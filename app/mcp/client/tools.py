@@ -182,7 +182,7 @@ async def services(
 ) -> Any:
     """Your services. list (service_type filters), detail, backups (a VM's backups and your backup slots, or a backup_slot service's retained backup and the VMs it can be restored onto), ssh_keys (VM), actions (plugin actions).
     fast_path: private proxy addresses per location and proxy IP (service_id optional).
-    networks (no service_id): your private networks with members and invitations, networks shared with you with their open shares, and invitations to answer. All others need service_id."""
+    networks (no service_id): your private networks with members, invitations and DHCP settings, networks shared with you with their open shares and effective DHCP settings, and invitations to answer. All others need service_id."""
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
         auth = _auth(ctx)
@@ -252,6 +252,7 @@ async def service_action(
     destructive scope: backup_delete and backup_restore (volid, storage; a volid held in a backup slot restores onto service_id, any of your VMs of the same type (cloud-init Linux or macOS), and replaces everything on it; on macOS, Apple account sign-ins may need redoing because they are tied to the VM's serial number), backup_release (service_id=backup_slot; deletes its retained backup), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
     write scope, proxies: fast_path_on and fast_path_off turn the private proxy network on or off in the locations of this proxy's IPs (for all your servers there).
     network (service_id only for attach): name = attach, detach, invite, invitation_cancel, member_remove, leave, invitation_accept or invitation_decline; params = network_id plus attach: service_id (or here), ip_address; detach: attachment_id; invite: invitee (email or username); invitation_cancel: invitation_id; member_remove: member_user_id; invitation_accept and invitation_decline: invitation_id only. Write: attach, invite, invitation_cancel, invitation_accept, invitation_decline. Destructive: detach, member_remove, leave. Members attach and detach their own services; the rest is owner-only.
+    network DHCP (owner only, params network_id plus): dhcp_get (read, no confirm); dhcp_set (write; any of enabled, range_start, range_end (both null removes the range), lease_seconds (null = default), gateway, dns_servers, domain, mtu, routes [{destination, gateway}], ntp_servers); dhcp_reservation_add (write; mac, ip, label); dhcp_reservation_update (write; reservation_id, mac, ip, label); dhcp_reservation_remove (destructive; reservation_id).
     """
     if action == "network":
         if name not in NETWORK_SCOPE:
@@ -262,6 +263,8 @@ async def service_action(
             raise ToolError(f"{action} needs: service_id")
         min_scope = _ACTION_SCOPE[action]
     needs_confirm = action != "console" and not (action == "backup_create" and backup_mode == "snapshot")
+    if action == "network" and min_scope == "read":
+        needs_confirm = False
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
         auth = _auth(ctx)
