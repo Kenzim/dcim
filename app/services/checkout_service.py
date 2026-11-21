@@ -35,8 +35,10 @@ from app.models.storefront import (
     ProductOptionValue,
 )
 from app.services.billing.coupons import (
+    FIRST_INVOICE_ONLY_NOTE,
     CouponRuleError,
     check_stored_rules,
+    first_invoice_only,
     record_coupon_usage,
 )
 from app.services.billing.order_refunds import apply_order_refund_policy
@@ -81,6 +83,7 @@ class QuoteResult:
     total_cents: int
     coupon_code: Optional[str] = None
     lines: list[QuoteLine] = field(default_factory=list)
+    coupon_first_invoice_only: bool = False
 
 
 class CheckoutService:
@@ -304,10 +307,12 @@ class CheckoutService:
                     kind="option",
                 )
             )
+        first_only = bool(discount and coupon is not None and first_invoice_only(coupon))
         if discount:
+            label = f"Coupon {coupon.code if coupon else ''}".strip()
             lines.append(
                 QuoteLine(
-                    description=f"Coupon {coupon.code if coupon else ''}".strip(),
+                    description=f"{label} ({FIRST_INVOICE_ONLY_NOTE})" if first_only else label,
                     quantity=1,
                     unit_cents=-discount,
                     total_cents=-discount,
@@ -336,6 +341,7 @@ class CheckoutService:
             total_cents=total,
             coupon_code=coupon.code if coupon else None,
             lines=lines,
+            coupon_first_invoice_only=first_only,
         )
 
     @staticmethod

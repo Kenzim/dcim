@@ -555,6 +555,214 @@ def test_mark_paid_leaves_an_uncancellable_card_attempt_for_review(
     assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
 
 
+# Findings 9 and 14: coupon limits are re-checked under the coupon lock at payment.
+
+
+def _limit_audits(db_session, coupon_id: int) -> list[dict]:
+    return [
+        event.event_metadata
+        for event in db_session.execute(
+            select(UserAuditEvent).where(
+                UserAuditEvent.action == "billing.coupon_limit_exceeded",
+                UserAuditEvent.resource_id == str(coupon_id),
+            )
+        ).scalars()
+    ]
+
+
+@pytest.mark.parametrize("limit", ["max_uses_per_account", "max_uses"])
+def test_coupon_limit_exceeded_at_payment_is_counted_and_flagged(db_session, provisioned, limit):
+    from tests.services.test_billing_a0_money_path import _coupon, _redemptions
+    from app.services.billing.manual_payments import record_manual_payment
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(db_session, **{limit: 1})
+    first = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+    second = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+    for order in (first, second):
+        record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
+        settlement.commit_and_fulfil(db_session)
+    db_session.refresh(coupon)
+    assert (coupon.used_count, _redemptions(db_session, coupon)) == (2, 2)
+    assert db_session.get(Invoice, second.invoice_id).status == InvoiceStatus.PAID
+    assert db_session.get(Order, second.id).status == OrderStatus.ACTIVE
+    audits = _limit_audits(db_session, coupon.id)
+    assert len(audits) == 1
+    assert audits[0]["order_id"] == second.id
+    assert limit in audits[0]["limits"] and audits[0]["review"] is True
+
+
+def test_coupon_within_limit_is_not_flagged(db_session, provisioned):
+    from tests.services.test_billing_a0_money_path import _coupon
+    from app.services.billing.manual_payments import record_manual_payment
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(db_session, max_uses=2, max_uses_per_account=2)
+    for _ in range(2):
+        order = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+        record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
+        settlement.commit_and_fulfil(db_session)
+    assert _limit_audits(db_session, coupon.id) == []
+
+
+# Finding 10: invoice-level refund reviews are idempotent per reason.
+
+
+def test_invoice_refund_review_is_recorded_once_per_reason(db_session):
+    from app.services.billing.order_refunds import record_refund_review
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    order = _place(db_session, account, user, product, plan)
+    invoice = db_session.get(Invoice, order.invoice_id)
+
+    def reviews() -> list[str]:
+        return [
+            event.event_metadata["reason"]
+            for event in db_session.execute(
+                select(UserAuditEvent).where(UserAuditEvent.action == "billing.refund_review")
+            ).scalars()
+        ]
+
+    for reason in ("provisioning_failed", "provisioning_failed", "order_cancelled", "order_cancelled"):
+        record_refund_review(db_session, invoice=invoice, amount_cents=1000, reason=reason)
+    assert reviews() == ["provisioning_failed", "order_cancelled"]
+    notes = db_session.get(Order, order.id).admin_notes
+    assert f"[refund-review:provisioning_failed:invoice-{invoice.id}]" in notes
+    assert f"[refund-review:order_cancelled:invoice-{invoice.id}]" in notes
+    # The money itself is listed for review once.
+    assert notes.count("Refund review required") == 1
+    assert "already held for refund review (provisioning_failed)" in notes
+
+
+def test_legacy_invoice_marker_still_suppresses_its_own_reason_only(db_session):
+    from app.services.billing.order_refunds import record_refund_review
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    order = _place(db_session, account, user, product, plan)
+    invoice = db_session.get(Invoice, order.invoice_id)
+    order.admin_notes = (
+        f"[refund-review:invoice-{invoice.id}] Refund review required: 1000 USD on invoice "
+        f"{invoice.invoice_number} (provisioning_failed); policy manual_review, held for manual review."
+    )
+    db_session.flush()
+    record_refund_review(db_session, invoice=invoice, amount_cents=1000, reason="provisioning_failed")
+    record_refund_review(db_session, invoice=invoice, amount_cents=1000, reason="order_cancelled")
+    reasons = [
+        event.event_metadata["reason"]
+        for event in db_session.execute(
+            select(UserAuditEvent).where(UserAuditEvent.action == "billing.refund_review")
+        ).scalars()
+    ]
+    assert reasons == ["order_cancelled"]
+
+
+# Finding 12: repeating and forever coupons say they apply to the first invoice only.
+
+
+@pytest.mark.parametrize("duration", ["repeating", "forever", "once"])
+def test_coupon_duration_is_stated_on_quote_and_invoice(db_session, duration):
+    from tests.services.test_billing_a0_money_path import _coupon
+    from app.models.commerce_coupon_tax import CouponDuration
+    from app.models.commerce_invoice_ext import InvoiceLine
+    from app.services.checkout_service import CheckoutService
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(
+        db_session,
+        duration=CouponDuration(duration),
+        duration_months=3 if duration == "repeating" else None,
+    )
+    quote = CheckoutService.quote(
+        db_session, account, product.id, plan.id, "monthly", coupon_code=coupon.code
+    )
+    first_only = duration != "once"
+    assert quote.coupon_first_invoice_only is first_only
+    discount_line = next(line for line in quote.lines if line.kind == "discount")
+    assert ("(first invoice only)" in discount_line.description) is first_only
+    order = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+    descriptions = db_session.scalars(
+        select(InvoiceLine.description).where(InvoiceLine.invoice_id == order.invoice_id)
+    ).all()
+    assert discount_line.description in descriptions
+
+
+def test_quote_response_body_carries_first_invoice_only(db_session):
+    """The quote endpoint returns ``asdict(quote)``, so the new field is an added response field."""
+    from dataclasses import asdict
+
+    from tests.services.test_billing_a0_money_path import _coupon
+    from app.models.commerce_coupon_tax import CouponDuration
+    from app.services.checkout_service import CheckoutService
+
+    _, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(db_session, duration=CouponDuration.FOREVER)
+    quote = CheckoutService.quote(
+        db_session, account, product.id, plan.id, "monthly", coupon_code=coupon.code
+    )
+    assert asdict(quote)["coupon_first_invoice_only"] is True
+
+
+# Finding 13: cancelling an order that kept no money gives its coupon use back.
+
+
+def test_cancel_after_reversal_releases_coupon_usage_once(db_session, provisioned, monkeypatch):
+    from tests.services.test_billing_a0_money_path import _coupon, _redemptions
+    from app.services.billing.manual_payments import record_manual_payment
+
+    monkeypatch.setattr(
+        "app.services.checkout_service.CheckoutService.mark_paid_and_fulfill",
+        lambda db, order: None,
+    )
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(db_session, max_uses=1)
+    order = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+    _, manual = record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
+    settlement.commit_and_fulfil(db_session)
+    db_session.refresh(coupon)
+    assert coupon.used_count == 1
+    # The money went back (a dispute or refund reversed the payment).
+    manual.status = PaymentStatus.REFUNDED
+    db_session.commit()
+    _, decision = cancel_order(db_session, order, actor_user_id=None)
+    db_session.commit()
+    assert decision is None
+    db_session.refresh(coupon)
+    assert (coupon.used_count, _redemptions(db_session, coupon)) == (0, 0)
+    from app.services.billing.coupons import release_coupon_usage
+
+    assert release_coupon_usage(db_session, order=order, reason="again") is False
+    db_session.refresh(coupon)
+    assert coupon.used_count == 0
+
+
+def test_cancel_with_money_held_keeps_coupon_usage(db_session, monkeypatch):
+    from tests.services.test_billing_a0_money_path import _coupon, _redemptions
+    from app.services.billing.manual_payments import record_manual_payment
+
+    monkeypatch.setattr(
+        "app.services.checkout_service.CheckoutService.mark_paid_and_fulfill",
+        lambda db, order: None,
+    )
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(db_session)
+    order = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+    record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
+    settlement.commit_and_fulfil(db_session)
+    _, decision = cancel_order(db_session, order, actor_user_id=None)
+    db_session.commit()
+    assert decision is not None and decision.handling == "manual_review"
+    db_session.refresh(coupon)
+    assert (coupon.used_count, _redemptions(db_session, coupon)) == (1, 1)
+
+
 def test_lock_keeps_unflushed_changes_of_the_caller(db_session):
     from app.services.invoice_service import InvoiceService
 
