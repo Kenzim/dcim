@@ -374,6 +374,19 @@ def test_guard_mode_follows_setting_and_is_enforce_in_v2(db_session):
         invoice_guard.set_mode_override(previous)
 
 
+def test_guard_enforces_when_its_mode_cannot_be_read(db_session, account, monkeypatch):
+    invoice = _create(db_session, account)
+    previous = invoice_guard.set_mode_override(None)
+    monkeypatch.setattr(invoice_guard, "_setting", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+    try:
+        invoice.amount_cents = 5
+        with pytest.raises(FrozenInvoiceError):
+            db_session.flush()
+    finally:
+        invoice_guard.set_mode_override(previous)
+    db_session.rollback()
+
+
 def test_allowance_is_only_the_proforma_conversion(db_session, account):
     with pytest.raises(ValueError):
         with invoice_guard.allow("anything", {"amount_cents"}):

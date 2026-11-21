@@ -159,9 +159,10 @@ def _mode_on(connection) -> str:
                 return "enforce"
         mode = _setting(connection, "billing_invoice_guard_mode")
         return mode if mode in MODES else "log"
-    except Exception:  # noqa: BLE001 - an unreadable setting must not block billing
-        logger.exception("invoice guard: could not read its mode; logging only")
-        return "log"
+    except Exception:  # noqa: BLE001
+        # Only read once a violation is found: refusing that write is the safe side.
+        logger.exception("invoice guard: could not read its mode; enforcing")
+        return "enforce"
 
 
 def _plain(value: Any) -> Any:
