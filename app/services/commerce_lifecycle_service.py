@@ -26,6 +26,10 @@ class CommerceLifecycleError(ValueError):
     pass
 
 
+class ServiceTerminationError(RuntimeError):
+    """The service could not be powered off, so it was not marked terminated."""
+
+
 async def terminate_service(
     db: Session,
     service: Service,
@@ -34,7 +38,12 @@ async def terminate_service(
     now: Optional[datetime] = None,
     reason: str = "cancellation",
 ) -> bool:
-    """Power the service off and mark it terminated. Returns False if it already was."""
+    """Power the service off and mark it terminated. Returns False if it already was.
+
+    Raises ``ServiceTerminationError`` when the power-off fails: the service is
+    left as it is, the failure is audited as ``billing.service_termination_failed``,
+    and the caller must keep the billing due so a later pass retries.
+    """
     if service.status == ServiceStatus.TERMINATED:
         return False
     if service.status != ServiceStatus.SUSPENDED:
@@ -44,6 +53,17 @@ async def terminate_service(
             logger.warning(
                 "Lifecycle suspend failed for service %s: %s", service.id, exc
             )
+            from app.services.audit_service import AuditService
+
+            AuditService.log(
+                db,
+                actor_user_id=None,
+                action="billing.service_termination_failed",
+                resource_type="service",
+                resource_id=str(service.id),
+                metadata={"reason": reason, "error": str(exc)[:500]},
+            )
+            raise ServiceTerminationError(str(exc)) from exc
     service.status = ServiceStatus.TERMINATED
     service.terminated_at = now or datetime.now(timezone.utc)
     db.flush()
@@ -66,9 +86,15 @@ class CommerceLifecycleService:
     def _billing_for_service(
         db: Session, service_id: int
     ) -> Optional[ServiceBilling]:
-        return db.execute(
-            select(ServiceBilling).where(ServiceBilling.service_id == service_id)
-        ).scalar_one_or_none()
+        """Lock and re-read the service's billing row (first in the billing lock order)."""
+        from app.services.billing_locks import BillingLocks
+
+        billing_id = db.scalar(
+            select(ServiceBilling.id).where(ServiceBilling.service_id == service_id)
+        )
+        if billing_id is None:
+            return None
+        return BillingLocks.service_billing(db, int(billing_id))
 
     @staticmethod
     async def request_cancellation(
@@ -92,6 +118,7 @@ class CommerceLifecycleService:
         note = (reason or "Client requested cancellation")[:500]
         now = datetime.now(timezone.utc)
 
+        termination_pending = False
         if billing is not None:
             if when == "end_of_cycle":
                 if billing.status == ServiceBillingStatus.CANCELLED:
@@ -103,13 +130,6 @@ class CommerceLifecycleService:
                     billing.status = ServiceBillingStatus.CANCELLED
                     billing.last_failure_code = "end_of_cycle_cancel"
                     billing.last_failure_message = note
-            else:
-                billing.status = ServiceBillingStatus.CANCELLED
-                billing.next_charge_at = None
-                billing.next_retry_at = None
-                billing.cancel_at = None
-                billing.last_failure_code = "immediate_cancel"
-                billing.last_failure_message = note
 
         if (
             when == "immediate"
@@ -119,13 +139,33 @@ class CommerceLifecycleService:
                 ServiceStatus.SUSPENDED,
             }
         ):
-            await terminate_service(db, service, now=now)
+            try:
+                await terminate_service(db, service, now=now)
+            except ServiceTerminationError:
+                termination_pending = True
+
+        if billing is not None and when == "immediate":
+            if termination_pending and billing.status != ServiceBillingStatus.CANCELLED:
+                # The service is still running: end the billing at once through
+                # the recurring worker, which retries the termination and only
+                # then cancels the billing. Nothing is charged meanwhile.
+                billing.cancel_at = now
+                billing.last_failure_code = "immediate_cancel_pending"
+                billing.last_failure_message = note
+            else:
+                billing.status = ServiceBillingStatus.CANCELLED
+                billing.next_charge_at = None
+                billing.next_retry_at = None
+                billing.cancel_at = None
+                billing.last_failure_code = "immediate_cancel"
+                billing.last_failure_message = note
 
         return {
             "service_id": service_id,
             "when": when,
             "billing_status": billing.status.value if billing else None,
             "service_status": service.status.value if service else None,
+            "termination_pending": termination_pending,
             "cancel_at": (
                 billing.cancel_at.isoformat()
                 if billing is not None and billing.cancel_at is not None

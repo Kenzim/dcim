@@ -10,6 +10,12 @@ An order is locked before its invoice: an order invoice belongs to exactly one
 order (``invoices.order_id`` is set when the invoice is created and never
 changes), so ``for_invoice`` reads it without a lock and locks the order first.
 
+A service billing row comes first of all: the recurring billing worker starts
+from it and then funds and settles the cycle invoice, so ``for_invoice`` locks
+the service billing of a cycle invoice before anything else. Every path that
+locks a billing cycle holds its service billing first, so the billing row also
+serialises work on its cycles.
+
 Every lock re-reads the row (``populate_existing``) after flushing the
 session, so a caller always sees the committed state of a locked row together
 with its own pending changes.
@@ -17,36 +23,85 @@ with its own pending changes.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from sqlalchemy import Select, select, update
 from sqlalchemy.orm import Session
 
 from app.models.commerce_coupon_tax import Coupon
 from app.models.commerce_order import Order
-from app.models.reseller import Invoice, Payment, Reseller
+from app.models.reseller import (
+    BillingCycle,
+    Invoice,
+    InvoicePurpose,
+    Payment,
+    Reseller,
+    ServiceBilling,
+)
 
 LOCK_ORDER = (
+    "service_billing",
     "reseller",
     "billing_account",
     "order",
     "invoice",
     "payment",
+    "billing_cycle",
     "coupon",
     "refund",
     "number_counter",
 )
 
 
-def _lock(db: Session, kind: str, row_id: Optional[int], statement: Select) -> Any:
-    """Run one locking SELECT of ``kind``; every billing lock goes through here."""
+def _lock(
+    db: Session,
+    kind: str,
+    row_id: Optional[int],
+    statement: Select,
+    *,
+    skip_locked: bool = False,
+) -> Any:
+    """Run one locking SELECT of ``kind``; every billing lock goes through here.
+
+    ``skip_locked`` skips rows another transaction holds where the database
+    supports it (MySQL, PostgreSQL) and is ignored elsewhere.
+    """
     db.flush()
+    skip = skip_locked and db.get_bind().dialect.name in {"mysql", "postgresql"}
     return db.execute(
-        statement.with_for_update().execution_options(populate_existing=True)
+        statement.with_for_update(skip_locked=skip).execution_options(
+            populate_existing=True
+        )
     )
 
 
 class BillingLocks:
+    @staticmethod
+    def service_billing(
+        db: Session,
+        billing_id: int,
+        *,
+        where: Sequence[Any] = (),
+        skip_locked: bool = False,
+    ) -> Optional[ServiceBilling]:
+        """Lock a service billing row; None if it is gone, no longer matches ``where``, or skipped."""
+        return _lock(
+            db,
+            "service_billing",
+            billing_id,
+            select(ServiceBilling).where(ServiceBilling.id == billing_id, *where),
+            skip_locked=skip_locked,
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def billing_cycle(
+        db: Session, statement: Select, *, skip_locked: bool = False
+    ) -> Optional[BillingCycle]:
+        """Lock the billing cycle a ``select(BillingCycle)`` statement returns."""
+        return _lock(
+            db, "billing_cycle", None, statement, skip_locked=skip_locked
+        ).scalar_one_or_none()
+
     @staticmethod
     def reseller(db: Session, reseller_id: int) -> Optional[Reseller]:
         return _lock(
@@ -80,16 +135,27 @@ class BillingLocks:
     ) -> Optional[Invoice]:
         """Lock an invoice after the rows that come before it.
 
-        Locks the invoice's order (when it has one), then the invoice. With
-        ``reseller=True`` the invoice's reseller is locked first, for
-        transactions that go on to write the reseller credit ledger.
+        Locks the service billing of a cycle invoice, then (with
+        ``reseller=True``, for transactions that go on to write the reseller
+        credit ledger) the invoice's reseller, then its order when it has one,
+        then the invoice.
         """
         db.flush()
         ids = db.execute(
-            select(Invoice.reseller_id, Invoice.order_id).where(Invoice.id == invoice_id)
+            select(Invoice.reseller_id, Invoice.order_id, Invoice.purpose).where(
+                Invoice.id == invoice_id
+            )
         ).first()
         if ids is None:
             return None
+        if ids.purpose == InvoicePurpose.CYCLE_CHARGE:
+            billing_id = db.scalar(
+                select(BillingCycle.service_billing_id).where(
+                    BillingCycle.invoice_id == invoice_id
+                )
+            )
+            if billing_id is not None:
+                BillingLocks.service_billing(db, int(billing_id))
         if reseller and ids.reseller_id is not None:
             BillingLocks.reseller(db, int(ids.reseller_id))
         if ids.order_id is not None:

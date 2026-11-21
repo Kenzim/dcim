@@ -11,6 +11,7 @@ from sqlalchemy import func, select, update
 from app.models.commerce_audit import UserAuditEvent
 from app.models.commerce_order import Order, OrderStatus
 from app.models.reseller import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.models.service import Service, ServiceStatus
 from app.services.billing import settlement
 from app.services.billing.order_refunds import OrderCancelError, cancel_order
 from tests.services.test_billing_a0_money_path import (  # noqa: F401  (fixtures)
@@ -394,9 +395,9 @@ def lock_calls(monkeypatch):
     calls: list[tuple[str, object]] = []
     original = billing_locks._lock
 
-    def recording(db, kind, row_id, statement):
+    def recording(db, kind, row_id, statement, **kwargs):
         calls.append((kind, row_id))
-        return original(db, kind, row_id, statement)
+        return original(db, kind, row_id, statement, **kwargs)
 
     monkeypatch.setattr(billing_locks, "_lock", recording)
     return calls
@@ -761,6 +762,215 @@ def test_cancel_with_money_held_keeps_coupon_usage(db_session, monkeypatch):
     assert decision is not None and decision.handling == "manual_review"
     db_session.refresh(coupon)
     assert (coupon.used_count, _redemptions(db_session, coupon)) == (1, 1)
+
+
+# Findings 16 to 20: renewals, cancellation, worker locks and the worker loop.
+
+
+class _FailingLifecycle:
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def suspend(self, db, service, *, reason):
+        from app.services.service_lifecycle import ServiceLifecycleError
+
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise ServiceLifecycleError("hypervisor unreachable")
+        service.status = ServiceStatus.SUSPENDED
+        db.flush()
+        return True
+
+    async def unsuspend(self, db, service, *, reason):
+        return True
+
+
+def _termination_audits(db_session, service_id: int) -> int:
+    return db_session.scalar(
+        select(func.count(UserAuditEvent.id)).where(
+            UserAuditEvent.action == "billing.service_termination_failed",
+            UserAuditEvent.resource_id == str(service_id),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_end_of_period_termination_failure_keeps_billing_due_and_retries(db_session):
+    from datetime import datetime, timezone
+
+    from tests.services.test_billing_a0_renewals import Clock, _retail_billing, _worker
+    from app.models.reseller import ServiceBillingStatus
+    from app.services.commerce_lifecycle_service import CommerceLifecycleService
+
+    due = datetime(2027, 5, 15, 9, tzinfo=timezone.utc)
+    billing, account = _retail_billing(db_session, due, interval="monthly")
+    await CommerceLifecycleService.request_cancellation(
+        db_session, billing.service_id, account, when="end_of_cycle"
+    )
+    db_session.commit()
+    lifecycle = _FailingLifecycle(failures=1)
+    worker = _worker(Clock(due), lifecycle=lifecycle, retail=True)
+
+    result = await worker.process_batch(db_session, owner="t")
+    assert result["cancelled"] == 0 and result["manual_review"] == 1
+    db_session.refresh(billing)
+    service = db_session.get(Service, billing.service_id)
+    assert service.status == ServiceStatus.ACTIVE
+    assert billing.status == ServiceBillingStatus.ACTIVE
+    assert billing.last_failure_code == "end_of_period_terminate_failed"
+    assert _termination_audits(db_session, service.id) == 1
+    assert db_session.query(Invoice).filter_by(service_id=billing.service_id).count() == 0
+
+    result = await worker.process_batch(db_session, owner="t")
+    assert result["cancelled"] == 1
+    db_session.refresh(billing)
+    db_session.refresh(service)
+    assert service.status == ServiceStatus.TERMINATED
+    assert billing.status == ServiceBillingStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_immediate_cancel_with_failing_power_off_leaves_termination_to_the_worker(
+    db_session, monkeypatch
+):
+    from datetime import datetime, timezone
+
+    from tests.services.test_billing_a0_renewals import Clock, _retail_billing, _worker
+    from app.models.reseller import ServiceBillingStatus
+    from app.services import commerce_lifecycle_service as lifecycle_module
+    from app.services.commerce_lifecycle_service import CommerceLifecycleService
+
+    failing = _FailingLifecycle(failures=1)
+    monkeypatch.setattr(lifecycle_module, "ServiceLifecycle", lambda: failing)
+    due = datetime(2027, 5, 15, 9, tzinfo=timezone.utc)
+    billing, account = _retail_billing(db_session, due, interval="monthly")
+    outcome = await CommerceLifecycleService.request_cancellation(
+        db_session, billing.service_id, account, when="immediate"
+    )
+    db_session.commit()
+    assert outcome["termination_pending"] is True
+    db_session.refresh(billing)
+    assert billing.status == ServiceBillingStatus.ACTIVE
+    assert billing.cancel_at is not None
+    assert db_session.get(Service, billing.service_id).status == ServiceStatus.ACTIVE
+
+    worker = _worker(Clock(datetime.now(timezone.utc)), lifecycle=failing, retail=True)
+    assert (await worker.process_batch(db_session, owner="t"))["cancelled"] == 1
+    db_session.refresh(billing)
+    assert billing.status == ServiceBillingStatus.CANCELLED
+    assert db_session.get(Service, billing.service_id).status == ServiceStatus.TERMINATED
+
+
+@pytest.mark.asyncio
+async def test_request_cancellation_locks_and_rereads_the_billing(db_session, lock_calls):
+    from datetime import datetime, timezone
+
+    from tests.services.test_billing_a0_renewals import _retail_billing, _utc
+    from app.models.reseller import ServiceBilling
+    from app.services.commerce_lifecycle_service import CommerceLifecycleService
+
+    due = datetime(2027, 5, 15, 9, tzinfo=timezone.utc)
+    billing, account = _retail_billing(db_session, due, interval="monthly")
+    advanced = datetime(2027, 6, 15, 9, tzinfo=timezone.utc)
+    # The worker advanced next_charge_at after this session loaded the row.
+    db_session.execute(
+        update(ServiceBilling)
+        .where(ServiceBilling.id == billing.id)
+        .values(next_charge_at=advanced)
+        .execution_options(synchronize_session=False)
+    )
+    lock_calls.clear()
+    await CommerceLifecycleService.request_cancellation(
+        db_session, billing.service_id, account, when="end_of_cycle"
+    )
+    assert lock_calls[0] == ("service_billing", billing.id)
+    assert _utc(billing.cancel_at) == advanced
+
+
+@pytest.mark.asyncio
+async def test_worker_relocks_each_row_and_skips_one_no_longer_due(db_session, lock_calls):
+    from datetime import datetime, timezone
+
+    from tests.services.test_billing_a0_renewals import Clock, _retail_billing, _worker
+    from app.models.reseller import ServiceBilling, ServiceBillingStatus
+
+    due = datetime(2027, 5, 15, 9, tzinfo=timezone.utc)
+    first, _ = _retail_billing(db_session, due, interval="monthly")
+    second, _ = _retail_billing(db_session, due, interval="monthly")
+    worker = _worker(Clock(due), retail=True)
+    original = worker._process_billing
+
+    async def process_and_race(db, *, billing, now, owner):
+        outcome = await original(db, billing=billing, now=now, owner=owner)
+        if billing.id == first.id:
+            # Another worker processed the second row after our first commit.
+            db.execute(
+                update(ServiceBilling)
+                .where(ServiceBilling.id == second.id)
+                .values(status=ServiceBillingStatus.CANCELLED)
+                .execution_options(synchronize_session=False)
+            )
+            db.commit()
+        return outcome
+
+    worker._process_billing = process_and_race
+    lock_calls.clear()
+    result = await worker.process_batch(db_session, owner="t")
+    assert result["processed"] == 1
+    assert ("service_billing", first.id) in lock_calls
+    assert ("service_billing", second.id) in lock_calls
+    assert db_session.query(Invoice).filter_by(service_id=second.service_id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cycle_invoice_settlement_locks_service_billing_first(db_session, lock_calls):
+    from datetime import datetime, timezone
+
+    from tests.services.test_billing_a0_renewals import Clock, _retail_billing, _worker
+    from app.models.reseller import BillingCycle, BillingCycleState
+    from app.services.billing.manual_payments import record_manual_payment
+
+    due = datetime(2027, 5, 15, 9, tzinfo=timezone.utc)
+    billing, _ = _retail_billing(db_session, due, interval="monthly")
+    worker = _worker(Clock(due), retail=True)
+    await worker.process_batch(db_session, owner="t")
+    cycle = db_session.execute(
+        select(BillingCycle).where(BillingCycle.service_billing_id == billing.id)
+    ).scalar_one()
+    lock_calls.clear()
+    record_manual_payment(db_session, cycle.invoice_id, reason="wire", actor_user_id=None)
+    settlement.commit_and_fulfil(db_session)
+    assert lock_calls[0] == ("service_billing", billing.id)
+    _assert_lock_order(lock_calls)
+    db_session.refresh(cycle)
+    assert cycle.state == BillingCycleState.PAID
+
+
+@pytest.mark.asyncio
+async def test_worker_rereads_interval_off_the_event_loop(monkeypatch):
+    import asyncio
+
+    from app.workers import recurring_billing
+
+    seen: list[str] = []
+
+    def interval(config):
+        import threading
+
+        seen.append(threading.current_thread().name)
+        raise asyncio.CancelledError
+
+    async def iteration(**_kwargs):
+        return {"processed": 0}
+
+    monkeypatch.setattr(recurring_billing, "_current_interval_seconds", interval)
+    monkeypatch.setattr(recurring_billing, "run_recurring_billing_iteration", iteration)
+    import threading
+
+    with pytest.raises(asyncio.CancelledError):
+        await recurring_billing.run_recurring_billing_worker(worker_id="t")
+    assert seen and seen[0] != threading.main_thread().name
 
 
 def test_lock_keeps_unflushed_changes_of_the_caller(db_session):

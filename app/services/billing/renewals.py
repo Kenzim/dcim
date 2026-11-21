@@ -26,6 +26,7 @@ from app.models.reseller import (
     ServiceBillingStatus,
 )
 from app.services.billing.intervals import advance_months
+from app.services.billing_locks import BillingLocks
 
 logger = logging.getLogger(__name__)
 
@@ -169,11 +170,9 @@ def complete_retail_cycle_for_invoice(db: Session, invoice: Invoice) -> None:
     """Settlement subscriber step: complete the retail cycle a paid invoice belongs to."""
     if invoice.purpose != InvoicePurpose.CYCLE_CHARGE:
         return
-    cycle = db.execute(
-        select(BillingCycle)
-        .where(BillingCycle.invoice_id == invoice.id)
-        .with_for_update()
-    ).scalar_one_or_none()
+    cycle = BillingLocks.billing_cycle(
+        db, select(BillingCycle).where(BillingCycle.invoice_id == invoice.id)
+    )
     if cycle is None or cycle.service_billing is None:
         return
     if not is_retail(cycle.service_billing):

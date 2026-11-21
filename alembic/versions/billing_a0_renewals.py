@@ -40,11 +40,17 @@ def _backfill() -> None:
         sa.column("cycle_interval", sa.String),
         sa.column("interval_months", sa.Integer),
     )
+    item_columns = {
+        column["name"] for column in sa.inspect(bind).get_columns("order_items")
+    }
     items = sa.table(
         "order_items",
+        sa.column("id", sa.Integer),
         sa.column("service_id", sa.Integer),
         sa.column("cycle_interval", sa.String),
+        *([sa.column("fulfill_status", sa.String)] if "fulfill_status" in item_columns else []),
     )
+    has_fulfil_status = "fulfill_status" in item_columns
     last_id = 0
     while True:
         rows = bind.execute(
@@ -58,14 +64,30 @@ def _backfill() -> None:
         retail_services = [row.service_id for row in rows if row.reseller_id is None]
         intervals: dict[int, str] = {}
         if retail_services:
-            for service_id, interval in bind.execute(
-                sa.select(items.c.service_id, items.c.cycle_interval).where(
-                    items.c.service_id.in_(retail_services)
-                )
+            # A service can have several order items (re-orders, upgrades). The
+            # billing renews on the item that produced the running service: the
+            # most recent fulfilled item with a known interval, else the most
+            # recent item with a known interval. Rows are read in id order and
+            # ranked explicitly, so the choice never depends on row order.
+            chosen: dict[int, tuple[bool, int]] = {}
+            columns = [items.c.id, items.c.service_id, items.c.cycle_interval]
+            if has_fulfil_status:
+                columns.append(items.c.fulfill_status)
+            for item in bind.execute(
+                sa.select(*columns)
+                .where(items.c.service_id.in_(retail_services))
+                .order_by(items.c.id)
             ):
-                value = (interval or "").strip().lower()
-                if value in _INTERVAL_MONTHS:
-                    intervals[service_id] = value
+                value = (item.cycle_interval or "").strip().lower()
+                if value not in _INTERVAL_MONTHS:
+                    continue
+                fulfilled = has_fulfil_status and (
+                    str(item.fulfill_status or "").lower() == "fulfilled"
+                )
+                rank = (bool(fulfilled), int(item.id))
+                if item.service_id not in chosen or rank > chosen[item.service_id]:
+                    chosen[item.service_id] = rank
+                    intervals[item.service_id] = value
         for row in rows:
             interval = intervals.get(row.service_id, "monthly") if row.reseller_id is None else "monthly"
             bind.execute(
