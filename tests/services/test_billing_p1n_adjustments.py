@@ -64,7 +64,7 @@ def rec(db_session, monkeypatch):
     monkeypatch.setattr(database, "SessionLocal", TestingSessionLocal)
     recorder = Recorder()
 
-    def fake_recompute(db, invoice, *, cause):
+    def fake_recompute(db, invoice, *, cause, payment=None):
         recorder.recomputes.append((invoice.id, cause))
         return invoice
 
