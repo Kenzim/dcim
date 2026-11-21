@@ -319,7 +319,7 @@ services:
     restart: unless-stopped
 
   mysql:
-    image: mariadb:11
+    image: mariadb:11.8
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-dcim}
