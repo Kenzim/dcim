@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ServiceStatus, ServiceType
+from app.plugin_host import events as plugin_events
 from app.services.service_resource import service_linked_server, vm_placement
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
 from app.services.ipmi_kvm import kvm_ready
@@ -478,6 +479,13 @@ async def client_power_service(
     action = (body.action or "").lower()
     server = service_linked_server(db, service)
     _validate_client_power_action(service, action, server)
+    await plugin_events.guard_power(
+        db,
+        service,
+        action,
+        source="client_mcp" if auth.get("type") == "client_mcp_key" else "client",
+        actor_user_id=int(user_id),
+    )
 
     plugin, _ = await _client_plugin_instance(db, service)
 

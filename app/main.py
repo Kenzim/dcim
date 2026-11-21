@@ -58,6 +58,11 @@ def _start_background_workers() -> list[asyncio.Task]:
 
         tasks.append(asyncio.create_task(run_alert_worker()))
         logger.info("In-process alert worker enabled")
+    if settings.run_plugin_worker:
+        from app.workers.plugins import run_plugin_worker
+
+        tasks.append(asyncio.create_task(run_plugin_worker()))
+        logger.info("In-process plugin worker enabled")
     return tasks
 
 
@@ -348,6 +353,13 @@ api_router.include_router(mcp_keys_admin_api.router, tags=["mcp-admin"])
 # Alerts: staff list, acknowledge, silence, channels, settings
 from app.api import alerts as alerts_api
 api_router.include_router(alerts_api.router, tags=["alerts-admin"])
+
+# Plugin system: admin management, service render documents and actions (docs/plugin-system.md)
+from app.api import plugin_host as plugin_host_api
+api_router.include_router(plugin_host_api.admin_router)
+api_router.include_router(plugin_host_api.admin_service_router)
+api_router.include_router(plugin_host_api.client_router)
+api_router.include_router(plugin_host_api.billing_router)
 
 # Client MCP keys: client portal (own keys) and staff view/revoke
 from app.api import client_mcp_keys as client_mcp_keys_api

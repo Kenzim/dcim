@@ -130,6 +130,14 @@ class Settings(BaseSettings):
     alert_delivery_batch_size: int = 50
     alert_delivery_timeout_seconds: float = 10.0
 
+    # Plugin system (docs/plugin-system.md). Packages live outside app/.
+    plugins_dir: str = "plugins"
+    run_plugin_worker: bool = True
+    plugin_worker_interval_seconds: int = 5
+    plugin_guest_exec_per_minute: int = 6
+    plugin_guest_exec_per_minute_total: int = 60
+    plugin_http_allow_plain: bool = False
+
     # Standard-library SMTP delivery for the durable notification outbox.
     smtp_enabled: bool = False
     smtp_host: Optional[str] = None

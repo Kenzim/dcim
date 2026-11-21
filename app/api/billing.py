@@ -1957,6 +1957,9 @@ async def power_control(
             if blocked:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
 
+        from app.plugin_host import events as plugin_events
+
+        await plugin_events.guard_power(db, service, action, source="billing")
         plugin_instance, _srv = await _billing_get_plugin_instance(db, service)
         if not plugin_instance:
             raise HTTPException(

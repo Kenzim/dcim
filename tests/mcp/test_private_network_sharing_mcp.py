@@ -192,7 +192,7 @@ def test_tool_names_and_sizes_are_unchanged_by_sharing():
     from app.mcp.client.instance import client_mcp
     from app.mcp.instance import mcp
 
-    assert len(asyncio.run(mcp.list_tools())) == 66
+    assert len(asyncio.run(mcp.list_tools())) == 67
     listed = client_mcp._tool_manager.list_tools()
     assert sorted(t.name for t in listed) == ["account", "billing", "service_action", "services", "storage", "tickets"]
     size = len(

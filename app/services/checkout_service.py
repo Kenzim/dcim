@@ -35,7 +35,7 @@ from app.models.storefront import (
     ProductOptionValue,
 )
 from app.services.commerce_recurring_service import CommerceRecurringService
-from app.services.commerce_webhook_service import CommerceWebhookService
+from app.plugin_host import events as plugin_events
 from app.services.email_message_service import EmailEvent, EmailMessageService
 from app.services.invoice_service import InvoiceService
 from app.services.provisioning import (
@@ -722,7 +722,7 @@ class CheckoutService:
                 note="Fulfillment complete",
             )
             try:
-                CommerceWebhookService.enqueue(
+                plugin_events.emit(
                     db,
                     "order.paid",
                     {
@@ -734,7 +734,7 @@ class CheckoutService:
                     },
                 )
                 if locked.invoice_id is not None:
-                    CommerceWebhookService.enqueue(
+                    plugin_events.emit(
                         db,
                         "invoice.paid",
                         {

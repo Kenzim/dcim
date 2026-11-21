@@ -35,7 +35,7 @@ def test_single_head_chained_after_storage_failover():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["private_network_dhcp"]
+    assert "private_network_dhcp" in script.get_revision("plugin_system").down_revision
     assert script.get_revision("private_network_dhcp").down_revision == "storage_failover"
 
 

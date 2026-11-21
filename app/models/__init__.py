@@ -287,3 +287,27 @@ __all__ += [
     "NotificationDelivery",
     "VmBackupRun",
 ]
+
+from app.models.plugin_host import (  # noqa: E402
+    PluginDelivery,
+    PluginInstallation,
+    PluginLog,
+    PluginSchedule,
+    PluginServiceLink,
+    PluginSetting,
+    PluginState,
+)
+
+from app.plugin_host import listeners as _plugin_listeners  # noqa: E402
+
+_plugin_listeners.install()
+
+__all__ += [
+    "PluginDelivery",
+    "PluginInstallation",
+    "PluginLog",
+    "PluginSchedule",
+    "PluginServiceLink",
+    "PluginSetting",
+    "PluginState",
+]

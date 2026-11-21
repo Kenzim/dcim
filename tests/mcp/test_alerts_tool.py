@@ -68,6 +68,6 @@ def test_staff_tool_count_and_size_budget():
 
     tools = asyncio.run(mcp.list_tools())
     names = {t.name for t in tools}
-    assert "alerts" in names and len(tools) == 66
+    assert "alerts" in names and "plugins" in names and len(tools) == 67
     size = len(json.dumps([t.model_dump(mode="json", exclude_none=True) for t in tools], separators=(",", ":")))
     assert size < 38_000

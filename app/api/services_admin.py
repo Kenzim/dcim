@@ -37,6 +37,7 @@ from app.services.private_network_service import PrivateNetworkService
 from app.services.retained_restore_service import power_block_reason
 from app.services import backup_slot_service
 from app.services.storage_service import StorageService
+from app.plugin_host import events as plugin_events
 from app.services.server_activity_logger import (
     log_server_activity_attempt,
     log_server_activity_success,
@@ -901,6 +902,13 @@ async def admin_vm_power_action(
     blocked = power_block_reason(service, action)
     if blocked:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
+    await plugin_events.guard_power(
+        db,
+        service,
+        action,
+        source="mcp" if auth.get("type") == "mcp_key" else "admin",
+        actor_user_id=auth.get("user_id"),
+    )
     log_server_activity_attempt(
         db,
         service_id=service.id,

@@ -230,6 +230,9 @@ async def console_power_action(body: VmVncPowerRequest, db: DbDep):
     blocked = power_block_reason(service, action)
     if blocked:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
+    from app.plugin_host import events as plugin_events
+
+    await plugin_events.guard_power(db, service, action, source="console")
     try:
         if action == "on":
             ok = await plugin.power_on()

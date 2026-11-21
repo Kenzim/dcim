@@ -67,6 +67,7 @@ CATEGORY_LIST = (
         "Shared private networks",
         "An invitation to a shared private network, or a change to who is on a network you share.",
     ),
+    Category("plugin", "Notices from plugins", "A notice about one of your services from an add-on feature."),
 )
 CATEGORIES = {c.key: c for c in CATEGORY_LIST}
 
@@ -91,7 +92,9 @@ _MCP_KEY_TEXT = {
     "admin_update": "An MCP key on your account was changed.",
     "admin_delete": "An MCP key on your account was deleted.",
 }
-_ALLOWED_DATA = ("service_id", "service_name", "share_name", "percent", "ip", "user_agent", "sftp_user")
+_ALLOWED_DATA = (
+    "service_id", "service_name", "share_name", "percent", "ip", "user_agent", "sftp_user", "plugin_id"
+)
 
 
 # ------------------------------------------------------------------ preferences
