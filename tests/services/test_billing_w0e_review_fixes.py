@@ -987,3 +987,114 @@ def test_lock_keeps_unflushed_changes_of_the_caller(db_session):
             Invoice.id == invoice.id, Invoice.description == "changed before the lock"
         )
     ) == 1
+
+
+# Follow-up review of the W0e fixes.
+
+
+def _locked_tables(statements) -> list[str]:
+    return [
+        table.name
+        for s in statements
+        if getattr(s, "is_select", False) and s._for_update_arg is not None
+        for table in s.get_final_froms()
+    ]
+
+
+@pytest.fixture
+def executed(monkeypatch):
+    from sqlalchemy.orm import Session
+
+    statements: list = []
+    original = Session.execute
+
+    def recording(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return original(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "execute", recording)
+    return statements
+
+
+def test_admin_refund_follows_the_lock_order(db_session, executed):
+    from app.models.reseller import InvoicePurpose
+    from app.services.credit_ledger_service import CreditLedgerService
+    from app.services.invoice_service import InvoiceService
+    from app.services.payments.refunds import PaymentRefundService
+    from app.services.payments.registry import PaymentGatewayRegistry
+    from tests.services.test_billing_a0_money_path import _reseller
+    from tests.services.test_payment_refunds import FakeRefundGateway
+
+    reseller = _reseller(db_session, 1)
+    invoice = InvoiceService.create(
+        db_session,
+        reseller_id=reseller.id,
+        purpose=InvoicePurpose.CREDIT_TOPUP,
+        amount_cents=3000,
+        description="top-up",
+    )
+    invoice.status = InvoiceStatus.PAID
+    payment = Payment(
+        invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.SUCCEEDED,
+        amount_cents=3000, currency="USD", external_ref="pi_refund_order_w0e",
+    )
+    db_session.add(payment)
+    db_session.flush()
+    CreditLedgerService.credit(
+        db_session, reseller.id, 3000, description="Paid top-up", invoice_id=invoice.id,
+        payment_id=payment.id, reference_type="topup_invoice", reference_id=str(invoice.id),
+        idempotency_key=f"topup-invoice:{invoice.id}",
+    )
+    db_session.commit()
+    registry = PaymentGatewayRegistry()
+    registry.register(FakeRefundGateway())
+    executed.clear()
+    refunded = PaymentRefundService(registry).refund(db_session, payment.id, reason="dup")
+    db_session.commit()
+    locked = _locked_tables(executed)
+    # Every FOR UPDATE, including ones outside BillingLocks, follows reseller, invoice, payment.
+    assert locked[0] == "resellers", locked
+    assert locked.index("invoices") < locked.index("payments"), locked
+    assert refunded.status == PaymentStatus.REFUNDED
+
+
+def test_per_account_coupon_count_at_payment_is_a_locking_read(db_session, provisioned, executed):
+    from app.services.billing.manual_payments import record_manual_payment
+    from tests.services.test_billing_a0_money_path import _coupon
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(db_session, max_uses_per_account=1)
+    order = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+    executed.clear()
+    record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
+    settlement.commit_and_fulfil(db_session)
+    # SQLite ignores FOR UPDATE; on MySQL the locking read sees committed redemptions.
+    assert "coupon_redemptions" in _locked_tables(executed)
+
+
+def test_invoice_less_order_releases_coupon_use_when_provisioning_fails(db_session, monkeypatch):
+    from app.services.checkout_service import CheckoutService
+    from tests.services.test_billing_a0_money_path import _coupon, _redemptions
+
+    monkeypatch.setattr(
+        "app.services.checkout_service.ProvisioningService.create",
+        lambda db, req, actor: (_ for _ in ()).throw(RuntimeError("no capacity")),
+    )
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=1000)
+    coupon = _coupon(db_session, amount_off_cents=1000, max_uses=1)
+    order = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
+    assert order.invoice_id is None and order.coupon_code == coupon.code
+    CheckoutService.mark_paid_and_fulfill(db_session, order)
+    db_session.commit()
+    assert db_session.get(Order, order.id).status == OrderStatus.PROVISION_ERROR
+    db_session.refresh(coupon)
+    assert (coupon.used_count, _redemptions(db_session, coupon)) == (0, 0)
+    released = db_session.execute(
+        select(UserAuditEvent).where(
+            UserAuditEvent.action == "billing.coupon_usage_released",
+            UserAuditEvent.resource_id == str(coupon.id),
+        )
+    ).scalars().all()
+    assert [event.event_metadata["reason"] for event in released] == ["provisioning_failed"]

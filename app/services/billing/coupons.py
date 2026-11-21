@@ -44,6 +44,7 @@ def coupon_by_code(db: Session, code: Optional[str]) -> Optional[Coupon]:
 
 
 def account_redemptions(db: Session, coupon_id: int, billing_account_id: int) -> int:
+    """Plain count, for quoting; payment-time checks use ``_locked_account_redemptions``."""
     return int(
         db.scalar(
             select(func.count(CouponRedemption.id)).where(
@@ -157,11 +158,28 @@ def _limits_exceeded(
     if (
         billing_account_id is not None
         and coupon.max_uses_per_account is not None
-        and account_redemptions(db, coupon.id, billing_account_id)
+        and _locked_account_redemptions(db, coupon.id, billing_account_id)
         >= int(coupon.max_uses_per_account)
     ):
         exceeded.append("max_uses_per_account")
     return exceeded
+
+
+def _locked_account_redemptions(db: Session, coupon_id: int, billing_account_id: int) -> int:
+    """Count an account's redemptions with a locking read.
+
+    A locking read sees the latest committed rows on MySQL under REPEATABLE
+    READ, where a plain COUNT would read the transaction's older snapshot.
+    """
+    rows = db.execute(
+        select(CouponRedemption.id)
+        .where(
+            CouponRedemption.coupon_id == coupon_id,
+            CouponRedemption.billing_account_id == billing_account_id,
+        )
+        .with_for_update()
+    ).all()
+    return len(rows)
 
 
 def release_coupon_usage(

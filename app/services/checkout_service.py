@@ -40,6 +40,7 @@ from app.services.billing.coupons import (
     check_stored_rules,
     first_invoice_only,
     record_coupon_usage,
+    release_coupon_usage,
 )
 from app.services.billing.order_refunds import apply_order_refund_policy
 from app.services.commerce_recurring_service import CommerceRecurringService
@@ -726,6 +727,9 @@ class CheckoutService:
                 note="Provisioning failed",
             )
             apply_order_refund_policy(db, locked, reason="provisioning_failed")
+            if locked.invoice_id is None and locked.coupon_code:
+                # No invoice means no money was taken, so the use counted above is given back.
+                release_coupon_usage(db, order=locked, reason="provisioning_failed")
             logger.warning(
                 "Order %s provision errors; refund policy applied",
                 locked.order_number,
