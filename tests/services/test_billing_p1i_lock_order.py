@@ -114,3 +114,55 @@ def test_credit_note_above_the_invoice_total_takes_at_most_the_invoice_tax(db_se
         outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key="above-cn",
     )
     assert (note.total_cents, note.tax_cents) == (1500, 200)
+
+
+def test_credit_note_takes_the_tax_of_a_taxed_debit_note(db_session, account):
+    from app.models.commerce_invoice_ext import InvoiceLineKind
+    from app.services.invoice_service import NewLine
+
+    invoice = InvoiceService.create(
+        db_session, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=1200,
+        lines=[NewLine("Server", 1000, kind=InvoiceLineKind.PRODUCT, tax_cents=200)],
+    )
+    debit = InvoiceAdjustmentService.issue_debit_note(
+        db_session, invoice, lines=[{"description": "Late fee", "unit_cents": 250, "tax_cents": 50}],
+        reason=AdjustmentReason.LATE_FEE, actor_user_id=None, idempotency_key="taxed-dn",
+    )
+    assert (debit.total_cents, debit.tax_cents) == (300, 50)
+    half = InvoiceAdjustmentService.issue_credit_note(
+        db_session, invoice, amount_cents=750, reason=AdjustmentReason.GOODWILL,
+        outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key="taxed-cn-1",
+    )
+    assert (half.total_cents, half.tax_cents) == (750, 125)
+    rest = InvoiceAdjustmentService.issue_credit_note(
+        db_session, invoice, amount_cents=750, reason=AdjustmentReason.GOODWILL,
+        outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key="taxed-cn-2",
+    )
+    # Against the worth and tax left after the first note: 750 of 750 takes the remaining 125.
+    assert (rest.total_cents, rest.tax_cents) == (750, 125)
+    assert half.tax_cents + rest.tax_cents == 250
+    # A retry of the first note, after the second, returns it unchanged.
+    again = InvoiceAdjustmentService.issue_credit_note(
+        db_session, invoice, amount_cents=750, reason=AdjustmentReason.GOODWILL,
+        outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key="taxed-cn-1",
+    )
+    assert again.id == half.id
+
+
+def test_one_credit_note_for_the_whole_worth_carries_the_debit_note_tax(db_session, account):
+    from app.models.commerce_invoice_ext import InvoiceLineKind
+    from app.services.invoice_service import NewLine
+
+    invoice = InvoiceService.create(
+        db_session, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=1200,
+        lines=[NewLine("Server", 1000, kind=InvoiceLineKind.PRODUCT, tax_cents=200)],
+    )
+    InvoiceAdjustmentService.issue_debit_note(
+        db_session, invoice, lines=[{"description": "Late fee", "unit_cents": 250, "tax_cents": 50}],
+        reason=AdjustmentReason.LATE_FEE, actor_user_id=None, idempotency_key="whole-dn",
+    )
+    note = InvoiceAdjustmentService.issue_credit_note(
+        db_session, invoice, amount_cents=1500, reason=AdjustmentReason.GOODWILL,
+        outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key="whole-cn",
+    )
+    assert (note.total_cents, note.tax_cents) == (1500, 250)

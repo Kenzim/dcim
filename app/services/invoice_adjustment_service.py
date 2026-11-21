@@ -358,14 +358,45 @@ def _snapshots(db: Session, invoice: Invoice, account_id: Optional[int], now: da
     return seller, buyer
 
 
-def _default_amount_lines(invoice: Invoice, amount_cents: int, description: str) -> list[NoteLine]:
-    # The invoice's own tax, in proportion to the part of the amount within its
-    # total; an amount above the total (worth raised by debit notes) takes no
-    # more of the invoice's tax than the invoice carried.
-    total = int(invoice.amount_cents)
-    tax = refund_tax_proportional(
-        min(amount_cents, total), min(int(invoice.tax_cents or 0), total), total
+def _worth_and_tax_before(db: Session, invoice: Invoice, key: str) -> tuple[int, int]:
+    """The invoice's worth and tax: its own, plus debit notes, less credit notes.
+
+    Only notes issued before the note with idempotency key ``key`` count, so a
+    retry of that note sees the figures its first request saw.
+    """
+    stmt = (
+        select(
+            InvoiceAdjustment.kind,
+            func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
+            func.coalesce(func.sum(InvoiceAdjustment.tax_cents), 0),
+        )
+        .where(InvoiceAdjustment.invoice_id == invoice.id)
+        .group_by(InvoiceAdjustment.kind)
     )
+    earlier = db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.idempotency_key == key))
+    if earlier is not None:
+        stmt = stmt.where(InvoiceAdjustment.id < earlier)
+    worth, tax = int(invoice.amount_cents), int(invoice.tax_cents or 0)
+    for kind, total_sum, tax_sum in db.execute(stmt).all():
+        sign = 1 if _value(kind) == AdjustmentKind.DEBIT.value else -1
+        worth += sign * int(total_sum)
+        tax += sign * int(tax_sum)
+    return worth, tax
+
+
+def _default_amount_lines(
+    db: Session, invoice: Invoice, amount_cents: int, description: str, key: str
+) -> list[NoteLine]:
+    # The tax in proportion to the invoice's current worth and tax, so a note
+    # crediting a taxed debit note takes that note's tax too. An amount above
+    # the worth is refused by the caller's checks; its tax here is bounded.
+    worth, current_tax = _worth_and_tax_before(db, invoice, key)
+    if worth <= 0:
+        tax = 0
+    else:
+        tax = refund_tax_proportional(
+            min(amount_cents, worth), max(0, min(current_tax, worth)), worth
+        )
     return [
         NoteLine(
             kind=InvoiceLineKind.ADJUSTMENT,
@@ -570,7 +601,11 @@ class InvoiceAdjustmentService:
 
         if amount_cents is not None:
             note_lines = _default_amount_lines(
-                invoice, amount_cents, reason_text or f"Credit note for invoice {_display(invoice)}"
+                db,
+                invoice,
+                amount_cents,
+                reason_text or f"Credit note for invoice {_display(invoice)}",
+                key,
             )
         else:
             note_lines = _normalise_lines(db, invoice, lines)
@@ -690,7 +725,9 @@ class InvoiceAdjustmentService:
         reason_text = _check_text(refund.reason_text)
         amount = _integer(int(refund.amount_cents), "refund amount", minimum=1)
         if lines is None:
-            note_lines = _default_amount_lines(invoice, amount, f"Refund of payment {refund.payment_id}")
+            note_lines = _default_amount_lines(
+                db, invoice, amount, f"Refund of payment {refund.payment_id}", key
+            )
         else:
             note_lines = _normalise_lines(db, invoice, lines)
         fingerprint = _fingerprint(
