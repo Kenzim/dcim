@@ -6,10 +6,12 @@ database; reading a setting returns the stored value when it is present and
 valid, otherwise the default. A stored value that no longer validates is
 ignored (and logged), never raised.
 
-Stored rows use the key ``setting:<name>`` so they cannot collide with the
-keys other features keep in the same table (``alerting``, ``alerting_status``,
-and the free-form keys of the commerce settings endpoints). The row value is
-``{"value": <typed value>}``.
+Stored rows use the key ``setting:<name>`` so they do not collide with the
+keys other features keep in the same table (``alerting``, ``alerting_status``).
+The generic ``/api/admin/commerce/settings/{key}`` endpoints write free-form
+keys and must not be used for this prefix; any row read here is validated, so
+a value written around this module is ignored rather than trusted. The row
+value is ``{"value": <typed value>}``.
 
 Nothing is cached: every read goes to the database, so several processes always
 agree. ``set_setting`` and ``reset_setting`` flush but never commit; the caller
@@ -428,12 +430,22 @@ def set_setting(
 def reset_setting(
     db: Session, key: str, actor_user_id: Optional[int] = None
 ) -> bool:
-    """Remove the stored override so the default applies; True if one existed."""
+    """Remove the stored override so the default applies; True if one existed.
+
+    Raises ``SettingValidationError`` if the default would break a rule with
+    another stored setting.
+    """
     definition = _definition(key)
     row = db.get(SystemSetting, definition.storage_key)
     if row is None:
         return False
     previous = _resolve_all(db)[key]
+    try:
+        _check_rules(db, key, previous.default)
+    except SettingValidationError as exc:
+        raise SettingValidationError(
+            f"Resetting {key} to its default would break a rule: {exc}"
+        ) from exc
     db.delete(row)
     db.flush()
     AuditService.log(

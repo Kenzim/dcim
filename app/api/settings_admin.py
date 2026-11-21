@@ -82,6 +82,12 @@ def update_setting(key: str, body: SettingUpdateBody, db: DbDep, auth: AdminDep)
 @router.delete("/{key}", responses=COMMON_ERROR_RESPONSES)
 def reset_setting(key: str, db: DbDep, auth: AdminDep):
     _definition_or_404(key)
-    settings_store.reset_setting(db, key, auth.get("user_id"))
+    try:
+        settings_store.reset_setting(db, key, auth.get("user_id"))
+    except SettingValidationError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     db.commit()
     return _item(key, settings_store.resolve_all(db)[key])

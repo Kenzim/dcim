@@ -155,3 +155,17 @@ def test_effective_config_applies_overrides_and_derived_properties(db_session):
     assert config.recurring_billing_worker_batch_size == base.recurring_billing_worker_batch_size
     assert base.recurring_billing_grace_days == 7
     assert base.recurring_billing_retry_day_offsets == (1, 3, 5)
+
+
+def test_reset_refuses_when_default_would_break_a_rule(db_session):
+    default_max = store.get_setting(db_session, "reseller_topup_max_cents")
+    store.set_setting(db_session, "reseller_topup_max_cents", default_max * 10)
+    store.set_setting(db_session, "reseller_topup_min_cents", default_max * 2)
+
+    with pytest.raises(SettingValidationError):
+        store.reset_setting(db_session, "reseller_topup_max_cents")
+
+    assert _row(db_session, "reseller_topup_max_cents").value == {"value": default_max * 10}
+    assert store.get_setting(db_session, "reseller_topup_min_cents") == default_max * 2
+    assert store.reset_setting(db_session, "reseller_topup_min_cents") is True
+    assert store.reset_setting(db_session, "reseller_topup_max_cents") is True
