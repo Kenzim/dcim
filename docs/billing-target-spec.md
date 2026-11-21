@@ -377,3 +377,54 @@ A rough total, one engineer working serially, is on the order of 12 to 18 months
 5. Keep both reseller balance caches until A3 has run in shadow mode with zero mismatches, then retire `resellers.cached_balance_cents` in a later contract step.
 6. Quotes in phase 4; affiliates in phase 5, as a plugin.
 7. Seam names aligned with `docs/plugin-system.md` in section 1.
+
+## 14. Internal billing events
+
+Event names are not listed here. The one list of event names, with their permissions and payload fields, is the plugin catalogue `app/plugin_host/catalogue.py` (documented in `docs/plugin-system.md` sections 6.2.1 and 17.1). A billing fact that other code or plugins should see is added there as an `EventSpec` with permission `billing.read` and published with `app.plugin_host.events.emit(db, name, payload)`, which also queues the outbound commerce webhook for names in that catalogue. This section describes the settlement function and the in-process subscriber list that billing uses for its own follow-up steps.
+
+### 14.1 The settlement function
+
+`settle_invoice(db, invoice_id, *, payment=None)` in `app/services/billing/settlement.py` is the only place an invoice becomes paid. Every path that records money ends there: `PaymentOrchestrator.finalize_success` (card webhook, saved-method charge, USDT) and reseller credit both call it through `InvoiceService.mark_paid_if_fully_allocated`, and admin mark-paid first records a `Payment(gateway="manual")` for the outstanding amount (`app/services/billing/manual_payments.py`).
+
+It locks the invoice row, sums succeeded payment allocations and then:
+
+- if they cover the total and the invoice was not yet paid, sets it PAID and fires the invoice paid event once (on that transition only, so replays and repeat calls fire nothing);
+- if a paid invoice has dropped below its total, reopens it (unchanged behaviour);
+- if money arrives for a voided order invoice, or a retail invoice is overpaid, keeps the invoice as it is and records a refund review (section 14.4). A reseller invoice that is overpaid still raises, as before.
+
+It never marks anything paid before the gateway has confirmed the payment; pending card payments do not count.
+
+### 14.2 Subscriber list API
+
+The invoice paid event is a plain in-process list, not a bus:
+
+- `subscribe_invoice_paid(name, handler, *, applies=..., isolated=True)` registers or replaces (by name) a handler `handler(db, InvoicePaid(invoice, payment))`; `applies(invoice)` filters which invoices it sees.
+- `unsubscribe_invoice_paid(name)` removes one; `invoice_paid_subscribers()` lists the names in run order.
+- Handlers run in registration order inside the caller's transaction. An `isolated` handler (a side effect such as email or the plugin event) runs in its own savepoint; if it raises, its work is rolled back and logged and the settlement stands. A non-isolated handler runs bare and handles its own errors.
+
+Default subscribers, in order (`app/services/billing/settlement_subscribers.py`):
+
+| Name | Applies to | What it does |
+|---|---|---|
+| `coupon_usage` | invoices with an order | counts the order's coupon use once per order (`app/services/billing/coupons.py`) |
+| `complete_billing_cycle` | retail cycle invoices | marks the cycle paid and schedules the next period by `interval_months`; reseller cycles are still completed by the recurring billing worker, because that can unsuspend services and lift reseller holds |
+| `publish_invoice_paid` | invoices with a billing account | the only `emit(db, "invoice.paid", ...)` call, payload `invoice_id`, `billing_account_id`, `invoice_number`, `order_id` |
+| `invoice_paid_email` | invoices with a billing account | queues the `invoice_paid` email (idempotency key `invoice:{id}:paid`) |
+| `fulfil_order` | order charge invoices (not isolated) | `CheckoutService.mark_paid_and_fulfill`, which emits `order.paid`; provisioning errors end in PROVISION_ERROR with a refund review, as before |
+
+Provisioning commits, which a savepoint cannot survive. When settlement runs inside a savepoint (the payment webhook), `fulfil_order` only moves the order to PAID_PENDING_FULFILLMENT and queues it; the webhook commits the settlement and then fulfils the queued orders (`run_deferred_fulfilment`). An order whose fulfilment then fails stays in PAID_PENDING_FULFILLMENT for an admin to accept again.
+
+### 14.3 Event names billing uses
+
+| Name | Status |
+|---|---|
+| `invoice.paid` | emitted, by `publish_invoice_paid` only |
+| `order.paid` | emitted, by `CheckoutService.mark_paid_and_fulfill` only |
+| `invoice.created`, `invoice.overdue`, `payment.failed`, `payment.refunded`, `credit.applied`, `service.suspended` for non-payment | not emitted by billing yet; when added they go into the plugin catalogue first. (`service.suspended` is already emitted for every suspension by the service flush listener.) |
+
+The retail renewal invoice email uses the email event `invoice_created`, which is an email template name, not a bus event.
+
+### 14.4 Refund reviews
+
+Until credit notes and the refund engine exist (phase 1, A2 and A4), money that may need returning is recorded for a person to decide, and no money moves. `app/services/billing/order_refunds.py` records the review on the order's admin notes, on the payment's metadata where there is one, and as an audit event `billing.refund_review`. The setting `billing_order_refund_policy` (`manual_review`, `original_method` or `credit`) is recorded with each review; in phase 0 every value is handled as a manual review because `PaymentRefundService` marks a refund successful while Stripe still reports it pending and retail accounts have no credit ledger yet (A3).
+
