@@ -84,7 +84,14 @@ def record_manual_payment(
     if amount_cents is not None and (type(amount_cents) is not int or amount_cents <= 0):
         raise ManualPaymentError("amount_cents must be a positive integer number of cents")
     mode = engine_mode(db)
-    invoice = InvoiceService.get_for_update(db, invoice_id)
+    if mode == "v2":
+        from app.services.billing_locks import BillingLocks
+
+        # v2 settlement may credit an overpayment and a write-off issues a
+        # note: reseller and account come before the order and the invoice.
+        invoice = BillingLocks.for_invoice(db, invoice_id, reseller=True, billing_account=True)
+    else:
+        invoice = InvoiceService.get_for_update(db, invoice_id)
     if invoice is None:
         raise ManualPaymentError("Invoice not found")
     if invoice.status == InvoiceStatus.VOID:

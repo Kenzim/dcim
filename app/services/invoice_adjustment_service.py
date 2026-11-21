@@ -578,7 +578,9 @@ class InvoiceAdjustmentService:
         if amount_cents is not None:
             _integer(amount_cents, "amount_cents", minimum=1)
         _require_engine_v2(db)
-        invoice = _lock_invoice(db, invoice)
+        # The recompute at the end may credit an overpayment: reseller and
+        # account are locked before the invoice, as settlement locks them.
+        invoice = _lock_invoice(db, invoice, reseller=True, billing_account=True)
 
         if amount_cents is not None:
             note_lines = _default_amount_lines(
@@ -644,7 +646,7 @@ class InvoiceAdjustmentService:
         if reason not in DEBIT_REASONS:
             raise InvoiceAdjustmentError(f"reason {reason.value} is not allowed on a debit note")
         _require_engine_v2(db)
-        invoice = _lock_invoice(db, invoice)
+        invoice = _lock_invoice(db, invoice, reseller=True, billing_account=True)
 
         note_lines = _normalise_lines(db, invoice, lines)
         outcome = AdjustmentOutcome.INCREASED_BALANCE
