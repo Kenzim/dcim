@@ -209,7 +209,8 @@ class PricePlanCycle(Base):
         ),
         CheckConstraint(
             "(interval_unit IS NULL AND interval_count IS NULL) OR "
-            "(interval_unit IN ('month','year') AND interval_count >= 1)",
+            "(interval_unit IS NOT NULL AND interval_count IS NOT NULL "
+            "AND interval_unit IN ('month','year') AND interval_count >= 1)",
             name="ck_price_plan_cycles_interval",
         ),
         CheckConstraint(
