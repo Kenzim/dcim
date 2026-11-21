@@ -625,13 +625,14 @@ class PaymentOrchestrator:
 
     @staticmethod
     def finalize_success(db: Session, payment: Payment) -> Invoice:
+        """Record a gateway-confirmed payment and settle its invoice."""
         payment.status = PaymentStatus.SUCCEEDED
         payment.processed_at = payment.processed_at or datetime.now(timezone.utc)
         payment.failure_code = None
         payment.failure_message = None
         db.flush()
         invoice = InvoiceService.mark_paid_if_fully_allocated(
-            db, payment.invoice_id
+            db, payment.invoice_id, payment=payment
         )
         if (
             invoice.status == InvoiceStatus.PAID

@@ -10,6 +10,7 @@ from app.services.payments.base import (
     GatewayChargeResult,
     GatewayCustomer,
     GatewayNotConfiguredError,
+    GatewayPaymentIntent,
     GatewayPaymentMethod,
     GatewayRefundResult,
     GatewayResultStatus,
@@ -173,6 +174,45 @@ class StripeGateway:
                 failure_code=str(getattr(exc, "code", None) or "stripe_error"),
                 failure_message="Stripe rejected the payment request",
             )
+
+    def create_payment_intent(
+        self,
+        *,
+        amount_cents: int,
+        currency: str,
+        idempotency_key: str,
+        metadata: Mapping[str, str],
+    ) -> GatewayPaymentIntent:
+        if type(amount_cents) is not int or amount_cents <= 0:
+            raise PaymentGatewayError("Stripe amount must be positive integer cents")
+        intent = self._stripe.PaymentIntent.create(
+            amount=amount_cents,
+            currency=currency.lower(),
+            automatic_payment_methods={"enabled": True},
+            metadata=dict(metadata),
+            api_key=self._secret_key,
+            idempotency_key=idempotency_key,
+        )
+        return self._payment_intent(intent)
+
+    def retrieve_payment_intent(self, *, external_ref: str) -> GatewayPaymentIntent:
+        intent = self._stripe.PaymentIntent.retrieve(
+            external_ref, api_key=self._secret_key
+        )
+        return self._payment_intent(intent)
+
+    @staticmethod
+    def _payment_intent(intent: Any) -> GatewayPaymentIntent:
+        amount = _value(intent, "amount")
+        currency = _value(intent, "currency")
+        secret = _value(intent, "client_secret")
+        return GatewayPaymentIntent(
+            external_ref=str(_value(intent, "id")),
+            client_secret=str(secret) if secret else None,
+            status=str(_value(intent, "status", "")),
+            amount_cents=int(amount) if amount is not None else None,
+            currency=str(currency).upper() if currency else None,
+        )
 
     @staticmethod
     def _intent_result(intent: Any) -> GatewayChargeResult:

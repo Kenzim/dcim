@@ -31,6 +31,10 @@ from app.services.payments.base import (
     NormalizedGatewayWebhookEvent,
     PaymentGatewayError,
 )
+from app.services.billing.settlement import (
+    discard_deferred_fulfilment,
+    run_deferred_fulfilment,
+)
 from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
 
@@ -92,6 +96,7 @@ class PaymentWebhookService:
             processed_at=datetime.now(timezone.utc),
         )
         try:
+            discard_deferred_fulfilment(db)
             with db.begin_nested():
                 db.add(record)
                 db.flush()
@@ -114,7 +119,12 @@ class PaymentWebhookService:
                     )
                 db.flush()
         except IntegrityError:
+            discard_deferred_fulfilment(db)
             return False
+        except Exception:
+            discard_deferred_fulfilment(db)
+            raise
+        run_deferred_fulfilment(db)
         return True
 
     @staticmethod
@@ -170,27 +180,6 @@ class PaymentWebhookService:
             raise PaymentGatewayError("Gateway payment currency does not match")
         payment.external_ref = event.external_ref
         PaymentOrchestrator.finalize_success(db, payment)
-        invoice = payment.invoice
-        if invoice is not None and invoice.billing_account_id is not None:
-            try:
-                from app.plugin_host import events as plugin_events
-
-                plugin_events.emit(
-                    db,
-                    "invoice.paid",
-                    {
-                        "invoice_id": invoice.id,
-                        "invoice_number": invoice.invoice_number,
-                        "billing_account_id": invoice.billing_account_id,
-                        "order_id": invoice.order_id,
-                    },
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to enqueue invoice.paid webhook for invoice %s",
-                    invoice.id,
-                    exc_info=True,
-                )
 
     @staticmethod
     def _handle_payment_disputed(
