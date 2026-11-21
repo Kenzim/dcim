@@ -675,6 +675,8 @@ class RefundService:
 
             cause = "dispute" if refund.reason == RefundReason.DISPUTE else "refund"
             InvoiceService.recompute(db, invoice, cause=cause)
+            if (refund.refund_metadata or {}).get("dispute_policy") == "debit_balance" and not _is_topup(invoice):
+                RefundService._dispute_debit_balance(db, refund, invoice)
         else:
             set_invoice_status(db, invoice, InvoiceStatus.FAILED, cause=legacy_reason)
         db.flush()
@@ -829,16 +831,24 @@ class RefundService:
         if _is_topup(invoice):
             RefundService._place_hold(db, refund, invoice, allow_negative=True)
             refund.ledger_entry_id = (refund.refund_metadata or {}).get("hold_entry_id")
-            return
-        if policy == "debit_balance":
-            CreditLedgerService.apply_to_invoice(
-                db,
-                invoice,
-                amount_cents=int(refund.amount_cents),
-                actor_user_id=None,
-                idempotency_key=f"dispute-apply:{refund.id}",
-                allow_negative_balance=True,
-            )
+
+    @staticmethod
+    def _dispute_debit_balance(db: Session, refund: Refund, invoice: Invoice) -> None:
+        """Policy ``debit_balance``: pay the reopened invoice from the balance, which may go negative."""
+        from app.services.credit_ledger_service import CreditLedgerService
+
+        payment = CreditLedgerService.apply_to_invoice(
+            db,
+            invoice,
+            amount_cents=int(refund.amount_cents),
+            actor_user_id=None,
+            idempotency_key=f"dispute-apply:{refund.id}",
+            allow_negative_balance=True,
+        )
+        refund.refund_metadata = {
+            **(refund.refund_metadata or {}),
+            "dispute_payment_id": getattr(payment, "id", None),
+        }
 
     @staticmethod
     def _place_hold(

@@ -445,6 +445,10 @@ api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"
 from app.api import settings_admin as settings_admin_api
 api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
 
+# Refunds and refund reviews (retail and reseller payments)
+from app.api import billing_refunds_admin as billing_refunds_admin_api
+api_router.include_router(billing_refunds_admin_api.router, tags=["billing-refunds-admin"])
+
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api
 api_router.include_router(scripts_admin_api.router, tags=["scripts-admin"])
