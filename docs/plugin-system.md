@@ -541,7 +541,7 @@ The WHMCS module (`whmcs/modules/servers/rackflow/`) renders plugin panels for e
 
 ### 14.1 Client area
 
-`rackflow_ClientArea` fetches `GET /api/billing/services/{id}/plugin-ui?audience=client` (short timeout, 5 seconds; any failure means no plugin section) and passes the panels to `clientarea.tpl`, which renders them by the rules of section 10.5 using WHMCS's Bootstrap classes. Actions post to `plugin_action.php`.
+`rackflow_ClientArea` fetches `GET /api/billing/services/{id}/plugin-ui?audience=client` (short timeout, 5 seconds; any failure means no plugin section) and passes the panels to `clientarea.tpl`, which renders them by the rules of section 10.5 using WHMCS's Bootstrap classes. Actions post to `plugin_action.php`; on success the module shows the message and reloads the page, which fetches the refreshed panels.
 
 ### 14.2 `plugin_action.php`
 
