@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.commerce_account import BillingAccount
@@ -168,22 +169,35 @@ def _lock_refund(db: Session, refund_id: int) -> tuple[_Locked, Refund]:
     return locked, refund
 
 
-def open_refund_cents(db: Session, payment_id: int, *, exclude_id: Optional[int] = None) -> int:
-    statement = select(func.coalesce(func.sum(Refund.amount_cents), 0)).where(
+def open_refund_cents(
+    db: Session, payment_id: int, *, exclude_id: Optional[int] = None, lock: bool = False
+) -> int:
+    """Pending and review refunds of a payment.
+
+    With ``lock`` (the payment is locked) the rows are read with a locking
+    read, which sees the latest committed rows on MySQL under REPEATABLE READ
+    where a plain SUM would read the transaction's older snapshot.
+    """
+    statement = select(Refund.id, Refund.amount_cents).where(
         Refund.payment_id == payment_id, Refund.status.in_(OPEN_STATUSES)
     )
     if exclude_id is not None:
         statement = statement.where(Refund.id != exclude_id)
-    return int(db.scalar(statement) or 0)
+    if lock:
+        statement = statement.with_for_update()
+    return sum(int(amount) for _id, amount in db.execute(statement).all())
 
 
-def refundable_cents(db: Session, payment: Payment) -> int:
-    """``amount - refunded - pending and review refunds`` (design 7.1)."""
+def refundable_cents(db: Session, payment: Payment, *, lock: bool = False) -> int:
+    """``amount - refunded - pending and review refunds`` (design 7.1).
+
+    Pass ``lock`` when the payment is locked and the answer decides a refund.
+    """
     return max(
         0,
         int(payment.amount_cents)
         - int(payment.refunded_cents or 0)
-        - open_refund_cents(db, payment.id),
+        - open_refund_cents(db, payment.id, lock=lock),
     )
 
 
@@ -295,8 +309,19 @@ class RefundService:
                 **({"credit_note_lines": list(credit_note_lines)} if credit_note_lines else {}),
             },
         )
-        db.add(refund)
-        db.flush()
+        try:
+            with db.begin_nested():
+                db.add(refund)
+                db.flush()
+        except IntegrityError:
+            # A concurrent request with the same key committed after this
+            # transaction's snapshot; the locking read sees its row.
+            if refund in db:
+                db.expunge(refund)
+            existing = RefundService._by_key(db, key, lock=True)
+            if existing is None:
+                raise
+            return RefundService._replay(existing, params)
         RefundService._audit(db, refund, "billing.refund_requested", actor_user_id)
 
         if destination != RefundDestination.GATEWAY:
@@ -315,6 +340,9 @@ class RefundService:
         refund.last_attempt_at = now
         refund.claim_token = token
         refund.claim_expires_at = now + CLAIM_TTL
+        # If this process dies during the call, the reconciler picks the refund
+        # up once the claim has expired.
+        refund.next_attempt_at = now + CLAIM_TTL
         refund_id = refund.id
         call = RefundService._call_args(db, refund)
         db.commit()
@@ -322,8 +350,11 @@ class RefundService:
         return RefundService.apply_outcome(db, refund_id, outcome, claim_token=token)
 
     @staticmethod
-    def _by_key(db: Session, key: str) -> Optional[Refund]:
-        return db.execute(select(Refund).where(Refund.idempotency_key == key)).scalar_one_or_none()
+    def _by_key(db: Session, key: str, *, lock: bool = False) -> Optional[Refund]:
+        statement = select(Refund).where(Refund.idempotency_key == key)
+        if lock:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return db.execute(statement).scalar_one_or_none()
 
     @staticmethod
     def _replay(existing: Refund, params: Mapping[str, Any]) -> Refund:
@@ -371,7 +402,7 @@ class RefundService:
             raise RefundError(
                 "Applied credit can only be refunded to credit", code="not_refundable"
             )
-        refundable = refundable_cents(db, payment)
+        refundable = refundable_cents(db, payment, lock=True)
         if refundable <= 0:
             raise RefundError("Nothing is left to refund on this payment", code="not_refundable")
         if amount_cents > refundable:
@@ -443,6 +474,7 @@ class RefundService:
             .values(
                 claim_token=token,
                 claim_expires_at=now + CLAIM_TTL,
+                next_attempt_at=now + CLAIM_TTL,
                 attempts=Refund.attempts + 1,
                 last_attempt_at=now,
             )
@@ -592,7 +624,7 @@ class RefundService:
         invoice = db.get(Invoice, payment.invoice_id)
         if payment.status not in REFUNDABLE_PAYMENT_STATUSES:
             return None
-        refundable = refundable_cents(db, payment)
+        refundable = refundable_cents(db, payment, lock=True)
         if refundable <= 0:
             return None
         mode = invoice_engine_mode(db)
@@ -863,11 +895,13 @@ class RefundService:
         if invoice_tax <= 0 or invoice_total <= 0:
             return 0
         previous = db.execute(
-            select(Refund.amount_cents, Refund.refund_metadata).where(
+            select(Refund.amount_cents, Refund.refund_metadata)
+            .where(
                 Refund.invoice_id == invoice.id,
                 Refund.status == RefundStatus.SUCCEEDED,
                 Refund.id != refund.id,
             )
+            .with_for_update()
         ).all()
         previous_cents = sum(int(amount) for amount, _meta in previous)
         already = sum(

@@ -137,6 +137,11 @@ class RefundReconciler:
             outcome = RefundReconciler._ask(adapter, external_ref, key, ref, refund, may_resend)
 
         refund = RefundService.apply_outcome(db, refund_id, outcome, claim_token=token, now=now)
+        if refund.status == RefundStatus.PENDING and refund.claim_token not in (None, token):
+            # The claim expired during the call and another worker holds the
+            # refund now; it decides what happens next.
+            db.commit()
+            return "skipped"
         if refund.status == RefundStatus.PENDING:
             refund = db.get(Refund, refund_id)
             if RefundReconciler._expired(refund, now):

@@ -58,7 +58,7 @@ class FakeGateway:
         if self.db is not None:
             self.in_transaction_during_call.append(self.db.in_transaction())
         self.calls.append(kwargs)
-        if isinstance(self.outcome, Exception):
+        if isinstance(self.outcome, BaseException):
             raise self.outcome
         return self.outcome
 
@@ -483,6 +483,63 @@ def test_reconciler_dry_run_changes_nothing(db_session):
     assert result["seen"] == 1 and result["planned"][0]["refund_id"] == refund.id
     assert refund.status == RefundStatus.PENDING and refund.attempts == attempts
     assert gateway.lookups == []
+
+
+# ------------------------------------------------- review 1 regression tests
+
+
+def test_crash_during_gateway_call_is_picked_up_after_claim_expiry(db_session):
+    _invoice, payment = _paid(db_session, reseller=_reseller(db_session, "crash"))
+    with pytest.raises(SystemExit):
+        _request(db_session, payment, FakeGateway(outcome=SystemExit("worker killed")), key="crash-key")
+    db_session.rollback()
+    refund = db_session.execute(select(Refund).where(Refund.idempotency_key == "crash-key")).scalar_one()
+    assert refund.status == RefundStatus.PENDING and refund.claim_token is not None
+    assert refund.next_attempt_at is not None
+    now = datetime.now(timezone.utc)
+    assert RefundReconciler.due(db_session, now) == []
+    later = now + refund_module.CLAIM_TTL + timedelta(seconds=1)
+    assert [row.id for row in RefundReconciler.due(db_session, later)] == [refund.id]
+    RefundReconciler.run(db_session, later, registry=_registry(FakeGateway(lookup=OK)))
+    db_session.refresh(refund)
+    assert refund.status == RefundStatus.SUCCEEDED
+
+
+def test_reconciler_leaves_refund_claimed_by_another_worker(db_session):
+    from sqlalchemy import update
+
+    refund, _payment = _pending(db_session, "stolen", requested=NOW - timedelta(hours=25))
+
+    class SlowGateway(FakeGateway):
+        def lookup_refund(self, **kwargs):
+            # The claim expires during the call and another worker claims the refund.
+            db_session.execute(update(Refund).where(Refund.id == refund.id).values(claim_token="other"))
+            db_session.commit()
+            return PENDING
+
+    result = RefundReconciler.run(db_session, NOW, registry=_registry(SlowGateway()))
+    db_session.refresh(refund)
+    assert result["skipped"] == 1
+    assert refund.status == RefundStatus.PENDING
+    assert refund.claim_token == "other"
+
+
+def test_same_key_committed_after_snapshot_replays_through_unique_constraint(db_session, monkeypatch):
+    _invoice, payment = _paid(db_session, reseller=_reseller(db_session, "snap"))
+    first = _request(db_session, payment, FakeGateway(outcome=PENDING), key="snap-key")
+    db_session.commit()
+    original = RefundService._by_key
+    # A plain read on a stale snapshot does not see the committed row.
+    monkeypatch.setattr(
+        RefundService,
+        "_by_key",
+        staticmethod(lambda db, key, *, lock=False: original(db, key, lock=True) if lock else None),
+    )
+    monkeypatch.setattr(refund_module, "refundable_cents", lambda db, payment, *, lock=False: int(payment.amount_cents))
+    gateway = FakeGateway()
+    again = _request(db_session, payment, gateway, key="snap-key")
+    assert again.id == first.id
+    assert gateway.calls == []
 
 
 def test_integrity_detectors_see_review_and_mismatch(db_session):
