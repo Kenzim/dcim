@@ -339,9 +339,21 @@ class StripeGateway:
                 )
             if not (external_ref or "").strip():
                 return None
-            listing = self._stripe.Refund.list(
-                payment_intent=external_ref.strip(), limit=100, api_key=self._secret_key
-            )
+            target = idempotency_key[:500]
+            starting_after = None
+            while True:
+                page = {"starting_after": starting_after} if starting_after else {}
+                listing = self._stripe.Refund.list(
+                    payment_intent=external_ref.strip(), limit=100, api_key=self._secret_key, **page
+                )
+                data = _value(listing, "data", []) or []
+                for refund in data:
+                    metadata = _value(refund, "metadata", {}) or {}
+                    if _value(metadata, "rackflow_idempotency_key") == target:
+                        return self._refund_result(refund)
+                if not _value(listing, "has_more", False) or not data:
+                    return None
+                starting_after = _value(data[-1], "id")
         except transient as exc:
             return GatewayRefundResult(
                 status=GatewayResultStatus.TRANSIENT_ERROR,
@@ -350,11 +362,6 @@ class StripeGateway:
             )
         except self._stripe.error.InvalidRequestError:
             return None
-        for refund in _value(listing, "data", []) or []:
-            metadata = _value(refund, "metadata", {}) or {}
-            if _value(metadata, "rackflow_idempotency_key") == idempotency_key[:500]:
-                return self._refund_result(refund)
-        return None
 
     def construct_webhook_event(
         self,
@@ -391,6 +398,7 @@ class StripeGateway:
         failure_code: Optional[str] = None
         refund_ref: Optional[str] = None
         refund_status: Optional[str] = None
+        refunded_total_cents: Optional[int] = None
 
         if event_type == "payment_intent.succeeded":
             action = GatewayWebhookAction.PAYMENT_COMPLETED
@@ -414,10 +422,12 @@ class StripeGateway:
                 refund_ref = str(_value(latest, "id") or "") or None
                 refund_status = str(_value(latest, "status", "")).lower() or None
                 amount = _value(latest, "amount")
+                amount_cents = int(amount) if amount is not None else None
             else:
+                # Without the refunds list Stripe gives only the running total.
                 refund_status = "succeeded"
-                amount = _value(obj, "amount_refunded")
-            amount_cents = int(amount) if amount is not None else None
+                total = _value(obj, "amount_refunded")
+                refunded_total_cents = int(total) if total is not None else None
             currency = str(_value(obj, "currency", "")).upper() or None
         elif event_type in {"refund.updated", "refund.failed"}:
             refund_status = str(_value(obj, "status", "")).lower() or None
@@ -448,6 +458,7 @@ class StripeGateway:
             failure_code=failure_code,
             refund_ref=refund_ref,
             refund_status=refund_status,
+            refunded_total_cents=refunded_total_cents,
         )
 
     @staticmethod

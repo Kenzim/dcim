@@ -596,3 +596,77 @@ def test_paypal_lookup_refund_by_id():
     found = _gateway(handler).lookup_refund(external_ref="CAP", idempotency_key="k", refund_ref="R1")
     assert found.status == GatewayResultStatus.SUCCEEDED and found.pending is False and found.amount_cents == 150
     assert _gateway(handler).lookup_refund(external_ref="CAP", idempotency_key="k") is None
+
+
+# ------------------------------------------------- review 2 regression tests
+
+
+def test_stripe_charge_refunded_without_list_reports_running_total_only():
+    from tests.services.test_stripe_gateway_gaps import gateway
+
+    charge = {"payment_intent": "pi_1", "currency": "usd", "amount_refunded": 2000}
+    event = gateway().normalize_webhook_event({"id": "evt", "type": "charge.refunded", "data": {"object": charge}})
+    assert event.amount_cents is None and event.refunded_total_cents == 2000
+
+
+def test_v2_running_total_event_records_only_the_new_part(db_session, v2):
+    account = _retail_account(db_session, "total")
+    _invoice, payment = _paid(db_session, account=account, ref="pi_total")
+    first = _request(db_session, payment, FakeGateway(), amount=500, key="total-1")
+    db_session.commit()
+    assert first.status == RefundStatus.SUCCEEDED
+    event = NormalizedGatewayWebhookEvent(
+        event_id="evt_total", event_type="charge.refunded", action=GatewayWebhookAction.PAYMENT_REVERSED,
+        external_ref="pi_total", refund_status="succeeded", refunded_total_cents=1200,
+    )
+    PaymentWebhookService.process(db_session, gateway="stripe", event=event, raw_payload=b"{}")
+    db_session.commit()
+    db_session.refresh(payment)
+    assert payment.refunded_cents == 1200
+    new = db_session.execute(select(Refund).where(Refund.idempotency_key == "stripe-refund:evt_total")).scalar_one()
+    assert new.amount_cents == 700
+
+
+def test_failure_event_without_amount_does_not_fail_an_unrelated_refund(db_session):
+    _invoice, payment = _paid(db_session, reseller=_reseller(db_session, "unrel"), ref="pi_unrel")
+    ours = _request(db_session, payment, FakeGateway(outcome=TIMEOUT), key="unrel-key")
+    db_session.commit()
+    assert ours.gateway_refund_ref is None
+    event = NormalizedGatewayWebhookEvent(
+        event_id="evt_unrel", event_type="PAYMENT.REFUND.FAILED", action=GatewayWebhookAction.PAYMENT_REVERSED,
+        external_ref="pi_unrel", refund_ref="R-DASHBOARD", refund_status="failed",
+    )
+    PaymentWebhookService.process(db_session, gateway="stripe", event=event, raw_payload=b"{}")
+    db_session.commit()
+    db_session.refresh(ours)
+    assert ours.status == RefundStatus.PENDING
+
+
+def test_stripe_lookup_refund_reads_every_page():
+    from tests.services.test_stripe_gateway_gaps import gateway, stripe_module
+
+    module = stripe_module()
+    pages = {
+        None: {"data": [{"id": f"re_{i}", "status": "succeeded", "metadata": {}} for i in range(100)], "has_more": True},
+        "re_99": {"data": [{"id": "re_x", "status": "succeeded", "amount": 5, "metadata": {"rackflow_idempotency_key": "late"}}], "has_more": False},
+    }
+    module.Refund.list = lambda **kw: pages[kw.get("starting_after")]
+    found = gateway(module).lookup_refund(external_ref="pi_1", idempotency_key="late")
+    assert found is not None and found.external_ref == "re_x"
+
+
+def test_paypal_lookup_refund_encodes_the_refund_id():
+    import httpx
+
+    from tests.services.test_paypal_gateway import _gateway
+
+    paths = []
+
+    def handler(request):
+        if request.url.path.endswith("/v1/oauth2/token"):
+            return httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        paths.append(request.url.raw_path)
+        return httpx.Response(404, json={})
+
+    assert _gateway(handler).lookup_refund(external_ref="CAP", idempotency_key="k", refund_ref="../captures/X?y=1") is None
+    assert paths == [b"/v2/payments/refunds/..%2Fcaptures%2FX%3Fy%3D1"]

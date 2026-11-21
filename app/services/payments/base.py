@@ -116,6 +116,8 @@ class NormalizedGatewayWebhookEvent:
     refund_ref: Optional[str] = None
     # Gateway status of that refund (for example succeeded, pending, failed).
     refund_status: Optional[str] = None
+    # Total refunded on the payment so far, when the gateway gives only that.
+    refunded_total_cents: Optional[int] = None
 
 
 class PaymentGateway(Protocol):

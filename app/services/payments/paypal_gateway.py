@@ -7,6 +7,7 @@ import json
 import threading
 import time
 import uuid
+from urllib.parse import quote
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Optional
 
@@ -487,7 +488,9 @@ class PayPalGateway:
         if not refund_ref:
             return None
         try:
-            response, data = self._request("GET", f"/v2/payments/refunds/{refund_ref}")
+            response, data = self._request(
+                "GET", f"/v2/payments/refunds/{quote(refund_ref, safe='')}"
+            )
         except (httpx.TimeoutException, httpx.RequestError):
             return GatewayRefundResult(
                 status=GatewayResultStatus.TRANSIENT_ERROR,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import logging
 from datetime import datetime, timezone
@@ -273,9 +274,8 @@ class PaymentWebhookService:
                     Refund.gateway_refund_ref.is_(None),
                 )
             ).scalars()
-            if event.amount_cents is None
-            or int(refund.amount_cents) == int(event.amount_cents)
-        ]
+            if int(refund.amount_cents) == int(event.amount_cents)
+        ] if event.amount_cents is not None else []
         return candidates[0] if len(candidates) == 1 else None
 
     @staticmethod
@@ -287,6 +287,17 @@ class PaymentWebhookService:
         )
         if payment is None:
             return
+        if event.amount_cents is None and event.refunded_total_cents is not None:
+            # The gateway gave only the running total: this event is about what
+            # it reports beyond the refunds already recorded as succeeded.
+            event = dataclasses.replace(
+                event,
+                amount_cents=max(
+                    0, int(event.refunded_total_cents) - int(payment.refunded_cents or 0)
+                ),
+            )
+            if event.amount_cents == 0:
+                return
         status = (event.refund_status or "succeeded").lower()
         refund = PaymentWebhookService._matching_refund(db, payment, event)
         if status in {"failed", "canceled", "cancelled"}:
