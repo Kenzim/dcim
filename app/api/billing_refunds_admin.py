@@ -162,6 +162,12 @@ def _jsonable(payload: dict[str, Any]) -> dict[str, Any]:
     return jsonable_encoder(payload)
 
 
+def _staff_key(header: Optional[str]) -> Optional[str]:
+    """Namespace a client-chosen key so it can never match a system key such as ``order-cancel:``."""
+    value = (header or "").strip()
+    return f"admin:{value}" if value else None
+
+
 @router.post("/refunds", status_code=201, responses=COMMON_ERROR_RESPONSES)
 def create_refund(
     body: RefundCreateBody,
@@ -169,7 +175,7 @@ def create_refund(
     auth: AdminDep,
     idempotency_key: Annotated[Optional[str], Header(alias="Idempotency-Key", max_length=200)] = None,
 ):
-    key = (idempotency_key or "").strip() or f"admin-refund:{body.payment_id}:{uuid.uuid4()}"
+    key = _staff_key(idempotency_key) or f"admin-refund:{body.payment_id}:{uuid.uuid4()}"
     try:
         refund = RefundService.request(
             db,
@@ -281,7 +287,7 @@ def resolve_review(
     auth: AdminDep,
     idempotency_key: Annotated[Optional[str], Header(alias="Idempotency-Key", max_length=200)] = None,
 ):
-    key = (idempotency_key or "").strip() or (
+    key = _staff_key(idempotency_key) or (
         f"refund-review:{body.invoice_id}:{body.payment_id}:{body.reason}:{uuid.uuid4()}"
     )
     try:

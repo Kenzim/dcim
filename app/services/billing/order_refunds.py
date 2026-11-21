@@ -402,7 +402,8 @@ def _review_state(
     order = db.get(Order, invoice.order_id) if invoice.order_id is not None else None
     notes = (order.admin_notes or "") if order is not None else ""
     if reason in _invoice_review_reasons(notes, invoice):
-        resolved = _resolution_marker(reason, invoice) in notes
+        marker = _resolution_marker(reason, invoice)
+        resolved = any(line.strip().startswith(marker) for line in notes.splitlines())
         return {"amount_cents": None, "invoice_level": True}, ({"recorded": True} if resolved else None)
     return None, None
 

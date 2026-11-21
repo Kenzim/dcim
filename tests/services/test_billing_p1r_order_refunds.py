@@ -209,3 +209,31 @@ def test_api_refund_reviews_list_and_dismiss(client, db_session, test_admin_user
     )
     assert resp.status_code == 200 and resp.json()["status"] == "resolved"
     assert client.get("/api/admin/billing/refund-reviews", headers=headers).json()["items"] == []
+
+
+# ------------------------------------------------- review 3 regression tests
+
+
+def test_api_staff_key_cannot_replay_a_system_refund(client, db_session, test_admin_user, v2, monkeypatch):
+    set_setting(db_session, "billing_order_refund_policy", "original_method")
+    order, _invoice, payment, _account = _order_with_payment(db_session, "apins")
+    monkeypatch.setattr(refund_module, "_registry", lambda registry: _registry(FakeGateway(outcome=PENDING)))
+    order_refunds.cancel_order(db_session, order, actor_user_id=None)
+    db_session.commit()
+    system_key = f"order-cancel:{order.id}:{payment.id}"
+    resp = client.post(
+        "/api/admin/billing/refunds",
+        json={"payment_id": payment.id, "amount_cents": 3000},
+        headers={**_login(client), "Idempotency-Key": system_key},
+    )
+    # The system refund already holds the whole amount; the staff key is its own refund.
+    assert resp.status_code == 400 and resp.json()["detail"]["code"] == "not_refundable"
+
+
+def test_invoice_level_review_is_not_resolved_by_marker_inside_staff_text(db_session):
+    order, invoice, _payment, _account = _order_with_payment(db_session, "marker")
+    order_refunds.record_refund_review(db_session, invoice=invoice, amount_cents=3000, reason="order_cancelled", actor_user_id=None)
+    order.admin_notes += f"\nStaff: copied [refund-review-resolved:order_cancelled:invoice-{invoice.id}] from another ticket"
+    db_session.commit()
+    review, resolution = order_refunds._review_state(db_session, invoice=invoice, payment=None, reason="order_cancelled")
+    assert review is not None and resolution is None
