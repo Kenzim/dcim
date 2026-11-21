@@ -145,7 +145,18 @@ from app.models.commerce_order import (
     OrderStatus,
     OrderStatusHistory,
 )
-from app.models.commerce_invoice_ext import InvoiceLine
+from app.models.commerce_invoice_ext import InvoiceLine, InvoiceLineKind
+from app.models.billing_series import DocumentSeries, DocumentType
+from app.models.invoice_adjustment import (
+    AdjustmentKind,
+    AdjustmentOutcome,
+    AdjustmentReason,
+    AdjustmentStatus,
+    InvoiceAdjustment,
+    InvoiceAdjustmentLine,
+)
+from app.models.refund import Refund, RefundDestination, RefundReason, RefundStatus
+from app.models.billing_shadow import BillingShadowMismatch
 from app.models.commerce_coupon_tax import (
     Coupon,
     CouponAppliesTo,
@@ -301,6 +312,23 @@ from app.models.plugin_host import (  # noqa: E402
 from app.plugin_host import listeners as _plugin_listeners  # noqa: E402
 
 _plugin_listeners.install()
+
+__all__ += [
+    "AdjustmentKind",
+    "AdjustmentOutcome",
+    "AdjustmentReason",
+    "AdjustmentStatus",
+    "BillingShadowMismatch",
+    "DocumentSeries",
+    "DocumentType",
+    "InvoiceAdjustment",
+    "InvoiceAdjustmentLine",
+    "InvoiceLineKind",
+    "Refund",
+    "RefundDestination",
+    "RefundReason",
+    "RefundStatus",
+]
 
 __all__ += [
     "PluginDelivery",
