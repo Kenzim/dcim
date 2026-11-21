@@ -271,7 +271,7 @@ def orphaned_payment(db: Session, params: dict, now: datetime) -> list[Finding]:
                Payment.external_ref, Payment.created_at, Invoice.invoice_number, Invoice.status.label("invoice_status"))
         .join(Invoice, Invoice.id == Payment.invoice_id)
         .where(Payment.status == PaymentStatus.PENDING,
-               or_(and_(Payment.external_ref.isnot(None), old), settled))
+               or_(and_(Payment.external_ref.isnot(None), Payment.external_ref != "", old), settled))
         .order_by(Payment.id)
     )
     rows, remaining = _limited(db, stmt, params["max_rows"])

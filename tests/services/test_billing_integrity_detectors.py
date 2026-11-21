@@ -282,6 +282,24 @@ def test_orphaned_payment_ignores_recent_resolved_and_reference_less(db_session)
     assert run(db_session, "billing_orphaned_payment") == []
 
 
+def test_orphaned_payment_ignores_an_empty_gateway_reference(db_session):
+    invoice = make_invoice(db_session, 1000)
+    make_payment(db_session, invoice, 1000, status=PaymentStatus.PENDING, external_ref="", age=timedelta(days=9))
+    assert run(db_session, "billing_orphaned_payment") == []
+
+
+def test_orphaned_payment_accepts_timezone_aware_timestamps(db_session):
+    from datetime import timezone
+
+    invoice = make_invoice(db_session, 1000)
+    payment = make_payment(db_session, invoice, 1000, status=PaymentStatus.PENDING, external_ref="pi_tz",
+                           age=timedelta(days=3))
+    params = {**CATALOGUE["billing_orphaned_payment"].defaults()}
+    found = d.DETECTORS["billing_orphaned_payment"](db_session, params, NOW)
+    assert ids(found) == [str(payment.id)]
+    assert bi._naive(NOW.replace(tzinfo=timezone.utc)) == NOW
+
+
 def test_orphaned_payment_threshold_parameter(db_session):
     invoice = make_invoice(db_session, 1000)
     payment = make_payment(db_session, invoice, 1000, status=PaymentStatus.PENDING, external_ref="pi_x",

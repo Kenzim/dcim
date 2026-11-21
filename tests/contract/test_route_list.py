@@ -49,8 +49,7 @@ def test_not_called_routes_still_exist(method, path):
 
 def test_every_php_call_is_listed():
     """A new `/api/billing/...` call in the PHP module must be added to the route list."""
-    if not PHP_DIR.is_dir():
-        pytest.skip("WHMCS module is not in this checkout")
+    assert PHP_DIR.is_dir(), f"WHMCS module not found at {PHP_DIR}"
     source = "\n".join(p.read_text(encoding="utf-8") for p in sorted(PHP_DIR.glob("*.php")))
     listed = {(r.method, r.path) for r in ROUTES}
     listed_paths = {path for _, path in listed}
@@ -81,8 +80,7 @@ def test_every_php_call_is_listed():
 
 def test_strategy_action_names_the_module_runs():
     """The module runs these strategy actions through `run_action`; they are pinned in test_vm_operations."""
-    if not PHP_DIR.is_dir():
-        pytest.skip("WHMCS module is not in this checkout")
+    assert PHP_DIR.is_dir(), f"WHMCS module not found at {PHP_DIR}"
     source = (PHP_DIR / "rackflow.php").read_text(encoding="utf-8")
     names = set(re.findall(r"rackflow_runStrategyAction\(\$params, '([a-z_]+)'", source))
     assert names == {"change_password", "reset_network", "randomize_smbios"}
