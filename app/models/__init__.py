@@ -51,6 +51,8 @@ from app.models.private_network import (
     PrivateNetworkPool,
     PrivateNetwork,
     PrivateNetworkAttachment,
+    PrivateNetworkDhcpLease,
+    PrivateNetworkDhcpReservation,
     PrivateNetworkInvitation,
     PrivateNetworkMember,
 )

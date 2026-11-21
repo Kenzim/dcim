@@ -33,6 +33,7 @@ import (
 	"rackflow/storage_runner/internal/api"
 	"rackflow/storage_runner/internal/ceph"
 	"rackflow/storage_runner/internal/config"
+	"rackflow/storage_runner/internal/dhcp"
 	"rackflow/storage_runner/internal/firewall"
 	"rackflow/storage_runner/internal/ganesha"
 	"rackflow/storage_runner/internal/lease"
@@ -86,6 +87,9 @@ type Reconciler struct {
 	Hostname string
 	// VIP adds and removes the location's SFTP virtual IP.
 	VIP vip.Manager
+	// DHCP runs the DHCP servers of network presences and tenants; nil
+	// serves no DHCP.
+	DHCP *dhcp.Pool
 
 	lastApplied string
 	lastOrphans string
@@ -95,7 +99,12 @@ type Reconciler struct {
 	leaseStarted    bool
 	destroyedLeases map[int64]bool
 	announced       map[int64]time.Time
-	vipIface        string
+	announcedNets   map[int64]time.Time
+	// presenceSince is when each presence was first served without leases.
+	presenceSince map[int64]time.Time
+	// servedNets are the presences the last posted status reported serving.
+	servedNets map[int64]bool
+	vipIface   string
 	// serveMu orders starting to serve against StopLease, so nothing is
 	// started after the lease that allows it has ended.
 	serveMu  sync.Mutex
@@ -148,12 +157,19 @@ type pass struct {
 	nodeErrs []string
 
 	namespaces map[int64]bool
+	// presences are the networks with a presence namespace on this node.
+	presences  map[int64]bool
 	containers map[int64]ganesha.Container
 	subvols    map[string]bool
 	users      map[string]ceph.User
 	minimal    *string
 	sftp       *sftpPass
 	ha         *haPass
+	cfg        *api.Config
+	// dhcpWanted are the DHCP servers wanted in this pass.
+	dhcpWanted map[string]bool
+	// servedNets are the presences reported serving in this pass.
+	servedNets map[int64]bool
 	// sftpMaster is set when this node serves the location's SFTP on the
 	// virtual IP in this pass.
 	sftpMaster bool
@@ -233,9 +249,11 @@ func (r *Reconciler) Once(ctx context.Context) error {
 		ctx:        ctx,
 		now:        r.now(),
 		namespaces: map[int64]bool{},
+		presences:  map[int64]bool{},
 		containers: map[int64]ganesha.Container{},
 		subvols:    map[string]bool{},
 		users:      map[string]ceph.User{},
+		cfg:        cfg,
 	}
 	p.checkCeph()
 	if err := p.inventory(cfg); err != nil {
@@ -258,11 +276,14 @@ func (r *Reconciler) Once(ctx context.Context) error {
 	p.setGrace(cfg.Settings)
 
 	works := p.validate(cfg.Tenants)
-	p.setupHA(cfg, works)
+	nets := p.validateNetworks(cfg, works)
+	p.setupHA(cfg, works, nets)
+	p.dropPresences(nets)
 	for _, w := range works {
 		p.applyTenant(w)
 	}
 	p.dropUnlisted(works)
+	p.applyNetworks(nets)
 	p.applyFirewall(works)
 	for _, w := range works {
 		p.applyNFS(w)
@@ -271,17 +292,21 @@ func (r *Reconciler) Once(ctx context.Context) error {
 	for _, w := range works {
 		p.destroy(w)
 	}
+	p.stopUnwantedDHCP()
 	p.pruneState(works)
 
 	st := p.baseStatus(cfg.Version)
 	p.fillStatus(&st, works)
+	p.fillTenantDHCP(&st, works)
 	st.Orphans = p.orphans(works)
 	p.fillSFTPStatus(&st)
 	p.fillHAStatus(&st, works)
+	p.fillNetworkStatus(&st, nets)
 	r.lastApplied = cfg.Version
 	if err := r.post(ctx, st); err != nil {
 		return err
 	}
+	r.servedNets = p.servedNets
 	p.ackSFTP()
 	if p.ha != nil {
 		r.Lease.AckEvents(len(st.Events))
@@ -349,6 +374,13 @@ func (p *pass) inventory(cfg *api.Config) error {
 	}
 	for _, id := range ids {
 		p.namespaces[id] = true
+	}
+	nets, err := r.Net.Presences(p.ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range nets {
+		p.presences[id] = true
 	}
 	ctrs, err := r.NFS.List(p.ctx)
 	if err != nil {
@@ -667,6 +699,8 @@ func (p *pass) applyTenant(w *tenantWork) {
 		return
 	}
 	if !w.valid {
+		// A config that cannot be applied leaves what runs as it is.
+		p.keepDHCP(names.TenantDHCPKey(w.t.ID))
 		return
 	}
 	if w.t.State == api.TenantTerminated {
@@ -700,6 +734,7 @@ func (p *pass) ensureTenant(w *tenantWork) {
 			changed, err = r.Net.Ensure(ctx, spec)
 			if err == nil {
 				p.announce(ctx, w)
+				p.ensureTenantDHCP(ctx, w)
 			}
 			return err
 		})
@@ -709,6 +744,11 @@ func (p *pass) ensureTenant(w *tenantWork) {
 		}
 		if err != nil {
 			w.fail("network: %v", err)
+			if p.namespaces[id] && w.t.NetworkID != nil {
+				// Keep a running DHCP server through a failed network
+				// update; the namespace is still there.
+				p.keepDHCP(names.TenantDHCPKey(id))
+			}
 		} else {
 			w.netOK = true
 			p.namespaces[id] = true
@@ -954,6 +994,8 @@ func (p *pass) teardown(w *tenantWork) {
 	}
 	_, linked := r.State.Link(id)
 	if p.namespaces[id] || linked {
+		// The DHCP socket keeps the namespace alive; close it first.
+		p.stopDHCP(names.TenantDHCPKey(id))
 		if err := r.Net.Remove(p.ctx, id); err != nil {
 			w.fail("remove network: %v", err)
 			return

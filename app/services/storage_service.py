@@ -25,12 +25,13 @@ from app.dao.storage_dao import StorageDAO
 from app.models.private_network import AttachmentState, NetworkKind, PrivateNetworkAttachment, PrivateNetworkStatus
 from app.models.service import Service, ServiceStatus, ServiceType
 from app.models.storage import SftpAccess, ShareState, StorageNode, StorageShare, StorageTenant, VlanMode
-from app.services import storage_ha, storage_location, storage_sftp
+from app.services import private_network_dhcp, storage_ha, storage_location, storage_sftp
 from app.services.storage_errors import StorageError
 from app.services.storage_location import normalise_host
 from app.services.private_network_service import (
     PrivateNetworkError,
     PrivateNetworkService,
+    in_dhcp_range,
     preview_uplink_ports,
     storage_endpoint_ip,
 )
@@ -517,6 +518,11 @@ class StorageService:
                 raise StorageError(f"{address} is not a usable address in {tenant.network_cidr}")
             if str(address) == tenant.endpoint_ip:
                 raise StorageError(f"{address} is the storage endpoint itself")
+            if tenant.network is not None and in_dhcp_range(tenant.network, address):
+                raise StorageError(
+                    f"{address} is inside the network's DHCP range, where addresses change; "
+                    "reserve a fixed address for the device instead"
+                )
             if str(address) not in out:
                 out.append(str(address))
         if len(out) > MAX_CLIENTS_PER_SHARE:
@@ -679,9 +685,12 @@ def build_runner_config(db: Session, node: StorageNode) -> dict:
     A runner older than 0.3.0 gets only its preferred tenants and no failover keys. A newer one
     also gets the failover settings, and with failover active every tenant of the location.
     Credentials: SFTP password hashes and public keys, and the location's SFTP host key (only
-    to its own nodes); never a password.
+    to its own nodes); never a password. A runner of 0.4.0 or later also gets ``networks`` (the
+    network presences it may serve, empty unless every enabled node of the location runs 0.4.0)
+    and, in such a location, ``network_id`` and ``dhcp`` on each live tenant.
     """
     context = storage_ha.ha_context(db, node) if storage_ha.supports_ha(node) else None
+    presence = private_network_dhcp.presence_context(db, node)
     source = context.tenants(db) if context is not None else StorageDAO.tenants_for_node(db, node.id)
     tenants = []
     for tenant in source:
@@ -690,6 +699,8 @@ def build_runner_config(db: Session, node: StorageNode) -> dict:
         entry = _tenant_config(tenant, node)
         if context is not None:
             entry.update(context.tenant_extras(tenant))
+        if presence is not None:
+            entry.update(presence.tenant_extras(db, tenant))
         tenants.append(entry)
     sftp = storage_sftp.runner_settings(node)
     body = {
@@ -702,6 +713,8 @@ def build_runner_config(db: Session, node: StorageNode) -> dict:
         body["node"] = context.node_block()
         body["ha"] = context.ha_block()
         body["sftp"] = context.sftp_block(sftp)
+    if presence is not None:
+        body["networks"] = presence.networks(db)
     version = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {"version": version, **body}
 
@@ -763,11 +776,14 @@ def apply_runner_status(db: Session, node: StorageNode, report: dict, client_ip:
                     share.used_bytes = used
                 share.runner_error = _short(share_entry.get("error"))
             storage_ha.note_serving(db, node, tenant, entry)
+            private_network_dhcp.apply_tenant_report(db, node, tenant, entry)
         else:
+            private_network_dhcp.tenant_not_serving(tenant, node)
             storage_ha.note_not_serving(tenant, node)
         if node.sftp_master if vip else serving:
             storage_sftp.apply_tenant_status(tenant, entry)
     storage_sftp.apply_logins(tenants, report)
+    private_network_dhcp.apply_network_reports(db, node, report)
 
     destroyed_shares = set(report.get("destroyed_shares") or [])
     for tenant in in_location.values():

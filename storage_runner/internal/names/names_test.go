@@ -3,7 +3,7 @@ package names
 import "testing"
 
 func TestNamesFitInterfaceLimit(t *testing.T) {
-	for _, n := range []string{VLANIface(MaxTenantID), HostVeth(MaxTenantID), NSVeth(MaxTenantID)} {
+	for _, n := range []string{VLANIface(MaxTenantID), HostVeth(MaxTenantID), NSVeth(MaxTenantID), PresenceIface(MaxTenantID)} {
 		if len(n) > 15 {
 			t.Errorf("%s is longer than 15 characters", n)
 		}
@@ -15,6 +15,12 @@ func TestParsersOnlyMatchRunnerNames(t *testing.T) {
 		got, ok := ParseNamespace(s)
 		if (want != 0) != ok || got != want {
 			t.Errorf("ParseNamespace(%q) = %d %v", s, got, ok)
+		}
+	}
+	for s, want := range map[string]int64{"rf-p6": 6, "rf-p06": 0, "rf-p": 0, "rf-t6": 0, "rf-p6x": 0} {
+		got, ok := ParsePresence(s)
+		if (want != 0) != ok || got != want {
+			t.Errorf("ParsePresence(%q) = %d %v", s, got, ok)
 		}
 	}
 	for s, want := range map[string]int64{"client.rf-t12": 12, "client.admin": 0, "client.rf-t12x": 0, "client.rf-tenant": 0} {

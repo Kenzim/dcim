@@ -60,7 +60,7 @@ async def lookup(
     ],
     location_id: Optional[int] = None,
 ) -> dict:
-    """List reference data. location_id filters racks and private_networks. network_pools: private network VLAN pools. private_networks: client networks with attachments, members and invitations."""
+    """List reference data. location_id filters racks and private_networks. network_pools: private network VLAN pools. private_networks: client networks with attachments, members, invitations, storage presence and DHCP summary."""
     if kind == "racks":
         return await inventory_tools.list_racks(location_id=location_id)
     if kind == "private_networks":

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"rackflow/storage_runner/internal/api"
 	"rackflow/storage_runner/internal/ceph"
 	"rackflow/storage_runner/internal/config"
+	"rackflow/storage_runner/internal/dhcp"
 	"rackflow/storage_runner/internal/execx"
 	"rackflow/storage_runner/internal/firewall"
 	"rackflow/storage_runner/internal/ganesha"
@@ -26,7 +28,7 @@ import (
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
-var version = "0.3.3"
+var version = "0.4.0"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -94,7 +96,18 @@ func runRunner() {
 		RunLease:      true,
 		Hostname:      hostname,
 		VIP:           &vip.IPRoute{Cmd: execx.Exec{Timeout: 15 * time.Second}},
+		DHCP: &dhcp.Pool{
+			StateDir: host.StateDir,
+			Open: func(ns, iface string) (net.PacketConn, error) {
+				return dhcp.OpenInNamespace(filepath.Join(names.NetnsDir, ns), iface)
+			},
+			Prober: func(ns, iface string) dhcp.Prober {
+				return dhcp.ARPProbe{Cmd: execx.Exec{Timeout: 5 * time.Second}, Netns: ns, Iface: iface}
+			},
+			Logf: log.Printf,
+		},
 	}
+	defer r.DHCP.StopAll()
 
 	// The location host key, once Rackflow sends one, replaces this file's
 	// contents; until then the node's own key is used.

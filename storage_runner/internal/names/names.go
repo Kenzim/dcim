@@ -26,6 +26,18 @@ func CephEntity(tenant int64) string { return "client." + CephUserID(tenant) }
 func TenantDir(tenant int64) string  { return fmt.Sprintf("t%d", tenant) }
 func NetnsPath(tenant int64) string  { return NetnsDir + "/" + Namespace(tenant) }
 
+// Presence is the namespace of a network presence: a private network's
+// storage address with no storage behind it.
+func Presence(network int64) string { return fmt.Sprintf("rf-p%d", network) }
+
+// PresenceIface is the VLAN interface of a network presence.
+func PresenceIface(network int64) string { return fmt.Sprintf("rf-w%d", network) }
+
+// DHCPKey names a DHCP server and its lease file: "net-<id>" for a network
+// presence, "tenant-<id>" for a tenant.
+func NetworkDHCPKey(network int64) string { return fmt.Sprintf("net-%d", network) }
+func TenantDHCPKey(tenant int64) string   { return fmt.Sprintf("tenant-%d", tenant) }
+
 // DefaultCephUserPrefix names tenant cephx users client.rf-t<id>.
 const DefaultCephUserPrefix = "rf-t"
 
@@ -53,6 +65,7 @@ func Subvolume(tenant, share int64) string { return fmt.Sprintf("t%d-s%d", tenan
 
 var (
 	namespaceRe = regexp.MustCompile(`^rf-t([1-9][0-9]{0,10})$`)
+	presenceRe  = regexp.MustCompile(`^rf-p([1-9][0-9]{0,10})$`)
 	containerRe = regexp.MustCompile(`^rf-t([1-9][0-9]{0,10})-nfs$`)
 	subvolumeRe = regexp.MustCompile(`^t([1-9][0-9]{0,17})-s([1-9][0-9]{0,17})$`)
 )
@@ -84,6 +97,7 @@ func SubvolumeOfPath(group, path string) (string, bool) {
 }
 
 func ParseNamespace(s string) (int64, bool)  { return parseID(namespaceRe, s) }
+func ParsePresence(s string) (int64, bool)   { return parseID(presenceRe, s) }
 func ParseCephEntity(s string) (int64, bool) { return parseID(entityRe, s) }
 func ParseContainer(s string) (int64, bool)  { return parseID(containerRe, s) }
 

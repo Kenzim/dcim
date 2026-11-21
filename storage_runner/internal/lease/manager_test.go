@@ -77,7 +77,18 @@ type sim struct {
 	overlap int
 }
 
-var tenant42 = TenantKey(42)
+var (
+	tenant42 = TenantKey(42)
+	net6     = NetKey(6)
+)
+
+// netWant is a network presence want: no fence entities, like reconcile
+// builds it.
+func netWant(k Key, order []int64, me int64) Want {
+	w := tenantWant(k, order, me)
+	w.FenceEntities, w.FenceHostname = nil, ""
+	return w
+}
 
 func tenantWant(k Key, order []int64, me int64) Want {
 	rank := -1
@@ -171,7 +182,7 @@ func (s *sim) step() {
 			n.m.PollTick(context.Background())
 		}
 	}
-	for _, k := range []Key{tenant42, SFTPKey(1)} {
+	for _, k := range []Key{tenant42, SFTPKey(1), net6} {
 		count := 0
 		for _, n := range s.nodes {
 			if n.isServing(k) {
@@ -892,12 +903,15 @@ func TestAddrIP(t *testing.T) {
 }
 
 func TestParseKey(t *testing.T) {
-	for _, k := range []Key{TenantKey(42), SFTPKey(1)} {
+	for _, k := range []Key{TenantKey(42), SFTPKey(1), NetKey(6)} {
 		if got, ok := ParseKey(k.Object()); !ok || got != k {
 			t.Errorf("%v -> %v %v", k, got, ok)
 		}
 	}
-	for _, bad := range []string{"node.1", "tenant.", "tenant.x", "tenant.-1"} {
+	if k, ok := ParseKey("net.6"); !ok || k != NetKey(6) {
+		t.Errorf("net.6 -> %v %v", k, ok)
+	}
+	for _, bad := range []string{"node.1", "tenant.", "tenant.x", "tenant.-1", "net.", "net.x"} {
 		if _, ok := ParseKey(bad); ok {
 			t.Errorf("parsed %q", bad)
 		}

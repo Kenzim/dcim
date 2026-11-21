@@ -167,12 +167,38 @@ def listed_share_addresses(db: Session, network_id: int) -> set:
     return out
 
 
+def dhcp_range_addresses(network: PrivateNetwork) -> Optional[tuple]:
+    """The network's dynamic DHCP range as ``(first, last)`` addresses, or None."""
+    if not network.dhcp_range_start or not network.dhcp_range_end:
+        return None
+    try:
+        return ipaddress.ip_address(network.dhcp_range_start), ipaddress.ip_address(network.dhcp_range_end)
+    except ValueError:
+        return None
+
+
+def in_dhcp_range(network: PrivateNetwork, address) -> bool:
+    bounds = dhcp_range_addresses(network)
+    if bounds is None:
+        return False
+    try:
+        value = ipaddress.ip_address(str(address))
+    except ValueError:
+        return False
+    return bounds[0] <= value <= bounds[1]
+
+
 def _pick_ip(network: PrivateNetwork, requested: Optional[str], avoid: frozenset = frozenset()) -> str:
-    """An address for a new attachment. ``avoid`` holds addresses the caller must not be given."""
+    """An address for a new attachment. ``avoid`` holds addresses the caller must not be given.
+
+    Owner DHCP reservations and the dynamic range are never handed out; the DHCP gateway is,
+    because it may be the owner's own router VM attached with that address on purpose.
+    """
     if network.kind == NetworkKind.PROXY_ACCESS:
         return _pick_access_ip(network, requested)
     cidr = ipaddress.ip_network(network.cidr)
     endpoint = storage_endpoint_ip(network.cidr)
+    reserved = {r.ip for r in network.dhcp_reservations}
     used = {a.ip_address for a in network.attachments if a.ip_address} | {endpoint} | set(avoid)
     if requested:
         try:
@@ -188,9 +214,17 @@ def _pick_ip(network: PrivateNetwork, requested: Optional[str], avoid: frozenset
             )
         if str(address) in used:
             raise PrivateNetworkError("IP address is already used in this network", status_code=409)
+        if str(address) in reserved:
+            raise PrivateNetworkError(
+                "IP address is reserved for another device in this network's DHCP settings", status_code=409
+            )
+        if in_dhcp_range(network, address):
+            raise PrivateNetworkError(
+                "IP address is inside this network's DHCP range, please choose another address", status_code=409
+            )
         return str(address)
     for host in cidr.hosts():
-        if str(host) not in used:
+        if str(host) not in used and str(host) not in reserved and not in_dhcp_range(network, host):
             return str(host)
     raise PrivateNetworkError("This network has no free addresses left", status_code=409)
 

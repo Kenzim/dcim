@@ -61,6 +61,10 @@ type Want struct {
 	FenceEntities []string
 	FenceHostname string
 	Guard         GuardInfo
+	// Defer holds back acquiring this lease while any of these leases has
+	// a locker on any node: a tenant waits for its network's presence to
+	// be released. Re-taking this node's own entries is not held back.
+	Defer []Key
 }
 
 // Desired is the lease part of the current config.
@@ -273,6 +277,10 @@ func (m *Manager) addEvent(kind string, k *Key, from int64, fence, detail string
 	if k != nil && k.Kind == KindTenant {
 		id := k.ID
 		ev.TenantID = &id
+	}
+	if k != nil && k.Kind == KindNet {
+		id := k.ID
+		ev.NetworkID = &id
 	}
 	if from > 0 {
 		f := from
@@ -826,7 +834,31 @@ func (m *Manager) pollKey(ctx context.Context, w Want, d Desired) {
 	if freeFor < wait {
 		return
 	}
+	if m.deferred(cctx, w) {
+		// The rank delay counts again from when the deferred lease is
+		// free, so the takeover order still decides who goes first.
+		m.mu.Lock()
+		ws.freeSince = 0
+		m.mu.Unlock()
+		return
+	}
 	m.acquire(ctx, w, t)
+}
+
+// deferred reports whether a lease in w.Defer has a locker (or its lockers
+// cannot be listed), so w.Key must not be acquired yet.
+func (m *Manager) deferred(ctx context.Context, w Want) bool {
+	for _, d := range w.Defer {
+		l, err := m.Store.ListLockers(ctx, d.Object())
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			m.logf("lease: not acquiring %s: list %s: %v", w.Key, d, err)
+			return true
+		}
+		if len(l.Lockers) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // ownEntries handles a lock that carries this node's tag but is not held by
@@ -954,7 +986,10 @@ func (m *Manager) acquire(ctx context.Context, w Want, t Timings) {
 	}
 	prev, prevToken := parseOwner(x[XattrOwner])
 	fence := ""
-	if prev != 0 && prev != me && x[XattrReleased] != prevToken {
+	// A network presence has no Ceph state, so its previous holder is never
+	// fenced: it stopped at its own deadline and its guard set the link
+	// down before the OSD let the lease go.
+	if prev != 0 && prev != me && x[XattrReleased] != prevToken && k.Kind != KindNet {
 		m.readNode(ctx, prev)
 		if m.fresh(prev) {
 			fence = "tenant"
