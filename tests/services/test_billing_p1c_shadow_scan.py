@@ -277,3 +277,70 @@ def test_negative_retail_balance_detector(db_session):
     db_session.commit()
     findings = billing_integrity.negative_retail_balance(db_session, PARAMS, NOW)
     assert [(f.resource_id, f.details["balance_cents"]) for f in findings] == [(str(account.id), -50)]
+
+
+# --- partial refunds in i2_scan ---
+
+
+def _refunded_invoice(db, name: str, *, status, refunded: int):
+    from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus, Payment
+    from app.services.invoice_service import InvoiceService
+
+    reseller = _reseller(db, name)
+    invoice = InvoiceService.create(db, reseller_id=reseller.id, purpose=InvoicePurpose.CYCLE_CHARGE, amount_cents=1_000)
+    invoice.status = InvoiceStatus.PAID
+    db.add(Payment(invoice_id=invoice.id, gateway="stripe", status=status, amount_cents=1_000,
+                   refunded_cents=refunded, currency="USD", external_ref=f"pi_{name}"))
+    db.commit()
+    assert isinstance(invoice, Invoice)
+    return invoice
+
+
+def _invoice_switch_after_scan(db):
+    now = datetime.now(timezone.utc)
+    set_setting(db, "billing_invoice_engine", "shadow")
+    set_credit_mode(db, "shadow")
+    _seed_quiet_history(db, "invoice", 14, now)
+    result = BillingShadowService.scan(db, now, session_factory=TestingSessionLocal)
+    db.commit()
+    db.expire_all()
+    failing = _failing(db, "invoice", now=now + timedelta(minutes=5), confirm_overpayments_to_reseller_cache=True)
+    return result["engines"]["invoice"], failing
+
+
+@pytest.mark.parametrize("status_name", ["SUCCEEDED", "PARTIALLY_REFUNDED"])
+def test_exact_partial_refund_difference_does_not_block_the_switch(db_session, status_name):
+    from app.models.reseller import PaymentStatus
+
+    invoice = _refunded_invoice(db_session, f"pr-{status_name.lower()}", status=PaymentStatus[status_name], refunded=200)
+    summary, failing = _invoice_switch_after_scan(db_session)
+    assert summary["mismatches_found"] == 0
+    assert [(f["check_key"], f["subject_id"]) for f in summary["expected_differences"]] == [
+        (billing_shadow.EXPECTED_PARTIAL_REFUND, invoice.id)
+    ]
+    assert failing == []
+    assert billing_shadow.open_mismatch_counts(db_session, "invoice") == {}
+    assert billing_shadow.open_mismatch_counts(db_session, "invoice", expected=True) == {
+        billing_shadow.EXPECTED_PARTIAL_REFUND: 1
+    }
+    assert billing_integrity.shadow_mismatch(db_session, PARAMS, NOW) == []
+
+
+def test_partial_refund_plus_one_cent_blocks_the_switch(db_session, monkeypatch):
+    import dataclasses
+
+    from app.models.reseller import PaymentStatus
+    from app.services.invoice_service import InvoiceService
+
+    invoice = _refunded_invoice(db_session, "pr-extra", status=PaymentStatus.SUCCEEDED, refunded=200)
+    real = InvoiceService.balance
+
+    def off_by_one(db, target):
+        value = real(db, target)
+        return dataclasses.replace(value, due_cents=value.due_cents + 1, remaining_cents=value.remaining_cents + 1)
+
+    monkeypatch.setattr(InvoiceService, "balance", staticmethod(off_by_one))
+    summary, failing = _invoice_switch_after_scan(db_session)
+    assert [(f["check_key"], f["subject_id"]) for f in summary["findings"]] == [("i2_scan", invoice.id)]
+    assert summary["expected_differences"] == []
+    assert {"no_open_mismatches", "daily_scans", "quiet_period"} <= set(failing)

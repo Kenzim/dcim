@@ -271,11 +271,15 @@ class BillingShadowService:
                     result["engines"][engine] = {"skipped": "balance_not_implemented"}
                     continue
                 checked, findings = outcome
+            blocking = [f for f in findings if f["check_key"] not in EXPECTED_DIFFERENCE_KEYS]
+            expected = [f for f in findings if f["check_key"] in EXPECTED_DIFFERENCE_KEYS]
             summary = {
                 "mode": mode,
                 "subjects_checked": checked,
-                "mismatches_found": len(findings),
-                "findings": findings[:_FINDINGS_RETURNED],
+                "mismatches_found": len(blocking),
+                "expected_differences_found": len(expected),
+                "findings": blocking[:_FINDINGS_RETURNED],
+                "expected_differences": expected[:_FINDINGS_RETURNED],
             }
             result["engines"][engine] = summary
             if dry_run:
@@ -291,7 +295,7 @@ class BillingShadowService:
                 started_at=started,
                 finished_at=finished,
                 subjects_checked=checked,
-                mismatches_found=len(findings),
+                mismatches_found=len(blocking),
             )
             _append_history(
                 db,
@@ -300,7 +304,8 @@ class BillingShadowService:
                     "started_at": started.isoformat(),
                     "finished_at": finished.isoformat(),
                     "subjects_checked": checked,
-                    "mismatches_found": len(findings),
+                    "mismatches_found": len(blocking),
+                    "expected_differences_found": len(expected),
                 },
             )
             if scheduled and mode == "shadow":
@@ -316,6 +321,11 @@ class BillingShadowService:
 
 
 HISTORY_LIMIT = 90
+
+# Check keys for differences the two engines are known to produce. They are
+# recorded and listed, but do not count against the switch criterion.
+EXPECTED_PARTIAL_REFUND = "i2_expected_partial_refund"
+EXPECTED_DIFFERENCE_KEYS = frozenset({EXPECTED_PARTIAL_REFUND})
 _SCAN_BATCH = 1000
 _FINDINGS_RETURNED = 200
 SCAN_FRESH_HOURS = 26
@@ -573,10 +583,47 @@ def _invoice_scan(db: Session, now: datetime) -> Optional[tuple[int, list[dict]]
                 "paid": allocated >= int(invoice.amount_cents),
             }
             v2 = {"remaining_cents": int(balance.remaining_cents), "paid": balance.remaining_cents == 0}
-            if legacy != v2:
-                findings.append(_finding("i2_scan", "invoice", invoice.id, legacy, v2,
-                                         f"status:{invoice.status.value}"))
+            if legacy == v2:
+                continue
+            context = f"status:{invoice.status.value}"
+            explained = _partial_refund_difference(db, invoice.id)
+            legacy_due = int(invoice.amount_cents) - allocated
+            if explained is not None and int(balance.due_cents) - legacy_due == explained:
+                findings.append(_finding(EXPECTED_PARTIAL_REFUND, "invoice", invoice.id, legacy, v2,
+                                         f"{context};refund_difference_cents:{explained}"))
+            else:
+                findings.append(_finding("i2_scan", "invoice", invoice.id, legacy, v2, context))
     return checked, findings
+
+
+def _partial_refund_difference(db: Session, invoice_id: int) -> Optional[int]:
+    """How much partial refunds alone move v2's amount due away from legacy's, or None.
+
+    Legacy counts the full amount of a ``succeeded`` payment and nothing of a
+    ``partially_refunded`` one; v2 counts ``amount - refunded_cents`` of both.
+    Returns the sum of that per-payment difference over the invoice's payments
+    with a partial refund, or None when it has none. A fully refunded payment
+    counts 0 in both models, so it adds nothing.
+    """
+    from app.models.reseller import Payment, PaymentStatus
+
+    rows = db.execute(
+        select(Payment.status, Payment.amount_cents, Payment.refunded_cents).where(
+            Payment.invoice_id == invoice_id,
+            or_(
+                Payment.status == PaymentStatus.PARTIALLY_REFUNDED,
+                and_(Payment.status == PaymentStatus.SUCCEEDED, Payment.refunded_cents > 0),
+            ),
+        )
+    ).all()
+    if not rows:
+        return None
+    difference = 0
+    for status, amount, refunded in rows:
+        legacy_counted = int(amount) if status == PaymentStatus.SUCCEEDED else 0
+        v2_counted = int(amount) - int(refunded or 0)
+        difference += legacy_counted - v2_counted
+    return difference
 
 
 # --- Engine switch records and the switch criterion (design 6.5) ---
@@ -625,10 +672,16 @@ def clear_shadow_since(db: Session, engine: str) -> None:
     write_switch_record(db, engine, record)
 
 
-def open_mismatch_counts(db: Session, engine: str) -> dict[str, int]:
+def open_mismatch_counts(db: Session, engine: str, *, expected: bool = False) -> dict[str, int]:
+    """Open rows per check key: blocking mismatches, or with ``expected`` the expected differences."""
+    keys = BillingShadowMismatch.check_key.in_(EXPECTED_DIFFERENCE_KEYS)
     rows = db.execute(
         select(BillingShadowMismatch.check_key, func.count(BillingShadowMismatch.id))
-        .where(BillingShadowMismatch.engine == engine, BillingShadowMismatch.resolved_at.is_(None))
+        .where(
+            BillingShadowMismatch.engine == engine,
+            BillingShadowMismatch.resolved_at.is_(None),
+            keys if expected else ~keys,
+        )
         .group_by(BillingShadowMismatch.check_key)
     ).all()
     return {key: int(count) for key, count in rows}
@@ -667,7 +720,12 @@ def evaluate_switch(
         items.append(_item("zero_totals_migration_applied", True))
     since = shadow_since(db, engine)
     last_seen = _parse_time(
-        db.scalar(select(func.max(BillingShadowMismatch.last_seen_at)).where(BillingShadowMismatch.engine == engine))
+        db.scalar(
+            select(func.max(BillingShadowMismatch.last_seen_at)).where(
+                BillingShadowMismatch.engine == engine,
+                BillingShadowMismatch.check_key.not_in(EXPECTED_DIFFERENCE_KEYS),
+            )
+        )
     )
     quiet_start = max([moment for moment in (since, last_seen) if moment is not None], default=None)
     quiet_days = (now - quiet_start).total_seconds() / 86400 if quiet_start is not None else None

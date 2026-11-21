@@ -68,6 +68,7 @@ def _engine_state(db: Session, engine: str, now: datetime) -> dict:
         "last_scan": BillingShadowService.last_scan(db, engine),
         "scan_history_count": len(BillingShadowService.scan_history(db, engine)),
         "open_mismatches": billing_shadow.open_mismatch_counts(db, engine),
+        "open_expected_differences": billing_shadow.open_mismatch_counts(db, engine, expected=True),
         "switch_criterion": {"ok": all(item["ok"] for item in criteria), "items": criteria},
     }
 
@@ -235,14 +236,22 @@ def switch_engine(engine: EngineName, body: SwitchBody, auth: AdminDep, db: DbDe
                 failing=[item["item"] for item in failing],
                 criteria=criteria,
             )
-    elif target == "shadow":
-        if current == "v2" and engine == "invoice":
-            blocker = _invoice_rollback_blocker(db)
-            if blocker is not None:
-                raise _conflict("rollback_refused", f"The invoice engine cannot go back to shadow: {blocker}")
-    else:
-        if current != "shadow":
-            raise _conflict("rollback_refused", f"The {engine} engine can only go to legacy from shadow")
+    elif current == "v2" and engine == "invoice":
+        # Rolling back from v2, to shadow or straight to legacy, has the same rules.
+        blocker = _invoice_rollback_blocker(db)
+        if blocker is not None:
+            raise _conflict("rollback_refused", f"The invoice engine cannot leave v2: {blocker}")
+    rollback_notes: dict = {}
+    if current == "v2" and engine == "credit":
+        # The reseller cache becomes authoritative again; list where it differs.
+        differing = billing_shadow.reseller_cache_differences(db)
+        rollback_notes = {
+            "reseller_caches_differing": len(differing),
+            "accounts_differing": [
+                {"billing_account_id": a, "reseller_cache_cents": r, "account_cache_cents": c}
+                for a, r, c in differing[:50]
+            ],
+        }
 
     set_setting(db, ENGINE_SETTING[engine], target, actor_user_id=auth["user_id"])
     record = billing_shadow.switch_record(db, engine)
@@ -272,10 +281,10 @@ def switch_engine(engine: EngineName, body: SwitchBody, auth: AdminDep, db: DbDe
         action="billing.engine.switch",
         resource_type="billing_engine",
         resource_id=engine,
-        metadata={"from": current, "to": target, "criteria": criteria},
+        metadata={"from": current, "to": target, "criteria": criteria, **rollback_notes},
     )
     db.commit()
-    return _engine_state(db, engine, _now())
+    return {**_engine_state(db, engine, _now()), "rollback": rollback_notes or None}
 
 
 class ResyncBody(BaseModel):

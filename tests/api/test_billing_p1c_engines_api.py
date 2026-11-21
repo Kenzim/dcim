@@ -247,3 +247,47 @@ def test_client_credit_endpoints_wait_for_v2(client, db_session, monkeypatch):
                           headers={"Idempotency-Key": "client-apply-1"})
     assert applied.status_code == 200, applied.text
     assert applied.json()["applied_cents"] == 500 and applied.json()["balance_cents"] == 100
+
+
+@pytest.mark.parametrize("key", ["billing_credit_engine", "billing_invoice_engine"])
+def test_generic_settings_endpoint_refuses_engine_keys(client, db_session, test_admin_user, key):
+    headers = _admin(client)
+    put = client.put(f"/api/admin/settings/{key}", headers=headers, json={"value": "v2"})
+    assert put.status_code == 409
+    assert put.json()["detail"]["managed_by"] == "billing_engines"
+    assert "/api/admin/billing/engines/" in put.json()["detail"]["message"]
+    assert client.delete(f"/api/admin/settings/{key}", headers=headers).status_code == 409
+    db_session.expire_all()
+    assert billing_engine_mode(db_session, key.split("_")[1]) == "shadow"
+    items = {item["key"]: item for item in client.get("/api/admin/settings", headers=headers).json()["items"]}
+    assert items[key]["managed_by"] == "billing_engines" and items[key]["read_only"] is True
+    assert items["billing_shadow_min_days"]["managed_by"] is None
+
+
+def test_rollback_from_v2_to_legacy_is_audited_and_follows_the_rules(client, db_session, test_admin_user, monkeypatch):
+    from app.api import billing_engines_admin
+
+    headers = _admin(client)
+    reseller = _reseller(db_session, "rb", 300)
+    set_credit_mode(db_session, "v2")
+    BillingAccountDAO.get_by_reseller_id(db_session, reseller.id).credit_balance_cents = 250
+    db_session.commit()
+    resp = client.post(f"{BASE}/credit/switch", headers=headers, json={"to": "legacy"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["rollback"]["reseller_caches_differing"] == 1
+    db_session.expire_all()
+    assert billing_engine_mode(db_session, "credit") == "legacy"
+    assert billing_shadow.shadow_since(db_session, "credit") is None
+    event = db_session.scalar(
+        select(UserAuditEvent).where(UserAuditEvent.action == "billing.engine.switch").order_by(UserAuditEvent.id.desc())
+    )
+    assert event is not None
+
+    set_setting(db_session, "billing_invoice_engine", "v2")
+    billing_shadow.write_switch_record(db_session, "invoice", {"mode": "v2"})
+    db_session.commit()
+    monkeypatch.setattr(billing_engines_admin, "_invoice_rollback_blocker", lambda db: "a partial refund exists")
+    refused = client.post(f"{BASE}/invoice/switch", headers=headers, json={"to": "legacy"})
+    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "rollback_refused"
+    monkeypatch.setattr(billing_engines_admin, "_invoice_rollback_blocker", lambda db: None)
+    assert client.post(f"{BASE}/invoice/switch", headers=headers, json={"to": "legacy"}).status_code == 200
