@@ -60,6 +60,7 @@ class AlertTypeSpec:
     resource_type: str
     params: tuple[ParamSpec, ...] = ()
     audience: str = AlertAudience.STAFF
+    enabled_by_default: bool = True
 
     def defaults(self) -> dict:
         return {p.key: p.default for p in self.params}
@@ -79,6 +80,13 @@ def _hours(key: str, label: str, default: int) -> ParamSpec:
 
 _W = AlertSeverity.WARNING
 _C = AlertSeverity.CRITICAL
+
+_BILLING_MAX_ROWS = ParamSpec("max_rows", "List at most this many records", 25, 1, 200)
+_BILLING_INVOICE_PARAMS = (
+    _minutes("min_age_minutes", "Ignore invoices younger than", 60),
+    ParamSpec("lookback_days", "Check invoices created in the last", 90, 1, 3650, "days"),
+    _BILLING_MAX_ROWS,
+)
 
 _SPECS = (
     AlertTypeSpec(
@@ -276,6 +284,63 @@ _SPECS = (
         (ParamSpec("quota_percent", "Warn at this share of the quota", 90, 50, 100, "%"),),
         audience=AlertAudience.CLIENT,
     ),
+    AlertTypeSpec(
+        "billing_invoice_lines_mismatch",
+        "Invoice lines do not add up",
+        "An invoice that has lines whose totals differ from the invoice total.",
+        _W,
+        "invoice",
+        _BILLING_INVOICE_PARAMS,
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_paid_without_payment",
+        "Paid invoice not covered by payments",
+        "A paid invoice whose succeeded payments do not cover its total.",
+        _W,
+        "invoice",
+        _BILLING_INVOICE_PARAMS,
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_overallocated",
+        "Invoice has more payments than its total",
+        "The succeeded payments on an invoice add up to more than the invoice total.",
+        _C,
+        "invoice",
+        _BILLING_INVOICE_PARAMS,
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_credit_drift",
+        "Credit balance disagrees with its ledger",
+        "A reseller's cached credit balance differs from its ledger entries or its newest balance-after value.",
+        _C,
+        "reseller",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_orphaned_payment",
+        "Payment stuck pending",
+        "A pending payment with a gateway reference that was never confirmed, or one whose invoice is already paid or void.",
+        _W,
+        "payment",
+        (
+            _minutes("pending_after_minutes", "Pending with a gateway reference for", 1440),
+            _minutes("settled_grace_minutes", "Pending after the invoice settled for", 60),
+            _BILLING_MAX_ROWS,
+        ),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_refund_stuck",
+        "Refund stuck pending",
+        "A refund was started but has stayed pending; the gateway outcome is unknown.",
+        _W,
+        "refund",
+        (_minutes("pending_after_minutes", "Pending for", 60), _BILLING_MAX_ROWS),
+    ),
 )
 
 CATALOGUE: dict[str, AlertTypeSpec] = {spec.key: spec for spec in _SPECS}
@@ -373,7 +438,7 @@ def effective_settings(db: Session) -> dict[str, EffectiveSetting]:
         )
         out[key] = EffectiveSetting(
             spec=spec,
-            enabled=True if row is None else bool(row.enabled),
+            enabled=spec.enabled_by_default if row is None else bool(row.enabled),
             severity=severity,
             params=params,
             reminder_interval_seconds=int(reminder),
@@ -412,7 +477,7 @@ def update_type_setting(
         if value is not None and (isinstance(value, bool) or not 0 <= value <= 30 * 86400):
             raise ValueError(f"{name} must be between 0 and {30 * 86400}")
     if row is None:
-        row = AlertTypeSetting(alert_type=alert_type, enabled=True, params={})
+        row = AlertTypeSetting(alert_type=alert_type, enabled=spec.enabled_by_default, params={})
         db.add(row)
     if enabled is not None:
         row.enabled = enabled
