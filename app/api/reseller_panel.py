@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Optional
 
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi import (
     APIRouter,
     Depends,
@@ -18,7 +19,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.client_permissions import PERMISSION_CATALOG
-from app.core.auth import require_reseller
+from app.core.auth import require_reseller, security
+from app.core.commerce_auth import _impersonated_by_from_token, _token_from_request
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
@@ -1088,7 +1090,14 @@ def pay_invoice(
     body: InvoicePay,
     reseller: ResellerDep,
     db: DbDep,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
+    if _impersonated_by_from_token(_token_from_request(request, credentials)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Money actions are blocked during impersonation",
+        )
     invoice = _invoice_or_404(db, reseller, invoice_id)
     try:
         result = PaymentOrchestrator().fund_invoice(

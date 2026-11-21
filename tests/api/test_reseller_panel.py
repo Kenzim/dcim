@@ -1066,3 +1066,31 @@ def test_paypal_webhook_accounting_dedupe_and_amount_mismatch(
         .count()
         == 0
     )
+
+
+def test_pay_invoice_is_blocked_during_impersonation(client, db_session, fake_stripe):
+    from app.services.user_session_service import mint_user_session
+
+    reseller, headers = _login(client, db_session, "impersonated-pay")
+    admin = User(username="panel-imp-admin", email="panel-imp-admin@example.com", is_admin=True)
+    admin.set_password("panel-password")
+    db_session.add(admin)
+    db_session.commit()
+    token = mint_user_session(reseller.user, extra_fields={"impersonated_by": admin.id})
+    invoice = InvoiceService.create_topup(db_session, reseller_id=reseller.id, amount_cents=700)
+    db_session.commit()
+
+    blocked = client.post(
+        f"/api/reseller-panel/invoices/{invoice.id}/pay",
+        headers={"Authorization": f"Bearer {token}"},
+        json={},
+    )
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "Money actions are blocked during impersonation"
+    db_session.refresh(invoice)
+    assert invoice.payments == []
+
+    own = client.post(
+        f"/api/reseller-panel/invoices/{invoice.id}/pay", headers=headers, json={}
+    )
+    assert own.status_code != 403
