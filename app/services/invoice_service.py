@@ -487,6 +487,10 @@ class InvoiceService:
                 else InvoiceDocumentType.INVOICE
             ),
             prices_include_tax=prices_include_tax if mode == "v2" else None,
+            # ck_invoices_v2_totals: a v2 row carries totals from its insert; publish computes them.
+            subtotal_cents=0 if mode == "v2" else None,
+            discount_cents=0 if mode == "v2" else None,
+            tax_cents=0 if mode == "v2" else None,
             customer_notes=customer_notes,
             locale=locale,
             series_id=series_id,
