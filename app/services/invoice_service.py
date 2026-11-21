@@ -67,19 +67,29 @@ _PAID_PAYMENT_STATUSES = (
 
 S = InvoiceStatus
 
-# Engine v2 (design 3.3). Every edge not listed is refused.
+# Engine v2 (design 3.3), plus the edges the status rule of 3.2 reaches that 3.3
+# does not list (a property test pins that the rule never leaves the table):
+# open to refunded and pending_action to refunded (a refund's credit note after
+# the invoice reopened), open to collections (a dispute under the reopen
+# policy), pending_action to void (a credit note covering an invoice with a
+# payment still pending), paid to pending_action and paid to void (after a
+# reversed payment). Every edge not listed is refused.
 V2_EDGES: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
     S.DRAFT: frozenset({S.OPEN}),
-    S.OPEN: frozenset({S.PENDING_ACTION, S.PAID, S.PARTIALLY_PAID, S.OVERDUE, S.VOID}),
+    S.OPEN: frozenset(
+        {S.PENDING_ACTION, S.PAID, S.PARTIALLY_PAID, S.OVERDUE, S.VOID, S.REFUNDED, S.COLLECTIONS}
+    ),
     S.PENDING_ACTION: frozenset(
-        {S.OPEN, S.PARTIALLY_PAID, S.OVERDUE, S.COLLECTIONS, S.PAID}
+        {S.OPEN, S.PARTIALLY_PAID, S.OVERDUE, S.COLLECTIONS, S.PAID, S.REFUNDED, S.VOID}
     ),
     S.PARTIALLY_PAID: frozenset(
         {S.PENDING_ACTION, S.PAID, S.OVERDUE, S.COLLECTIONS, S.OPEN, S.REFUNDED, S.VOID}
     ),
     S.OVERDUE: frozenset({S.PENDING_ACTION, S.PAID, S.COLLECTIONS, S.REFUNDED, S.VOID}),
     S.COLLECTIONS: frozenset({S.PENDING_ACTION, S.PAID, S.REFUNDED, S.VOID}),
-    S.PAID: frozenset({S.COLLECTIONS, S.PARTIALLY_PAID, S.OPEN, S.REFUNDED}),
+    S.PAID: frozenset(
+        {S.COLLECTIONS, S.PARTIALLY_PAID, S.OPEN, S.REFUNDED, S.PENDING_ACTION, S.VOID}
+    ),
     S.VOID: frozenset(),
     S.REFUNDED: frozenset(),
     S.FAILED: frozenset(),

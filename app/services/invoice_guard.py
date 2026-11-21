@@ -69,8 +69,9 @@ ONCE_SET_COLUMNS = frozenset(
         "proforma_number_display",
     }
 )
-# Mirrors of ON DELETE SET NULL: a change to NULL is allowed.
-NULLABLE_FOREIGN_KEYS = frozenset({"service_id", "billing_account_id"})
+# Mirrors of ON DELETE SET NULL: a change to NULL is allowed. ``service_id`` is
+# not here: the database clears it when a service is deleted, without the ORM.
+NULLABLE_FOREIGN_KEYS = frozenset({"billing_account_id"})
 LINE_NULLABLE_FOREIGN_KEYS = frozenset({"service_id", "service_billing_id", "order_item_id"})
 GUARDED_COLUMNS = FROZEN_COLUMNS | ONCE_SET_COLUMNS | {"document_type"}
 

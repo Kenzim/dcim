@@ -324,6 +324,30 @@ def test_guard_allows_drafts_once_set_columns_and_free_columns(db_session, accou
     db_session.rollback()
 
 
+def test_guard_lets_service_id_be_set_once_and_never_changed_or_cleared(db_session, account):
+    from app.models.service import Service
+
+    invoice = _create(db_session, account)
+    services = []
+    for name in ("a", "b"):
+        service = Service(name=f"p1i-guard-{name}")
+        db_session.add(service)
+        services.append(service)
+    db_session.flush()
+    invoice.service_id = services[0].id
+    db_session.commit()
+    invoice.service_id = services[1].id
+    with pytest.raises(FrozenInvoiceError):
+        db_session.flush()
+    db_session.rollback()
+    invoice = db_session.get(Invoice, invoice.id)
+    assert invoice.service_id == services[0].id
+    invoice.service_id = None
+    with pytest.raises(FrozenInvoiceError):
+        db_session.flush()
+    db_session.rollback()
+
+
 def test_guard_log_mode_lets_the_write_through_and_records_it(db_session, account, shadow_records):
     invoice = _create(db_session, account)
     invoice_guard.set_mode_override("log")
@@ -478,7 +502,7 @@ def test_v2_status_follows_the_balance(db_session, account, events):
     ]
 
 
-def test_v2_full_refund_without_a_credit_note_reopens(db_session, account):
+def test_v2_full_refund_without_a_credit_note_reopens_then_its_note_ends_refunded(db_session, account):
     _v2(db_session)
     invoice = _create(db_session, account)
     payment = _pay(db_session, invoice, 1000)
@@ -488,6 +512,10 @@ def test_v2_full_refund_without_a_credit_note_reopens(db_session, account):
     db_session.flush()
     InvoiceService.recompute(db_session, invoice, cause="refund")
     assert invoice.status == S.OPEN and invoice.paid_at is not None
+    _note(db_session, invoice, AdjustmentKind.CREDIT, 1000, AdjustmentOutcome.REFUNDED)
+    InvoiceService.recompute(db_session, invoice, cause="credit_note")
+    assert invoice.status == S.REFUNDED
+    assert _status_audits(db_session, invoice)[-3:] == ["paid", "open", "refunded"]
 
 
 def test_v2_credit_note_covering_an_unpaid_invoice_voids_it(db_session, account):
@@ -597,7 +625,10 @@ def test_v2_edges_are_the_design_table():
     assert V2_EDGES[S.VOID] == V2_EDGES[S.REFUNDED] == V2_EDGES[S.FAILED] == frozenset()
     assert V2_EDGES[S.DRAFT] == {S.OPEN}
     assert S.PAID not in V2_EDGES[S.DRAFT]
-    assert V2_EDGES[S.PAID] == {S.COLLECTIONS, S.PARTIALLY_PAID, S.OPEN, S.REFUNDED}
+    assert V2_EDGES[S.PAID] == {
+        S.COLLECTIONS, S.PARTIALLY_PAID, S.OPEN, S.REFUNDED, S.PENDING_ACTION, S.VOID
+    }
+    assert S.OVERDUE not in V2_EDGES[S.PAID] and S.PAID in V2_EDGES[S.OPEN]
 
 
 # ------------------------------------------------------------------ proforma
