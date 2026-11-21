@@ -498,7 +498,7 @@ def test_resolve_cycle_matches_todays_checkout_rules():
     for label, message in ((None, "required"), ("weekly", "Invalid"), ("biennially", "Invalid"), ("quarterly", "unavailable")):
         with pytest.raises(CycleError, match=message):
             resolve_cycle(plan, label)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(CycleError, match="Invalid"):
         resolve_cycle(plan, interval_unit="year", interval_count=2)
 
 
