@@ -349,7 +349,7 @@ The two locking revisions are last on purpose: if the rehearsal shows them over 
 
 The old code keeps running while revisions 7 and 8 execute during a rolling deploy, and it writes ledger entries without `billing_account_id` and without touching the account cache. Therefore:
 
-- the deploy runbook re-runs `python -m app.services.billing_backfill ledger_accounts` once no old process remains;
+- the deploy runbook re-runs `python -m app.services.billing_backfill accounts` (all four steps, idempotent) once no old process remains, because while the deploy rolls old processes write unlinked reseller entries and move only the reseller cache;
 - the credit engine stays in `shadow` until its switch criterion holds (6.5), and the first criterion is "no ledger entry with `reseller_id` set and `billing_account_id` NULL";
 - while the credit engine is not `v2`, an admin action "Resynchronise account caches from reseller balances" (P1-C) repeats step (b) for named accounts, audited. It is refused in `v2`.
 
@@ -993,7 +993,7 @@ All ten are written by P1-S. Contract revisions (2.3) chain after them in a late
 
 ### 11.5 Rollout after phase 1 merges
 
-1. Deploy with both engines in `shadow` (the default), guard in `log`. Run `billing_backfill ledger_accounts` once the old processes are gone.
+1. Deploy with both engines in `shadow` (the default), guard in `log`. Run `billing_backfill accounts` once the old processes are gone.
 2. Watch `billing_shadow_mismatches` and the E2 alerts. Fix and redeploy until clean.
 3. After the quiet period, switch the credit engine to `v2` (6.5). Retail credit features (top-up, apply, remove) are available from this point; before it they are refused for retail with a clear error.
 4. After its own quiet period, switch the invoice engine to `v2`. Credit and debit notes, partial refunds, refunds to credit, overpayment to credit, `partially_paid`, `refunded` and `collections` become live, and the guard becomes `enforce`.
