@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Optional
 
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi import (
     APIRouter,
@@ -1156,7 +1157,8 @@ async def stripe_webhook(
             status_code=400, detail="Invalid Stripe webhook signature"
         ) from exc
     try:
-        processed = PaymentWebhookService.process(
+        processed = await run_in_threadpool(
+            PaymentWebhookService.process,
             db,
             gateway="stripe",
             event=normalized,
@@ -1194,7 +1196,8 @@ async def paypal_webhook(
             status_code=400, detail="Invalid PayPal webhook signature"
         ) from exc
     try:
-        processed = PaymentWebhookService.process(
+        processed = await run_in_threadpool(
+            PaymentWebhookService.process,
             db,
             gateway="paypal",
             event=normalized,

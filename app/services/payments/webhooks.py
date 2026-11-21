@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import hashlib
 import logging
@@ -51,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentWebhookService:
+    # Session-info key for services a dispute queued for suspension after commit.
+    DEFERRED_SUSPENSION_KEY = "billing.deferred_dispute_suspension"
+
     @staticmethod
     def reverse_payment(
         db: Session,
@@ -108,6 +112,7 @@ class PaymentWebhookService:
             if db.info.get("billing.deferred_order_fulfilment"):
                 logger.warning("Dropping order fulfilment queued by an earlier, unfinished webhook")
             discard_deferred_fulfilment(db)
+            db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, None)
             with db.begin_nested():
                 db.add(record)
                 db.flush()
@@ -125,11 +130,14 @@ class PaymentWebhookService:
                 db.flush()
         except IntegrityError:
             discard_deferred_fulfilment(db)
+            db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, None)
             return False
         except Exception:
             discard_deferred_fulfilment(db)
+            db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, None)
             raise
         run_deferred_fulfilment(db)
+        PaymentWebhookService.run_deferred_suspensions(db)
         return True
 
     @staticmethod
@@ -436,13 +444,15 @@ class PaymentWebhookService:
             )
 
         try:
-            asyncio.run(_run())
+            asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(_run())
-            finally:
-                loop.close()
+            asyncio.run(_run())
+            return
+        # Called from code already inside an event loop: run the coroutine on a
+        # loop of its own in a helper thread; this thread waits, so the session
+        # is still used by one thread at a time.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(asyncio.run, _run()).result()
 
     @staticmethod
     def _enqueue_dispute_suspend_email(db: Session, invoice, *, reason: str) -> None:
@@ -483,10 +493,33 @@ class PaymentWebhookService:
 
     @staticmethod
     def _suspend_linked_services(db: Session, invoice, *, reason: str) -> None:
+        """Queue the invoice's services for suspension once the transaction commits."""
         service_ids = PaymentWebhookService._linked_service_ids(db, invoice)
         if not service_ids:
             return
-        PaymentWebhookService._run_suspend_services_for_dispute(
-            db, service_ids, reason=reason
-        )
+        queued = db.info.setdefault(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, [])
+        queued.append((list(service_ids), reason))
         PaymentWebhookService._enqueue_dispute_suspend_email(db, invoice, reason=reason)
+
+    @staticmethod
+    def run_deferred_suspensions(db: Session) -> None:
+        """Commit, then suspend the services a dispute queued, each in its own transaction.
+
+        Lifecycle calls reach hypervisors and must not run while billing rows
+        are locked. A failed suspension is logged and left for staff; the
+        dispute itself is already committed.
+        """
+        pending = db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, [])
+        if not pending:
+            return
+        db.commit()
+        for service_ids, reason in pending:
+            for service_id in service_ids:
+                try:
+                    PaymentWebhookService._run_suspend_services_for_dispute(
+                        db, [service_id], reason=reason
+                    )
+                    db.commit()
+                except Exception:  # noqa: BLE001 - one service must not stop the others
+                    db.rollback()
+                    logger.exception("Dispute suspend failed for service %s", service_id)
