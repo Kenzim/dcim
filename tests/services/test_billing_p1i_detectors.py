@@ -93,6 +93,25 @@ def test_invoice_totals_ignores_legacy_invoices(db_session, account):
     assert bi.invoice_totals(db_session, _params("billing_invoice_totals"), NOW) == []
 
 
+def test_invoice_lines_mismatch_skips_v2_invoices(db_session, account, v2):
+    from app.models.commerce_invoice_ext import InvoiceLine
+
+    invoice = _v2_invoice(db_session, account, tax=200)
+    assert invoice.amount_cents == 1200
+    legacy = Invoice(invoice_number=next(_numbers), billing_account_id=account.id,
+                     purpose=InvoicePurpose.UPGRADE, status=InvoiceStatus.DRAFT, amount_cents=1000,
+                     currency="USD")
+    db_session.add(legacy)
+    db_session.flush()
+    db_session.add(InvoiceLine(invoice_id=legacy.id, description="x", quantity=1, unit_cents=900,
+                               total_cents=900, tax_cents=0, sort_order=0))
+    db_session.flush()
+    legacy.status = InvoiceStatus.OPEN
+    db_session.flush()
+    findings = bi.invoice_lines_mismatch(db_session, _params("billing_invoice_lines_mismatch"), NOW)
+    assert [f.resource_id for f in findings] == [str(legacy.id)]
+
+
 # ------------------------------------------------------------------ P3 status
 
 

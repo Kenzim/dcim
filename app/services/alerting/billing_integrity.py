@@ -91,14 +91,18 @@ def invoice_lines_mismatch(db: Session, params: dict, now: datetime) -> list[Fin
     """An invoice that has lines whose totals do not add up to the invoice total.
 
     Invoices without lines are skipped (reseller invoices often have none), as are
-    draft and void invoices.
+    draft and void invoices, and model v2 invoices, whose tax sits on the lines
+    and whose totals ``invoice_totals`` checks.
     """
     line_sum = func.sum(InvoiceLine.total_cents)
     stmt = (
         select(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency, line_sum.label("lines"),
                func.count(InvoiceLine.id).label("line_count"))
         .join(InvoiceLine, InvoiceLine.invoice_id == Invoice.id)
-        .where(*_invoice_filters(params, now, _checked_invoices()))
+        .where(
+            *_invoice_filters(params, now, _checked_invoices()),
+            or_(Invoice.model_version.is_(None), Invoice.model_version != 2),
+        )
         .group_by(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency)
         .having(line_sum != Invoice.amount_cents)
         .order_by(Invoice.id)
