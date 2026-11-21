@@ -719,8 +719,13 @@ class CreditLedgerService:
         idempotency_key: Optional[str] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         created_by_user_id: Optional[int] = None,
+        allow_negative_balance: bool = False,
     ) -> CreditLedgerEntry:
-        """Signed adjustment of a billing account without allowing debt; keywords as ``adjust``."""
+        """Signed adjustment of a billing account; keywords as ``adjust``.
+
+        A negative adjustment cannot take the balance below zero unless
+        ``allow_negative_balance`` is set.
+        """
         CreditLedgerService._require_integer_cents(amount_cents, positive=False)
         return CreditLedgerService._write_account(
             db,
@@ -735,6 +740,7 @@ class CreditLedgerService:
                 metadata=metadata,
                 created_by_user_id=created_by_user_id,
             ),
+            allow_negative_balance=allow_negative_balance,
         )
 
     @staticmethod
@@ -799,6 +805,7 @@ class CreditLedgerService:
         created_by_user_id: Optional[int],
         idempotency_key: Optional[str] = None,
         fire_event: bool = True,
+        allow_negative_balance: bool = False,
     ) -> Optional[Payment]:
         """Pay ``amount_cents`` of a locked invoice from its owner's credit.
 
@@ -845,10 +852,20 @@ class CreditLedgerService:
             created_by_user_id=created_by_user_id,
         )
         if reseller is not None:
-            ledger = CreditLedgerService.debit(db, reseller.id, amount_cents, **keywords)
+            ledger = CreditLedgerService.debit(
+                db,
+                reseller.id,
+                amount_cents,
+                allow_negative_balance=allow_negative_balance,
+                **keywords,
+            )
         else:
             ledger = CreditLedgerService.debit_account(
-                db, int(invoice.billing_account_id), amount_cents, **keywords
+                db,
+                int(invoice.billing_account_id),
+                amount_cents,
+                allow_negative_balance=allow_negative_balance,
+                **keywords,
             )
         metadata = {"source": source, "ledger_entry_id": ledger.id}
         if idempotency_key is not None:
@@ -878,14 +895,18 @@ class CreditLedgerService:
         amount_cents: Optional[int] = None,
         actor_user_id: Optional[int] = None,
         idempotency_key: str,
+        allow_negative_balance: bool = False,
     ) -> Optional[Payment]:
         """Pay (part of) an invoice from account credit as a ``credit`` payment (design 6.7).
 
         ``amount_cents`` defaults to ``min(available, remaining)``; an explicit
-        amount must be positive and within both. Locks reseller, account and
-        invoice in order. Returns the payment, the earlier payment for a
-        repeated ``idempotency_key``, or None when there is nothing to apply.
-        Retail invoices need the credit engine in ``v2``.
+        amount must be positive and within both. With ``allow_negative_balance``
+        (the reseller ``debit_balance`` dispute policy, design 7.6) the available
+        credit is no cap: the default is the remaining amount and the balance
+        may go below zero by the shortfall. Locks reseller, account and invoice
+        in order. Returns the payment, the earlier payment for a repeated
+        ``idempotency_key``, or None when there is nothing to apply. Retail
+        invoices need the credit engine in ``v2``.
         """
         from app.services.billing_locks import BillingLocks
 
@@ -928,13 +949,13 @@ class CreditLedgerService:
         available = CreditLedgerService.available_cents(db, owner)
         remaining = CreditLedgerService._remaining_cents(db, locked)
         if amount_cents is None:
-            amount = min(available, remaining)
+            amount = remaining if allow_negative_balance else min(available, remaining)
         else:
             if amount_cents > remaining:
                 raise CreditLedgerError(
                     f"amount_cents exceeds the {remaining} cents due on the invoice"
                 )
-            if amount_cents > available:
+            if amount_cents > available and not allow_negative_balance:
                 raise InsufficientCreditError(
                     reseller_id=locked.reseller_id,
                     billing_account_id=locked.billing_account_id,
@@ -949,6 +970,7 @@ class CreditLedgerService:
             amount_cents=amount,
             created_by_user_id=actor_user_id,
             idempotency_key=idempotency_key,
+            allow_negative_balance=allow_negative_balance,
         )
 
     @staticmethod

@@ -290,6 +290,92 @@ def test_remove_from_invoice_requests_a_credit_refund(db_session, recorded, monk
         CreditLedgerService.remove_from_invoice(db_session, card, amount_cents=1, actor_user_id=None, idempotency_key="rm-2")
 
 
+def test_negative_balance_is_refused_by_default(db_session, recorded):
+    set_credit_mode(db_session, "shadow")
+    reseller = _reseller(db_session, "nodebt")
+    CreditLedgerService.credit(db_session, reseller.id, 100)
+    account = _account_of(db_session, reseller)
+    invoice = _open_invoice(db_session, amount=500, reseller=reseller)
+    with pytest.raises(InsufficientCreditError):
+        CreditLedgerService.apply_to_invoice(db_session, invoice, amount_cents=300, idempotency_key="nd-1")
+    with pytest.raises(InsufficientCreditError):
+        CreditLedgerService.debit_account(db_session, account.id, 101)
+    with pytest.raises(InsufficientCreditError):
+        CreditLedgerService.adjust_account(db_session, account.id, -101)
+    retail = _retail(db_session, "nodebt")
+    CreditLedgerService.credit_account(db_session, retail.id, 50)
+    with pytest.raises(InsufficientCreditError):
+        CreditLedgerService.debit_account(db_session, retail.id, 51)
+    assert (reseller.cached_balance_cents, account.credit_balance_cents) == (100, 100)
+    assert retail.credit_balance_cents == 50
+
+
+@pytest.mark.parametrize("mode", ["shadow", "v2"])
+def test_apply_to_invoice_may_take_a_reseller_negative(db_session, recorded, mode):
+    set_credit_mode(db_session, mode)
+    reseller = _reseller(db_session, f"debt{mode}")
+    CreditLedgerService.credit(db_session, reseller.id, 100)
+    account = _account_of(db_session, reseller)
+    invoice = _open_invoice(db_session, amount=500, reseller=reseller)
+    payment = CreditLedgerService.apply_to_invoice(
+        db_session, invoice, idempotency_key=f"neg-{mode}", allow_negative_balance=True
+    )
+    again = CreditLedgerService.apply_to_invoice(
+        db_session, invoice, idempotency_key=f"neg-{mode}", allow_negative_balance=True
+    )
+    assert again.id == payment.id
+    assert payment.amount_cents == 500
+    assert invoice.status == InvoiceStatus.PAID
+    # Both caches move by exactly the amount and agree, so no drift is recorded.
+    assert (reseller.cached_balance_cents, account.credit_balance_cents) == (-400, -400)
+    assert CreditLedgerService.balance_cents(db_session, account) == -400
+    assert CreditLedgerService.available_cents(db_session, account) == 0
+    assert recorded == []
+
+
+def test_explicit_amount_beyond_credit_with_negative_allowed(db_session, recorded):
+    set_credit_mode(db_session, "shadow")
+    reseller = _reseller(db_session, "debtexplicit")
+    invoice = _open_invoice(db_session, amount=500, reseller=reseller)
+    payment = CreditLedgerService.apply_to_invoice(
+        db_session, invoice, amount_cents=200, idempotency_key="ne-1", allow_negative_balance=True
+    )
+    assert payment.amount_cents == 200
+    assert reseller.cached_balance_cents == _account_of(db_session, reseller).credit_balance_cents == -200
+    # The invoice's remaining amount still caps the application.
+    with pytest.raises(CreditLedgerError):
+        CreditLedgerService.apply_to_invoice(
+            db_session, invoice, amount_cents=301, idempotency_key="ne-2", allow_negative_balance=True
+        )
+
+
+def test_retail_account_may_go_negative_when_allowed(db_session, recorded):
+    set_credit_mode(db_session, "v2")
+    retail = _retail(db_session, "retaildebt")
+    CreditLedgerService.credit_account(db_session, retail.id, 100)
+    invoice = _open_invoice(db_session, amount=300, account=retail)
+    payment = CreditLedgerService.apply_to_invoice(
+        db_session, invoice, idempotency_key="rd-1", allow_negative_balance=True
+    )
+    assert payment.amount_cents == 300
+    assert retail.credit_balance_cents == -200
+    CreditLedgerService.debit_account(db_session, retail.id, 50, allow_negative_balance=True)
+    CreditLedgerService.adjust_account(db_session, retail.id, -25, allow_negative_balance=True)
+    assert retail.credit_balance_cents == -275
+
+
+def test_account_debit_may_take_a_reseller_negative_in_shadow(db_session, recorded):
+    set_credit_mode(db_session, "shadow")
+    reseller = _reseller(db_session, "acctdebt")
+    account = BillingAccountDAO.ensure_reseller_account(db_session, reseller)
+    CreditLedgerService.credit_account(db_session, account.id, 100)
+    debit = CreditLedgerService.debit_account(db_session, account.id, 250, allow_negative_balance=True)
+    adjust = CreditLedgerService.adjust_account(db_session, account.id, -50, allow_negative_balance=True)
+    assert [debit.balance_after_cents, adjust.balance_after_cents] == [-150, -200]
+    assert (reseller.cached_balance_cents, account.credit_balance_cents) == (-200, -200)
+    assert recorded == []
+
+
 def test_paid_retail_topup_credits_the_account(db_session, recorded):
     set_credit_mode(db_session, "v2")
     account = _retail(db_session, "topup")
