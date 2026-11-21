@@ -29,6 +29,7 @@ from app.services.commerce_lifecycle_service import (
     CommerceLifecycleError,
     CommerceLifecycleService,
 )
+from app.plugin_host import events as plugin_events
 from app.services.commerce_webhook_service import CommerceWebhookService
 from app.services.email_message_service import EmailMessageService
 from app.services.gdpr_service import GdprService
@@ -449,7 +450,7 @@ def mark_invoice_paid(
         metadata={"reason": body.reason},
     )
     try:
-        CommerceWebhookService.enqueue(
+        plugin_events.emit(
             db,
             "invoice.paid",
             {

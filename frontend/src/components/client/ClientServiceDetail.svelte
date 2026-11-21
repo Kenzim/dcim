@@ -7,6 +7,7 @@
   import VmServiceView from './VmServiceView.svelte';
   import BareMetalServiceView from './BareMetalServiceView.svelte';
   import ProxyServiceView from './ProxyServiceView.svelte';
+  import PluginPanels from '../PluginPanels.svelte';
 
   /** @type {number} */
   export let serviceId;
@@ -115,6 +116,9 @@
         <p class="muted">Keep, restore and release the backup in this slot on the <a href="/client/backup-slots">Backup slots</a> page.</p>
       {:else}
         <p class="muted">This service type has no portal controls.</p>
+      {/if}
+      {#if !tabs.length || activeTab === 'overview'}
+        <PluginPanels {serviceId} audience="client" />
       {/if}
     </div>
   {/if}

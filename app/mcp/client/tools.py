@@ -19,6 +19,8 @@ from app.api import commerce_client as commerce
 from app.api import private_networks as network_portal
 from app.api import services_client as portal
 from app.api import storage_client as storage_portal
+from app.mcp.scopes import scope_allows
+from app.plugin_host import ui as plugin_ui
 from app.api.vm_backup_routes import BackupCreateBody, BackupMutateBody
 from app.core.client_mcp_auth import ClientMcpAuthContext
 from app.core.config import settings
@@ -77,6 +79,7 @@ _ACTION_SCOPE = {
     "fast_path_on": "write",
     "fast_path_off": "write",
     "network": "write",
+    "plugin": "write",
 }
 
 
@@ -107,6 +110,28 @@ def _owned_service(db: Session, ctx: ClientMcpAuthContext, service_id: int):
     if not service or service.owner_user_id != ctx.user_id:
         raise HTTPException(status_code=404, detail="Service not found")
     return service
+
+
+async def _plugin_action(
+    db: Session, ctx: ClientMcpAuthContext, service_id: int, name: Optional[str], params, confirm: bool
+):
+    """Run a plugin's client action or client MCP tool, named plugin_id.id."""
+    plugin_id, _, item = (name or "").partition(".")
+    if not plugin_id or not item:
+        raise ToolError("plugin needs name=plugin_id.action_or_tool (see services view=plugins)")
+    service = _owned_service(db, ctx, service_id)
+    actor = {"type": "client", "user_id": ctx.user_id, "via": "mcp"}
+    tool = plugin_ui.client_tool_spec(db, plugin_id, item)
+    try:
+        if tool is None:
+            params = dict(params or {})
+            return await plugin_ui.run_action(db, service, plugin_id, item, params=params, confirm=confirm, actor=actor)
+        if not scope_allows(ctx.scopes, tool.scope):
+            raise ToolError(f"MCP key lacks required scope: {tool.scope}")
+        merged = {**dict(params or {}), "service_id": service.id} if tool.service_scoped else dict(params or {})
+        return await plugin_ui.run_tool(db, plugin_id, item, params=merged, actor=actor, audience="client")
+    except plugin_ui.PluginRequestError as exc:
+        raise ToolError(exc.detail) from exc
 
 
 def _fast_path(overview: dict, service_id: Optional[int]) -> dict:
@@ -176,11 +201,11 @@ async def account(
 
 @client_mcp.tool()
 async def services(
-    view: Literal["list", "detail", "backups", "ssh_keys", "actions", "fast_path", "networks"] = "list",
+    view: Literal["list", "detail", "backups", "ssh_keys", "actions", "fast_path", "networks", "plugins"] = "list",
     service_id: Optional[int] = None,
     service_type: Optional[str] = None,
 ) -> Any:
-    """Your services. list (service_type filters), detail, backups (a VM's backups and your backup slots, or a backup_slot service's retained backup and the VMs it can be restored onto), ssh_keys (VM), actions (plugin actions).
+    """Your services. list (service_type filters), detail, backups (a VM's backups and your backup slots, or a backup_slot service's retained backup and the VMs it can be restored onto), ssh_keys (VM), actions (server actions), plugins (plugin panels and tools).
     fast_path: private proxy addresses per location and proxy IP (service_id optional).
     networks (no service_id): your private networks with members, invitations and DHCP settings, networks shared with you with their open shares and effective DHCP settings, and invitations to answer. All others need service_id."""
 
@@ -207,6 +232,9 @@ async def services(
             return {**out, **await slot_portal.client_list_slots(auth, db)}
         if view == "ssh_keys":
             return await portal.client_get_vm_ssh_keys(service_id, auth, db)
+        if view == "plugins":
+            service = _owned_service(db, ctx, service_id)
+            return {**plugin_ui.render(db, service, "client"), "tools": plugin_ui.client_tools(db, service)}
         return await portal.client_list_strategy_actions(service_id, auth, db)
 
     return await run_client_tool("services", "read", work, args={"view": view, "service_id": service_id})
@@ -231,6 +259,7 @@ async def service_action(
         "run_action",
         "fast_path_on",
         "fast_path_off",
+        "plugin",
     ],
     service_id: Optional[int] = None,
     confirm: bool = False,
@@ -250,6 +279,7 @@ async def service_action(
 
     write scope: power_on, power_off, reboot, reset, console (one-time browser link; console_type kvm/sol for servers, vnc/serial for VMs), backup_create (backup_mode, notes; suspend/stop interrupt the VM), set_ssh_keys (VM; replaces all keys, ssh_public_keys), backup_retain (service_id=VM, volid, slot_service_id; keeps that backup in your backup slot; replace=true swaps out what the slot holds).
     destructive scope: backup_delete and backup_restore (volid, storage; a volid held in a backup slot restores onto service_id, any of your VMs of the same type (cloud-init Linux or macOS), and replaces everything on it; on macOS, Apple account sign-ins may need redoing because they are tied to the VM's serial number), backup_release (service_id=backup_slot; deletes its retained backup), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
+    plugin (write): name = plugin_id.id from services view=plugins, params.
     write scope, proxies: fast_path_on and fast_path_off turn the private proxy network on or off in the locations of this proxy's IPs (for all your servers there).
     network (service_id only for attach): name = attach, detach, invite, invitation_cancel, member_remove, leave, invitation_accept or invitation_decline; params = network_id plus attach: service_id (or here), ip_address; detach: attachment_id; invite: invitee (email or username); invitation_cancel: invitation_id; member_remove: member_user_id; invitation_accept and invitation_decline: invitation_id only. Write: attach, invite, invitation_cancel, invitation_accept, invitation_decline. Destructive: detach, member_remove, leave. Members attach and detach their own services; the rest is owner-only.
     network DHCP (owner only, params network_id plus): dhcp_get (read, no confirm); dhcp_set (write; any of enabled, range_start, range_end (both null removes the range), lease_seconds (null = default), gateway, dns_servers, domain, mtu, routes [{destination, gateway}], ntp_servers); dhcp_reservation_add (write; mac, ip, label); dhcp_reservation_update (write; reservation_id, mac, ip, label); dhcp_reservation_remove (destructive; reservation_id).
@@ -319,6 +349,8 @@ async def service_action(
                 elif location_id in enabled:
                     await network_portal.client_fast_path_off(location_id, auth, db)
             return _fast_path(await network_portal.client_fast_path(auth, db), service_id)
+        if action == "plugin":
+            return await _plugin_action(db, ctx, service_id, name, params, confirm)
         _need("run_action", name=name)
         body = portal.ClientStrategyActionBody(params=params or {})
         return await portal.client_run_strategy_action(service_id, name, body, auth, db)

@@ -1,0 +1,87 @@
+"""Public catalogue of plugin API 1.0: version, permissions and events (docs/plugin-system.md sections 6 and 7)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+API_VERSION = "1.0"
+
+
+@dataclass(frozen=True)
+class Permission:
+    key: str
+    label: str
+    description: str
+    risk: str
+
+    def as_dict(self) -> dict:
+        return {"key": self.key, "label": self.label, "description": self.description, "risk": self.risk}
+
+
+PERMISSION_LIST = (
+    Permission("service.read", "Read services", "Read basic facts of the services it is active for and receive service events.", "low"),
+    Permission("billing.read", "Billing events", "Receive order paid and invoice paid events.", "low"),
+    Permission("support.read", "Support events", "Receive ticket created events.", "low"),
+    Permission("events.veto", "Refuse operations", "Run checks before operations such as power actions and refuse them.", "medium"),
+    Permission("notify.client", "Notify clients", "Send notices to the owners of services it is active for.", "medium"),
+    Permission("http.outbound", "Outbound HTTP", "Make HTTP requests to public addresses.", "medium"),
+    Permission("ui.client", "Client interface", "Show panels and buttons to clients in the portal, WHMCS and client MCP.", "medium"),
+    Permission("mcp.staff", "Staff MCP tools", "Offer tools to staff MCP keys.", "medium"),
+    Permission("mcp.client", "Client MCP tools", "Offer tools to client MCP keys.", "medium"),
+    Permission("vm.power", "VM power", "Start, shut down, stop, reboot or reset VMs it is active for.", "high"),
+    Permission("guest.exec", "Run commands in VMs", "Run commands inside VMs it is active for through the QEMU guest agent.", "high"),
+)
+PERMISSIONS = {p.key: p for p in PERMISSION_LIST}
+
+
+def describe_permissions(keys) -> list[dict]:
+    out = []
+    for key in sorted(set(keys or [])):
+        perm = PERMISSIONS.get(key)
+        out.append(perm.as_dict() if perm else {"key": key, "label": key, "description": "", "risk": "high"})
+    return out
+
+
+@dataclass(frozen=True)
+class EventSpec:
+    name: str
+    permission: str
+    required: tuple[str, ...]
+    optional: tuple[str, ...] = ()
+    service_scoped: bool = False
+    before: bool = False
+    mutable: tuple[str, ...] = field(default_factory=tuple)
+
+
+_SERVICE_FIELDS = ("service_id", "service_type", "owner_user_id")
+
+EVENT_LIST = (
+    EventSpec(
+        "service.created",
+        "service.read",
+        ("service_id", "service_type", "status", "owner_user_id", "product_code", "os_code", "provisioning_source"),
+        service_scoped=True,
+    ),
+    EventSpec("service.activated", "service.read", _SERVICE_FIELDS + ("previous_status",), service_scoped=True),
+    EventSpec("service.suspended", "service.read", _SERVICE_FIELDS + ("previous_status",), service_scoped=True),
+    EventSpec("service.unsuspended", "service.read", _SERVICE_FIELDS + ("status",), service_scoped=True),
+    EventSpec("service.terminated", "service.read", _SERVICE_FIELDS + ("previous_status",), service_scoped=True),
+    EventSpec(
+        "service.power_requested",
+        "service.read",
+        ("service_id", "service_type", "action", "source", "actor_user_id"),
+        service_scoped=True,
+        before=True,
+    ),
+    EventSpec("order.paid", "billing.read", ("order_id", "order_number", "billing_account_id", "total_cents", "currency")),
+    EventSpec("invoice.paid", "billing.read", ("invoice_id", "billing_account_id"), ("invoice_number", "order_id")),
+    EventSpec(
+        "ticket.created",
+        "support.read",
+        ("ticket_id", "ticket_number", "billing_account_id", "department_id", "subject"),
+    ),
+)
+EVENTS = {e.name: e for e in EVENT_LIST}
+
+POWER_ACTIONS = ("on", "off", "shutdown", "reboot", "reset")
+POWER_SOURCES = ("admin", "client", "billing", "reseller", "mcp", "client_mcp", "console", "plugin")

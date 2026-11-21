@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.dao.ticket_dao import TicketDAO, TicketDepartmentDAO, TicketMessageDAO
 from app.models.commerce_account import BillingAccount
 from app.models.support_ticket import Ticket, TicketMessage, TicketPriority, TicketStatus
-from app.services.commerce_webhook_service import CommerceWebhookService
+from app.plugin_host import events as plugin_events
 
 
 class TicketService:
@@ -47,7 +47,7 @@ class TicketService:
             is_staff_note=False,
         )
         try:
-            CommerceWebhookService.enqueue(
+            plugin_events.emit(
                 db,
                 "ticket.created",
                 {

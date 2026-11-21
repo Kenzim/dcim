@@ -24,6 +24,7 @@ EXPECTED_TOOLS = {
     "outlet_power", "pdu_action", "pdus", "power_feeds", "rack_power_summary", "save_pdu",
     "server_power_inputs", "server_power_summary",
     "alerts",
+    "plugins",
 }
 
 

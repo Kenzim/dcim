@@ -3271,3 +3271,12 @@ add_hook('AdminAreaFooterOutput', 2, function (array $vars) {
 </script>
 HTML;
 });
+
+// Product add-ons on RackFlow services: report their state so Rackflow switches the
+// plugins linked to that add-on on or off for the service (docs/plugin-system.md 14.4).
+foreach (array('AddonActivation', 'AddonActivated', 'AddonUnsuspended', 'AddonSuspended', 'AddonTerminated', 'AddonCancelled') as $rackflowAddonHook) {
+    add_hook($rackflowAddonHook, 1, function (array $vars) use ($rackflowAddonHook) {
+        rackflow_reportAddonStatus($vars, $rackflowAddonHook);
+    });
+}
+unset($rackflowAddonHook);

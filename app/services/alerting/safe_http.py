@@ -106,6 +106,33 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
+def request(
+    method: str,
+    url: str,
+    body: Optional[bytes],
+    headers: dict[str, str],
+    *,
+    public_only: bool,
+    https_only: bool,
+    timeout: float = 10.0,
+    resolver: Optional[Resolver] = None,
+    max_bytes: int = 4096,
+) -> HttpResult:
+    scheme, host, port, path, addresses = validate_url(
+        url, public_only=public_only, https_only=https_only, resolver=resolver
+    )
+    address = addresses[0]
+    factory = _PinnedHTTPSConnection if scheme == "https" else _PinnedHTTPConnection
+    conn = factory(host, port, address, timeout)
+    try:
+        conn.request(method, path, body=body, headers=headers)
+        response = conn.getresponse()
+        text = response.read(max_bytes).decode("utf-8", "replace")
+        return HttpResult(response.status, text)
+    finally:
+        conn.close()
+
+
 def post(
     url: str,
     body: bytes,
@@ -116,16 +143,6 @@ def post(
     timeout: float = 10.0,
     resolver: Optional[Resolver] = None,
 ) -> HttpResult:
-    scheme, host, port, path, addresses = validate_url(
-        url, public_only=public_only, https_only=https_only, resolver=resolver
+    return request(
+        "POST", url, body, headers, public_only=public_only, https_only=https_only, timeout=timeout, resolver=resolver
     )
-    address = addresses[0]
-    factory = _PinnedHTTPSConnection if scheme == "https" else _PinnedHTTPConnection
-    conn = factory(host, port, address, timeout)
-    try:
-        conn.request("POST", path, body=body, headers=headers)
-        response = conn.getresponse()
-        text = response.read(4096).decode("utf-8", "replace")
-        return HttpResult(response.status, text)
-    finally:
-        conn.close()

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getPlugins } from '../lib/api.js';
   import PageHeader from './PageHeader.svelte';
+  import PluginManager from './PluginManager.svelte';
 
   let plugins = [];
   let loading = true;
@@ -29,6 +30,10 @@
   <PageHeader title="Plugins" />
 
   <div class="page-content">
+    <PluginManager />
+
+    <h2 class="section-heading">Hardware adapters</h2>
+    <p class="section-note">Built-in adapters for servers, switches and power. They are part of Rackflow and are not installed or removed here.</p>
     {#if loading}
       <div class="loading-container">
         <div class="spinner"></div>
@@ -107,6 +112,17 @@
 
   .page-content {
     padding: 32px;
+  }
+
+  .section-heading {
+    margin: 32px 0 4px;
+    font-size: 18px;
+  }
+
+  .section-note {
+    margin: 0 0 16px;
+    color: var(--text-secondary);
+    font-size: 14px;
   }
 
   @media (max-width: 768px) {
