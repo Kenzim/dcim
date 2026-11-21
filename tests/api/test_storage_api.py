@@ -417,16 +417,25 @@ def test_runner_auth_failures_and_disabled_node(client, world, admin, monkeypatc
 
     monkeypatch.setattr(settings, "storage_runner_auth_failures_per_ip", 3)
     world.redis.get = lambda key: world.redis._counters.get(key)
+    world.redis._counters.clear()
+    # A disabled node's real key is refused but not counted, however often it retries.
+    other = _node(client, admin, world.servers[1])
+    client.patch(f"{ADMIN}/nodes/{other['id']}", headers=admin, json={"enabled": False})
+    codes = [client.get(f"{RUNNER}/config", headers=_bearer(other["api_key"])).status_code for _ in range(5)]
+    assert codes == [401] * 5
+    assert client.get(f"{RUNNER}/config", headers=_bearer("srk_bad")).status_code == 401
+
     codes = [client.get(f"{RUNNER}/config", headers=_bearer("srk_bad")).status_code for _ in range(5)]
     assert 429 in codes
-    # Once blocked, even the right key is refused from that address until the window ends.
-    assert client.get(f"{RUNNER}/config", headers=_bearer(node["api_key"])).status_code == 429
-    # A forged X-Forwarded-For cannot dodge the block unless the proxy header is trusted.
-    spoofed = {**_bearer(node["api_key"]), "X-Forwarded-For": "203.0.113.9"}
+    # Unknown keys stay blocked from that address until the window ends.
+    assert client.get(f"{RUNNER}/config", headers=_bearer("srk_bad")).status_code == 429
+    spoofed_bad = {**_bearer("srk_bad"), "X-Forwarded-For": "203.0.113.9"}
     monkeypatch.setattr(settings, "trust_x_forwarded_for", False)
-    assert client.get(f"{RUNNER}/config", headers=spoofed).status_code == 429
+    assert client.get(f"{RUNNER}/config", headers=spoofed_bad).status_code == 429
     monkeypatch.setattr(settings, "trust_x_forwarded_for", True)
-    assert client.get(f"{RUNNER}/config", headers=spoofed).status_code == 200
+    assert client.get(f"{RUNNER}/config", headers=spoofed_bad).status_code == 401
+    # Nodes share the tunnel's address, so a blocked address never locks out a valid key.
+    assert client.get(f"{RUNNER}/config", headers=_bearer(node["api_key"])).status_code == 200
 
 
 def test_admin_resize_and_terminated_storage_hidden_from_client(client, world, admin, alice, db_session):

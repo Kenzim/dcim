@@ -126,29 +126,36 @@ def _blocked(client_ip: str) -> bool:
 
 
 def authenticate_node(db: Session, request: Request, authorization: Optional[str]) -> StorageNode:
-    """Resolve the node from ``Authorization: Bearer <key>``; failures are counted per address."""
+    """Resolve the node from ``Authorization: Bearer <key>``; unknown keys are counted per address.
+
+    Nodes usually share one source address (the tunnel or proxy in front of the app), so a
+    valid key is never refused by the block, and a disabled node's valid key is not counted:
+    otherwise one misconfigured node would lock every healthy node out. Keys are 384-bit
+    random tokens, so the block only throttles junk; it is not what stops guessing.
+    """
     client_ip = _client_ip(request)
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    node = StorageDAO.get_node_by_key(db, token) if token else None
+    if node is not None:
+        if not node.enabled:
+            logger.info("Storage runner: disabled node %s tried to connect from %s", node.id, client_ip)
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_KEY)
+        return node
     if _blocked(client_ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many attempts. Please try again later.",
             headers={"Retry-After": str(settings.storage_runner_auth_failures_window_seconds)},
         )
-    token = ""
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1].strip()
-    node = StorageDAO.get_node_by_key(db, token) if token else None
-    if node is None or not node.enabled:
-        # Counts this failure; raises 429 once the limit is passed.
-        rate_limit.enforce_rate_limit(
-            _failure_key(client_ip),
-            settings.storage_runner_auth_failures_per_ip,
-            settings.storage_runner_auth_failures_window_seconds,
-        )
-        if node is not None:
-            logger.info("Storage runner: disabled node %s tried to connect from %s", node.id, client_ip)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_KEY)
-    return node
+    # Counts this failure; raises 429 once the limit is passed.
+    rate_limit.enforce_rate_limit(
+        _failure_key(client_ip),
+        settings.storage_runner_auth_failures_per_ip,
+        settings.storage_runner_auth_failures_window_seconds,
+    )
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_KEY)
 
 
 @router.get("/config")
