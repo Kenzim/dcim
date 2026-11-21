@@ -105,6 +105,34 @@ def test_backfill_is_idempotent_and_batched(engine_at):
     assert _snapshot(engine) == after_first
 
 
+def test_second_pass_catches_up_writes_made_while_the_deploy_rolls(engine_at):
+    engine = engine_at(helpers.before(REVISION))
+    _seed(engine)
+    helpers.migrate(engine, REVISION)
+    # An old process moves a reseller cache and writes an unlinked entry, and a
+    # retail cache changes on an account that had no opening entry yet.
+    execute(engine, "UPDATE resellers SET cached_balance_cents = 650 WHERE id = 1")
+    execute(
+        engine,
+        "INSERT INTO credit_ledger_entries (reseller_id, entry_type, amount_cents, "
+        "balance_after_cents, metadata) VALUES (1, 'topup', 150, 650, '{}')",
+    )
+    execute(engine, "UPDATE billing_accounts SET credit_balance_cents = 300 WHERE id = 21")
+
+    with engine.begin() as conn:
+        second = billing_backfill.backfill_accounts(conn)
+    assert [r.rows for r in second] == [0, 1, 1, 1]
+    assert scalar(
+        engine,
+        "SELECT credit_balance_cents FROM billing_accounts WHERE account_type = 'reseller' AND reseller_id = 1",
+    ) == 650
+    assert scalar(engine, "SELECT COUNT(*) FROM credit_ledger_entries WHERE billing_account_id IS NULL") == 0
+    # The opening entry copies the cache as it is when the entry is written.
+    assert scalar(
+        engine, "SELECT amount_cents FROM credit_ledger_entries WHERE idempotency_key = 'a3-opening:21'"
+    ) == 300
+
+
 def test_command_line_commits_each_batch(engine_at, monkeypatch, capsys):
     engine = engine_at(REVISION)
     _seed(engine)

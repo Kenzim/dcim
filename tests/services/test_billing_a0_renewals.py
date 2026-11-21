@@ -168,7 +168,9 @@ def test_advance_months_keeps_anchor_across_short_months():
     assert advance_months(start, 12, 31) == datetime(2028, 1, 31, 12, tzinfo=timezone.utc)
     assert advance_months(datetime(2028, 2, 29, tzinfo=timezone.utc), 12, 29) == datetime(2029, 2, 28, tzinfo=timezone.utc)
     assert CommerceRecurringService.next_due_at(start, "semiannually") == datetime(2027, 7, 31, 12, tzinfo=timezone.utc)
-    assert interval_months("unknown") == 1
+    assert interval_months(None) == 1
+    with pytest.raises(ValueError):
+        interval_months("unknown")
 
 
 @pytest.mark.asyncio

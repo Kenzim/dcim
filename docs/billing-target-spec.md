@@ -113,6 +113,14 @@ Plugins: none.
 Depends on: A1.
 Size: **M**.
 
+*Built in phase 1 (P1-N).* `app/services/invoice_adjustment_service.py` is the only writer of `invoice_adjustments`.
+- A note is published and immutable, with its own number series, a snapshot of its lines, the seller and buyer snapshots from the invoice, and a unique idempotency key. A retry with the same key and parameters returns the existing note; the same key with different parameters is a 409.
+- Notes are issued only while the invoice engine is `v2` (refused in `legacy` and `shadow`), against a published tax invoice that is open, pending action, partially paid, overdue, in collections or paid. Drafts, proformas, credit top-ups and void, refunded or failed invoices are refused.
+- An admin credit note always has outcome `reduced_balance`. It cannot exceed what the invoice still owes, is refused while a payment is pending, and a line naming an invoice line cannot credit more than is left on it. Credit notes in total never exceed the invoice total plus its debit notes. Money already paid goes back through a refund (A4), whose credit note `issue_for_refund` writes for exactly the refund amount, with outcome `refunded` or `credited_to_balance`.
+- An overpayment is a debit note from `issue_overpayment`, for exactly the overpaid amount, with the same amount credited to the account in the same transaction.
+- Tax on an amount-only note is split in proportion to the invoice's tax, rounded half to even. PDFs are rendered from the note's own snapshots only.
+- Routes: admin under `/api/admin/billing` (issue needs an `Idempotency-Key` header or gets a random one; refused during impersonation; audited); clients and resellers read their own notes under `/api/client/commerce/adjustments` and `/api/reseller-panel/adjustments`.
+
 ### A3. Credit balance for every account
 
 Scope: give retail accounts the credit facility resellers already have, with one implementation.
@@ -232,6 +240,7 @@ Size: **L**.
 **Purpose.** Pricing expressive enough for real hosting products.
 
 - **D1 Cycles.** Replace the four-value interval enum (`app/models/storefront.py:57-61`) with `interval_unit` and `interval_count`, keeping the four existing values and adding biennially and triennially. Per-cycle setup fee (`price_plan_cycles.setup_cents`; today one `price_plans.setup_cents`, `:178`). Store interval on the service (A0). Size **M**.
+  - *Built in phase 1 (P1-D).* `app/services/billing/intervals.py` knows all six labels in every process, whatever the settings say, and an unknown non-empty label is an error, never monthly (`None` or empty still means monthly). Cycles longer than 12 months are sold and created only while `billing_long_cycles_enabled` is on; with it off, admins get 422 and checkout "Invalid billing cycle", as before. `resolve_cycle` (`app/services/billing/cycles.py`) selects by label, by unit and count, or both, and cycle rows are read in id order, so "first enabled cycle" is the lowest id. A duplicate cycle length returns 409. Known gaps: checkout requests cannot yet pass unit and count (the label path covers every cycle); a one-time plan with no enabled cycle is still priced at 0 plus its setup fee, unchanged, because a setup-fee-only one-time plan is a valid product.
 - **D2 Configurable options.** Add types radio, yes/no and quantity (min, max, step, optional tiers) beside select and text (`storefront.py:64-66`). Move pricing to `product_option_value_prices` by cycle and currency, with recurring and setup parts, replacing the single flat `price_delta_cents` (`:256`). Emit one invoice line per option. Store the priced components of each service (`service_billing_items`) so renewals rebuild from a snapshot: catalogue price changes do not silently reprice existing services, and a separate bulk "update prices" tool does it deliberately. Size **L**.
 - **D3 Add-ons.** Wire the unused `ProductAddon` model (`storefront.py:262`) into checkout and fulfilment, with its own cycle optionally aligned to the parent service's due date (prorata, A6). Size **M**.
 - **D4 Currencies.** A `currencies` table: code, symbol, prefix and suffix, minor-unit count, format, rate to base, rate timestamp, enabled, base flag. Per-currency price rows. An account's currency is fixed after its first invoice. Store the exchange rate on each invoice at issue for reporting. Replace every "divide by 100" with minor-unit-aware helpers. Rate fetch is a plugin. Size **M**.

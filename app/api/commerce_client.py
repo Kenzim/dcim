@@ -32,6 +32,7 @@ from app.models.commerce_order import Order, OrderStatus
 from app.models.reseller import Invoice, InvoiceStatus
 from app.models.storefront import FrontendProductVisibility
 from app.models.support_ticket import TicketPriority, TicketStatus
+from app.services.billing.cycles import cycle_length_fields, sellable_cycles
 from app.services.billing_account_service import BillingAccountService
 from app.services.checkout_service import CheckoutError, CheckoutService
 from app.services.commerce_lifecycle_service import (
@@ -167,9 +168,9 @@ def _serialize_client_product(row, *, detailed: bool = False) -> dict:
                         "id": cycle.id,
                         "interval": cycle.interval.value,
                         "price_cents": cycle.price_cents,
+                        **cycle_length_fields(cycle),
                     }
-                    for cycle in plan.cycles
-                    if cycle.enabled
+                    for cycle in sellable_cycles(plan)
                 ],
             }
             for plan in row.price_plans
