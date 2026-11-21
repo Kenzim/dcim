@@ -23,6 +23,7 @@ from app.models.reseller import (
     PaymentStatus,
 )
 from app.models.service import Service
+from app.services.audit_service import AuditService
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.email_message_service import EmailEvent, EmailMessageService
 from app.services.invoice_service import InvoiceService
@@ -96,6 +97,8 @@ class PaymentWebhookService:
             processed_at=datetime.now(timezone.utc),
         )
         try:
+            if db.info.get("billing.deferred_order_fulfilment"):
+                logger.warning("Dropping order fulfilment queued by an earlier, unfinished webhook")
             discard_deferred_fulfilment(db)
             with db.begin_nested():
                 db.add(record)
@@ -263,6 +266,24 @@ class PaymentWebhookService:
                     idempotency_key=f"{gateway}-{reason}:{event_id}",
                     metadata={"gateway_event_id": event_id, "reason": reason},
                 )
+        elif invoice.reseller_id is None:
+            # Retail payments have no credit ledger; the reversal is recorded for an admin.
+            AuditService.log(
+                db,
+                actor_user_id=None,
+                billing_account_id=invoice.billing_account_id,
+                action="billing.payment_reversed",
+                resource_type="invoice",
+                resource_id=str(invoice.id),
+                metadata={
+                    "reason": reason,
+                    "gateway": gateway,
+                    "gateway_event_id": event_id,
+                    "payment_id": payment.id,
+                    "amount_cents": int(payment.amount_cents),
+                    "currency": payment.currency,
+                },
+            )
         else:
             CreditLedgerService.debit(
                 db,

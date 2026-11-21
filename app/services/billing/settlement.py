@@ -135,7 +135,9 @@ def settle_invoice(
         raise InvoiceError("Invoice not found")
     allocated = InvoiceService.allocated_cents(db, invoice.id)
 
-    if invoice.status == InvoiceStatus.VOID and invoice.order_id is not None:
+    if invoice.status == InvoiceStatus.VOID and (
+        invoice.order_id is not None or _is_retail(invoice)
+    ):
         if allocated > 0 and payment is not None:
             record_refund_review(
                 db,

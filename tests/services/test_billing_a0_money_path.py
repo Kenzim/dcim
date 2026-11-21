@@ -213,6 +213,7 @@ class _FakeCardGateway:
         self.created: list[dict] = []
         self.status = "requires_payment_method"
         self.event = None
+        self.cancelled: list[str] = []
 
     def create_payment_intent(self, *, amount_cents, currency, idempotency_key, metadata):
         self.created.append({"amount": amount_cents, "key": idempotency_key, "metadata": dict(metadata)})
@@ -223,9 +224,14 @@ class _FakeCardGateway:
         )
 
     def retrieve_payment_intent(self, *, external_ref):
+        status = "canceled" if external_ref in self.cancelled else self.status
         return GatewayPaymentIntent(
-            external_ref=external_ref, client_secret=f"{external_ref}_secret", status=self.status,
+            external_ref=external_ref, client_secret=f"{external_ref}_secret", status=status,
         )
+
+    def cancel_payment_intent(self, *, external_ref):
+        self.cancelled.append(external_ref)
+        return GatewayPaymentIntent(external_ref=external_ref, client_secret=None, status="canceled")
 
     def parse_webhook(self, payload, headers):
         return self.event
@@ -329,8 +335,74 @@ def test_card_payment_amount_change_replaces_attempt(db_session):
     db_session.commit()
     assert second.payment_id != first.payment_id
     assert db_session.get(Payment, first.payment_id).status == PaymentStatus.FAILED
+    assert gateway.cancelled == [first.payment_intent_id]
     assert second.amount_cents == 900
     assert gateway.created[0]["key"] != gateway.created[1]["key"]
+
+
+def test_card_payment_amount_change_while_in_flight_creates_no_new_charge(db_session):
+    _, account = _account(db_session)
+    invoice = _open_invoice(db_session, account)
+    gateway = _FakeCardGateway()
+    first = start_card_payment(db_session, invoice, billing_account_id=account.id, registry=_registry(gateway))
+    invoice.amount_cents = 900
+    db_session.commit()
+    gateway.status = "processing"
+    second = start_card_payment(db_session, invoice, billing_account_id=account.id, registry=_registry(gateway))
+    assert (second.status, second.payment_id) == ("processing", first.payment_id)
+    assert len(gateway.created) == 1
+    assert gateway.cancelled == []
+
+
+def test_late_success_on_replaced_attempt_is_recorded_and_flagged(db_session, emitted):
+    _, account = _account(db_session)
+    invoice = _open_invoice(db_session, account, 700)
+    gateway = _FakeCardGateway()
+    first = start_card_payment(db_session, invoice, billing_account_id=account.id, registry=_registry(gateway))
+    invoice.amount_cents = 900
+    db_session.commit()
+    second = start_card_payment(db_session, invoice, billing_account_id=account.id, registry=_registry(gateway))
+    db_session.commit()
+    _deliver(db_session, gateway, _succeeded(second.payment_intent_id, 900))
+    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.PAID
+    # The first attempt's money arrives anyway (for example a race with the cancel).
+    _deliver(db_session, gateway, _succeeded(first.payment_intent_id, 700))
+    late = db_session.get(Payment, first.payment_id)
+    assert late.status == PaymentStatus.SUCCEEDED
+    assert late.payment_metadata["refund_review"]["overpayment"]["amount_cents"] == 700
+    assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
+
+
+def test_retail_refund_event_records_reversal_without_reseller_ledger(db_session):
+    _, account = _account(db_session)
+    invoice = _open_invoice(db_session, account, 700)
+    gateway = _FakeCardGateway()
+    started = start_card_payment(db_session, invoice, billing_account_id=account.id, registry=_registry(gateway))
+    db_session.commit()
+    _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 700))
+    refund = NormalizedGatewayWebhookEvent(
+        event_id=f"evt_{uuid.uuid4().hex[:10]}",
+        event_type="charge.refunded",
+        action=GatewayWebhookAction.PAYMENT_REVERSED,
+        external_ref=started.payment_intent_id,
+        amount_cents=700,
+        currency="USD",
+    )
+    _deliver(db_session, gateway, refund)
+    assert db_session.get(Payment, started.payment_id).status == PaymentStatus.REFUNDED
+
+
+def test_payment_on_voided_retail_invoice_is_flagged(db_session, emitted):
+    _, account = _account(db_session)
+    invoice = _open_invoice(db_session, account, 700)
+    gateway = _FakeCardGateway()
+    started = start_card_payment(db_session, invoice, billing_account_id=account.id, registry=_registry(gateway))
+    db_session.get(Invoice, invoice.id).status = InvoiceStatus.VOID
+    db_session.commit()
+    _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 700))
+    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.VOID
+    assert "payment_on_void_invoice" in db_session.get(Payment, started.payment_id).payment_metadata["refund_review"]
+    assert _events(emitted, "invoice.paid", "invoice_id", invoice.id) == []
 
 
 def test_card_payment_rejects_other_accounts_invoice(db_session):

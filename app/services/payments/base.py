@@ -148,6 +148,10 @@ class PaymentGateway(Protocol):
         self, *, external_ref: str
     ) -> GatewayPaymentIntent: ...
 
+    def cancel_payment_intent(
+        self, *, external_ref: str
+    ) -> GatewayPaymentIntent: ...
+
     def refund_payment(
         self,
         *,

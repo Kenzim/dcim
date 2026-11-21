@@ -201,6 +201,12 @@ class StripeGateway:
         )
         return self._payment_intent(intent)
 
+    def cancel_payment_intent(self, *, external_ref: str) -> GatewayPaymentIntent:
+        intent = self._stripe.PaymentIntent.cancel(
+            external_ref, api_key=self._secret_key
+        )
+        return self._payment_intent(intent)
+
     @staticmethod
     def _payment_intent(intent: Any) -> GatewayPaymentIntent:
         amount = _value(intent, "amount")

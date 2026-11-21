@@ -76,7 +76,7 @@ def start_card_payment(
     invoice: Invoice,
     *,
     billing_account_id: int,
-    registry: PaymentGatewayRegistry = payment_gateway_registry,
+    registry: Optional[PaymentGatewayRegistry] = None,
 ) -> Optional[CardPaymentStart]:
     """Return a client secret for the outstanding amount, reusing an open attempt.
 
@@ -85,7 +85,7 @@ def start_card_payment(
     """
     from app.services.invoice_service import InvoiceService
 
-    gateway = registry.maybe_get(CARD_GATEWAY)
+    gateway = (registry or payment_gateway_registry).maybe_get(CARD_GATEWAY)
     if gateway is None:
         return None
     locked = InvoiceService.get_for_update(db, invoice.id)
@@ -101,28 +101,42 @@ def start_card_payment(
 
     existing = _open_card_payment(db, locked.id)
     if existing is not None:
-        if existing.amount_cents == outstanding and existing.external_ref:
-            intent = gateway.retrieve_payment_intent(external_ref=existing.external_ref)
-            if intent.status in _IN_FLIGHT_INTENT_STATUSES:
-                return CardPaymentStart(
-                    status="processing",
-                    invoice_id=locked.id,
-                    payment_id=existing.id,
-                    payment_intent_id=existing.external_ref,
-                    amount_cents=existing.amount_cents,
+        intent = (
+            gateway.retrieve_payment_intent(external_ref=existing.external_ref)
+            if existing.external_ref
+            else None
+        )
+        if intent is not None and intent.status in _IN_FLIGHT_INTENT_STATUSES:
+            # Never open a second charge while one may still complete.
+            return CardPaymentStart(
+                status="processing",
+                invoice_id=locked.id,
+                payment_id=existing.id,
+                payment_intent_id=existing.external_ref,
+                amount_cents=existing.amount_cents,
+            )
+        reusable = intent is not None and intent.status in _REUSABLE_INTENT_STATUSES
+        if reusable and existing.amount_cents == outstanding:
+            return CardPaymentStart(
+                status="requires_payment_method",
+                invoice_id=locked.id,
+                payment_id=existing.id,
+                payment_intent_id=existing.external_ref,
+                client_secret=intent.client_secret,
+                amount_cents=existing.amount_cents,
+            )
+        if reusable:
+            cancelled = gateway.cancel_payment_intent(external_ref=existing.external_ref)
+            if cancelled.status != "canceled":
+                raise PaymentGatewayError(
+                    "The previous payment attempt could not be cancelled"
                 )
-            if intent.status in _REUSABLE_INTENT_STATUSES:
-                return CardPaymentStart(
-                    status="requires_payment_method",
-                    invoice_id=locked.id,
-                    payment_id=existing.id,
-                    payment_intent_id=existing.external_ref,
-                    client_secret=intent.client_secret,
-                    amount_cents=existing.amount_cents,
-                )
-            _close(existing, f"intent_{intent.status or 'unusable'}"[:128])
-        else:
             _close(existing, "amount_changed")
+        else:
+            _close(
+                existing,
+                f"intent_{intent.status if intent is not None else 'missing'}"[:128],
+            )
         db.flush()
 
     ordinal = int(
