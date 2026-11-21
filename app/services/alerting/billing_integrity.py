@@ -368,6 +368,56 @@ def _optional(table: Table) -> tuple[str, ...]:
     return tuple(name for name in ("payment_id", "invoice_id", "amount_cents", "currency") if name in table.c)
 
 
+# Billing phase 1 detectors (docs/billing-phase1-design.md 10.4). Each is a
+# read-only stub returning no findings until its owner fills it in, and each
+# alert type ships disabled.
+
+
+def shadow_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Open rows in ``billing_shadow_mismatches`` (P1-C)."""
+    return []
+
+
+def shadow_scan_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """An engine in ``shadow`` whose last daily scan is over 26 hours old (P1-C)."""
+    return []
+
+
+def ledger_chain_broken(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Billing accounts whose ledger chain fails property P4 (P1-C)."""
+    return []
+
+
+def negative_retail_balance(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Retail billing accounts with a balance below zero (P1-C)."""
+    return []
+
+
+def invoice_totals(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Model v2 invoices whose totals fail property P1 (P1-I)."""
+    return []
+
+
+def invoice_status(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Model v2 invoices whose status disagrees with their balance, property P3 (P1-I)."""
+    return []
+
+
+def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Gapless series with a gap or a duplicate number, property P7 (P1-I)."""
+    return []
+
+
+def refund_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Payments whose refunded_cents disagrees with their succeeded refunds, property P5 (P1-R)."""
+    return []
+
+
+def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Invoices worth less than zero, or notes whose lines do not sum to their totals (P1-N)."""
+    return []
+
+
 BILLING_DETECTORS = {
     "billing_invoice_lines_mismatch": invoice_lines_mismatch,
     "billing_paid_without_payment": paid_invoice_without_payment,
@@ -375,4 +425,13 @@ BILLING_DETECTORS = {
     "billing_credit_drift": credit_ledger_drift,
     "billing_orphaned_payment": orphaned_payment,
     "billing_refund_stuck": refund_stuck,
+    "billing_shadow_mismatch": shadow_mismatch,
+    "billing_shadow_scan_stale": shadow_scan_stale,
+    "billing_ledger_chain_broken": ledger_chain_broken,
+    "billing_negative_retail_balance": negative_retail_balance,
+    "billing_invoice_totals": invoice_totals,
+    "billing_invoice_status": invoice_status,
+    "billing_numbering_gaps": numbering_gaps,
+    "billing_refund_mismatch": refund_mismatch,
+    "billing_adjustment_bounds": adjustment_bounds,
 }

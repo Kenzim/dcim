@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Union
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment
 from app.models.reseller import (
     Invoice,
     InvoicePurpose,
@@ -17,6 +19,55 @@ from app.models.reseller import (
     Payment,
     PaymentStatus,
 )
+
+# Invoice statuses the frozen client and reseller APIs have always shown.
+PUBLIC_INVOICE_STATUSES = frozenset(
+    {"draft", "open", "paid", "void", "failed", "pending_action", "overdue"}
+)
+_PUBLIC_STATUS_OF = {
+    "partially_paid": "open",
+    "collections": "overdue",
+    # Paid and then returned: nothing is owed and nothing should be retried.
+    "refunded": "paid",
+}
+
+
+def public_invoice_status(status: Union[InvoiceStatus, str]) -> str:
+    """The ``status`` shown on ``/api/client/commerce/*`` and ``/api/reseller/*``.
+
+    Those APIs keep today's seven values; the real value goes in ``status_detail``.
+    """
+    value = getattr(status, "value", status)
+    public = _PUBLIC_STATUS_OF.get(value, value)
+    if public not in PUBLIC_INVOICE_STATUSES:
+        raise ValueError(f"unknown invoice status {value!r}")
+    return public
+
+
+_PAID_PAYMENT_STATUSES = (
+    PaymentStatus.SUCCEEDED,
+    PaymentStatus.PARTIALLY_REFUNDED,
+    PaymentStatus.REFUNDED,
+)
+
+
+@dataclass(frozen=True)
+class InvoiceBalance:
+    """What an invoice is worth and what has been paid against it (design 4.1)."""
+
+    total_cents: int  # invoices.amount_cents
+    debit_cents: int  # debit notes on the invoice
+    credit_cents: int  # credit notes on the invoice
+    worth_cents: int  # total + debit - credit
+    paid_gross_cents: int  # payments succeeded, partially refunded or refunded
+    refunded_cents: int  # refunded_cents of those payments
+    paid_net_cents: int  # paid_gross - refunded
+    pending_cents: int  # pending payments, not deducted
+    due_cents: int  # worth - paid_net; negative means overpaid
+    remaining_cents: int  # max(0, due_cents)
+
+    def as_dict(self) -> dict:
+        return dict(self.__dict__)
 
 
 class InvoiceError(ValueError):
@@ -192,6 +243,88 @@ class InvoiceService:
         return int(value or 0)
 
     @staticmethod
+    def balance(db: Session, invoice: Invoice) -> InvoiceBalance:
+        """The invoice's balance from two aggregate queries. Never writes."""
+        payments = db.execute(
+            select(
+                Payment.status,
+                func.coalesce(func.sum(Payment.amount_cents), 0),
+                func.coalesce(func.sum(Payment.refunded_cents), 0),
+            )
+            .where(Payment.invoice_id == invoice.id)
+            .group_by(Payment.status)
+        ).all()
+        paid_gross = refunded = pending = 0
+        for status, amount, refunded_sum in payments:
+            if status in _PAID_PAYMENT_STATUSES:
+                paid_gross += int(amount)
+                refunded += int(refunded_sum)
+            elif status == PaymentStatus.PENDING:
+                pending += int(amount)
+        notes = dict(
+            db.execute(
+                select(
+                    InvoiceAdjustment.kind,
+                    func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
+                )
+                .where(InvoiceAdjustment.invoice_id == invoice.id)
+                .group_by(InvoiceAdjustment.kind)
+            ).all()
+        )
+        total = int(invoice.amount_cents)
+        debit = int(notes.get(AdjustmentKind.DEBIT, 0))
+        credit = int(notes.get(AdjustmentKind.CREDIT, 0))
+        worth = total + debit - credit
+        paid_net = paid_gross - refunded
+        due = worth - paid_net
+        return InvoiceBalance(
+            total_cents=total,
+            debit_cents=debit,
+            credit_cents=credit,
+            worth_cents=worth,
+            paid_gross_cents=paid_gross,
+            refunded_cents=refunded,
+            paid_net_cents=paid_net,
+            pending_cents=pending,
+            due_cents=due,
+            remaining_cents=max(0, due),
+        )
+
+    @staticmethod
+    def recompute(db: Session, invoice: Invoice, *, cause: str) -> Invoice:
+        """Derive the status from ``balance()`` and transition if it differs (design 3.1); P1-I."""
+        raise NotImplementedError("InvoiceService.recompute is implemented by P1-I")
+
+    @staticmethod
+    def transition(
+        db: Session,
+        invoice: Invoice,
+        to: InvoiceStatus,
+        *,
+        cause: str,
+        actor_user_id: Optional[int] = None,
+        reason: Optional[str] = None,
+    ) -> Invoice:
+        """The one writer of ``invoices.status`` (design 3.3 and 3.4); P1-I."""
+        raise NotImplementedError("InvoiceService.transition is implemented by P1-I")
+
+    @staticmethod
+    def publish(db: Session, invoice: Invoice) -> Invoice:
+        """``draft`` to ``open``: totals, snapshots, number, ``invoice.created`` (design 3.3); P1-I."""
+        raise NotImplementedError("InvoiceService.publish is implemented by P1-I")
+
+    @staticmethod
+    def void(
+        db: Session,
+        invoice: Invoice,
+        *,
+        reason: str,
+        actor_user_id: Optional[int] = None,
+    ) -> Invoice:
+        """Void an unpaid invoice, keeping its number (design 3.3); P1-I."""
+        raise NotImplementedError("InvoiceService.void is implemented by P1-I")
+
+    @staticmethod
     def mark_paid_if_fully_allocated(
         db: Session,
         invoice_id: int,
@@ -229,7 +362,8 @@ class InvoiceService:
             "reseller_id": invoice.reseller_id,
             "service_id": invoice.service_id,
             "purpose": invoice.purpose.value,
-            "status": invoice.status.value,
+            "status": public_invoice_status(invoice.status),
+            "status_detail": invoice.status.value,
             "amount_cents": invoice.amount_cents,
             "allocated_cents": allocated,
             "remaining_cents": max(0, invoice.amount_cents - allocated),

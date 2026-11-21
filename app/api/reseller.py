@@ -49,6 +49,7 @@ from app.services.provisioning import (
 from app.services.provisioning.adapters import from_billing_bare_metal, from_billing_vm
 from app.services.client_permission_resolver import require_client_permission
 from app.services.client_portal_service import mint_sso_ticket
+from app.services.invoice_service import public_invoice_status
 from app.services.private_network_service import PrivateNetworkService
 from app.services.retained_restore_service import power_block_reason
 from app.services import backup_slot_service
@@ -165,7 +166,8 @@ def _invoice_payload(invoice: Invoice) -> dict:
     return {
         "id": invoice.id,
         "invoice_number": invoice.invoice_number,
-        "status": invoice.status.value,
+        "status": public_invoice_status(invoice.status),
+        "status_detail": invoice.status.value,
         "purpose": invoice.purpose.value,
         "amount_cents": invoice.amount_cents,
         "currency": invoice.currency,
