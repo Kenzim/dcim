@@ -2037,7 +2037,7 @@ def apply_reseller_credit_to_invoice(
             invoice,
             amount_cents=body.amount_cents,
             actor_user_id=auth["user_id"],
-            idempotency_key=f"admin-apply-credit:{body.idempotency_key}",
+            idempotency_key=f"admin-apply-credit:{invoice.id}:{body.idempotency_key}",
         )
     except InsufficientCreditError as exc:
         db.rollback()
