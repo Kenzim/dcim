@@ -36,7 +36,6 @@ FROZEN_COLUMNS = frozenset(
         "invoice_number",
         "reseller_id",
         "billing_account_id",
-        "service_id",
         "order_id",
         "purpose",
         "amount_cents",
@@ -54,9 +53,11 @@ FROZEN_COLUMNS = frozenset(
         "created_at",
     }
 )
-# NULL to a value once; a value never changes.
+# NULL to a value once; a value never changes. ``service_id`` is here because a
+# reseller deploy charge is invoiced before the service it pays for exists.
 ONCE_SET_COLUMNS = frozenset(
     {
+        "service_id",
         "issued_at",
         "series_id",
         "number_period",
