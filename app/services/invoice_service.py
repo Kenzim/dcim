@@ -193,12 +193,16 @@ class InvoiceService:
 
     @staticmethod
     def mark_paid_if_fully_allocated(
-        db: Session, invoice_id: int, *, payment: Optional[Payment] = None
+        db: Session,
+        invoice_id: int,
+        *,
+        payment: Optional[Payment] = None,
+        source: Optional[str] = None,
     ) -> Invoice:
         """Settle the invoice through the single settlement function."""
         from app.services.billing.settlement import settle_invoice
 
-        return settle_invoice(db, invoice_id, payment=payment)
+        return settle_invoice(db, invoice_id, payment=payment, source=source)
 
     @staticmethod
     def serialize_payment(payment: Payment) -> dict:

@@ -400,7 +400,8 @@ The invoice paid event is a plain in-process list, not a bus:
 
 - `subscribe_invoice_paid(name, handler, *, applies=..., isolated=True)` registers or replaces (by name) a handler `handler(db, InvoicePaid(invoice, payment))`; `applies(invoice)` filters which invoices it sees.
 - `unsubscribe_invoice_paid(name)` removes one; `invoice_paid_subscribers()` lists the names in run order.
-- Handlers run in registration order inside the caller's transaction. An `isolated` handler (a side effect such as email or the plugin event) runs in its own savepoint; if it raises, its work is rolled back and logged and the settlement stands. A non-isolated handler runs bare and handles its own errors.
+- Handlers run in registration order inside the caller's transaction. An `isolated` handler (the default, and every default subscriber) runs in its own savepoint; if it raises, its work is rolled back and logged and the settlement stands. A non-isolated handler runs bare and must neither raise nor commit; none of the defaults uses that.
+- `InvoicePaid` also carries `source`, set to `admin_mark_paid` by admin mark-paid and otherwise empty.
 
 Default subscribers, in order (`app/services/billing/settlement_subscribers.py`):
 
@@ -408,11 +409,11 @@ Default subscribers, in order (`app/services/billing/settlement_subscribers.py`)
 |---|---|---|
 | `coupon_usage` | invoices with an order | counts the order's coupon use once per order (`app/services/billing/coupons.py`) |
 | `complete_billing_cycle` | retail cycle invoices | marks the cycle paid and schedules the next period by `interval_months`; reseller cycles are still completed by the recurring billing worker, because that can unsuspend services and lift reseller holds |
-| `publish_invoice_paid` | invoices with a billing account | the only `emit(db, "invoice.paid", ...)` call, payload `invoice_id`, `billing_account_id`, `invoice_number`, `order_id` |
+| `publish_invoice_paid` | invoices with a billing account, and any invoice settled by admin mark-paid | the only `emit(db, "invoice.paid", ...)` call, payload `invoice_id`, `billing_account_id`, `invoice_number`, `order_id`. Before A0, admin mark-paid published for every invoice and the card webhook for invoices with an account; both still do, once per settlement. A reseller invoice marked paid by an admin has no account, so `billing_account_id` is present and null, as it was before A0 (the catalogue requires the key, not a value) |
 | `invoice_paid_email` | invoices with a billing account | queues the `invoice_paid` email (idempotency key `invoice:{id}:paid`) |
-| `fulfil_order` | order charge invoices (not isolated) | `CheckoutService.mark_paid_and_fulfill`, which emits `order.paid`; provisioning errors end in PROVISION_ERROR with a refund review, as before |
+| `fulfil_order` | order charge invoices | moves the order to PAID_PENDING_FULFILLMENT and queues it; fulfilment (`CheckoutService.mark_paid_and_fulfill`, which emits `order.paid`) runs after the settlement commits |
 
-Provisioning commits, which a savepoint cannot survive. When settlement runs inside a savepoint (the payment webhook), `fulfil_order` only moves the order to PAID_PENDING_FULFILLMENT and queues it; the webhook commits the settlement and then fulfils the queued orders (`run_deferred_fulfilment`). An order whose fulfilment then fails stays in PAID_PENDING_FULFILLMENT for an admin to accept again.
+Fulfilment never runs inside the settlement transaction, on any path. Provisioning commits, which would end the caller's transaction half way (before its audit row) and which a savepoint cannot survive, and a provisioning error must not undo money already received. So `fulfil_order` only queues the order, and every settlement path ends its transaction with `settlement.commit_and_fulfil(db)` instead of `db.commit()`: it commits the settlement together with the caller's audit rows, then fulfils each queued order in a transaction of its own (`run_deferred_fulfilment`). The payment webhook, which settles inside a savepoint, calls `run_deferred_fulfilment` after leaving it. The paths are admin mark-paid (`POST /api/admin/commerce/invoices/{id}/mark-paid`), reseller panel pay (`POST /api/reseller-panel/invoices/{id}/pay`, credit and saved-method charges for reseller account orders), the Stripe and PayPal webhooks, the USDT worker and admin USDT reconcile (USDT pays top-up invoices only, so nothing is queued there today). The recurring billing worker and reseller deploy settle only cycle and deploy invoices, which have no order, and keep their own commits. A queued order is fulfilled only if its invoice is PAID under lock, so a queue left by a transaction that rolled back does nothing. An order whose fulfilment raises stays in PAID_PENDING_FULFILLMENT for an admin to accept again; provisioning failures inside fulfilment still end in PROVISION_ERROR with a refund review, as before.
 
 ### 14.3 Event names billing uses
 

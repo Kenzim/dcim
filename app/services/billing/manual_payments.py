@@ -27,7 +27,10 @@ def record_manual_payment(
     """Record a manual payment for the outstanding amount and settle the invoice.
 
     An invoice that is already paid is returned unchanged with no new payment.
+    The caller writes its audit row and then ends the transaction with
+    ``settlement.commit_and_fulfil``, which fulfils a paid order afterwards.
     """
+    from app.services.billing.settlement import SOURCE_ADMIN_MARK_PAID
     from app.services.invoice_service import InvoiceService
 
     invoice = InvoiceService.get_for_update(db, invoice_id)
@@ -65,5 +68,7 @@ def record_manual_payment(
         )
         db.add(payment)
         db.flush()
-    invoice = InvoiceService.mark_paid_if_fully_allocated(db, invoice.id, payment=payment)
+    invoice = InvoiceService.mark_paid_if_fully_allocated(
+        db, invoice.id, payment=payment, source=SOURCE_ADMIN_MARK_PAID
+    )
     return invoice, payment

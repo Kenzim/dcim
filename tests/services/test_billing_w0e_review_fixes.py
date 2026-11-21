@@ -155,6 +155,234 @@ def test_finalize_success_refuses_a_refunded_payment(db_session, emitted):
     assert _events(emitted, "invoice.paid", "invoice_id", invoice.id) == []
 
 
+# Finding 3: fulfilment runs after the settlement commits, on every path.
+
+
+@pytest.fixture
+def fulfilment_raises(monkeypatch):
+    calls: list[int] = []
+
+    def boom(db, order):
+        calls.append(order.id)
+        raise RuntimeError("provisioning backend crashed")
+
+    monkeypatch.setattr(
+        "app.services.checkout_service.CheckoutService.mark_paid_and_fulfill", boom
+    )
+    return calls
+
+
+def _assert_settled_not_fulfilled(db_session, order, emitted, calls):
+    db_session.expire_all()
+    invoice = db_session.get(Invoice, order.invoice_id)
+    assert invoice.status == InvoiceStatus.PAID
+    assert db_session.get(Order, order.id).status == OrderStatus.PAID_PENDING_FULFILLMENT
+    assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
+    assert calls == [order.id]
+
+
+def _card_order(db_session, price: int = 900):
+    from tests.services.test_billing_a0_money_path import _FakeCardGateway, _registry
+    from app.services.payments.retail_card import start_card_payment
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=price)
+    order = _place(db_session, account, user, product, plan)
+    gateway = _FakeCardGateway()
+    started = start_card_payment(
+        db_session,
+        db_session.get(Invoice, order.invoice_id),
+        billing_account_id=account.id,
+        registry=_registry(gateway),
+    )
+    db_session.commit()
+    return order, gateway, started
+
+
+def test_webhook_settlement_survives_failing_fulfilment(db_session, emitted, fulfilment_raises):
+    from tests.services.test_billing_a0_money_path import _deliver, _succeeded
+
+    order, gateway, started = _card_order(db_session)
+    assert _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 900)) is True
+    _assert_settled_not_fulfilled(db_session, order, emitted, fulfilment_raises)
+    assert db_session.get(Payment, started.payment_id).status == PaymentStatus.SUCCEEDED
+
+
+def test_webhook_settlement_fulfils_once(db_session, emitted, provisioned):
+    from tests.services.test_billing_a0_money_path import _deliver, _succeeded
+
+    order, gateway, started = _card_order(db_session)
+    _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 900))
+    _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 900))
+    assert db_session.get(Order, order.id).status == OrderStatus.ACTIVE
+    assert len(provisioned) == 1
+    assert len(_events(emitted, "invoice.paid", "invoice_id", order.invoice_id)) == 1
+
+
+def _admin_token(client) -> str:
+    return client.post(
+        "/api/users/login", json={"username": "admin", "password": "adminpassword123"}
+    ).json()["token"]
+
+
+def test_admin_mark_paid_settlement_and_audit_survive_failing_fulfilment(
+    client, db_session, test_admin_user, emitted, fulfilment_raises
+):
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=900)
+    order = _place(db_session, account, user, product, plan)
+    resp = client.post(
+        f"/api/admin/commerce/invoices/{order.invoice_id}/mark-paid",
+        headers={"Authorization": f"Bearer {_admin_token(client)}"},
+        json={"reason": "wire"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == InvoiceStatus.PAID.value
+    _assert_settled_not_fulfilled(db_session, order, emitted, fulfilment_raises)
+    audit = db_session.execute(
+        select(UserAuditEvent).where(
+            UserAuditEvent.action == "invoice.mark_paid_manual",
+            UserAuditEvent.resource_id == str(order.invoice_id),
+        )
+    ).scalar_one()
+    assert audit.event_metadata["reason"] == "wire"
+
+
+def test_admin_mark_paid_api_fulfils_once(client, db_session, test_admin_user, emitted, provisioned):
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=900)
+    order = _place(db_session, account, user, product, plan)
+    headers = {"Authorization": f"Bearer {_admin_token(client)}"}
+    for _ in range(2):
+        resp = client.post(
+            f"/api/admin/commerce/invoices/{order.invoice_id}/mark-paid",
+            headers=headers,
+            json={"reason": "wire"},
+        )
+        assert resp.status_code == 200, resp.text
+    db_session.expire_all()
+    assert db_session.get(Order, order.id).status == OrderStatus.ACTIVE
+    assert len(provisioned) == 1
+    assert len(_events(emitted, "invoice.paid", "invoice_id", order.invoice_id)) == 1
+    assert len(_events(emitted, "order.paid", "order_id", order.id)) == 1
+
+
+def _reseller_order(db_session, credit_cents: int = 5000, price: int = 900):
+    from app.dao.commerce_dao import BillingAccountDAO
+    from tests.services.test_billing_a0_money_path import _reseller
+
+    reseller = _reseller(db_session, credit_cents)
+    account = BillingAccountDAO.ensure_reseller_account(db_session, reseller)
+    db_session.commit()
+    product, plan = _product(db_session, price_cents=price)
+    order = _place(db_session, account, reseller.user, product, plan)
+    invoice = db_session.get(Invoice, order.invoice_id)
+    assert invoice.reseller_id == reseller.id
+    return reseller, order, invoice
+
+
+@pytest.mark.parametrize("fulfilment_fails", [True, False])
+def test_reseller_credit_settlement_fulfils_after_commit(
+    db_session, emitted, provisioned, monkeypatch, fulfilment_fails
+):
+    from app.services.payments.orchestrator import PaymentOrchestrator
+
+    calls: list[int] = []
+    if fulfilment_fails:
+        def boom(db, order):
+            calls.append(order.id)
+            raise RuntimeError("provisioning backend crashed")
+
+        monkeypatch.setattr(
+            "app.services.checkout_service.CheckoutService.mark_paid_and_fulfill", boom
+        )
+    reseller, order, invoice = _reseller_order(db_session)
+    result = PaymentOrchestrator().fund_invoice(db_session, reseller, invoice)
+    assert result.funded
+    # Nothing is provisioned inside the settlement transaction.
+    assert provisioned == [] and calls == []
+    settlement.commit_and_fulfil(db_session)
+    if fulfilment_fails:
+        _assert_settled_not_fulfilled(db_session, order, emitted, calls)
+    else:
+        assert db_session.get(Order, order.id).status == OrderStatus.ACTIVE
+        assert len(provisioned) == 1
+        assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
+    db_session.refresh(reseller)
+    assert reseller.cached_balance_cents == 5000 - 900
+
+
+def test_usdt_settlement_commits_through_commit_and_fulfil(db_session, monkeypatch):
+    """USDT pays reseller top-up invoices only: no order to fulfil and no invoice.paid, as before A0."""
+    from tests.services.test_usdt_watcher import FakeRpc, _config, _deposit, _log
+    from app.services.payments.usdt_watcher import UsdtWatcher
+
+    reseller, invoice, deposit, payment, _cursor = _deposit(db_session)
+    UsdtWatcher(FakeRpc([_log(1_000_000, tx_digit="a", log_index=0)]), _config()).run_once(db_session)
+    assert settlement._DEFERRED_FULFILMENT_KEY not in db_session.info
+    settlement.commit_and_fulfil(db_session)
+    db_session.expire_all()
+    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.PAID
+    assert db_session.get(Payment, payment.id).status == PaymentStatus.SUCCEEDED
+
+
+def test_usdt_worker_ends_with_commit_and_fulfil():
+    import inspect
+
+    from app.workers import usdt_watcher
+
+    assert "commit_and_fulfil(db)" in inspect.getsource(usdt_watcher.run_usdt_iteration)
+
+
+def test_queued_order_from_a_rolled_back_settlement_is_not_fulfilled(db_session, provisioned):
+    from app.services.billing.manual_payments import record_manual_payment
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=900)
+    order = _place(db_session, account, user, product, plan)
+    record_manual_payment(db_session, order.invoice_id, reason="t", actor_user_id=None)
+    db_session.rollback()
+    settlement.commit_and_fulfil(db_session)
+    assert db_session.get(Order, order.id).status == OrderStatus.PENDING_PAYMENT
+    assert db_session.get(Invoice, order.invoice_id).status == InvoiceStatus.OPEN
+    assert provisioned == []
+
+
+# Finding 5: admin mark-paid publishes invoice.paid for every invoice, as before A0, once.
+
+
+def test_admin_mark_paid_on_reseller_invoice_publishes_once(client, db_session, test_admin_user, emitted):
+    from app.services.invoice_service import InvoiceService
+    from app.models.reseller import InvoicePurpose
+    from tests.services.test_billing_a0_money_path import _reseller
+
+    reseller = _reseller(db_session, 1)
+    invoice = InvoiceService.create(
+        db_session,
+        reseller_id=reseller.id,
+        purpose=InvoicePurpose.DEPLOY_CHARGE,
+        amount_cents=1200,
+        description="deploy",
+    )
+    db_session.commit()
+    headers = {"Authorization": f"Bearer {_admin_token(client)}"}
+    for _ in range(2):
+        resp = client.post(
+            f"/api/admin/commerce/invoices/{invoice.id}/mark-paid",
+            headers=headers,
+            json={"reason": "bank transfer"},
+        )
+        assert resp.status_code == 200, resp.text
+    assert _events(emitted, "invoice.paid", "invoice_id", invoice.id) == [
+        {
+            "invoice_id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "billing_account_id": None,
+            "order_id": None,
+        }
+    ]
+
+
 def test_lock_keeps_unflushed_changes_of_the_caller(db_session):
     from app.services.invoice_service import InvoiceService
 

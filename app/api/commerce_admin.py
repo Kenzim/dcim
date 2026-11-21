@@ -35,6 +35,7 @@ from app.services.billing.manual_payments import (
     record_manual_payment,
 )
 from app.services.billing.order_refunds import OrderCancelError
+from app.services.billing.settlement import commit_and_fulfil
 from app.services.billing.order_refunds import cancel_order as cancel_commerce_order
 from app.services.commerce_webhook_service import CommerceWebhookService
 from app.services.email_message_service import EmailMessageService
@@ -470,7 +471,8 @@ def mark_invoice_paid(
             "payment_id": payment.id if payment is not None else None,
         },
     )
-    db.commit()
+    commit_and_fulfil(db)
+    db.refresh(invoice)
     return _serialize_invoice(db, invoice)
 
 

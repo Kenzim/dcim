@@ -477,7 +477,7 @@ def test_failing_side_effect_subscriber_does_not_undo_settlement(db_session, emi
         _, account = _account(db_session)
         invoice = _open_invoice(db_session, account, 300)
         record_manual_payment(db_session, invoice.id, reason="t", actor_user_id=None)
-        db_session.commit()
+        settlement.commit_and_fulfil(db_session)
         assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.PAID
         assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
     finally:
@@ -492,14 +492,14 @@ def test_admin_mark_paid_records_manual_payment_and_one_event(db_session, provis
     product, plan = _product(db_session, price_cents=1200)
     order = _place(db_session, account, user, product, plan)
     invoice, payment = record_manual_payment(db_session, order.invoice_id, reason="wire received", actor_user_id=42)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     assert invoice.status == InvoiceStatus.PAID
     assert (payment.gateway, payment.status, payment.amount_cents) == ("manual", PaymentStatus.SUCCEEDED, 1200)
     assert payment.payment_metadata["reason"] == "wire received"
     assert payment.payment_metadata["actor_user_id"] == 42
     assert db_session.get(Order, order.id).status == OrderStatus.ACTIVE
     _, none = record_manual_payment(db_session, invoice.id, reason="dup", actor_user_id=42)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     assert none is None
     assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
     assert len(_events(emitted, "order.paid", "order_id", order.id)) == 1
@@ -643,7 +643,7 @@ def test_provisioning_failure_records_refund_review(db_session, provisioning_fai
     product, plan = _product(db_session, price_cents=900)
     order = _place(db_session, account, user, product, plan)
     record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     order = db_session.get(Order, order.id)
     assert order.status == OrderStatus.PROVISION_ERROR
     assert "Refund path stub" not in (order.admin_notes or "")
@@ -658,7 +658,7 @@ def test_cancel_paid_order_records_review_without_moving_money(db_session, provi
     product, plan = _product(db_session, price_cents=900)
     order = _place(db_session, account, user, product, plan)
     record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     order, decision = cancel_order(db_session, db_session.get(Order, order.id), actor_user_id=7)
     db_session.commit()
     assert order.status == OrderStatus.CANCELLED
@@ -696,7 +696,7 @@ def test_admin_cancel_api_reports_refund(client, db_session, test_admin_user, pr
     product, plan = _product(db_session, price_cents=400)
     order = _place(db_session, account, user, product, plan)
     record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     token = client.post("/api/users/login", json={"username": "admin", "password": "adminpassword123"}).json()["token"]
     resp = client.post(f"/api/admin/commerce/orders/{order.id}/cancel", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200, resp.text
@@ -731,7 +731,7 @@ def test_coupon_usage_counted_at_payment_not_placement(db_session, provisioned):
     db_session.refresh(coupon)
     assert (coupon.used_count, _redemptions(db_session, coupon)) == (0, 0)
     record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     db_session.refresh(coupon)
     assert coupon.used_count == 1
     redemption = db_session.execute(select(CouponRedemption).where(CouponRedemption.coupon_id == coupon.id)).scalar_one()
@@ -748,7 +748,7 @@ def test_coupon_max_uses_per_account_enforced(db_session, provisioned):
     coupon = _coupon(db_session, max_uses_per_account=1)
     order = _place(db_session, account, user, product, plan, coupon_code=coupon.code)
     record_manual_payment(db_session, order.invoice_id, reason="paid", actor_user_id=None)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     with pytest.raises(CheckoutError, match="usage limit"):
         CheckoutService.quote(db_session, account, product.id, plan.id, "monthly", coupon_code=coupon.code)
     _, other = _account(db_session)
@@ -853,7 +853,7 @@ def test_admin_mark_paid_leaves_integrity_detectors_quiet(db_session, provisione
     product, plan = _product(db_session, setup_cents=300, price_cents=1200)
     order = _place(db_session, account, user, product, plan)
     record_manual_payment(db_session, order.invoice_id, reason="wire received", actor_user_id=1)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     invoice = db_session.get(Invoice, order.invoice_id)
     assert invoice.status == InvoiceStatus.PAID
     assert _integrity_findings(db_session, invoice) == {
@@ -883,7 +883,7 @@ def test_open_card_attempt_on_invoice_paid_by_admin_is_reported_as_orphaned(db_s
     )
     db_session.commit()
     record_manual_payment(db_session, invoice.id, reason="wire received", actor_user_id=1)
-    db_session.commit()
+    settlement.commit_and_fulfil(db_session)
     findings = _integrity_findings(db_session, db_session.get(Invoice, invoice.id))
     assert findings["billing_paid_without_payment"] == []
     assert [f.resource_id for f in findings["billing_orphaned_payment"]] == [str(started.payment_id)]
