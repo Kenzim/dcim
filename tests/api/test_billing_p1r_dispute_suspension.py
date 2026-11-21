@@ -278,3 +278,39 @@ def test_paypal_dispute_through_async_route_suspends_linked_service(client, db_s
     assert state.payment == (PaymentStatus.REFUNDED, 1500)
     assert state.service_status == ServiceStatus.SUSPENDED
     assert state.suspend_failed_audits == []
+
+
+def test_stripe_dispute_two_services_first_fails_second_still_suspended(client, db_session, fake_stripe, monkeypatch, caplog):  # noqa: F811
+    reseller, _headers = _login(client, db_session, "p1r-dispute-two")
+    first, _invoice = _disputable(db_session, reseller, "pi_p1r_two")
+    second = Service(name="proxy-pi_p1r_two-b", service_type=ServiceType.HTTP_PROXY, status=ServiceStatus.ACTIVE)
+    db_session.add(second)
+    db_session.commit()
+    first_id, second_id = first.id, second.id
+    # The invoice links both services (as an order with two items would).
+    monkeypatch.setattr(PaymentWebhookService, "_linked_service_ids", staticmethod(lambda db, invoice: [first_id, second_id]))
+    original = ServiceLifecycle.suspend
+
+    async def first_fails(self, db, svc, *, reason):
+        if svc.id == first_id:
+            raise ServiceLifecycleError("hypervisor unreachable")
+        return await original(self, db, svc, reason=reason)
+
+    monkeypatch.setattr(ServiceLifecycle, "suspend", first_fails)
+    fake_stripe.event = _dispute_event("evt_p1r_two", "pi_p1r_two")
+    with caplog.at_level(logging.ERROR, logger="app.services.payments.webhooks"):
+        response = _post_stripe(client)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"received": True, "duplicate": False}
+    state = _committed(db_session, gateway="stripe", event_id="evt_p1r_two", payment_ref="pi_p1r_two", service_id=first_id)
+    assert state.refunds == [(RefundReason.DISPUTE, RefundStatus.SUCCEEDED, 1500, "stripe-dispute:evt_p1r_two")]
+    assert state.payment == (PaymentStatus.REFUNDED, 1500)
+    assert state.invoice_status == InvoiceStatus.FAILED
+    assert state.service_status == ServiceStatus.ACTIVE
+    assert len(state.suspend_failed_audits) == 1
+    assert "hypervisor unreachable" in state.suspend_failed_audits[0]["error"]
+    second_state = _committed(db_session, gateway="stripe", event_id="evt_p1r_two", payment_ref="pi_p1r_two", service_id=second_id)
+    assert second_state.service_status == ServiceStatus.SUSPENDED
+    assert second_state.suspend_failed_audits == []
+    assert any(f"Dispute suspend failed for service {first_id}" in r.getMessage() for r in caplog.records)
