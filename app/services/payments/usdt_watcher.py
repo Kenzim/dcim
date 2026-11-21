@@ -494,16 +494,20 @@ class UsdtWatcher:
         events: list[UsdtTransferEvent],
         now: datetime,
     ) -> None:
+        from app.services.billing_locks import BillingLocks
+
         expected = int(deposit.expected_token_units)
         received = int(deposit.received_token_units)
-        payment = db.execute(
-            select(Payment)
-            .where(
+        # Billing lock order: reseller, invoice, then payment (``billing_locks``).
+        BillingLocks.for_invoice(db, int(deposit.invoice_id), reseller=True)
+        locked = BillingLocks.payments(
+            db,
+            select(Payment).where(
                 Payment.gateway == "usdt",
                 Payment.external_ref == f"usdt-deposit:{deposit.id}",
-            )
-            .with_for_update()
-        ).scalar_one_or_none()
+            ),
+        )
+        payment = locked[0] if locked else None
         if payment is None:
             deposit.status = UsdtDepositStatus.MANUAL_REVIEW
             return

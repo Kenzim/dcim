@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Optional
 
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi import (
     APIRouter,
     Depends,
@@ -18,7 +19,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.client_permissions import PERMISSION_CATALOG
-from app.core.auth import require_reseller
+from app.core.auth import require_reseller, security
+from app.core.commerce_auth import _impersonated_by_from_token, _token_from_request
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
@@ -46,6 +48,7 @@ from app.models.server_group import ServerGroup
 from app.models.service import Service, ServiceStatus
 from app.models.user import User
 from app.models.usdt import UsdtChainCursor, UsdtDeposit, UsdtTransferEvent
+from app.services.billing.settlement import commit_and_fulfil
 from app.services.invoice_service import InvoiceError, InvoiceService
 from app.services.payments.base import (
     GatewayNotConfiguredError,
@@ -63,6 +66,7 @@ from app.services.payments.usdt_crypto import (
     format_token_units,
 )
 from app.services.payments.usdt_rpc import EthereumRpcClient, EthereumRpcError
+from app.services.settings_store import get_setting
 from app.services.reseller_billing_service import (
     ProductNotAvailableError,
     ResellerBillingService,
@@ -878,17 +882,15 @@ def create_topup_invoice(
     reseller: ResellerDep,
     db: DbDep,
 ):
-    if not (
-        settings.reseller_topup_min_cents
-        <= body.amount_cents
-        <= settings.reseller_topup_max_cents
-    ):
+    min_cents = get_setting(db, "reseller_topup_min_cents", base=settings)
+    max_cents = get_setting(db, "reseller_topup_max_cents", base=settings)
+    if not (min_cents <= body.amount_cents <= max_cents):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "code": "invalid_topup_amount",
-                "min_cents": settings.reseller_topup_min_cents,
-                "max_cents": settings.reseller_topup_max_cents,
+                "min_cents": min_cents,
+                "max_cents": max_cents,
             },
         )
     invoice = InvoiceService.create_topup(
@@ -1088,7 +1090,14 @@ def pay_invoice(
     body: InvoicePay,
     reseller: ResellerDep,
     db: DbDep,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
+    if _impersonated_by_from_token(_token_from_request(request, credentials)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Money actions are blocked during impersonation",
+        )
     invoice = _invoice_or_404(db, reseller, invoice_id)
     try:
         result = PaymentOrchestrator().fund_invoice(
@@ -1101,7 +1110,7 @@ def pay_invoice(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (InvoiceError, PaymentGatewayError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    db.commit()
+    commit_and_fulfil(db)
     db.refresh(invoice)
     if not result.funded:
         detail = {

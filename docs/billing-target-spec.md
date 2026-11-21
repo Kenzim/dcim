@@ -29,9 +29,18 @@ Companion document: `docs/billing-whmcs-comparison.md` (the feature-by-feature c
 
 ## 1. Plugin seams
 
-The plugin design document (`docs/plugin-system.md` on the plugin chat's branch) did not exist when this was written. The seam names below are provisional and should be aligned with that design. Two things already exist: `PaymentGatewayRegistry` with a `PaymentGateway` protocol (`app/services/payments/registry.py:14`, `base.py:97`), and a hardware plugin registry in `app/plugins/` that is for server management only.
+Aligned on 2026-11-21 with `docs/plugin-system.md` (plugin API 1.0, core in `app/plugin_host/`, merged into main at ce345cc). Its vocabulary is used here:
 
-| Seam | Core provides | Plugin provides | Built-in or first plugins |
+- A **plugin** is an admin-installed package with a `plugin.json` manifest declaring `permissions`, `settings`, `events`, `hooks`, `schedules`, `actions`, `ui.panels` and `mcp_tools` (plugin doc section 3.2).
+- **Events** are delivered to plugin **after handlers** through the plugin outbox (at least once, idempotent by event id); **before hooks** may veto (plugin doc section 6). Events are published with `app.plugin_host.events.emit(db, name, payload, service_id=None)`, which also enqueues the outbound commerce webhook for the same event (plugin doc section 6.5), so billing never calls `CommerceWebhookService.enqueue` directly for catalogue events. Billing receives no second event mechanism: billing's single settlement function fires its internal subscriber list (section 14 of this spec), and one subscriber of that list is the only caller of `emit("invoice.paid", ...)`. The event catalogue (`app/plugin_host/catalogue.py`, plugin doc sections 6.2.1 and 17.1) is the one list of event names: new billing events such as `invoice.created` or `invoice.refunded` are added there when they gain an emitter, and section 14 of this spec refers to it rather than keeping a parallel list. Within plugin API 1.x payload fields are only ever added.
+- Receiving billing events needs the `billing.read` permission (plugin doc section 7).
+- Each seam below becomes a **plugin kind**: a kind-specific registrar on top of the plugin core, as plugin doc section 17 plans ("Plugin kinds for payment gateways, tax providers, accounting export, fraud checks"). Kinds are not in plugin API 1.0; until a kind exists, its seam is an in-core registry with the interface named here, so the later plugin registrar only wraps it.
+- Plugin settings (secrets sealed) and schedules (leased rows in `plugin_schedules`) come from the plugin core; billing kinds use them rather than their own.
+- The hardware adapters in `app/plugins/` are a separate, older mechanism for server management only and are not billing seams.
+
+Already present: `PaymentGatewayRegistry` with a `PaymentGateway` protocol (`app/services/payments/registry.py:14`, `base.py:97`), which is the contract the payment gateway kind will keep.
+
+| Seam (plugin kind) | Core provides | Plugin provides | Built-in or first plugins |
 |---|---|---|---|
 | Payment gateway | Registry, settlement point, refund and webhook plumbing, `Payment` and `Refund` records | Charge, refund, vault, webhook normalisation, hosted-page flows | Stripe, PayPal, USDT as plugins (they already fit the protocol); manual and credit stay in core |
 | Fraud check | Hook after order placement, `fraud_score` column (`app/models/commerce_order.py:115`), hold-for-review order state | Scoring against FraudLabs Pro, MaxMind, others | None in core |
@@ -358,3 +367,84 @@ A rough total, one engineer working serially, is on the order of 12 to 18 months
 5. **Reseller balances.** Retire `resellers.cached_balance_cents` in favour of the account-level cache once A3 is proven, or keep both indefinitely?
 6. **Affiliates and quotes.** Where should these sit relative to Phase 4?
 7. **Plugin seam names.** Confirm or adjust section 1 once `docs/plugin-system.md` exists.
+
+**Decided defaults** (relayed by the project chat, 2026-11-21; implement these):
+
+1. Invoice numbering is unique and ordered by default, with a per-series "gapless" option. In gapless mode numbers are allocated only at publish or payment, and a void never frees a number.
+2. Daily proration for upgrades; a downgrade credits the account balance; refund on cancellation is off by default. All three are settings.
+3. The first tax rule packs are UK VAT and EU VAT, the latter with a VIES tax-ID validator plugin.
+4. Until saved retail payment methods exist (B6), retail renewal invoices are emailed and the client pays them in the client area.
+5. Keep both reseller balance caches until A3 has run in shadow mode with zero mismatches, then retire `resellers.cached_balance_cents` in a later contract step.
+6. Quotes in phase 4; affiliates in phase 5, as a plugin.
+7. Seam names aligned with `docs/plugin-system.md` in section 1.
+
+## 14. Internal billing events
+
+Event names are not listed here. The one list of event names, with their permissions and payload fields, is the plugin catalogue `app/plugin_host/catalogue.py` (documented in `docs/plugin-system.md` sections 6.2.1 and 17.1). A billing fact that other code or plugins should see is added there as an `EventSpec` with permission `billing.read` and published with `app.plugin_host.events.emit(db, name, payload)`, which also queues the outbound commerce webhook for names in that catalogue. This section describes the settlement function and the in-process subscriber list that billing uses for its own follow-up steps.
+
+### 14.1 The settlement function
+
+`settle_invoice(db, invoice_id, *, payment=None)` in `app/services/billing/settlement.py` is the only place an invoice becomes paid. Every path that records money ends there: `PaymentOrchestrator.finalize_success` (card webhook, saved-method charge, USDT) and reseller credit both call it through `InvoiceService.mark_paid_if_fully_allocated`, and admin mark-paid first records a `Payment(gateway="manual")` for the outstanding amount (`app/services/billing/manual_payments.py`).
+
+It locks the invoice row, sums succeeded payment allocations and then:
+
+- if they cover the total and the invoice was not yet paid, sets it PAID and fires the invoice paid event once (on that transition only, so replays and repeat calls fire nothing);
+- if a paid invoice has dropped below its total, reopens it (unchanged behaviour);
+- if money arrives for a voided order invoice, or a retail invoice is overpaid, keeps the invoice as it is and records a refund review (section 14.4). A reseller invoice that is overpaid still raises, as before.
+
+It never marks anything paid before the gateway has confirmed the payment; pending card payments do not count.
+
+### 14.2 Subscriber list API
+
+The invoice paid event is a plain in-process list, not a bus:
+
+- `subscribe_invoice_paid(name, handler, *, applies=..., isolated=True)` registers or replaces (by name) a handler `handler(db, InvoicePaid(invoice, payment))`; `applies(invoice)` filters which invoices it sees.
+- `unsubscribe_invoice_paid(name)` removes one; `invoice_paid_subscribers()` lists the names in run order.
+- Handlers run in registration order inside the caller's transaction. An `isolated` handler (the default, and every default subscriber) runs in its own savepoint; if it raises, its work is rolled back and logged and the settlement stands. A non-isolated handler runs bare and must neither raise nor commit; none of the defaults uses that.
+- `InvoicePaid` also carries `source`, set to `admin_mark_paid` by admin mark-paid and otherwise empty.
+
+Default subscribers, in order (`app/services/billing/settlement_subscribers.py`):
+
+| Name | Applies to | What it does |
+|---|---|---|
+| `coupon_usage` | invoices with an order | counts the order's coupon use once per order (`app/services/billing/coupons.py`) |
+| `complete_billing_cycle` | retail cycle invoices | marks the cycle paid and schedules the next period by `interval_months`; reseller cycles are still completed by the recurring billing worker, because that can unsuspend services and lift reseller holds |
+| `publish_invoice_paid` | invoices with a billing account, and any invoice settled by admin mark-paid | the only `emit(db, "invoice.paid", ...)` call, payload `invoice_id`, `billing_account_id`, `invoice_number`, `order_id`. Before A0, admin mark-paid published for every invoice and the card webhook for invoices with an account; both still do, once per settlement. A reseller invoice marked paid by an admin has no account, so `billing_account_id` is present and null, as it was before A0 (the catalogue requires the key, not a value) |
+| `invoice_paid_email` | invoices with a billing account | queues the `invoice_paid` email (idempotency key `invoice:{id}:paid`) |
+| `fulfil_order` | order charge invoices | moves the order to PAID_PENDING_FULFILLMENT and queues it; fulfilment (`CheckoutService.mark_paid_and_fulfill`, which emits `order.paid`) runs after the settlement commits |
+
+Fulfilment never runs inside the settlement transaction, on any path. Provisioning commits, which would end the caller's transaction half way (before its audit row) and which a savepoint cannot survive, and a provisioning error must not undo money already received. So `fulfil_order` only queues the order, and every settlement path ends its transaction with `settlement.commit_and_fulfil(db)` instead of `db.commit()`: it commits the settlement together with the caller's audit rows, then fulfils each queued order in a transaction of its own (`run_deferred_fulfilment`). The payment webhook, which settles inside a savepoint, calls `run_deferred_fulfilment` after leaving it. The paths are admin mark-paid (`POST /api/admin/commerce/invoices/{id}/mark-paid`), reseller panel pay (`POST /api/reseller-panel/invoices/{id}/pay`, credit and saved-method charges for reseller account orders), the Stripe and PayPal webhooks, the USDT worker and admin USDT reconcile (USDT pays top-up invoices only, so nothing is queued there today). The recurring billing worker and reseller deploy settle only cycle and deploy invoices, which have no order, and keep their own commits. A queued order is fulfilled only if its invoice is PAID under lock, so a queue left by a transaction that rolled back does nothing. An order whose fulfilment raises stays in PAID_PENDING_FULFILLMENT for an admin to accept again; provisioning failures inside fulfilment still end in PROVISION_ERROR with a refund review, as before.
+
+### 14.2.1 Lock order
+
+Billing row locks are taken through `app/services/billing_locks.py` (`BillingLocks`), in the order of its `LOCK_ORDER`: service billing, reseller, billing account, order, invoice, payment, billing cycle, coupon, refund, number counter. This is the order of section 0 of `docs/billing-phase1-design.md` with the service billing first (the recurring worker starts from it and then settles the cycle invoice), the order before its invoice, and the billing cycle and coupon after the payment. Every path that locks a billing cycle holds its service billing first, so the billing row also serialises work on its cycles; `BillingLocks.for_invoice` locks the service billing of a cycle invoice before the invoice, and the worker's paid-cycle recovery locks the service billing before the cycle. A transaction never takes an earlier kind after a later one; re-locking a row it already holds is allowed. `BillingLocks.for_invoice` reads the invoice without a lock to learn its order (and, with `reseller=True`, its reseller), locks those, then the invoice; `InvoiceService.get_for_update` and `OrderDAO.get_for_update` go through it. Every lock flushes the session and re-reads the row (`populate_existing`), so a status checked after the lock is the committed one. The payment webhook and the USDT watcher look the payment up without a lock and then lock reseller, order, invoice and payment in that order, so the reseller credit ledger, which locks the reseller again later, only re-locks. Rows that open a gateway transaction (the webhook event claim, the USDT cursor and deposit) come before all of these. The tests check the sequence of lock calls on SQLite; lock waits and deadlocks themselves can only be exercised on MySQL. `PaymentRefundService.refund` looks the payment up without a lock and then locks through `BillingLocks.for_invoice(..., reseller=True)` and `BillingLocks.payments`, so a refund takes reseller, order, invoice and payment in order before the reversal re-locks them. Not yet on this order: the reseller recurring worker, which is outside A0 and moves in phase 1 (P1-D). Card payment start still calls the gateway while holding the invoice lock, so that two clicks cannot open two PaymentIntents; phase 1 section 0 removes gateway calls under locks.
+
+### 14.2.2 Coupons and refund reviews (A0 review fixes)
+
+- A coupon discounts the first invoice of an order only. `repeating` and `forever` coupons are accepted at checkout (an A0 test pins acceptance of a correctly configured repeating coupon); the quote carries `coupon_first_invoice_only: true` and the discount line on the quote and the invoice reads `Coupon CODE (first invoice only)`. Recurring discounts are deferred to D6.
+- `max_uses` and `max_uses_per_account` are checked unlocked at quote time and again under the coupon row lock when the use is counted at payment. At payment the per-account count is a locking read of the account's redemptions, so on MySQL under REPEATABLE READ it sees redemptions committed after the transaction's snapshot. A use over a limit at payment is still counted (the client paid the discounted price), logged and audited as `billing.coupon_limit_exceeded` with `review: true`.
+- Cancelling an order that holds no money (unpaid, or every payment reversed or refunded) releases its coupon use (`release_coupon_usage`: the redemption row is deleted, `used_count` decremented, audit `billing.coupon_usage_released`), idempotently under the coupon lock. While money waits for a refund review (provisioning failure, paid then cancelled) the use stays counted. Usage is only counted at payment, so an unpaid cancelled order has nothing to release. An order without an invoice (a zero total) counts its use when it is fulfilled and releases it again if provisioning fails, because no money was taken.
+- Invoice-level refund review markers carry the reason (`[refund-review:{reason}:invoice-{id}]`; older notes with `[refund-review:invoice-{id}]` are still read, by the `({reason});` they contain). A second reason for the same invoice is recorded (note line and `billing.refund_review` audit row with `already_under_review` listing the earlier reasons) but does not list the same money a second time.
+
+### 14.2.3 Renewals and cancellation (A0 review fixes)
+
+- The recurring worker selects due billing rows (locked, `skip_locked` on MySQL) and then, because its first commit releases those locks, locks each row again by id with `populate_existing` and the same due conditions before processing it; a row another worker took, or that is no longer due, is skipped. Paid-cycle recovery reads candidate cycles without a lock and locks the service billing, then the cycle, re-checking both. This was already so on the reseller path before A0; with one worker nothing changes. The worker lease (`recurring_billing_worker_lease_seconds`) already keeps a second worker out while it is held, but it is not renewed during a batch, so a batch that outlasts the lease could overlap the next worker; the per-row lock closes that gap.
+- `terminate_service` no longer marks a service TERMINATED when the power-off fails. It audits `billing.service_termination_failed` and raises; at the end of the period the billing stays due (`cancel_at` passed, not cancelled, nothing charged), `last_failure_code` is `end_of_period_terminate_failed`, the pass counts it under `manual_review`, and the next pass retries. An immediate cancel whose power-off fails sets `cancel_at` to now instead of cancelling the billing, so the worker retries the termination, and the response gains `termination_pending: true`. The audit row is enough for alerting now; an integrity detector for billings whose `cancel_at` passed more than a day ago without a cancellation would make it visible on the billing health page and is worth adding with E2.
+- `request_cancellation` locks and re-reads the service billing (first in the lock order) before copying `next_charge_at` into `cancel_at`.
+- Migration `billing_a0_renewals` backfills a retail billing from the most recent fulfilled order item of its service with a known interval, else the most recent item with a known interval, else monthly.
+- The worker loop reads the stored interval in a thread (`asyncio.to_thread`), each pass.
+
+### 14.3 Event names billing uses
+
+| Name | Status |
+|---|---|
+| `invoice.paid` | emitted, by `publish_invoice_paid` only |
+| `order.paid` | emitted, by `CheckoutService.mark_paid_and_fulfill` only |
+| `invoice.created`, `invoice.overdue`, `payment.failed`, `payment.refunded`, `credit.applied`, `service.suspended` for non-payment | not emitted by billing yet; when added they go into the plugin catalogue first. (`service.suspended` is already emitted for every suspension by the service flush listener.) |
+
+The retail renewal invoice email uses the email event `invoice_created`, which is an email template name, not a bus event.
+
+### 14.4 Refund reviews
+
+Until credit notes and the refund engine exist (phase 1, A2 and A4), money that may need returning is recorded for a person to decide, and no money moves. `app/services/billing/order_refunds.py` records the review on the order's admin notes, on the payment's metadata where there is one, and as an audit event `billing.refund_review`. The setting `billing_order_refund_policy` (`manual_review`, `original_method` or `credit`) is recorded with each review; in phase 0 every value is handled as a manual review because `PaymentRefundService` marks a refund successful while Stripe still reports it pending and retail accounts have no credit ledger yet (A3).
+

@@ -13,6 +13,7 @@ import uuid
 
 from app.core.config import Settings, settings
 from app.core.database import SessionLocal
+from app.services.billing.settlement import commit_and_fulfil
 from app.services.payments.usdt_rpc import EthereumRpcClient
 from app.services.payments.usdt_sweeper import UsdtSweeper
 from app.services.payments.usdt_watcher import UsdtWatcher
@@ -54,7 +55,7 @@ def run_usdt_iteration(
             return 0
         processed = watcher.run_once(db, lease_owner=owner)
         processed += UsdtSweeper(client, config).run_once(db)
-        db.commit()
+        commit_and_fulfil(db)
         return processed
     except Exception:
         db.rollback()

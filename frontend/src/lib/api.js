@@ -5352,3 +5352,37 @@ export const runServicePluginAction = (serviceId, pluginId, actionId, params, co
       errorMessage: 'The action failed' },
   );
 };
+
+// --- Automation and billing settings (staff) ---
+
+async function settingsAdminRequest(path, { method = 'GET', body, errorMessage } = {}) {
+  const options = { method, credentials: 'include' };
+  if (body !== undefined) {
+    options.headers = { 'Content-Type': 'application/json' };
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(`${API_BASE}/admin/settings${path}`, options);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    let message = errorMessage;
+    if (typeof detail === 'string' && detail) message = detail;
+    else if (Array.isArray(detail) && detail.length) {
+      const msgs = detail.map((item) => item?.msg || item?.message).filter(Boolean);
+      if (msgs.length) message = msgs.join('; ');
+    }
+    throw new Error(message);
+  }
+  return response.json();
+}
+
+export const getAutomationSettings = () =>
+  settingsAdminRequest('', { errorMessage: 'Failed to load settings' });
+export const updateAutomationSetting = (key, value) =>
+  settingsAdminRequest(`/${encodeURIComponent(key)}`, {
+    method: 'PUT', body: { value }, errorMessage: 'Failed to save the setting',
+  });
+export const resetAutomationSetting = (key) =>
+  settingsAdminRequest(`/${encodeURIComponent(key)}`, {
+    method: 'DELETE', errorMessage: 'Failed to reset the setting',
+  });

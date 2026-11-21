@@ -29,7 +29,14 @@ from app.services.commerce_lifecycle_service import (
     CommerceLifecycleError,
     CommerceLifecycleService,
 )
-from app.plugin_host import events as plugin_events
+from app.services import settings_store
+from app.services.billing.manual_payments import (
+    ManualPaymentError,
+    record_manual_payment,
+)
+from app.services.billing.order_refunds import OrderCancelError
+from app.services.billing.settlement import commit_and_fulfil
+from app.services.billing.order_refunds import cancel_order as cancel_commerce_order
 from app.services.commerce_webhook_service import CommerceWebhookService
 from app.services.email_message_service import EmailMessageService
 from app.services.gdpr_service import GdprService
@@ -349,21 +356,12 @@ def cancel_order(
     db: DbDep,
 ):
     order = _get_order_or_404(db, order_id)
-    if order.status in {OrderStatus.ACTIVE, OrderStatus.CANCELLED}:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Order cannot be cancelled from status {order.status.value}",
+    try:
+        order, refund = cancel_commerce_order(
+            db, order, actor_user_id=auth.get("user_id")
         )
-    prior = order.status
-    order.status = OrderStatus.CANCELLED
-    OrderStatusHistoryDAO.append(
-        db,
-        order_id=order.id,
-        from_status=prior,
-        to_status=OrderStatus.CANCELLED,
-        actor_user_id=auth.get("user_id"),
-        note="Cancelled by admin",
-    )
+    except OrderCancelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     AuditService.log(
         db,
         actor_user_id=auth.get("user_id"),
@@ -373,9 +371,25 @@ def cancel_order(
         resource_id=str(order.id),
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
+        metadata=(
+            {"refund_policy": refund.policy, "refund_handling": refund.handling}
+            if refund is not None
+            else None
+        ),
     )
     db.commit()
-    return _serialize_order(order)
+    payload = _serialize_order(order)
+    payload["refund"] = (
+        {
+            "policy": refund.policy,
+            "handling": refund.handling,
+            "amount_cents": refund.amount_cents,
+            "currency": refund.currency,
+        }
+        if refund is not None
+        else None
+    )
+    return payload
 
 
 # --- Invoices ---
@@ -434,10 +448,15 @@ def mark_invoice_paid(
     db: DbDep,
 ):
     invoice = _get_invoice_or_404(db, invoice_id)
-    if invoice.status == InvoiceStatus.VOID:
-        raise HTTPException(status_code=400, detail="Cannot mark a void invoice as paid")
-    invoice.status = InvoiceStatus.PAID
-    invoice.paid_at = datetime.now(timezone.utc)
+    try:
+        invoice, payment = record_manual_payment(
+            db,
+            invoice.id,
+            reason=body.reason,
+            actor_user_id=auth.get("user_id"),
+        )
+    except ManualPaymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     AuditService.log(
         db,
         actor_user_id=auth.get("user_id"),
@@ -447,22 +466,13 @@ def mark_invoice_paid(
         resource_id=str(invoice.id),
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
-        metadata={"reason": body.reason},
+        metadata={
+            "reason": body.reason,
+            "payment_id": payment.id if payment is not None else None,
+        },
     )
-    try:
-        plugin_events.emit(
-            db,
-            "invoice.paid",
-            {
-                "invoice_id": invoice.id,
-                "invoice_number": invoice.invoice_number,
-                "billing_account_id": invoice.billing_account_id,
-                "order_id": invoice.order_id,
-            },
-        )
-    except Exception:
-        pass
-    db.commit()
+    commit_and_fulfil(db)
+    db.refresh(invoice)
     return _serialize_invoice(db, invoice)
 
 
@@ -659,6 +669,11 @@ def get_setting(key: str, db: DbDep):
 
 @router.put("/settings/{key}", responses=COMMON_ERROR_RESPONSES)
 def put_setting(key: str, body: SettingUpdateBody, db: DbDep):
+    if key.strip().lower().startswith(settings_store.STORAGE_PREFIX.lower()):
+        raise HTTPException(
+            status_code=400,
+            detail="Typed settings are managed through /api/admin/settings",
+        )
     row = SystemSettingDAO.set(db, key.strip(), body.value)
     db.commit()
     return {"key": row.key, "value": row.value, "updated_at": row.updated_at}

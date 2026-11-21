@@ -91,6 +91,7 @@
   $: isCommerceGatewayLogsActive = currentPath.startsWith('/admin/commerce/gateway-logs');
   $: isCommerceEmailLogActive = currentPath.startsWith('/admin/commerce/email-log');
   $: isCommerceAuditActive = currentPath.startsWith('/admin/commerce/audit');
+  $: isAutomationSettingsActive = currentPath.startsWith('/admin/settings/automation');
   $: isSupportTicketsActive = currentPath.startsWith('/admin/support/tickets');
 </script>
 
@@ -490,6 +491,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
             </svg>
             <span>Email Log</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/settings/automation" class="nav-link" class:active={isAutomationSettingsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+            </svg>
+            <span>Automation Settings</span>
           </a>
         </li>
       </ul>

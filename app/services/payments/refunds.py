@@ -16,6 +16,7 @@ from app.models.reseller import (
     Payment,
     PaymentStatus,
 )
+from app.services.billing_locks import BillingLocks
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.payments.base import (
     GatewayNotConfiguredError,
@@ -70,11 +71,16 @@ class PaymentRefundService:
         reason: Optional[str] = None,
         admin_user_id: Optional[int] = None,
     ) -> Payment:
-        payment = db.execute(
-            select(Payment).where(Payment.id == payment_id).with_for_update()
-        ).scalar_one_or_none()
-        if payment is None:
+        found = db.execute(
+            select(Payment.id, Payment.invoice_id).where(Payment.id == payment_id)
+        ).first()
+        if found is None:
             raise PaymentRefundError("Payment not found", code="not_found")
+        BillingLocks.for_invoice(db, int(found.invoice_id), reseller=True)
+        locked = BillingLocks.payments(db, select(Payment).where(Payment.id == found.id))
+        if not locked:
+            raise PaymentRefundError("Payment not found", code="not_found")
+        payment = locked[0]
 
         ok, detail = self.refundability(payment)
         if not ok:

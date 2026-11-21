@@ -15,7 +15,7 @@ from app.dao.commerce_dao import BillingProfileDAO, SystemSettingDAO
 from app.dao.order_dao import OrderDAO, OrderItemDAO, OrderStatusHistoryDAO
 from app.dao.storefront_dao import FrontendProductDAO
 from app.models.commerce_account import BillingAccount, BillingAccountType
-from app.models.commerce_coupon_tax import Coupon, CouponAppliesTo, CouponRedemption, TaxRate
+from app.models.commerce_coupon_tax import Coupon, CouponAppliesTo, TaxRate
 from app.models.commerce_invoice_ext import InvoiceLine
 from app.models.commerce_order import (
     Order,
@@ -34,6 +34,15 @@ from app.models.storefront import (
     ProductOption,
     ProductOptionValue,
 )
+from app.services.billing.coupons import (
+    FIRST_INVOICE_ONLY_NOTE,
+    CouponRuleError,
+    check_stored_rules,
+    first_invoice_only,
+    record_coupon_usage,
+    release_coupon_usage,
+)
+from app.services.billing.order_refunds import apply_order_refund_policy
 from app.services.commerce_recurring_service import CommerceRecurringService
 from app.plugin_host import events as plugin_events
 from app.services.email_message_service import EmailEvent, EmailMessageService
@@ -60,6 +69,7 @@ class QuoteLine:
     unit_cents: int
     total_cents: int
     recurring_cents: int = 0
+    kind: str = "product"
 
 
 @dataclass(frozen=True)
@@ -74,6 +84,7 @@ class QuoteResult:
     total_cents: int
     coupon_code: Optional[str] = None
     lines: list[QuoteLine] = field(default_factory=list)
+    coupon_first_invoice_only: bool = False
 
 
 class CheckoutService:
@@ -161,6 +172,7 @@ class CheckoutService:
         coupon_code: Optional[str],
         *,
         frontend_product: FrontendProduct,
+        account: Optional[BillingAccount] = None,
     ) -> Optional[Coupon]:
         if not coupon_code:
             return None
@@ -185,6 +197,12 @@ class CheckoutService:
         elif coupon.applies_to == CouponAppliesTo.CATEGORY:
             if coupon.category_id != frontend_product.category_id:
                 raise CheckoutError("Coupon does not apply to this product category")
+        try:
+            check_stored_rules(
+                db, coupon, billing_account_id=account.id if account else None
+            )
+        except CouponRuleError as exc:
+            raise CheckoutError(str(exc)) from exc
         return coupon
 
     @staticmethod
@@ -245,27 +263,41 @@ class CheckoutService:
         _, option_delta = CheckoutService._normalize_options(
             product, options
         )
-        setup, recurring = CheckoutService._resolve_cycle_price(plan, cycle_interval)
-        setup += option_delta
-        recurring += option_delta
+        setup, period = CheckoutService._resolve_cycle_price(plan, cycle_interval)
+        # Option prices are per billing period; the setup fee is charged once.
+        recurring = period + option_delta
         subtotal = setup + recurring
         coupon = CheckoutService._find_coupon(
-            db, coupon_code, frontend_product=product
+            db, coupon_code, frontend_product=product, account=account
         )
         discount = CheckoutService._coupon_discount(coupon, subtotal)
         taxable = max(0, subtotal - discount)
         tax = CheckoutService._tax_cents(db, account, taxable)
         total = taxable + tax
 
-        lines = [
-            QuoteLine(
-                description=f"{product.name} — {plan.name}",
-                quantity=1,
-                unit_cents=setup,
-                total_cents=setup,
-                recurring_cents=recurring,
+        title = f"{product.name} — {plan.name}"
+        lines: list[QuoteLine] = []
+        if setup:
+            lines.append(
+                QuoteLine(
+                    description=f"{title} setup fee",
+                    quantity=1,
+                    unit_cents=setup,
+                    total_cents=setup,
+                    kind="setup",
+                )
             )
-        ]
+        period_label = f" ({cycle_interval})" if cycle_interval else ""
+        lines.append(
+            QuoteLine(
+                description=f"{title}{period_label}",
+                quantity=1,
+                unit_cents=period,
+                total_cents=period,
+                recurring_cents=recurring,
+                kind="product",
+            )
+        )
         if option_delta:
             lines.append(
                 QuoteLine(
@@ -273,15 +305,19 @@ class CheckoutService:
                     quantity=1,
                     unit_cents=option_delta,
                     total_cents=option_delta,
+                    kind="option",
                 )
             )
+        first_only = bool(discount and coupon is not None and first_invoice_only(coupon))
         if discount:
+            label = f"Coupon {coupon.code if coupon else ''}".strip()
             lines.append(
                 QuoteLine(
-                    description=f"Coupon {coupon.code if coupon else ''}".strip(),
+                    description=f"{label} ({FIRST_INVOICE_ONLY_NOTE})" if first_only else label,
                     quantity=1,
                     unit_cents=-discount,
                     total_cents=-discount,
+                    kind="discount",
                 )
             )
         if tax:
@@ -291,6 +327,7 @@ class CheckoutService:
                     quantity=1,
                     unit_cents=tax,
                     total_cents=tax,
+                    kind="tax",
                 )
             )
 
@@ -305,6 +342,7 @@ class CheckoutService:
             total_cents=total,
             coupon_code=coupon.code if coupon else None,
             lines=lines,
+            coupon_first_invoice_only=first_only,
         )
 
     @staticmethod
@@ -351,38 +389,19 @@ class CheckoutService:
                     quantity=line.quantity,
                     unit_cents=line.unit_cents,
                     total_cents=line.total_cents,
-                    tax_cents=quote.tax_cents if line.description == "Tax" else 0,
+                    tax_cents=line.total_cents if line.kind == "tax" else 0,
                     sort_order=sort,
-                    order_item_id=order_item_id if sort == 0 else None,
+                    order_item_id=(
+                        order_item_id
+                        if line.kind in {"setup", "product", "option"}
+                        else None
+                    ),
                 )
             )
             sort += 1
         order.invoice_id = invoice.id
         db.flush()
         return invoice
-
-    @staticmethod
-    def _redeem_coupon_for_order(
-        db: Session,
-        *,
-        account: BillingAccount,
-        order: Order,
-        quote: QuoteResult,
-        product: FrontendProduct,
-    ) -> None:
-        if not quote.coupon_code:
-            return
-        coupon = CheckoutService._find_coupon(db, quote.coupon_code, frontend_product=product)
-        if coupon is None:
-            return
-        coupon.used_count = int(coupon.used_count or 0) + 1
-        db.add(
-            CouponRedemption(
-                coupon_id=coupon.id,
-                billing_account_id=account.id,
-                order_id=order.id,
-            )
-        )
 
     @staticmethod
     def _enqueue_checkout_emails(
@@ -515,10 +534,6 @@ class CheckoutService:
             to_status=status,
             actor_user_id=user_id,
             note="Order placed",
-        )
-
-        CheckoutService._redeem_coupon_for_order(
-            db, account=account, order=order, quote=quote, product=product
         )
 
         invoice = None
@@ -672,8 +687,12 @@ class CheckoutService:
         if locked.status not in {
             OrderStatus.PENDING_PAYMENT,
             OrderStatus.PENDING_ACCEPTANCE,
+            OrderStatus.PAID_PENDING_FULFILLMENT,
         }:
             raise CheckoutError(f"Order cannot be fulfilled from status {locked.status.value}")
+        if locked.invoice_id is None and locked.coupon_code:
+            # Orders without an invoice never settle, so their coupon use counts here.
+            record_coupon_usage(db, order=locked)
 
         prior = locked.status
         locked.status = OrderStatus.FULFILLING
@@ -699,7 +718,6 @@ class CheckoutService:
                 (locked.admin_notes or "")
                 + "\nProvision failures:\n"
                 + "\n".join(errors)
-                + "\nRefund path stub: manual review required."
             ).strip()
             OrderStatusHistoryDAO.append(
                 db,
@@ -708,8 +726,12 @@ class CheckoutService:
                 to_status=OrderStatus.PROVISION_ERROR,
                 note="Provisioning failed",
             )
+            apply_order_refund_policy(db, locked, reason="provisioning_failed")
+            if locked.invoice_id is None and locked.coupon_code:
+                # No invoice means no money was taken, so the use counted above is given back.
+                release_coupon_usage(db, order=locked, reason="provisioning_failed")
             logger.warning(
-                "Order %s provision errors; refund stub logged",
+                "Order %s provision errors; refund policy applied",
                 locked.order_number,
             )
         else:
@@ -733,16 +755,6 @@ class CheckoutService:
                         "currency": locked.currency,
                     },
                 )
-                if locked.invoice_id is not None:
-                    plugin_events.emit(
-                        db,
-                        "invoice.paid",
-                        {
-                            "invoice_id": locked.invoice_id,
-                            "order_id": locked.id,
-                            "billing_account_id": locked.billing_account_id,
-                        },
-                    )
             except Exception:
                 logger.warning(
                     "Failed to enqueue order.paid webhook for order %s",

@@ -42,6 +42,10 @@ from app.services.discord_link_service import DiscordLinkError, DiscordLinkServi
 from app.services.email_message_service import EmailMessageService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceService
+from app.services.payments.retail_card import (
+    RetailCardPaymentError,
+    start_card_payment,
+)
 from app.services.ticket_service import TicketService
 
 DbDep = Annotated[Session, Depends(get_db)]
@@ -457,7 +461,18 @@ def pay_invoice(
     if invoice.status == InvoiceStatus.VOID:
         raise HTTPException(status_code=400, detail="Invoice is void")
 
-    if not settings.stripe_secret_key:
+    try:
+        started = start_card_payment(db, invoice, billing_account_id=account.id)
+    except RetailCardPaymentError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Could not create payment intent",
+        ) from exc
+    if started is None:
         return {
             "status": "manual",
             "message": (
@@ -465,32 +480,8 @@ def pay_invoice(
             ),
             "invoice_id": invoice.id,
         }
-
-    try:
-        import importlib
-
-        stripe = importlib.import_module("stripe")
-        intent = stripe.PaymentIntent.create(
-            amount=int(invoice.amount_cents),
-            currency=(invoice.currency or "USD").lower(),
-            automatic_payment_methods={"enabled": True},
-            metadata={
-                "rackflow_invoice_id": str(invoice.id),
-                "rackflow_billing_account_id": str(account.id),
-            },
-            api_key=settings.stripe_secret_key,
-        )
-        return {
-            "status": "requires_payment_method",
-            "invoice_id": invoice.id,
-            "client_secret": intent.client_secret,
-            "payment_intent_id": intent.id,
-        }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Could not create payment intent: {exc}",
-        ) from exc
+    db.commit()
+    return started.as_response()
 
 
 # --- Payment methods (stub) ---

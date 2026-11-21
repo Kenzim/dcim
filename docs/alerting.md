@@ -166,12 +166,53 @@ UI (Alerts, Settings). Defaults:
 | `vm_backup_failed` | warning | a recorded VM backup run failed recently | `lookback_hours` 24 |
 | `notification_delivery_failing` | warning | billing outbox, account email or alert deliveries failing, or queued and unsent (queue checks only while SMTP is on) | `failed_threshold` 3, `window_minutes` 60, `queued_after_minutes` 30 |
 | `client_storage_quota` | info, client audience | a share of a client's storage at or above `quota_percent` of its quota; never shown in the staff list, it only feeds the client's `storage_quota` notice | `quota_percent` 90 |
+| `billing_invoice_lines_mismatch` | warning, ships disabled | an open, overdue, paid, pending-action or failed invoice with lines whose totals do not add up to the invoice total; invoices without lines are skipped | `min_age_minutes` 60, `lookback_days` 90, `max_rows` 25 |
+| `billing_paid_without_payment` | warning, ships disabled | a paid invoice whose succeeded payments do not cover its total (refunded payments do not count) | `min_age_minutes` 60, `lookback_days` 90, `max_rows` 25 |
+| `billing_overallocated` | critical, ships disabled | an invoice whose succeeded payments add up to more than its total | `min_age_minutes` 60, `lookback_days` 90, `max_rows` 25 |
+| `billing_credit_drift` | critical, ships disabled | a reseller with ledger entries whose cached balance differs from the sum of its entries or from the newest entry's balance after | `max_rows` 25 |
+| `billing_orphaned_payment` | warning, ships disabled | a pending payment with a gateway reference that has stayed pending, or a pending payment whose invoice is already paid or void | `pending_after_minutes` 1440, `settled_grace_minutes` 60, `max_rows` 25 |
+| `billing_refund_stuck` | warning | a refund that has stayed pending (reads a `refunds` table; reports nothing until refunds are recorded in one) | `pending_after_minutes` 60, `max_rows` 25 |
 
 Resource keys: `storage_node`, `storage_tenant`, `proxy_runner`, `runner`,
 `pdu`, `power_feed`, `switch`, `deployment_job`, `boot_task`,
-`install_task`, `private_network_attachment`, `service` (backups), `system`.
+`install_task`, `private_network_attachment`, `service` (backups), `system`,
+`invoice`, `payment`, `reseller`, `refund` (billing integrity).
 A silence uses the same pair, so a maintenance silence on `switch` 4 mutes
 every alert about that switch.
+
+### Billing integrity types
+
+The six `billing_*` types implement the integrity checks of the billing spec
+(E2). They live in `app/services/alerting/billing_integrity.py` and only read
+recorded state: they never change a record, call a gateway or emit an event.
+
+- Each detector aggregates in SQL (`GROUP BY` and `HAVING` over the invoice,
+  payment, invoice line and credit ledger tables, using their existing
+  indexes) and runs on SQLite and MySQL alike.
+- Money is compared in integer minor units. A payment counts only when its
+  status is `succeeded`; a payment recorded as `refunded` no longer counts, so
+  a fully refunded paid invoice is reported by `billing_paid_without_payment`.
+- Each offending record is one finding (resource `invoice`, `payment`,
+  `reseller` or `refund`), with the ids and amounts in the alert details. At
+  most `max_rows` records are listed per cycle. When there are more, one extra
+  finding with resource id `overflow` carries the number not listed
+  (`remaining`) and the number listed (`shown`); fixing the listed records
+  brings the next ones into view.
+- `min_age_minutes` keeps a just-created invoice from being flagged in the
+  middle of its own transaction, and `lookback_days` bounds the scan to recent
+  invoices.
+- Paid invoices without a payment row are legitimate today (admin mark-paid and
+  credit-funded settlement record no payment), so `billing_paid_without_payment`
+  would page on existing data. It, `billing_invoice_lines_mismatch`,
+  `billing_overallocated`, `billing_credit_drift` and `billing_orphaned_payment`
+  therefore ship disabled: enable each one in Alerts, Settings after checking
+  what it reports on your data. A type with no settings row is enabled unless
+  its definition says it ships disabled (`enabled_by_default`).
+- Credit drift covers resellers. Retail `billing_accounts.credit_balance_cents`
+  has no ledger to compare with yet.
+- `billing_refund_stuck` has nothing to read until refunds are stored in their
+  own `refunds` table (columns `id`, `status`, `created_at`); until then it
+  reports nothing.
 
 Not detectable from recorded state today (follow-ups, not built): the IPMI
 proxy runner (it keeps no heartbeat), BMC reachability per server, Proxmox

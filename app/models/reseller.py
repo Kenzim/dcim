@@ -847,6 +847,10 @@ class ServiceBilling(Base):
     currency = Column(String(3), nullable=False, default="USD", server_default="USD")
     next_charge_at = Column(DateTime(timezone=True), nullable=True, index=True)
     billing_anchor_day = Column(Integer, nullable=True)
+    # monthly_price_cents is the price of one billing period of interval_months.
+    cycle_interval = Column(String(32), nullable=True)
+    interval_months = Column(Integer, nullable=True)
+    cancel_at = Column(DateTime(timezone=True), nullable=True, index=True)
     status = Column(
         _string_enum(ServiceBillingStatus),
         nullable=False,

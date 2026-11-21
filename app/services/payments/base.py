@@ -74,6 +74,17 @@ class GatewayChargeResult:
 
 
 @dataclass(frozen=True)
+class GatewayPaymentIntent:
+    """An on-session payment the client confirms in the browser."""
+
+    external_ref: str
+    client_secret: Optional[str]
+    status: str
+    amount_cents: Optional[int] = None
+    currency: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class GatewayRefundResult:
     status: GatewayResultStatus
     external_ref: Optional[str] = None
@@ -123,6 +134,23 @@ class PaymentGateway(Protocol):
         idempotency_key: str,
         metadata: Mapping[str, str],
     ) -> GatewayChargeResult: ...
+
+    def create_payment_intent(
+        self,
+        *,
+        amount_cents: int,
+        currency: str,
+        idempotency_key: str,
+        metadata: Mapping[str, str],
+    ) -> GatewayPaymentIntent: ...
+
+    def retrieve_payment_intent(
+        self, *, external_ref: str
+    ) -> GatewayPaymentIntent: ...
+
+    def cancel_payment_intent(
+        self, *, external_ref: str
+    ) -> GatewayPaymentIntent: ...
 
     def refund_payment(
         self,
