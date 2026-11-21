@@ -188,21 +188,17 @@ def _credited_gross(db: Session, invoice_line_id: int) -> int:
     return int(value or 0)
 
 
-def _normalise_lines(
-    db: Session, invoice: Invoice, raw_lines: Sequence[Any], *, credit: bool
-) -> list[NoteLine]:
+def _normalise_lines(db: Session, invoice: Invoice, raw_lines: Sequence[Any]) -> list[NoteLine]:
     """Validate ``raw_lines`` (dicts or objects) into ``NoteLine`` rows.
 
     A line that names an ``invoice_line_id`` takes its description, kind,
-    service and period from that invoice line when it gives none, and a credit
-    line may not credit more than that invoice line (net of earlier credit notes).
+    service and period from that invoice line when it gives none.
     """
     if not raw_lines:
         raise InvoiceAdjustmentError("a note needs at least one line")
     if len(raw_lines) > MAX_NOTE_LINES:
         raise InvoiceAdjustmentError(f"a note has at most {MAX_NOTE_LINES} lines")
     lines: list[NoteLine] = []
-    requested: dict[int, int] = {}
     for index, raw in enumerate(raw_lines, start=1):
         label = f"line {index}"
         invoice_line: Optional[InvoiceLine] = None
@@ -243,16 +239,24 @@ def _normalise_lines(
             period_start=_field(raw, "period_start", invoice_line.period_start if invoice_line else None),
             period_end=_field(raw, "period_end", invoice_line.period_end if invoice_line else None),
         )
-        if invoice_line is not None and credit:
-            requested[invoice_line.id] = requested.get(invoice_line.id, 0) + line.gross_cents
-            limit = _gross_of_invoice_line(invoice, invoice_line) - _credited_gross(db, invoice_line.id)
-            if requested[invoice_line.id] > limit:
-                raise AdjustmentConflictError(
-                    f"{label} credits more than is left on invoice line {invoice_line.id} "
-                    f"({max(0, limit)} cents)"
-                )
         lines.append(line)
     return lines
+
+
+def _check_line_limits(db: Session, invoice: Invoice, lines: Sequence[NoteLine]) -> None:
+    """A credit line may not credit more than is left on its invoice line (net of earlier credit notes)."""
+    requested: dict[int, int] = {}
+    for index, line in enumerate(lines, start=1):
+        if line.invoice_line_id is None:
+            continue
+        invoice_line = db.get(InvoiceLine, line.invoice_line_id)
+        requested[invoice_line.id] = requested.get(invoice_line.id, 0) + line.gross_cents
+        limit = _gross_of_invoice_line(invoice, invoice_line) - _credited_gross(db, invoice_line.id)
+        if requested[invoice_line.id] > limit:
+            raise AdjustmentConflictError(
+                f"line {index} credits more than is left on invoice line {invoice_line.id} "
+                f"({max(0, limit)} cents)"
+            )
 
 
 def _fingerprint(
@@ -581,7 +585,7 @@ class InvoiceAdjustmentService:
                 invoice, amount_cents, reason_text or f"Credit note for invoice {_display(invoice)}"
             )
         else:
-            note_lines = _normalise_lines(db, invoice, lines, credit=True)
+            note_lines = _normalise_lines(db, invoice, lines)
         fingerprint = _fingerprint(
             AdjustmentKind.CREDIT, invoice.id, reason, outcome, reason_text, note_lines
         )
@@ -589,6 +593,7 @@ class InvoiceAdjustmentService:
         if existing is not None:
             return existing
         _require_documentable(invoice, noun="a credit note")
+        _check_line_limits(db, invoice, note_lines)
 
         total = sum(line.gross_cents for line in note_lines)
         if total <= 0:
@@ -641,7 +646,7 @@ class InvoiceAdjustmentService:
         _require_engine_v2(db)
         invoice = _lock_invoice(db, invoice)
 
-        note_lines = _normalise_lines(db, invoice, lines, credit=False)
+        note_lines = _normalise_lines(db, invoice, lines)
         outcome = AdjustmentOutcome.INCREASED_BALANCE
         fingerprint = _fingerprint(
             AdjustmentKind.DEBIT, invoice.id, reason, outcome, reason_text, note_lines
@@ -699,7 +704,7 @@ class InvoiceAdjustmentService:
         if lines is None:
             note_lines = _default_amount_lines(invoice, amount, f"Refund of payment {refund.payment_id}")
         else:
-            note_lines = _normalise_lines(db, invoice, lines, credit=True)
+            note_lines = _normalise_lines(db, invoice, lines)
         fingerprint = _fingerprint(
             AdjustmentKind.CREDIT, invoice.id, reason, outcome, reason_text, note_lines
         )
@@ -711,6 +716,7 @@ class InvoiceAdjustmentService:
             raise AdjustmentConflictError("the refund and the invoice are in different currencies")
         if sum(line.gross_cents for line in note_lines) != amount:
             raise InvoiceAdjustmentError("the credit note lines must add up to the refund amount")
+        _check_line_limits(db, invoice, note_lines)
         _check_worth(_balance(db, invoice), amount)
 
         note = _insert_note(
@@ -762,7 +768,7 @@ class InvoiceAdjustmentService:
             return existing
         _require_documentable(invoice, None, noun="an overpayment debit note")
         balance = _balance(db, invoice)
-        if excess > -balance.due_cents:
+        if excess != -balance.due_cents:
             raise AdjustmentConflictError(
                 f"the invoice is overpaid by {max(0, -balance.due_cents)} cents, not {excess}"
             )

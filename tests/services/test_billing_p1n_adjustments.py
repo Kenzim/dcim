@@ -371,6 +371,15 @@ def test_credit_by_invoice_line_takes_defaults_and_caps_the_line(db_session, acc
         credit(db_session, invoice, "k4", lines=[{"invoice_line_id": line.id, "unit_cents": 1}])
 
 
+def test_retry_of_a_line_credit_note_returns_the_note_even_when_the_line_is_used_up(db_session, account, rec):
+    invoice = make_invoice(db_session, account, amount=1000)
+    line = _line(db_session, invoice, 1000)
+    lines = [{"invoice_line_id": line.id, "unit_cents": 1000}]
+    first = credit(db_session, invoice, "k1", lines=lines)
+    assert credit(db_session, invoice, "k1", lines=lines).id == first.id
+    assert db_session.query(InvoiceAdjustment).count() == 1
+
+
 def test_credit_lines_must_belong_to_the_invoice(db_session, account, rec):
     invoice = make_invoice(db_session, account)
     other = make_invoice(db_session, account)
@@ -631,6 +640,8 @@ def test_overpayment_refusals(db_session, account, rec):
     late = make_payment(db_session, invoice, 200)
     with pytest.raises(AdjustmentConflictError, match="overpaid by 200"):
         InvoiceAdjustmentService.issue_overpayment(db_session, invoice, 201, late)
+    with pytest.raises(AdjustmentConflictError, match="overpaid by 200 cents, not 199"):
+        InvoiceAdjustmentService.issue_overpayment(db_session, invoice, 199, late)
     with pytest.raises(InvoiceAdjustmentError, match="not on this invoice"):
         InvoiceAdjustmentService.issue_overpayment(db_session, invoice, 200, foreign)
     for bad in (0, -1, 1.5, True):
