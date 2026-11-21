@@ -229,6 +229,22 @@ Service events carry `service_id` in the envelope and are delivered only to plug
 
 Emitting is part of the caller's transaction: the outbox rows commit or roll back with the change that caused them (a transactional outbox). Emitting never raises into the caller and adds no rows when no enabled plugin subscribes, so with no plugins installed the behaviour of every existing path is unchanged.
 
+`service.power_requested` means a power action was *requested* and passed every check, including before hooks. It is committed on its own session before the hypervisor call, so it is delivered even when the power call then fails. Plugins that need the outcome should read the VM's state rather than treat the event as proof the action happened.
+
+### 6.2.1 Emission call sites and billing (stable names)
+
+There is one bus and one function to publish on it, `app.plugin_host.events.emit(db, name, payload, service_id=None)`. Other subsystems must not build a second publish or subscribe mechanism for these facts.
+
+| Event | Where it is emitted today |
+|---|---|
+| `service.created`, `service.activated`, `service.suspended`, `service.unsuspended`, `service.terminated` | Only in `app/plugin_host/listeners.py`, from the Service flush listener, whichever code path changed the row |
+| `service.power_requested` | `app.plugin_host.events.power_requested` (or `guard_power` for HTTP routes), called by each power entry point |
+| `order.paid` | `CheckoutService.mark_paid_and_fulfill` (`app/services/checkout_service.py`) |
+| `invoice.paid` | `CheckoutService.mark_paid_and_fulfill` for an order's invoice, `_payment_succeeded` in `app/services/payments/webhooks.py`, and `mark_invoice_paid` in `app/api/commerce_admin.py` (manual payment) |
+| `ticket.created` | `app/services/ticket_service.py` |
+
+`invoice.paid` has three call sites today because Rackflow has three settlement paths. When billing has one settlement function (for example a payment orchestrator's "finalise success"), that function should be the **only** caller of `emit(db, "invoice.paid", ...)` and the three sites above should go. Billing's own in-process steps after settlement (fulfil the order, complete the cycle, send the email) can stay as direct calls inside that function, or become after handlers of `invoice.paid`; either way the outbound webhook keeps coming from `emit`, which already queues it (section 6.5). The event names in section 6.2 are stable for API 1.x; billing should add new facts (for example `invoice.created`, `invoice.overdue`, `payment.failed`, `payment.refunded`, `credit.applied`) to this catalogue rather than invent parallel names.
+
 ### 6.3 Before hooks
 
 A before hook runs synchronously inside the request, before the operation:
@@ -728,9 +744,26 @@ def register(plugin):
 ## 17. Out of scope for API 1.0, and next steps
 
 - Plugin-owned tables and migrations (section 3.5).
-- Plugin kinds for payment gateways, tax providers, accounting export, fraud checks and the built-in hardware adapters: they will be plugins with extra, kind-specific registrars on top of this core.
+- Plugin kinds (below).
 - More events (invoice created and overdue, ticket replies, backups, installs) and before hooks with mutable fields (order placement).
 - Placements other than the service page (client dashboard, server page) and plugin pages of their own.
 - Storefront add-on purchase (section 9.2).
 - Outbound webhooks for service events (section 6.5).
 - Signed plugin packages and a plugin index.
+
+### 17.1 Plugin kinds
+
+API 1.0 has one kind of plugin, the general one described here. A kind is a plugin that also implements a typed provider interface Rackflow calls directly, declared in the manifest as `"provides": [{"kind": "payment_gateway", "id": "stripe"}]` (reserved, refused in 1.0) and registered with `@plugin.provider("payment_gateway", "stripe")`. Each kind gets its own permission, its own typed interface and the same lifecycle, settings, audit and failure isolation as everything else. The kinds expected, with the seam names billing should align to:
+
+| Kind | Interface sketch |
+|---|---|
+| `payment_gateway` | create a payment, capture, refund, parse and verify a webhook |
+| `tax_provider` | calculate tax for a basket and an address |
+| `tax_id_validator` | validate a tax or VAT number for a country |
+| `tax_rule_pack` | static rules (rates by country and product class) loaded as data |
+| `accounting_export` | export invoices, payments and credit notes to an external ledger |
+| `currency_rates` | fetch exchange rates |
+| `notification_channel` | send a rendered message (email, SMS, chat) |
+| `import_source` | import clients, services and invoices from another billing system |
+| `fraud_check` | score an order before it is accepted (a before hook with a verdict) |
+| `server_adapter`, `switch_adapter`, `pdu_adapter` | the existing hardware adapters in `app/plugins/`, moved later |
