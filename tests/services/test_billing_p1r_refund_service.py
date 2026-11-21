@@ -263,7 +263,7 @@ def test_v2_partial_gateway_refund_issues_credit_note_and_recomputes(db_session,
     assert payment.status == PaymentStatus.PARTIALLY_REFUNDED
     assert payment.refunded_cents == 500
     assert refund.adjustment_id == 601
-    assert v2.notes == [(refund.id, None)]
+    assert [note[0] for note in v2.notes] == [refund.id]
     assert v2.recompute == [(invoice.id, "refund")]
     second = _request(db_session, payment, FakeGateway(outcome=GatewayRefundResult(status=GatewayResultStatus.SUCCEEDED, external_ref="re_2")), amount=1500, key="k2")
     db_session.commit()
@@ -271,6 +271,36 @@ def test_v2_partial_gateway_refund_issues_credit_note_and_recomputes(db_session,
     assert second.status == RefundStatus.SUCCEEDED
     assert payment.status == PaymentStatus.REFUNDED
     assert payment.refunded_cents == 2000
+
+
+@pytest.mark.parametrize(
+    "total,tax,parts",
+    [
+        # Per refund on its own each part rounds to 56: 168 refunded against 167.
+        (1000, 167, [333, 333, 334]),
+        # Per refund on its own each 1-cent part rounds to 0: no tax refunded at all.
+        (10, 3, [1] * 10),
+        (997, 143, [101, 250, 1, 399, 246]),
+    ],
+)
+def test_v2_partial_refund_tax_is_cumulative(db_session, v2, total, tax, parts):
+    account = _retail_account(db_session, f"tax{total}{len(parts)}")
+    invoice, payment = _paid(db_session, account=account, amount=total)
+    invoice.tax_cents = tax
+    db_session.commit()
+    taxes = []
+    for index, part in enumerate(parts):
+        ref = GatewayRefundResult(status=GatewayResultStatus.SUCCEEDED, external_ref=f"re_tax_{total}_{index}")
+        refund = _request(db_session, payment, FakeGateway(outcome=ref), amount=part, key=f"tax-{total}-{index}")
+        db_session.commit()
+        assert refund.status == RefundStatus.SUCCEEDED
+        taxes.append(refund.refund_metadata["tax_cents"])
+    assert sum(taxes) == tax
+    assert all(0 <= value <= part for value, part in zip(taxes, parts))
+    # The credit note lines carry the same split: net plus tax equals each refund.
+    notes = v2.notes[-len(parts):]
+    assert [line[0]["tax_cents"] for _refund_id, line in notes] == taxes
+    assert [line[0]["unit_cents"] + line[0]["tax_cents"] for _refund_id, line in notes] == parts
 
 
 def test_v2_refund_to_credit_credits_account_without_gateway(db_session, v2):

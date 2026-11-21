@@ -111,6 +111,27 @@ def set_invoice_status(
         invoice.paid_at = None
 
 
+def proportional_tax(amount: int, invoice_tax: int, invoice_total: int) -> int:
+    """Tax part of ``amount`` in proportion to the invoice's tax, rounded half to even."""
+    try:
+        from app.services.billing.rounding import refund_tax_proportional
+    except ImportError:
+        # Until app/services/billing/rounding.py is on this branch.
+        if invoice_total == 0:
+            return 0
+        quotient, remainder = divmod(amount * invoice_tax, invoice_total)
+        if remainder * 2 > invoice_total or (remainder * 2 == invoice_total and quotient % 2 == 1):
+            quotient += 1
+        return quotient
+    return refund_tax_proportional(amount, invoice_tax, invoice_total)
+
+
+def _line_value(line: Any, name: str) -> Any:
+    if isinstance(line, Mapping):
+        return line.get(name)
+    return getattr(line, name, None)
+
+
 def account_id_for(db: Session, invoice: Invoice) -> Optional[int]:
     if invoice.billing_account_id is not None:
         return int(invoice.billing_account_id)
@@ -807,14 +828,57 @@ class RefundService:
                 # A refund the gateway made itself has no hold; the deposit is debited now.
                 hold_id = RefundService._place_hold(db, refund, invoice, allow_negative=True)
             refund.ledger_entry_id = hold_id
+        lines = (refund.refund_metadata or {}).get("credit_note_lines")
+        if lines:
+            tax = sum(int(_line_value(line, "tax_cents") or 0) for line in lines)
+        else:
+            tax = RefundService._cumulative_tax(db, refund, invoice)
+        refund.refund_metadata = {**(refund.refund_metadata or {}), "tax_cents": tax}
         adjustment = None
         if refund.issue_credit_note:
             from app.services.invoice_adjustment_service import InvoiceAdjustmentService
 
-            lines = (refund.refund_metadata or {}).get("credit_note_lines")
+            if not lines:
+                lines = [
+                    {
+                        "description": f"Refund of payment {refund.payment_id}",
+                        "quantity": 1,
+                        "unit_cents": int(refund.amount_cents) - tax,
+                        "tax_cents": tax,
+                    }
+                ]
             adjustment = InvoiceAdjustmentService.issue_for_refund(db, refund, lines=lines)
             refund.adjustment_id = getattr(adjustment, "id", None)
         return adjustment
+
+    @staticmethod
+    def _cumulative_tax(db: Session, refund: Refund, invoice: Invoice) -> int:
+        """Tax part of this refund, worked out on everything refunded on the invoice so far.
+
+        ``tax(previous + this) - tax already refunded``, so rounding never takes
+        the refunded tax past the invoice's tax and no refund's tax is negative.
+        """
+        invoice_tax = int(invoice.tax_cents or 0)
+        invoice_total = int(invoice.amount_cents or 0)
+        if invoice_tax <= 0 or invoice_total <= 0:
+            return 0
+        previous = db.execute(
+            select(Refund.amount_cents, Refund.refund_metadata).where(
+                Refund.invoice_id == invoice.id,
+                Refund.status == RefundStatus.SUCCEEDED,
+                Refund.id != refund.id,
+            )
+        ).all()
+        previous_cents = sum(int(amount) for amount, _meta in previous)
+        already = sum(
+            int((meta or {}).get("tax_cents"))
+            if (meta or {}).get("tax_cents") is not None
+            else proportional_tax(min(int(amount), invoice_total), invoice_tax, invoice_total)
+            for amount, meta in previous
+        )
+        through = min(previous_cents + int(refund.amount_cents), invoice_total)
+        tax = proportional_tax(through, invoice_tax, invoice_total) - already
+        return max(0, min(tax, int(refund.amount_cents)))
 
     @staticmethod
     def _dispute_policy(db: Session, refund: Refund, invoice: Invoice) -> None:
