@@ -46,9 +46,10 @@ class OrderDAO:
 
     @staticmethod
     def get_for_update(db: Session, order_id: int) -> Optional[Order]:
-        return db.execute(
-            select(Order).where(Order.id == order_id).with_for_update()
-        ).scalar_one_or_none()
+        """Lock the order and re-read it; see ``billing_locks`` for the lock order."""
+        from app.services.billing_locks import BillingLocks
+
+        return BillingLocks.order(db, order_id)
 
     @staticmethod
     def get_by_number(db: Session, order_number: int) -> Optional[Order]:

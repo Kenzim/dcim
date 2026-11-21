@@ -176,19 +176,10 @@ class InvoiceService:
 
     @staticmethod
     def get_for_update(db: Session, invoice_id: int) -> Optional[Invoice]:
-        if db.get_bind().dialect.name == "sqlite":
-            # SQLite ignores SELECT ... FOR UPDATE. A no-op UPDATE acquires its
-            # database write lock before a gateway call can race settlement.
-            db.execute(
-                update(Invoice)
-                .where(Invoice.id == invoice_id)
-                .values(updated_at=Invoice.updated_at)
-            )
-        return db.execute(
-            select(Invoice)
-            .where(Invoice.id == invoice_id)
-            .with_for_update()
-        ).scalar_one_or_none()
+        """Lock the invoice (and its order first) and re-read it; see ``billing_locks``."""
+        from app.services.billing_locks import BillingLocks
+
+        return BillingLocks.for_invoice(db, invoice_id)
 
     @staticmethod
     def allocated_cents(db: Session, invoice_id: int) -> int:
