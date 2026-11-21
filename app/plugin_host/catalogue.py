@@ -20,7 +20,13 @@ class Permission:
 
 PERMISSION_LIST = (
     Permission("service.read", "Read services", "Read basic facts of the services it is active for and receive service events.", "low"),
-    Permission("billing.read", "Billing events", "Receive order paid and invoice paid events.", "low"),
+    Permission(
+        "billing.read",
+        "Billing events",
+        "Receive billing events: orders and invoices paid, invoices created, overdue, voided and refunded, "
+        "credit and debit notes issued, payments refunded, and account credit added or applied.",
+        "low",
+    ),
     Permission("support.read", "Support events", "Receive ticket created events.", "low"),
     Permission("events.veto", "Refuse operations", "Run checks before operations such as power actions and refuse them.", "medium"),
     Permission("notify.client", "Notify clients", "Send notices to the owners of services it is active for.", "medium"),
@@ -74,7 +80,75 @@ EVENT_LIST = (
         before=True,
     ),
     EventSpec("order.paid", "billing.read", ("order_id", "order_number", "billing_account_id", "total_cents", "currency")),
-    EventSpec("invoice.paid", "billing.read", ("invoice_id", "billing_account_id"), ("invoice_number", "order_id")),
+    EventSpec(
+        "invoice.paid",
+        "billing.read",
+        ("invoice_id", "billing_account_id"),
+        ("invoice_number", "order_id", "reseller_id", "number_display", "total_cents", "currency", "document_type"),
+    ),
+    EventSpec(
+        "invoice.created",
+        "billing.read",
+        ("invoice_id", "billing_account_id", "purpose", "total_cents", "currency"),
+        ("reseller_id", "invoice_number", "number_display", "order_id", "service_id", "due_at", "document_type"),
+    ),
+    EventSpec(
+        "invoice.overdue",
+        "billing.read",
+        ("invoice_id", "billing_account_id", "due_cents", "currency"),
+        ("reseller_id", "invoice_number", "number_display", "due_at"),
+    ),
+    EventSpec(
+        "invoice.voided",
+        "billing.read",
+        ("invoice_id", "billing_account_id", "reason"),
+        ("reseller_id", "invoice_number", "number_display"),
+    ),
+    EventSpec(
+        "invoice.refunded",
+        "billing.read",
+        ("invoice_id", "billing_account_id", "refunded_cents", "currency"),
+        ("reseller_id", "invoice_number", "number_display"),
+    ),
+    EventSpec(
+        "credit_note.issued",
+        "billing.read",
+        ("credit_note_id", "invoice_id", "billing_account_id", "total_cents", "currency", "reason", "outcome"),
+        ("reseller_id", "number_display", "refund_id"),
+    ),
+    EventSpec(
+        "debit_note.issued",
+        "billing.read",
+        ("debit_note_id", "invoice_id", "billing_account_id", "total_cents", "currency", "reason", "outcome"),
+        ("reseller_id", "number_display"),
+    ),
+    EventSpec(
+        "payment.refunded",
+        "billing.read",
+        (
+            "refund_id",
+            "payment_id",
+            "invoice_id",
+            "billing_account_id",
+            "amount_cents",
+            "currency",
+            "destination",
+            "reason",
+        ),
+        ("reseller_id", "gateway", "gateway_refund_ref", "credit_note_id"),
+    ),
+    EventSpec(
+        "credit.added",
+        "billing.read",
+        ("ledger_entry_id", "billing_account_id", "amount_cents", "balance_cents", "currency", "entry_type"),
+        ("reseller_id", "invoice_id", "refund_id"),
+    ),
+    EventSpec(
+        "credit.applied",
+        "billing.read",
+        ("ledger_entry_id", "billing_account_id", "invoice_id", "amount_cents", "balance_cents", "currency"),
+        ("reseller_id", "payment_id"),
+    ),
     EventSpec(
         "ticket.created",
         "support.read",

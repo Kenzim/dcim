@@ -28,12 +28,15 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import Select, select, update
 from sqlalchemy.orm import Session
 
+from app.models.commerce_account import BillingAccount
 from app.models.commerce_coupon_tax import Coupon
 from app.models.commerce_order import Order
+from app.models.refund import Refund
 from app.models.reseller import (
     BillingCycle,
     Invoice,
     InvoicePurpose,
+    InvoiceSequence,
     Payment,
     Reseller,
     ServiceBilling,
@@ -115,6 +118,30 @@ class BillingLocks:
         ).scalar_one_or_none()
 
     @staticmethod
+    def billing_account(db: Session, account_id: int) -> Optional[BillingAccount]:
+        """Lock a billing account, whose ``credit_balance_cents`` is the A3 cache."""
+        return _lock(
+            db,
+            "billing_account",
+            account_id,
+            select(BillingAccount).where(BillingAccount.id == account_id),
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def reseller_and_account(
+        db: Session, reseller_id: int
+    ) -> tuple[Optional[Reseller], Optional[BillingAccount]]:
+        """Lock a reseller and then its reseller billing account, if it has one."""
+        reseller = BillingLocks.reseller(db, reseller_id)
+        account_id = db.scalar(
+            select(BillingAccount.id).where(BillingAccount.reseller_id == reseller_id)
+        )
+        account = (
+            BillingLocks.billing_account(db, int(account_id)) if account_id is not None else None
+        )
+        return reseller, account
+
+    @staticmethod
     def invoice_row(db: Session, invoice_id: int) -> Optional[Invoice]:
         """Lock the invoice row alone; callers holding no order lock use ``for_invoice``."""
         if db.get_bind().dialect.name == "sqlite":
@@ -131,20 +158,30 @@ class BillingLocks:
 
     @staticmethod
     def for_invoice(
-        db: Session, invoice_id: int, *, reseller: bool = False
+        db: Session,
+        invoice_id: int,
+        *,
+        reseller: bool = False,
+        billing_account: bool = False,
     ) -> Optional[Invoice]:
         """Lock an invoice after the rows that come before it.
 
         Locks the service billing of a cycle invoice, then (with
         ``reseller=True``, for transactions that go on to write the reseller
-        credit ledger) the invoice's reseller, then its order when it has one,
-        then the invoice.
+        credit ledger) the invoice's reseller, then (with
+        ``billing_account=True``, for transactions that write any account's
+        credit ledger) the invoice's billing account, falling back to the
+        reseller's account for reseller invoices without one, then its order
+        when it has one, then the invoice.
         """
         db.flush()
         ids = db.execute(
-            select(Invoice.reseller_id, Invoice.order_id, Invoice.purpose).where(
-                Invoice.id == invoice_id
-            )
+            select(
+                Invoice.reseller_id,
+                Invoice.order_id,
+                Invoice.purpose,
+                Invoice.billing_account_id,
+            ).where(Invoice.id == invoice_id)
         ).first()
         if ids is None:
             return None
@@ -158,9 +195,64 @@ class BillingLocks:
                 BillingLocks.service_billing(db, int(billing_id))
         if reseller and ids.reseller_id is not None:
             BillingLocks.reseller(db, int(ids.reseller_id))
+        if billing_account:
+            account_id = ids.billing_account_id
+            if account_id is None and ids.reseller_id is not None:
+                account_id = db.scalar(
+                    select(BillingAccount.id).where(
+                        BillingAccount.reseller_id == ids.reseller_id
+                    )
+                )
+            if account_id is not None:
+                BillingLocks.billing_account(db, int(account_id))
         if ids.order_id is not None:
             BillingLocks.order(db, int(ids.order_id))
         return BillingLocks.invoice_row(db, invoice_id)
+
+    @staticmethod
+    def payment(db: Session, payment_id: int) -> Optional[Payment]:
+        """Lock one payment row alone; callers that also need its invoice use ``for_payment``."""
+        return _lock(
+            db, "payment", payment_id, select(Payment).where(Payment.id == payment_id)
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def for_payment(
+        db: Session,
+        payment_id: int,
+        *,
+        reseller: bool = False,
+        billing_account: bool = False,
+    ) -> Optional[Payment]:
+        """Lock a payment after its invoice and the rows ``for_invoice`` takes first."""
+        db.flush()
+        invoice_id = db.scalar(select(Payment.invoice_id).where(Payment.id == payment_id))
+        if invoice_id is None:
+            return None
+        BillingLocks.for_invoice(
+            db, int(invoice_id), reseller=reseller, billing_account=billing_account
+        )
+        return BillingLocks.payment(db, payment_id)
+
+    @staticmethod
+    def refund(db: Session, refund_id: int) -> Optional[Refund]:
+        """Lock one refund row; callers hold its payment chain first (``for_payment``)."""
+        return _lock(
+            db, "refund", refund_id, select(Refund).where(Refund.id == refund_id)
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def number_counter(db: Session, name: str) -> Optional[InvoiceSequence]:
+        """Lock a numbering counter row inside the caller's transaction (gapless series).
+
+        This is the last lock of any billing transaction.
+        """
+        return _lock(
+            db,
+            "number_counter",
+            None,
+            select(InvoiceSequence).where(InvoiceSequence.name == name),
+        ).scalar_one_or_none()
 
     @staticmethod
     def payments(db: Session, statement: Select) -> list[Payment]:

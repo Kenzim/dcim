@@ -222,7 +222,16 @@ Every event a handler receives is:
 | `service.terminated` | `service_id`, `service_type`, `owner_user_id`, `previous_status` | `service.read` | no |
 | `service.power_requested` | `service_id`, `service_type`, `action` (`on`, `off`, `shutdown`, `reboot`, `reset`), `source` (`admin`, `client`, `billing`, `reseller`, `mcp`, `client_mcp`, `console`, `plugin`), `actor_user_id` | `service.read` | yes (veto only) |
 | `order.paid` | `order_id`, `order_number`, `billing_account_id`, `total_cents`, `currency` | `billing.read` | no |
-| `invoice.paid` | `invoice_id`, `billing_account_id`; optional `invoice_number`, `order_id` | `billing.read` | no |
+| `invoice.paid` | `invoice_id`, `billing_account_id`; optional `invoice_number`, `order_id`, `reseller_id`, `number_display`, `total_cents`, `currency`, `document_type` | `billing.read` | no |
+| `invoice.created` | `invoice_id`, `billing_account_id`, `purpose`, `total_cents`, `currency`; optional `reseller_id`, `invoice_number`, `number_display`, `order_id`, `service_id`, `due_at`, `document_type` | `billing.read` | no |
+| `invoice.overdue` | `invoice_id`, `billing_account_id`, `due_cents`, `currency`; optional `reseller_id`, `invoice_number`, `number_display`, `due_at` | `billing.read` | no |
+| `invoice.voided` | `invoice_id`, `billing_account_id`, `reason`; optional `reseller_id`, `invoice_number`, `number_display` | `billing.read` | no |
+| `invoice.refunded` | `invoice_id`, `billing_account_id`, `refunded_cents`, `currency`; optional `reseller_id`, `invoice_number`, `number_display` | `billing.read` | no |
+| `credit_note.issued` | `credit_note_id`, `invoice_id`, `billing_account_id`, `total_cents`, `currency`, `reason`, `outcome`; optional `reseller_id`, `number_display`, `refund_id` | `billing.read` | no |
+| `debit_note.issued` | `debit_note_id`, `invoice_id`, `billing_account_id`, `total_cents`, `currency`, `reason`, `outcome`; optional `reseller_id`, `number_display` | `billing.read` | no |
+| `payment.refunded` | `refund_id`, `payment_id`, `invoice_id`, `billing_account_id`, `amount_cents`, `currency`, `destination`, `reason`; optional `reseller_id`, `gateway`, `gateway_refund_ref`, `credit_note_id` | `billing.read` | no |
+| `credit.added` | `ledger_entry_id`, `billing_account_id`, `amount_cents`, `balance_cents`, `currency`, `entry_type`; optional `reseller_id`, `invoice_id`, `refund_id` | `billing.read` | no |
+| `credit.applied` | `ledger_entry_id`, `billing_account_id`, `invoice_id`, `amount_cents`, `balance_cents`, `currency`; optional `reseller_id`, `payment_id` | `billing.read` | no |
 | `ticket.created` | `ticket_id`, `ticket_number`, `billing_account_id`, `department_id`, `subject` | `support.read` | no |
 
 Service events carry `service_id` in the envelope and are delivered only to plugins active for that service (checked at delivery). The service events come from one place: a SQLAlchemy `before_flush` listener on `Service` (`app/plugin_host/listeners.py`) that sees every insert and every status change from any code path (billing API, admin, reseller, MCP, recurring billing, commerce lifecycle), so no caller can forget to emit. `service.power_requested` is emitted by the power entry points (billing, client portal, admin, reseller, staff and client MCP, VNC console) after their own checks pass and before the power call. Commerce events are emitted where the commerce webhooks were queued before (`checkout_service.py`, `payments/webhooks.py`, `commerce_admin.py`, `ticket_service.py`).
@@ -241,9 +250,10 @@ There is one bus and one function to publish on it, `app.plugin_host.events.emit
 | `service.power_requested` | `app.plugin_host.events.power_requested` (or `guard_power` for HTTP routes), called by each power entry point |
 | `order.paid` | `CheckoutService.mark_paid_and_fulfill` (`app/services/checkout_service.py`), the one fulfilment path for paid and accepted orders |
 | `invoice.paid` | Only `publish_invoice_paid` in `app/services/billing/settlement_subscribers.py`, a subscriber of the billing settlement function `settle_invoice` (`app/services/billing/settlement.py`), for invoices with a billing account |
+| `invoice.created`, `invoice.overdue`, `invoice.voided`, `invoice.refunded`, `credit_note.issued`, `debit_note.issued`, `payment.refunded`, `credit.added`, `credit.applied` | Only the subscriber `catalogue:<event>` in `app/services/billing/settlement_subscribers.py`, which runs when billing fires the internal event of the same name with `settlement.fire` (`docs/billing-phase1-design.md` section 9). Billing phase 1 fires them from `InvoiceService` (publish and transitions), `InvoiceAdjustmentService`, `RefundService` and `CreditLedgerService`; none is fired before those services land |
 | `ticket.created` | `app/services/ticket_service.py` |
 
-Every way an invoice is paid (card webhook, saved-method charge, reseller credit, USDT, admin mark-paid) ends in `settle_invoice`, which publishes `invoice.paid` exactly once, on the transition to paid. Billing's own steps after settlement (count coupon use, complete a retail renewal cycle, send the email, fulfil the order) are in-process subscribers of that function (`docs/billing-target-spec.md` section 14), not handlers on this bus; the outbound webhook keeps coming from `emit`, which already queues it (section 6.5). Invoices without a billing account (reseller deploy and reseller cycle invoices) publish nothing, as before. The event names in section 6.2 are stable for API 1.x; billing adds new facts (for example `invoice.created`, `invoice.overdue`, `payment.failed`, `payment.refunded`, `credit.applied`) to this catalogue rather than invent parallel names. None of those are emitted yet.
+Every way an invoice is paid (card webhook, saved-method charge, reseller credit, USDT, admin mark-paid) ends in `settle_invoice`, which publishes `invoice.paid` exactly once, on the transition to paid. Billing's own steps after settlement (count coupon use, complete a retail renewal cycle, send the email, fulfil the order) are in-process subscribers of that function (`docs/billing-target-spec.md` section 14), not handlers on this bus; the outbound webhook keeps coming from `emit`, which already queues it (section 6.5). Invoices without a billing account (reseller deploy and reseller cycle invoices) publish nothing, as before. The event names in section 6.2 are stable for API 1.x; billing adds new facts to this catalogue rather than invent parallel names. The billing events after `invoice.paid` in section 6.2 are catalogued for billing phase 1 and are not sent to outbound commerce webhooks (`COMMERCE_WEBHOOK_EVENTS` is unchanged). `payment.failed` is still only a suggested name and is not emitted.
 
 ### 6.3 Before hooks
 
@@ -276,7 +286,7 @@ The bus is the single place events come from. `emit()` also hands events in the 
 | Key | Lets the plugin | Risk |
 |---|---|---|
 | `service.read` | Read basic facts (id, name, type, status, owner id, product, OS) of services it is active for; receive service events; per-service schedules and panels | low |
-| `billing.read` | Receive `order.paid` and `invoice.paid` | low |
+| `billing.read` | Receive the billing events of section 6.2: `order.paid`, `invoice.paid`, `invoice.created`, `invoice.overdue`, `invoice.voided`, `invoice.refunded`, `credit_note.issued`, `debit_note.issued`, `payment.refunded`, `credit.added` and `credit.applied` | low |
 | `support.read` | Receive `ticket.created` | low |
 | `events.veto` | Register before hooks that can refuse operations | medium |
 | `notify.client` | Send notices to the owner of a service it is active for (category "Notices from plugins", opt-in) | medium |

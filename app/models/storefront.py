@@ -5,13 +5,16 @@ from __future__ import annotations
 import enum
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
     Integer,
     JSON,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -59,6 +62,8 @@ class PricePlanInterval(str, enum.Enum):
     QUARTERLY = "quarterly"
     SEMIANNUALLY = "semiannually"
     ANNUALLY = "annually"
+    BIENNIALLY = "biennially"
+    TRIENNIALLY = "triennially"
 
 
 class ProductOptionType(str, enum.Enum):
@@ -196,6 +201,22 @@ class PricePlanCycle(Base):
     __tablename__ = "price_plan_cycles"
     __table_args__ = (
         UniqueConstraint("price_plan_id", "interval", name="uq_price_plan_cycles_plan_interval"),
+        UniqueConstraint(
+            "price_plan_id",
+            "interval_unit",
+            "interval_count",
+            name="uq_price_plan_cycles_plan_unit_count",
+        ),
+        CheckConstraint(
+            "(interval_unit IS NULL AND interval_count IS NULL) OR "
+            "(interval_unit IS NOT NULL AND interval_count IS NOT NULL "
+            "AND interval_unit IN ('month','year') AND interval_count >= 1)",
+            name="ck_price_plan_cycles_interval",
+        ),
+        CheckConstraint(
+            "setup_cents IS NULL OR setup_cents >= 0",
+            name="ck_price_plan_cycles_setup_nonnegative",
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -208,6 +229,11 @@ class PricePlanCycle(Base):
     interval = Column(_string_enum(PricePlanInterval), nullable=False)
     price_cents = Column(Integer, nullable=False)
     enabled = Column(Boolean, nullable=False, default=True, server_default="1")
+    # Canonical cycle description from billing phase 1 on; ``interval`` stays as the label.
+    interval_unit = Column(String(8), nullable=True)
+    interval_count = Column(SmallInteger, nullable=True)
+    # Per-cycle setup fee; NULL means the plan's setup_cents.
+    setup_cents = Column(BigInteger, nullable=True)
 
     price_plan = relationship("PricePlan", back_populates="cycles")
 

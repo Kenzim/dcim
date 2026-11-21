@@ -1,0 +1,49 @@
+# Optional: billing phase 1 migrations on MariaDB 11.
+#
+# Runs tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
+# billing_p1_* chain) against a mariadb:11 service container. Manual trigger
+# only, so it never blocks other work; the SQLite migration tests in
+# tests/migrations run in the normal test suite.
+name: Billing migrations (MariaDB)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mariadb:
+    runs-on: docker
+    container:
+      image: python:3.11-bookworm
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: rackflow-ci
+          MARIADB_DATABASE: rackflow
+    env:
+      RACKFLOW_TEST_MARIADB_URL: mysql+pymysql://root:rackflow-ci@mariadb:3306/rackflow
+      DATABASE_URL: sqlite:///:memory:
+      INITIAL_ADMIN_USERNAME: ""
+      INITIAL_ADMIN_PASSWORD: ""
+      REQUIRE_SERVICE_INSTANCE_ENCRYPTION: "false"
+      MCP_ENABLED: "false"
+      CLIENT_MCP_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Wait for MariaDB
+        run: |
+          python - <<'EOF'
+          import time, pymysql
+          for _ in range(60):
+              try:
+                  pymysql.connect(host="mariadb", user="root", password="rackflow-ci").close()
+                  break
+              except Exception:
+                  time.sleep(2)
+          else:
+              raise SystemExit("MariaDB did not start")
+          EOF
+      - name: Billing phase 1 chain on MariaDB
+        run: python -m pytest tests/migrations/test_billing_p1_mariadb.py -q

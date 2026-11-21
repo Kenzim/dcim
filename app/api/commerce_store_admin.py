@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
@@ -28,6 +28,7 @@ from app.models.storefront import (
     PricePlanPricingModel,
     ProductOptionType,
 )
+from app.services.billing.intervals import INTERVAL_MONTHS
 from app.services.markdown_sanitize import sanitize_markdown_to_html
 from app.services.provisioning import ALLOWED_PROVISION_KEYS
 
@@ -135,16 +136,27 @@ class PricePlanUpdate(RequestModel):
     enabled: Optional[StrictBool] = None
 
 
+def _refuse_long_cycle(value: Optional[PricePlanInterval]) -> Optional[PricePlanInterval]:
+    """Cycles the renewal engine cannot bill yet (biennial, triennial) are refused."""
+    if value is not None and value.value not in INTERVAL_MONTHS:
+        raise ValueError(f"billing cycle {value.value!r} is not available")
+    return value
+
+
 class PricePlanCycleCreate(RequestModel):
     interval: PricePlanInterval
     price_cents: StrictInt = Field(ge=0)
     enabled: StrictBool = True
+
+    _sold_interval = field_validator("interval")(_refuse_long_cycle)
 
 
 class PricePlanCycleUpdate(RequestModel):
     interval: Optional[PricePlanInterval] = None
     price_cents: Optional[Annotated[StrictInt, Field(ge=0)]] = None
     enabled: Optional[StrictBool] = None
+
+    _sold_interval = field_validator("interval")(_refuse_long_cycle)
 
 
 class ProductOptionCreate(RequestModel):

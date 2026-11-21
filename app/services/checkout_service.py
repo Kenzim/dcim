@@ -29,8 +29,6 @@ from app.models.storefront import (
     FrontendProduct,
     PricePlan,
     PricePlanCycle,
-    PricePlanInterval,
-    PricePlanPricingModel,
     ProductOption,
     ProductOptionValue,
 )
@@ -42,6 +40,7 @@ from app.services.billing.coupons import (
     record_coupon_usage,
     release_coupon_usage,
 )
+from app.services.billing.cycles import CycleError, resolve_cycle
 from app.services.billing.order_refunds import apply_order_refund_policy
 from app.services.commerce_recurring_service import CommerceRecurringService
 from app.plugin_host import events as plugin_events
@@ -102,25 +101,11 @@ class CheckoutService:
         plan: PricePlan,
         cycle_interval: Optional[str],
     ) -> tuple[int, int]:
-        setup = int(plan.setup_cents or 0)
-        if plan.pricing_model == PricePlanPricingModel.FREE:
-            return 0, 0
-        if plan.pricing_model == PricePlanPricingModel.ONE_TIME:
-            cycle = next((c for c in plan.cycles if c.enabled), None)
-            return setup, int(cycle.price_cents if cycle else 0)
-        if not cycle_interval:
-            raise CheckoutError("Billing cycle is required for recurring plans")
         try:
-            interval = PricePlanInterval(cycle_interval)
-        except ValueError as exc:
-            raise CheckoutError("Invalid billing cycle") from exc
-        cycle = next(
-            (c for c in plan.cycles if c.enabled and c.interval == interval),
-            None,
-        )
-        if cycle is None:
-            raise CheckoutError("Selected billing cycle is unavailable")
-        return setup, int(cycle.price_cents)
+            resolved = resolve_cycle(plan, cycle_interval)
+        except CycleError as exc:
+            raise CheckoutError(str(exc)) from exc
+        return resolved.setup_cents, resolved.recurring_cents
 
     @staticmethod
     def _normalize_options(

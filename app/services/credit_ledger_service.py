@@ -307,3 +307,55 @@ class CreditLedgerService:
                 created_by_user_id=created_by_user_id,
             ),
         )
+
+    # Billing account ledger (A3, docs/billing-phase1-design.md 6.1); P1-C fills these in.
+
+    @staticmethod
+    def credit_account(
+        db: Session, billing_account_id: int, amount_cents: int, **keywords: Any
+    ) -> CreditLedgerEntry:
+        """Credit a billing account (retail or reseller); keywords as ``credit``."""
+        raise NotImplementedError("CreditLedgerService.credit_account is implemented by P1-C")
+
+    @staticmethod
+    def debit_account(
+        db: Session, billing_account_id: int, amount_cents: int, **keywords: Any
+    ) -> CreditLedgerEntry:
+        """Debit a billing account; keywords as ``debit``."""
+        raise NotImplementedError("CreditLedgerService.debit_account is implemented by P1-C")
+
+    @staticmethod
+    def adjust_account(
+        db: Session, billing_account_id: int, amount_cents: int, **keywords: Any
+    ) -> CreditLedgerEntry:
+        """Signed adjustment of a billing account; keywords as ``adjust``."""
+        raise NotImplementedError("CreditLedgerService.adjust_account is implemented by P1-C")
+
+    @staticmethod
+    def available_cents(db: Session, account: Any) -> int:
+        """Credit the account can spend now (design 6.2)."""
+        raise NotImplementedError("CreditLedgerService.available_cents is implemented by P1-C")
+
+    @staticmethod
+    def apply_to_invoice(
+        db: Session,
+        invoice: Any,
+        *,
+        amount_cents: Optional[int] = None,
+        actor_user_id: Optional[int] = None,
+        idempotency_key: str,
+    ) -> Optional[Any]:
+        """Pay (part of) an invoice from account credit as a ``credit`` payment (design 6.7)."""
+        raise NotImplementedError("CreditLedgerService.apply_to_invoice is implemented by P1-C")
+
+    @staticmethod
+    def remove_from_invoice(
+        db: Session,
+        payment: Any,
+        *,
+        amount_cents: int,
+        actor_user_id: Optional[int],
+        idempotency_key: str,
+    ) -> Any:
+        """Return applied credit to the balance as a ``credit`` refund (design 6.7)."""
+        raise NotImplementedError("CreditLedgerService.remove_from_invoice is implemented by P1-C")

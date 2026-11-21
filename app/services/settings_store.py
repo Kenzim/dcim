@@ -39,6 +39,9 @@ STORAGE_PREFIX = "setting:"
 
 _NO_FALLBACK = object()
 
+# Modes of the billing phase 1 invoice and credit engines.
+ENGINE_MODES = ("legacy", "shadow", "v2")
+
 
 class SettingValidationError(ValueError):
     """A value does not satisfy the setting's type or validation rules."""
@@ -156,6 +159,12 @@ GROUPS: dict[str, SettingGroup] = {
             "Reseller payments",
             "Limits on reseller credit top-ups.",
         ),
+        SettingGroup(
+            "billing_engines",
+            "Billing engines",
+            "Which invoice and credit engines run (legacy, shadow comparison, or v2), "
+            "the shadow comparison schedule, and the periodic billing jobs.",
+        ),
     )
 }
 
@@ -234,6 +243,179 @@ _DEFINITIONS = (
         min_value=1,
         max_value=1_000_000_000,
     ),
+    # Billing phase 1 (docs/billing-phase1-design.md appendix A).
+    SettingDef(
+        "billing_invoice_engine",
+        "str",
+        "Invoice engine: legacy rules only, shadow (legacy rules, with the v2 answer "
+        "compared and differences recorded), or v2. Reaches v2 only through the engine "
+        "switch, which checks the shadow comparison criteria.",
+        "billing_engines",
+        choices=ENGINE_MODES,
+        fallback="shadow",
+    ),
+    SettingDef(
+        "billing_credit_engine",
+        "str",
+        "Credit balance engine: legacy (reseller cache only), shadow (both caches written "
+        "and compared), or v2 (the billing account cache is authoritative). Reaches v2 only "
+        "through the engine switch.",
+        "billing_engines",
+        choices=ENGINE_MODES,
+        fallback="shadow",
+    ),
+    SettingDef(
+        "billing_invoice_guard_mode",
+        "str",
+        "What the invoice guard does when a published invoice's frozen columns are "
+        "written: log the write, or enforce (refuse it). Always enforce once the invoice "
+        "engine is v2.",
+        "billing_engines",
+        choices=("log", "enforce"),
+        fallback="log",
+    ),
+    SettingDef(
+        "billing_shadow_min_days",
+        "int",
+        "Days without any shadow mismatch (and with a completed daily scan each day) "
+        "before an engine may switch to v2.",
+        "billing_engines",
+        min_value=1,
+        max_value=90,
+        fallback=14,
+    ),
+    SettingDef(
+        "billing_shadow_scan_hour_utc",
+        "int",
+        "Hour of the day (UTC) at which the daily shadow comparison scan runs.",
+        "billing_engines",
+        min_value=0,
+        max_value=23,
+        fallback=3,
+    ),
+    SettingDef(
+        "billing_shadow_scan_enabled",
+        "bool",
+        "Whether the recurring billing worker runs the daily shadow comparison scan.",
+        "billing_engines",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_shadow_scan_dry_run",
+        "bool",
+        "Run the daily shadow scan without recording mismatches or the scan result; "
+        "what it would record is logged.",
+        "billing_engines",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_refund_reconciler_enabled",
+        "bool",
+        "Whether the recurring billing worker runs the refund reconciler, which settles "
+        "pending gateway refunds and retries failed ones.",
+        "billing_engines",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_refund_reconciler_dry_run",
+        "bool",
+        "Run the refund reconciler without changing any refund; what it would do is logged.",
+        "billing_engines",
+        fallback=True,
+    ),
+    SettingDef(
+        "billing_refund_reconcile_minutes",
+        "int",
+        "Minutes between refund reconciler passes.",
+        "billing_engines",
+        min_value=1,
+        max_value=60,
+        fallback=5,
+    ),
+    SettingDef(
+        "billing_proforma_enabled",
+        "bool",
+        "Publish unpaid invoices as proforma invoices, numbered in the proforma series, "
+        "and give them an invoice number when they are paid.",
+        "retail_billing",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_credit_enabled_retail",
+        "bool",
+        "Whether retail clients can hold account credit (top up, apply to invoices). "
+        "Takes effect only once the credit engine is v2.",
+        "retail_billing",
+        fallback=True,
+    ),
+    SettingDef(
+        "billing_credit_topup_min_cents",
+        "int",
+        "Smallest retail credit top-up, in minor currency units (cents).",
+        "retail_billing",
+        min_value=1,
+        max_value=1_000_000_000,
+        fallback=500,
+    ),
+    SettingDef(
+        "billing_credit_topup_max_cents",
+        "int",
+        "Largest retail credit top-up, in minor currency units (cents).",
+        "retail_billing",
+        min_value=1,
+        max_value=1_000_000_000,
+        fallback=100_000,
+    ),
+    SettingDef(
+        "billing_credit_max_balance_cents",
+        "int",
+        "Largest retail credit balance a top-up may reach, in minor currency units "
+        "(cents); 0 means no limit.",
+        "retail_billing",
+        min_value=0,
+        max_value=10_000_000_000,
+        fallback=0,
+    ),
+    SettingDef(
+        "billing_credit_require_approved_order",
+        "bool",
+        "Retail clients may top up credit only after one of their orders has been "
+        "fulfilled.",
+        "retail_billing",
+        fallback=True,
+    ),
+    SettingDef(
+        "billing_credit_auto_apply_retail",
+        "bool",
+        "Apply a retail client's credit to new invoices automatically.",
+        "retail_billing",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_dispute_policy_reseller",
+        "str",
+        "What a lost card dispute on a reseller payment does: debit the reseller's credit "
+        "balance, or reopen the invoice.",
+        "reseller_payments",
+        choices=("debit_balance", "reopen_invoice"),
+        fallback="debit_balance",
+    ),
+    SettingDef(
+        "billing_dispute_policy_retail",
+        "str",
+        "What a lost card dispute on a retail payment does: reopen the invoice (into "
+        "collections), or debit the client's credit balance.",
+        "retail_billing",
+        choices=("reopen_invoice", "debit_balance"),
+        fallback="reopen_invoice",
+    ),
+    SettingDef(
+        "billing_long_cycles_enabled",
+        "bool",
+        "Offer billing cycles longer than a year (biennial, triennial) on price plans.",
+        "retail_billing",
+        fallback=False,
+    ),
 )
 
 SCHEMA: dict[str, SettingDef] = {definition.key: definition for definition in _DEFINITIONS}
@@ -267,6 +449,12 @@ def _topup_range(values: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _retail_topup_range(values: dict[str, Any]) -> Optional[str]:
+    if values["billing_credit_topup_min_cents"] > values["billing_credit_topup_max_cents"]:
+        return "billing_credit_topup_min_cents must not exceed billing_credit_topup_max_cents"
+    return None
+
+
 RULES = (
     ConsistencyRule(
         ("recurring_billing_retry_days", "recurring_billing_grace_days"),
@@ -275,6 +463,10 @@ RULES = (
     ConsistencyRule(
         ("reseller_topup_min_cents", "reseller_topup_max_cents"),
         _topup_range,
+    ),
+    ConsistencyRule(
+        ("billing_credit_topup_min_cents", "billing_credit_topup_max_cents"),
+        _retail_topup_range,
     ),
 )
 

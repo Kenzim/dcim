@@ -3,9 +3,8 @@
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import BigInteger, Column, DateTime, Integer, MetaData, String, Table
-
 from app.models.commerce_invoice_ext import InvoiceLine
+from app.models.refund import Refund
 from app.models.reseller import (
     CreditLedgerEntry,
     CreditLedgerEntryType,
@@ -29,6 +28,18 @@ BILLING_TYPES = (
     "billing_credit_drift",
     "billing_orphaned_payment",
     "billing_refund_stuck",
+)
+# Billing phase 1 types: stubs until their owners fill them in, shipped disabled.
+PHASE1_TYPES = (
+    "billing_shadow_mismatch",
+    "billing_shadow_scan_stale",
+    "billing_ledger_chain_broken",
+    "billing_negative_retail_balance",
+    "billing_invoice_totals",
+    "billing_invoice_status",
+    "billing_numbering_gaps",
+    "billing_refund_mismatch",
+    "billing_adjustment_bounds",
 )
 _numbers = iter(range(9000, 100000))
 
@@ -92,7 +103,7 @@ def ids(findings):
 
 
 def test_every_billing_type_is_in_the_catalogue_and_detectors():
-    for key in BILLING_TYPES:
+    for key in BILLING_TYPES + PHASE1_TYPES:
         assert key in CATALOGUE and key in d.DETECTORS
         assert CATALOGUE[key].audience == "staff"
         assert set(CATALOGUE[key].defaults()) >= {"max_rows"}
@@ -126,7 +137,15 @@ def test_changing_only_a_parameter_keeps_the_default_state(db_session):
 
 def test_pre_existing_types_stay_enabled_by_default(db_session):
     settings = effective_settings(db_session)
-    assert all(s.enabled for key, s in settings.items() if key not in BILLING_TYPES)
+    assert all(s.enabled for key, s in settings.items() if key not in BILLING_TYPES + PHASE1_TYPES)
+
+
+def test_phase1_types_ship_disabled_and_find_nothing_yet(db_session):
+    settings = effective_settings(db_session)
+    for key in PHASE1_TYPES:
+        assert CATALOGUE[key].enabled_by_default is False
+        assert settings[key].enabled is False
+        assert run(db_session, key) == []
 
 
 # ------------------------------------------------------------------ invoice lines
@@ -313,32 +332,28 @@ def test_orphaned_payment_threshold_parameter(db_session):
 
 @pytest.fixture
 def refunds_table(db_session):
-    db_session.rollback()
-    engine = db_session.get_bind()
-    table = Table(
-        "refunds", MetaData(),
-        Column("id", Integer, primary_key=True),
-        Column("payment_id", Integer),
-        Column("amount_cents", BigInteger),
-        Column("status", String(32)),
-        Column("created_at", DateTime),
-    )
-    table.create(engine)
-    yield table
-    db_session.rollback()
-    table.drop(engine)
+    return Refund.__table__
 
 
-def test_refund_stuck_is_empty_when_there_is_no_refunds_table(db_session):
+def _refund_row(refund_id, payment_id, amount, status, created_at):
+    return {
+        "id": refund_id, "payment_id": payment_id, "invoice_id": 1, "billing_account_id": 1,
+        "amount_cents": amount, "currency": "USD", "destination": "gateway", "gateway": "stripe",
+        "reason": "customer_request", "status": status, "idempotency_key": f"refund-{refund_id}",
+        "requested_at": created_at, "metadata": {}, "created_at": created_at,
+    }
+
+
+def test_refund_stuck_is_empty_when_there_are_no_refunds(db_session):
     assert run(db_session, "billing_refund_stuck") == []
 
 
 def test_refund_stuck_found_and_healthy_ignored(db_session, refunds_table):
     db_session.execute(refunds_table.insert(), [
-        {"id": 1, "payment_id": 5, "amount_cents": 700, "status": "pending", "created_at": ago(hours=3)},
-        {"id": 2, "payment_id": 6, "amount_cents": 100, "status": "pending", "created_at": ago(minutes=5)},
-        {"id": 3, "payment_id": 7, "amount_cents": 100, "status": "succeeded", "created_at": ago(days=3)},
-        {"id": 4, "payment_id": 8, "amount_cents": 100, "status": "failed", "created_at": ago(days=3)},
+        _refund_row(1, 5, 700, "pending", ago(hours=3)),
+        _refund_row(2, 6, 100, "pending", ago(minutes=5)),
+        _refund_row(3, 7, 100, "succeeded", ago(days=3)),
+        _refund_row(4, 8, 100, "failed", ago(days=3)),
     ])
     db_session.commit()
     findings = run(db_session, "billing_refund_stuck")
