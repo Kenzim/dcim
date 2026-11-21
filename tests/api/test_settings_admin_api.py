@@ -112,3 +112,25 @@ def test_reseller_topup_limits_use_stored_values(client, db_session, test_admin_
     assert client.delete(f"{BASE}/reseller_topup_min_cents", headers=admin).status_code == 200
     assert client.delete(f"{BASE}/reseller_topup_max_cents", headers=admin).status_code == 200
     assert client.post(path, headers=reseller_headers, json={"amount_cents": 499}).status_code == 422
+
+
+def test_manual_billing_run_uses_stored_settings(client, db_session, test_admin_user, monkeypatch):
+    from app.api import reseller_admin
+    from app.services.recurring_billing_service import RecurringBillingService
+
+    seen = []
+
+    class Spy(RecurringBillingService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            seen.append(self.config)
+
+    monkeypatch.setattr(reseller_admin, "RecurringBillingService", Spy)
+    headers = admin_headers(client)
+    url = "/api/admin/resellers/billing-cycles/run-due"
+    assert client.post(url, headers=headers).status_code == 200
+    assert seen[-1].recurring_billing_grace_days == 7
+
+    assert client.put(f"{BASE}/recurring_billing_grace_days", headers=headers, json={"value": 11}).status_code == 200
+    assert client.post(url, headers=headers).status_code == 200
+    assert seen[-1].recurring_billing_grace_days == 11
