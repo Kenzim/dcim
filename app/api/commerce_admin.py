@@ -667,7 +667,7 @@ def get_setting(key: str, db: DbDep):
 
 @router.put("/settings/{key}", responses=COMMON_ERROR_RESPONSES)
 def put_setting(key: str, body: SettingUpdateBody, db: DbDep):
-    if key.strip().startswith(settings_store.STORAGE_PREFIX):
+    if key.strip().lower().startswith(settings_store.STORAGE_PREFIX.lower()):
         raise HTTPException(
             status_code=400,
             detail="Typed settings are managed through /api/admin/settings",

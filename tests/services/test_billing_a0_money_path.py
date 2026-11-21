@@ -716,5 +716,8 @@ def test_generic_settings_endpoint_rejects_settings_store_keys(client, db_sessio
     put = client.put(f"/api/admin/commerce/settings/{key}", headers=headers, json={"value": {"v": "credit"}})
     assert put.status_code == 400
     assert "/api/admin/settings" in put.json()["detail"]
+    # MySQL compares primary keys case-insensitively, so a differently cased prefix must be refused too.
+    upper = client.put(f"/api/admin/commerce/settings/ {key.upper()}", headers=headers, json={"value": {"v": "x"}})
+    assert upper.status_code == 400
     ok = client.put("/api/admin/commerce/settings/a0_plain_key", headers=headers, json={"value": {"v": "x"}})
     assert ok.status_code == 200, ok.text

@@ -240,6 +240,25 @@ async def test_retail_cycle_invoice_left_open_emailed_then_settled(db_session):
 
 
 @pytest.mark.asyncio
+async def test_voided_retail_renewal_invoice_goes_to_manual_review(db_session):
+    due = datetime(2027, 1, 10, 9, tzinfo=timezone.utc)
+    clock = Clock(due)
+    billing, _ = _retail_billing(db_session, due)
+    worker = _worker(clock, retail=True)
+    await worker.process_batch(db_session, owner="t")
+    cycle = db_session.execute(select(BillingCycle).where(BillingCycle.service_billing_id == billing.id)).scalar_one()
+    db_session.get(Invoice, cycle.invoice_id).status = InvoiceStatus.VOID
+    db_session.commit()
+    clock.current = datetime(2027, 1, 12, 9, tzinfo=timezone.utc)
+    result = await worker.process_batch(db_session, owner="t")
+    assert result["manual_review"] == 1
+    db_session.refresh(billing)
+    db_session.refresh(cycle)
+    assert (cycle.state, billing.status) == (BillingCycleState.MANUAL_REVIEW, ServiceBillingStatus.MANUAL_REVIEW)
+    assert billing.last_failure_code == "invoice_void"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("retail_enabled", [False, True])
 async def test_end_of_cycle_cancel_terminates_at_period_end(db_session, retail_enabled):
     due = datetime(2027, 5, 15, 9, tzinfo=timezone.utc)

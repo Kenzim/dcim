@@ -343,6 +343,15 @@ class RecurringBillingService:
             complete_retail_cycle(db, cycle, now)
             db.commit()
             return "paid"
+        if cycle.invoice.status == InvoiceStatus.VOID:
+            self._mark_manual(
+                billing,
+                cycle,
+                code="invoice_void",
+                message="Renewal invoice was voided; decide whether to reissue or cancel",
+            )
+            db.commit()
+            return "manual_review"
         funding = self._funder_for(billing).fund(db, billing, cycle)
         if funding.funded:
             InvoiceService.mark_paid_if_fully_allocated(db, cycle.invoice_id)
