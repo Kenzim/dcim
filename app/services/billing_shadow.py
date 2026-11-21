@@ -26,6 +26,14 @@ ENGINES = ("invoice", "credit")
 SCAN_RESULT_KEY = "billing_shadow_scan"
 SWITCH_RECORD_PREFIX = "billing_engine_switch:"
 ENGINE_SETTING = {"invoice": "billing_invoice_engine", "credit": "billing_credit_engine"}
+
+
+def is_reserved_key(key: str) -> bool:
+    """``system_settings`` keys only the engine switch and the shadow scan may write."""
+    lowered = key.strip().lower()
+    return lowered == SCAN_RESULT_KEY or lowered.startswith(SWITCH_RECORD_PREFIX)
+
+
 _VALUE_LOG_LIMIT = 200
 
 

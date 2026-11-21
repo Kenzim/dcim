@@ -36,6 +36,7 @@ from app.services.billing.manual_payments import (
 )
 from app.services.billing.order_refunds import OrderCancelError
 from app.services.billing.settlement import commit_and_fulfil
+from app.services.billing_shadow import is_reserved_key as is_reserved_billing_key
 from app.services.billing.order_refunds import cancel_order as cancel_commerce_order
 from app.services.commerce_webhook_service import CommerceWebhookService
 from app.services.email_message_service import EmailMessageService
@@ -673,6 +674,11 @@ def put_setting(key: str, body: SettingUpdateBody, db: DbDep):
         raise HTTPException(
             status_code=400,
             detail="Typed settings are managed through /api/admin/settings",
+        )
+    if is_reserved_billing_key(key):
+        raise HTTPException(
+            status_code=400,
+            detail="This key is written only by the billing engine switch and shadow scan",
         )
     row = SystemSettingDAO.set(db, key.strip(), body.value)
     db.commit()

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -244,12 +244,24 @@ class InvoiceService:
 
     @staticmethod
     def balance(db: Session, invoice: Invoice) -> InvoiceBalance:
-        """The invoice's balance from two aggregate queries. Never writes."""
+        """The invoice's balance from two aggregate queries. Never writes.
+
+        A payment marked ``refunded`` whose ``refunded_cents`` is still 0 was
+        refunded by a path that does not write the column; it counts as
+        refunded in full, the fact ``billing_backfill`` records for older rows.
+        """
+        refunded_column = case(
+            (
+                and_(Payment.status == PaymentStatus.REFUNDED, Payment.refunded_cents == 0),
+                Payment.amount_cents,
+            ),
+            else_=Payment.refunded_cents,
+        )
         payments = db.execute(
             select(
                 Payment.status,
                 func.coalesce(func.sum(Payment.amount_cents), 0),
-                func.coalesce(func.sum(Payment.refunded_cents), 0),
+                func.coalesce(func.sum(refunded_column), 0),
             )
             .where(Payment.invoice_id == invoice.id)
             .group_by(Payment.status)

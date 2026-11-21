@@ -286,6 +286,17 @@ def test_balance_equals_legacy_allocation_on_legacy_shaped_data(db_session):
     assert (balance.paid_gross_cents, balance.refunded_cents) == (1000, 400)
 
 
+def test_balance_counts_refunded_payments_without_refunded_cents_in_full(db_session):
+    invoice = _invoice(db_session, amount=1000)
+    _payment(db_session, invoice, 1000, PaymentStatus.SUCCEEDED)
+    # Today's refund paths set the status only, leaving refunded_cents at 0.
+    _payment(db_session, invoice, 300, PaymentStatus.REFUNDED, refunded=0)
+    balance = InvoiceService.balance(db_session, invoice)
+    assert (balance.paid_gross_cents, balance.refunded_cents, balance.paid_net_cents) == (1300, 300, 1000)
+    assert balance.paid_net_cents == InvoiceService.allocated_cents(db_session, invoice.id)
+    assert balance.remaining_cents == 0
+
+
 def test_balance_counts_notes_and_partial_refunds(db_session):
     invoice = _invoice(db_session, amount=1000)
     _payment(db_session, invoice, 1000, PaymentStatus.PARTIALLY_REFUNDED, refunded=250)

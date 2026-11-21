@@ -664,7 +664,8 @@ class Payment(Base):
     payment_metadata = Column("metadata", JSON, nullable=False, default=dict)
     processed_at = Column(DateTime(timezone=True), nullable=True)
     refunded_at = Column(DateTime(timezone=True), nullable=True)
-    # Cache of the succeeded refunds of this payment; written only by RefundService.
+    # Cache of the succeeded refunds of this payment. Billing phase 1 RefundService
+    # keeps it; older refund paths set status refunded without writing it.
     refunded_cents = Column(BigInteger, nullable=False, default=0, server_default="0")
     fee_cents = Column(BigInteger, nullable=True)
     net_cents = Column(BigInteger, nullable=True)
