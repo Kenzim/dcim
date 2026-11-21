@@ -171,6 +171,10 @@ class PaymentWebhookService:
         )
         if payment is None:
             return
+        if PaymentOrchestrator.refuse_late_success(
+            db, payment, source="webhook", event_id=event.event_id
+        ):
+            return
         event_amount = event.amount_cents
         event_currency = (event.currency or "").upper()
         if event_amount is None:

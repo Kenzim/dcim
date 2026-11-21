@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
@@ -34,6 +35,15 @@ from app.services.payments.base import (
 from app.services.payments.registry import (
     PaymentGatewayRegistry,
     payment_gateway_registry,
+)
+
+
+logger = logging.getLogger(__name__)
+
+# A replaced (failed) attempt whose money arrives anyway is recorded and then
+# flagged by settlement as an overpayment; a refunded payment never succeeds again.
+SUCCESS_ALLOWED_FROM = frozenset(
+    {PaymentStatus.PENDING, PaymentStatus.FAILED, PaymentStatus.SUCCEEDED}
 )
 
 
@@ -624,8 +634,52 @@ class PaymentOrchestrator:
         return PaymentStatus.FAILED
 
     @staticmethod
+    def refuse_late_success(
+        db: Session, payment: Payment, *, source: str, event_id: Optional[str] = None
+    ) -> bool:
+        """Record and refuse a success report for a payment that may no longer succeed.
+
+        Returns True when the payment's status does not allow success (it was
+        refunded or reversed); the report is then logged and audited only.
+        """
+        if payment.status in SUCCESS_ALLOWED_FROM:
+            return False
+        from app.services.audit_service import AuditService
+
+        invoice = db.get(Invoice, payment.invoice_id)
+        logger.warning(
+            "Ignoring a success report for payment %s, which is %s",
+            payment.id,
+            payment.status.value,
+        )
+        AuditService.log(
+            db,
+            actor_user_id=None,
+            billing_account_id=invoice.billing_account_id if invoice is not None else None,
+            action="billing.late_success_ignored",
+            resource_type="payment",
+            resource_id=str(payment.id),
+            metadata={
+                "status": payment.status.value,
+                "gateway": payment.gateway,
+                "source": source,
+                "gateway_event_id": event_id,
+                "invoice_id": payment.invoice_id,
+                "amount_cents": int(payment.amount_cents),
+            },
+        )
+        db.flush()
+        return True
+
+    @staticmethod
     def finalize_success(db: Session, payment: Payment) -> Invoice:
-        """Record a gateway-confirmed payment and settle its invoice."""
+        """Record a gateway-confirmed payment and settle its invoice.
+
+        Only a pending, failed or just-recorded succeeded payment may succeed; a
+        refunded (reversed or disputed) payment is left as it is.
+        """
+        if PaymentOrchestrator.refuse_late_success(db, payment, source="finalize_success"):
+            return db.get(Invoice, payment.invoice_id)
         payment.status = PaymentStatus.SUCCEEDED
         payment.processed_at = payment.processed_at or datetime.now(timezone.utc)
         payment.failure_code = None
