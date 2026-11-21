@@ -28,6 +28,7 @@ Product name: **Rackflow** (repo folder: `dcim`). Stack: **FastAPI + SQLAlchemy 
 | Cisco vPC pair detection | `app/services/switch_vpc_service.py` (CISCO-VPC-MIB via `snmpv3.get_vpc_info`, pairs by peer-keepalive addresses) → `network_switches.vpc_*`; `POST /api/admin/network-switches/vpc/detect`, MCP `switch_action` `detect_vpc` |
 | Auth / sessions / Redis | `app/core/auth.py`, `app/core/redis.py`, `app/core/billing_auth.py`, `app/core/mcp_auth.py` |
 | Config / env vars | `app/core/config.py` + `.env` |
+| Settings an operator can change at runtime (billing and automation) | Typed schema, env defaults and `effective_config(db)` in `app/services/settings_store.py` (rows `setting:<key>` in `system_settings`); admin API `app/api/settings_admin.py`; UI `AutomationSettings.svelte`. To add a setting: a `SettingDef` in `SCHEMA` (its default is the `Settings` attribute of the same name), then read it with `get_setting(db, key)` or `effective_config(db)` instead of `settings`. Process switches such as `run_recurring_billing_worker` stay env-only |
 | Admin MCP (remote AI tools) | `app/mcp/` tools/resources; keys API `app/api/mcp_keys_admin.py`; UI `McpKeys.svelte` |
 | Client MCP (customers' own assistants) | `app/mcp/client/` (tools call client-portal handlers), `app/core/client_mcp_auth.py`, keys API `app/api/client_mcp_keys.py`; UI `ClientMcpKeys.svelte` |
 | OS install templates | `os_templates/<name>/` (`template.json` + `install.sh`); bare-metal WHMCS OS list is the server group’s permitted templates |
@@ -164,6 +165,7 @@ All included from `app/main.py` under `/api`.
 | `commerce_admin.py` | `/api/admin/commerce` | Orders, invoices/PDF, gateway logs, emails, webhooks, GDPR |
 | `commerce_client.py` | `/api/client/commerce` | Client browse/checkout/orders/invoices/support/Discord/2FA |
 | `commerce_support_admin.py` | `/api/admin/support` | Support ticket admin queue |
+| `settings_admin.py` | `/api/admin/settings` | Admin only. `GET` lists the settings schema with value, default, source (`default` or `stored`), group, description, validation and `requires_restart`; `PUT /{key}` stores a validated value (422 with a message on a bad value); `DELETE /{key}` resets to the default |
 | `commerce_auth_public.py` | `/api/commerce/auth` | Register, verify email, password reset |
 | `product_catalog.py` | `/api/product-catalog` | Families, products, VM templates, OS profiles, VM config |
 | `proxmox_inventory.py` | `/api/proxmox` | Clusters, sync, inventory, VM plan |
@@ -383,6 +385,7 @@ Defined in `Admin.svelte`; nav links in `Sidebar.svelte`.
 | `/admin/commerce/gateway-logs` | `commerce/CommerceGatewayLogs.svelte` |
 | `/admin/commerce/email-log` | `commerce/CommerceEmailLog.svelte` |
 | `/admin/commerce/audit` | `commerce/CommerceAudit.svelte` |
+| `/admin/settings/automation` | `AutomationSettings.svelte` ("Automation and billing settings": grouped typed form, per-field save and reset to default) |
 | `/admin/support/tickets` | `commerce/SupportTickets.svelte` |
 | `/admin/user` | `User.svelte` |
 | `/login` | `Login.svelte` |
