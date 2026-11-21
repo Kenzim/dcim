@@ -133,8 +133,12 @@ tuned without a runner release; the runner enforces `stop_margin < lease`, `rene
 and refuses nonsense. The values above are the defaults.
 
 Local deadlines use both `CLOCK_BOOTTIME` and the wall clock: a lease counts as expired locally
-if either says so. This covers a VM that was paused (boot time may not include the pause, the
-wall clock is corrected by NTP) and a wall clock step (boot time is unaffected).
+if either says so. This covers a wall clock step (boot time is unaffected). It does not reliably
+cover a VM paused by the hypervisor: in the production test (14.2, T4) both guest clocks stood
+still during a 60 s `qm suspend`, and NTP then slewed the wall clock back over about 10 minutes,
+so neither deadline had passed on resume. What stops a resumed holder is the blocklist peers
+set when they took over: its first RADOS call after the resume fails (errno 108), and the runner
+stops Ganesha at once (0.1 s in the test).
 
 ### 4.1 Expected pauses
 
@@ -306,7 +310,7 @@ for longer than `lease - guard_margin` seconds. The runner also notifies systemd
 | Holder partitioned from Ceph (still on the customer VLAN) | Renewals time out; at 14 s the holder brings the interface down and stops Ganesha (the guard at 17 s if the runner is stuck). At 20 s the lease expires; the next node fences the old node's address (record stale) and takes over. No two nodes answer on the address at the same time. |
 | Two nodes racing for one free lease | The OSD applies one `lock_shared`; the other gets `EBUSY`. Rank delays make races rare; correctness does not depend on them. |
 | Renewal stalls on the holder (slow helper, slow PG) | The holder stops at its deadline. If its node record is still fresh, peers wait an extra `lease_seconds`, then take over with a tenant fence. If the stall is node-wide, the record goes stale and peers node-fence. |
-| Holder VM paused for a long time, then resumed | Peers took over and node-fenced it (blocklist) and the MDS evicted its sessions (instance blocklist, one hour). On resume the runner's deadline check (boot time and wall clock) stops serving within 500 ms, renewals fail with `EBLOCKLISTED` or `EBUSY`. Its stale Ganesha cannot write to Ceph. |
+| Holder VM paused for a long time, then resumed | Peers took over and node-fenced it (blocklist) and the MDS evicted its sessions (instance blocklist, one hour). On resume its guest clocks have not moved, so the local deadline check does not fire; its first renewal fails because of the blocklist and the runner stops Ganesha at once (0.1 s on production), then removes the tenant network. Its stale Ganesha cannot write to Ceph. |
 | Runner process dies, Ganesha keeps running | Restarted by systemd within seconds: re-takes leases by tag, no pause. If it does not come back, the guard stops serving at 17 s and peers take over and fence. |
 | Ceph outage for everyone | Every holder stops at 14 s. When Ceph returns, each previous holder (fresh record) gets first claim and takes its own tenants back without a fence; others wait. |
 | Rackflow outage | Nothing changes. Runners use the saved config; failovers still work; no moves start. |
@@ -716,3 +720,70 @@ the Ceph public network); cut it from peers only; pause a VM for 60 s; planned m
 return; SFTP master failover with a running transfer; Rackflow stopped for an hour; the upgrade
 from 0.2.2 with a live client. For each: the measured client pause, that only one node ever
 served, the blocklist entries, and that locks and data survived.
+
+### 14.1 Production pilot results (Ashburn Tier, 21 November 2026)
+
+The pilot ran on production Ashburn Tier before any storage was sold, not on the test cluster.
+
+**Set-up:**
+- Three nodes on runner 0.3.3 with the scoped Ceph logins (section 13), each on its own
+  hypervisor: `rf-storage-01` (VM 900, hv-12), `rf-storage-02` (VM 901, hv-03) and
+  `rf-storage-03` (VM 902, hv-08). Each has a trunk NIC on `vmbr3000`, a Ceph NIC on `vmbr230`
+  and a management NIC, plus the public NIC of section 9.2. The hypervisors' Ceph address had
+  to move from `bond1.230` onto a new `vmbr230` bridge on hv-03 and hv-08, as on hv-12.
+- SFTP virtual IP 23.140.8.30, outside IPAM, with no DNS name yet.
+- Two client VMs on the tenant's VLAN, hard NFS 4.1 mounts (`timeo=600,retrans=2`). Each ran a
+  writer doing a 64 KiB write plus fsync every 0.5 s into rotating 10 MiB files, with a sha256
+  per file. Client 1 held a POSIX lock and rewrote a heartbeat under it every second; client 2
+  tried a conflicting non-blocking lock every second.
+- Auto-failback was off during T1 to T5, T7 and T8.
+- Pause is the longest gap between two successful writes, or two lock operations.
+
+The 0.2.2 upgrade test was done earlier on node 1 and was not repeated. The Rackflow outage was
+shortened to 15 minutes.
+
+| Test | Serving node | Writer pause (client 1 / 2) | Lock pause, holder / prober | Notes |
+|---|---|---|---|---|
+| Baseline, 10 min | 2 | 0.7 / 1.0 s | 1.5 / 1.0 s | |
+| T1 runner stopped (guard running) | 2 → 3 | 27.0 / 27.1 s | 26.8 / 30.4 s | node 3: "acquired tenant.3 after a node fence of node 2"; blocklist `10.16.1.52/32` |
+| T2 node cut from peers and Rackflow (management NIC, 5 min) | 3 → 3 | 0.5 / 0.5 s | 1.0 / 1.0 s | no failover: leases live in Ceph |
+| T3 node cut from Ceph only (5 min) | 3 → 2 | 31.8 / 31.9 s | 31.5 / 45.5 s | guard stopped the tenant 19 s after the cut; node 2 took over at 24 s with a node fence; after the cut ended node 3 found itself blocklisted (errno 108) and served nothing |
+| T4 VM paused 60 s (`qm suspend`) | 2 → 3 | 39.0 / 39.2 s | 39.7 / 52.7 s | node 3 took over 32 s into the pause; on resume node 2 failed its first RADOS call (blocklisted) and stopped Ganesha within 0.1 s |
+| T5 VM killed (`qm stop`) | 3 → 2 | 30.1 / 30.0 s | 30.4 / 43.2 s | takeover with a node fence 22 s after the kill; on boot node 3 came up fenced, then unfenced when the entry expired |
+| T6 planned move, then drain, then return | 2 → 3 → 1 → 2 | pending | pending | move took 34 s from request to serving, drain 33 s; automatic return 15 min after the drain (`storage_return_after_seconds`); no fences |
+| T7 SFTP master runner stopped during a 1 GiB upload | 2 → 2 (master 1 → 2) | 1.0 / 0.5 s | 1.0 / 1.0 s | VIP silent for 15 s, then answered only by node 2; the upload resumed with `reput`; final sha256 over NFS matched the source |
+| T8 Rackflow app stopped 15 min | 2 → 2 | 1.1 / 1.0 s | 1.5 / 1.0 s | about 55 failed config and status calls per runner; normal again at once after the start |
+
+**Results across all tests:**
+- No client saw an I/O error in any test, and the T7 upload's sha256 matched over NFS. The
+  full re-read of every written file is pending.
+- The lock holder never lost its lock, and the prober never got the conflicting lock (0 `LOST`).
+- The tenant link (`rf-v3` up) was never up on two nodes at once.
+- An ARP watcher on the public subnet saw at most one MAC for the VIP at any time.
+- Ceph health did not change.
+
+**Pause times:** crash-type failovers (T1, T3, T4, T5) paused writes for 27 to 39 s. That is
+quicker than section 4.1's 45 to 75 s, because the clients reconnected on their first
+retransmission. The lock prober waits 13 to 15 s longer: Ganesha refuses new locks
+(`NFS4ERR_GRACE`) until the grace period ends, while the holder's reclaim succeeds at once.
+
+**Blocklist entries:**
+- In T1 and T7 the snapshot showed the expected `cidr:<old node Ceph address>/32` entry, expiring
+  after 10 minutes.
+- For T3, T4 and T5 the snapshot was taken after expiry. Two journal lines show the entry did its
+  job: the new holder's "after a node fence of node N", and the old node's "this node is fenced
+  (errno 108)" when it came back.
+
+**Found and fixed during the pilot:**
+- **Runner authentication** (app, commit ac619b4): every runner reaches the app through one
+  tunnel address, and the per-address failure block was checked before the key. A disabled node
+  retrying therefore locked every healthy node out with HTTP 429. Valid keys now always
+  authenticate, and only unknown keys count towards the block.
+- **VIP return routing** (host configuration, section 9.2): removing the VIP flushed the policy
+  routes. Each node's public NIC now keeps an anchor address.
+- **Pause handling** (section 4): a hypervisor pause freezes both guest clocks, so the local
+  deadline check does not fire on resume. The blocklist is what stops the resumed holder; the
+  text is corrected.
+
+**Open items from the pilot:** ledger to-dos for the SFTP back-end showing its container
+root, and for the guard leaving SFTP back-ends running on a fenced node (harmless).
