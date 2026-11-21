@@ -46,6 +46,7 @@ from app.models.server_group import ServerGroup
 from app.models.service import Service, ServiceStatus
 from app.models.user import User
 from app.models.usdt import UsdtChainCursor, UsdtDeposit, UsdtTransferEvent
+from app.services.billing.settlement import commit_and_fulfil
 from app.services.invoice_service import InvoiceError, InvoiceService
 from app.services.payments.base import (
     GatewayNotConfiguredError,
@@ -1100,7 +1101,7 @@ def pay_invoice(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (InvoiceError, PaymentGatewayError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    db.commit()
+    commit_and_fulfil(db)
     db.refresh(invoice)
     if not result.funded:
         detail = {

@@ -68,6 +68,7 @@ from app.services.credit_ledger_service import (
     CreditLedgerService,
     InsufficientCreditError,
 )
+from app.services.billing.settlement import commit_and_fulfil
 from app.services.invoice_service import InvoiceService
 from app.services.reseller_billing_service import ResellerBillingService
 from app.services.recurring_billing_service import RecurringBillingService
@@ -1432,7 +1433,7 @@ async def reconcile_admin_usdt_deposit(
         with _admin_usdt_rpc() as rpc:
             rpc.assert_chain_id(int(settings.usdt_chain_id))
             deposit = UsdtWatcher(rpc).reconcile_deposit(db, deposit_id)
-        db.commit()
+        commit_and_fulfil(db)
         db.refresh(deposit)
         return _admin_usdt_payload(db, deposit, include_events=True)
     except EthereumRpcError as exc:

@@ -8,7 +8,14 @@ registration order inside the caller's transaction.
 Subscribers registered with ``isolated=True`` (the default) are side effects:
 each runs in its own savepoint and a failure is logged and rolled back without
 undoing the settlement. Subscribers registered with ``isolated=False`` run
-bare and handle their own errors (order fulfilment, which commits).
+bare and must not raise or commit; no default subscriber uses that.
+
+Order fulfilment never runs inside the settlement transaction, because
+provisioning commits. The ``fulfil_order`` subscriber only queues the order;
+the caller ends its transaction with ``commit_and_fulfil`` (or, inside a
+savepoint, ``run_deferred_fulfilment`` after leaving it), which commits the
+settlement and its audit rows first and then fulfils each queued order in a
+transaction of its own.
 """
 
 from __future__ import annotations
@@ -25,14 +32,20 @@ from app.models.reseller import Invoice, InvoiceStatus, Payment
 logger = logging.getLogger(__name__)
 
 INVOICE_PAID = "invoice.paid"
+SOURCE_ADMIN_MARK_PAID = "admin_mark_paid"
 
 
 @dataclass(frozen=True)
 class InvoicePaid:
-    """Payload of the internal invoice paid event."""
+    """Payload of the internal invoice paid event.
+
+    ``source`` names the settlement path when it matters to a subscriber
+    (``SOURCE_ADMIN_MARK_PAID`` for admin mark-paid), else None.
+    """
 
     invoice: Invoice
     payment: Optional[Payment] = None
+    source: Optional[str] = None
 
 
 InvoicePaidHandler = Callable[[Session, InvoicePaid], None]
@@ -117,6 +130,7 @@ def settle_invoice(
     invoice_id: int,
     *,
     payment: Optional[Payment] = None,
+    source: Optional[str] = None,
 ) -> Invoice:
     """Lock the invoice, compare succeeded payments with its total, and settle it.
 
@@ -171,7 +185,9 @@ def settle_invoice(
         invoice.paid_at = None
     db.flush()
     if became_paid:
-        fire_invoice_paid(db, InvoicePaid(invoice=invoice, payment=payment))
+        fire_invoice_paid(
+            db, InvoicePaid(invoice=invoice, payment=payment, source=source)
+        )
     return invoice
 
 
@@ -185,11 +201,13 @@ def defer_order_fulfilment(db: Session, order_id: int) -> None:
 
 
 def run_deferred_fulfilment(db: Session) -> None:
-    """Fulfil orders paid inside a savepoint, once the savepoint has closed.
+    """Commit the settlement, then fulfil the orders it queued, one transaction each.
 
-    Provisioning commits, which a savepoint cannot survive, so settlements
-    inside one (the payment webhook) queue the order here and the caller runs
-    this after leaving the savepoint.
+    Must be called outside any savepoint. An order whose fulfilment raises is
+    rolled back to its state after settlement (paid, pending fulfilment) for
+    an admin to retry; the settlement is already committed. A queued order is
+    only fulfilled if its invoice is paid, so an order left in the queue by a
+    transaction that rolled back is skipped.
     """
     pending = db.info.pop(_DEFERRED_FULFILMENT_KEY, [])
     if not pending:
@@ -201,9 +219,21 @@ def run_deferred_fulfilment(db: Session) -> None:
     for order_id in pending:
         try:
             fulfil_paid_order(db, order_id)
+            db.commit()
         except Exception:  # noqa: BLE001 - the order stays paid_pending_fulfillment for a retry
             db.rollback()
             logger.exception("Fulfilment of paid order %s failed", order_id)
+
+
+def commit_and_fulfil(db: Session) -> None:
+    """End a transaction that may have settled an order invoice.
+
+    Commits the caller's work (the settlement and its audit rows) and then
+    fulfils any order the settlement queued. Every settlement path that is not
+    inside a savepoint ends with this instead of a bare ``db.commit()``.
+    """
+    db.commit()
+    run_deferred_fulfilment(db)
 
 
 def discard_deferred_fulfilment(db: Session) -> None:

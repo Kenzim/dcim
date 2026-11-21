@@ -10,6 +10,7 @@ the gateway before the local record is committed.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -19,6 +20,7 @@ from app.dao.order_dao import OrderDAO, OrderStatusHistoryDAO
 from app.models.commerce_order import Order, OrderStatus
 from app.models.reseller import Invoice, InvoiceStatus, Payment
 from app.services.audit_service import AuditService
+from app.services.billing.coupons import release_coupon_usage
 from app.services.billing.settings_access import billing_setting
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,26 @@ class RefundDecision:
 def _marker(reason: str, invoice: Invoice, payment: Optional[Payment]) -> str:
     if payment is not None:
         return f"[refund-review:{reason}:payment-{payment.id}]"
-    return f"[refund-review:invoice-{invoice.id}]"
+    return f"[refund-review:{reason}:invoice-{invoice.id}]"
+
+
+def _invoice_review_reasons(notes: str, invoice: Invoice) -> list[str]:
+    """Reasons of the invoice-level reviews already in the order notes, oldest first.
+
+    Notes written before the reason was part of the marker carry
+    ``[refund-review:invoice-{id}]`` and name the reason as ``({reason});``.
+    """
+    current = re.compile(rf"\[refund-review:(\w+):invoice-{invoice.id}\]")
+    legacy_marker = f"[refund-review:invoice-{invoice.id}]"
+    legacy_reason = re.compile(r"\((\w+)\);")
+    reasons: list[str] = []
+    for line in notes.splitlines():
+        found = current.search(line)
+        if found is None and legacy_marker in line:
+            found = legacy_reason.search(line)
+        if found is not None and found.group(1) not in reasons:
+            reasons.append(found.group(1))
+    return reasons
 
 
 def _refund_policy(db: Session) -> str:
@@ -79,6 +100,7 @@ def record_refund_review(
     )
     marker = _marker(reason, invoice, payment)
     order = db.get(Order, invoice.order_id) if invoice.order_id is not None else None
+    already_under_review: list[str] = []
     if payment is not None:
         if (payment.payment_metadata or {}).get("refund_review", {}).get(reason):
             return decision
@@ -89,13 +111,25 @@ def record_refund_review(
                 reason: {"amount_cents": int(amount_cents), "policy": policy},
             },
         }
-    elif order is not None and marker in (order.admin_notes or ""):
-        return decision
-    message = (
-        f"{marker} Refund review required: {int(amount_cents)} {invoice.currency} "
-        f"on invoice {invoice.invoice_number} ({reason}); policy {policy}, "
-        f"{_POLICY_NOTES[policy]}."
-    )
+    elif order is not None:
+        earlier = _invoice_review_reasons(order.admin_notes or "", invoice)
+        if reason in earlier:
+            return decision
+        already_under_review = earlier
+    if already_under_review:
+        # The same invoice money is already listed for review under another
+        # reason; this reason is recorded without listing the money twice.
+        message = (
+            f"{marker} {reason}: the {int(amount_cents)} {invoice.currency} on invoice "
+            f"{invoice.invoice_number} is already held for refund review "
+            f"({', '.join(already_under_review)})."
+        )
+    else:
+        message = (
+            f"{marker} Refund review required: {int(amount_cents)} {invoice.currency} "
+            f"on invoice {invoice.invoice_number} ({reason}); policy {policy}, "
+            f"{_POLICY_NOTES[policy]}."
+        )
     if order is not None:
         order.admin_notes = ((order.admin_notes or "") + "\n" + message).strip()
     AuditService.log(
@@ -113,6 +147,7 @@ def record_refund_review(
             "currency": invoice.currency,
             "order_id": invoice.order_id,
             "payment_id": payment.id if payment is not None else None,
+            "already_under_review": already_under_review,
         },
     )
     logger.warning(message)
@@ -174,6 +209,11 @@ def cancel_order(
             invoice.status = InvoiceStatus.VOID
         decision = apply_order_refund_policy(
             db, locked, reason="order_cancelled", actor_user_id=actor_user_id
+        )
+    if decision is None:
+        # No money is held for the order, so its coupon use is given back.
+        release_coupon_usage(
+            db, order=locked, actor_user_id=actor_user_id, reason="order_cancelled"
         )
     prior = locked.status
     locked.status = OrderStatus.CANCELLED

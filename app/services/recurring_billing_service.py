@@ -27,6 +27,7 @@ from app.models.reseller import (
 )
 from app.models.service import ServiceStatus
 from app.services.billing.intervals import advance_months
+from app.services.billing_locks import BillingLocks
 from app.services.billing.renewals import (
     AccountFunder,
     ResellerFunder,
@@ -170,44 +171,35 @@ class RecurringBillingService:
         if remaining == 0:
             return result
 
-        due_statement = (
-            select(ServiceBilling)
-            .where(
-                or_(
-                    and_(
-                        ServiceBilling.status == ServiceBillingStatus.ACTIVE,
-                        ServiceBilling.next_charge_at.is_not(None),
-                        ServiceBilling.next_charge_at <= now,
+        due_conditions = [
+            or_(
+                and_(
+                    ServiceBilling.status == ServiceBillingStatus.ACTIVE,
+                    ServiceBilling.next_charge_at.is_not(None),
+                    ServiceBilling.next_charge_at <= now,
+                ),
+                and_(
+                    ServiceBilling.status.in_(
+                        [
+                            ServiceBillingStatus.PAST_DUE,
+                            ServiceBillingStatus.GRACE,
+                        ]
                     ),
-                    and_(
-                        ServiceBilling.status.in_(
-                            [
-                                ServiceBillingStatus.PAST_DUE,
-                                ServiceBillingStatus.GRACE,
-                            ]
-                        ),
-                        or_(
-                            ServiceBilling.next_retry_at.is_(None),
-                            ServiceBilling.next_retry_at <= now,
-                            ServiceBilling.grace_until <= now,
-                        ),
+                    or_(
+                        ServiceBilling.next_retry_at.is_(None),
+                        ServiceBilling.next_retry_at <= now,
+                        ServiceBilling.grace_until <= now,
                     ),
-                    and_(
-                        ServiceBilling.cancel_at.is_not(None),
-                        ServiceBilling.cancel_at <= now,
-                        ServiceBilling.status != ServiceBillingStatus.CANCELLED,
-                    ),
-                )
+                ),
+                and_(
+                    ServiceBilling.cancel_at.is_not(None),
+                    ServiceBilling.cancel_at <= now,
+                    ServiceBilling.status != ServiceBillingStatus.CANCELLED,
+                ),
             )
-            .order_by(
-                ServiceBilling.next_retry_at,
-                ServiceBilling.next_charge_at,
-                ServiceBilling.id,
-            )
-            .limit(remaining)
-        )
+        ]
         if not self._retail_enabled():
-            due_statement = due_statement.where(
+            due_conditions.append(
                 or_(
                     ServiceBilling.reseller_id.is_not(None),
                     and_(
@@ -216,10 +208,27 @@ class RecurringBillingService:
                     ),
                 )
             )
+        due_statement = (
+            select(ServiceBilling)
+            .where(*due_conditions)
+            .order_by(
+                ServiceBilling.next_retry_at,
+                ServiceBilling.next_charge_at,
+                ServiceBilling.id,
+            )
+            .limit(remaining)
+        )
         billings = list(
             db.execute(self._locked(due_statement, db)).scalars()
         )
-        for billing in billings:
+        for candidate in billings:
+            # The first commit in the loop releases the batch's locks, so each
+            # row is locked again and re-checked before it is processed.
+            billing = BillingLocks.service_billing(
+                db, candidate.id, where=due_conditions, skip_locked=True
+            )
+            if billing is None:
+                continue
             outcome = await self._process_billing(
                 db, billing=billing, now=now, owner=owner
             )
@@ -236,31 +245,48 @@ class RecurringBillingService:
         limit: int,
         result: dict[str, int],
     ) -> int:
-        statement = (
-            select(BillingCycle)
+        conditions = (
+            Invoice.status == InvoiceStatus.PAID,
+            BillingCycle.state.not_in(
+                [
+                    BillingCycleState.PAID,
+                    BillingCycleState.CANCELLED,
+                ]
+            ),
+        )
+        candidates = db.execute(
+            select(BillingCycle.id, BillingCycle.service_billing_id)
             .join(Invoice, Invoice.id == BillingCycle.invoice_id)
-            .where(
-                Invoice.status == InvoiceStatus.PAID,
-                BillingCycle.state.not_in(
-                    [
-                        BillingCycleState.PAID,
-                        BillingCycleState.CANCELLED,
-                    ]
-                ),
-            )
+            .where(*conditions)
             .order_by(BillingCycle.id)
             .limit(limit)
-        )
-        cycles = list(db.execute(self._locked(statement, db)).scalars())
-        for cycle in cycles:
+        ).all()
+        recovered = 0
+        for cycle_id, billing_id in candidates:
+            # Billing lock order: the service billing, then its cycle.
+            if billing_id is not None and BillingLocks.service_billing(
+                db, int(billing_id), skip_locked=True
+            ) is None:
+                continue
+            cycle = BillingLocks.billing_cycle(
+                db,
+                select(BillingCycle)
+                .join(Invoice, Invoice.id == BillingCycle.invoice_id)
+                .where(BillingCycle.id == cycle_id, *conditions),
+                skip_locked=True,
+            )
+            if cycle is None:
+                db.rollback()
+                continue
             if is_retail(cycle.service_billing):
                 complete_retail_cycle(db, cycle, now)
             else:
                 await self._complete_paid_cycle(db, cycle, now)
             db.commit()
+            recovered += 1
             result["processed"] += 1
             result["paid"] += 1
-        return len(cycles)
+        return recovered
 
     async def _process_billing(
         self,
@@ -272,9 +298,9 @@ class RecurringBillingService:
     ) -> str:
         service = billing.service
         if billing.cancel_at is not None and _utc(billing.cancel_at) <= now:
-            await self._end_at_cancel_date(db, billing, now)
+            ended = await self._end_at_cancel_date(db, billing, now)
             db.commit()
-            return "cancelled"
+            return "cancelled" if ended else "manual_review"
         if service is None or service.status == ServiceStatus.TERMINATED:
             self._cancel_billing(db, billing, now)
             db.commit()
@@ -306,16 +332,28 @@ class RecurringBillingService:
 
     async def _end_at_cancel_date(
         self, db: Session, billing: ServiceBilling, now: datetime
-    ) -> None:
-        from app.services.commerce_lifecycle_service import terminate_service
+    ) -> bool:
+        """Terminate the service and cancel the billing; False if termination failed."""
+        from app.services.commerce_lifecycle_service import (
+            ServiceTerminationError,
+            terminate_service,
+        )
 
         service = billing.service
         if service is not None:
-            await terminate_service(
-                db, service, lifecycle=self.lifecycle, now=now, reason="end_of_period_cancel"
-            )
+            try:
+                await terminate_service(
+                    db, service, lifecycle=self.lifecycle, now=now, reason="end_of_period_cancel"
+                )
+            except ServiceTerminationError as exc:
+                # Billing stays due (cancel_at passed, not cancelled), so the
+                # next pass retries; nothing is charged while cancel_at is set.
+                billing.last_failure_code = "end_of_period_terminate_failed"
+                billing.last_failure_message = str(exc)[:500]
+                return False
         self._cancel_billing(db, billing, now)
         billing.last_failure_code = "end_of_cycle_cancel"
+        return True
 
     def _process_retail_billing(
         self,

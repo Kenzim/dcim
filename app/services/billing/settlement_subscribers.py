@@ -6,12 +6,18 @@
    worker, as before, because completing them can unsuspend services and lift
    reseller holds, which is async lifecycle work.
 3. ``publish_invoice_paid``: the one ``invoice.paid`` publication, through the
-   plugin event outbox, which also feeds outbound commerce webhooks. Only for
-   invoices with a billing account; reseller deploy and cycle invoices have none
-   and publish nothing, as before.
+   plugin event outbox, which also feeds outbound commerce webhooks. For
+   invoices with a billing account, and for any invoice an admin marks paid
+   (admin mark-paid published for every invoice before A0, with a null
+   ``billing_account_id`` for reseller invoices). Reseller deploy, top-up and
+   cycle invoices paid any other way have no account and publish nothing, as
+   before.
 4. ``invoice_paid_email``: the ``invoice_paid`` email to the account owner.
-5. ``fulfil_order``: provision the order behind an order invoice. Runs last
-   because provisioning commits.
+5. ``fulfil_order``: queue the order behind an order invoice for fulfilment
+   after the settlement commits (``settlement.commit_and_fulfil``).
+
+All five are isolated: a failure in one is logged and never undoes the
+settlement.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.models.commerce_order import Order, OrderStatus
 from app.models.reseller import Invoice, InvoicePurpose
 from app.services.billing.settlement import (
+    SOURCE_ADMIN_MARK_PAID,
     InvoicePaid,
     defer_order_fulfilment,
     subscribe_invoice_paid,
@@ -62,6 +69,8 @@ def publish_invoice_paid(db: Session, event: InvoicePaid) -> None:
     from app.plugin_host import events as plugin_events
 
     invoice = event.invoice
+    if invoice.billing_account_id is None and event.source != SOURCE_ADMIN_MARK_PAID:
+        return
     plugin_events.emit(
         db,
         "invoice.paid",
@@ -104,11 +113,8 @@ def email_invoice_paid(db: Session, event: InvoicePaid) -> None:
 
 def fulfil_order(db: Session, event: InvoicePaid) -> None:
     order_id = int(event.invoice.order_id)
-    if db.in_nested_transaction():
-        _mark_paid_pending_fulfilment(db, order_id)
-        defer_order_fulfilment(db, order_id)
-        return
-    fulfil_paid_order(db, order_id)
+    defer_order_fulfilment(db, order_id)
+    _mark_paid_pending_fulfilment(db, order_id)
 
 
 def _mark_paid_pending_fulfilment(db: Session, order_id: int) -> None:
@@ -129,12 +135,22 @@ def _mark_paid_pending_fulfilment(db: Session, order_id: int) -> None:
 
 
 def fulfil_paid_order(db: Session, order_id: int) -> None:
-    """Fulfil a paid order; provisioning errors end in PROVISION_ERROR as before."""
+    """Fulfil an order whose invoice is paid; provisioning errors end in PROVISION_ERROR."""
+    from app.models.reseller import InvoiceStatus
+    from app.services.billing_locks import BillingLocks
     from app.services.checkout_service import CheckoutError, CheckoutService
 
-    order = db.get(Order, order_id)
+    order = BillingLocks.order(db, order_id)
     if order is None:
         logger.warning("Paid invoice refers to missing order %s", order_id)
+        return
+    invoice = (
+        BillingLocks.invoice_row(db, order.invoice_id)
+        if order.invoice_id is not None
+        else None
+    )
+    if invoice is None or invoice.status != InvoiceStatus.PAID:
+        logger.info("Order %s is queued for fulfilment but its invoice is not paid", order.id)
         return
     if order.status not in FULFILLABLE_ORDER_STATUSES:
         logger.info(
@@ -168,12 +184,8 @@ def register_defaults() -> None:
     subscribe_invoice_paid(
         "complete_billing_cycle", complete_billing_cycle, applies=_is_retail_cycle
     )
-    subscribe_invoice_paid(
-        "publish_invoice_paid", publish_invoice_paid, applies=_has_billing_account
-    )
+    subscribe_invoice_paid("publish_invoice_paid", publish_invoice_paid)
     subscribe_invoice_paid(
         "invoice_paid_email", email_invoice_paid, applies=_has_billing_account
     )
-    subscribe_invoice_paid(
-        "fulfil_order", fulfil_order, applies=_is_order_charge, isolated=False
-    )
+    subscribe_invoice_paid("fulfil_order", fulfil_order, applies=_is_order_charge)

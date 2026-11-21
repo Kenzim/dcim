@@ -84,3 +84,51 @@ def test_upgrade_backfills_in_batches_and_downgrade_drops(tmp_path, monkeypatch)
     _run(engine, migration.upgrade)
     _run(engine, migration.downgrade)
     assert not NEW_COLUMNS & _columns(engine)
+
+
+def test_backfill_picks_the_latest_fulfilled_item_per_service(tmp_path):
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'multi.db'}")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "CREATE TABLE service_billings (id INTEGER PRIMARY KEY, service_id INTEGER,"
+                " reseller_id INTEGER)"
+            )
+        )
+        conn.execute(
+            sa.text(
+                "CREATE TABLE order_items (id INTEGER PRIMARY KEY, service_id INTEGER,"
+                " cycle_interval VARCHAR(32), fulfill_status VARCHAR(32))"
+            )
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO service_billings (id, service_id, reseller_id) VALUES"
+                " (1, 20, NULL), (2, 21, NULL), (3, 22, NULL)"
+            )
+        )
+        # Service 20: a later failed re-order must not override the fulfilled item.
+        # Service 21: two fulfilled items, the most recent wins whatever the row order.
+        # Service 22: nothing fulfilled, so the most recent valid item wins.
+        conn.execute(
+            sa.text(
+                "INSERT INTO order_items (id, service_id, cycle_interval, fulfill_status) VALUES"
+                " (9, 21, 'annually', 'fulfilled'),"
+                " (3, 20, 'quarterly', 'fulfilled'),"
+                " (7, 20, 'annually', 'failed'),"
+                " (4, 21, 'quarterly', 'fulfilled'),"
+                " (5, 22, 'semiannually', 'pending'),"
+                " (6, 22, 'bogus', 'pending'),"
+                " (2, 22, 'annually', 'cancelled')"
+            )
+        )
+    _run(engine, _migration().upgrade)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.text("SELECT id, cycle_interval, interval_months FROM service_billings ORDER BY id")
+        ).all()
+    assert [tuple(row) for row in rows] == [
+        (1, "quarterly", 3),
+        (2, "annually", 12),
+        (3, "semiannually", 6),
+    ]

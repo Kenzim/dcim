@@ -176,19 +176,10 @@ class InvoiceService:
 
     @staticmethod
     def get_for_update(db: Session, invoice_id: int) -> Optional[Invoice]:
-        if db.get_bind().dialect.name == "sqlite":
-            # SQLite ignores SELECT ... FOR UPDATE. A no-op UPDATE acquires its
-            # database write lock before a gateway call can race settlement.
-            db.execute(
-                update(Invoice)
-                .where(Invoice.id == invoice_id)
-                .values(updated_at=Invoice.updated_at)
-            )
-        return db.execute(
-            select(Invoice)
-            .where(Invoice.id == invoice_id)
-            .with_for_update()
-        ).scalar_one_or_none()
+        """Lock the invoice (and its order first) and re-read it; see ``billing_locks``."""
+        from app.services.billing_locks import BillingLocks
+
+        return BillingLocks.for_invoice(db, invoice_id)
 
     @staticmethod
     def allocated_cents(db: Session, invoice_id: int) -> int:
@@ -202,12 +193,16 @@ class InvoiceService:
 
     @staticmethod
     def mark_paid_if_fully_allocated(
-        db: Session, invoice_id: int, *, payment: Optional[Payment] = None
+        db: Session,
+        invoice_id: int,
+        *,
+        payment: Optional[Payment] = None,
+        source: Optional[str] = None,
     ) -> Invoice:
         """Settle the invoice through the single settlement function."""
         from app.services.billing.settlement import settle_invoice
 
-        return settle_invoice(db, invoice_id, payment=payment)
+        return settle_invoice(db, invoice_id, payment=payment, source=source)
 
     @staticmethod
     def serialize_payment(payment: Payment) -> dict:

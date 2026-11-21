@@ -98,7 +98,7 @@ async def run_recurring_billing_worker(
             raise
         except Exception:
             logger.exception("Recurring billing worker cycle failed")
-        await asyncio.sleep(_current_interval_seconds(config))
+        await asyncio.sleep(await asyncio.to_thread(_current_interval_seconds, config))
 
 
 def main() -> None:
