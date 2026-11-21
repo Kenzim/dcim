@@ -56,7 +56,7 @@ This starts:
 - **dhcp-runner** – optional container that runs `dhcpd`; phones home to Rackflow over WebSocket (`RACKFLOW_URL` + `API_KEY`) and still exposes HTTP 9080 as a fallback.
 - **tftp-runner** – optional container that runs `in.tftpd`; same uplink; TFTP on 69/udp.
 - **media-runner** – per-location ISO library (HTTP on 9083, SMB on 445). Enroll under Admin → Runners, then set the generated key as `MEDIA_RUNNER_API_KEY`. Set `MEDIA_PUBLIC_HTTP_BASE` / `MEDIA_SMB_ADVERTISE_HOST` to the address BMCs and PXE clients can reach. Build `isos/rackflow-netboot.iso` with `scripts/build-rackflow-netboot-iso.sh` before imaging so the container can seed it; if the file is missing the runner still starts with an empty library.
-- **mysql** – MariaDB 11 (database `dcim`, user `dcim`/`dcim`)
+- **mysql** – MariaDB 11.8 (database `dcim`, user `dcim`/`dcim`)
 - **redis** – Redis 7
 
 When `RACKFLOW_URL` is set, Python runners open `ws(s)://…/api/runner/ws` and push status every ~10s. The admin UI reads that cache (online vs daemon running) instead of blocking on a live HTTP call. Legacy `DHCP_RUNNER_URL` / `TFTP_RUNNER_URL` HTTP control still works for un-migrated installs.
