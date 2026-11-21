@@ -2,8 +2,11 @@
 
 Set ``RACKFLOW_TEST_MARIADB_URL`` to an empty database, for example
 ``mysql+pymysql://root:pw@127.0.0.1:3307/rackflow``. The test drops and
-recreates every table in it. ``.forgejo/workflows/billing-mariadb.yml`` runs it
-against a ``mariadb:11`` service container.
+recreates every table in it and drops them again afterwards, so it refuses a
+database that holds rows in ``users`` or ``invoices`` unless
+``RACKFLOW_TEST_MARIADB_ALLOW_DROP=1``.
+``.forgejo/workflows/billing-mariadb.yml`` runs it against a ``mariadb:11``
+service container.
 
 A fresh ``alembic upgrade`` cannot reach ``billing_a0_renewals`` on MariaDB
 (``add_rack_units_servers`` lacks ``existing_type``, ledger to-do e01f7dbc), so
@@ -25,6 +28,18 @@ URL = os.environ.get("RACKFLOW_TEST_MARIADB_URL", "")
 pytestmark = pytest.mark.skipif(not URL, reason="RACKFLOW_TEST_MARIADB_URL is not set")
 
 
+def _refuse_populated_database(conn) -> None:
+    if os.environ.get("RACKFLOW_TEST_MARIADB_ALLOW_DROP") == "1":
+        return
+    tables = set(sa.inspect(conn).get_table_names())
+    for table in ("users", "invoices"):
+        if table in tables and conn.execute(sa.text(f"SELECT 1 FROM `{table}` LIMIT 1")).first():
+            pytest.fail(
+                f"RACKFLOW_TEST_MARIADB_URL points at a database with rows in {table}; "
+                "use an empty throwaway database or set RACKFLOW_TEST_MARIADB_ALLOW_DROP=1"
+            )
+
+
 @pytest.fixture
 def mariadb():
     import app.models  # noqa: F401
@@ -32,16 +47,23 @@ def mariadb():
 
     engine = sa.create_engine(URL, pool_pre_ping=True)
     with engine.begin() as conn:
-        conn.execute(sa.text("SET foreign_key_checks = 0"))
-        for table in sa.inspect(conn).get_table_names():
-            conn.execute(sa.text(f"DROP TABLE `{table}`"))
-        conn.execute(sa.text("SET foreign_key_checks = 1"))
+        _refuse_populated_database(conn)
+    _drop_all(engine)
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         MigrationContext.configure(conn).stamp(helpers.script(), helpers.HEAD)
     helpers.migrate(engine, helpers.A0)
     yield engine
+    _drop_all(engine)
     engine.dispose()
+
+
+def _drop_all(engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(sa.text("SET foreign_key_checks = 0"))
+        for table in sa.inspect(conn).get_table_names():
+            conn.execute(sa.text(f"DROP TABLE `{table}`"))
+        conn.execute(sa.text("SET foreign_key_checks = 1"))
 
 
 def _checks(engine, table):
