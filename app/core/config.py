@@ -115,6 +115,8 @@ class Settings(BaseSettings):
     recurring_billing_worker_lease_seconds: int = 300
     recurring_billing_worker_batch_size: int = 100
     run_recurring_billing_worker: bool = False
+    billing_retail_renewals_enabled: bool = False
+    billing_order_refund_policy: Literal["manual_review", "original_method", "credit"] = "manual_review"
     notification_worker_interval_seconds: int = 30
     notification_worker_lease_seconds: int = 120
     notification_worker_batch_size: int = 100

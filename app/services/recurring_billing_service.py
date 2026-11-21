@@ -26,6 +26,16 @@ from app.models.reseller import (
     ServiceBillingStatus,
 )
 from app.models.service import ServiceStatus
+from app.services.billing.intervals import advance_months
+from app.services.billing.renewals import (
+    AccountFunder,
+    ResellerFunder,
+    RetailInvoiceFunder,
+    await_client_payment,
+    billing_interval_months,
+    complete_retail_cycle,
+    is_retail,
+)
 from app.services.invoice_service import InvoiceService
 from app.services.notification_service import NotificationEvent, NotificationService
 from app.services.payments.orchestrator import PaymentOrchestrator
@@ -71,11 +81,15 @@ class RecurringBillingService:
     @staticmethod
     def next_calendar_month(value: datetime, anchor_day: Optional[int] = None) -> datetime:
         """Advance one calendar month while retaining a month-end anchor."""
-        anchor = int(anchor_day or value.day)
-        year = value.year + (1 if value.month == 12 else 0)
-        month = 1 if value.month == 12 else value.month + 1
-        day = min(anchor, calendar.monthrange(year, month)[1])
-        return value.replace(year=year, month=month, day=day)
+        return advance_months(value, 1, anchor_day)
+
+    def _retail_enabled(self) -> bool:
+        return bool(getattr(self.config, "billing_retail_renewals_enabled", False))
+
+    def _funder_for(self, billing: ServiceBilling) -> AccountFunder:
+        if is_retail(billing):
+            return RetailInvoiceFunder()
+        return ResellerFunder(self.gateway)
 
     @staticmethod
     def _locked(statement, db: Session):
@@ -178,6 +192,11 @@ class RecurringBillingService:
                             ServiceBilling.grace_until <= now,
                         ),
                     ),
+                    and_(
+                        ServiceBilling.cancel_at.is_not(None),
+                        ServiceBilling.cancel_at <= now,
+                        ServiceBilling.status != ServiceBillingStatus.CANCELLED,
+                    ),
                 )
             )
             .order_by(
@@ -187,6 +206,16 @@ class RecurringBillingService:
             )
             .limit(remaining)
         )
+        if not self._retail_enabled():
+            due_statement = due_statement.where(
+                or_(
+                    ServiceBilling.reseller_id.is_not(None),
+                    and_(
+                        ServiceBilling.cancel_at.is_not(None),
+                        ServiceBilling.cancel_at <= now,
+                    ),
+                )
+            )
         billings = list(
             db.execute(self._locked(due_statement, db)).scalars()
         )
@@ -224,7 +253,10 @@ class RecurringBillingService:
         )
         cycles = list(db.execute(self._locked(statement, db)).scalars())
         for cycle in cycles:
-            await self._complete_paid_cycle(db, cycle, now)
+            if is_retail(cycle.service_billing):
+                complete_retail_cycle(db, cycle, now)
+            else:
+                await self._complete_paid_cycle(db, cycle, now)
             db.commit()
             result["processed"] += 1
             result["paid"] += 1
@@ -239,10 +271,16 @@ class RecurringBillingService:
         owner: str,
     ) -> str:
         service = billing.service
+        if billing.cancel_at is not None and _utc(billing.cancel_at) <= now:
+            await self._end_at_cancel_date(db, billing, now)
+            db.commit()
+            return "cancelled"
         if service is None or service.status == ServiceStatus.TERMINATED:
             self._cancel_billing(db, billing, now)
             db.commit()
             return "cancelled"
+        if is_retail(billing):
+            return self._process_retail_billing(db, billing=billing, now=now)
 
         cycle = self._current_cycle(db, billing)
         if cycle is None:
@@ -265,6 +303,64 @@ class RecurringBillingService:
         return await self._attempt_payment(
             db, billing=billing, cycle=cycle, now=now, owner=owner
         )
+
+    async def _end_at_cancel_date(
+        self, db: Session, billing: ServiceBilling, now: datetime
+    ) -> None:
+        from app.services.commerce_lifecycle_service import terminate_service
+
+        service = billing.service
+        if service is not None:
+            await terminate_service(
+                db, service, lifecycle=self.lifecycle, now=now, reason="end_of_period_cancel"
+            )
+        self._cancel_billing(db, billing, now)
+        billing.last_failure_code = "end_of_cycle_cancel"
+
+    def _process_retail_billing(
+        self,
+        db: Session,
+        *,
+        billing: ServiceBilling,
+        now: datetime,
+    ) -> str:
+        cycle = self._current_cycle(db, billing)
+        if cycle is None:
+            cycle = self._ensure_cycle(db, billing, now)
+            db.commit()
+        if cycle.state == BillingCycleState.MANUAL_REVIEW:
+            return "manual_review"
+        if cycle.invoice is None:
+            self._mark_manual(
+                billing,
+                cycle,
+                code="missing_invoice",
+                message="Billing cycle has no invoice",
+            )
+            db.commit()
+            return "manual_review"
+        if cycle.invoice.status == InvoiceStatus.PAID:
+            complete_retail_cycle(db, cycle, now)
+            db.commit()
+            return "paid"
+        if cycle.invoice.status == InvoiceStatus.VOID:
+            self._mark_manual(
+                billing,
+                cycle,
+                code="invoice_void",
+                message="Renewal invoice was voided; decide whether to reissue or cancel",
+            )
+            db.commit()
+            return "manual_review"
+        funding = self._funder_for(billing).fund(db, billing, cycle)
+        if funding.funded:
+            InvoiceService.mark_paid_if_fully_allocated(db, cycle.invoice_id)
+            complete_retail_cycle(db, cycle, now)
+            db.commit()
+            return "paid"
+        await_client_payment(billing, cycle, now)
+        db.commit()
+        return "pending_action"
 
     async def _initial_cycle_outcome(
         self,
@@ -416,6 +512,9 @@ class RecurringBillingService:
                             f"Recurring service charge for {billing.service.name}"
                         ),
                         due_at=due_at,
+                        billing_account_id=(
+                            billing.billing_account_id if is_retail(billing) else None
+                        ),
                     )
                     cycle.invoice_id = invoice.id
                 else:
@@ -453,9 +552,7 @@ class RecurringBillingService:
         )
         db.commit()
         try:
-            funding = self.gateway.fund_invoice(
-                db, billing.reseller, cycle.invoice
-            )
+            funding = self._funder_for(billing).fund(db, billing, cycle)
         except Exception as exc:
             db.rollback()
             billing = db.get(ServiceBilling, billing.id)
@@ -790,8 +887,10 @@ class RecurringBillingService:
         billing.next_retry_at = None
         billing.last_charged_at = cycle.paid_at
         billing.billing_anchor_day = billing.billing_anchor_day or _utc(cycle.due_at).day
-        billing.next_charge_at = self.next_calendar_month(
-            _utc(cycle.due_at), billing.billing_anchor_day
+        billing.next_charge_at = advance_months(
+            _utc(cycle.due_at),
+            billing_interval_months(billing),
+            billing.billing_anchor_day,
         )
         if was_nonpayment_suspended:
             await self.lifecycle.unsuspend(

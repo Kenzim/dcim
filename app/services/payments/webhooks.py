@@ -23,6 +23,7 @@ from app.models.reseller import (
     PaymentStatus,
 )
 from app.models.service import Service
+from app.services.audit_service import AuditService
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.email_message_service import EmailEvent, EmailMessageService
 from app.services.invoice_service import InvoiceService
@@ -30,6 +31,10 @@ from app.services.payments.base import (
     GatewayWebhookAction,
     NormalizedGatewayWebhookEvent,
     PaymentGatewayError,
+)
+from app.services.billing.settlement import (
+    discard_deferred_fulfilment,
+    run_deferred_fulfilment,
 )
 from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
@@ -92,6 +97,9 @@ class PaymentWebhookService:
             processed_at=datetime.now(timezone.utc),
         )
         try:
+            if db.info.get("billing.deferred_order_fulfilment"):
+                logger.warning("Dropping order fulfilment queued by an earlier, unfinished webhook")
+            discard_deferred_fulfilment(db)
             with db.begin_nested():
                 db.add(record)
                 db.flush()
@@ -114,7 +122,12 @@ class PaymentWebhookService:
                     )
                 db.flush()
         except IntegrityError:
+            discard_deferred_fulfilment(db)
             return False
+        except Exception:
+            discard_deferred_fulfilment(db)
+            raise
+        run_deferred_fulfilment(db)
         return True
 
     @staticmethod
@@ -170,27 +183,6 @@ class PaymentWebhookService:
             raise PaymentGatewayError("Gateway payment currency does not match")
         payment.external_ref = event.external_ref
         PaymentOrchestrator.finalize_success(db, payment)
-        invoice = payment.invoice
-        if invoice is not None and invoice.billing_account_id is not None:
-            try:
-                from app.plugin_host import events as plugin_events
-
-                plugin_events.emit(
-                    db,
-                    "invoice.paid",
-                    {
-                        "invoice_id": invoice.id,
-                        "invoice_number": invoice.invoice_number,
-                        "billing_account_id": invoice.billing_account_id,
-                        "order_id": invoice.order_id,
-                    },
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to enqueue invoice.paid webhook for invoice %s",
-                    invoice.id,
-                    exc_info=True,
-                )
 
     @staticmethod
     def _handle_payment_disputed(
@@ -274,6 +266,24 @@ class PaymentWebhookService:
                     idempotency_key=f"{gateway}-{reason}:{event_id}",
                     metadata={"gateway_event_id": event_id, "reason": reason},
                 )
+        elif invoice.reseller_id is None:
+            # Retail payments have no credit ledger; the reversal is recorded for an admin.
+            AuditService.log(
+                db,
+                actor_user_id=None,
+                billing_account_id=invoice.billing_account_id,
+                action="billing.payment_reversed",
+                resource_type="invoice",
+                resource_id=str(invoice.id),
+                metadata={
+                    "reason": reason,
+                    "gateway": gateway,
+                    "gateway_event_id": event_id,
+                    "payment_id": payment.id,
+                    "amount_cents": int(payment.amount_cents),
+                    "currency": payment.currency,
+                },
+            )
         else:
             CreditLedgerService.debit(
                 db,

@@ -154,12 +154,13 @@ class InvoiceService:
     def create_cycle(
         db: Session,
         *,
-        reseller_id: int,
+        reseller_id: Optional[int],
         service_id: int,
         amount_cents: int,
         description: str,
         due_at: Optional[datetime] = None,
         currency: str = "USD",
+        billing_account_id: Optional[int] = None,
     ) -> Invoice:
         return InvoiceService.create(
             db,
@@ -170,6 +171,7 @@ class InvoiceService:
             service_id=service_id,
             due_at=due_at or datetime.now(timezone.utc),
             currency=currency,
+            billing_account_id=billing_account_id,
         )
 
     @staticmethod
@@ -200,22 +202,12 @@ class InvoiceService:
 
     @staticmethod
     def mark_paid_if_fully_allocated(
-        db: Session, invoice_id: int
+        db: Session, invoice_id: int, *, payment: Optional[Payment] = None
     ) -> Invoice:
-        invoice = InvoiceService.get_for_update(db, invoice_id)
-        if invoice is None:
-            raise InvoiceError("Invoice not found")
-        allocated = InvoiceService.allocated_cents(db, invoice.id)
-        if allocated > invoice.amount_cents:
-            raise InvoiceError("Invoice payment allocations exceed its total")
-        if allocated == invoice.amount_cents:
-            invoice.status = InvoiceStatus.PAID
-            invoice.paid_at = invoice.paid_at or datetime.now(timezone.utc)
-        elif invoice.status == InvoiceStatus.PAID:
-            invoice.status = InvoiceStatus.OPEN
-            invoice.paid_at = None
-        db.flush()
-        return invoice
+        """Settle the invoice through the single settlement function."""
+        from app.services.billing.settlement import settle_invoice
+
+        return settle_invoice(db, invoice_id, payment=payment)
 
     @staticmethod
     def serialize_payment(payment: Payment) -> dict:

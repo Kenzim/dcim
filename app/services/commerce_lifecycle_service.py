@@ -26,6 +26,30 @@ class CommerceLifecycleError(ValueError):
     pass
 
 
+async def terminate_service(
+    db: Session,
+    service: Service,
+    *,
+    lifecycle: Optional[ServiceLifecycle] = None,
+    now: Optional[datetime] = None,
+    reason: str = "cancellation",
+) -> bool:
+    """Power the service off and mark it terminated. Returns False if it already was."""
+    if service.status == ServiceStatus.TERMINATED:
+        return False
+    if service.status != ServiceStatus.SUSPENDED:
+        try:
+            await (lifecycle or ServiceLifecycle()).suspend(db, service, reason=reason)
+        except ServiceLifecycleError as exc:
+            logger.warning(
+                "Lifecycle suspend failed for service %s: %s", service.id, exc
+            )
+    service.status = ServiceStatus.TERMINATED
+    service.terminated_at = now or datetime.now(timezone.utc)
+    db.flush()
+    return True
+
+
 class CommerceLifecycleService:
     @staticmethod
     def _get_owned_service(
@@ -70,13 +94,20 @@ class CommerceLifecycleService:
 
         if billing is not None:
             if when == "end_of_cycle":
-                billing.status = ServiceBillingStatus.CANCELLED
-                billing.last_failure_code = "end_of_cycle_cancel"
-                billing.last_failure_message = note
+                if billing.status == ServiceBillingStatus.CANCELLED:
+                    pass
+                elif billing.next_charge_at is not None:
+                    billing.cancel_at = billing.cancel_at or billing.next_charge_at
+                    billing.last_failure_message = note
+                else:
+                    billing.status = ServiceBillingStatus.CANCELLED
+                    billing.last_failure_code = "end_of_cycle_cancel"
+                    billing.last_failure_message = note
             else:
                 billing.status = ServiceBillingStatus.CANCELLED
                 billing.next_charge_at = None
                 billing.next_retry_at = None
+                billing.cancel_at = None
                 billing.last_failure_code = "immediate_cancel"
                 billing.last_failure_message = note
 
@@ -88,24 +119,18 @@ class CommerceLifecycleService:
                 ServiceStatus.SUSPENDED,
             }
         ):
-                lifecycle = ServiceLifecycle()
-                try:
-                    await lifecycle.suspend(db, service, reason="cancellation")
-                except ServiceLifecycleError as exc:
-                    logger.warning(
-                        "Lifecycle suspend failed for service %s: %s",
-                        service_id,
-                        exc,
-                    )
-                service.status = ServiceStatus.TERMINATED
-                service.terminated_at = now
-                db.flush()
+            await terminate_service(db, service, now=now)
 
         return {
             "service_id": service_id,
             "when": when,
             "billing_status": billing.status.value if billing else None,
             "service_status": service.status.value if service else None,
+            "cancel_at": (
+                billing.cancel_at.isoformat()
+                if billing is not None and billing.cancel_at is not None
+                else None
+            ),
         }
 
     @staticmethod

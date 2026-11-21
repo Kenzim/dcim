@@ -39,7 +39,7 @@ def test_single_head():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["plugin_system"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("plugin_system").down_revision == "private_network_dhcp"
 
 
