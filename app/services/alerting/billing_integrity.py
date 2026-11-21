@@ -614,9 +614,99 @@ def invoice_status(db: Session, params: dict, now: datetime) -> list[Finding]:
     return out
 
 
+def _issued_numbers():
+    """Every legal number issued: (series_id, period, value) from invoices, proformas and notes."""
+    from sqlalchemy import literal, union_all
+
+    from app.models.invoice_adjustment import InvoiceAdjustment
+
+    return union_all(
+        select(
+            Invoice.series_id.label("series_id"),
+            func.coalesce(Invoice.number_period, literal("")).label("period"),
+            Invoice.number_value.label("value"),
+        ).where(Invoice.series_id.is_not(None), Invoice.number_value.is_not(None)),
+        select(
+            Invoice.proforma_series_id.label("series_id"),
+            func.coalesce(Invoice.proforma_number_period, literal("")).label("period"),
+            Invoice.proforma_number_value.label("value"),
+        ).where(Invoice.proforma_series_id.is_not(None), Invoice.proforma_number_value.is_not(None)),
+        select(
+            InvoiceAdjustment.series_id.label("series_id"),
+            func.coalesce(InvoiceAdjustment.number_period, literal("")).label("period"),
+            InvoiceAdjustment.number_value.label("value"),
+        ).where(InvoiceAdjustment.series_id.is_not(None), InvoiceAdjustment.number_value.is_not(None)),
+    ).subquery()
+
+
 def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Gapless series with a gap or a duplicate number, property P7 (P1-I)."""
-    return []
+    """Gapless series with a gap or a duplicate number, property P7 (design 5.1).
+
+    Per (series, period) the issued values are clean when their count, their
+    distinct count and their maximum are equal and the minimum is 1.
+    """
+    from app.models.billing_series import DocumentSeries
+
+    issued = _issued_numbers()
+    count = func.count(issued.c.value)
+    distinct = func.count(func.distinct(issued.c.value))
+    smallest = func.min(issued.c.value)
+    largest = func.max(issued.c.value)
+    stmt = (
+        select(
+            DocumentSeries.id,
+            DocumentSeries.code,
+            issued.c.period,
+            count.label("issued"),
+            distinct.label("distinct"),
+            smallest.label("smallest"),
+            largest.label("largest"),
+        )
+        .select_from(issued)
+        .join(DocumentSeries, DocumentSeries.id == issued.c.series_id)
+        .where(DocumentSeries.gapless.is_(True))
+        .group_by(DocumentSeries.id, DocumentSeries.code, issued.c.period)
+        .having(or_(count != distinct, distinct != largest, smallest != 1))
+        .order_by(DocumentSeries.id, issued.c.period)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = []
+    for row in rows:
+        issued_count, distinct_count = int(row.issued), int(row.distinct)
+        duplicates = issued_count - distinct_count
+        missing = max(0, int(row.largest) - distinct_count)
+        period = row.period or "all time"
+        problems = []
+        if duplicates:
+            problems.append(f"{duplicates} repeated")
+        if missing:
+            problems.append(f"{missing} missing")
+        out.append(
+            Finding(
+                "billing_numbering_gaps",
+                "document_series",
+                f"{row.id}:{row.period}",
+                f"Series {row.code}",
+                f"Series {row.code} ({period}) has {' and '.join(problems)} numbers",
+                f"{issued_count} numbers issued, {distinct_count} distinct, from {row.smallest} "
+                f"to {row.largest}; a gapless series must issue exactly 1 to its largest number once each.",
+                details={
+                    "series_id": row.id,
+                    "code": row.code,
+                    "period": row.period,
+                    "issued": issued_count,
+                    "distinct": distinct_count,
+                    "min_value": int(row.smallest),
+                    "max_value": int(row.largest),
+                    "duplicates": duplicates,
+                    "missing": missing,
+                },
+            )
+        )
+    if remaining:
+        out.append(_overflow("billing_numbering_gaps", "document_series",
+                             "series periods with gaps or repeats", remaining, len(rows)))
+    return out
 
 
 def refund_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:

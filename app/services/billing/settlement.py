@@ -432,8 +432,9 @@ def _settle_v2(
         InvoiceService,
     )
 
-    # The account lock comes before the invoice lock, for an overpayment credit.
-    invoice = BillingLocks.for_invoice(db, invoice_id, billing_account=True)
+    # Reseller and account come before the invoice in the lock order, for an
+    # overpayment credit (the same locks ``issue_overpayment`` takes).
+    invoice = BillingLocks.for_invoice(db, invoice_id, reseller=True, billing_account=True)
     if invoice is None:
         raise InvoiceError("Invoice not found")
     if invoice.status == InvoiceStatus.DRAFT:

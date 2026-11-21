@@ -141,3 +141,146 @@ class InvoiceNumbering:
             finally:
                 session.close()
         return period, value, InvoiceNumbering.format_number(series, value, at)
+
+
+# --- Series configuration (design 5.2 and 5.3) ---
+
+SERIES_TAGS = ("{SERIES}", "{NUMBER}", "{YEAR}", "{MONTH}")
+_CODE_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
+
+def validate_series_config(
+    *,
+    code: str,
+    document_type: str,
+    format: str,
+    number_padding: int,
+    number_source: str,
+    gapless: bool,
+    reset_period: str,
+) -> None:
+    """Raise ``NumberingError`` when a series configuration breaks a rule of design 5.2.
+
+    The format needs ``{NUMBER}`` (and ``{YEAR}`` for a yearly series), may hold
+    no other braces than the four tags, and its longest expansion (12 digits or
+    the padding, year 9999, month 12) must fit ``MAX_DISPLAY_LENGTH``.
+    """
+    if not code or len(code) > 16 or not set(code) <= _CODE_CHARACTERS:
+        raise NumberingError("code must be 1 to 16 letters, digits, '-' or '_'")
+    if document_type not in {item.value for item in DocumentType}:
+        raise NumberingError(f"unknown document type {document_type!r}")
+    if number_source not in ("own", "invoice_number"):
+        raise NumberingError("number_source must be 'own' or 'invoice_number'")
+    if reset_period not in ("never", "yearly"):
+        raise NumberingError("reset_period must be 'never' or 'yearly'")
+    if type(number_padding) is not int or not 0 <= number_padding <= 12:
+        raise NumberingError("number_padding must be between 0 and 12")
+    if "{NUMBER}" not in format:
+        raise NumberingError("format must contain {NUMBER}")
+    if reset_period == "yearly" and "{YEAR}" not in format:
+        raise NumberingError("a yearly series needs {YEAR} in its format")
+    stripped = format
+    for tag in SERIES_TAGS:
+        stripped = stripped.replace(tag, "")
+    if "{" in stripped or "}" in stripped:
+        raise NumberingError("format may only use the tags " + ", ".join(SERIES_TAGS))
+    longest = (
+        format.replace("{SERIES}", code)
+        .replace("{YEAR}", "9999")
+        .replace("{MONTH}", "12")
+        .replace("{NUMBER}", "9" * max(12, number_padding))
+    )
+    if len(longest) > MAX_DISPLAY_LENGTH:
+        raise NumberingError(
+            f"the longest number of this format has {len(longest)} characters, "
+            f"more than {MAX_DISPLAY_LENGTH}"
+        )
+    if number_source == "invoice_number" and (
+        document_type != DocumentType.INVOICE.value or gapless or reset_period != "never"
+    ):
+        raise NumberingError(
+            "number_source 'invoice_number' is only for a non-gapless invoice series "
+            "that never resets"
+        )
+
+
+def series_max_value(db: Session, series_id: int, period: Optional[str] = None) -> int:
+    """The largest number value issued in a series (in ``period`` when given), 0 if none."""
+    from sqlalchemy import func
+
+    from app.models.invoice_adjustment import InvoiceAdjustment
+    from app.models.reseller import Invoice
+
+    sources = (
+        (Invoice.series_id, Invoice.number_period, Invoice.number_value),
+        (Invoice.proforma_series_id, Invoice.proforma_number_period, Invoice.proforma_number_value),
+        (InvoiceAdjustment.series_id, InvoiceAdjustment.number_period, InvoiceAdjustment.number_value),
+    )
+    largest = 0
+    for series_column, period_column, value_column in sources:
+        stmt = select(func.max(value_column)).where(series_column == series_id)
+        if period is not None:
+            stmt = stmt.where(period_column == period)
+        largest = max(largest, int(db.scalar(stmt) or 0))
+    return largest
+
+
+def series_in_use(db: Session, series_id: int) -> bool:
+    """Whether any invoice, proforma number or note references the series."""
+    from app.models.invoice_adjustment import InvoiceAdjustment
+    from app.models.reseller import Invoice
+
+    for column in (Invoice.series_id, Invoice.proforma_series_id, InvoiceAdjustment.series_id):
+        if db.scalar(select(column).where(column == series_id).limit(1)) is not None:
+            return True
+    return False
+
+
+def counter_next_value(db: Session, series: DocumentSeries, at: datetime) -> int:
+    """The value the series' counter gives next in the period of ``at`` (1 with no counter)."""
+    name = series_counter_name(series.id, InvoiceNumbering.period(series, at))
+    value = db.scalar(select(InvoiceSequence.next_value).where(InvoiceSequence.name == name))
+    return int(value) if value is not None else 1
+
+
+def set_counter_at_least(db: Session, series: DocumentSeries, value: int, at: datetime) -> int:
+    """Raise the series' counter for the period of ``at`` so it gives ``value`` next.
+
+    Counters only go up: a ``value`` below the counter, or at or below a number
+    already issued in that period, raises ``NumberingError``. Returns the new
+    next value. Takes the counter row lock on MySQL.
+    """
+    if type(value) is not int or value < 1:
+        raise NumberingError("start_value must be a positive integer")
+    period = InvoiceNumbering.period(series, at)
+    issued = series_max_value(db, series.id, period)
+    if value <= issued:
+        raise NumberingError(
+            f"start_value {value} is not above {issued}, the largest number already issued"
+        )
+    name = series_counter_name(series.id, period)
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(
+            sqlite_insert(InvoiceSequence)
+            .values(name=name, next_value=1)
+            .on_conflict_do_nothing(index_elements=["name"])
+        )
+        counter = db.execute(
+            select(InvoiceSequence).where(InvoiceSequence.name == name)
+        ).scalar_one()
+    else:
+        from app.services.billing_locks import BillingLocks
+
+        counter = BillingLocks.number_counter(db, name)
+        if counter is None:
+            counter = InvoiceSequence(name=name, next_value=1)
+            db.add(counter)
+            db.flush()
+            counter = BillingLocks.number_counter(db, name)
+    if value < int(counter.next_value):
+        raise NumberingError(
+            f"start_value {value} is below the counter's next value {counter.next_value}"
+        )
+    counter.next_value = value
+    db.flush()
+    return value

@@ -76,6 +76,11 @@ INVOICE_GUARD_LOG_MODE_TESTS: frozenset[str] = frozenset(
         "tests/services/test_billing_integrity_detectors.py::"
         "test_row_limit_for_other_invoice_detectors[billing_overallocated]",
         "tests/services/test_billing_w0e_review_fixes.py::test_lock_keeps_unflushed_changes_of_the_caller",
+        "tests/services/test_billing_p1n_adjustments.py::"
+        "test_credit_by_invoice_line_takes_defaults_and_caps_the_line",
+        "tests/services/test_billing_p1n_adjustments.py::"
+        "test_retry_of_a_line_credit_note_returns_the_note_even_when_the_line_is_used_up",
+        "tests/services/test_billing_p1n_adjustments.py::test_credit_lines_must_belong_to_the_invoice",
     }
 )
 

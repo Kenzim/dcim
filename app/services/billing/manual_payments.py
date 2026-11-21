@@ -117,38 +117,42 @@ def record_manual_payment(
             )
             or 0
         )
+        external_ref = f"manual:{invoice.id}:{ordinal + 1}"
+        if write_off_cents > 0:
+            # The note comes first: it recomputes the invoice itself, and the
+            # payment below must be the one that settles it.
+            from app.models.invoice_adjustment import AdjustmentOutcome, AdjustmentReason
+            from app.services.invoice_adjustment_service import InvoiceAdjustmentService
+
+            InvoiceAdjustmentService.issue_credit_note(
+                db,
+                invoice,
+                amount_cents=write_off_cents,
+                reason=AdjustmentReason.WRITE_OFF,
+                outcome=AdjustmentOutcome.REDUCED_BALANCE,
+                actor_user_id=actor_user_id,
+                idempotency_key=f"write-off:{external_ref}",
+                reason_text=reason,
+            )
         payment = Payment(
             invoice_id=invoice.id,
             gateway=MANUAL_GATEWAY,
             status=PaymentStatus.SUCCEEDED,
             amount_cents=paid_cents,
             currency=invoice.currency,
-            external_ref=f"manual:{invoice.id}:{ordinal + 1}",
+            external_ref=external_ref,
             payment_metadata={
                 "source": "admin_mark_paid",
                 "reason": reason,
                 "actor_user_id": actor_user_id,
                 "card_payments_cancelled": card_attempts["cancelled"],
                 "card_payments_left_open": card_attempts["left_open"],
+                **({"written_off_cents": write_off_cents} if write_off_cents else {}),
             },
             processed_at=datetime.now(timezone.utc),
         )
         db.add(payment)
         db.flush()
-    if write_off_cents > 0:
-        from app.models.invoice_adjustment import AdjustmentOutcome, AdjustmentReason
-        from app.services.invoice_adjustment_service import InvoiceAdjustmentService
-
-        InvoiceAdjustmentService.issue_credit_note(
-            db,
-            invoice,
-            amount_cents=write_off_cents,
-            reason=AdjustmentReason.WRITE_OFF,
-            outcome=AdjustmentOutcome.REDUCED_BALANCE,
-            actor_user_id=actor_user_id,
-            idempotency_key=f"write-off:{invoice.id}:{payment.id}",
-            reason_text=reason,
-        )
     invoice = settle_invoice(
         db,
         invoice.id,
