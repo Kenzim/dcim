@@ -90,14 +90,7 @@ class InvoiceNumbering:
                 raise NumberingError(f"could not allocate from counter {name}")
             return int(allocated)
 
-        from app.services.billing_locks import BillingLocks
-
-        counter = BillingLocks.number_counter(db, name)
-        if counter is None:
-            counter = InvoiceSequence(name=name, next_value=1)
-            db.add(counter)
-            db.flush()
-            counter = BillingLocks.number_counter(db, name)
+        counter = lock_counter(db, name)
         allocated = int(counter.next_value)
         counter.next_value = allocated + 1
         db.flush()
@@ -206,7 +199,7 @@ def validate_series_config(
 
 def series_max_value(db: Session, series_id: int, period: Optional[str] = None) -> int:
     """The largest number value issued in a series (in ``period`` when given), 0 if none."""
-    from sqlalchemy import func
+    from sqlalchemy import func, or_
 
     from app.models.invoice_adjustment import InvoiceAdjustment
     from app.models.reseller import Invoice
@@ -219,7 +212,9 @@ def series_max_value(db: Session, series_id: int, period: Optional[str] = None) 
     largest = 0
     for series_column, period_column, value_column in sources:
         stmt = select(func.max(value_column)).where(series_column == series_id)
-        if period is not None:
+        if period == "":
+            stmt = stmt.where(or_(period_column == "", period_column.is_(None)))
+        elif period is not None:
             stmt = stmt.where(period_column == period)
         largest = max(largest, int(db.scalar(stmt) or 0))
     return largest
@@ -253,30 +248,12 @@ def set_counter_at_least(db: Session, series: DocumentSeries, value: int, at: da
     if type(value) is not int or value < 1:
         raise NumberingError("start_value must be a positive integer")
     period = InvoiceNumbering.period(series, at)
+    counter = lock_counter(db, series_counter_name(series.id, period))
     issued = series_max_value(db, series.id, period)
     if value <= issued:
         raise NumberingError(
             f"start_value {value} is not above {issued}, the largest number already issued"
         )
-    name = series_counter_name(series.id, period)
-    if db.get_bind().dialect.name == "sqlite":
-        db.execute(
-            sqlite_insert(InvoiceSequence)
-            .values(name=name, next_value=1)
-            .on_conflict_do_nothing(index_elements=["name"])
-        )
-        counter = db.execute(
-            select(InvoiceSequence).where(InvoiceSequence.name == name)
-        ).scalar_one()
-    else:
-        from app.services.billing_locks import BillingLocks
-
-        counter = BillingLocks.number_counter(db, name)
-        if counter is None:
-            counter = InvoiceSequence(name=name, next_value=1)
-            db.add(counter)
-            db.flush()
-            counter = BillingLocks.number_counter(db, name)
     if value < int(counter.next_value):
         raise NumberingError(
             f"start_value {value} is below the counter's next value {counter.next_value}"
@@ -284,3 +261,64 @@ def set_counter_at_least(db: Session, series: DocumentSeries, value: int, at: da
     counter.next_value = value
     db.flush()
     return value
+
+
+def _create_counter_if_missing(db: Session, name: str) -> None:
+    """Insert counter ``name`` at 1 unless it exists; safe when two transactions race."""
+    dialect = db.get_bind().dialect.name
+    values = {"name": name, "next_value": 1}
+    if dialect == "sqlite":
+        db.execute(sqlite_insert(InvoiceSequence).values(**values).on_conflict_do_nothing(index_elements=["name"]))
+    elif dialect in ("mysql", "mariadb"):
+        from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+        db.execute(mysql_insert(InvoiceSequence).values(**values).prefix_with("IGNORE"))
+    else:
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with db.begin_nested():
+                db.execute(InvoiceSequence.__table__.insert().values(**values))
+        except IntegrityError:
+            pass
+
+
+def lock_counter(db: Session, name: str) -> InvoiceSequence:
+    """Counter ``name``, created at 1 if missing, locked for the caller's transaction."""
+    from app.services.billing_locks import BillingLocks
+
+    _create_counter_if_missing(db, name)
+    counter = BillingLocks.number_counter(db, name)
+    if counter is None:
+        raise NumberingError(f"could not create counter {name}")
+    return counter
+
+
+def lock_series_numbering(db: Session, series: DocumentSeries, at: datetime) -> None:
+    """Hold back publishes that number from ``series`` while its configuration changes.
+
+    Takes the global invoice number row, then the series' counter for the
+    period of ``at``: the order publish takes them. An ``invoice_number``
+    publish holds the first from allocation to commit, an ``own`` publish
+    holds the second, so checks made after this see every number in flight.
+    """
+    if db.get_bind().dialect.name != "sqlite":
+        db.execute(select(InvoiceSequence).where(InvoiceSequence.name == "invoice").with_for_update())
+    lock_counter(db, series_counter_name(series.id, InvoiceNumbering.period(series, at)))
+
+
+def invoice_number_floor(db: Session) -> int:
+    """The next internal invoice number: above every ``invoice_number`` already allocated."""
+    value = db.scalar(select(InvoiceSequence.next_value).where(InvoiceSequence.name == "invoice"))
+    return int(value or 1)
+
+
+def delete_series_counters(db: Session, series_id: int) -> None:
+    """Remove every counter of a series (only for a series that issued nothing)."""
+    from sqlalchemy import delete
+
+    db.execute(
+        delete(InvoiceSequence).where(
+            InvoiceSequence.name.like(series_counter_name(series_id, "") + "%")
+        )
+    )

@@ -260,3 +260,46 @@ def test_v2_mark_paid_partial_and_write_off(client, db_session, admin, account):
     balance = InvoiceService.balance(db_session, written)
     assert written.status == InvoiceStatus.PAID
     assert (balance.credit_cents, balance.paid_net_cents, balance.due_cents) == (100, 900, 0)
+
+
+def test_delete_removes_the_series_counters(client, db_session, admin):
+    series_id = _new(client, admin, start_value=40).json()["id"]
+    name = series_counter_name(series_id, "")
+    assert db_session.scalar(select(InvoiceSequence).where(InvoiceSequence.name == name)) is not None
+    assert client.delete(f"{SERIES}/{series_id}", headers=admin).status_code == 204
+    db_session.expire_all()
+    assert db_session.scalar(select(InvoiceSequence).where(InvoiceSequence.name == name)) is None
+
+
+def test_switch_to_own_starts_above_every_allocated_invoice_number(client, db_session, admin, account):
+    series_id = _new(client, admin, number_source="invoice_number").json()["id"]
+    client.post(f"{SERIES}/{series_id}/make-default", headers=admin)
+    first = _invoice(db_session, account)
+    # A later invoice number that has not reached this series yet (in flight elsewhere).
+    later = InvoiceService.allocate_number(db_session)
+    db_session.commit()
+    response = client.patch(f"{SERIES}/{series_id}", headers=admin, json={"number_source": "own"})
+    assert response.status_code == 200, response.text
+    assert response.json()["next_value"] == later + 1 > first.invoice_number + 1
+
+
+def test_make_default_turns_a_unique_key_clash_into_409(client, db_session, admin, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.orm import Session
+
+    first = _new(client, admin).json()["id"]
+    second = _new(client, admin, code="INV2").json()["id"]
+    client.post(f"{SERIES}/{first}/make-default", headers=admin)
+    real_flush = Session.flush
+    calls = []
+
+    def flush(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise IntegrityError("UPDATE document_series", {}, Exception("uq_document_series_default_for"))
+        return real_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "flush", flush)
+    response = client.post(f"{SERIES}/{second}/make-default", headers=admin)
+    monkeypatch.setattr(Session, "flush", real_flush)
+    assert response.status_code == 409

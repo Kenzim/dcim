@@ -646,8 +646,10 @@ def _issued_numbers():
 def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
     """Gapless series with a gap or a duplicate number, property P7 (design 5.1).
 
-    Per (series, period) the issued values are clean when their count, their
-    distinct count and their maximum are equal and the minimum is 1.
+    Per (series, period) the issued values are clean when they are distinct and
+    run without a hole from the smallest to the largest. The smallest need not
+    be 1: an admin may start a series higher (``start_value``), and the counter
+    keeps no record of that start, so a missing first number is not detected.
     """
     from app.models.billing_series import DocumentSeries
 
@@ -670,7 +672,7 @@ def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
         .join(DocumentSeries, DocumentSeries.id == issued.c.series_id)
         .where(DocumentSeries.gapless.is_(True))
         .group_by(DocumentSeries.id, DocumentSeries.code, issued.c.period)
-        .having(or_(count != distinct, distinct != largest, smallest != 1))
+        .having(or_(count != distinct, distinct != largest - smallest + 1))
         .order_by(DocumentSeries.id, issued.c.period)
     )
     rows, remaining = _limited(db, stmt, params["max_rows"])
@@ -678,7 +680,7 @@ def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
     for row in rows:
         issued_count, distinct_count = int(row.issued), int(row.distinct)
         duplicates = issued_count - distinct_count
-        missing = max(0, int(row.largest) - distinct_count)
+        missing = max(0, int(row.largest) - int(row.smallest) + 1 - distinct_count)
         period = row.period or "all time"
         problems = []
         if duplicates:
@@ -693,7 +695,7 @@ def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
                 f"Series {row.code}",
                 f"Series {row.code} ({period}) has {' and '.join(problems)} numbers",
                 f"{issued_count} numbers issued, {distinct_count} distinct, from {row.smallest} "
-                f"to {row.largest}; a gapless series must issue exactly 1 to its largest number once each.",
+                f"to {row.largest}; a gapless series must issue every number from its first to its largest once each.",
                 details={
                     "series_id": row.id,
                     "code": row.code,

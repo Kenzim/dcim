@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
@@ -18,6 +19,9 @@ from app.services.audit_service import AuditService
 from app.services.invoice_numbering import (
     NumberingError,
     counter_next_value,
+    delete_series_counters,
+    invoice_number_floor,
+    lock_series_numbering,
     series_in_use,
     series_max_value,
     set_counter_at_least,
@@ -105,6 +109,17 @@ def _get_or_404(db: Session, series_id: int) -> DocumentSeries:
     return series
 
 
+def _lock_for_change(db: Session, series_id: int) -> DocumentSeries:
+    """Lock the series row, then its numbering, before any check reads what was issued."""
+    series = db.execute(
+        select(DocumentSeries).where(DocumentSeries.id == series_id).with_for_update()
+    ).scalar_one_or_none()
+    if series is None:
+        raise HTTPException(status_code=404, detail="Series not found")
+    lock_series_numbering(db, series, _now())
+    return series
+
+
 def _validate(**config) -> None:
     try:
         validate_series_config(**config)
@@ -188,7 +203,7 @@ def create_series(body: SeriesCreate, auth: AdminDep, db: DbDep):
 
 @router.patch("/{series_id}")
 def update_series(series_id: int, body: SeriesUpdate, auth: AdminDep, db: DbDep):
-    series = _get_or_404(db, series_id)
+    series = _lock_for_change(db, series_id)
     changes = body.model_dump(exclude_unset=True)
     start_value = changes.pop("start_value", None)
     if any(value is None for value in changes.values()):
@@ -232,7 +247,13 @@ def update_series(series_id: int, body: SeriesUpdate, auth: AdminDep, db: DbDep)
         setattr(series, name, value)
     db.flush()
     if switch_to_own:
-        _set_counter(db, series, max(start_value or 0, series_max_value(db, series.id) + 1))
+        # Above every number the series took from invoice_number, including any
+        # allocated by a publish still in flight (the floor is read under its lock).
+        _set_counter(
+            db,
+            series,
+            max(start_value or 0, series_max_value(db, series.id) + 1, invoice_number_floor(db)),
+        )
     elif start_value is not None:
         _set_counter(db, series, start_value)
     _audit(
@@ -254,12 +275,18 @@ def update_series(series_id: int, body: SeriesUpdate, auth: AdminDep, db: DbDep)
 @router.post("/{series_id}/make-default")
 def make_default(series_id: int, auth: AdminDep, db: DbDep):
     series = _get_or_404(db, series_id)
+    document_type = _type(series)
+    # Every series of the type, in id order, so concurrent make-default calls queue.
+    rows = db.execute(
+        select(DocumentSeries)
+        .where(DocumentSeries.document_type == series.document_type)
+        .order_by(DocumentSeries.id)
+        .with_for_update()
+    ).scalars().all()
+    series = next(row for row in rows if row.id == series_id)
     if not series.enabled:
         raise HTTPException(status_code=409, detail="a disabled series cannot be the default")
-    document_type = _type(series)
-    previous = db.scalar(
-        select(DocumentSeries).where(DocumentSeries.default_for == document_type)
-    )
+    previous = next((row for row in rows if row.default_for == document_type), None)
     if previous is not None and previous.id == series.id:
         return _serialize(db, series)
     if previous is not None:
@@ -267,7 +294,13 @@ def make_default(series_id: int, auth: AdminDep, db: DbDep):
         # The unique key on default_for needs the old default cleared first.
         db.flush()
     series.default_for = document_type
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409, detail="another default was set at the same time; try again"
+        ) from exc
     _audit(
         db,
         auth,
@@ -282,13 +315,14 @@ def make_default(series_id: int, auth: AdminDep, db: DbDep):
 
 @router.delete("/{series_id}", status_code=204)
 def delete_series(series_id: int, auth: AdminDep, db: DbDep):
-    series = _get_or_404(db, series_id)
+    series = _lock_for_change(db, series_id)
     if series.default_for is not None or series_in_use(db, series.id):
         raise HTTPException(
             status_code=409,
             detail="a default series or one in use cannot be deleted; disable it instead",
         )
     _audit(db, auth, "delete", series, {"code": series.code})
+    delete_series_counters(db, series.id)
     db.delete(series)
     db.commit()
     return None

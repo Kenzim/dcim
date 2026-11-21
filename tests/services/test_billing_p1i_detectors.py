@@ -171,7 +171,9 @@ def test_numbering_gaps_clean_gap_duplicate_and_non_gapless(db_session, account)
 
 def test_numbering_gaps_overflow(db_session, account):
     for code in ("E", "F", "G"):
-        _numbered(db_session, account, _series(db_session, code), 2)
+        series = _series(db_session, code)
+        _numbered(db_session, account, series, 1)
+        _numbered(db_session, account, series, 3)
     findings = bi.numbering_gaps(db_session, _params("billing_numbering_gaps", max_rows=2), NOW)
     assert len(findings) == 3 and findings[-1].details == {"remaining": 1, "shown": 2}
 
@@ -193,3 +195,35 @@ def test_legacy_pdf_still_renders(db_session, account):
     invoice = InvoiceService.create(db_session, billing_account_id=account.id,
                                     purpose=InvoicePurpose.UPGRADE, amount_cents=1000)
     assert InvoicePdfService.render_pdf_bytes(db_session, invoice).startswith(b"%PDF")
+
+
+def test_numbering_gaps_accepts_a_series_started_above_one(db_session, account):
+    started = _series(db_session, "H")
+    for value in (50, 51, 52):
+        _numbered(db_session, account, started, value)
+    holed = _series(db_session, "J")
+    for value in (50, 52):
+        _numbered(db_session, account, holed, value)
+    findings = bi.numbering_gaps(db_session, _params("billing_numbering_gaps"), NOW)
+    assert [(f.resource_id, f.details["missing"]) for f in findings] == [(f"{holed.id}:", 1)]
+
+
+def test_series_max_value_counts_a_null_period_as_the_empty_period(db_session, account):
+    from app.services.invoice_numbering import NumberingError, series_max_value, set_counter_at_least
+
+    series = _series(db_session, "K")
+    _numbered(db_session, account, series, 5, period=None)
+    assert series_max_value(db_session, series.id, "") == 5
+    with pytest.raises(NumberingError):
+        set_counter_at_least(db_session, series, 5, NOW)
+    assert set_counter_at_least(db_session, series, 6, NOW) == 6
+
+
+def test_counter_creation_ignores_a_concurrent_insert_on_mysql():
+    from sqlalchemy.dialects import mysql
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+    from app.models.reseller import InvoiceSequence
+
+    statement = mysql_insert(InvoiceSequence).values(name="x", next_value=1).prefix_with("IGNORE")
+    assert str(statement.compile(dialect=mysql.dialect())).startswith("INSERT IGNORE INTO invoice_sequences")
