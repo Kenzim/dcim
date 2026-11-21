@@ -219,11 +219,13 @@ def test_series_max_value_counts_a_null_period_as_the_empty_period(db_session, a
     assert set_counter_at_least(db_session, series, 6, NOW) == 6
 
 
-def test_counter_creation_ignores_a_concurrent_insert_on_mysql():
+def test_counter_creation_on_mysql_takes_the_exclusive_lock_at_once():
     from sqlalchemy.dialects import mysql
     from sqlalchemy.dialects.mysql import insert as mysql_insert
 
     from app.models.reseller import InvoiceSequence
 
-    statement = mysql_insert(InvoiceSequence).values(name="x", next_value=1).prefix_with("IGNORE")
-    assert str(statement.compile(dialect=mysql.dialect())).startswith("INSERT IGNORE INTO invoice_sequences")
+    statement = mysql_insert(InvoiceSequence).values(name="x", next_value=1)
+    sql = str(statement.on_duplicate_key_update(name=statement.inserted.name).compile(dialect=mysql.dialect()))
+    assert sql.startswith("INSERT INTO invoice_sequences") and "ON DUPLICATE KEY UPDATE" in sql
+    assert "IGNORE" not in sql

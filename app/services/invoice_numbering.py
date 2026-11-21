@@ -264,7 +264,16 @@ def set_counter_at_least(db: Session, series: DocumentSeries, value: int, at: da
 
 
 def _create_counter_if_missing(db: Session, name: str) -> None:
-    """Insert counter ``name`` at 1 unless it exists; safe when two transactions race."""
+    """Insert counter ``name`` at 1 unless it exists; safe when transactions race.
+
+    On MySQL and MariaDB this is ``INSERT ... ON DUPLICATE KEY UPDATE`` with no
+    read first. It takes the row's exclusive lock at once, so racing creators
+    queue on it. ``INSERT IGNORE`` would take a shared lock on an existing row,
+    and sessions upgrading it to ``FOR UPDATE`` deadlock. A plain read first
+    would open a read view, and with ``innodb_snapshot_isolation`` (MariaDB
+    11.6 and later) the locking read after it fails with error 1020 once
+    another session commits the row.
+    """
     dialect = db.get_bind().dialect.name
     values = {"name": name, "next_value": 1}
     if dialect == "sqlite":
@@ -272,7 +281,8 @@ def _create_counter_if_missing(db: Session, name: str) -> None:
     elif dialect in ("mysql", "mariadb"):
         from sqlalchemy.dialects.mysql import insert as mysql_insert
 
-        db.execute(mysql_insert(InvoiceSequence).values(**values).prefix_with("IGNORE"))
+        statement = mysql_insert(InvoiceSequence).values(**values)
+        db.execute(statement.on_duplicate_key_update(name=statement.inserted.name))
     else:
         from sqlalchemy.exc import IntegrityError
 
