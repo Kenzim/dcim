@@ -4,8 +4,9 @@ Adds every column of docs/billing-phase1-design.md 1.2 and 1.3. All columns are
 nullable or have a constant server default, so on MariaDB 11 each ADD COLUMN is
 instant; index builds are online. Foreign keys on the new columns are added
 with ``foreign_key_checks = 0`` on MySQL (the columns are all NULL, so no
-violation is possible); on SQLite the columns are plain, as SQLite cannot add a
-foreign key to an existing table.
+violation is possible). MariaDB then reports the ON DELETE RESTRICT rule as
+NO ACTION; InnoDB enforces the two identically. On SQLite the columns are
+plain, as SQLite cannot add a foreign key to an existing table.
 
 Revision ID: billing_p1_invoice_columns
 Revises: billing_p1_series_shadow

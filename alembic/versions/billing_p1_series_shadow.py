@@ -165,6 +165,5 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     bind.execute(sa.text("DELETE FROM invoice_sequences WHERE name LIKE 'series:%'"))
-    op.drop_index("ix_billing_shadow_open", table_name="billing_shadow_mismatches")
     op.drop_table("billing_shadow_mismatches")
     op.drop_table("document_series")

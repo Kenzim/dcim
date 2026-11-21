@@ -57,14 +57,19 @@ def upgrade() -> None:
             ["price_plan_id", "interval_unit", "interval_count"],
         )
 
+    # ``interval`` is a reserved word on MySQL; a Core expression quotes it.
+    cycles = sa.table(
+        TABLE,
+        sa.column("interval", sa.String),
+        sa.column("interval_unit", sa.String),
+        sa.column("interval_count", sa.SmallInteger),
+    )
     bind = op.get_bind()
     for label, (unit, count) in INTERVAL_UNITS.items():
         bind.execute(
-            sa.text(
-                f"UPDATE {TABLE} SET interval_unit = :unit, interval_count = :count "
-                "WHERE interval = :label AND interval_unit IS NULL"
-            ),
-            {"unit": unit, "count": count, "label": label},
+            cycles.update()
+            .where(cycles.c.interval == label, cycles.c.interval_unit.is_(None))
+            .values(interval_unit=unit, interval_count=count)
         )
 
 

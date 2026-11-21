@@ -145,13 +145,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_invoice_adjustment_lines_adjustment_id", table_name="invoice_adjustment_lines")
+    # Dropping a table drops its indexes; MySQL refuses to drop an index a
+    # foreign key still needs.
     op.drop_table("invoice_adjustment_lines")
-    for name in (
-        "ix_invoice_adjustments_invoice_kind",
-        "ix_invoice_adjustments_reseller_id",
-        "ix_invoice_adjustments_billing_account_id",
-        "ix_invoice_adjustments_invoice_id",
-    ):
-        op.drop_index(name, table_name="invoice_adjustments")
     op.drop_table("invoice_adjustments")

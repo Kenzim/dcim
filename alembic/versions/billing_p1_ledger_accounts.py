@@ -8,7 +8,8 @@ exist, plus index ``ix_credit_ledger_account_id`` and foreign key
 MySQL/MariaDB: ADD COLUMN is instant; ``MODIFY reseller_id INT NULL`` is an
 in-place rebuild that allows concurrent reads and writes; the index is built
 online; the foreign key is added with ``foreign_key_checks = 0`` (the column is
-all NULL). SQLite cannot alter a column, so the table is recreated from an
+all NULL), which MariaDB reports as NO ACTION rather than RESTRICT (InnoDB
+enforces the two identically). SQLite cannot alter a column, so the table is recreated from an
 explicit copy of its current definition.
 
 Revision ID: billing_p1_ledger_accounts

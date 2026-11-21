@@ -110,8 +110,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for name, _columns in REFUND_INDEXES:
-        op.drop_index(name, table_name="refunds")
+    # Dropping the table drops its indexes; MySQL refuses to drop an index a
+    # foreign key still needs.
     op.drop_table("refunds")
     for name in reversed(PAYMENT_COLUMNS):
         op.drop_column("payments", name)
