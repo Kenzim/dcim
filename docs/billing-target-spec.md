@@ -113,6 +113,14 @@ Plugins: none.
 Depends on: A1.
 Size: **M**.
 
+*Built in phase 1 (P1-N).* `app/services/invoice_adjustment_service.py` is the only writer of `invoice_adjustments`.
+- A note is published and immutable, with its own number series, a snapshot of its lines, the seller and buyer snapshots from the invoice, and a unique idempotency key. A retry with the same key and parameters returns the existing note; the same key with different parameters is a 409.
+- Notes are issued only while the invoice engine is `v2` (refused in `legacy` and `shadow`), against a published tax invoice that is open, pending action, partially paid, overdue, in collections or paid. Drafts, proformas, credit top-ups and void, refunded or failed invoices are refused.
+- An admin credit note always has outcome `reduced_balance`. It cannot exceed what the invoice still owes, is refused while a payment is pending, and a line naming an invoice line cannot credit more than is left on it. Credit notes in total never exceed the invoice total plus its debit notes. Money already paid goes back through a refund (A4), whose credit note `issue_for_refund` writes for exactly the refund amount, with outcome `refunded` or `credited_to_balance`.
+- An overpayment is a debit note from `issue_overpayment`, for exactly the overpaid amount, with the same amount credited to the account in the same transaction.
+- Tax on an amount-only note is split in proportion to the invoice's tax, rounded half to even. PDFs are rendered from the note's own snapshots only.
+- Routes: admin under `/api/admin/billing` (issue needs an `Idempotency-Key` header or gets a random one; refused during impersonation; audited); clients and resellers read their own notes under `/api/client/commerce/adjustments` and `/api/reseller-panel/adjustments`.
+
 ### A3. Credit balance for every account
 
 Scope: give retail accounts the credit facility resellers already have, with one implementation.
