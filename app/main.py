@@ -441,6 +441,10 @@ api_router.include_router(commerce_client_api.router, tags=["commerce-client"])
 api_router.include_router(commerce_support_admin_api.router, tags=["commerce-support-admin"])
 api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"])
 
+# Automation and billing settings store (typed, database-backed, env defaults)
+from app.api import settings_admin as settings_admin_api
+api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
+
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api
 api_router.include_router(scripts_admin_api.router, tags=["scripts-admin"])

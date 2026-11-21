@@ -23,6 +23,7 @@
   import OSTemplates from '../components/OSTemplates.svelte';
   import BillingIntegrations from '../components/BillingIntegrations.svelte';
   import McpKeys from '../components/McpKeys.svelte';
+  import AutomationSettings from '../components/AutomationSettings.svelte';
   import Alerts from '../components/Alerts.svelte';
   import AdminBilling from '../components/AdminBilling.svelte';
   import Services from '../components/Services.svelte';
@@ -407,6 +408,8 @@
         <CommerceEmailLog />
       {:else if routeName === 'commerce/audit'}
         <CommerceAudit />
+      {:else if routeName === 'settings/automation'}
+        <AutomationSettings />
       {:else if routeName === 'support/tickets'}
         <SupportTickets />
       {:else if routeName === 'user'}

@@ -63,6 +63,7 @@ from app.services.payments.usdt_crypto import (
     format_token_units,
 )
 from app.services.payments.usdt_rpc import EthereumRpcClient, EthereumRpcError
+from app.services.settings_store import get_setting
 from app.services.reseller_billing_service import (
     ProductNotAvailableError,
     ResellerBillingService,
@@ -878,17 +879,15 @@ def create_topup_invoice(
     reseller: ResellerDep,
     db: DbDep,
 ):
-    if not (
-        settings.reseller_topup_min_cents
-        <= body.amount_cents
-        <= settings.reseller_topup_max_cents
-    ):
+    min_cents = get_setting(db, "reseller_topup_min_cents", base=settings)
+    max_cents = get_setting(db, "reseller_topup_max_cents", base=settings)
+    if not (min_cents <= body.amount_cents <= max_cents):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "code": "invalid_topup_amount",
-                "min_cents": settings.reseller_topup_min_cents,
-                "max_cents": settings.reseller_topup_max_cents,
+                "min_cents": min_cents,
+                "max_cents": max_cents,
             },
         )
     invoice = InvoiceService.create_topup(

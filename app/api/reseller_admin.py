@@ -71,6 +71,7 @@ from app.services.credit_ledger_service import (
 from app.services.invoice_service import InvoiceService
 from app.services.reseller_billing_service import ResellerBillingService
 from app.services.recurring_billing_service import RecurringBillingService
+from app.services.settings_store import effective_config
 from app.services.payments.refunds import PaymentRefundError, PaymentRefundService
 from app.services.payments.usdt_crypto import format_token_units
 from app.services.payments.usdt_rpc import EthereumRpcClient, EthereumRpcError
@@ -1220,7 +1221,7 @@ async def run_admin_billing_batch(
     db: DbDep,
 ):
     owner = f"admin-{uuid.uuid4().hex}"
-    service = RecurringBillingService()
+    service = RecurringBillingService(config=effective_config(db))
     acquired = service.acquire_lease(db, owner=owner)
     db.commit()
     if not acquired:
