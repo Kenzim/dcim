@@ -432,9 +432,15 @@ node gets a separate public NIC that carries no address of its own; only the SFT
 the VIP on it. The runner only adds and removes the address, so the host provides the rest:
 
 - **NIC**: one extra NIC per node on the public bridge (Ashburn Tier: `vmbr0`, untagged,
-  23.140.8.0/24, gateway 23.140.8.1), Proxmox firewall off, link up with no IPv4 address, IPv6
-  disabled on it (`disable_ipv6=1`, so router advertisements give it no public address), and
-  `SFTP_VIP_INTERFACE` set to it.
+  23.140.8.0/24, gateway 23.140.8.1, guest name `enp6s21`), Proxmox firewall off, no public
+  address of its own, IPv6 disabled on it (`disable_ipv6=1`, so router advertisements give it no
+  public address), and `SFTP_VIP_INTERFACE` set to it.
+- **Anchor address**: the NIC keeps a permanent link-local `/32` (Ashburn Tier: 169.254.73.N
+  for node N, scope link). When a device's last IPv4 address is deleted, the kernel flushes
+  every route through it in all tables, so without the anchor a node that releases the VIP
+  loses the policy routes below and the next time it takes the VIP its replies leave by the
+  management default route (found in the production build, 2026-11-21). The anchor adds no
+  routes and is never chosen as a source for public traffic.
 - **Policy routing**: replies from the VIP must leave through the public NIC, not the
   management default route. A routing table holds `23.140.8.0/24 dev <pub> scope link` and
   `default via 23.140.8.1 dev <pub> onlink`, and a rule sends `from 23.140.8.30` to that table.
