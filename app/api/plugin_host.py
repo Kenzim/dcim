@@ -30,7 +30,7 @@ BillingDep = Annotated[BillingIntegration, Depends(get_billing_integration)]
 
 admin_router = APIRouter(prefix="/admin/plugins", tags=["plugins-admin"])
 admin_service_router = APIRouter(prefix="/admin/services", tags=["plugins-admin"])
-client_router = APIRouter(prefix="/services", tags=["services-client"])
+client_router = APIRouter(prefix="/client/services", tags=["client"])
 billing_router = APIRouter(prefix="/billing", tags=["billing"])
 
 
@@ -383,6 +383,9 @@ async def admin_plugin_action(service_id: int, plugin_id: str, action_id: str, b
 
 
 def _client_service(db: Session, auth: dict, service_id: int) -> tuple[Service, dict]:
+    from app.api.client import _require_non_admin_client
+
+    _require_non_admin_client(auth)
     user_id = auth.get("user_id")
     if not user_id or auth.get("type") == "api_key":
         raise HTTPException(status_code=403, detail="A user session is required")

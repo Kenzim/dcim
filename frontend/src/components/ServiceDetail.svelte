@@ -7,6 +7,7 @@
   import VMServiceDetail from './VMServiceDetail.svelte';
   import ProxyServiceDetail from './ProxyServiceDetail.svelte';
   import ServicePermissionsPanel from './ServicePermissionsPanel.svelte';
+  import PluginPanels from './PluginPanels.svelte';
 
   export let serviceId;
 
@@ -86,10 +87,13 @@
   </div>
 {:else if service?.service_type === 'bare_metal'}
   <BareMetalServiceDetail {serviceId} />
+  <div class="plugin-wrap"><PluginPanels serviceId={service.id} audience="admin" /></div>
 {:else if service?.service_type === 'vm'}
   <VMServiceDetail {serviceId} />
+  <div class="plugin-wrap"><PluginPanels serviceId={service.id} audience="admin" /></div>
 {:else if service?.service_type === 'http_proxy'}
   <ProxyServiceDetail {serviceId} />
+  <div class="plugin-wrap"><PluginPanels serviceId={service.id} audience="admin" /></div>
 {:else}
   <!-- Generic fallback for any other/unknown service type. -->
   <PageHeader title="Service Detail" />
@@ -153,6 +157,7 @@
         permissionOverrides={service.permission_overrides}
         on:saved={load}
       />
+      <PluginPanels serviceId={service.id} audience="admin" />
     {/if}
   </div>
 {/if}
@@ -160,6 +165,9 @@
 <style>
   .container { padding: 32px; display: grid; gap: 16px; }
   @media (max-width: 768px) { .container { padding: 16px; } }
+  .plugin-wrap { padding: 0 32px 32px; }
+  .plugin-wrap:empty { display: none; }
+  @media (max-width: 768px) { .plugin-wrap { padding: 0 16px 16px; } }
   .panel { border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; background: var(--bg-secondary); }
   .kv-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
   .kv-table th { text-align: left; padding: 6px 10px; color: var(--text-secondary); font-weight: 600; width: 200px; }

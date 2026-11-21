@@ -5265,3 +5265,90 @@ export const clientSaveNotifications = (data) =>
   });
 export const clientTestNotification = () =>
   clientMcpKeysRequest('/client/notifications/test', { method: 'POST', errorMessage: 'Failed to send a test notification' });
+
+// ---------------------------------------------------------------- plugin system (docs/plugin-system.md)
+
+async function pluginRequest(path, { method = 'GET', body, errorMessage = 'Plugin request failed', client = false } = {}) {
+  const headers = client ? { ..._impersonationHeaders() } : {};
+  const options = { method, credentials: 'include', headers };
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(`${API_BASE}${path}`, options);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    const detail = error.detail;
+    let message = errorMessage;
+    if (typeof detail === 'string' && detail) message = detail;
+    else if (Array.isArray(detail) && detail.length) {
+      const msgs = detail.map((item) => item?.msg || item?.message).filter(Boolean);
+      if (msgs.length) message = msgs.join('; ');
+    } else if (detail?.code === 'permissions_not_accepted') {
+      message = 'Accept the requested permissions to continue';
+    }
+    throw Object.assign(new Error(message), { status: response.status, detail });
+  }
+  return response.json();
+}
+
+const pluginPath = (id, rest = '') => `/admin/plugins/${encodeURIComponent(id)}${rest}`;
+
+export const listPluginPackages = () => pluginRequest('/admin/plugins', { errorMessage: 'Failed to load plugins' });
+export const installPlugin = (directory, acceptPermissions, enable = false) =>
+  pluginRequest('/admin/plugins/install', {
+    method: 'POST',
+    body: { directory, accept_permissions: acceptPermissions, enable },
+    errorMessage: 'Failed to install the plugin',
+  });
+export const upgradePlugin = (id, acceptPermissions) =>
+  pluginRequest(pluginPath(id, '/upgrade'), {
+    method: 'POST', body: { accept_permissions: acceptPermissions }, errorMessage: 'Failed to upgrade the plugin',
+  });
+export const setPluginEnabled = (id, enabled) =>
+  pluginRequest(pluginPath(id, enabled ? '/enable' : '/disable'), {
+    method: 'POST', errorMessage: enabled ? 'Failed to enable the plugin' : 'Failed to disable the plugin',
+  });
+export const uninstallPlugin = (id, keepData) =>
+  pluginRequest(pluginPath(id, '/uninstall'), {
+    method: 'POST', body: { keep_data: !!keepData }, errorMessage: 'Failed to remove the plugin',
+  });
+export const resetPluginHealth = (id) =>
+  pluginRequest(pluginPath(id, '/reset-health'), { method: 'POST', errorMessage: 'Failed to reset health' });
+export const getPluginSettings = (id) =>
+  pluginRequest(pluginPath(id, '/settings'), { errorMessage: 'Failed to load settings' });
+export const savePluginSettings = (id, values) =>
+  pluginRequest(pluginPath(id, '/settings'), { method: 'PUT', body: { values }, errorMessage: 'Failed to save settings' });
+export const getPluginLogs = (id, level = '') =>
+  pluginRequest(pluginPath(id, `/logs${level ? `?level=${encodeURIComponent(level)}` : ''}`), {
+    errorMessage: 'Failed to load the log',
+  });
+export const getPluginDeliveries = (id) =>
+  pluginRequest(pluginPath(id, '/deliveries'), { errorMessage: 'Failed to load deliveries' });
+export const retryPluginDelivery = (id, deliveryId) =>
+  pluginRequest(pluginPath(id, `/deliveries/${deliveryId}/retry`), { method: 'POST', errorMessage: 'Failed to retry' });
+export const getPluginSchedules = (id) =>
+  pluginRequest(pluginPath(id, '/schedules'), { errorMessage: 'Failed to load schedules' });
+export const getPluginServices = (id) =>
+  pluginRequest(pluginPath(id, '/services'), { errorMessage: 'Failed to load services' });
+export const setPluginServices = (id, items) =>
+  pluginRequest(pluginPath(id, '/services'), { method: 'PUT', body: { items }, errorMessage: 'Failed to save' });
+export const setPluginAddonRefs = (id, addonRefs) =>
+  pluginRequest(pluginPath(id, '/addon-refs'), {
+    method: 'PUT', body: { addon_refs: addonRefs }, errorMessage: 'Failed to save add-on links',
+  });
+
+// Render documents and actions for a service page. audience 'admin' uses the staff
+// session; 'client' uses the client portal (impersonation headers honoured).
+export const getServicePluginUi = (serviceId, audience = 'admin') =>
+  audience === 'client'
+    ? pluginRequest(`/client/services/${serviceId}/plugin-ui`, { client: true, errorMessage: 'Failed to load' })
+    : pluginRequest(`/admin/services/${serviceId}/plugin-ui`, { errorMessage: 'Failed to load' });
+export const runServicePluginAction = (serviceId, pluginId, actionId, params, confirm, audience = 'admin') => {
+  const base = audience === 'client' ? `/client/services/${serviceId}` : `/admin/services/${serviceId}`;
+  return pluginRequest(
+    `${base}/plugin-actions/${encodeURIComponent(pluginId)}/${encodeURIComponent(actionId)}`,
+    { method: 'POST', body: { params: params || {}, confirm: !!confirm }, client: audience === 'client',
+      errorMessage: 'The action failed' },
+  );
+};

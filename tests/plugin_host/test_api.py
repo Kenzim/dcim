@@ -123,7 +123,7 @@ def test_sample_end_to_end(client, db_session, test_admin_user, sample, monkeypa
     run(scheduler.run_once(owner="t"))
 
     client_headers = _client_headers(client)
-    doc = client.get(f"/api/services/{service.id}/plugin-ui", headers=client_headers).json()
+    doc = client.get(f"/api/client/services/{service.id}/plugin-ui", headers=client_headers).json()
     assert doc["audience"] == "client"
     panel = doc["panels"][0]
     assert panel["plugin_id"] == "uptime_reminder" and panel["health"] == "ok"
@@ -137,7 +137,7 @@ def test_sample_end_to_end(client, db_session, test_admin_user, sample, monkeypa
     admin_doc = client.get(f"/api/admin/services/{service.id}/plugin-ui", headers=admin_headers(client)).json()
     assert set(_actions(admin_doc["panels"][0])) == {"confirm", "remind_now"}
 
-    url = f"/api/services/{service.id}/plugin-actions/uptime_reminder/confirm"
+    url = f"/api/client/services/{service.id}/plugin-actions/uptime_reminder/confirm"
     resp = client.post(url, headers=client_headers, json={"params": {"note": "still used"}})
     assert resp.status_code == 400 and "Confirmation" in resp.json()["detail"]
     resp = client.post(url, headers=client_headers, json={"params": {"note": "still used"}, "confirm": True})
@@ -147,7 +147,7 @@ def test_sample_end_to_end(client, db_session, test_admin_user, sample, monkeypa
     assert note["value"] == "still used"
     resp = client.post(url, headers=client_headers, json={"params": {"bogus": 1}, "confirm": True})
     assert resp.status_code == 400
-    resp = client.post(f"/api/services/{service.id}/plugin-actions/uptime_reminder/remind_now",
+    resp = client.post(f"/api/client/services/{service.id}/plugin-actions/uptime_reminder/remind_now",
                        headers=client_headers, json={})
     assert resp.status_code == 403
 
@@ -171,8 +171,8 @@ def test_client_cannot_see_other_services(client, db_session, sample):
     other = make_user(db_session, "someoneelse")
     service = make_service(db_session, other)
     headers = _client_headers(client)
-    assert client.get(f"/api/services/{service.id}/plugin-ui", headers=headers).status_code == 404
-    resp = client.post(f"/api/services/{service.id}/plugin-actions/uptime_reminder/confirm", headers=headers,
+    assert client.get(f"/api/client/services/{service.id}/plugin-ui", headers=headers).status_code == 404
+    resp = client.post(f"/api/client/services/{service.id}/plugin-actions/uptime_reminder/confirm", headers=headers,
                        json={"confirm": True})
     assert resp.status_code == 404
 

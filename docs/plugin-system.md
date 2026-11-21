@@ -438,7 +438,7 @@ All surfaces get the same JSON:
 
 ```
 GET /api/admin/services/{service_id}/plugin-ui                     staff session
-GET /api/services/{service_id}/plugin-ui                           client session (own services; impersonation headers honoured)
+GET /api/client/services/{service_id}/plugin-ui                    client session (own services; impersonation headers honoured)
 GET /api/billing/services/{service_id}/plugin-ui?audience=client   billing API key (WHMCS), audience client or admin
 ```
 
@@ -478,7 +478,7 @@ Running an action:
 
 ```
 POST /api/admin/services/{service_id}/plugin-actions/{plugin_id}/{action_id}
-POST /api/services/{service_id}/plugin-actions/{plugin_id}/{action_id}
+POST /api/client/services/{service_id}/plugin-actions/{plugin_id}/{action_id}
 POST /api/billing/services/{service_id}/plugin-actions/{plugin_id}/{action_id}?audience=client
 body {"params": {...}, "confirm": true}
 200  {"ok": true, "message": "Thanks, we have recorded that.", "panels": [panels of that plugin only]}
