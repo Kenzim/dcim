@@ -478,6 +478,83 @@ def test_reseller_webhook_locks_reseller_before_invoice_and_payment(db_session, 
     assert reseller.cached_balance_cents == 801
 
 
+# Finding 6: admin mark-paid cancels an open card attempt first, when the gateway confirms.
+
+
+def _open_card_attempt(db_session, amount: int = 600):
+    from tests.services.test_billing_a0_money_path import _FakeCardGateway, _registry
+    from app.services.payments.retail_card import start_card_payment
+
+    _, account = _account(db_session)
+    invoice = _open_invoice(db_session, account, amount)
+    gateway = _FakeCardGateway()
+    started = start_card_payment(
+        db_session, invoice, billing_account_id=account.id, registry=_registry(gateway)
+    )
+    db_session.commit()
+    return invoice, gateway, started
+
+
+def test_mark_paid_cancels_a_payable_card_attempt(db_session, emitted):
+    from tests.services.test_billing_a0_money_path import _deliver, _registry, _succeeded
+    from app.services.billing.manual_payments import record_manual_payment
+
+    invoice, gateway, started = _open_card_attempt(db_session)
+    _, manual = record_manual_payment(
+        db_session, invoice.id, reason="wire", actor_user_id=None, registry=_registry(gateway)
+    )
+    settlement.commit_and_fulfil(db_session)
+    assert gateway.cancelled == [started.payment_intent_id]
+    card = db_session.get(Payment, started.payment_id)
+    assert card.status == PaymentStatus.FAILED
+    assert card.failure_code == "cancelled_manual_payment"
+    assert manual.payment_metadata["card_payments_cancelled"] == [started.payment_id]
+    assert manual.amount_cents == 600
+    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.PAID
+    assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
+
+
+@pytest.mark.parametrize("gateway_state", ["processing", "unreachable", "refuses"])
+def test_mark_paid_leaves_an_uncancellable_card_attempt_for_review(
+    db_session, emitted, gateway_state
+):
+    from tests.services.test_billing_a0_money_path import _deliver, _registry, _succeeded
+    from app.services.billing.manual_payments import record_manual_payment
+    from app.services.payments.base import GatewayPaymentIntent, PaymentGatewayError
+
+    invoice, gateway, started = _open_card_attempt(db_session)
+    if gateway_state == "processing":
+        gateway.status = "processing"
+    elif gateway_state == "unreachable":
+        def down(**_kwargs):
+            raise PaymentGatewayError("gateway timeout")
+
+        gateway.cancel_payment_intent = down
+    else:
+        gateway.cancel_payment_intent = lambda **kw: GatewayPaymentIntent(
+            external_ref=kw["external_ref"], client_secret=None, status="requires_payment_method"
+        )
+    _, manual = record_manual_payment(
+        db_session, invoice.id, reason="wire", actor_user_id=None, registry=_registry(gateway)
+    )
+    settlement.commit_and_fulfil(db_session)
+    assert db_session.get(Payment, started.payment_id).status == PaymentStatus.PENDING
+    assert manual.payment_metadata["card_payments_left_open"] == [started.payment_id]
+    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.PAID
+
+    # The card money arrives anyway: recorded, flagged as an overpayment, no second invoice.paid.
+    gateway.status = "succeeded"
+    _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 600))
+    assert db_session.get(Payment, started.payment_id).status == PaymentStatus.SUCCEEDED
+    flagged = db_session.execute(
+        select(UserAuditEvent).where(UserAuditEvent.action == "billing.refund_review")
+    ).scalars().all()
+    assert any(
+        (event.event_metadata or {}).get("reason") == "overpayment" for event in flagged
+    ), [event.event_metadata for event in flagged]
+    assert len(_events(emitted, "invoice.paid", "invoice_id", invoice.id)) == 1
+
+
 def test_lock_keeps_unflushed_changes_of_the_caller(db_session):
     from app.services.invoice_service import InvoiceService
 

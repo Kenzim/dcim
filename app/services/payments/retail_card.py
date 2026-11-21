@@ -72,11 +72,55 @@ def _open_card_payment(db: Session, invoice_id: int) -> Optional[Payment]:
     return payments[0] if payments else None
 
 
-def _close(payment: Payment, code: str) -> None:
+def _close(
+    payment: Payment, code: str, message: str = "The payment attempt was replaced"
+) -> None:
     payment.status = PaymentStatus.FAILED
     payment.failure_code = code
-    payment.failure_message = "The payment attempt was replaced"
+    payment.failure_message = message
     payment.processed_at = datetime.now(timezone.utc)
+
+
+def cancel_open_card_payments(
+    db: Session,
+    invoice_id: int,
+    *,
+    registry: Optional[PaymentGatewayRegistry] = None,
+) -> dict[str, list[int]]:
+    """Cancel the invoice's open card attempts at the gateway; the invoice must be locked.
+
+    A pending attempt is closed only after the gateway confirms the cancellation.
+    One the gateway cannot cancel (processing, already succeeded, unreachable
+    or no card gateway configured) stays pending; if its money arrives later,
+    settlement records it as an overpayment for refund review.
+    Returns the payment ids under ``cancelled`` and ``left_open``.
+    """
+    result: dict[str, list[int]] = {"cancelled": [], "left_open": []}
+    payments = open_card_payments(db, invoice_id)
+    if not payments:
+        return result
+    gateway = (registry or payment_gateway_registry).maybe_get(CARD_GATEWAY)
+    for payment in payments:
+        cancelled = False
+        if gateway is not None and payment.external_ref:
+            try:
+                intent = gateway.retrieve_payment_intent(external_ref=payment.external_ref)
+                if intent.status in _REUSABLE_INTENT_STATUSES:
+                    intent = gateway.cancel_payment_intent(external_ref=payment.external_ref)
+                cancelled = intent.status == "canceled"
+            except PaymentGatewayError:
+                cancelled = False
+        if cancelled:
+            _close(
+                payment,
+                "cancelled_manual_payment",
+                "Cancelled because the invoice was paid another way",
+            )
+            result["cancelled"].append(int(payment.id))
+        else:
+            result["left_open"].append(int(payment.id))
+    db.flush()
+    return result
 
 
 def start_card_payment(

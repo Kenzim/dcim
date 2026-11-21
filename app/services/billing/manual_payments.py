@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.reseller import Invoice, InvoiceStatus, Payment, PaymentStatus
+
+if TYPE_CHECKING:
+    from app.services.payments.registry import PaymentGatewayRegistry
 
 MANUAL_GATEWAY = "manual"
 
@@ -23,15 +26,22 @@ def record_manual_payment(
     *,
     reason: str,
     actor_user_id: Optional[int],
+    registry: Optional["PaymentGatewayRegistry"] = None,
 ) -> tuple[Invoice, Optional[Payment]]:
     """Record a manual payment for the outstanding amount and settle the invoice.
 
     An invoice that is already paid is returned unchanged with no new payment.
     The caller writes its audit row and then ends the transaction with
     ``settlement.commit_and_fulfil``, which fulfils a paid order afterwards.
+
+    Open client card attempts are cancelled at the gateway first
+    (``retail_card.cancel_open_card_payments``); an attempt the gateway does not
+    cancel stays pending and is listed in the payment's metadata, and its money,
+    if it arrives, is flagged as an overpayment for refund review.
     """
     from app.services.billing.settlement import SOURCE_ADMIN_MARK_PAID
     from app.services.invoice_service import InvoiceService
+    from app.services.payments.retail_card import cancel_open_card_payments
 
     invoice = InvoiceService.get_for_update(db, invoice_id)
     if invoice is None:
@@ -43,6 +53,7 @@ def record_manual_payment(
     outstanding = int(invoice.amount_cents) - InvoiceService.allocated_cents(db, invoice.id)
     payment: Optional[Payment] = None
     if outstanding > 0:
+        card_attempts = cancel_open_card_payments(db, invoice.id, registry=registry)
         ordinal = int(
             db.scalar(
                 select(func.count(Payment.id)).where(
@@ -63,6 +74,8 @@ def record_manual_payment(
                 "source": "admin_mark_paid",
                 "reason": reason,
                 "actor_user_id": actor_user_id,
+                "card_payments_cancelled": card_attempts["cancelled"],
+                "card_payments_left_open": card_attempts["left_open"],
             },
             processed_at=datetime.now(timezone.utc),
         )
