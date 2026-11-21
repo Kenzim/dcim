@@ -422,14 +422,8 @@ class PaymentWebhookService:
             service = db.get(Service, service_id)
             if service is None:
                 continue
-            try:
-                await lifecycle.suspend(db, service, reason=reason)
-            except ServiceLifecycleError as exc:
-                logger.warning(
-                    "Dispute suspend failed for service %s: %s",
-                    service_id,
-                    exc,
-                )
+            # Errors reach run_deferred_suspensions, which logs and audits them.
+            await lifecycle.suspend(db, service, reason=reason)
 
     @staticmethod
     def _run_suspend_services_for_dispute(
@@ -520,6 +514,23 @@ class PaymentWebhookService:
                         db, [service_id], reason=reason
                     )
                     db.commit()
-                except Exception:  # noqa: BLE001 - one service must not stop the others
+                except Exception as exc:  # noqa: BLE001 - one service must not stop the others
                     db.rollback()
                     logger.exception("Dispute suspend failed for service %s", service_id)
+                    PaymentWebhookService._audit_suspend_failure(db, service_id, reason, exc)
+
+    @staticmethod
+    def _audit_suspend_failure(db: Session, service_id: int, reason: str, exc: Exception) -> None:
+        try:
+            AuditService.log(
+                db,
+                actor_user_id=None,
+                action="billing.dispute_suspend_failed",
+                resource_type="service",
+                resource_id=str(service_id),
+                metadata={"reason": reason, "error": f"{type(exc).__name__}: {exc}"[:500]},
+            )
+            db.commit()
+        except Exception:  # noqa: BLE001 - the dispute is committed; the log line above remains
+            db.rollback()
+            logger.exception("Could not audit the failed dispute suspend of service %s", service_id)

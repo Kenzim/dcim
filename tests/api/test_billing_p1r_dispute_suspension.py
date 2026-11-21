@@ -7,11 +7,24 @@ lifecycle calls, and it works from both the async routes and sync callers.
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import event as sa_event
 
-from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
+from app.models.commerce_audit import UserAuditEvent
+from app.models.refund import Refund, RefundReason, RefundStatus
+from app.models.reseller import (
+    GatewayWebhookEvent,
+    Invoice,
+    InvoicePurpose,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 from app.models.service import Service, ServiceStatus, ServiceType
+from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
 from app.services.payments.base import GatewayWebhookAction, NormalizedGatewayWebhookEvent
 from app.services.payments.webhooks import PaymentWebhookService
 from tests.api.test_reseller_panel import _login, fake_stripe  # noqa: F401
@@ -54,38 +67,118 @@ def _dispute_event(event_id, ref):
     }
 
 
+def _committed(db_session, *, gateway, event_id, payment_ref, service_id):
+    """Read back what the webhook committed.
+
+    The test engine shares one SQLite connection between sessions, so the
+    request's session is rolled back first: whatever is still there was
+    committed. It is then read in a fresh session.
+    """
+    from tests.conftest import TestingSessionLocal
+
+    db_session.rollback()
+    fresh = TestingSessionLocal()
+    try:
+        payment = fresh.query(Payment).filter(Payment.external_ref == payment_ref).one()
+        return SimpleNamespace(
+            webhook_event=fresh.query(GatewayWebhookEvent)
+            .filter(GatewayWebhookEvent.gateway == gateway, GatewayWebhookEvent.event_id == event_id)
+            .one_or_none(),
+            refunds=[
+                (r.reason, r.status, int(r.amount_cents), r.idempotency_key)
+                for r in fresh.query(Refund).filter(Refund.payment_id == payment.id)
+            ],
+            payment=(payment.status, int(payment.refunded_cents or 0)),
+            invoice_status=fresh.get(Invoice, payment.invoice_id).status,
+            service_status=fresh.get(Service, service_id).status,
+            suspend_failed_audits=[
+                event.event_metadata
+                for event in fresh.query(UserAuditEvent).filter(
+                    UserAuditEvent.action == "billing.dispute_suspend_failed",
+                    UserAuditEvent.resource_id == str(service_id),
+                )
+            ],
+        )
+    finally:
+        fresh.close()
+
+
+def _post_stripe(client):
+    return client.post("/api/reseller-panel/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "valid"})
+
+
 def test_stripe_dispute_through_async_route_suspends_linked_service(client, db_session, fake_stripe):  # noqa: F811
     reseller, _headers = _login(client, db_session, "p1r-dispute")
-    service, invoice = _disputable(db_session, reseller, "pi_p1r_dispute")
+    service, _invoice = _disputable(db_session, reseller, "pi_p1r_dispute")
     fake_stripe.event = _dispute_event("evt_p1r_dispute", "pi_p1r_dispute")
 
-    response = client.post("/api/reseller-panel/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "valid"})
+    response = _post_stripe(client)
+
+    # 1. The route answers 200 with its usual body.
+    assert response.status_code == 200, response.text
+    assert response.json() == {"received": True, "duplicate": False}
+    state = _committed(db_session, gateway="stripe", event_id="evt_p1r_dispute", payment_ref="pi_p1r_dispute", service_id=service.id)
+    # 2. The dispute and its refund row are committed.
+    assert state.webhook_event is not None
+    assert state.refunds == [(RefundReason.DISPUTE, RefundStatus.SUCCEEDED, 1500, "stripe-dispute:evt_p1r_dispute")]
+    assert state.payment == (PaymentStatus.REFUNDED, 1500)
+    assert state.invoice_status == InvoiceStatus.FAILED
+    # 3. The linked service is suspended.
+    assert state.service_status == ServiceStatus.SUSPENDED
+    assert state.suspend_failed_audits == []
+    # A gateway retry is a duplicate and changes nothing.
+    assert _post_stripe(client).json() == {"received": True, "duplicate": True}
+
+
+@pytest.mark.parametrize("error", [ServiceLifecycleError("hypervisor unreachable"), RuntimeError("plugin crashed")])
+def test_stripe_dispute_with_failing_suspension_is_still_committed(client, db_session, fake_stripe, monkeypatch, caplog, error):  # noqa: F811
+    reseller, _headers = _login(client, db_session, f"p1r-dispute-fail-{type(error).__name__}")
+    ref = f"pi_p1r_fail_{type(error).__name__}"
+    service, _invoice = _disputable(db_session, reseller, ref)
+    fake_stripe.event = _dispute_event(f"evt_{ref}", ref)
+
+    async def failing_suspend(self, db, svc, *, reason):
+        svc.status = ServiceStatus.SUSPENDED  # a half-done change must be rolled back
+        db.flush()
+        raise error
+
+    monkeypatch.setattr(ServiceLifecycle, "suspend", failing_suspend)
+    with caplog.at_level(logging.ERROR, logger="app.services.payments.webhooks"):
+        response = _post_stripe(client)
 
     assert response.status_code == 200, response.text
     assert response.json() == {"received": True, "duplicate": False}
-    db_session.expire_all()
-    assert db_session.get(Service, service.id).status == ServiceStatus.SUSPENDED
-    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.FAILED
-    replay = client.post("/api/reseller-panel/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "valid"})
-    assert replay.json() == {"received": True, "duplicate": True}
+    state = _committed(db_session, gateway="stripe", event_id=f"evt_{ref}", payment_ref=ref, service_id=service.id)
+    assert state.webhook_event is not None
+    assert state.refunds == [(RefundReason.DISPUTE, RefundStatus.SUCCEEDED, 1500, f"stripe-dispute:evt_{ref}")]
+    assert state.payment == (PaymentStatus.REFUNDED, 1500)
+    assert state.service_status == ServiceStatus.ACTIVE
+    assert [audit["reason"] for audit in state.suspend_failed_audits] == ["dispute"]
+    assert str(error) in state.suspend_failed_audits[0]["error"]
+    assert any(f"Dispute suspend failed for service {service.id}" in r.getMessage() for r in caplog.records)
 
 
 def test_sync_caller_dispute_suspends_after_commit_with_no_lock_held(db_session, client, lock_calls):  # noqa: F811
     reseller, _headers = _login(client, db_session, "p1r-dispute-sync")
     service, _invoice = _disputable(db_session, reseller, "pi_p1r_sync")
     seen = {}
+    lock_calls.clear()
+    marker = [0]
+    commits = [0]
 
     async def recording_suspend(self, db, svc, *, reason):
-        # The dispute's transaction is already committed: no locks are held.
-        seen["in_transaction"] = db.in_transaction() and bool(db.dirty or db.new)
+        # The dispute's transaction has committed (its locks were taken and
+        # released) and no billing lock has been taken since.
+        seen["uncommitted_writes"] = db.connection().connection.dbapi_connection.in_transaction
+        seen["refund_recorded"] = db.query(Refund).filter(Refund.idempotency_key == "stripe-dispute:evt_p1r_sync").count() == 1
+        seen["dispute_took_locks"] = marker[0] > 0
         seen["locks_since_commit"] = list(lock_calls[marker[0]:])
         svc.status = ServiceStatus.SUSPENDED
         db.flush()
         return True
 
-    marker = [0]
-
     def on_commit(_session):
+        commits[0] += 1
         marker[0] = len(lock_calls)
 
     sa_event.listen(db_session, "after_commit", on_commit)
@@ -108,7 +201,12 @@ def test_sync_caller_dispute_suspends_after_commit_with_no_lock_held(db_session,
         sa_event.remove(db_session, "after_commit", on_commit)
     db_session.expire_all()
     assert db_session.get(Service, service.id).status == ServiceStatus.SUSPENDED
-    assert seen == {"in_transaction": False, "locks_since_commit": []}
+    assert seen == {
+        "uncommitted_writes": False,
+        "refund_recorded": True,
+        "dispute_took_locks": True,
+        "locks_since_commit": [],
+    }
 
 
 def test_failed_dispute_transaction_does_not_suspend(db_session, client, monkeypatch):
@@ -174,5 +272,9 @@ def test_paypal_dispute_through_async_route_suspends_linked_service(client, db_s
             payment_gateway_registry.unregister("paypal")
     assert response.status_code == 200, response.text
     assert response.json() == {"received": True, "duplicate": False}
-    db_session.expire_all()
-    assert db_session.get(Service, service.id).status == ServiceStatus.SUSPENDED
+    state = _committed(db_session, gateway="paypal", event_id="WH-P1R", payment_ref="CAP-P1R", service_id=service.id)
+    assert state.webhook_event is not None
+    assert state.refunds == [(RefundReason.DISPUTE, RefundStatus.SUCCEEDED, 1500, "paypal-dispute:WH-P1R")]
+    assert state.payment == (PaymentStatus.REFUNDED, 1500)
+    assert state.service_status == ServiceStatus.SUSPENDED
+    assert state.suspend_failed_audits == []
