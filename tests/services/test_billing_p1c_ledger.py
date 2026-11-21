@@ -128,11 +128,12 @@ def test_v2_makes_the_account_cache_authoritative(db_session, recorded):
     assert CreditLedgerService.balance_cents(db_session, reseller) == 300
 
 
-def test_retail_account_credit_is_refused_in_legacy_and_chains_in_shadow(db_session, recorded):
+def test_retail_account_credit_chains_in_every_mode(db_session, recorded):
     set_credit_mode(db_session, "legacy")
     account = _retail(db_session, "retail")
-    with pytest.raises(RetailCreditUnavailableError):
-        CreditLedgerService.credit_account(db_session, account.id, 100)
+    legacy = CreditLedgerService.credit_account(db_session, account.id, 100)
+    assert legacy.billing_account_id == account.id and account.credit_balance_cents == 100
+    CreditLedgerService.debit_account(db_session, account.id, 100)
     set_credit_mode(db_session, "shadow")
     first = CreditLedgerService.credit_account(db_session, account.id, 1_000, idempotency_key="r-1")
     again = CreditLedgerService.credit_account(db_session, account.id, 1_000, idempotency_key="r-1")

@@ -6,8 +6,9 @@ ordered by id (docs/billing-phase1-design.md 6.1). The reseller methods
 resolve the reseller's account; the ``*_account`` methods take a billing
 account id. The credit engine mode decides which cache is authoritative:
 
-- ``legacy``: the reseller cache only, as before A3; account entries are not
-  linked and retail accounts have no ledger.
+- ``legacy``: the reseller cache only, as before A3; reseller entries are not
+  linked to an account. Retail accounts (one cache) chain in every mode; their
+  credit features are gated on ``v2`` where they start.
 - ``shadow``: the reseller cache is authoritative for reseller accounts and the
   account cache is written beside it as a mirror; differences are recorded as
   check ``c1_cache_pair``.
@@ -427,11 +428,10 @@ class CreditLedgerService:
                 allow_negative_balance=allow_negative_balance,
             )
         mode = credit_engine_mode(db)
-        if mode == "legacy":
-            raise RetailCreditUnavailableError(
-                "Retail account credit is not available while the credit engine is legacy"
-            )
         account = BillingLocks.billing_account(db, billing_account_id)
+        # A retail account has one cache, so its chain is written in every mode;
+        # retail credit features are gated on v2 where they start (top-up and
+        # apply), so a gateway-confirmed top-up still settles after a rollback.
         return CreditLedgerService._append(
             db,
             mode=mode,
