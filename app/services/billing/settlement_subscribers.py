@@ -18,6 +18,11 @@
 
 All five are isolated: a failure in one is logged and never undoes the
 settlement.
+
+Every other catalogue billing event has one default subscriber named
+``catalogue:<event>``, which builds the catalogue payload from the internal
+event and emits it; it is the only emission site of that event. Nothing fires
+those events until the phase 1 services do.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models.commerce_order import Order, OrderStatus
 from app.models.reseller import Invoice, InvoicePurpose
+from app.services.billing import settlement
 from app.services.billing.settlement import (
     SOURCE_ADMIN_MARK_PAID,
     InvoicePaid,
@@ -189,3 +195,179 @@ def register_defaults() -> None:
         "invoice_paid_email", email_invoice_paid, applies=_has_billing_account
     )
     subscribe_invoice_paid("fulfil_order", fulfil_order, applies=_is_order_charge)
+    for event, builder in CATALOGUE_PAYLOADS.items():
+        settlement.subscribe(event, f"catalogue:{event}", _catalogue_publisher(event, builder))
+
+
+# Catalogue payloads of the phase 1 billing events (docs/billing-phase1-design.md 9.2).
+
+
+def _value(value):
+    return getattr(value, "value", value)
+
+
+def _iso(value):
+    return value.isoformat() if value is not None else None
+
+
+def account_id_for(db: Session, *, billing_account_id, reseller_id):
+    """The billing account of a document, resolved through the reseller's account if unset."""
+    if billing_account_id is not None or reseller_id is None:
+        return billing_account_id
+    from sqlalchemy import select
+
+    from app.models.commerce_account import BillingAccount
+
+    return db.scalar(select(BillingAccount.id).where(BillingAccount.reseller_id == reseller_id))
+
+
+def _invoice_fields(db: Session, invoice: Invoice) -> dict:
+    return {
+        "invoice_id": invoice.id,
+        "billing_account_id": account_id_for(
+            db, billing_account_id=invoice.billing_account_id, reseller_id=invoice.reseller_id
+        ),
+        "reseller_id": invoice.reseller_id,
+        "invoice_number": invoice.invoice_number,
+        "number_display": invoice.number_display,
+    }
+
+
+def _invoice_created(db: Session, event: settlement.InvoiceCreated) -> dict:
+    invoice = event.invoice
+    return {
+        **_invoice_fields(db, invoice),
+        "purpose": _value(invoice.purpose),
+        "total_cents": int(invoice.amount_cents),
+        "currency": invoice.currency,
+        "order_id": invoice.order_id,
+        "service_id": invoice.service_id,
+        "due_at": _iso(invoice.due_at),
+        "document_type": _value(invoice.document_type),
+    }
+
+
+def _invoice_overdue(db: Session, event: settlement.InvoiceOverdue) -> dict:
+    invoice = event.invoice
+    return {
+        **_invoice_fields(db, invoice),
+        "due_cents": int(event.due_cents),
+        "currency": invoice.currency,
+        "due_at": _iso(invoice.due_at),
+    }
+
+
+def _invoice_voided(db: Session, event: settlement.InvoiceVoided) -> dict:
+    return {**_invoice_fields(db, event.invoice), "reason": event.reason}
+
+
+def _invoice_refunded(db: Session, event: settlement.InvoiceRefunded) -> dict:
+    return {
+        **_invoice_fields(db, event.invoice),
+        "refunded_cents": int(event.refunded_cents),
+        "currency": event.invoice.currency,
+    }
+
+
+def _note_fields(db: Session, note, id_key: str) -> dict:
+    return {
+        id_key: note.id,
+        "invoice_id": note.invoice_id,
+        "billing_account_id": account_id_for(
+            db, billing_account_id=note.billing_account_id, reseller_id=note.reseller_id
+        ),
+        "total_cents": int(note.total_cents),
+        "currency": note.currency,
+        "reason": _value(note.reason_code),
+        "outcome": _value(note.outcome),
+        "reseller_id": note.reseller_id,
+        "number_display": note.number_display,
+    }
+
+
+def _credit_note_issued(db: Session, event: settlement.CreditNoteIssued) -> dict:
+    payload = _note_fields(db, event.adjustment, "credit_note_id")
+    payload["refund_id"] = event.refund.id if event.refund is not None else None
+    return payload
+
+
+def _debit_note_issued(db: Session, event: settlement.DebitNoteIssued) -> dict:
+    return _note_fields(db, event.adjustment, "debit_note_id")
+
+
+def _payment_refunded(db: Session, event: settlement.PaymentRefunded) -> dict:
+    refund = event.refund
+    return {
+        "refund_id": refund.id,
+        "payment_id": refund.payment_id,
+        "invoice_id": refund.invoice_id,
+        "billing_account_id": account_id_for(
+            db, billing_account_id=refund.billing_account_id, reseller_id=refund.reseller_id
+        ),
+        "amount_cents": int(refund.amount_cents),
+        "currency": refund.currency,
+        "destination": _value(refund.destination),
+        "reason": _value(refund.reason),
+        "reseller_id": refund.reseller_id,
+        "gateway": refund.gateway,
+        "gateway_refund_ref": refund.gateway_refund_ref,
+        "credit_note_id": event.credit_note.id if event.credit_note is not None else None,
+    }
+
+
+def _entry_account_id(db: Session, entry):
+    return account_id_for(
+        db, billing_account_id=entry.billing_account_id, reseller_id=entry.reseller_id
+    )
+
+
+def _credit_added(db: Session, event: settlement.CreditAdded) -> dict:
+    entry = event.entry
+    return {
+        "ledger_entry_id": entry.id,
+        "billing_account_id": _entry_account_id(db, entry),
+        "amount_cents": int(entry.amount_cents),
+        "balance_cents": int(event.balance_cents),
+        "currency": event.currency,
+        "entry_type": _value(entry.entry_type),
+        "reseller_id": entry.reseller_id,
+        "invoice_id": entry.invoice_id,
+        "refund_id": event.refund.id if event.refund is not None else None,
+    }
+
+
+def _credit_applied(db: Session, event: settlement.CreditApplied) -> dict:
+    entry = event.entry
+    return {
+        "ledger_entry_id": entry.id,
+        "billing_account_id": _entry_account_id(db, entry),
+        "invoice_id": event.invoice.id,
+        "amount_cents": abs(int(entry.amount_cents)),
+        "balance_cents": int(event.balance_cents),
+        "currency": event.invoice.currency,
+        "reseller_id": entry.reseller_id,
+        "payment_id": event.payment.id if event.payment is not None else None,
+    }
+
+
+CATALOGUE_PAYLOADS = {
+    settlement.INVOICE_CREATED: _invoice_created,
+    settlement.INVOICE_OVERDUE: _invoice_overdue,
+    settlement.INVOICE_VOIDED: _invoice_voided,
+    settlement.INVOICE_REFUNDED: _invoice_refunded,
+    settlement.CREDIT_NOTE_ISSUED: _credit_note_issued,
+    settlement.DEBIT_NOTE_ISSUED: _debit_note_issued,
+    settlement.PAYMENT_REFUNDED: _payment_refunded,
+    settlement.CREDIT_ADDED: _credit_added,
+    settlement.CREDIT_APPLIED: _credit_applied,
+}
+
+
+def _catalogue_publisher(event: str, builder):
+    def publish(db: Session, payload) -> None:
+        from app.plugin_host import events as plugin_events
+
+        plugin_events.emit(db, event, builder(db, payload))
+
+    publish.__name__ = f"publish_{event.replace('.', '_')}"
+    return publish

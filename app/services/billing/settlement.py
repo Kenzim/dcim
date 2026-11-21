@@ -1,14 +1,24 @@
-"""The single point where an invoice becomes paid, and the in-process "invoice paid" event.
+"""The single point where an invoice becomes paid, and the in-process billing events.
 
 Every path that records money against an invoice (card webhook, saved-method
 charge, reseller credit, USDT, admin mark-paid) ends in ``settle_invoice``.
-When an invoice moves to PAID there, the registered subscribers run in
+When an invoice moves to PAID there, the subscribers of ``invoice.paid`` run in
 registration order inside the caller's transaction.
+
+The subscriber registry is keyed by event name: ``subscribe(event, ...)`` and
+``fire(db, event, payload)``. Internal event names are the plugin catalogue
+names (``app/plugin_host/catalogue.py``), and each payload is a frozen
+dataclass carrying ORM objects. For each catalogue event one default
+subscriber (registered in ``settlement_subscribers``) builds the catalogue
+payload and calls ``app.plugin_host.events.emit``; that subscriber is the only
+emission site of the event. ``subscribe_invoice_paid`` and
+``fire_invoice_paid`` are the ``invoice.paid`` forms of the two functions.
 
 Subscribers registered with ``isolated=True`` (the default) are side effects:
 each runs in its own savepoint and a failure is logged and rolled back without
-undoing the settlement. Subscribers registered with ``isolated=False`` run
-bare and must not raise or commit; no default subscriber uses that.
+undoing the change that fired the event. Subscribers registered with
+``isolated=False`` run bare and must not raise or commit; no default
+subscriber uses that.
 
 Order fulfilment never runs inside the settlement transaction, because
 provisioning commits. The ``fulfil_order`` subscriber only queues the order;
@@ -23,7 +33,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -32,6 +42,15 @@ from app.models.reseller import Invoice, InvoiceStatus, Payment
 logger = logging.getLogger(__name__)
 
 INVOICE_PAID = "invoice.paid"
+INVOICE_CREATED = "invoice.created"
+INVOICE_OVERDUE = "invoice.overdue"
+INVOICE_VOIDED = "invoice.voided"
+INVOICE_REFUNDED = "invoice.refunded"
+CREDIT_NOTE_ISSUED = "credit_note.issued"
+DEBIT_NOTE_ISSUED = "debit_note.issued"
+PAYMENT_REFUNDED = "payment.refunded"
+CREDIT_ADDED = "credit.added"
+CREDIT_APPLIED = "credit.applied"
 SOURCE_ADMIN_MARK_PAID = "admin_mark_paid"
 
 
@@ -48,23 +67,128 @@ class InvoicePaid:
     source: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class InvoiceCreated:
+    """``invoice.created``: an invoice was published (``draft`` to ``open``)."""
+
+    invoice: Invoice
+
+
+@dataclass(frozen=True)
+class InvoiceOverdue:
+    """``invoice.overdue``: an invoice moved to ``overdue``; ``due_cents`` from its balance."""
+
+    invoice: Invoice
+    due_cents: int
+
+
+@dataclass(frozen=True)
+class InvoiceVoided:
+    invoice: Invoice
+    reason: str
+
+
+@dataclass(frozen=True)
+class InvoiceRefunded:
+    """``invoice.refunded``: an invoice moved to ``refunded``."""
+
+    invoice: Invoice
+    refunded_cents: int
+
+
+@dataclass(frozen=True)
+class CreditNoteIssued:
+    adjustment: Any  # InvoiceAdjustment with kind credit
+    refund: Any = None  # Refund paired with the note, if any
+
+
+@dataclass(frozen=True)
+class DebitNoteIssued:
+    adjustment: Any  # InvoiceAdjustment with kind debit
+
+
+@dataclass(frozen=True)
+class PaymentRefunded:
+    """``payment.refunded``: a refund succeeded (also for disputes)."""
+
+    refund: Any  # Refund
+    credit_note: Any = None  # InvoiceAdjustment issued with it, if any
+
+
+@dataclass(frozen=True)
+class CreditAdded:
+    """``credit.added``: a positive ledger entry; ``balance_cents`` is the authoritative cache."""
+
+    entry: Any  # CreditLedgerEntry
+    balance_cents: int
+    currency: str
+    refund: Any = None
+
+
+@dataclass(frozen=True)
+class CreditApplied:
+    """``credit.applied``: credit paid (part of) an invoice."""
+
+    entry: Any  # CreditLedgerEntry (the debit)
+    invoice: Invoice
+    balance_cents: int
+    payment: Optional[Payment] = None
+
+
 InvoicePaidHandler = Callable[[Session, InvoicePaid], None]
+EventHandler = Callable[[Session, Any], None]
 
 
 @dataclass(frozen=True)
 class _Subscriber:
     name: str
-    handler: InvoicePaidHandler
-    applies: Callable[[Invoice], bool]
+    handler: EventHandler
+    applies: Callable[[Any], bool]
     isolated: bool
 
 
-_SUBSCRIBERS: list[_Subscriber] = []
+_REGISTRY: dict[str, list[_Subscriber]] = {}
 _defaults_loaded = False
 
 
-def _always(_invoice: Invoice) -> bool:
+def _always(_subject: Any) -> bool:
     return True
+
+
+def subscribe(
+    event: str,
+    name: str,
+    handler: EventHandler,
+    *,
+    applies: Callable[[Any], bool] = _always,
+    isolated: bool = True,
+) -> None:
+    """Register (or replace, by name) a subscriber to ``event``.
+
+    ``applies`` receives the event payload and decides whether the handler runs.
+    """
+    entries = _REGISTRY.setdefault(event, [])
+    entry = _Subscriber(name=name, handler=handler, applies=applies, isolated=isolated)
+    for index, existing in enumerate(entries):
+        if existing.name == name:
+            entries[index] = entry
+            return
+    entries.append(entry)
+
+
+def unsubscribe(event: str, name: str) -> None:
+    entries = _REGISTRY.get(event)
+    if entries is not None:
+        entries[:] = [entry for entry in entries if entry.name != name]
+
+
+def subscribers(event: str) -> list[str]:
+    _load_default_subscribers()
+    return [entry.name for entry in _REGISTRY.get(event, [])]
+
+
+def _invoice_of(event: InvoicePaid) -> Invoice:
+    return event.invoice
 
 
 def subscribe_invoice_paid(
@@ -74,22 +198,25 @@ def subscribe_invoice_paid(
     applies: Callable[[Invoice], bool] = _always,
     isolated: bool = True,
 ) -> None:
-    """Register (or replace, by name) a subscriber to the invoice paid event."""
-    entry = _Subscriber(name=name, handler=handler, applies=applies, isolated=isolated)
-    for index, existing in enumerate(_SUBSCRIBERS):
-        if existing.name == name:
-            _SUBSCRIBERS[index] = entry
-            return
-    _SUBSCRIBERS.append(entry)
+    """Register (or replace, by name) a subscriber to the invoice paid event.
+
+    ``applies`` receives the paid invoice, as before the registry was keyed by event.
+    """
+    if applies is _always:
+        test = _always
+    else:
+        def test(event: InvoicePaid, _applies=applies) -> bool:
+            return _applies(_invoice_of(event))
+
+    subscribe(INVOICE_PAID, name, handler, applies=test, isolated=isolated)
 
 
 def unsubscribe_invoice_paid(name: str) -> None:
-    _SUBSCRIBERS[:] = [entry for entry in _SUBSCRIBERS if entry.name != name]
+    unsubscribe(INVOICE_PAID, name)
 
 
 def invoice_paid_subscribers() -> list[str]:
-    _load_default_subscribers()
-    return [entry.name for entry in _SUBSCRIBERS]
+    return subscribers(INVOICE_PAID)
 
 
 def _load_default_subscribers() -> None:
@@ -102,23 +229,48 @@ def _load_default_subscribers() -> None:
     settlement_subscribers.register_defaults()
 
 
-def fire_invoice_paid(db: Session, event: InvoicePaid) -> None:
+def _subject_id(payload: Any) -> Any:
+    for attribute in ("invoice", "adjustment", "refund", "entry"):
+        subject = getattr(payload, attribute, None)
+        if subject is not None:
+            return f"{attribute} {getattr(subject, 'id', None)}"
+    return type(payload).__name__
+
+
+def fire(db: Session, event: str, payload: Any) -> None:
+    """Run the subscribers of ``event`` in registration order, inside the caller's transaction.
+
+    Call it after the change is flushed. Isolated subscribers run in a
+    savepoint each; their failures are logged and never propagate.
+    """
     _load_default_subscribers()
-    for entry in list(_SUBSCRIBERS):
-        if not entry.applies(event.invoice):
+    for entry in list(_REGISTRY.get(event, [])):
+        if not entry.applies(payload):
             continue
         if not entry.isolated:
-            entry.handler(db, event)
+            entry.handler(db, payload)
             continue
         try:
             with db.begin_nested():
-                entry.handler(db, event)
-        except Exception:  # noqa: BLE001 - side effects must not undo a settlement
-            logger.exception(
-                "Invoice paid subscriber %s failed for invoice %s",
-                entry.name,
-                event.invoice.id,
-            )
+                entry.handler(db, payload)
+        except Exception:  # noqa: BLE001 - side effects must not undo a money change
+            if event == INVOICE_PAID:
+                logger.exception(
+                    "Invoice paid subscriber %s failed for invoice %s",
+                    entry.name,
+                    payload.invoice.id,
+                )
+            else:
+                logger.exception(
+                    "Billing event %s subscriber %s failed for %s",
+                    event,
+                    entry.name,
+                    _subject_id(payload),
+                )
+
+
+def fire_invoice_paid(db: Session, event: InvoicePaid) -> None:
+    fire(db, INVOICE_PAID, event)
 
 
 def _is_retail(invoice: Invoice) -> bool:
