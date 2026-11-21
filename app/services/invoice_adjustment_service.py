@@ -44,6 +44,7 @@ from app.models.reseller import (
     InvoiceStatus,
     Payment,
 )
+from app.services.billing.rounding import refund_tax_proportional
 
 MAX_NOTE_LINES = 100
 MAX_KEY_LENGTH = 255
@@ -117,25 +118,6 @@ def _value(item: Any) -> Any:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _round_half_even_div(numerator: int, denominator: int) -> int:
-    quotient, remainder = divmod(numerator, denominator)
-    twice = remainder * 2
-    if twice > denominator or (twice == denominator and quotient % 2 == 1):
-        quotient += 1
-    return quotient
-
-
-def refund_tax_proportional(amount_cents: int, invoice_tax_cents: int, invoice_total_cents: int) -> int:
-    """Tax part of ``amount_cents`` in proportion to the invoice's tax (appendix B), half to even.
-
-    Zero when the invoice total is zero; never more than the amount.
-    """
-    if invoice_total_cents <= 0 or invoice_tax_cents <= 0 or amount_cents <= 0:
-        return 0
-    tax = _round_half_even_div(amount_cents * invoice_tax_cents, invoice_total_cents)
-    return min(tax, amount_cents)
 
 
 def _field(item: Any, name: str, default: Any = None) -> Any:
@@ -377,8 +359,12 @@ def _snapshots(db: Session, invoice: Invoice, account_id: Optional[int], now: da
 
 
 def _default_amount_lines(invoice: Invoice, amount_cents: int, description: str) -> list[NoteLine]:
+    # The invoice's own tax, in proportion to the part of the amount within its
+    # total; an amount above the total (worth raised by debit notes) takes no
+    # more of the invoice's tax than the invoice carried.
+    total = int(invoice.amount_cents)
     tax = refund_tax_proportional(
-        amount_cents, int(invoice.tax_cents or 0), int(invoice.amount_cents)
+        min(amount_cents, total), min(int(invoice.tax_cents or 0), total), total
     )
     return [
         NoteLine(

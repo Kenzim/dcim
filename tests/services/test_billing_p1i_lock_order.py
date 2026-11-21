@@ -95,3 +95,22 @@ def test_v2_overpayment_settlement_follows_the_lock_order(db_session, account, l
     InvoiceService.recompute(db_session, invoice, cause="payment")
     _account_before_invoice(lock_calls)
     _assert_lock_order(lock_calls)
+
+
+def test_credit_note_above_the_invoice_total_takes_at_most_the_invoice_tax(db_session, account):
+    from app.models.commerce_invoice_ext import InvoiceLineKind
+    from app.services.invoice_service import NewLine
+
+    invoice = InvoiceService.create(
+        db_session, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=1200,
+        lines=[NewLine("Server", 1000, kind=InvoiceLineKind.PRODUCT, tax_cents=200)],
+    )
+    InvoiceAdjustmentService.issue_debit_note(
+        db_session, invoice, lines=[{"description": "Late fee", "unit_cents": 300}],
+        reason=AdjustmentReason.LATE_FEE, actor_user_id=None, idempotency_key="above-dn",
+    )
+    note = InvoiceAdjustmentService.issue_credit_note(
+        db_session, invoice, amount_cents=1500, reason=AdjustmentReason.GOODWILL,
+        outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key="above-cn",
+    )
+    assert (note.total_cents, note.tax_cents) == (1500, 200)
