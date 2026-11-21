@@ -31,6 +31,7 @@ from app.models.service import Service, ServiceStatus
 from app.models.storage import StorageEvent, StorageLocation, StorageNode, StorageShare, StorageTenant
 from app.models.switch_port import SwitchPort
 from app.models.vm_deployment_job import DeploymentJobStatus, VMDeploymentJob
+from app.services.alerting.billing_integrity import BILLING_DETECTORS
 from app.services.alerting.catalogue import Finding, naive
 from app.services.alerting.scrub import scrub
 from app.services import storage_ha, storage_location
@@ -947,4 +948,5 @@ DETECTORS: dict[str, Detector] = {
     "vm_backup_failed": vm_backup_failed,
     "notification_delivery_failing": notification_delivery_failing,
     "client_storage_quota": client_storage_quota,
+    **BILLING_DETECTORS,
 }
