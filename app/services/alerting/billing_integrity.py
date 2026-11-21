@@ -22,11 +22,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import MetaData, Table, and_, func, inspect, or_, select
+from sqlalchemy import MetaData, Table, and_, case, func, inspect, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
 from app.models.commerce_invoice_ext import InvoiceLine
+from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment, InvoiceAdjustmentLine
 from app.models.reseller import (
     CreditLedgerEntry,
     Invoice,
@@ -550,8 +551,77 @@ def refund_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
 
 
 def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Invoices worth less than zero, or notes whose lines do not sum to their totals (P1-N)."""
-    return []
+    """Invoices worth less than zero, or notes whose lines do not sum to their totals (P1-N).
+
+    One finding per invoice; a note with no lines counts as lines that sum to zero.
+    """
+    debits = func.coalesce(func.sum(case((InvoiceAdjustment.kind == AdjustmentKind.DEBIT, InvoiceAdjustment.total_cents), else_=0)), 0)
+    credits = func.coalesce(func.sum(case((InvoiceAdjustment.kind == AdjustmentKind.CREDIT, InvoiceAdjustment.total_cents), else_=0)), 0)
+    worth_stmt = (
+        select(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency,
+               debits.label("debits"), credits.label("credits"))
+        .join(InvoiceAdjustment, InvoiceAdjustment.invoice_id == Invoice.id)
+        .group_by(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency)
+        .having(Invoice.amount_cents + debits - credits < 0)
+        .order_by(Invoice.id)
+    )
+    line_totals = func.coalesce(func.sum(InvoiceAdjustmentLine.total_cents), 0)
+    line_tax = func.coalesce(func.sum(InvoiceAdjustmentLine.tax_cents), 0)
+    lines_stmt = (
+        select(InvoiceAdjustment.id.label("note_id"), InvoiceAdjustment.invoice_id, InvoiceAdjustment.number_display,
+               InvoiceAdjustment.subtotal_cents, InvoiceAdjustment.tax_cents,
+               line_totals.label("line_subtotal"), line_tax.label("line_tax"))
+        .outerjoin(InvoiceAdjustmentLine, InvoiceAdjustmentLine.adjustment_id == InvoiceAdjustment.id)
+        .group_by(InvoiceAdjustment.id, InvoiceAdjustment.invoice_id, InvoiceAdjustment.number_display,
+                  InvoiceAdjustment.subtotal_cents, InvoiceAdjustment.tax_cents)
+        .having(or_(line_totals != InvoiceAdjustment.subtotal_cents, line_tax != InvoiceAdjustment.tax_cents))
+        .order_by(InvoiceAdjustment.id)
+    )
+    max_rows = params["max_rows"]
+    worth_rows, worth_remaining = _limited(db, worth_stmt, max_rows)
+    line_rows, line_remaining = _limited(db, lines_stmt, max_rows)
+
+    details: dict[int, dict] = {}
+    for row in worth_rows:
+        details.setdefault(row.id, {"invoice_id": row.id})["worth_cents"] = (
+            _money(row.amount_cents) + _money(row.debits) - _money(row.credits)
+        )
+    for row in line_rows:
+        entry = details.setdefault(row.invoice_id, {"invoice_id": row.invoice_id})
+        entry.setdefault("notes_with_mismatched_lines", []).append(
+            {
+                "note_id": row.note_id,
+                "number": row.number_display,
+                "note_subtotal_cents": _money(row.subtotal_cents),
+                "lines_subtotal_cents": _money(row.line_subtotal),
+                "note_tax_cents": _money(row.tax_cents),
+                "lines_tax_cents": _money(row.line_tax),
+            }
+        )
+    out = []
+    for invoice_id in sorted(details):
+        entry = details[invoice_id]
+        problems = []
+        if "worth_cents" in entry:
+            problems.append(f"it is worth {entry['worth_cents']} after its notes")
+        if "notes_with_mismatched_lines" in entry:
+            problems.append("a note's lines do not add up to its totals")
+        out.append(
+            Finding(
+                "billing_adjustment_bounds",
+                "invoice",
+                str(invoice_id),
+                f"Invoice {invoice_id}",
+                f"Invoice {invoice_id} has out-of-bounds credit or debit notes",
+                "; ".join(problems).capitalize() + ".",
+                details=entry,
+            )
+        )
+    remaining = worth_remaining + line_remaining
+    if remaining:
+        out.append(_overflow("billing_adjustment_bounds", "invoice", "invoices with out-of-bounds notes",
+                             remaining, len(out)))
+    return out
 
 
 BILLING_DETECTORS = {

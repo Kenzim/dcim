@@ -12,9 +12,13 @@ commits on its own. From the command line they commit after every batch::
     python -m app.services.billing_backfill ledger_accounts
     python -m app.services.billing_backfill accounts --batch-size 1000
 
-The deploy runbook re-runs ``ledger_accounts`` once no process of the previous
-release remains, because old processes write ledger entries without
-``billing_account_id`` while the deploy rolls.
+The deploy runbook re-runs ``accounts`` (steps (a) to (d), all idempotent)
+once no process of the previous release remains. While the deploy rolls, old
+processes write reseller ledger entries without ``billing_account_id`` and
+move ``resellers.cached_balance_cents`` without the account cache, so the
+first pass leaves both behind; the second pass links the entries and
+re-copies the caches. The credit engine shadow scan reports anything still
+unlinked or out of step, and the engine cannot switch to ``v2`` while it does.
 """
 
 from __future__ import annotations
@@ -178,46 +182,48 @@ def open_retail_balances(
 
     The entry is an ``adjustment`` for the cached amount with idempotency key
     ``a3-opening:<account_id>``, so the ledger chain explains the cache.
+
+    Each entry is written by one ``INSERT ... SELECT`` that reads the cache,
+    the "no entries yet" test and the key test in the same statement. On
+    InnoDB that read takes a shared lock on the account row, so a concurrent
+    balance change either finishes first (and its value is copied) or waits.
     """
 
     def step(low: int, high: int) -> int:
-        rows = conn.execute(
+        candidates = conn.execute(
             text(
-                "SELECT ba.id, ba.credit_balance_cents FROM billing_accounts ba "
+                "SELECT ba.id FROM billing_accounts ba "
                 "WHERE ba.id > :low AND ba.id <= :high "
                 "AND ba.account_type = 'client' AND ba.credit_balance_cents <> 0 "
-                "AND NOT EXISTS (SELECT 1 FROM credit_ledger_entries e "
-                "WHERE e.billing_account_id = ba.id) "
                 "ORDER BY ba.id"
             ),
             {"low": low, "high": high},
-        ).all()
+        ).scalars().all()
         inserted = 0
-        for account_id, balance in rows:
+        for account_id in candidates:
             key = f"a3-opening:{int(account_id)}"
-            exists = conn.execute(
-                text("SELECT 1 FROM credit_ledger_entries WHERE idempotency_key = :key"),
-                {"key": key},
-            ).first()
-            if exists is not None:
-                continue
-            conn.execute(
+            inserted += conn.execute(
                 text(
                     "INSERT INTO credit_ledger_entries "
                     "(reseller_id, billing_account_id, entry_type, amount_cents, "
                     "balance_after_cents, description, idempotency_key, metadata, created_at) "
-                    "VALUES (NULL, :account_id, 'adjustment', :amount, :amount, :description, "
-                    ":key, :metadata, CURRENT_TIMESTAMP)"
+                    "SELECT NULL, ba.id, 'adjustment', ba.credit_balance_cents, "
+                    "ba.credit_balance_cents, :description, :key, :metadata, CURRENT_TIMESTAMP "
+                    "FROM billing_accounts ba "
+                    "WHERE ba.id = :account_id AND ba.account_type = 'client' "
+                    "AND ba.credit_balance_cents <> 0 "
+                    "AND NOT EXISTS (SELECT 1 FROM credit_ledger_entries e "
+                    "WHERE e.billing_account_id = ba.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM credit_ledger_entries k "
+                    "WHERE k.idempotency_key = :key)"
                 ),
                 {
                     "account_id": int(account_id),
-                    "amount": int(balance),
                     "description": OPENING_BALANCE_DESCRIPTION,
                     "key": key,
                     "metadata": json.dumps({"source": "billing_p1_backfill_accounts"}),
                 },
-            )
-            inserted += 1
+            ).rowcount
         return inserted
 
     return _run_batches(

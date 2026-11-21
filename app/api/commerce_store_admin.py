@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
@@ -28,7 +29,13 @@ from app.models.storefront import (
     PricePlanPricingModel,
     ProductOptionType,
 )
-from app.services.billing.intervals import INTERVAL_MONTHS
+from app.services.billing.cycles import cycle_length_fields, long_cycles_enabled
+from app.services.billing.intervals import (
+    INTERVAL_MONTHS,
+    label_for_months,
+    months_for,
+    unit_and_count,
+)
 from app.services.markdown_sanitize import sanitize_markdown_to_html
 from app.services.provisioning import ALLOWED_PROVISION_KEYS
 
@@ -36,6 +43,7 @@ _MSG_CATEGORY_NOT_FOUND = "Category not found"
 _MSG_PRODUCT_NOT_FOUND = "Product not found"
 _MSG_PRICE_PLAN_NOT_FOUND = "Price plan not found"
 _MSG_PRODUCT_OPTION_NOT_FOUND = "Product option not found"
+_MSG_CYCLE_EXISTS = "This price plan already has a cycle of that length"
 
 
 def _validate_provision_key(key: Optional[str]) -> None:
@@ -136,27 +144,54 @@ class PricePlanUpdate(RequestModel):
     enabled: Optional[StrictBool] = None
 
 
-def _refuse_long_cycle(value: Optional[PricePlanInterval]) -> Optional[PricePlanInterval]:
-    """Cycles the renewal engine cannot bill yet (biennial, triennial) are refused."""
-    if value is not None and value.value not in INTERVAL_MONTHS:
-        raise ValueError(f"billing cycle {value.value!r} is not available")
-    return value
-
-
 class PricePlanCycleCreate(RequestModel):
-    interval: PricePlanInterval
+    interval: Optional[PricePlanInterval] = None
+    interval_unit: Optional[Literal["month", "year"]] = None
+    interval_count: Optional[StrictInt] = Field(default=None, ge=1, le=120)
     price_cents: StrictInt = Field(ge=0)
+    setup_cents: Optional[StrictInt] = Field(default=None, ge=0)
     enabled: StrictBool = True
-
-    _sold_interval = field_validator("interval")(_refuse_long_cycle)
 
 
 class PricePlanCycleUpdate(RequestModel):
     interval: Optional[PricePlanInterval] = None
+    interval_unit: Optional[Literal["month", "year"]] = None
+    interval_count: Optional[StrictInt] = Field(default=None, ge=1, le=120)
     price_cents: Optional[Annotated[StrictInt, Field(ge=0)]] = None
+    setup_cents: Optional[Annotated[StrictInt, Field(ge=0)]] = None
     enabled: Optional[StrictBool] = None
 
-    _sold_interval = field_validator("interval")(_refuse_long_cycle)
+
+def _cycle_fields(db: Session, data: dict, *, partial: bool) -> dict:
+    """Resolve a cycle request to the stored label, unit and count, written together.
+
+    Either the label or the unit and count may be given; they must agree. Cycles
+    longer than a year are refused while ``billing_long_cycles_enabled`` is off.
+    """
+    label = data.pop("interval", None)
+    unit = data.pop("interval_unit", None)
+    count = data.pop("interval_count", None)
+    if label is None and unit is None and count is None:
+        if partial:
+            return data
+        raise HTTPException(status_code=422, detail="interval or interval_unit and interval_count is required")
+    if (unit is None) != (count is None):
+        raise HTTPException(status_code=422, detail="interval_unit and interval_count go together")
+    months = months_for(unit, count)
+    if label is not None:
+        if label.value not in INTERVAL_MONTHS or (months is not None and months != INTERVAL_MONTHS[label.value]):
+            raise HTTPException(status_code=422, detail="billing cycle label does not match its unit and count")
+        months = INTERVAL_MONTHS[label.value]
+    else:
+        label_value = label_for_months(months) if months is not None else None
+        if label_value is None:
+            raise HTTPException(status_code=422, detail="billing cycle length is not available")
+        label = PricePlanInterval(label_value)
+    if months > 12 and not long_cycles_enabled(db):
+        raise HTTPException(status_code=422, detail=f"billing cycle {label.value!r} is not available")
+    stored_unit, stored_count = unit_and_count(months)
+    data.update(interval=label, interval_unit=stored_unit, interval_count=stored_count)
+    return data
 
 
 class ProductOptionCreate(RequestModel):
@@ -306,6 +341,7 @@ def _serialize_cycle(row) -> dict:
         "interval": row.interval.value,
         "price_cents": row.price_cents,
         "enabled": row.enabled,
+        **cycle_length_fields(row),
     }
 
 
@@ -557,8 +593,13 @@ def create_plan_cycle(
     plan = PricePlanDAO.get(db, plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail=_MSG_PRICE_PLAN_NOT_FOUND)
-    row = PricePlanCycleDAO.create(db, price_plan_id=plan_id, **body.model_dump())
-    db.commit()
+    fields = _cycle_fields(db, body.model_dump(), partial=False)
+    try:
+        row = PricePlanCycleDAO.create(db, price_plan_id=plan_id, **fields)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_MSG_CYCLE_EXISTS)
     return _serialize_cycle(row)
 
 
@@ -569,8 +610,13 @@ def update_plan_cycle(
     row = PricePlanCycleDAO.get(db, cycle_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Price plan cycle not found")
-    row = PricePlanCycleDAO.update(db, row, **body.model_dump(exclude_unset=True))
-    db.commit()
+    fields = _cycle_fields(db, body.model_dump(exclude_unset=True), partial=True)
+    try:
+        row = PricePlanCycleDAO.update(db, row, **fields)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_MSG_CYCLE_EXISTS)
     return _serialize_cycle(row)
 
 
