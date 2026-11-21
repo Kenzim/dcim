@@ -50,8 +50,9 @@ class RefundDecision:
 
 
 def _marker(reason: str, invoice: Invoice, payment: Optional[Payment]) -> str:
-    target = f"payment-{payment.id}" if payment is not None else f"invoice-{invoice.id}"
-    return f"[refund-review:{reason}:{target}]"
+    if payment is not None:
+        return f"[refund-review:{reason}:payment-{payment.id}]"
+    return f"[refund-review:invoice-{invoice.id}]"
 
 
 def _refund_policy(db: Session) -> str:
