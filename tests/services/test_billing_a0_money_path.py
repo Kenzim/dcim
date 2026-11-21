@@ -793,3 +793,97 @@ def test_generic_settings_endpoint_rejects_settings_store_keys(client, db_sessio
     assert upper.status_code == 400
     ok = client.put("/api/admin/commerce/settings/a0_plain_key", headers=headers, json={"value": {"v": "x"}})
     assert ok.status_code == 200, ok.text
+
+
+# Billing integrity detectors (E2) stay quiet for invoices settled through the A0 paths.
+
+
+_STRICT = {
+    "min_age_minutes": 0,
+    "settled_grace_minutes": 0,
+    "pending_after_minutes": 0,
+}
+
+
+def _integrity_findings(db: Session, invoice: Invoice) -> dict[str, list]:
+    from datetime import datetime, timedelta
+
+    from app.services.alerting import detectors
+    from app.services.alerting.catalogue import CATALOGUE
+
+    later = datetime.utcnow() + timedelta(minutes=1)
+    payment_ids = {
+        str(p.id) for p in db.execute(select(Payment).where(Payment.invoice_id == invoice.id)).scalars()
+    }
+    found = {}
+    for name in ("billing_paid_without_payment", "billing_orphaned_payment", "billing_invoice_lines_mismatch",
+                 "billing_overallocated"):
+        params = {**CATALOGUE[name].defaults(), **_STRICT}
+        params = {key: value for key, value in params.items() if key in CATALOGUE[name].defaults()}
+        findings = detectors.DETECTORS[name](db, params, later)
+        found[name] = [
+            f for f in findings
+            if (f.resource_type == "invoice" and f.resource_id == str(invoice.id))
+            or (f.resource_type == "payment" and f.resource_id in payment_ids)
+        ]
+    return found
+
+
+def test_card_payment_settled_by_webhook_leaves_integrity_detectors_quiet(db_session, provisioned):
+    user, account = _account(db_session)
+    product, plan = _product(db_session, setup_cents=500, price_cents=1000, option_delta=250)
+    order = _place(db_session, account, user, product, plan, options={"ram": "big"})
+    invoice = db_session.get(Invoice, order.invoice_id)
+    gateway = _FakeCardGateway()
+    started = start_card_payment(db_session, invoice, billing_account_id=account.id, registry=_registry(gateway))
+    db_session.commit()
+    _deliver(db_session, gateway, _succeeded(started.payment_intent_id, invoice.amount_cents))
+    invoice = db_session.get(Invoice, invoice.id)
+    assert invoice.status == InvoiceStatus.PAID
+    assert _integrity_findings(db_session, invoice) == {
+        "billing_paid_without_payment": [],
+        "billing_orphaned_payment": [],
+        "billing_invoice_lines_mismatch": [],
+        "billing_overallocated": [],
+    }
+
+
+def test_admin_mark_paid_leaves_integrity_detectors_quiet(db_session, provisioned):
+    user, account = _account(db_session)
+    product, plan = _product(db_session, setup_cents=300, price_cents=1200)
+    order = _place(db_session, account, user, product, plan)
+    record_manual_payment(db_session, order.invoice_id, reason="wire received", actor_user_id=1)
+    db_session.commit()
+    invoice = db_session.get(Invoice, order.invoice_id)
+    assert invoice.status == InvoiceStatus.PAID
+    assert _integrity_findings(db_session, invoice) == {
+        "billing_paid_without_payment": [],
+        "billing_orphaned_payment": [],
+        "billing_invoice_lines_mismatch": [],
+        "billing_overallocated": [],
+    }
+
+
+def test_detectors_flag_the_old_admin_mark_paid_shape(db_session):
+    """A paid invoice with no payment (what admin mark-paid used to leave) is what the detector reports."""
+    _, account = _account(db_session)
+    invoice = _open_invoice(db_session, account, 800)
+    invoice.status = InvoiceStatus.PAID
+    db_session.commit()
+    findings = _integrity_findings(db_session, invoice)
+    assert [f.alert_type for f in findings["billing_paid_without_payment"]] == ["billing_paid_without_payment"]
+
+
+def test_open_card_attempt_on_invoice_paid_by_admin_is_reported_as_orphaned(db_session):
+    """The client may still confirm that PaymentIntent, so it is left for a person to cancel, and reported."""
+    _, account = _account(db_session)
+    invoice = _open_invoice(db_session, account, 800)
+    started = start_card_payment(
+        db_session, invoice, billing_account_id=account.id, registry=_registry(_FakeCardGateway())
+    )
+    db_session.commit()
+    record_manual_payment(db_session, invoice.id, reason="wire received", actor_user_id=1)
+    db_session.commit()
+    findings = _integrity_findings(db_session, db_session.get(Invoice, invoice.id))
+    assert findings["billing_paid_without_payment"] == []
+    assert [f.resource_id for f in findings["billing_orphaned_payment"]] == [str(started.payment_id)]
