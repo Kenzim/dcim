@@ -215,7 +215,7 @@ class BillingShadowService:
         """
         if engine not in ENGINES:
             raise ValueError(f"unknown billing engine {engine!r}")
-        row = db.get(SystemSetting, SCAN_RESULT_KEY)
+        row = db.get(SystemSetting, SCAN_RESULT_KEY, with_for_update=True)
         value = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
         engines = dict(value.get("engine") or {})
         engines[engine] = {
@@ -337,7 +337,7 @@ def _parse_time(value: Any) -> Optional[datetime]:
 
 
 def _append_history(db: Session, engine: str, entry: dict) -> None:
-    row = db.get(SystemSetting, SCAN_RESULT_KEY)
+    row = db.get(SystemSetting, SCAN_RESULT_KEY, with_for_update=True)
     value = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
     history = dict(value.get("history") or {})
     history[engine] = (list(history.get(engine) or []) + [entry])[-HISTORY_LIMIT:]
@@ -582,8 +582,8 @@ def _invoice_scan(db: Session, now: datetime) -> Optional[tuple[int, list[dict]]
 # --- Engine switch records and the switch criterion (design 6.5) ---
 
 
-def switch_record(db: Session, engine: str) -> dict:
-    row = db.get(SystemSetting, SWITCH_RECORD_PREFIX + engine)
+def switch_record(db: Session, engine: str, *, for_update: bool = False) -> dict:
+    row = db.get(SystemSetting, SWITCH_RECORD_PREFIX + engine, with_for_update=for_update)
     return dict(row.value) if row is not None and isinstance(row.value, dict) else {}
 
 
@@ -607,7 +607,7 @@ def set_shadow_since(db: Session, engine: str, *, at: datetime, by: str, reset: 
     recorded as entering shadow) the clock restarts at ``at`` if that is later.
     Returns whether the value changed.
     """
-    record = switch_record(db, engine)
+    record = switch_record(db, engine, for_update=True)
     current = _parse_time(record.get("shadow_since"))
     at = _aware(at)
     if current is not None and (not reset or at <= current):
@@ -619,7 +619,7 @@ def set_shadow_since(db: Session, engine: str, *, at: datetime, by: str, reset: 
 
 
 def clear_shadow_since(db: Session, engine: str) -> None:
-    record = switch_record(db, engine)
+    record = switch_record(db, engine, for_update=True)
     record.pop("shadow_since", None)
     record.pop("shadow_since_set_by", None)
     write_switch_record(db, engine, record)

@@ -213,6 +213,8 @@ def _invoice_rollback_blocker(db: Session) -> Optional[str]:
 @router.post("/{engine}/switch", responses=COMMON_ERROR_RESPONSES)
 def switch_engine(engine: EngineName, body: SwitchBody, auth: AdminDep, db: DbDep):
     now = _now()
+    # Serialise switches of one engine: the record row is locked before the mode is read.
+    billing_shadow.switch_record(db, engine, for_update=True)
     current = billing_engine_mode(db, engine)
     target = body.to
     if target == current:
@@ -259,7 +261,8 @@ def switch_engine(engine: EngineName, body: SwitchBody, auth: AdminDep, db: DbDe
     billing_shadow.write_switch_record(db, engine, record)
     if target == "legacy":
         billing_shadow.clear_shadow_since(db, engine)
-    elif target == "shadow" and current == "legacy":
+    elif target == "shadow":
+        # Entering shadow from either side restarts the quiet period.
         billing_shadow.set_shadow_since(
             db, engine, at=now, by=f"engine_switch:user:{auth['user_id']}", reset=True
         )

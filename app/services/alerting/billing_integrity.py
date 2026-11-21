@@ -378,7 +378,7 @@ def shadow_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
     from app.services.billing_shadow import ENGINES, open_mismatch_counts
 
     out = []
-    for engine in ENGINES[: params["max_rows"]]:
+    for engine in ENGINES:
         counts = open_mismatch_counts(db, engine)
         if not counts:
             continue
@@ -395,7 +395,7 @@ def shadow_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
                 details={"engine": engine, "open_by_check": counts, "open_total": total},
             )
         )
-    return out
+    return out[: params["max_rows"]]
 
 
 def shadow_scan_stale(db: Session, params: dict, now: datetime) -> list[Finding]:

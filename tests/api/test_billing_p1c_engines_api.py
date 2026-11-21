@@ -99,6 +99,10 @@ def test_switch_to_v2_refused_then_accepted(client, db_session, test_admin_user)
     assert back.status_code == 200
     db_session.expire_all()
     assert billing_engine_mode(db_session, "credit") == "shadow"
+    # The rollback restarts the quiet period, so the switch is refused again.
+    assert billing_shadow.shadow_since(db_session, "credit") > _now() - timedelta(minutes=5)
+    again = client.post(f"{BASE}/credit/switch", headers=headers, json={"to": "v2"})
+    assert again.status_code == 409 and "quiet_period" in again.json()["detail"]["failing"]
 
 
 def test_legacy_only_from_shadow_and_clock_rules(client, db_session, test_admin_user):
