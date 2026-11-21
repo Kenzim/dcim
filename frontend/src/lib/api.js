@@ -5326,7 +5326,7 @@ export const getPluginLogs = (id, level = '') =>
 export const getPluginDeliveries = (id) =>
   pluginRequest(pluginPath(id, '/deliveries'), { errorMessage: 'Failed to load deliveries' });
 export const retryPluginDelivery = (id, deliveryId) =>
-  pluginRequest(pluginPath(id, `/deliveries/${deliveryId}/retry`), { method: 'POST', errorMessage: 'Failed to retry' });
+  pluginRequest(pluginPath(id, `/deliveries/${encodeURIComponent(deliveryId)}/retry`), { method: 'POST', errorMessage: 'Failed to retry' });
 export const getPluginSchedules = (id) =>
   pluginRequest(pluginPath(id, '/schedules'), { errorMessage: 'Failed to load schedules' });
 export const getPluginServices = (id) =>

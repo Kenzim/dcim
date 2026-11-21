@@ -158,9 +158,16 @@ async def run_once(owner: Optional[str] = None, batch_size: int = 50) -> dict[st
 
 
 def expire_disabled(db: Session) -> int:
-    """Queued deliveries of plugins that stayed disabled for a day become dead letters."""
+    """Queued deliveries of plugins that stayed disabled for a day become dead letters.
+
+    A disabled installation's ``updated_at`` is when it stopped running (nothing else
+    updates it while disabled), so both it and the delivery must be older than a day.
+    """
     cutoff = utcnow() - DISABLED_EXPIRY
-    disabled = select(PluginInstallation.id).where(PluginInstallation.status != PluginStatus.ENABLED)
+    disabled = select(PluginInstallation.id).where(
+        PluginInstallation.status != PluginStatus.ENABLED,
+        PluginInstallation.updated_at < cutoff,
+    )
     result = db.execute(
         update(PluginDelivery)
         .where(

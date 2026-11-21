@@ -112,7 +112,9 @@ def _owned_service(db: Session, ctx: ClientMcpAuthContext, service_id: int):
     return service
 
 
-async def _plugin_action(db: Session, ctx: ClientMcpAuthContext, service_id: int, name: Optional[str], params):
+async def _plugin_action(
+    db: Session, ctx: ClientMcpAuthContext, service_id: int, name: Optional[str], params, confirm: bool
+):
     """Run a plugin's client action or client MCP tool, named plugin_id.id."""
     plugin_id, _, item = (name or "").partition(".")
     if not plugin_id or not item:
@@ -123,7 +125,7 @@ async def _plugin_action(db: Session, ctx: ClientMcpAuthContext, service_id: int
     try:
         if tool is None:
             params = dict(params or {})
-            return await plugin_ui.run_action(db, service, plugin_id, item, params=params, confirm=True, actor=actor)
+            return await plugin_ui.run_action(db, service, plugin_id, item, params=params, confirm=confirm, actor=actor)
         if not scope_allows(ctx.scopes, tool.scope):
             raise ToolError(f"MCP key lacks required scope: {tool.scope}")
         merged = {**dict(params or {}), "service_id": service.id} if tool.service_scoped else dict(params or {})
@@ -348,7 +350,7 @@ async def service_action(
                     await network_portal.client_fast_path_off(location_id, auth, db)
             return _fast_path(await network_portal.client_fast_path(auth, db), service_id)
         if action == "plugin":
-            return await _plugin_action(db, ctx, service_id, name, params)
+            return await _plugin_action(db, ctx, service_id, name, params, confirm)
         _need("run_action", name=name)
         body = portal.ClientStrategyActionBody(params=params or {})
         return await portal.client_run_strategy_action(service_id, name, body, auth, db)

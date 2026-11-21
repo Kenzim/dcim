@@ -197,7 +197,7 @@ The admin settings form is a list of fields:
 | `secret` | string, write-only | Stored encrypted; never returned |
 | `window` | maintenance window | `{"days": ["mon", ...], "start": "02:00", "end": "05:00", "timezone": "Europe/London"}` |
 
-Keys match `^[a-z][a-z0-9_]{0,63}$`. Secrets are sealed with the same Fernet key as other stored secrets (`SERVICE_INSTANCE_ENCRYPTION_KEY`, through `app/services/alerting/secrets.py` `seal` and `unseal`). When `REQUIRE_SERVICE_INSTANCE_ENCRYPTION` is on and no key is configured, saving a secret is refused. The settings API returns a set secret as the mask `••••••••`; sending the mask back keeps the stored value, an empty string clears it. Plugins read settings, decrypted, through `ctx.settings`.
+Keys match `^[a-z][a-z0-9_]{0,63}$`. Secrets are sealed with the same Fernet key as other stored secrets (`SERVICE_INSTANCE_ENCRYPTION_KEY`, through `app/services/alerting/secrets.py` `seal` and `unseal`). Without that key, secrets are stored unencrypted with a plain marker, exactly like alert channel secrets today; when `REQUIRE_SERVICE_INSTANCE_ENCRYPTION` is on and no key is configured, saving a secret is refused instead. The settings API returns a set secret as the mask `••••••••`; sending the mask back keeps the stored value, an empty string clears it. Plugins read settings, decrypted, through `ctx.settings`.
 
 ## 6. Event bus
 
