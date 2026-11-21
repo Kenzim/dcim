@@ -425,6 +425,33 @@ Rackflow owns placement; runners own failover.
   VLANs, because tenant interfaces use their own fixed MACs. The same applies to any hypervisor
   bridge with MAC or ARP filtering.
 
+### 9.2 Public interface and return routing
+
+When the nodes' default route is on a private management network (as in Ashburn Tier), each
+node gets a separate public NIC that carries no address of its own; only the SFTP master holds
+the VIP on it. The runner only adds and removes the address, so the host provides the rest:
+
+- **NIC**: one extra NIC per node on the public bridge (Ashburn Tier: `vmbr0`, untagged,
+  23.140.8.0/24, gateway 23.140.8.1), Proxmox firewall off, link up with no IPv4 address, IPv6
+  disabled on it (`disable_ipv6=1`, so router advertisements give it no public address), and
+  `SFTP_VIP_INTERFACE` set to it.
+- **Policy routing**: replies from the VIP must leave through the public NIC, not the
+  management default route. A routing table holds `23.140.8.0/24 dev <pub> scope link` and
+  `default via 23.140.8.1 dev <pub> onlink`, and a rule sends `from 23.140.8.30` to that table.
+  `onlink` and the scope-link route let both exist on standby nodes while the address is
+  absent, so taking over the VIP needs no routing change. When the master adds the VIP, the
+  kernel also adds the connected route to the main table, so hosts on the public subnet are
+  reached directly.
+- **ARP and reverse path**: `arp_ignore=1` and `arp_announce=2` on the public NIC, so a node
+  never answers ARP there for its management or Ceph addresses and announces the VIP only from
+  the NIC that carries it; `rp_filter=2` (loose) on the public NIC.
+- **Host filter**: the VIP must expose only the SFTP gateway. A separate nftables table (not
+  `inet rf-storage`, which the runner owns, and loaded without `flush ruleset`) accepts, on the
+  public NIC only, established and related traffic, ICMP, and TCP to the location's SFTP port,
+  and drops everything else inbound. It also drops all forwarding into or out of the public NIC,
+  because the nodes have `ip_forward=1` and a neighbour on the public subnet could otherwise
+  route to tenant networks through the master. Other interfaces are left alone.
+
 ## 10. Mixed versions, single-node locations and rollout
 
 - **HA active** for a location means: the location's `ha_enabled` is on (default) **and** every
