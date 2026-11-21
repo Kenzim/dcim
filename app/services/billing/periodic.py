@@ -96,8 +96,10 @@ def _run_shadow_scan(db: Session, now: datetime, dry_run: bool) -> dict:
 
 
 def _run_refund_reconciler(db: Session, now: datetime, dry_run: bool) -> dict:
-    """Settle pending gateway refunds (design 7.4); filled in by P1-R."""
-    raise NotImplementedError("the refund reconciler is implemented by P1-R")
+    """Settle pending gateway refunds (design 7.4)."""
+    from app.services.payments.refund_reconciler import RefundReconciler
+
+    return RefundReconciler.run(db, now, dry_run=dry_run)
 
 
 JOBS: tuple[PeriodicJob, ...] = (
