@@ -8,7 +8,7 @@ setting ``billing_invoice_guard_mode``, except that it is always ``enforce``
 once the invoice engine is ``v2``; it is only read when a violation is found,
 so writes that respect the rules cost nothing extra.
 
-The only escape hatch is ``allow(name, columns)``, used by ``InvoiceService``
+The only escape hatch is ``allow(name, columns, invoice_id)``, used by ``InvoiceService``
 for the proforma conversion. Core ``update(Invoice)`` statements bypass these
 events; a test keeps them out of every module but the invoice service and the
 backfills.
@@ -85,22 +85,22 @@ class FrozenInvoiceError(RuntimeError):
     """A published invoice's frozen column or line was written."""
 
 
-_allowance: contextvars.ContextVar[Optional[tuple[str, frozenset]]] = contextvars.ContextVar(
+_allowance: contextvars.ContextVar[Optional[tuple[str, frozenset, int]]] = contextvars.ContextVar(
     "invoice_guard_allowance", default=None
 )
 _mode_override: Optional[str] = None
 
 
 @contextlib.contextmanager
-def allow(name: str, columns: Iterable[str]) -> Iterator[None]:
-    """Allow writes to ``columns`` of published invoices inside the block.
+def allow(name: str, columns: Iterable[str], invoice_id: int) -> Iterator[None]:
+    """Allow writes to ``columns`` of the published invoice ``invoice_id`` inside the block.
 
     Only ``proforma_conversion`` exists; the flush that writes the columns must
-    happen inside the block.
+    happen inside the block. Other invoices flushed in the block stay guarded.
     """
     if name != PROFORMA_CONVERSION:
         raise ValueError(f"unknown invoice guard allowance {name!r}")
-    token = _allowance.set((name, frozenset(columns)))
+    token = _allowance.set((name, frozenset(columns), int(invoice_id)))
     try:
         yield
     finally:
@@ -224,8 +224,14 @@ def _old_status(state, committed: _Committed) -> str:
     return _plain(state.obj().status)
 
 
-def _allowed(name: str, old: Any, new: Any, allowance: Optional[tuple[str, frozenset]]) -> bool:
-    if allowance is not None and name in allowance[1]:
+def _allowed(
+    name: str,
+    old: Any,
+    new: Any,
+    allowance: Optional[tuple[str, frozenset, int]],
+    invoice_id: Optional[int],
+) -> bool:
+    if allowance is not None and name in allowance[1] and invoice_id == allowance[2]:
         if name == "document_type":
             return _plain(old) == "proforma" and _plain(new) == "invoice"
         return True
@@ -236,23 +242,51 @@ def _allowed(name: str, old: Any, new: Any, allowance: Optional[tuple[str, froze
     return False
 
 
+# Personal data or free text: logs and shadow rows carry only their size.
+_REDACTED_COLUMNS = frozenset({"seller_snapshot", "buyer_snapshot", "description", "customer_notes"})
+_MAX_LOGGED_CHARS = 120
+
+
+def _safe(column: Optional[str], value: Any) -> Any:
+    """A value fit for a log line or a shadow row: redacted or cut short."""
+    if value is None:
+        return None
+    if column in _REDACTED_COLUMNS:
+        return f"<redacted, {len(str(value))} characters>"
+    value = _plain(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (int, float, bool)):
+        return value
+    text_value = str(value)
+    if len(text_value) > _MAX_LOGGED_CHARS:
+        return text_value[:_MAX_LOGGED_CHARS] + "..."
+    return text_value
+
+
 def _violation(connection, target: Any, invoice_id: Optional[int], what: str, detail: dict) -> None:
     mode = _mode_on(connection)
     message = f"invoice {invoice_id}: {what} on a published invoice"
     if mode == "enforce":
         raise FrozenInvoiceError(message)
+    column = detail.get("column")
+    record = {
+        "invoice_id": invoice_id,
+        "what": what,
+        **{key: _safe(column if key in ("old", "new") else None, value) for key, value in detail.items()},
+    }
     logger.error(
         "invoice guard (log mode): %s %s\n%s",
         message,
-        detail,
+        record,
         "".join(traceback.format_stack(limit=12)),
     )
     session = object_session(target)
-    record = {"invoice_id": invoice_id, "what": what, **{k: _plain(v) for k, v in detail.items()}}
     if session is None:
         _record([record])
-    else:
-        session.info.setdefault(_PENDING_KEY, []).append(record)
+        return
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    session.info.setdefault(_PENDING_KEY, []).append((transaction, record))
 
 
 def _record(records: list[dict]) -> None:
@@ -282,7 +316,7 @@ def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
     allowance = _allowance.get()
     for name in sorted(GUARDED_COLUMNS):
         changed, old, new = _old_value(state, name, committed)
-        if not changed or _allowed(name, old, new, allowance):
+        if not changed or _allowed(name, old, new, allowance, target.id):
             continue
         _violation(
             connection,
@@ -312,7 +346,7 @@ def _parent_status(connection, invoice_id: Optional[int]) -> Optional[str]:
 
 def _guard_line(action: str):
     def guard(_mapper, connection, target: InvoiceLine) -> None:
-        invoice_id = target.invoice_id
+        parents = [target.invoice_id]
         if action == "update":
             state = inspect(target)
             changed = [
@@ -328,29 +362,55 @@ def _guard_line(action: str):
                 for key in changed
             ):
                 return
+            # A line moved between invoices changes both of them.
             history = state.attrs["invoice_id"].history
             if history.deleted and history.deleted[0] is not None:
-                invoice_id = history.deleted[0]
-        status = _parent_status(connection, invoice_id)
-        if status in (None, _DRAFT):
-            return
-        _violation(
-            connection,
-            target,
-            invoice_id,
-            f"invoice line {action}",
-            {"column": "invoice_lines", "line_id": target.id, "status": status},
-        )
+                parents.insert(0, history.deleted[0])
+        for invoice_id in dict.fromkeys(parents):
+            status = _parent_status(connection, invoice_id)
+            if status in (None, _DRAFT):
+                continue
+            _violation(
+                connection,
+                target,
+                invoice_id,
+                f"invoice line {action}",
+                {"column": "invoice_lines", "line_id": target.id, "status": status},
+            )
 
     return guard
 
 
-def _flush_pending(session: Session, transaction) -> None:
-    if transaction.parent is not None:
+def _descends_from(transaction, ancestor) -> bool:
+    while transaction is not None:
+        if transaction is ancestor:
+            return True
+        transaction = transaction.parent
+    return False
+
+
+def _write_on_root_commit(session: Session) -> None:
+    """Write log-mode records once the outermost transaction commits (not a savepoint)."""
+    if session.get_nested_transaction() is not None:
         return
-    records = session.info.pop(_PENDING_KEY, None)
-    if records:
-        _record(records)
+    pending = session.info.pop(_PENDING_KEY, None)
+    if pending:
+        _record([record for _transaction, record in pending])
+
+
+def _drop_rolled_back(session: Session, previous_transaction) -> None:
+    """Forget records of writes undone by a rollback (a savepoint's, or all of them)."""
+    pending = session.info.get(_PENDING_KEY)
+    if pending:
+        session.info[_PENDING_KEY] = [
+            item for item in pending if not _descends_from(item[0], previous_transaction)
+        ]
+
+
+def _clear_at_root_end(session: Session, transaction) -> None:
+    """A root transaction that ended without a commit (rollback or close) leaves nothing behind."""
+    if transaction.parent is None:
+        session.info.pop(_PENDING_KEY, None)
 
 
 _LISTENERS = (
@@ -371,7 +431,9 @@ def register() -> None:
     _registered = True
     for target, name, handler in _LISTENERS:
         event.listen(target, name, handler)
-    event.listen(Session, "after_transaction_end", _flush_pending)
+    event.listen(Session, "after_commit", _write_on_root_commit)
+    event.listen(Session, "after_soft_rollback", _drop_rolled_back)
+    event.listen(Session, "after_transaction_end", _clear_at_root_end)
 
 
 register()

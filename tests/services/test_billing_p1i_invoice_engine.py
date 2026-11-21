@@ -389,14 +389,104 @@ def test_guard_enforces_when_its_mode_cannot_be_read(db_session, account, monkey
 
 def test_allowance_is_only_the_proforma_conversion(db_session, account):
     with pytest.raises(ValueError):
-        with invoice_guard.allow("anything", {"amount_cents"}):
+        with invoice_guard.allow("anything", {"amount_cents"}, 1):
             pass
     invoice = _create(db_session, account)
-    with invoice_guard.allow(invoice_guard.PROFORMA_CONVERSION, {"document_type"}):
+    with invoice_guard.allow(invoice_guard.PROFORMA_CONVERSION, {"document_type"}, invoice.id):
         invoice.document_type = InvoiceDocumentType.PROFORMA
         with pytest.raises(FrozenInvoiceError):
             db_session.flush()
     db_session.rollback()
+
+
+def test_allowance_covers_only_the_invoice_it_names(db_session, account):
+    converted = _create(db_session, account)
+    other = _create(db_session, account)
+    db_session.commit()
+    with invoice_guard.allow(invoice_guard.PROFORMA_CONVERSION, {"number_display"}, converted.id):
+        converted.number_display = "A-1"
+        db_session.flush()
+        converted.number_display = "A-2"
+        db_session.flush()
+        other.number_display = "B-1"
+        db_session.flush()
+        other.number_display = "B-2"
+        with pytest.raises(FrozenInvoiceError):
+            db_session.flush()
+    db_session.rollback()
+
+
+def test_guard_refuses_moving_a_line_into_a_published_invoice(db_session, account):
+    draft = _create(db_session, account, publish=False)
+    published = _create(db_session, account)
+    line = db_session.execute(select(InvoiceLine).where(InvoiceLine.invoice_id == draft.id)).scalar_one()
+    line.invoice_id = published.id
+    with pytest.raises(FrozenInvoiceError):
+        db_session.flush()
+    db_session.rollback()
+
+
+@pytest.fixture
+def log_mode():
+    previous = invoice_guard.set_mode_override("log")
+    yield
+    invoice_guard.set_mode_override(previous)
+
+
+def test_log_mode_redacts_personal_data_and_cuts_long_values(db_session, account, shadow_records, log_mode,
+                                                           caplog):
+    invoice = _create(db_session, account)
+    db_session.commit()
+    invoice.buyer_snapshot = {"legal_name": "Secret Person", "address_line1": "1 Hidden Road"}
+    invoice.currency = "EUR"
+    db_session.commit()
+    by_column = {r["legacy"]["column"]: r for r in shadow_records}
+    assert by_column["buyer_snapshot"]["legacy"]["old"].startswith("<redacted, ")
+    assert by_column["buyer_snapshot"]["v2"]["new"].startswith("<redacted, ")
+    assert by_column["currency"]["v2"]["new"] == "EUR"
+    assert "Secret Person" not in caplog.text and "Hidden Road" not in caplog.text
+    assert invoice_guard._safe("admin_notes", "x" * 500).endswith("...")
+
+
+def test_log_mode_records_nothing_for_a_rolled_back_write(db_session, account, shadow_records, log_mode):
+    invoice = _create(db_session, account)
+    db_session.commit()
+    invoice.amount_cents = 5
+    db_session.flush()
+    db_session.rollback()
+    db_session.commit()
+    assert shadow_records == []
+
+
+def test_log_mode_drops_a_rolled_back_savepoint_and_keeps_a_committed_one(
+    db_session, account, shadow_records, log_mode
+):
+    invoice = _create(db_session, account)
+    db_session.commit()
+    savepoint = db_session.begin_nested()
+    invoice.amount_cents = 5
+    db_session.flush()
+    savepoint.rollback()
+    savepoint = db_session.begin_nested()
+    invoice.currency = "EUR"
+    db_session.flush()
+    savepoint.commit()
+    assert shadow_records == []  # nothing before the outer commit
+    db_session.commit()
+    assert [r["legacy"]["column"] for r in shadow_records] == ["currency"]
+
+
+def test_zero_amount_support_does_not_cache_a_failed_read(db_session, monkeypatch):
+    from app.services import invoice_service
+
+    monkeypatch.setattr(invoice_service, "_zero_amount_support", {})
+    real_execute = db_session.execute
+    monkeypatch.setattr(db_session, "execute", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    assert invoice_service.zero_amounts_supported(db_session) is False
+    assert invoice_service._zero_amount_support == {}
+    monkeypatch.setattr(db_session, "execute", real_execute)
+    invoice_service.zero_amounts_supported(db_session)
+    assert len(invoice_service._zero_amount_support) == 1
 
 
 def test_no_core_updates_of_invoices_outside_the_allowed_modules():

@@ -249,7 +249,8 @@ _zero_amount_support: dict[str, bool] = {}
 def zero_amounts_supported(db: Session) -> bool:
     """Whether ``invoices`` accepts ``amount_cents = 0`` (revision ``billing_p1_invoice_checks``).
 
-    Decided once per database URL in this process by reading the constraint list.
+    Decided once per database URL in this process by reading the constraint list;
+    a failed read refuses zero totals for that call and is tried again next time.
     """
     bind = db.get_bind()
     key = str(bind.engine.url)
@@ -273,9 +274,9 @@ def zero_amounts_supported(db: Session) -> bool:
                 ).scalars()
             )
             supported = "ck_invoices_positive_amount" not in names
-    except Exception:  # noqa: BLE001 - unknown means the old rule stays
+    except Exception:  # noqa: BLE001 - unknown means the old rule stays, for this call only
         logger.exception("Could not read the invoices constraints; zero totals stay refused")
-        supported = False
+        return False
     _zero_amount_support[key] = supported
     return supported
 
@@ -683,6 +684,7 @@ class InvoiceService:
         with invoice_guard.allow(
             invoice_guard.PROFORMA_CONVERSION,
             {"document_type", "issued_at", "series_id", "number_period", "number_value", "number_display"},
+            invoice.id,
         ):
             period, value, display = InvoiceNumbering.allocate(
                 db, series, at=at, invoice_number=invoice.invoice_number
