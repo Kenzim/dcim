@@ -383,6 +383,101 @@ def test_admin_mark_paid_on_reseller_invoice_publishes_once(client, db_session, 
     ]
 
 
+# Finding 4: one lock order for billing. SQLite does not block on FOR UPDATE, so these tests
+# record the order of lock calls; real lock waits and deadlocks need MySQL.
+
+
+@pytest.fixture
+def lock_calls(monkeypatch):
+    from app.services import billing_locks
+
+    calls: list[tuple[str, object]] = []
+    original = billing_locks._lock
+
+    def recording(db, kind, row_id, statement):
+        calls.append((kind, row_id))
+        return original(db, kind, row_id, statement)
+
+    monkeypatch.setattr(billing_locks, "_lock", recording)
+    return calls
+
+
+def _assert_lock_order(calls):
+    from app.services.billing_locks import LOCK_ORDER
+
+    held: set = set()
+    highest = -1
+    for kind, row_id in calls:
+        rank = LOCK_ORDER.index(kind)
+        relock = (kind, row_id) in held or (row_id is None and any(k == kind for k, _ in held))
+        assert relock or rank >= highest, f"{kind} {row_id} locked after a later kind: {calls}"
+        held.add((kind, row_id))
+        highest = max(highest, rank)
+
+
+def test_card_payment_and_webhook_follow_the_lock_order(db_session, provisioned, lock_calls):
+    from tests.services.test_billing_a0_money_path import _deliver, _succeeded
+
+    order, gateway, started = _card_order(db_session)
+    assert [kind for kind, _ in lock_calls[:3]] == ["order", "invoice", "payment"]
+    _assert_lock_order(lock_calls)
+    lock_calls.clear()
+    _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 900))
+    assert [kind for kind, _ in lock_calls[:3]] == ["order", "invoice", "payment"]
+    _assert_lock_order(lock_calls)
+    assert db_session.get(Order, order.id).status == OrderStatus.ACTIVE
+
+
+def test_admin_mark_paid_and_cancel_follow_the_lock_order(db_session, provisioned, lock_calls):
+    from app.services.billing.manual_payments import record_manual_payment
+
+    user, account = _account(db_session)
+    product, plan = _product(db_session, price_cents=900)
+    order = _place(db_session, account, user, product, plan)
+    lock_calls.clear()
+    record_manual_payment(db_session, order.invoice_id, reason="t", actor_user_id=None)
+    _assert_lock_order(lock_calls)
+    assert lock_calls[0] == ("order", order.id)
+    settlement.commit_and_fulfil(db_session)
+
+    other = _place(db_session, account, user, product, plan)
+    lock_calls.clear()
+    cancel_order(db_session, other, actor_user_id=None)
+    _assert_lock_order(lock_calls)
+    assert lock_calls[0] == ("order", other.id)
+
+
+def test_reseller_webhook_locks_reseller_before_invoice_and_payment(db_session, lock_calls):
+    from app.models.reseller import InvoicePurpose
+    from app.services.invoice_service import InvoiceService
+    from app.services.payments.webhooks import PaymentWebhookService
+    from tests.services.test_billing_a0_money_path import _reseller, _succeeded
+
+    reseller = _reseller(db_session, 1)
+    invoice = InvoiceService.create(
+        db_session,
+        reseller_id=reseller.id,
+        purpose=InvoicePurpose.CREDIT_TOPUP,
+        amount_cents=800,
+        description="top-up",
+    )
+    payment = Payment(
+        invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.PENDING,
+        amount_cents=800, currency="USD", external_ref="pi_topup_w0e",
+    )
+    db_session.add(payment)
+    db_session.commit()
+    lock_calls.clear()
+    PaymentWebhookService.process(
+        db_session, gateway="stripe", event=_succeeded("pi_topup_w0e", 800), raw_payload=b"{}"
+    )
+    db_session.commit()
+    assert [kind for kind, _ in lock_calls[:3]] == ["reseller", "invoice", "payment"]
+    _assert_lock_order(lock_calls)
+    db_session.refresh(reseller)
+    assert reseller.cached_balance_cents == 801
+
+
 def test_lock_keeps_unflushed_changes_of_the_caller(db_session):
     from app.services.invoice_service import InvoiceService
 

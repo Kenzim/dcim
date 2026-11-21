@@ -75,9 +75,9 @@ def record_coupon_usage(
     ).scalar_one_or_none()
     if existing is not None:
         return existing
-    locked = db.execute(
-        select(Coupon).where(Coupon.id == coupon.id).with_for_update()
-    ).scalar_one()
+    from app.services.billing_locks import BillingLocks
+
+    locked = BillingLocks.coupon(db, coupon.id)
     redemption = CouponRedemption(
         coupon_id=locked.id,
         billing_account_id=order.billing_account_id,

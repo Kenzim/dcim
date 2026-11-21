@@ -51,17 +51,25 @@ class CardPaymentStart:
         return body
 
 
-def _open_card_payment(db: Session, invoice_id: int) -> Optional[Payment]:
-    return db.execute(
+def open_card_payments(db: Session, invoice_id: int) -> list[Payment]:
+    """Lock the invoice's pending card payments, newest first; the invoice must be locked."""
+    from app.services.billing_locks import BillingLocks
+
+    return BillingLocks.payments(
+        db,
         select(Payment)
         .where(
             Payment.invoice_id == invoice_id,
             Payment.gateway == CARD_GATEWAY,
             Payment.status == PaymentStatus.PENDING,
         )
-        .order_by(Payment.id.desc())
-        .with_for_update()
-    ).scalars().first()
+        .order_by(Payment.id.desc()),
+    )
+
+
+def _open_card_payment(db: Session, invoice_id: int) -> Optional[Payment]:
+    payments = open_card_payments(db, invoice_id)
+    return payments[0] if payments else None
 
 
 def _close(payment: Payment, code: str) -> None:
