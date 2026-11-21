@@ -397,9 +397,20 @@ function rackflow_ClientArea(array $vars)
         !empty($rackflowServiceId) && $backupsAllowed,
         isset($vars['systemurl']) ? (string)$vars['systemurl'] : ''
     );
+    $pluginPanelsHtml = '';
+    if (!empty($rackflowServiceId) && !empty($params['serviceid'])) {
+        $pluginPanelsHtml = rackflow_renderPluginPanels(
+            rackflow_fetchPluginPanels($params, (int)$rackflowServiceId, 'client'),
+            (int)$params['serviceid'],
+            rackflow_pluginActionEndpointUrl(isset($vars['systemurl']) ? (string)$vars['systemurl'] : ''),
+            'client'
+        );
+    }
     return array(
         'templatefile' => 'clientarea',
         'vars' => array_merge($fastPathVars, $slotVars + array(
+            // Escaped HTML from rackflow_renderPluginPanels(); output without |escape.
+            'rackflow_plugin_panels_html' => $pluginPanelsHtml,
             'rackflow_hostname' => $hostname,
             'rackflow_primary_ip' => $primaryIp,
             'rackflow_power_available' => $powerAvailable,
@@ -5205,6 +5216,15 @@ function rackflow_AdminServicesTabFields(array $params)
     // via admin_link.php (action=card) so the RackFlow API calls don't block page load.
     if ($rackflowSvcId !== '' && is_numeric($rackflowSvcId)) {
         $out['RackFlow Server Status'] = rackflow_renderAdminStatusPlaceholder($params, $serviceId, $rackflowSvcId);
+        $pluginHtml = rackflow_renderPluginPanels(
+            rackflow_fetchPluginPanels($params, (int)$rackflowSvcId, 'admin'),
+            $serviceId,
+            rackflow_pluginActionEndpointUrl(isset($params['systemurl']) ? (string)$params['systemurl'] : ''),
+            'admin'
+        );
+        if ($pluginHtml !== '') {
+            $out['RackFlow Plugins'] = $pluginHtml;
+        }
     } else {
         $out['RackFlow Server Status'] = rackflow_buildAdminStatusCard($params, $serviceId, $rackflowSvcId);
     }
@@ -6184,4 +6204,404 @@ function rackflow_slotActionEndpointUrl($systemUrl = '')
         }
     }
     return $basePath . '/modules/servers/rackflow/slot_action.php';
+}
+
+/*
+ * Plugin panels (docs/plugin-system.md section 14).
+ *
+ * One generic renderer for every Rackflow plugin: Rackflow serves a render
+ * document per service and audience, this module draws it with Bootstrap
+ * markup and posts actions to plugin_action.php. Nothing here is specific to
+ * any plugin.
+ */
+
+/**
+ * Whether a plugin id and an action id are safe to put in an API path.
+ *
+ * @param string $pluginId
+ * @param string $actionId
+ * @return bool
+ */
+function rackflow_pluginIdsValid($pluginId, $actionId)
+{
+    return is_string($pluginId) && is_string($actionId)
+        && preg_match('/^[a-z][a-z0-9_]{2,47}$/', $pluginId) === 1
+        && preg_match('/^[a-z][a-z0-9_]{0,63}$/', $actionId) === 1;
+}
+
+/**
+ * Fetch the plugin panels of a linked service. Any failure yields no panels.
+ *
+ * @param array  $params             WHMCS module params
+ * @param int    $rackflowServiceId  linked RackFlow service id
+ * @param string $audience           client or admin
+ * @return array list of panels
+ */
+function rackflow_fetchPluginPanels(array $params, $rackflowServiceId, $audience = 'client')
+{
+    $rackflowServiceId = (int)$rackflowServiceId;
+    if ($rackflowServiceId <= 0) {
+        return array();
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return array();
+    }
+    $audience = $audience === 'admin' ? 'admin' : 'client';
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'GET',
+        '/api/billing/services/' . $rackflowServiceId . '/plugin-ui?audience=' . $audience,
+        null,
+        5
+    );
+    if (empty($result['success']) || !is_array($result['data']) || !isset($result['data']['panels'])
+        || !is_array($result['data']['panels'])) {
+        return array();
+    }
+    return $result['data']['panels'];
+}
+
+/**
+ * Run a plugin action on a linked service through the billing API.
+ *
+ * @return array {success, data|error}
+ */
+function rackflow_runPluginAction(array $params, $rackflowServiceId, $pluginId, $actionId, array $values, $confirm, $audience = 'client')
+{
+    if (!rackflow_pluginIdsValid($pluginId, $actionId) || (int)$rackflowServiceId <= 0) {
+        return array('success' => false, 'error' => 'Invalid request.');
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return array('success' => false, 'error' => 'API URL and API key must be configured (Setup > Servers).');
+    }
+    $audience = $audience === 'admin' ? 'admin' : 'client';
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        'POST',
+        '/api/billing/services/' . (int)$rackflowServiceId . '/plugin-actions/' . $pluginId . '/' . $actionId
+            . '?audience=' . $audience,
+        array('params' => (object)$values, 'confirm' => (bool)$confirm),
+        40
+    );
+    if (empty($result['success'])) {
+        $detail = is_array($result['data'] ?? null) && isset($result['data']['detail']) ? $result['data']['detail'] : null;
+        $error = is_string($detail) ? $detail : (isset($result['error']) && is_string($result['error']) ? $result['error'] : 'The action failed.');
+        return array('success' => false, 'error' => $error);
+    }
+    return array('success' => true, 'data' => is_array($result['data']) ? $result['data'] : array());
+}
+
+/**
+ * Action params from a posted form: fields named p_<key>, as strings.
+ * Rackflow validates and converts them against the action's declared params.
+ *
+ * @param array $posted raw $_POST
+ * @return array
+ */
+function rackflow_pluginParamValues(array $posted)
+{
+    $out = array();
+    foreach ($posted as $name => $value) {
+        if (!is_string($name) || strpos($name, 'p_') !== 0 || !is_scalar($value)) {
+            continue;
+        }
+        $key = substr($name, 2);
+        if (preg_match('/^[a-z][a-z0-9_]{0,63}$/', $key) !== 1) {
+            continue;
+        }
+        $value = trim((string)$value);
+        if ($value === '') {
+            continue;
+        }
+        $out[$key] = $value;
+    }
+    return $out;
+}
+
+function rackflow_pluginActionEndpointUrl($systemUrl = '')
+{
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $basePath = rtrim((string)parse_url($systemUrl, PHP_URL_PATH), '/');
+        }
+    }
+    return $basePath . '/modules/servers/rackflow/plugin_action.php';
+}
+
+/**
+ * Render plugin panels as HTML. Every string from Rackflow is escaped.
+ *
+ * @param array  $panels          panels from the render document
+ * @param int    $whmcsServiceId  tblhosting.id
+ * @param string $actionUrl       plugin_action.php URL
+ * @param string $audience        client or admin
+ * @return string HTML, or '' when there are no panels
+ */
+function rackflow_renderPluginPanels(array $panels, $whmcsServiceId, $actionUrl, $audience = 'client')
+{
+    if (empty($panels)) {
+        return '';
+    }
+    $h = function ($v) {
+        return htmlspecialchars(is_scalar($v) ? (string)$v : '', ENT_QUOTES, 'UTF-8');
+    };
+    $tones = array('success' => 'success', 'warning' => 'warning', 'danger' => 'danger', 'info' => 'info', 'neutral' => 'default');
+    $alerts = array('success' => 'success', 'warning' => 'warning', 'danger' => 'danger', 'info' => 'info', 'neutral' => 'info');
+    $styles = array('primary' => 'btn-primary', 'secondary' => 'btn-default', 'danger' => 'btn-danger');
+    $audience = $audience === 'admin' ? 'admin' : 'client';
+
+    $html = '<div class="rf-plugins" data-rf-plugin-url="' . $h($actionUrl) . '" data-rf-service-id="' . (int)$whmcsServiceId
+        . '" data-rf-audience="' . $audience . '">';
+    foreach ($panels as $panel) {
+        if (!is_array($panel)) {
+            continue;
+        }
+        $html .= '<div class="panel panel-default rf-plugin-panel"><div class="panel-heading"><h3 class="panel-title">'
+            . $h($panel['title'] ?? '') . '</h3></div><div class="panel-body">';
+        if (!empty($panel['notice'])) {
+            $html .= '<div class="alert alert-warning">' . $h($panel['notice']) . '</div>';
+        }
+        $rows = '';
+        $flushRows = function () use (&$rows, &$html) {
+            if ($rows !== '') {
+                $html .= '<table class="table table-condensed rf-plugin-fields"><tbody>' . $rows . '</tbody></table>';
+                $rows = '';
+            }
+        };
+        foreach ((array)($panel['elements'] ?? array()) as $el) {
+            if (!is_array($el) || !isset($el['type'])) {
+                continue;
+            }
+            switch ($el['type']) {
+                case 'field':
+                    $rows .= '<tr><th>' . $h($el['label'] ?? '') . '</th><td>' . $h($el['value'] ?? '') . '</td></tr>';
+                    break;
+                case 'badge':
+                    $tone = isset($tones[$el['tone'] ?? '']) ? $tones[$el['tone']] : 'default';
+                    $rows .= '<tr><th>' . $h($el['label'] ?? '') . '</th><td><span class="label label-' . $tone . '">'
+                        . $h($el['text'] ?? '') . '</span></td></tr>';
+                    break;
+                case 'text':
+                    $flushRows();
+                    if (!empty($el['tone']) && isset($alerts[$el['tone']])) {
+                        $html .= '<div class="alert alert-' . $alerts[$el['tone']] . '">' . $h($el['text'] ?? '') . '</div>';
+                    } else {
+                        $html .= '<p>' . $h($el['text'] ?? '') . '</p>';
+                    }
+                    break;
+                case 'divider':
+                    $flushRows();
+                    $html .= '<hr />';
+                    break;
+                case 'action':
+                    $flushRows();
+                    if (!rackflow_pluginIdsValid($el['plugin_id'] ?? '', $el['action_id'] ?? '')) {
+                        break;
+                    }
+                    $style = isset($styles[$el['style'] ?? '']) ? $styles[$el['style']] : 'btn-default';
+                    $html .= '<form class="form-inline rf-plugin-action" data-rf-plugin="' . $h($el['plugin_id'])
+                        . '" data-rf-action="' . $h($el['action_id']) . '" data-rf-confirm="' . $h($el['confirm'] ?? '') . '">';
+                    foreach ((array)($el['params'] ?? array()) as $param) {
+                        if (!is_array($param) || !isset($param['key']) || !preg_match('/^[a-z][a-z0-9_]{0,63}$/', (string)$param['key'])) {
+                            continue;
+                        }
+                        $name = 'p_' . $param['key'];
+                        $type = (string)($param['type'] ?? 'string');
+                        $required = !empty($param['required']) ? ' required' : '';
+                        $default = $param['default'] ?? '';
+                        $html .= '<div class="form-group"><label>' . $h($param['label'] ?? $param['key']) . '</label> ';
+                        if ($type === 'boolean') {
+                            $html .= '<input type="checkbox" name="' . $h($name) . '" value="1"' . (!empty($default) ? ' checked' : '') . ' />';
+                        } elseif ($type === 'select') {
+                            $html .= '<select class="form-control" name="' . $h($name) . '"' . $required . '>';
+                            foreach ((array)($param['options'] ?? array()) as $opt) {
+                                if (!is_array($opt)) {
+                                    continue;
+                                }
+                                $value = is_bool($opt['value'] ?? null) ? ($opt['value'] ? 'true' : 'false') : ($opt['value'] ?? '');
+                                $selected = (string)$value === (is_bool($default) ? ($default ? 'true' : 'false') : (string)$default) ? ' selected' : '';
+                                $html .= '<option value="' . $h($value) . '"' . $selected . '>' . $h($opt['label'] ?? $value) . '</option>';
+                            }
+                            $html .= '</select>';
+                        } elseif ($type === 'text') {
+                            $max = isset($param['max_length']) ? ' maxlength="' . (int)$param['max_length'] . '"' : '';
+                            $html .= '<textarea class="form-control" name="' . $h($name) . '"' . $max . $required . '>' . $h($default) . '</textarea>';
+                        } elseif ($type === 'integer' || $type === 'number') {
+                            $attrs = '';
+                            if (isset($param['min']) && is_numeric($param['min'])) {
+                                $attrs .= ' min="' . $h($param['min']) . '"';
+                            }
+                            if (isset($param['max']) && is_numeric($param['max'])) {
+                                $attrs .= ' max="' . $h($param['max']) . '"';
+                            }
+                            $attrs .= ' step="' . ($type === 'integer' ? '1' : 'any') . '"';
+                            $html .= '<input type="number" class="form-control" name="' . $h($name) . '" value="' . $h($default) . '"' . $attrs . $required . ' />';
+                        } else {
+                            $max = isset($param['max_length']) ? ' maxlength="' . (int)$param['max_length'] . '"' : '';
+                            $html .= '<input type="text" class="form-control" name="' . $h($name) . '" value="' . $h($default) . '"' . $max . $required . ' />';
+                        }
+                        $html .= '</div> ';
+                    }
+                    $disabled = ($panel['health'] ?? 'ok') === 'unavailable' ? ' disabled' : '';
+                    $html .= '<button type="submit" class="btn btn-sm ' . $style . '"' . $disabled . '>' . $h($el['label'] ?? 'Run') . '</button>'
+                        . ' <span class="rf-plugin-message" role="status"></span></form>';
+                    break;
+                default:
+                    break;
+            }
+        }
+        $flushRows();
+        $html .= '</div></div>';
+    }
+    $html .= '</div>';
+    return $html . rackflow_pluginPanelsScript();
+}
+
+/**
+ * Script that posts plugin action forms to plugin_action.php. Safe to include
+ * more than once per page.
+ *
+ * @return string
+ */
+function rackflow_pluginPanelsScript()
+{
+    return <<<'JS'
+<script>
+(function () {
+  if (window.rackflowPluginPanels) { return; }
+  window.rackflowPluginPanels = true;
+  document.addEventListener('submit', function (ev) {
+    var form = ev.target;
+    if (!form || !form.classList || !form.classList.contains('rf-plugin-action')) { return; }
+    ev.preventDefault();
+    var root = form.closest('.rf-plugins');
+    if (!root) { return; }
+    var confirmText = form.getAttribute('data-rf-confirm');
+    if (confirmText && !window.confirm(confirmText)) { return; }
+    var msg = form.querySelector('.rf-plugin-message');
+    var btn = form.querySelector('button[type="submit"]');
+    var body = new URLSearchParams();
+    body.set('serviceid', root.getAttribute('data-rf-service-id'));
+    body.set('audience', root.getAttribute('data-rf-audience'));
+    body.set('plugin_id', form.getAttribute('data-rf-plugin'));
+    body.set('action_id', form.getAttribute('data-rf-action'));
+    body.set('confirm', confirmText ? '1' : '0');
+    Array.prototype.forEach.call(form.elements, function (input) {
+      if (!input.name || input.name.indexOf('p_') !== 0) { return; }
+      if (input.type === 'checkbox') { body.set(input.name, input.checked ? '1' : '0'); }
+      else { body.set(input.name, input.value); }
+    });
+    if (btn) { btn.disabled = true; }
+    if (msg) { msg.textContent = 'Working...'; msg.className = 'rf-plugin-message text-muted'; }
+    fetch(root.getAttribute('data-rf-plugin-url'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+      body: body.toString(),
+      credentials: 'same-origin'
+    }).then(function (res) {
+      return res.json().catch(function () { return { ok: false, error: 'Unexpected response (' + res.status + ')' }; });
+    }).then(function (data) {
+      if (data && data.ok) {
+        if (msg) { msg.textContent = data.message || 'Done.'; msg.className = 'rf-plugin-message text-success'; }
+        window.setTimeout(function () { window.location.reload(); }, 1200);
+        return;
+      }
+      if (msg) { msg.textContent = (data && data.error) || 'The action failed.'; msg.className = 'rf-plugin-message text-danger'; }
+      if (btn) { btn.disabled = false; }
+    }).catch(function () {
+      if (msg) { msg.textContent = 'The action failed.'; msg.className = 'rf-plugin-message text-danger'; }
+      if (btn) { btn.disabled = false; }
+    });
+  });
+})();
+</script>
+JS;
+}
+
+/**
+ * Rackflow add-on status for a WHMCS add-on hook name, or null for other hooks.
+ *
+ * @param string $hookName
+ * @return string|null
+ */
+function rackflow_addonHookStatus($hookName)
+{
+    $map = array(
+        'AddonActivation' => 'active',
+        'AddonActivated' => 'active',
+        'AddonUnsuspended' => 'active',
+        'AddonSuspended' => 'suspended',
+        'AddonTerminated' => 'terminated',
+        'AddonCancelled' => 'terminated',
+    );
+    return isset($map[$hookName]) ? $map[$hookName] : null;
+}
+
+/**
+ * Tell Rackflow that a WHMCS product add-on on a RackFlow service changed state,
+ * so the plugins linked to that add-on are switched on or off for the service.
+ * Never throws; failures are logged with logModuleCall.
+ *
+ * @param array  $vars     hook variables (serviceid, addonid)
+ * @param string $hookName WHMCS hook name
+ * @return void
+ */
+function rackflow_reportAddonStatus(array $vars, $hookName)
+{
+    $status = rackflow_addonHookStatus($hookName);
+    $serviceId = isset($vars['serviceid']) ? (int)$vars['serviceid'] : 0;
+    $addonId = isset($vars['addonid']) ? (int)$vars['addonid'] : 0;
+    if ($status === null || $serviceId <= 0 || $addonId <= 0) {
+        return;
+    }
+    try {
+        if (!class_exists('\Illuminate\Database\Capsule\Manager')) {
+            return;
+        }
+        $hosting = \Illuminate\Database\Capsule\Manager::table('tblhosting')->where('id', $serviceId)->first();
+        if (!$hosting) {
+            return;
+        }
+        $product = \Illuminate\Database\Capsule\Manager::table('tblproducts')->where('id', (int)$hosting->packageid)->first();
+        if (!$product || strtolower((string)$product->servertype) !== 'rackflow') {
+            return;
+        }
+        $params = array(
+            'serviceid' => $serviceId,
+            'userid' => (int)$hosting->userid,
+            'packageid' => (int)$hosting->packageid,
+            'pid' => (int)$hosting->packageid,
+            'serverid' => (int)$hosting->server,
+        );
+        $rackflowServiceId = (int)rackflow_getRackflowServiceId($params);
+        if ($rackflowServiceId <= 0) {
+            return;
+        }
+        $apiConfig = rackflow_getApiConfig($params);
+        if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+            return;
+        }
+        $body = array('addon_ref' => 'whmcs:' . $addonId, 'status' => $status);
+        $result = rackflow_apiCall(
+            $apiConfig['url'],
+            $apiConfig['key'],
+            'POST',
+            '/api/billing/services/' . $rackflowServiceId . '/addons',
+            $body,
+            15
+        );
+        if (empty($result['success']) && function_exists('logModuleCall')) {
+            logModuleCall('rackflow', 'AddonStatus', $body, isset($result['error']) ? $result['error'] : 'failed', $result);
+        }
+    } catch (\Throwable $e) {
+        if (function_exists('logModuleCall')) {
+            logModuleCall('rackflow', 'AddonStatus', array('hook' => $hookName, 'serviceid' => $serviceId), $e->getMessage(), '');
+        }
+    }
 }

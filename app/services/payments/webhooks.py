@@ -173,9 +173,9 @@ class PaymentWebhookService:
         invoice = payment.invoice
         if invoice is not None and invoice.billing_account_id is not None:
             try:
-                from app.services.commerce_webhook_service import CommerceWebhookService
+                from app.plugin_host import events as plugin_events
 
-                CommerceWebhookService.enqueue(
+                plugin_events.emit(
                     db,
                     "invoice.paid",
                     {

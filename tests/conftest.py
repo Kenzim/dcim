@@ -23,6 +23,7 @@ os.environ["MCP_ENABLED"] = "false"
 os.environ["CLIENT_MCP_ENABLED"] = "false"
 # The alert worker loop must not start inside TestClient lifespans.
 os.environ["RUN_ALERT_WORKER"] = "false"
+os.environ["RUN_PLUGIN_WORKER"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -285,6 +286,16 @@ def mock_redis():
     mock_redis_client.get = mock_get
     
     return mock_redis_client
+
+
+@pytest.fixture(autouse=True)
+def _reset_plugin_runtime():
+    """The plugin host caches subscriptions and loaded code per process; start each test clean."""
+    from app.plugin_host import runtime
+
+    runtime.reset_all()
+    yield
+    runtime.reset_all()
 
 
 @pytest.fixture(scope="function")

@@ -1,0 +1,54 @@
+{
+  "id": "uptime_reminder",
+  "name": "Uptime reminder",
+  "version": "1.0.0",
+  "description": "Asks clients every so often to confirm a service is still needed, so unused services can be cancelled.",
+  "author": "Rackflow",
+  "licence": "MIT",
+  "rackflow_api": ">=1.0,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["service.read", "notify.client", "http.outbound", "ui.client", "mcp.staff"],
+  "services": {"types": ["vm", "bare_metal"], "enablement": "all"},
+  "settings": [
+    {"key": "reminder_days", "label": "Remind after (days)", "type": "integer", "default": 30, "min": 1, "max": 365, "required": true,
+     "help": "Days after the last confirmation before the client is asked again."},
+    {"key": "notify_clients", "label": "Send a notice to the client when a reminder falls due", "type": "boolean", "default": true},
+    {"key": "webhook_url", "label": "Webhook URL (optional)", "type": "url",
+     "help": "Rackflow posts a JSON message here when a reminder falls due."},
+    {"key": "webhook_token", "label": "Webhook token", "type": "secret",
+     "help": "Sent as a Bearer token with the webhook."}
+  ],
+  "events": ["service.created", "service.suspended", "service.unsuspended"],
+  "schedules": [{"id": "check", "every": "1h", "scope": "service", "timeout": 30, "jitter": "30m"}],
+  "actions": [
+    {"id": "confirm", "label": "Confirm I still need this", "audience": ["client", "admin"], "style": "primary",
+     "confirm": "Confirm that you still use this service?",
+     "params": [{"key": "note", "label": "Note (optional)", "type": "string", "max_length": 200, "default_state": "note"}]},
+    {"id": "remind_now", "label": "Ask the client now", "audience": ["admin"], "style": "secondary"}
+  ],
+  "ui": {"panels": [{
+    "id": "status",
+    "title": "Uptime reminder",
+    "placement": "service",
+    "audience": ["admin", "client"],
+    "elements": [
+      {"type": "badge", "label": "Status", "state": "status",
+       "map": {"ok": {"text": "Confirmed", "tone": "success"},
+               "due": {"text": "Please confirm", "tone": "warning"},
+               "paused": {"text": "Paused while suspended", "tone": "neutral"}},
+       "default": {"text": "Not checked yet", "tone": "neutral"}},
+      {"type": "field", "label": "Last confirmed", "state": "confirmed_at", "format": "datetime", "empty": "Never"},
+      {"type": "field", "label": "Next reminder", "state": "due_at", "format": "datetime", "empty": "Not scheduled"},
+      {"type": "field", "label": "Client note", "state": "note", "empty": "None"},
+      {"type": "field", "label": "Reminders sent", "state": "reminders_sent", "format": "number", "empty": "0", "audience": ["admin"]},
+      {"type": "text", "text": "We ask now and then so that services nobody uses can be cancelled.", "audience": ["client"]},
+      {"type": "action", "action": "confirm", "when": {"state": "status", "ne": "paused"}},
+      {"type": "action", "action": "remind_now", "when": {"state": "status", "eq": "ok"}}
+    ]
+  }]},
+  "mcp_tools": [
+    {"id": "status", "description": "Reminder status of one service: status, last confirmation and next reminder.",
+     "audience": "staff", "scope": "read",
+     "params": [{"key": "service_id", "label": "Service", "type": "integer", "required": true}]}
+  ]
+}

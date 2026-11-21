@@ -292,6 +292,14 @@ async def service_power(service_id: int, action: str, confirm: bool = False) -> 
         server = service_linked_server(db, service)
         if not server:
             raise ValueError("Service has no linked server")
+        from app.plugin_host import events as plugin_events
+
+        try:
+            await plugin_events.power_requested(
+                db, service, action_norm, source="mcp", actor_user_id=ctx.created_by_user_id
+            )
+        except plugin_events.OperationVetoed as exc:
+            raise ValueError(exc.message) from exc
         return await server_power(server.id, action_norm, confirm=confirm)
 
     return await run_tool(

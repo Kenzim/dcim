@@ -856,6 +856,9 @@ async def power_service(
         blocked = power_block_reason(service, action)
         if blocked:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
+    from app.plugin_host import events as plugin_events
+
+    await plugin_events.guard_power(db, service, action, source="reseller")
     plugin, _ = await _billing_get_plugin_instance(db, service)
     try:
         if action == "on":

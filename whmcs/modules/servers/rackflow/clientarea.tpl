@@ -835,6 +835,9 @@ button.rf-ca__btn--danger:hover {
       {/if}
     </div>
   </div>
+  {if $rackflow_plugin_panels_html}
+  <div class="rf-ca__plugins">{$rackflow_plugin_panels_html}</div>
+  {/if}
 </div>
 
 {if $rackflow_change_password_allowed}
