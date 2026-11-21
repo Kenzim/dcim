@@ -207,7 +207,15 @@ class RecurringBillingService:
             .limit(remaining)
         )
         if not self._retail_enabled():
-            due_statement = due_statement.where(ServiceBilling.reseller_id.is_not(None))
+            due_statement = due_statement.where(
+                or_(
+                    ServiceBilling.reseller_id.is_not(None),
+                    and_(
+                        ServiceBilling.cancel_at.is_not(None),
+                        ServiceBilling.cancel_at <= now,
+                    ),
+                )
+            )
         billings = list(
             db.execute(self._locked(due_statement, db)).scalars()
         )
