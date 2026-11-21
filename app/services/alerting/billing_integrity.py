@@ -19,7 +19,7 @@ Coverage notes:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import MetaData, Table, and_, func, inspect, or_, select
@@ -368,29 +368,165 @@ def _optional(table: Table) -> tuple[str, ...]:
     return tuple(name for name in ("payment_id", "invoice_id", "amount_cents", "currency") if name in table.c)
 
 
-# Billing phase 1 detectors (docs/billing-phase1-design.md 10.4). Each is a
-# read-only stub returning no findings until its owner fills it in, and each
-# alert type ships disabled.
+# Billing phase 1 detectors (docs/billing-phase1-design.md 10.4). Each alert
+# type ships disabled.
 
 
 def shadow_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Open rows in ``billing_shadow_mismatches`` (P1-C)."""
-    return []
+    """One finding per engine with open rows in ``billing_shadow_mismatches``."""
+    del now
+    from app.services.billing_shadow import ENGINES, open_mismatch_counts
+
+    out = []
+    for engine in ENGINES[: params["max_rows"]]:
+        counts = open_mismatch_counts(db, engine)
+        if not counts:
+            continue
+        total = sum(counts.values())
+        listed = ", ".join(f"{key} {count}" for key, count in sorted(counts.items()))
+        out.append(
+            Finding(
+                "billing_shadow_mismatch",
+                "billing_shadow_mismatch",
+                engine,
+                f"{engine} engine",
+                f"{total} open shadow mismatches for the {engine} engine",
+                f"Open by check: {listed}. The {engine} engine cannot switch to v2 until they are resolved.",
+                details={"engine": engine, "open_by_check": counts, "open_total": total},
+            )
+        )
+    return out
 
 
 def shadow_scan_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """An engine in ``shadow`` whose last daily scan is over 26 hours old (P1-C)."""
-    return []
+    """An engine in ``shadow`` whose last daily scan finished over 26 hours ago, or never.
+
+    Only while the scheduled scan job is enabled, so an install with the job
+    off (the default) is quiet.
+    """
+    del params
+    from app.services.billing_shadow import (
+        ENGINES,
+        SCAN_FRESH_HOURS,
+        BillingShadowService,
+        _parse_time,
+        billing_engine_mode,
+    )
+    from app.services.settings_store import get_setting
+
+    if not get_setting(db, "billing_shadow_scan_enabled"):
+        return []
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    out = []
+    for engine in ENGINES:
+        if billing_engine_mode(db, engine) != "shadow":
+            continue
+        last = BillingShadowService.last_scan(db, engine)
+        finished = _parse_time(last.get("finished_at")) if last else None
+        if finished is not None and now - finished < timedelta(hours=SCAN_FRESH_HOURS):
+            continue
+        out.append(
+            Finding(
+                "billing_shadow_scan_stale",
+                "system",
+                f"shadow_scan:{engine}",
+                f"{engine} engine shadow scan",
+                f"The {engine} engine's shadow scan has not finished in the last {SCAN_FRESH_HOURS} hours",
+                "Last finished: " + (finished.isoformat() if finished else "never") + ".",
+                details={"engine": engine, "last_finished_at": finished.isoformat() if finished else None},
+            )
+        )
+    return out
 
 
 def ledger_chain_broken(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Billing accounts whose ledger chain fails property P4 (P1-C)."""
-    return []
+    """Billing accounts whose ledger chain is broken or whose last entry disagrees with the cache.
+
+    The cache compared is the authoritative one for the credit engine mode
+    (the reseller cache for reseller accounts until v2).
+    """
+    del now
+    from app.services.billing_shadow import (
+        account_chain_state,
+        authoritative_cache,
+        billing_engine_mode,
+        chain_breaks,
+    )
+
+    mode = billing_engine_mode(db, "credit")
+    breaks = chain_breaks(db)
+    account_ids = [
+        int(value)
+        for value in db.scalars(
+            select(CreditLedgerEntry.billing_account_id)
+            .where(CreditLedgerEntry.billing_account_id.is_not(None))
+            .group_by(CreditLedgerEntry.billing_account_id)
+        )
+    ]
+    offenders: list[tuple[int, dict]] = []
+    for start in range(0, len(account_ids), 1000):
+        states = account_chain_state(db, account_ids[start : start + 1000])
+        for account_id, state in states.items():
+            cache = authoritative_cache(state, mode)
+            if account_id in breaks or cache != state["last_balance_after"]:
+                offenders.append((account_id, {**state, "cache": cache}))
+    offenders.sort()
+    limit = params["max_rows"]
+    out = []
+    for account_id, state in offenders[:limit]:
+        broken = breaks.get(account_id)
+        details = {
+            "billing_account_id": account_id,
+            "cached_balance_cents": state["cache"],
+            "latest_balance_after_cents": state["last_balance_after"],
+            "first_broken_entry_id": broken[0] if broken else None,
+        }
+        out.append(
+            Finding(
+                "billing_ledger_chain_broken",
+                "billing_account",
+                str(account_id),
+                f"Billing account {account_id}",
+                f"Credit ledger of billing account {account_id} does not chain to its balance",
+                (f"Entry {broken[0]} should end at {broken[1]} but says {broken[2]}. " if broken else "")
+                + f"Cached balance {state['cache']}, newest entry says {state['last_balance_after']} (minor units).",
+                details=details,
+            )
+        )
+    if len(offenders) > limit:
+        out.append(_overflow("billing_ledger_chain_broken", "billing_account", "accounts with a broken ledger",
+                             len(offenders) - limit, limit))
+    return out
 
 
 def negative_retail_balance(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Retail billing accounts with a balance below zero (P1-C)."""
-    return []
+    """Retail billing accounts with a balance below zero."""
+    del now
+    from app.models.commerce_account import BillingAccount, BillingAccountType
+
+    stmt = (
+        select(BillingAccount.id, BillingAccount.credit_balance_cents, BillingAccount.currency)
+        .where(BillingAccount.account_type != BillingAccountType.RESELLER, BillingAccount.credit_balance_cents < 0)
+        .order_by(BillingAccount.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_negative_retail_balance",
+            "billing_account",
+            str(row.id),
+            f"Billing account {row.id}",
+            f"Credit balance of billing account {row.id} is negative",
+            f"Balance {int(row.credit_balance_cents)} {row.currency} minor units, usually after a chargeback "
+            "of a top-up that was already spent.",
+            details={"billing_account_id": row.id, "balance_cents": int(row.credit_balance_cents)},
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_negative_retail_balance", "billing_account", "negative retail balances",
+                             remaining, len(rows)))
+    return out
 
 
 def invoice_totals(db: Session, params: dict, now: datetime) -> list[Finding]:

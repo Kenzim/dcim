@@ -463,8 +463,7 @@ def test_shipped_job_bodies_are_stubs(file_db):
     db = file_db()
     with pytest.raises(NotImplementedError):
         periodic._run_refund_reconciler(db, NOW, True)
-    with pytest.raises(NotImplementedError):
-        periodic._run_shadow_scan(db, NOW, True)
+    assert periodic._run_shadow_scan(db, NOW, True)["dry_run"] is True
 
 
 # ------------------------------------------------------------------ cycles
