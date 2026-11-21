@@ -441,6 +441,10 @@ api_router.include_router(commerce_client_api.router, tags=["commerce-client"])
 api_router.include_router(commerce_support_admin_api.router, tags=["commerce-support-admin"])
 api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"])
 
+# Credit and debit notes (admin issue, client and reseller read)
+from app.api import billing_adjustments as billing_adjustments_api
+api_router.include_router(billing_adjustments_api.router)
+
 # Automation and billing settings store (typed, database-backed, env defaults)
 from app.api import settings_admin as settings_admin_api
 api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
