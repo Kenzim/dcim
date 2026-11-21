@@ -153,7 +153,7 @@ class PaymentWebhookService:
             ).first()
             if found is None:
                 continue
-            BillingLocks.for_invoice(db, int(found.invoice_id), reseller=True)
+            BillingLocks.for_invoice(db, int(found.invoice_id), reseller=True, billing_account=True)
             locked = BillingLocks.payments(
                 db, select(Payment).where(Payment.id == found.id)
             )

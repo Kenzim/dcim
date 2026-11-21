@@ -76,13 +76,28 @@ class BillingAccountDAO:
         existing = BillingAccountDAO.get_by_reseller_id(db, reseller.id)
         if existing is not None:
             return existing
+        from app.models.reseller import CreditLedgerEntry
+
+        has_entries = (
+            db.scalar(
+                select(CreditLedgerEntry.id)
+                .where(CreditLedgerEntry.reseller_id == reseller.id)
+                .limit(1)
+            )
+            is not None
+        )
+        # A reseller with no ledger entries starts at 0; one with entries (created
+        # before its account existed) mirrors the reseller cache, as the account
+        # backfill does, and the shadow scan compares the two from then on.
         account = BillingAccount(
             account_type=BillingAccountType.RESELLER,
             reseller_id=reseller.id,
             user_id=reseller.user_id,
             currency="USD",
             status=BillingAccountStatus.ACTIVE,
-            credit_balance_cents=int(reseller.cached_balance_cents or 0),
+            credit_balance_cents=(
+                int(reseller.cached_balance_cents or 0) if has_entries else 0
+            ),
         )
         db.add(account)
         db.flush()

@@ -424,7 +424,9 @@ def test_card_payment_and_webhook_follow_the_lock_order(db_session, provisioned,
     _assert_lock_order(lock_calls)
     lock_calls.clear()
     _deliver(db_session, gateway, _succeeded(started.payment_intent_id, 900))
-    assert [kind for kind, _ in lock_calls[:3]] == ["order", "invoice", "payment"]
+    assert [kind for kind, _ in lock_calls[:4]] == [
+        "billing_account", "order", "invoice", "payment"
+    ]
     _assert_lock_order(lock_calls)
     assert db_session.get(Order, order.id).status == OrderStatus.ACTIVE
 
@@ -473,7 +475,9 @@ def test_reseller_webhook_locks_reseller_before_invoice_and_payment(db_session, 
         db_session, gateway="stripe", event=_succeeded("pi_topup_w0e", 800), raw_payload=b"{}"
     )
     db_session.commit()
-    assert [kind for kind, _ in lock_calls[:3]] == ["reseller", "invoice", "payment"]
+    assert [kind for kind, _ in lock_calls[:4]] == [
+        "reseller", "billing_account", "invoice", "payment"
+    ]
     _assert_lock_order(lock_calls)
     db_session.refresh(reseller)
     assert reseller.cached_balance_cents == 801

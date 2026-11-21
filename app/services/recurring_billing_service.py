@@ -39,7 +39,11 @@ from app.services.billing.renewals import (
 )
 from app.services.invoice_service import InvoiceService
 from app.services.notification_service import NotificationEvent, NotificationService
-from app.services.payments.orchestrator import PaymentOrchestrator
+from app.services.credit_ledger_service import CreditLedgerService
+from app.services.payments.orchestrator import (
+    PaymentOrchestrator,
+    transition_invoice_status,
+)
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
 
 
@@ -690,7 +694,9 @@ class RecurringBillingService:
             else BillingCycleState.GRACE
         )
         if cycle.invoice.status != InvoiceStatus.PENDING_ACTION:
-            cycle.invoice.status = InvoiceStatus.OVERDUE
+            transition_invoice_status(
+                db, cycle.invoice, InvoiceStatus.OVERDUE, cause="renewal_past_due"
+            )
         billing.status = (
             ServiceBillingStatus.PAST_DUE
             if cycle.attempts == 1
@@ -937,7 +943,7 @@ class RecurringBillingService:
 
         if not self._has_overdue_cycles(db, reseller.id, excluding=cycle.id):
             await self._restore_cascade(db, reseller)
-            if reseller.cached_balance_cents >= 0 and (
+            if CreditLedgerService.balance_cents(db, reseller) >= 0 and (
                 not reseller.billing_hold
                 or reseller.billing_hold_reason == "nonpayment"
             ):
@@ -1017,7 +1023,13 @@ class RecurringBillingService:
             cycle.completed_at = now
             cycle.next_retry_at = None
             if cycle.invoice is not None and cycle.invoice.status != InvoiceStatus.PAID:
-                cycle.invoice.status = InvoiceStatus.VOID
+                transition_invoice_status(
+                    db,
+                    cycle.invoice,
+                    InvoiceStatus.VOID,
+                    cause="service_billing_cancelled",
+                    reason="Service billing cancelled",
+                )
 
     @staticmethod
     def _mark_manual(

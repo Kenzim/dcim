@@ -234,7 +234,7 @@ class ResellerBillingService:
                 return None
             raise DeployCreditRequiredError(
                 required_cents=request.invoice.amount_cents,
-                available_cents=reseller.cached_balance_cents,
+                available_cents=CreditLedgerService.balance_cents(db, reseller),
                 invoice_id=request.invoice.id,
             )
         raise IdempotencyConflictError(
@@ -691,7 +691,7 @@ class ResellerBillingService:
         if idempotency is not None:
             idempotency.invoice_id = invoice.id
 
-        available_before = max(0, int(reseller.cached_balance_cents))
+        available_before = CreditLedgerService.available_cents(db, reseller)
         if payment_fallback is None:
             from app.services.payments.orchestrator import PaymentOrchestrator
 
@@ -792,7 +792,15 @@ class ResellerBillingService:
                 metadata={"reason": str(error)[:500]},
                 created_by_user_id=reseller.user_id,
             )
-        charge.invoice.status = InvoiceStatus.VOID
+        from app.services.payments.orchestrator import transition_invoice_status
+
+        transition_invoice_status(
+            db,
+            charge.invoice,
+            InvoiceStatus.VOID,
+            cause="deploy_failed_credit_returned",
+            reason=str(error)[:500],
+        )
         if charge.idempotency is not None:
             charge.idempotency.status = (
                 ResellerProvisioningRequestStatus.FAILED
