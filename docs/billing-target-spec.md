@@ -29,9 +29,18 @@ Companion document: `docs/billing-whmcs-comparison.md` (the feature-by-feature c
 
 ## 1. Plugin seams
 
-The plugin design document (`docs/plugin-system.md` on the plugin chat's branch) did not exist when this was written. The seam names below are provisional and should be aligned with that design. Two things already exist: `PaymentGatewayRegistry` with a `PaymentGateway` protocol (`app/services/payments/registry.py:14`, `base.py:97`), and a hardware plugin registry in `app/plugins/` that is for server management only.
+Aligned on 2026-11-21 with `docs/plugin-system.md` (plugin API 1.0, core in `app/plugin_host/`, branch `task/plugin-system-design-and-core-35d640`). Its vocabulary is used here:
 
-| Seam | Core provides | Plugin provides | Built-in or first plugins |
+- A **plugin** is an admin-installed package with a `plugin.json` manifest declaring `permissions`, `settings`, `events`, `hooks`, `schedules`, `actions`, `ui.panels` and `mcp_tools` (plugin doc section 3.2).
+- **Events** are delivered to plugin **after handlers** through the plugin outbox (at least once, idempotent by event id); **before hooks** may veto (plugin doc section 6). Billing receives no second event mechanism: billing's single settlement function fires its internal subscriber list (section 14 of this spec), and the plugin bus's `emit()` is one subscriber of it. The billing event names in section 14 are added to the plugin catalogue as they gain emitters; within plugin API 1.x payload fields are only ever added.
+- Receiving billing events needs the `billing.read` permission (plugin doc section 7).
+- Each seam below becomes a **plugin kind**: a kind-specific registrar on top of the plugin core, as plugin doc section 17 plans ("Plugin kinds for payment gateways, tax providers, accounting export, fraud checks"). Kinds are not in plugin API 1.0; until a kind exists, its seam is an in-core registry with the interface named here, so the later plugin registrar only wraps it.
+- Plugin settings (secrets sealed) and schedules (leased rows in `plugin_schedules`) come from the plugin core; billing kinds use them rather than their own.
+- The hardware adapters in `app/plugins/` are a separate, older mechanism for server management only and are not billing seams.
+
+Already present: `PaymentGatewayRegistry` with a `PaymentGateway` protocol (`app/services/payments/registry.py:14`, `base.py:97`), which is the contract the payment gateway kind will keep.
+
+| Seam (plugin kind) | Core provides | Plugin provides | Built-in or first plugins |
 |---|---|---|---|
 | Payment gateway | Registry, settlement point, refund and webhook plumbing, `Payment` and `Refund` records | Charge, refund, vault, webhook normalisation, hosted-page flows | Stripe, PayPal, USDT as plugins (they already fit the protocol); manual and credit stay in core |
 | Fraud check | Hook after order placement, `fraud_score` column (`app/models/commerce_order.py:115`), hold-for-review order state | Scoring against FraudLabs Pro, MaxMind, others | None in core |
@@ -358,3 +367,13 @@ A rough total, one engineer working serially, is on the order of 12 to 18 months
 5. **Reseller balances.** Retire `resellers.cached_balance_cents` in favour of the account-level cache once A3 is proven, or keep both indefinitely?
 6. **Affiliates and quotes.** Where should these sit relative to Phase 4?
 7. **Plugin seam names.** Confirm or adjust section 1 once `docs/plugin-system.md` exists.
+
+**Decided defaults** (relayed by the project chat, 2026-11-21; implement these):
+
+1. Invoice numbering is unique and ordered by default, with a per-series "gapless" option. In gapless mode numbers are allocated only at publish or payment, and a void never frees a number.
+2. Daily proration for upgrades; a downgrade credits the account balance; refund on cancellation is off by default. All three are settings.
+3. The first tax rule packs are UK VAT and EU VAT, the latter with a VIES tax-ID validator plugin.
+4. Until saved retail payment methods exist (B6), retail renewal invoices are emailed and the client pays them in the client area.
+5. Keep both reseller balance caches until A3 has run in shadow mode with zero mismatches, then retire `resellers.cached_balance_cents` in a later contract step.
+6. Quotes in phase 4; affiliates in phase 5, as a plugin.
+7. Seam names aligned with `docs/plugin-system.md` in section 1.
