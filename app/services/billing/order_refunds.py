@@ -120,6 +120,7 @@ def record_refund_review(
     reason: str,
     payment: Optional[Payment] = None,
     actor_user_id: Optional[int] = None,
+    detail: Optional[str] = None,
 ) -> RefundDecision:
     """Record money that needs a human refund decision. Idempotent per reason and payment."""
     policy = _refund_policy(db)
@@ -159,7 +160,7 @@ def record_refund_review(
         message = (
             f"{marker} Refund review required: {int(amount_cents)} {invoice.currency} "
             f"on invoice {invoice.invoice_number} ({reason}); policy {policy}, "
-            f"{_POLICY_NOTES[policy]}."
+            f"{detail or _POLICY_NOTES[policy]}."
         )
     if order is not None:
         order.admin_notes = ((order.admin_notes or "") + "\n" + message).strip()
@@ -290,6 +291,7 @@ def _refund_order_payments(
             record_refund_review(
                 db, invoice=invoice, amount_cents=amount, reason=reason,
                 payment=payment, actor_user_id=actor_user_id,
+                detail=f"the automatic refund was refused ({exc.code}): {exc}; held for manual review",
             )
             reviewed = True
             continue
