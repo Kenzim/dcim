@@ -174,19 +174,25 @@ def test_subscribe_invoice_paid_applies_still_receives_the_invoice(db_session):
     assert seen == [invoice.id]
 
 
-def test_catalogue_publisher_builds_a_valid_payload(db_session, monkeypatch):
+def test_catalogue_publisher_builds_a_valid_payload(db_session, monkeypatch, test_admin_user):
     from app.plugin_host import events as plugin_events
 
     emitted = []
     monkeypatch.setattr(plugin_events, "emit", lambda db, name, payload, *a, **k: emitted.append((name, payload)))
-    invoice = _invoice(db_session, billing_account_id=None)
+    orphan = _invoice(db_session, number=5009, billing_account_id=None)
+    settlement.fire(db_session, "invoice.voided", settlement.InvoiceVoided(invoice=orphan, reason="duplicate"))
+    assert emitted == []  # no billing account: billing_account_id is required, so nothing is sent
+    account = BillingAccount(account_type="client", user_id=test_admin_user.id, status="active", currency="USD")
+    db_session.add(account)
+    db_session.flush()
+    invoice = _invoice(db_session, billing_account_id=account.id)
     settlement.fire(db_session, "invoice.voided", settlement.InvoiceVoided(invoice=invoice, reason="duplicate"))
     assert emitted == [
         (
             "invoice.voided",
             {
                 "invoice_id": invoice.id,
-                "billing_account_id": None,
+                "billing_account_id": account.id,
                 "reseller_id": None,
                 "invoice_number": 5001,
                 "number_display": None,

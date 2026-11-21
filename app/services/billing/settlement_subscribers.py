@@ -367,7 +367,13 @@ def _catalogue_publisher(event: str, builder):
     def publish(db: Session, payload) -> None:
         from app.plugin_host import events as plugin_events
 
-        plugin_events.emit(db, event, builder(db, payload))
+        body = builder(db, payload)
+        if body.get("billing_account_id") is None:
+            # billing_account_id is a required catalogue field; a document with
+            # no account and no reseller account is not published.
+            logger.info("Billing event %s not published: no billing account", event)
+            return
+        plugin_events.emit(db, event, body)
 
     publish.__name__ = f"publish_{event.replace('.', '_')}"
     return publish

@@ -141,6 +141,17 @@ def test_store_product_plan_and_coupon_flow(client, db_session: Session, test_ad
         },
     )
     assert cycle.status_code == 201, cycle.text
+    for label in ("biennially", "triennially"):
+        refused = client.post(
+            f"/api/admin/store/plans/{plan_id}/cycles",
+            headers=_auth(token),
+            json={"interval": label, "price_cents": 1500, "enabled": True},
+        )
+        assert refused.status_code == 422, label
+        refused = client.put(
+            f"/api/admin/store/cycles/{cycle.json()['id']}", headers=_auth(token), json={"interval": label}
+        )
+        assert refused.status_code == 422, label
 
     coupon_code = f"SAVE{uuid.uuid4().hex[:6].upper()}"
     coupon = client.post(
