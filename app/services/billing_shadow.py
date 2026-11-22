@@ -24,10 +24,17 @@ from app.models.commerce_account import SystemSetting
 
 logger = logging.getLogger(__name__)
 
+# Engines the daily scan, the detectors and the engines page iterate. The tax
+# engine (billing phase 2) joins once its scan and switch criteria exist; until
+# then it has a mode (``ENGINE_SETTING``) but no scan.
 ENGINES = ("invoice", "credit")
 SCAN_RESULT_KEY = "billing_shadow_scan"
 SWITCH_RECORD_PREFIX = "billing_engine_switch:"
-ENGINE_SETTING = {"invoice": "billing_invoice_engine", "credit": "billing_credit_engine"}
+ENGINE_SETTING = {
+    "invoice": "billing_invoice_engine",
+    "credit": "billing_credit_engine",
+    "tax": "billing_tax_engine",
+}
 
 
 def is_reserved_key(key: str) -> bool:
@@ -59,7 +66,7 @@ def _jsonable(value: Any) -> Any:
 
 
 def billing_engine_mode(db: Session, engine: str) -> str:
-    """The effective mode of ``engine`` (``invoice`` or ``credit``): legacy, shadow or v2.
+    """The effective mode of ``engine`` (``invoice``, ``credit`` or ``tax``): legacy, shadow or v2.
 
     ``v2`` counts only when the switch record ``billing_engine_switch:<engine>``
     written by the engine switch also says ``v2``; a setting changed to ``v2``
