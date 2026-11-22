@@ -92,6 +92,7 @@
   $: isBillingRefundsActive = currentPath.startsWith('/admin/billing-refunds');
   $: isBillingNotesActive = currentPath.startsWith('/admin/billing-notes');
   $: isBillingCreditActive = currentPath.startsWith('/admin/billing-credit');
+  $: isBillingJobsActive = currentPath.startsWith('/admin/billing-jobs');
   $: isCommerceTransactionsActive = currentPath.startsWith('/admin/commerce/transactions');
   $: isCommerceGatewayLogsActive = currentPath.startsWith('/admin/commerce/gateway-logs');
   $: isCommerceEmailLogActive = currentPath.startsWith('/admin/commerce/email-log');
@@ -496,6 +497,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
             </svg>
             <span>Account Credit</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-jobs" class="nav-link" class:active={isBillingJobsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>Billing Jobs</span>
           </a>
         </li>
         <li class="nav-item">
