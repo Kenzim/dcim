@@ -1402,6 +1402,51 @@ def tax_fx_rate_missing(db: Session, params: dict, now: datetime) -> list[Findin
     return pending + out
 
 
+def tax_home_registration_missing(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """The seller holds no domestic registration in force in its establishment country (design 4.3 step 2).
+
+    Silent unless tax is in ``shadow`` or ``v2`` with ``billing_tax_enabled``
+    and a seller country set, so a system without tax set up never sees it.
+    An OSS registration alone does not count: domestic sales would go untaxed.
+    """
+    del params
+    from app.models.tax import SellerTaxRegistration, TaxRegistrationScheme
+    from app.services.billing_shadow import billing_engine_mode
+    from app.services.settings_store import get_setting
+    from app.services.tax.rules_repo import normalise_country
+
+    if billing_engine_mode(db, "tax") not in ("shadow", "v2") or not get_setting(db, "billing_tax_enabled"):
+        return []
+    seller = normalise_country(get_setting(db, "billing_tax_seller_country"))
+    if seller is None:
+        return []
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    found = db.scalar(
+        select(func.count(SellerTaxRegistration.id)).where(
+            SellerTaxRegistration.enabled.is_(True),
+            SellerTaxRegistration.scheme == TaxRegistrationScheme.DOMESTIC.value,
+            SellerTaxRegistration.jurisdiction == seller,
+            SellerTaxRegistration.valid_from <= now,
+            or_(SellerTaxRegistration.valid_to.is_(None), SellerTaxRegistration.valid_to > now),
+        )
+    )
+    if found:
+        return []
+    return [
+        Finding(
+            "billing_tax_home_registration_missing",
+            "system",
+            f"tax_registration:{seller}",
+            f"Tax registration {seller}",
+            f"No registration in force in the seller's country ({seller})",
+            f"The seller is established in {seller} but holds no enabled domestic registration there in force "
+            "now, so sales to buyers in that country are charged no tax. Add or re-enable the registration under "
+            "Billing, Tax, Registrations.",
+            details={"seller_country": seller},
+        )
+    ]
+
+
 def _pending_fx_findings(months: list[tuple[str, str, int]]) -> list[Finding]:
     from app.services.tax import exchange_rates
 
@@ -1496,4 +1541,5 @@ BILLING_DETECTORS = {
     "billing_tax_fx_rate_missing": tax_fx_rate_missing,
     "billing_tax_buyer_country_missing": tax_buyer_country_missing,
     "billing_tax_no_rule_for_class": tax_no_rule_for_class,
+    "billing_tax_home_registration_missing": tax_home_registration_missing,
 }

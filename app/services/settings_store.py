@@ -156,6 +156,10 @@ def _validate_country_or_empty(text: str) -> str:
     return country
 
 
+def _validate_signoff(text: str) -> str:
+    return text.strip()
+
+
 def _validate_currency(text: str) -> str:
     currency = text.upper()
     if not re.fullmatch(r"[A-Z]{3}", currency):
@@ -613,6 +617,16 @@ _DEFINITIONS = (
         min_value=1,
         max_value=5_000,
         fallback=200,
+    ),
+    SettingDef(
+        "billing_tax_adviser_signoff",
+        "str",
+        "The tax adviser's sign-off of the VAT treatment (their reference and the date), or "
+        "empty. The tax engine cannot switch to v2 while it is empty.",
+        "billing_tax",
+        max_length=500,
+        validator=_validate_signoff,
+        fallback="",
     ),
     SettingDef(
         "billing_tax_ip_country_header",

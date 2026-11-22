@@ -516,6 +516,15 @@ _SPECS = (
         "system",
     ),
     AlertTypeSpec(
+        "billing_tax_home_registration_missing",
+        "No tax registration in the seller's country",
+        "The seller holds no enabled domestic registration in force in its establishment country, so sales "
+        "there are charged no tax. An OSS registration alone does not count. Checked only while tax is in "
+        "shadow or v2 with tax enabled and a seller country set.",
+        _W,
+        "system",
+    ),
+    AlertTypeSpec(
         "billing_email_template_render_failed",
         "Email template failed to render",
         "Emails were sent with the built-in text because their stored template failed to render.",

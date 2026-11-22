@@ -365,6 +365,12 @@ def test_tax_switch_refused_then_accepted_and_rollback_lists_open_invoices(clien
     _seed_quiet_history(db_session, "tax", 14, datetime.now(timezone.utc))
     set_engine(db_session, "invoice", "v2")
     db_session.commit()
+    unsigned = client.post(f"{engines}/tax/switch", headers=headers, json={"to": "v2", "confirm_mirrored_only": True})
+    assert unsigned.status_code == 409 and unsigned.json()["detail"]["failing"] == ["adviser_signoff"]
+    signed = client.put(
+        "/api/admin/settings/billing_tax_adviser_signoff", headers=headers, json={"value": "Adviser ref 12, 2026-12-01"}
+    )
+    assert signed.status_code == 200, signed.text
     accepted = client.post(
         f"{engines}/tax/switch", headers=headers, json={"to": "v2", "confirm_mirrored_only": True}
     )

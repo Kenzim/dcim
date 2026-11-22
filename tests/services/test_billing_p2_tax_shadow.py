@@ -221,6 +221,59 @@ def test_switch_lists_products_whose_class_has_no_rule_where_registered(db_sessi
     assert _items(db_session)["product_classes_have_rules"]["ok"]
 
 
+def test_switch_needs_the_adviser_signoff(db_session):
+    from app.services.settings_store import set_setting
+
+    seed_classes(db_session)
+    item = _items(db_session)["adviser_signoff"]
+    assert not item["ok"] and item["setting"] == "billing_tax_adviser_signoff"
+    assert any(c.startswith("18 q8") for c in item["covers"]) and any(c.startswith("18 q10") for c in item["covers"])
+    assert sum(c.startswith("18.1 q") for c in item["covers"]) == 9
+    set_setting(db_session, "billing_tax_adviser_signoff", "   ")
+    assert not _items(db_session)["adviser_signoff"]["ok"]
+    set_setting(db_session, "billing_tax_adviser_signoff", "Smith & Co ref VAT-12, 2026-12-01")
+    item = _items(db_session)["adviser_signoff"]
+    assert item["ok"] and item["signoff"] == "Smith & Co ref VAT-12, 2026-12-01"
+
+
+def _home(db, now=None):
+    return [f.resource_id for f in bi.tax_home_registration_missing(db, {}, now or _now())]
+
+
+@pytest.mark.parametrize("mode", ["shadow", "v2"])
+def test_home_registration_missing_fires_in_shadow_and_v2(db_session, mode):
+    from app.models.tax import SellerTaxRegistration
+
+    seed_classes(db_session)
+    set_engine(db_session, "tax", mode)
+    enable_tax(db_session, "DE")
+    assert _home(db_session) == ["tax_registration:DE"]
+    add_registration(db_session, "EU_OSS", scheme="oss_union", country="DE")
+    assert _home(db_session) == ["tax_registration:DE"]
+    home = add_registration(db_session, "DE")
+    assert _home(db_session) == []
+    home.enabled = False
+    db_session.flush()
+    assert _home(db_session) == ["tax_registration:DE"]
+    assert db_session.get(SellerTaxRegistration, home.id) is not None
+
+
+def test_home_registration_missing_is_silent_with_tax_legacy_or_not_set_up(db_session):
+    from app.services.alerting.catalogue import CATALOGUE
+    from app.services.settings_store import set_setting
+
+    assert CATALOGUE["billing_tax_home_registration_missing"].enabled_by_default is True
+    seed_classes(db_session)
+    set_engine(db_session, "tax", "shadow")
+    assert _home(db_session) == []
+    enable_tax(db_session, "GB")
+    set_engine(db_session, "tax", "legacy")
+    assert _home(db_session) == []
+    set_engine(db_session, "tax", "v2")
+    set_setting(db_session, "billing_tax_enabled", False)
+    assert _home(db_session) == []
+
+
 def test_a_tax_id_country_mismatch_raises_the_evidence_conflict_alert(db_session, invoice):
     evidence = dict(invoice.tax_evidence)
     db_session.execute(

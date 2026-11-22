@@ -957,6 +957,24 @@ def evaluate_switch(
     return items
 
 
+# What the tax adviser's sign-off covers: design 18 questions 8 and 10, and the questions of the
+# legal review of billing phase 2 (design 18.1). The full text stays in the design.
+ADVISER_SIGNOFF_COVERS = (
+    "18 q8: what Rackflow sells for VAT (electronically supplied services, or hire of equipment or "
+    "property-related services for bare metal and colocation)",
+    "18 q10: reverse charge wording",
+    "18.1 q1: Isle of Man and Monaco",
+    "18.1 q2: a VAT number of another country than the billing country; GB numbers for EU sellers",
+    "18.1 q3: a customer with no address",
+    "18.1 q4: wording of gb_outside_scope_b2b, eu_reverse_charge and outside_scope",
+    "18.1 q5: billing country outside the EU against an IP address in the EU",
+    "18.1 q6: Article 59c, established in only one member state",
+    "18.1 q7: exempt lines on EU invoices",
+    "18.1 q8: special territories (Canary Islands, Ceuta, Melilla)",
+    "18.1 q9: appendix C as a whole",
+)
+
+
 def _tax_switch_items(
     db: Session, now: datetime, *, confirm_mirrored_only: bool, confirm_divergence: list[int], confirm_uncovered: bool
 ) -> list[dict]:
@@ -1009,6 +1027,9 @@ def _tax_switch_items(
         uncovered=uncovered, confirm_uncovered=confirm_uncovered,
     ))
     items.append(_product_classes_item(db, now, enabled))
+    signoff = str(get_setting(db, "billing_tax_adviser_signoff") or "").strip()
+    items.append(_item("adviser_signoff", bool(signoff), signoff=signoff or None,
+                       setting="billing_tax_adviser_signoff", covers=list(ADVISER_SIGNOFF_COVERS)))
     from app.services.tax import exchange_rates
 
     currency = exchange_rates.rates_needed(db, now)
