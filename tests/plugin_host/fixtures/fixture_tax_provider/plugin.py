@@ -23,6 +23,9 @@ def register(plugin):
 
         def calculate(self, request):
             mode = current_context().settings.get("mode")
+            if mode == "shrink_request":
+                object.__setattr__(request, "lines", ())
+                return TaxProviderResult(lines={}, reference="TX-1")
             if mode == "raise":
                 raise ValueError("no tax today")
             lines = {line.key: (_part(line),) for line in request.lines}
