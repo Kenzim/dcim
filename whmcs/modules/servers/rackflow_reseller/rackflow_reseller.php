@@ -265,6 +265,16 @@ function rackflow_reseller_buildApiRequest($apiUrl, $apiKey, $method, $endpoint,
         }
     }
     $timeoutSeconds = min(max((int)$timeoutSeconds, 1), 45);
+    // RackFlow bodies are JSON objects: an empty array (or empty service_config) must
+    // be written as "{}", not the list "[]" which the API rejects with 422.
+    if (is_array($data)) {
+        if (isset($data['service_config']) && $data['service_config'] === array()) {
+            $data['service_config'] = new stdClass();
+        }
+        if ($data === array()) {
+            $data = new stdClass();
+        }
+    }
     $body = $data === null ? null : json_encode($data, JSON_UNESCAPED_SLASHES);
     if ($data !== null && $body === false) {
         throw new InvalidArgumentException('Unable to encode RackFlow API request as JSON');

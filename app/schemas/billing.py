@@ -2,8 +2,10 @@
 Pydantic schemas for billing API requests and responses.
 """
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Annotated, Optional, List, Dict, Any
 from datetime import datetime
+
+from app.schemas.empty_object import EmptyListIsObject
 
 
 # Service schemas for billing API
@@ -21,7 +23,7 @@ class BillingBareMetalServiceCreate(BaseModel):
     product_code: Optional[str] = Field(None, description="RackFlow product code")
     service_type: Optional[str] = Field("bare_metal", description="bare_metal or http_proxy")
     description: Optional[str] = Field(None, description="Service description")
-    service_config: Optional[Dict[str, Any]] = Field(
+    service_config: Annotated[Optional[Dict[str, Any]], EmptyListIsObject] = Field(
         None,
         description=(
             "Type-specific config. Bare metal: server_group_id (required), "
@@ -44,7 +46,9 @@ class BillingVmServiceCreate(BaseModel):
         description="Catalog VM template id (preferred); linked to product. Strategy = template os_type (e.g. Linux - Cloudinit)",
     )
     description: Optional[str] = Field(None, description="Service description")
-    service_config: Optional[Dict[str, Any]] = Field(None, description="Service-specific configuration")
+    service_config: Annotated[Optional[Dict[str, Any]], EmptyListIsObject] = Field(
+        None, description="Service-specific configuration"
+    )
     proxmox_cluster_id: Optional[int] = Field(None, description="Proxmox cluster id from RackFlow inventory")
     proxmox_node_name: Optional[str] = Field(None, description="Proxmox node name")
     proxmox_vmid: Optional[int] = Field(None, description="QEMU/KVM vmid")
@@ -224,4 +228,6 @@ class ServiceActionRunScript(BaseModel):
 class ServiceActionReinstallOS(BaseModel):
     """Request schema for reinstalling OS on a service"""
     template_id: str = Field(..., description="OS template ID to install")
-    template_parameters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Template parameters (e.g., admin_password)")
+    template_parameters: Annotated[Optional[Dict[str, Any]], EmptyListIsObject] = Field(
+        default_factory=dict, description="Template parameters (e.g., admin_password)"
+    )

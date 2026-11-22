@@ -3,6 +3,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.empty_object import EmptyListBody
+
 
 class SolSessionResponse(BaseModel):
     ws_token: str
@@ -37,7 +39,7 @@ class SolSendResponse(BaseModel):
     encoding: str = "utf-8"
 
 
-class WindowsPasswordResetRequest(BaseModel):
+class WindowsPasswordResetRequest(EmptyListBody):
     """Omit ``password`` to let RackFlow generate a cmd-safe one."""
 
     password: Optional[str] = Field(default=None, max_length=127)
