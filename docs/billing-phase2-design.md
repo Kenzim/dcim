@@ -1,6 +1,6 @@
 # Billing phase 2: design
 
-Status: design for the phase 2 workers, written 2026-11-22 against main at `62a0296`. Nothing here is built yet.
+Status: design for the phase 2 workers, written 2026-11-22 against main at `62a0296` and reviewed by the billing manager the same day (place of supply and registration choice, mirrored `tax_rates` behaviour, the per-row tax base for notes and refunds, cancellation through phase 1's helpers, and smaller points). Nothing here is built yet.
 
 Phase 2 of `docs/billing-target-spec.md` (section 12) delivers:
 
@@ -186,6 +186,7 @@ Index `(country, normalised_id, validator, checked_at)`. Rows are evidence: they
 |---|---|---|
 | `job` | String(64) PK | section 9.1 |
 | `mode` | String(16) | `off` (default), `dry_run`, `live` |
+| `dry_run_since` | DateTime null | dry-run watermark: set to now each time the mode becomes `dry_run`; cleared when it leaves `dry_run` (section 9.2) |
 | `live_since` | DateTime null | watermark: set to now each time the mode becomes `live`; cleared when it leaves `live` |
 | `config_hash` | String(64) null | SHA-256 of the job's settings as last seen by a live run |
 | `config_since` | DateTime null | when the live run last saw `config_hash` change (section 11.2) |
@@ -232,7 +233,7 @@ Unique `(job, subject_key)`: the claim mechanism of section 9.3.
 
 As P1 2.1: additive and nullable; one revision per concern; each revision up, down and up again on SQLite and on MariaDB 11.8 (`tests/migrations/`, one file per revision, and `tests/migrations/test_billing_p1_mariadb.py` extended or a sibling `test_billing_p2_mariadb.py`), and the full chain from an empty database (`tests/core/test_alembic_fresh_mariadb.py`). The current head is `billing_p1_ledger_owner_check` (P1 11.4); P2-S confirms with `alembic heads` before writing and chains from whatever single head main has then. Downgrades drop only what the revision added; data revisions (2.2, number 3) downgrade by deleting the rows they inserted, identified by `source` and `system`.
 
-Ledger to-do e01f7dbc (fresh MariaDB `alembic upgrade head` stops at `add_rack_units_servers`) blocks the fresh-database test on MariaDB for every revision; P2-S fixes that revision's `existing_type` first (it is a one-line fix in an old revision and does not change any schema), so the phase 2 chain can be tested from empty.
+Ledger to-do e01f7dbc (fresh MariaDB `alembic upgrade head` stopped at `add_rack_units_servers`) is already fixed on main (`4343069`), and `tests/core/test_alembic_fresh_mariadb.py` already runs the whole chain from an empty MariaDB 11.8 database as the first step of the billing MariaDB CI job. P2-S changes no old revision; it only makes sure the phase 2 revisions pass that test.
 
 ### 2.2 Phase 2 revisions
 
@@ -311,11 +312,15 @@ class TaxContext:
 
 `TaxEngine.calculate` does, in order:
 
-1. **Scope.** If `billing_tax_enabled` is false, or the purpose is out of scope (section 4.6), every line gets no tax rows and the result says `engine = "rules"`, `scope = "disabled"` or `"out_of_scope"`.
-2. **Registration.** Candidate registrations are the enabled `seller_tax_registrations` valid at `tax_point_at`. The place of supply (appendix C) picks the jurisdiction: buyer country for B2C supplies of electronically supplied services, buyer country for B2B; the engine then looks for a registration of that jurisdiction (`GB`; the buyer's EU country; else `EU_OSS` for EU B2C). With no registration for the place of supply, no tax is charged and the result carries the note `not_registered` in its evidence (no legal note on the invoice). Rules with `jurisdiction = ANY` (the mirrored `tax_rates` rules) need no registration, which is today's behaviour.
+1. **Scope.** If the purpose is out of scope (section 4.6), every line gets no tax rows and the result says `engine = "rules"`, `scope = "out_of_scope"`. If `billing_tax_enabled` is false, only the mirrored rules (`source = tax_rates`, `jurisdiction = ANY`) are considered, and steps 2 and 5 are skipped: this reproduces today's checkout tax, which applies whenever an enabled `tax_rates` row matches and has no global switch (`checkout_service.py:206-229`). `billing_tax_enabled` therefore means "pack and admin rules, registrations and reverse charge apply", not "tax is charged". Requirement (P2-T test): on an installation with only mirrored rules and `billing_tax_enabled` false, shadow records no `t1_checkout` difference for a table of checkouts covering an exempt account, a region row, a profile with no country, a coupon by amount and by percent, and a zero subtotal.
+2. **Place of supply and registration.** Setting `billing_tax_seller_country` (appendix A) is the seller's country of establishment, and its registration (the enabled `domestic` registration of that country valid at `tax_point_at`) is the **establishment registration**. The engine decides, in order:
+   1. Buyer in the seller's country: the establishment registration; that country's rules.
+   2. Buyer is a business whose tax ID is `valid` and fresh, in another country: the place of supply is the buyer's country (general B2B rule), and the seller does not charge that country's VAT. The invoice is issued under the establishment registration (its number is printed), every line gets a zero-tax row with `reverse_charge = true`, and the legal note comes from the establishment's pack: `eu_reverse_charge` when seller and buyer are both in the EU, `gb_outside_scope_b2b` from a UK seller to an EU business, `outside_scope` for any other buyer country.
+   3. Otherwise (a consumer, or a business without a valid fresh tax ID, in another country), place of supply for electronically supplied services is the buyer's country: a `domestic` registration of the buyer's country if the seller holds one (its rules apply, for example GB 20% for an EU seller registered in the UK); else `EU_OSS` when the buyer is in the EU and the seller holds an OSS registration (the buyer country's rules under OSS); else, for an EU-established seller and an EU buyer, the establishment registration and the seller's own country's rules (the under-threshold case of appendix C; the threshold itself is not tracked); else no tax, the legal note `outside_scope` when the buyer is outside the EU and the UK, and for an EU or UK buyer the evidence note `not_registered` plus the alert detector `tax_not_registered` (no legal note, because the supply is taxable there and the seller is not registered for it).
+   Rules are then matched only among those whose `jurisdiction` is the chosen registration's (or `ANY`). Appendix C is the acceptance table for this step: P2-P's golden tests run every row of it through `TaxEngine.calculate`. With no establishment country set, only `ANY` rules apply (today's behaviour), and the switch criterion (section 5) refuses `v2` when non-`ANY` rules are enabled.
 3. **Exemption.** `exempt_all`, or an active exemption covering the line's class, makes the line exempt: no tax row, and the legal note `exempt_customer` with the exemption reason.
 4. **Rule match.** For each line, enabled rules valid at `tax_point_at` (`valid_from <= t < valid_to`) whose country, region and postcode match the buyer (NULL matches anything), whose class is the line's class, and whose `customer_type` is `any` or matches `is_business`. Most specific wins (postcode, then region, then country, then none), then highest `priority`, then lowest `id`. Compound rules of the same specificity are all applied in `compound_order`. No matching rule: no tax.
-5. **Reverse charge.** A matching rule with `reverse_charge = true` applies only if the buyer is a business, `tax_id_status` is `valid` and fresh, the buyer's country is in `reverse_charge_zone`, and the buyer's country differs from the registration's country. Then the line gets a tax row with `tax_cents = 0`, `reverse_charge = true` and the rule's legal note. If any condition fails, the rule is skipped and the next matching rule (the normal rate) applies, and the evidence records why (`tax_id_unchecked`, `tax_id_stale`, `tax_id_invalid`, `tax_id_unavailable`).
+5. **Reverse charge.** Case 2.2 above, implemented as pack rules with `reverse_charge = true` under the establishment registration's jurisdiction. Such a rule applies only if the buyer is a business, `tax_id_status` is `valid` and fresh, the buyer's country is in `reverse_charge_zone` (when set), and the buyer's country differs from the establishment registration's country. Then the line gets a tax row with `tax_cents = 0`, `reverse_charge = true` and the rule's legal note. If any condition fails, the buyer is handled as case 2.3, and the evidence records why (`tax_id_unchecked`, `tax_id_stale`, `tax_id_invalid`, `tax_id_unavailable`).
 6. **Amounts.** Per line in compound order, with the rule's `rounding_point` and `rounding_rule` (4.4). Exclusive prices add the tax; inclusive prices derive it from the gross.
 7. **Result.** `TaxResult` holds, per line key, the parts (rule id, name, rate, jurisdiction, base, tax, reverse charge, note key), the line tax total, the summary, the legal note keys of the invoice, the registration used, the evidence, the engine name and a `context_hash` (SHA-256 of the canonical context and the ids and versions of every rule, registration and exemption read).
 
@@ -342,7 +347,7 @@ New named rules (appendix B), in `app/services/billing/rounding.py`:
 
 The rate is the one valid at the invoice's **tax point**, `invoices.tax_point_at`:
 
-- An invoice (not a proforma) published by `InvoiceService.publish` (`app/services/invoice_service.py:584-661`): `tax_point_at = issued_at`, the publish time. For a continuing supply of services such as hosting, the UK and EU tax point is the earlier of the invoice and the payment, and the invoice comes first on every Rackflow path (checkout invoices before payment, renewals before the due date with B3). The rate is therefore fixed at publish and never moves.
+- An invoice (not a proforma) published by `InvoiceService.publish` (`app/services/invoice_service.py:584-661`): `tax_point_at = issued_at`, the publish time. Publish always recalculates under the invoice lock with the pure path at that tax point, whatever was calculated for the draft, because a rule may have been superseded between create and publish; a result prepared by a provider before the lock is used only if its `context_hash` (which includes the tax point's date and the rule rows valid then) still matches. For a continuing supply of services such as hosting, the UK and EU tax point is the earlier of the invoice and the payment, and the invoice comes first on every Rackflow path (checkout invoices before payment, renewals before the due date with B3). The rate is therefore fixed at publish and never moves.
 - A proforma (P1 5.4) is not a tax invoice. Tax is calculated at its publish for the amount the client is asked to pay, with `tax_point_at` set provisionally to `issued_at`. At conversion on payment (`convert_proforma`, `:720-748`) the tax is **not** recalculated (the invoice is frozen); if a rule covering one of its lines has a different rate at the payment time, the conversion records shadow-style mismatch `t3_proforma_rate_changed` and staff issue a credit or debit note. Owner question 6.
 - A quote uses the rules valid at the quote time; the checkout invoice is created in the same request, so the quote and the invoice agree, which today's shared `_tax_cents` guarantees and the engine keeps (`quote` and `_create_commerce_invoice` both call one `CheckoutService._tax_result(...)`).
 
@@ -364,7 +369,7 @@ The reseller default keeps today's reseller invoices unchanged, as the reference
 | Path | Mode `legacy` | Mode `shadow` | Mode `v2` |
 |---|---|---|---|
 | `CheckoutService.quote` and `_create_commerce_invoice` | `_tax_cents` as today | `_tax_cents` decides; engine runs beside it, `t1_checkout` | engine decides; `quote` returns the parts and summary as new fields |
-| `InvoiceService.create` and `publish` for other purposes | no tax | engine runs at publish, `t2_uncovered` recorded, nothing written | engine at create (draft lines get `invoice_line_taxes`), re-run at publish if the draft changed (the publish run is final) |
+| `InvoiceService.create` and `publish` for other purposes | no tax | engine runs at publish, `t2_uncovered` recorded, nothing written | engine at create (draft lines get `invoice_line_taxes`), always re-run at publish at the tax point (4.5; the publish run is final) |
 | `InvoiceAdjustmentService` credit notes by lines | phase 1 behaviour | as legacy, plus `t4_note_tax` | reverses `invoice_line_taxes` proportionally (4.8) |
 | B3 generation ahead | n/a (job off) | engine runs beside, nothing written | engine at create |
 
@@ -372,9 +377,13 @@ The reseller default keeps today's reseller invoices unchanged, as the reference
 
 ### 4.8 Credit notes and debit notes
 
-- A **credit note by lines** reverses, for each credited line, each of its `invoice_line_taxes` rows proportionally: `refund_tax_proportional(credit_net, row.tax_cents, line.total_cents)` (P1 appendix B), one `invoice_adjustment_line_taxes` row per reversed row with `source_line_tax_id`, the same rate, name, jurisdiction and reverse charge flag, so a reverse-charged line stays reverse charged on its note. A full credit of a line reverses exactly its tax.
-- A **credit note by amount** (P1 7.2) on a v2 tax invoice splits the amount over the invoice's summary entries by `tax_split_largest_remainder` weighted by gross, then applies `refund_tax_proportional` per entry; P1's single-rate rule is the one-entry case of this.
-- A **debit note** is taxed as a new supply at its own tax point (its issue time) through the engine with `purpose = adjustment`; late fees are `outside_scope`.
+Phase 1 settled one rule for the tax of a credit note without lines and of a v2 refund (P1 4.4 and 7.2, `InvoiceAdjustmentService.tax_base` and `tax_of`, `app/services/invoice_adjustment_service.py:719-732`, used by `RefundService._refund_tax`, `app/services/refund_service.py:860`): the base is the invoice plus debit notes, leaving out overpayment debit notes, less credit notes issued before this note (`before_key`), and earlier refunds that issued no note are taken off by the refund service. The base shrinks by what each note takes, so partial notes that add up to the base take exactly its tax, with no drift. Phase 2 generalises that rule per tax row instead of replacing it:
+
+- **The per-row base.** For a v2 tax invoice, `tax_base` gains a per-row form, `tax_base_rows(db, invoice, *, before_key) -> list[RowBase]`: one entry per `(name, rate_percent, jurisdiction, reverse_charge)` group of the invoice's `invoice_line_taxes` and of its debit notes' `invoice_adjustment_line_taxes` (overpayment notes left out, as in P1), each with its remaining worth and remaining tax after the credit notes issued before `before_key`, plus one untaxed entry for lines with no tax row. The single-pair `tax_base` stays and equals the sum of the rows, so phase 1 callers and tests are unchanged; on an invoice with no tax rows (legacy, shadow, or before phase 2) both behave exactly as in phase 1.
+- **A credit note by amount, and a v2 refund,** split the amount over the row bases with `tax_split_largest_remainder` weighted by remaining worth, then take each part's tax with `tax_of` against that row's remaining worth and tax. Each part becomes an `invoice_adjustment_line_taxes` row pointing at a source row of its group. A refund uses the same function, so the refund's `tax_cents` and its credit note's tax rows always agree.
+- **A credit note by lines** reverses each tax row of the credited line against that line's remaining worth and tax (the line's tax rows less the rows of earlier notes on the same line), with the same shrinking rule, so two partial credits of one line that add up to the whole line reverse exactly its tax. Each reversal row carries `source_line_tax_id`, the same name, rate, jurisdiction and reverse charge flag, so a reverse-charged line stays reverse charged on its note.
+- **A debit note** is taxed as a new supply at its own tax point (its issue time) through the engine with `purpose = adjustment`; late fees are `outside_scope` (a zero-rate untaxed entry in later bases, as P1's untaxed late fee already is).
+- **Tests (P2-T):** P1's refund and credit-note tax tests pass unchanged; on a two-rate invoice (20% and 5%) with a taxed debit note: a full credit, a full refund, refunds in several parts, and a mix of notes by amount and by lines each take exactly the total tax, per rate; a retry returns the same note and rows.
 - Notes print the legal notes of their invoice plus the `credit_note_reference` note (appendix C).
 
 ### 4.9 Invoice and PDF
@@ -410,8 +419,8 @@ The tax engine is a third engine of the P1 engine framework: setting `billing_ta
 **Switch criterion.** As P1 6.5 items 1, 3, 4 and 5 for engine `tax`, and in place of item 2:
 
 1. the invoice engine is `v2` (v2 tax lives on v2 lines and their tax rows; a legacy invoice has no lines to tax);
-2. tax is enabled (`billing_tax_enabled`) or the operator confirms switching with tax disabled;
-3. every enabled rule with `jurisdiction != ANY` has an enabled registration for its jurisdiction valid now;
+2. `billing_tax_enabled` is true, or the operator confirms switching with only the mirrored `tax_rates` rules in force (4.3 step 1);
+3. every enabled rule with `jurisdiction != ANY` has an enabled registration for its jurisdiction valid now, and `billing_tax_seller_country` is set with an establishment registration (4.3 step 2) when any such rule is enabled;
 4. the request body carries `"confirm_divergence": [<t1_rule_divergence row ids>]` listing every open divergence row, and `"confirm_uncovered": true` when `t2_uncovered` rows exist, so the operator has seen what changes.
 
 **Rollback.** `v2` to `shadow` or `legacy` is allowed at any time: published invoices keep their tax rows (frozen), and later invoices go back to `_tax_cents` and untaxed renewals. The response lists the number of v2-taxed invoices still open, because a client may then receive a renewal without the VAT its previous invoice had; the audit row `billing.engine.switch` records it.
@@ -501,10 +510,10 @@ Cache horizons (`expires_at`): `valid` 30 days (`billing_tax_id_valid_days`), `i
 
 ### 7.5 The VIES validator plugin (`plugin_packages/vies_validator/`)
 
-A first-party plugin package in the repository (the folder name is shared with the parallel chat's example plugins; owner question 12), API `>=1.1,<2`, kind `tax_id_validator`, id `vies`.
+A first-party plugin package in the repository at `plugin_packages/vies_validator/`, API `>=1.1,<2`, kind `tax_id_validator`, id `vies`. `plugin_packages/` holds plugins Rackflow ships and supports; `examples/plugins/` (the developer kit's folder) holds teaching examples only. Plugins install from `settings.plugins_dir` today (`app/plugin_host/loader.py:33`, `discover` at `:98`); P2-K adds a second, read-only discovery root, `settings.bundled_plugins_dir` (default the repository's `plugin_packages/`), so the admin plugin page lists first-party plugins as installable without copying files, and an upgrade of Rackflow upgrades them. Install, permission grant and enable are the ordinary lifecycle; nothing is installed or enabled automatically (owner question 12 is closed by this).
 
 - **Manifest:** `permissions: ["tax.validate_id", "http.outbound"]`; `provides: [{"kind": "tax_id_validator", "id": "vies", "countries": [the EU 27 VIES codes, with "EL" for Greece], "id_types": ["eu_vat"], "rate_limit": {"calls": 60, "per_seconds": 60}}]`; settings `requester_country` and `requester_vat_number` (optional; when set, VIES returns a consultation number, `requestIdentifier`, the evidence a tax authority accepts), `endpoint` (default the Commission's REST endpoint `https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number`, overridable for the test service).
-- **Behaviour:** `check_online` posts the country code and number, maps `valid: true` to `valid`, `valid: false` to `invalid`, and the error codes `MS_UNAVAILABLE`, `SERVICE_UNAVAILABLE`, `TIMEOUT`, `MS_MAX_CONCURRENT_REQ`, `GLOBAL_MAX_CONCURRENT_REQ` and any HTTP or network error to `unavailable` with the code. `INVALID_INPUT` is `invalid` with the code. It never maps an unavailable answer to `invalid`.
+- **Behaviour:** `check_online` posts the country code and number, maps `valid: true` to `valid`, `valid: false` to `invalid`, and the error codes `MS_UNAVAILABLE`, `SERVICE_UNAVAILABLE`, `TIMEOUT`, `MS_MAX_CONCURRENT_REQ`, `GLOBAL_MAX_CONCURRENT_REQ` (and their `_TIME` variants) and any HTTP or network error to `unavailable` with the code. `INVALID_INPUT` is `invalid` with the code. `INVALID_REQUESTER_INFO`, `VAT_BLOCKED` and `IP_BLOCKED` say nothing about the customer's number, so they are `unavailable` with the code, and `INVALID_REQUESTER_INFO` also writes a plugin log line telling the operator to fix the requester settings. It never maps an unavailable answer to `invalid`. P2-K checks the full code list and the test-service numbers against the Commission's current VIES REST documentation and records any difference in the plugin's README.
 - **Rate limiting:** the host enforces the manifest's `rate_limit` per provider (8.6; excess calls answer `unavailable`, `error_code = RATE_LIMITED`, without calling the plugin); the plugin also keeps a per-member-state back-off: after `MS_UNAVAILABLE` for a country, it answers `unavailable` for that country for 5 minutes without calling VIES.
 - **Caching** is the host's (7.4); the plugin is stateless apart from the back-off.
 - **Network:** only the configured endpoint host, through the outbound HTTP facility `http.outbound` grants (plugin doc section 7); no other egress.
@@ -666,6 +675,10 @@ Billing validates every answer: a validator result with an unknown status, or a 
 - Packs: every enabled `tax_rule_pack` provider is listed in the pack registry as `<plugin_id>:<provider_id>`.
 - Lifecycle, settings (sealed secrets), audit (`plugin.enabled`, `plugin.disabled`, and the new `plugin.provider_failed` audit when a circuit opens on a provider) and uninstall are the existing ones. Disabling or uninstalling a provider never changes stored results: tax ID checks, applied rules and invoice tax rows stay.
 
+### 8.7.1 Discovery of first-party plugins
+
+`discover` (`app/plugin_host/loader.py:98`) also scans a second, read-only root, `settings.bundled_plugins_dir` (default the repository's `plugin_packages/`), after `settings.plugins_dir`. Packages found there are marked `bundled: true` in the admin plugin list; a plugin id present in both roots is an error shown on the page, and neither copy loads until it is resolved. Install, permission grant, enable, upgrade and uninstall are the ordinary lifecycle. This is a host addition of API 1.1 that applies to any plugin, not only to kinds.
+
 ### 8.8 Events
 
 New catalogue entries (`app/plugin_host/catalogue.py`, permission `billing.read`, payload fields only ever added):
@@ -735,7 +748,7 @@ Effects outside the database (termination's power-off) use two transactions: cla
 
 ### 9.4 Dry run
 
-A dry run calls `candidates` and `plan` only, inside a transaction that is rolled back, and writes only `billing_job_runs` and `billing_job_run_items` (on the job tables' own short session, as `BillingShadowService.record` does). It never enqueues email, emits events, calls plugins with side effects or locks rows. Its watermark is `dry_run_since` (11.1), so after a week in dry run the operator sees, item by item, what the job would have done in that week; the forecast route shows what is coming. Amounts in a dry run (invoice totals, tax, late fees) are computed by the same pure functions the live path uses. A test (15.2) snapshots the row counts of every non-job table before and after a dry run of each job.
+A dry run calls `candidates` and `plan` only, inside a transaction that is rolled back, and writes only `billing_job_runs` and `billing_job_run_items` (on the job tables' own short session, as `BillingShadowService.record` does). It never enqueues email, emits events, calls plugins with side effects or locks rows. Its watermark is `dry_run_since` (11.1); an admin dry run of a job that is `off` (no `dry_run_since`) or `live` uses the job's live watermark if it has one, else the run's own `now_at`, so it shows exactly what going live now would do (normally nothing at once; the forecast route shows what follows). After a week in dry run the operator sees, item by item, what the job would have done in that week; the forecast route shows what is coming. Amounts in a dry run (invoice totals, tax, late fees) are computed by the same pure functions the live path uses. A test (15.2) snapshots the row counts of every non-job table before and after a dry run of each job.
 
 ### 9.5 Time of day and catch-up
 
@@ -783,11 +796,11 @@ Every job: mode `off` by default; acts only on triggers at or after its watermar
 
 **Policy.** `billing_nonpayment_policies`: the service's product row if any, else `retail_default`. `suspend_after_days` NULL means never (the seeded default, today's behaviour). Reseller suspension stays entirely with the existing recurring pass in phase 2: the API refuses a non-NULL `suspend_after_days` on `reseller_default` and on product rows for reseller-sold products, so there is one suspension authority per track.
 
-**Trigger.** `T = due_at(oldest unpaid cycle invoice of the billing) + suspend_after_days`. Act when `W <= T <= now`, the invoice still has a balance and the service is active.
+**Trigger.** Per unpaid cycle invoice of the billing, `T = due_at + suspend_after_days`. The job acts on the earliest unpaid cycle invoice whose `T` satisfies `W <= T <= now`, when that invoice still has a balance and the service is active. An unpaid invoice whose `T` is before `W` never triggers a suspension; the next unpaid cycle invoice can.
 
 **Action.** Lock service billing, then the invoice (lock order); re-check; claim `service:{id}:suspend:invoice:{invoice_id}`; set the billing's status to `suspended_nonpayment` (`ServiceBillingStatus`, `app/models/reseller.py:131`) and `last_failure_code = "nonpayment"`; commit; then suspend the service through `ServiceLifecycle.suspend` (`app/services/service_lifecycle.py:92`, async, own transactions, outside the billing locks) as the second step of the two-transaction pattern (9.3); queue the `service_suspended` email (with `reason = "nonpayment"`).
 
-**Unsuspend on payment (retail).** New settlement subscriber `unsuspend_after_payment` in `app/services/billing/settlement_subscribers.py`, after `complete_billing_cycle`: for a retail cycle invoice whose billing is `suspended_nonpayment` and which has no other unpaid cycle invoice, it queues the service for unsuspension; the unsuspension runs after the settlement commits, beside `run_deferred_fulfilment` (`app/services/billing/settlement.py:673-706`), because the lifecycle call does I/O and must not run inside the settlement transaction. The reseller unsuspend path in the worker (`recurring_billing_service.py:796-799`, `:840-855`) is unchanged.
+**Unsuspend on payment (retail).** New settlement subscriber `unsuspend_after_payment` in `app/services/billing/settlement_subscribers.py`, after `complete_billing_cycle`: for a retail cycle invoice whose billing is `suspended_nonpayment` and which has no other unpaid cycle invoice, it queues the service for unsuspension, but only when the service's current suspension is the one this job made (a `done` claim `service:{id}:suspend:...` and no later suspension by staff or abuse handling in the service's audit trail); a service suspended for another reason is left suspended and listed for staff; the unsuspension runs after the settlement commits, beside `run_deferred_fulfilment` (`app/services/billing/settlement.py:673-706`), because the lifecycle call does I/O and must not run inside the settlement transaction. The reseller unsuspend path in the worker (`recurring_billing_service.py:796-799`, `:840-855`) is unchanged.
 
 ### 10.5 `nonpayment_termination` (B7, both tracks)
 
@@ -796,7 +809,7 @@ Every job: mode `off` by default; acts only on triggers at or after its watermar
 **Two actions per service.**
 
 - *Notice:* `T_n = due_at + terminate_after_days - termination_notice_days`. Act when `W <= T_n <= now` and the service is suspended for non-payment (retail: billing `suspended_nonpayment`; reseller: suspended by the recurring pass for that cycle). Claim `service:{id}:termination_notice:invoice:{invoice_id}`; queue `service_termination_warning`; emit `service.termination_scheduled`.
-- *Terminate:* `T_t = due_at + terminate_after_days`. Act only if the notice claim for the same invoice is `done` and was made at least `termination_notice_days` before now, the invoice still has a balance and the service is still suspended for non-payment. Claim `service:{id}:terminate`, commit, call `terminate_service` (`app/services/commerce_lifecycle_service.py:33`, which audits and raises if the power-off fails, A0 spec 14.2.3), then mark `done` or `failed` (a failed termination becomes `needs_review`, never retried automatically). Then the policy's `unpaid_invoice_action_on_terminate`: `keep` (default; the debt stays open) or `cancel` (each unpaid invoice of the service: a full credit note with outcome cancel in `v2`, `transition(..., VOID, cause="nonpayment_termination")` in `legacy` and `shadow`). Queue `service_terminated`.
+- *Terminate:* `T_t = due_at + terminate_after_days`. Act only if the notice claim for the same invoice is `done` and was made at least `termination_notice_days` before now, the invoice still has a balance and the service is still suspended for non-payment. Claim `service:{id}:terminate`, commit, call `terminate_service` (`app/services/commerce_lifecycle_service.py:33`, which audits and raises if the power-off fails, A0 spec 14.2.3), then mark `done` or `failed` (a failed termination becomes `needs_review`, never retried automatically). Then the policy's `unpaid_invoice_action_on_terminate`: `keep` (default; the debt stays open) or `cancel` (each unpaid invoice of the service through `cancel_unpaid_invoices`, 10.6). Queue `service_terminated`.
 
 **Retroactive guard:** the notice anchor `T_n >= W` and the rule that termination needs a sent notice mean that turning the job on cannot terminate anything for at least `termination_notice_days`, and never a service whose notice time had already passed.
 
@@ -807,7 +820,8 @@ Every job: mode `off` by default; acts only on triggers at or after its watermar
 **Service.** `CancellationService` in `app/services/billing/cancellations.py` (new):
 
 - `request(db, *, service_id, type, reason, actor_user_id, source, idempotency_key, invoice_action="cancel_unpaid") -> CancellationRequest`: locks the service billing first (as `request_cancellation` does since A0, spec 14.2.3), writes the request. `end_of_period` sets `effective_at` from `next_charge_at` and delegates to the existing `CommerceLifecycleService.request_cancellation` (`app/services/commerce_lifecycle_service.py:100`) for `cancel_at`; status `scheduled`. `immediate` delegates to the existing immediate path; status `completed`, or `scheduled` with `termination_pending` when the power-off failed (A0 behaviour).
-- In both cases, in the same transaction, every unpaid invoice of the service whose period starts at or after `effective_at` (an invoice generated ahead for a period the client will not have) is cancelled: full credit note in `v2`, void through `transition()` in `legacy` and `shadow`. This is a client or admin action, not automation, so it is not subject to the job watermark.
+- In both cases, in the same transaction, every unpaid invoice of the service whose period starts at or after `effective_at` (an invoice generated ahead for a period the client will not have) is cancelled through `cancel_unpaid_invoices`. This is a client or admin action, not automation, so it is not subject to the job watermark.
+- **`cancel_unpaid_invoices` reuses phase 1's cancellation helpers, never a direct `transition(VOID)`.** The phase 1 core status review found that direct `transition(VOID)` calls skip `void()`'s checks (fixes merged at `8e855ac`). In `v2` each invoice goes through `void_cancelled_invoice_v2` (`app/services/billing/order_refunds.py:337`): `void()` with its checks under the reseller, account and invoice locks; when `void()` refuses and no money is held, a `cancel` credit note (`close_kept_invoice_v2`, `:358`); when money is held, a refund review, never a silent void. In `legacy` and `shadow` it makes the same decision the cycle cancellation path makes since those fixes (`_void_cancelled_cycle_invoice`, `app/services/recurring_billing_service.py`), deciding from the locked row.
 - `withdraw(db, request_id, *, actor_user_id)`: only while `scheduled` and before `effective_at`; clears `cancel_at` under the service billing lock; status `withdrawn`.
 
 **Job `cancellations`.** Trigger `T = effective_at`. Act when `W <= T <= now`, the request is `scheduled` and the service is terminated: claim `cancellation:{id}:complete`; if `invoice_action = cancel_unpaid`, cancel the service's remaining unpaid invoices as above; status `completed`; queue `cancellation_completed`. A request whose service is not yet terminated is left to the recurring pass, which terminates at `cancel_at` today.
@@ -865,7 +879,7 @@ A template that fails to render at enqueue (an undefined variable the validation
 
 ### 12.5 No new email at deploy
 
-Templates for events that had no sender before phase 2 (`welcome`, `payment_failed`, `service_provisioned`, `ticket_reply`, and every new event of 12.2) are seeded with `enabled = false`, so deploying phase 2 sends nothing new; the operator enables each. The seeded text of the six events that already send is identical to today's hard-coded text, so their mail does not change.
+Templates for events that had no sender before phase 2 (`welcome`, `payment_failed`, `service_provisioned`, `ticket_reply`, `invoice_overdue`, and every new event of 12.2) are seeded with `enabled = false`, so deploying phase 2 sends nothing new; the operator enables each. The seeded text of the events that already send is identical to today's hard-coded text, so their mail does not change. P2-E establishes from the code (every `enqueue` caller on main) exactly which events send today, seeds those enabled and every other one disabled, and lists both sets in its report; the list above is the design's reading and the code decides.
 
 ## 13. Changes visible to WHMCS, frozen APIs and legacy behaviour
 
@@ -880,7 +894,7 @@ Templates for events that had no sender before phase 2 (`welcome`, `payment_fail
 
 ### 14.1 Waves
 
-- **Wave 1: P2-S, foundations** (alone). Every model and column of section 1; the migrations of 2.2 (chain in 14.4) with their tests, plus the one-line fix of ledger to-do e01f7dbc; every setting of appendix A in `app/services/settings_store.py`; catalogue permissions and events of 8.3 and 8.8 in `app/plugin_host/catalogue.py` (leaving `API_VERSION` at `"1.0"`; P2-K bumps it); the rounding rules of appendix B with property tests (working, they are small); `billing_engine_mode(db, "tax")` and the managed-setting protection for `billing_tax_engine`; the public interfaces of 14.3 as stubs raising `NotImplementedError`; the new MariaDB tests registered in `.forgejo/workflows/billing-mariadb.yml`.
+- **Wave 1: P2-S, foundations** (alone). Every model and column of section 1; the migrations of 2.2 (chain in 14.4) with their tests (from empty included, 2.1); every setting of appendix A in `app/services/settings_store.py`; catalogue permissions and events of 8.3 and 8.8 in `app/plugin_host/catalogue.py` (leaving `API_VERSION` at `"1.0"`; P2-K bumps it); the rounding rules of appendix B with property tests (working, they are small); `billing_engine_mode(db, "tax")` and the managed-setting protection for `billing_tax_engine`; the public interfaces of 14.3 as stubs raising `NotImplementedError`; the new MariaDB tests registered in `.forgejo/workflows/billing-mariadb.yml`.
 - **Wave 2, in parallel, isolated branches after P2-S merges:** P2-T, P2-K, P2-P, P2-J, P2-L, P2-E. None adds a migration; a needed schema change goes to the manager, who chains a follow-up revision after the head.
 - **Wave 3: P2-UI**, all screens, after the wave 2 APIs merge.
 - **Reviews:** an Opus 5.5 high reviewer on each area of section 17 before merge to main.
@@ -891,14 +905,14 @@ Suggested wave 2 merge order: P2-K, P2-P, P2-T, P2-E, P2-J, P2-L (P2-L last beca
 
 | Worker | Owns (creates or edits) | Model and effort |
 |---|---|---|
-| **P2-S** foundations | `app/models/tax.py`, `app/models/billing_jobs.py`; new columns in `app/models/reseller.py`, `commerce_account.py`, `commerce_order.py`, `storefront.py`, `commerce_email.py`, `plugin_host.py`; `alembic/versions/billing_p2_*.py` and `plugin_p2_effective_api.py` and their tests; the e01f7dbc fix; `app/services/settings_store.py` (phase 2 definitions); `app/plugin_host/catalogue.py` (8.3, 8.8 entries); `app/services/billing/rounding.py` (appendix B); stubs of 14.3; `.forgejo/workflows/billing-mariadb.yml`; stub functions in `app/services/alerting/billing_integrity.py` | Opus, high: migrations and money rounding |
+| **P2-S** foundations | `app/models/tax.py`, `app/models/billing_jobs.py`; new columns in `app/models/reseller.py`, `commerce_account.py`, `commerce_order.py`, `storefront.py`, `commerce_email.py`, `plugin_host.py`; `alembic/versions/billing_p2_*.py` and `plugin_p2_effective_api.py` and their tests; `app/services/settings_store.py` (phase 2 definitions); `app/plugin_host/catalogue.py` (8.3, 8.8 entries); `app/services/billing/rounding.py` (appendix B); stubs of 14.3; `.forgejo/workflows/billing-mariadb.yml`; stub functions in `app/services/alerting/billing_integrity.py` | Opus, high: migrations and money rounding |
 | **P2-T** tax engine | `app/services/tax/` except `packs/`, `pack_import.py`, `validators.py`, `id_formats.py`, `legal_notes.py`; `app/services/invoice_service.py` (tax at create and publish, `tax_result`, snapshots), `app/services/invoice_guard.py` (tax rows frozen), `app/services/invoice_pdf_service.py`, `app/services/adjustment_pdf_service.py`, `app/services/invoice_adjustment_service.py` (tax reversal 4.8), `app/services/checkout_service.py` (`_tax_result`, evidence capture), `app/api/commerce_client.py` (profile and quote fields), `app/api/commerce_store_admin.py` (`/tax-rates` façade, product tax class), new `app/api/billing_tax_admin.py`, `app/api/billing_engines_admin.py` (tax switch), `app/services/billing_shadow.py` (tax checks and scan), its detectors in `billing_integrity.py`, tests | Opus, high |
 | **P2-K** plugin API 1.1 | `app/plugin_host/manifest.py`, `loader.py`, new `kinds.py`, new `providers.py`, `health.py` (provider failure audit), `catalogue.py` (`API_VERSION`, `SUPPORTED_API_VERSIONS` only, after P2-S), the SDK module `rackflow_plugin.kinds`, `docs/plugin-system.md` section 17.1 and a new 1.1 section, `plugin_packages/vies_validator/` (manifest, code, recorded fixtures, tests), a fixture plugin per kind under `tests/plugin_host/fixtures/` | Sonnet, high |
 | **P2-P** packs and tax IDs | `app/services/tax/packs/uk_vat.json`, `eu_vat.json`, `app/services/tax/packs/registry.py`, `pack_import.py`, `validators.py` (`TaxIdService`), `id_formats.py`, `legal_notes.py`, the appendix C golden tests, `docs/billing-tax-packs.md` (operator guide: packs are starting points, not advice) | Opus, high: legal data |
 | **P2-J** scheduler, B3, B4 | `app/services/billing/jobs/__init__.py`, `base.py`, `registry.py`, `runner.py` (lease, claim, watermark, dry run, catch-up), `generate_ahead.py`, `reminders.py`, `tax_id_recheck.py`; `app/services/billing/periodic.py` (job list); `app/workers/recurring_billing.py`; `app/services/recurring_billing_service.py` (at-due reuse of a pre-generated cycle, 10.1); new `app/api/billing_jobs_admin.py`; its detectors (`billing_job_needs_review`, `billing_job_stale`); tests including the MariaDB claim and race tests | Opus, high: claim mechanism and the recurring worker |
 | **P2-L** B5, B7, B8 | `app/services/billing/jobs/late_fees.py`, `suspension.py`, `termination.py`, `cancellations.py` (job); new `app/services/billing/cancellations.py` (`CancellationService`); `app/services/commerce_lifecycle_service.py`; `app/services/billing/settlement_subscribers.py` (`unsuspend_after_payment`); `app/services/billing/settlement.py` (deferred unsuspend beside `run_deferred_fulfilment`); new `app/api/billing_cancellations.py` (client, reseller and admin routes); the one cancel route function in `app/api/commerce_client.py:728` (after P2-T merged); policy admin routes in the same new file; tests | Opus, high: suspensions, terminations and debit notes |
 | **P2-E** email templates | `app/services/email_templates/` (new), `app/services/email_message_service.py`, new `app/api/email_templates_admin.py`, `app/services/payments/webhooks.py` (the `payment_failed` sender only), the support ticket staff-reply sender, `app/services/billing/email_events.py` (one small function per new sender that other workers call: `send_service_provisioned`, `send_welcome`), tests including sandbox escape attempts | Sonnet, high |
-| **P2-UI** screens (wave 3) | `frontend/`: tax admin (6.1), account tax panel, product tax class, jobs page with runs, items and forecast, nonpayment policies, cancellation queue (admin, client, reseller), email template editor, client profile VAT fields and quote tax display | Sonnet, medium |
+| **P2-UI** screens (wave 3) | `frontend/`: tax admin (6.1), account tax panel, product tax class, jobs page with runs, items and forecast, nonpayment policies, cancellation queue (admin, client, reseller), email template editor, client profile VAT fields and quote tax display | Sonnet, high (the manager may split it into admin and client screens, as phase 1 did) |
 
 Shared files and how: `catalogue.py` (P2-S, then P2-K for the version lines only); `commerce_client.py` (P2-T, then P2-L's one function); `checkout_service.py` (P2-T; the `send_service_provisioned` call is inserted by P2-T calling P2-E's stubbed function); `settlement.py` (P2-L only in phase 2); `billing_integrity.py` (each worker its own stub functions). `recurring_billing_service.py` is P2-J's only.
 
@@ -961,7 +975,7 @@ All six are written by P2-S.
 
 ### 15.1 Migrations (P2-S)
 
-Each revision: up, down, up on SQLite and on MariaDB 11.8 (`RACKFLOW_TEST_MARIADB_URL`), with data present (a `tax_rates` row with and without a region, a billing profile, an email message); the mirror produces the rows of section 3; the chain from an empty MariaDB database (`tests/core/test_alembic_fresh_mariadb.py`) after the e01f7dbc fix; `alembic heads` returns one head.
+Each revision: up, down, up on SQLite and on MariaDB 11.8 (`RACKFLOW_TEST_MARIADB_URL`), with data present (a `tax_rates` row with and without a region, a billing profile, an email message); the mirror produces the rows of section 3; the chain from an empty MariaDB database (`tests/core/test_alembic_fresh_mariadb.py`, already in CI); `alembic heads` returns one head.
 
 ### 15.2 Unit and service tests per worker
 
@@ -978,7 +992,7 @@ Each revision: up, down, up on SQLite and on MariaDB 11.8 (`RACKFLOW_TEST_MARIAD
 
 ### 15.4 E2 integrity detectors
 
-`tax_line_sum` (line tax equals its rows), `tax_summary_consistent` (summary equals rows), `tax_evidence_conflict`, `billing_job_needs_review`, `billing_job_stale` (a live job whose last scheduled run is older than twice its cadence), `email_template_render_failed`.
+`tax_line_sum` (line tax equals its rows), `tax_summary_consistent` (summary equals rows), `tax_evidence_conflict`, `tax_not_registered` (4.3 step 2), `billing_job_needs_review`, `billing_job_stale` (a live job whose last scheduled run is older than twice its cadence), `email_template_render_failed`.
 
 ### 15.5 MariaDB concurrency tests (each added to `.forgejo/workflows/billing-mariadb.yml`)
 
@@ -1024,7 +1038,7 @@ Each has a recommended default that phase 2 builds unless the owner decides othe
 9. **UK seller, consumers outside the UK.** *Recommended: no UK VAT on B2C digital services to consumers outside the UK; EU consumers need the seller's non-Union OSS registration, and without one the engine charges nothing and alerts.* Confirm the operator's registrations.
 10. **Reverse charge wording.** *Recommended: "Reverse charge" (EU businesses, Article 196 of Directive 2006/112/EC) and, from a UK seller, "Outside the scope of UK VAT: the customer accounts for any VAT due".* Adviser to confirm.
 11. **Northern Ireland.** *Recommended: for services, Northern Ireland is the UK (GB VAT); `XI` numbers are not used for services.* Confirm.
-12. **Plugin package folder.** *Recommended: `plugin_packages/` at the repository root for first-party plugins, shared with the parallel developer guide chat's examples.* Confirm with that chat.
+12. **Plugin package folder.** *Decided by the billing manager:* first-party plugins in `plugin_packages/`, listed through a read-only bundled discovery root (7.5); the developer kit's teaching examples stay in `examples/plugins/`. No owner decision needed.
 13. **Unpaid invoices at termination.** *Recommended: keep them open as debt (`keep`)*; `cancel` is available per policy.
 14. **VAT on reseller invoices.** *Recommended: off by default (`billing_tax_resellers_enabled = false`)*, so reseller invoices stay as they are; turn on deliberately.
 15. **Tax ID check when VIES is down.** *Recommended: fail open (`charge_tax`)*; renewals never blocked.
@@ -1037,7 +1051,8 @@ All `SettingDef` entries in `app/services/settings_store.py` with a `fallback`; 
 | Key | Type | Choices or range | Default |
 |---|---|---|---|
 | `billing_tax_engine` | str | `legacy`, `shadow`, `v2` | `shadow` (managed by the switch endpoint) |
-| `billing_tax_enabled` | bool | | false |
+| `billing_tax_enabled` | bool | | false (pack and admin rules, registrations and reverse charge; mirrored `tax_rates` rules apply either way, 4.3 step 1) |
+| `billing_tax_seller_country` | str | ISO 3166-1 alpha-2 or empty | `""` (4.3 step 2) |
 | `billing_tax_prices_include_tax` | bool | | false |
 | `billing_tax_retail_renewals` | bool | | true |
 | `billing_tax_resellers_enabled` | bool | | false |
@@ -1097,7 +1112,7 @@ The engine produces documents; compliance advice is the operator's (spec 4). The
 | UK business | GB VAT standard 20% | none | no domestic reverse charge for hosting (question 16) |
 | EU business, valid VAT number | none | `gb_outside_scope_b2b` | place of supply is the customer's country; customer VAT number printed |
 | EU business, number not valid or unchecked | as an EU consumer | none | evidence records why |
-| EU consumer | member state rate under `EU_OSS` if registered; else none and alert | none | question 9 |
+| EU consumer | member state rate under `EU_OSS` (or a domestic registration of that state) if registered; else none and the `tax_not_registered` alert | none | question 9 |
 | Rest of world, any | none | `outside_scope` | question 9 |
 
 **Seller established in an EU member state** (registration of that state, optionally `EU_OSS` union scheme):
@@ -1107,8 +1122,9 @@ The engine produces documents; compliance advice is the operator's (spec 4). The
 | same member state, any | that state's rate | none |
 | other member state business, valid VAT number | none (reverse charge) | `eu_reverse_charge` |
 | other member state consumer | customer state's rate under `EU_OSS` (union scheme), else the seller's state rate (the operator declares which by its registrations; the 10,000 euro threshold is not tracked in phase 2) | none |
-| UK or rest of world, business | none | `outside_scope` |
-| UK or rest of world, consumer | none (place of supply is the customer's country) | `outside_scope` |
+| UK or rest of world, business with a valid number | none | `outside_scope` |
+| UK consumer (or UK business without a valid number) | GB VAT if the seller holds a GB registration; else none, `not_registered` alert | none |
+| rest of world, consumer | none (place of supply is the customer's country) | `outside_scope` |
 
 **Legal note keys seeded in English:** `gb_outside_scope_b2b`: "Outside the scope of UK VAT: reverse charge. The customer accounts for any VAT due."; `eu_reverse_charge`: "Reverse charge: VAT to be accounted for by the customer (Article 196, Directive 2006/112/EC)."; `outside_scope`: "Outside the scope of VAT."; `exempt_customer`: "VAT exempt: {reason}."; `credit_note_reference`: "Credit note for invoice {number} dated {date}."
 
