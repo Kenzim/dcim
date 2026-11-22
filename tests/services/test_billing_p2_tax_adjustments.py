@@ -559,6 +559,40 @@ def _check_invariants(db, invoice, *, admin_after_silent):
             assert admin_tax.get(rate, 0) + refunded.get(rate, 0) == charged[rate]
 
 
+def test_admin_credit_note_after_a_full_refund_with_no_note_pays_nothing_out_twice(db_session, setup):
+    """A refund with no note returns the money; a later admin note only clears what the client owes again."""
+    from app.services.credit_ledger_service import CreditLedgerService
+    from app.services.invoice_adjustment_service import AdjustmentConflictError
+    from app.services.payments.base import GatewayRefundResult, GatewayResultStatus
+    from app.services.refund_service import RefundService
+    from tests.services.test_billing_p1r_refund_service import FakeGateway, _registry
+
+    account, classes = setup
+    invoice, total = _invoice(db_session, account, classes, debit=False)
+    payment = _pay_part(db_session, invoice, total)
+    credit_before = CreditLedgerService.balance_cents(db_session, account)
+    gateway = FakeGateway(outcome=GatewayRefundResult(status=GatewayResultStatus.SUCCEEDED, external_ref="rf"))
+    RefundService.request(
+        db_session, payment_id=payment.id, amount_cents=total, destination="gateway",
+        reason="customer_request", actor_user_id=None, idempotency_key="rf-silent", registry=_registry(gateway),
+        issue_credit_note=False,
+    )
+    db_session.commit()
+    _credit_amount(db_session, invoice, total, "admin-after-silent")
+    db_session.commit()
+    db_session.refresh(invoice)
+    assert CreditLedgerService.balance_cents(db_session, account) == credit_before
+    assert db_session.scalar(
+        select(func.count(InvoiceAdjustment.id)).where(
+            InvoiceAdjustment.invoice_id == invoice.id, InvoiceAdjustment.reason_code == AdjustmentReason.OVERPAYMENT
+        )
+    ) == 0
+    assert InvoiceService.balance(db_session, invoice).remaining_cents == 0
+    with pytest.raises(AdjustmentConflictError):
+        _credit_amount(db_session, invoice, 1, "admin-again")
+    _assert_within(db_session, invoice)
+
+
 _FRACTIONS = st.sampled_from(
     [Fraction(1), Fraction(1), Fraction(1, 2), Fraction(1, 3), Fraction(1, 4), Fraction(1, 10)]
 ) | st.integers(1, 99).map(lambda p: Fraction(p, 100))
@@ -579,6 +613,7 @@ _OPS = st.one_of(
 @example(paid=0, debit=False, ops=[("amount", Fraction(1, 2)), ("lines", 1, "line", Fraction(1))])
 def test_random_sequences_of_credits_and_refunds_keep_each_rate_within_its_tax(db_session, setup, paid, debit, ops):
     from app.models.invoice_adjustment import InvoiceAdjustmentLine
+    from app.services.credit_ledger_service import CreditLedgerService
     from app.services.invoice_adjustment_service import InvoiceAdjustmentError
     from app.services.payments.base import GatewayRefundResult, GatewayResultStatus
     from app.services.refund_service import RefundError, RefundService
@@ -588,6 +623,7 @@ def test_random_sequences_of_credits_and_refunds_keep_each_rate_within_its_tax(d
     invoice, total = _invoice(db_session, account, classes, debit=debit)
     lines = _invoice_lines(db_session, invoice)
     db_session.commit()
+    credit_before = CreditLedgerService.balance_cents(db_session, account)
     payment = _pay_part(db_session, invoice, total if paid is None else paid) if paid != 0 else None
     done: list = []
     state = {"silent": False, "admin_after_silent": False}
@@ -658,6 +694,20 @@ def test_random_sequences_of_credits_and_refunds_keep_each_rate_within_its_tax(d
             db_session.rollback()
         db_session.refresh(invoice)
         _check_invariants(db_session, invoice, admin_after_silent=state["admin_after_silent"])
+        paid_in = 0 if payment is None else int(db_session.get(type(payment), payment.id).amount_cents)
+        to_gateway = _refunded_to_gateway(db_session, invoice)
+        assert CreditLedgerService.balance_cents(db_session, account) - credit_before <= paid_in - to_gateway
+
+
+def _refunded_to_gateway(db, invoice) -> int:
+    from app.models.refund import Refund, RefundDestination, RefundStatus
+
+    return int(db.scalar(
+        select(func.coalesce(func.sum(Refund.amount_cents), 0)).where(
+            Refund.invoice_id == invoice.id, Refund.status == RefundStatus.SUCCEEDED,
+            Refund.destination == RefundDestination.GATEWAY,
+        )
+    ))
 
 
 def test_shadow_credit_by_lines_records_t4_when_phase1_tax_differs(db_session, setup, monkeypatch):
