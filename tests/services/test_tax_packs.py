@@ -10,13 +10,15 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, func, select, update
+from sqlalchemy.dialects import mysql
 
 from app.models.commerce_audit import UserAuditEvent
 from app.models.tax import TaxClass, TaxLegalNote, TaxRule
 from app.plugin_host import providers as plugin_providers
 from app.plugin_host.providers import ProviderRef, ProviderUnavailable
 from app.services.tax.id_formats import EU_MEMBER_STATES
+from app.services.tax import pack_import
 from app.services.tax.pack_import import PackImporter, PackImportError
 from app.services.tax.packs import registry as registry_module
 from app.services.tax.packs.registry import PackNotFound, PackRegistry, PackUnavailable
@@ -392,6 +394,94 @@ def test_hash_changes_when_applied_rules_change_after_preview(basics):
             basics, "uk_vat", UK["version"], EFFECTIVE, diff_hash=diff.diff_hash, actor_user_id=None, now=NOW
         )
     assert err.value.code == "pack_changed"
+
+
+def _statements(db):
+    """Record, in order, each ORM select of tax rules and each SQL write to tax_rules."""
+    seen = []
+
+    def on_orm(state):
+        if state.is_select and any(d.get("entity") is TaxRule for d in state.statement.column_descriptions):
+            seen.append(("lock" if state.statement._for_update_arg is not None else "read", state.statement))
+
+    def on_sql(conn, cursor, statement, params, context, executemany):
+        if statement.lstrip().startswith(("UPDATE tax_rules", "INSERT INTO tax_rules")):
+            seen.append(("write", statement))
+
+    event.listen(db, "do_orm_execute", on_orm)
+    event.listen(db.get_bind(), "before_cursor_execute", on_sql)
+    return seen, lambda: (event.remove(db, "do_orm_execute", on_orm), event.remove(db.get_bind(), "before_cursor_execute", on_sql))
+
+
+def _bump_nonzero_rates(data):
+    for rule in data["rules"]:
+        if Decimal(rule["rate_percent"]) > 0:
+            rule["rate_percent"] = str(Decimal(rule["rate_percent"]) + 1)
+
+
+CHANGE_AT = datetime(2027, 4, 1, tzinfo=timezone.utc)
+CHANGE_NOW = datetime(2027, 1, 10, tzinfo=timezone.utc)
+
+
+def test_apply_locks_the_rules_in_effect_in_one_id_ordered_statement_before_writing(basics, monkeypatch):
+    apply_pack(basics, "uk_vat")
+    version = _with_new_version(monkeypatch, _bump_nonzero_rates)
+    seen, stop = _statements(basics)
+    try:
+        diff = PackImporter.preview(basics, "uk_vat", version, CHANGE_AT, now=CHANGE_NOW)
+        assert [kind for kind, _ in seen] == ["read"]  # a preview takes no locks
+        seen.clear()
+        PackImporter.apply(basics, "uk_vat", version, CHANGE_AT, diff_hash=diff.diff_hash, actor_user_id=None, now=CHANGE_NOW)
+    finally:
+        stop()
+    kinds = [kind for kind, _ in seen]
+    assert kinds[0] == "lock" and kinds.count("lock") == 1 and "read" not in kinds
+    assert {"write"} == set(kinds[1:])
+    sql = str(seen[0][1].compile(dialect=mysql.dialect()))
+    assert "FROM tax_rules FORCE INDEX (PRIMARY)" in sql
+    assert sql.rstrip().endswith("ORDER BY tax_rules.id FOR UPDATE")
+    assert "tax_rules.pack_id = %s" in sql
+
+
+def test_apply_refuses_when_a_rule_changed_after_the_preview_and_writes_nothing(basics, monkeypatch):
+    apply_pack(basics, "uk_vat")
+    basics.commit()
+    version = _with_new_version(monkeypatch, _bump_nonzero_rates)
+    diff = PackImporter.preview(basics, "uk_vat", version, CHANGE_AT, now=CHANGE_NOW)
+    before = [(r.id, r.rate_percent, r.valid_to) for r in _rules(basics)]
+    audits = basics.scalar(select(func.count()).select_from(UserAuditEvent))
+    # Another administrator ends a rule between the preview and the apply.
+    basics.execute(update(TaxRule).where(TaxRule.pack_rule_key == "gb_zero").values(valid_to=CHANGE_AT + timedelta(days=30)))
+    with pytest.raises(PackImportError) as err:
+        PackImporter.apply(basics, "uk_vat", version, CHANGE_AT, diff_hash=diff.diff_hash, actor_user_id=None, now=CHANGE_NOW)
+    assert err.value.code == "pack_changed" and "preview the pack again" in str(err.value)
+    basics.rollback()
+    assert [(r.id, r.rate_percent, r.valid_to) for r in _rules(basics)] == before
+    assert basics.scalar(select(func.count()).select_from(UserAuditEvent)) == audits
+
+
+def test_an_apply_that_fails_part_way_leaves_nothing_once_rolled_back(basics, monkeypatch):
+    apply_pack(basics, "uk_vat")
+    basics.commit()
+    before = [(r.id, r.rate_percent, r.valid_to) for r in _rules(basics)]
+    audits = basics.scalar(select(func.count()).select_from(UserAuditEvent))
+    version = _with_new_version(monkeypatch, _bump_nonzero_rates)
+    diff = PackImporter.preview(basics, "uk_vat", version, CHANGE_AT, now=CHANGE_NOW)
+    real_insert, calls = pack_import._insert, []
+
+    def failing_insert(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            basics.flush()  # the first rule is closed and superseded in the database
+            raise RuntimeError("Deadlock found when trying to get lock (1213)")
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(pack_import, "_insert", failing_insert)
+    with pytest.raises(RuntimeError):
+        PackImporter.apply(basics, "uk_vat", version, CHANGE_AT, diff_hash=diff.diff_hash, actor_user_id=None, now=CHANGE_NOW)
+    basics.rollback()
+    assert [(r.id, r.rate_percent, r.valid_to) for r in _rules(basics)] == before
+    assert basics.scalar(select(func.count()).select_from(UserAuditEvent)) == audits
 
 
 def test_unknown_pack_and_version(basics):

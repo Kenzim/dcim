@@ -160,13 +160,30 @@ def _check_effective_from(effective_from: datetime, now: Optional[datetime]) -> 
     return effective_from
 
 
-def _rows_in_effect(db: Session, pack_id: str, effective_from: datetime) -> dict[str, list[TaxRule]]:
-    rows = db.scalars(
+def _in_effect_query(pack_id: str, effective_from: datetime, *, lock: bool):
+    query = (
         select(TaxRule)
         .where(TaxRule.pack_id == pack_id)
         .where(or_(TaxRule.valid_to.is_(None), TaxRule.valid_to > effective_from))
         .order_by(TaxRule.id)
-    ).all()
+    )
+    if not lock:
+        return query
+    # The tax engine's publish locks rule rows in ascending id, so the import does too, or the
+    # two can deadlock. ORDER BY alone does not set the order the locks are taken in: once the
+    # table holds other packs, MariaDB reads through ix_tax_rules_pack_rule (rule key order) and
+    # sorts afterwards. Reading the primary key locks in id order; under REPEATABLE READ it also
+    # holds the table's other rule rows and gaps until the import's transaction ends.
+    for dialect in ("mysql", "mariadb"):
+        query = query.with_hint(TaxRule, "FORCE INDEX (PRIMARY)", dialect)
+    # A locking read sees the latest committed rows, not this transaction's snapshot.
+    return query.with_for_update().execution_options(populate_existing=True)
+
+
+def _rows_in_effect(
+    db: Session, pack_id: str, effective_from: datetime, *, lock: bool = False
+) -> dict[str, list[TaxRule]]:
+    rows = db.scalars(_in_effect_query(pack_id, effective_from, lock=lock)).all()
     by_key: dict[str, list[TaxRule]] = {}
     for row in rows:
         if row.pack_rule_key:
@@ -185,7 +202,9 @@ def _diff_hash(pack_id: str, version: str, effective_from: datetime, entries: li
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _compute(db: Session, pack: PackData, effective_from: datetime) -> list[dict[str, Any]]:
+def _compute(
+    db: Session, pack: PackData, effective_from: datetime, in_effect: dict[str, list[TaxRule]]
+) -> list[dict[str, Any]]:
     classes = {row.code: row.id for row in db.scalars(select(TaxClass)).all()}
     class_codes = {class_id: code for code, class_id in classes.items()}
     entries: list[dict[str, Any]] = []
@@ -194,7 +213,6 @@ def _compute(db: Session, pack: PackData, effective_from: datetime) -> list[dict
     for code in sorted(needed - set(classes)):
         entries.append({"type": "tax_class", "key": code, "action": "add"})
 
-    in_effect = _rows_in_effect(db, pack.pack_id, effective_from)
     wanted = {
         rule["pack_rule_key"]: rule
         for rule in pack.rules
@@ -254,10 +272,14 @@ def _compute(db: Session, pack: PackData, effective_from: datetime) -> list[dict
     return entries
 
 
-def _build(db: Session, pack_id: str, version: str, effective_from: datetime, now: Optional[datetime]):
+def _build(
+    db: Session, pack_id: str, version: str, effective_from: datetime, now: Optional[datetime], *, lock: bool = False
+):
     effective_from = _check_effective_from(effective_from, now)
+    # Loaded first: a plugin pack is fetched before any rule row is locked.
     pack = _load(db, pack_id, version)
-    entries = _compute(db, pack, effective_from)
+    in_effect = _rows_in_effect(db, pack.pack_id, effective_from, lock=lock)
+    entries = _compute(db, pack, effective_from, in_effect)
     diff = PackDiff(
         pack_id=pack_id,
         version=version,
@@ -265,7 +287,7 @@ def _build(db: Session, pack_id: str, version: str, effective_from: datetime, no
         entries=tuple(entries),
         diff_hash=_diff_hash(pack_id, version, effective_from, entries),
     )
-    return pack, diff
+    return pack, diff, in_effect
 
 
 def _close(row: TaxRule, at: datetime) -> None:
@@ -339,12 +361,18 @@ class PackImporter:
     ) -> PackDiff:
         """Apply the diff the administrator previewed, in the caller's transaction (flushes, no commit).
 
-        Raises ``PackImportError`` with code ``pack_changed`` when the diff is no
-        longer the one whose hash the administrator saw.
+        The rules in effect are locked first, in one statement in ascending id, and the
+        diff is rebuilt from the locked rows. Raises ``PackImportError`` with code
+        ``pack_changed`` when that diff is no longer the one whose hash the
+        administrator saw. Nothing is written before that check; on any error the
+        caller rolls the transaction back, which also removes the audit entry.
         """
-        pack, diff = _build(db, pack_id, version, effective_from, now)
+        pack, diff, in_effect = _build(db, pack_id, version, effective_from, now, lock=True)
         if diff.diff_hash != diff_hash:
-            raise PackImportError("pack_changed", "the pack or the applied rules changed since the preview")
+            raise PackImportError(
+                "pack_changed",
+                "the pack or its rules in effect changed since the preview; preview the pack again before applying it",
+            )
         effective_from = diff.effective_from
 
         classes = {row.code: row.id for row in db.scalars(select(TaxClass)).all()}
@@ -362,7 +390,6 @@ class PackImporter:
                 classes[row.code] = row.id
 
         rules = {rule["pack_rule_key"]: rule for rule in pack.rules}
-        in_effect = _rows_in_effect(db, pack_id, effective_from)
         for entry in diff.entries:
             if entry["type"] != "rule" or entry["action"] == "unchanged":
                 continue
