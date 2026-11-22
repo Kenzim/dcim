@@ -116,3 +116,24 @@ def test_dry_run_does_not_call_the_validator(factory, checks):
     _profile(factory, status="unavailable", checked_at=None)
     result = runner.run_job(factory, NAME, dry_run=True, trigger="admin", now=T0)
     assert result.counts == {"planned": 1} and checks == []
+
+
+def test_no_check_made_is_nothing_to_do(factory, monkeypatch):
+    from app.models.billing_jobs import BillingJobRunItem
+
+    profile_id = _profile(factory, status="unavailable", checked_at=None)
+
+    def no_check(db, profile, *, force=False):
+        profile.tax_id_status = "unchecked"
+        return None
+
+    monkeypatch.setattr(TaxIdService, "check", staticmethod(no_check))
+    _go_live(factory, T0 - timedelta(hours=1))
+    result = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0)
+    assert result.counts == {"done": 1}
+    db = factory()
+    item = db.query(BillingJobRunItem).filter_by(run_id=result.run_id).one()
+    assert item.detail["reason"] == "no_check"
+    assert db.get(BillingProfile, profile_id).tax_id_status == "unchecked"
+    db.close()
+    assert runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0 + timedelta(hours=1)).counts == {}

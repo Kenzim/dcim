@@ -113,6 +113,8 @@ class TaxIdRecheck:
             return "skipped:not_due"
         if not run.claim(db, subject_key(profile)):
             return "already_done"
-        TaxIdService.check(db, profile, force=True)
+        check = TaxIdService.check(db, profile, force=True)
         db.flush()
-        return "done"
+        # None: no check was made and the service set the profile ``unchecked``,
+        # so it leaves the job's scope; that status change commits.
+        return "done" if check is not None else "done:no_check"
