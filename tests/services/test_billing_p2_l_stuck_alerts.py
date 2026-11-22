@@ -222,3 +222,99 @@ def test_the_nonpayment_jobs_cannot_go_live_while_a_stuck_service_alert_is_off(d
 
 def test_the_stuck_service_alerts_ship_disabled(db_session):
     assert all(CATALOGUE[key].enabled_by_default is False for key in STUCK_SERVICE_ALERTS)
+
+
+# ---------------------------------------------------------------- payment lifts on state and balance
+
+
+def _suspended_by_job(db, billing):
+    invoice = make_cycle_invoice(db, billing, due_at=NOW - timedelta(days=20))
+    run_job(db, NonpaymentSuspensionJob(lambda: FakeLifecycle()), make_run(JOB))
+    assert _state(db, billing) == (ServiceStatus.SUSPENDED, ServiceBillingStatus.SUSPENDED_NONPAYMENT)
+    return invoice
+
+
+def test_a_partial_payment_leaving_the_invoice_overdue_does_not_lift(db_session, env):
+    from app.models.reseller import Payment, PaymentStatus
+    from app.services.billing import settlement
+
+    billing = env
+    invoice = _suspended_by_job(db_session, billing)
+    payment = Payment(
+        invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.SUCCEEDED, amount_cents=400,
+        refunded_cents=0, currency=invoice.currency, payment_metadata={},
+    )
+    db_session.add(payment)
+    db_session.flush()
+    settlement.settle_invoice(db_session, invoice.id, payment=payment)
+    settlement.commit_and_fulfil(db_session)
+    assert _state(db_session, billing) == (ServiceStatus.SUSPENDED, ServiceBillingStatus.SUSPENDED_NONPAYMENT)
+    assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspended").count() == 0
+
+
+def test_an_admin_suspension_is_not_lifted_by_a_payment(db_session, env):
+    billing = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW + timedelta(days=5))
+    _manual_suspend(db_session, billing)
+    _pay(db_session, db_session.get(Invoice, invoice.id))
+    assert _state(db_session, billing) == (ServiceStatus.SUSPENDED, ServiceBillingStatus.ACTIVE)
+    assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspended").count() == 0
+    assert _detect(db_session, nonpayment_suspended_paid) == []
+
+
+def test_a_failed_unsuspension_after_payment_is_left_for_review_not_retried(db_session, env, monkeypatch):
+    from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
+
+    billing = env
+    invoice = _suspended_by_job(db_session, billing)
+    attempts = []
+
+    async def failing(self, db, service, *, reason):
+        attempts.append(service.id)
+        raise ServiceLifecycleError("power on failed")
+
+    monkeypatch.setattr(ServiceLifecycle, "unsuspend", failing)
+    _pay(db_session, db_session.get(Invoice, invoice.id))
+    assert attempts == [billing.service_id]
+    assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspend_failed").count() == 1
+    assert _state(db_session, billing)[0] == ServiceStatus.SUSPENDED
+    # The next suspension run does not retry it; the alert reports it.
+    run_job(db_session, NonpaymentSuspensionJob(lambda: FakeLifecycle()), make_run(JOB, now=NOW + timedelta(days=1)))
+    assert attempts == [billing.service_id]
+    assert _detect(db_session, nonpayment_suspended_paid, WALL_CLOCK_AFTER) == [billing.service_id]
+
+
+# ---------------------------------------------------------------- go-live through the mode change
+
+
+@pytest.mark.parametrize("job_class", [NonpaymentSuspensionJob, NonpaymentTerminationJob])
+def test_going_live_is_refused_while_a_stuck_service_alert_is_off(db_session, env, job_class):
+    from app.models.alerting import AlertTypeSetting
+    from app.services.alerting.catalogue import effective_settings
+    from app.services.billing.jobs import runner
+    from tests.services.p2l_support import go_live
+
+    set_policy(db_session, suspend_after_days=5, terminate_after_days=30, termination_notice_days=7)
+    enable_templates(db_session)
+    job = job_class(lambda: FakeLifecycle()) if job_class is NonpaymentSuspensionJob else job_class()
+    enable_stuck_service_alerts(db_session, enabled=False)
+    others = {key: s.enabled for key, s in effective_settings(db_session).items() if key not in STUCK_SERVICE_ALERTS}
+    with pytest.raises(runner.JobModeError) as refused:
+        go_live(db_session, job, NOW)
+    assert all(f"the {key} alert is not enabled" in str(refused.value) for key in STUCK_SERVICE_ALERTS)
+    db_session.expire_all()
+    # Nothing was switched on, and no other alert changed.
+    assert all(not db_session.get(AlertTypeSetting, key).enabled for key in STUCK_SERVICE_ALERTS)
+    after = {key: s.enabled for key, s in effective_settings(db_session).items() if key not in STUCK_SERVICE_ALERTS}
+    assert after == others
+
+
+@pytest.mark.parametrize("job_class", [NonpaymentSuspensionJob, NonpaymentTerminationJob])
+def test_going_live_succeeds_with_the_stuck_service_alerts_on(db_session, env, job_class):
+    from tests.services.p2l_support import go_live
+
+    set_policy(db_session, suspend_after_days=5, terminate_after_days=30, termination_notice_days=7)
+    job = job_class(lambda: FakeLifecycle()) if job_class is NonpaymentSuspensionJob else job_class()
+    go_live(db_session, job, NOW)
+    db_session.expire_all()
+    assert db_session.query(BillingJobState).filter_by(job=job.name).one().mode.value == "live"

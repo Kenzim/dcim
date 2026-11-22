@@ -264,9 +264,12 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
         return
     if billing.status == ServiceBillingStatus.CANCELLED:
         return
+    # The billing stays suspended_nonpayment until the service is lifted:
+    # ``unsuspend_paid_service`` sets it active, and if that fails the
+    # ``billing_nonpayment_suspended_paid`` alert reports the service.
+    billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+    db.flush()
     if owed:
-        billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
-        db.flush()
         return
     settlement.defer_unsuspension(db, int(service.id))
 
