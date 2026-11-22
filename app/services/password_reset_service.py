@@ -86,7 +86,7 @@ def request_password_reset(db: Session, *, email: str, client_ip: str) -> None:
             to_address=user.email,
             event=EmailEvent.PASSWORD_RESET,
             idempotency_key=f"pwdreset:{user.id}:{raw_token[:16]}",
-            data={"reset_url": f"{base_url}/reset-password?token={raw_token}"},
+            variables={"reset_url": f"{base_url}/reset-password?token={raw_token}"},
             user_id=user.id,
         )
     except ValueError:

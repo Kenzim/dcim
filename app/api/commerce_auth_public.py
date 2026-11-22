@@ -20,6 +20,7 @@ from app.dao import UserDAO
 from app.models.commerce_auth_extra import EmailVerificationToken
 from app.models.user import MIN_PASSWORD_LENGTH, User
 from app.services.billing_account_service import BillingAccountService
+from app.services.billing.email_events import send_welcome
 from app.services.email_message_service import EmailEvent, EmailMessageService
 from app.services import password_reset_service
 
@@ -78,7 +79,7 @@ def _enqueue_verify_email(db: Session, *, user: User, raw_token: str) -> None:
         to_address=user.email,
         event=EmailEvent.VERIFY_EMAIL,
         idempotency_key=f"verify:{user.id}:{raw_token[:16]}",
-        data={"username": user.username, "verify_url": verify_url},
+        variables={"verify_url": verify_url},
         user_id=user.id,
     )
 
@@ -144,6 +145,9 @@ def verify_email(body: VerifyEmailBody, db: Annotated[Session, Depends(get_db)])
     if _as_utc(row.expires_at) < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail=_INVALID_TOKEN_MSG)
     row.consumed_at = datetime.now(timezone.utc)
+    verified_user = db.get(User, row.user_id)
+    if verified_user is not None:
+        send_welcome(db, verified_user)
     db.commit()
     return {"verified": True, "user_id": row.user_id}
 
