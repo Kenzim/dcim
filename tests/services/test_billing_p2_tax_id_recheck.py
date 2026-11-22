@@ -140,14 +140,17 @@ def test_no_check_made_is_nothing_to_do(factory, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("valid_days", "age_days"),
-    [(30, 25), (10, 5), (6, 1), (5, 1), (1, 1)],
+    ("valid_days", "max_age_days", "age_days"),
+    [(30, 30, 25), (10, 30, 5), (6, 30, 1), (5, 30, 1), (1, 30, 1), (30, 10, 5), (30, 2, 1), (20, 12, 7)],
 )
-def test_recheck_age_follows_the_validity_setting(factory, checks, valid_days, age_days):
+def test_recheck_age_follows_the_validity_and_freshness_settings(
+    factory, checks, valid_days, max_age_days, age_days
+):
     from app.services.billing.jobs import tax_id_recheck
 
     db = factory()
     set_setting(db, "billing_tax_id_valid_days", valid_days)
+    set_setting(db, "billing_tax_id_max_age_days", max_age_days)
     db.commit()
     assert tax_id_recheck.recheck_age_days(db) == age_days
     db.close()
@@ -161,6 +164,12 @@ def test_recheck_age_follows_the_validity_setting(factory, checks, valid_days, a
     [item] = db.query(BillingJobRunItem).filter_by(run_id=result.run_id).all()
     assert item.detail["profile_id"] == due and fresh != due
     db.close()
+
+
+def test_both_settings_are_in_the_config_hash():
+    from app.services.billing.jobs.registry import JOBS
+
+    assert {"billing_tax_id_valid_days", "billing_tax_id_max_age_days"} <= set(JOBS[NAME].setting_keys)
 
 
 def test_validator_runs_without_a_lock_or_open_transaction_and_a_changed_tax_id_keeps_its_status(

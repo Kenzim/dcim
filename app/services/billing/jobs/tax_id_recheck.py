@@ -1,8 +1,10 @@
 """``tax_id_recheck`` (docs/billing-phase2-design.md 7.4 and 10.7).
 
 Re-checks the EU VAT number of profiles whose ``valid`` result is older than
-``recheck_age_days`` (``RECHECK_BEFORE_EXPIRY_DAYS`` before the result stops
-counting under ``billing_tax_id_valid_days``, never under one day) and of
+``recheck_age_days`` (``RECHECK_BEFORE_EXPIRY_DAYS`` before the result's cache
+expires under ``billing_tax_id_valid_days`` or it stops counting for reverse
+charge under ``billing_tax_id_max_age_days``, whichever is first, never under
+one day) and of
 every ``unavailable`` profile (at most every ``UNAVAILABLE_RETRY`` per profile) through ``TaxIdService.check(force=True)``,
 at most ``billing_tax_id_recheck_batch`` profiles per run. It writes only
 checks and profile status, never invoices.
@@ -51,7 +53,8 @@ def subject_key(profile: BillingProfile) -> str:
 
 def recheck_age_days(db: Session) -> int:
     valid_days = int(_setting(db, "billing_tax_id_valid_days"))
-    return max(MIN_RECHECK_AGE_DAYS, valid_days - RECHECK_BEFORE_EXPIRY_DAYS)
+    max_age_days = int(_setting(db, "billing_tax_id_max_age_days"))
+    return max(MIN_RECHECK_AGE_DAYS, min(valid_days, max_age_days) - RECHECK_BEFORE_EXPIRY_DAYS)
 
 
 def _due_clause(db: Session, run: JobRun):
@@ -128,7 +131,11 @@ def _release_claim(db: Session, run: JobRun, key: str) -> None:
 
 class TaxIdRecheck:
     name = NAME
-    setting_keys = ("billing_tax_id_recheck_batch", "billing_tax_id_valid_days")
+    setting_keys = (
+        "billing_tax_id_recheck_batch",
+        "billing_tax_id_valid_days",
+        "billing_tax_id_max_age_days",
+    )
 
     def candidates(self, db: Session, run: JobRun) -> Iterable[int]:
         batch = int(_setting(db, "billing_tax_id_recheck_batch"))
