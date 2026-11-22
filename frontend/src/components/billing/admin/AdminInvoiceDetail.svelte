@@ -176,6 +176,7 @@
   $: status = invoice?.status_detail || invoice?.status || '';
   $: balance = invoice?.balance || {};
   $: currency = invoice?.currency || 'USD';
+  $: showNoteSterling = (invoice?.adjustments || []).some((row) => row.fx_period || row.tax_total_gbp_cents != null);
   $: v2 = engineMode === 'v2';
   $: unpaid = UNPAID.includes(status);
   $: noteBlock = noteBlockReason(invoice, status, v2, engineMode);
@@ -300,7 +301,7 @@
     {:else}
       <div class="ba-scroll">
         <table class="ba-table">
-          <thead><tr><th>Number</th><th>Kind</th><th>Reason</th><th>Outcome</th><th class="ba-num">Tax</th><th class="ba-num">Total</th><th>Issued</th></tr></thead>
+          <thead><tr><th>Number</th><th>Kind</th><th>Reason</th><th>Outcome</th><th class="ba-num">Tax</th>{#if showNoteSterling}<th class="ba-num">VAT in sterling</th>{/if}<th class="ba-num">Total</th><th>Issued</th></tr></thead>
           <tbody>
             {#each invoice.adjustments as row (row.id)}
               <tr>
@@ -309,6 +310,15 @@
                 <td>{label(row.reason_code)}</td>
                 <td>{label(row.outcome)}</td>
                 <td class="ba-num">{formatMoney(row.tax_cents, row.currency)}</td>
+                {#if showNoteSterling}
+                  <td class="ba-num">
+                    {#if row.tax_total_gbp_cents != null}
+                      {formatMoney(row.tax_total_gbp_cents, 'GBP')}<div class="ba-hint">{row.fx_period}{row.fx_rate != null ? `, ${row.fx_rate} per £1` : ''}</div>
+                    {:else if row.fx_period}
+                      <span class="ba-pill warn">pending</span>
+                    {:else}-{/if}
+                  </td>
+                {/if}
                 <td class="ba-num">{formatMoney(row.total_cents, row.currency)}</td>
                 <td>{when(row.issued_at)}</td>
               </tr>
