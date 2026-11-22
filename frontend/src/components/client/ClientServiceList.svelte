@@ -40,6 +40,7 @@
     <h1>Services</h1>
     <p class="sub">{services.length} service{services.length === 1 ? '' : 's'} on your account</p>
   </div>
+  <a class="head-link" href="/client/cancellations">Cancellation requests</a>
 </div>
 
 {#if loading}
@@ -98,6 +99,8 @@
     font-weight: 750;
     letter-spacing: -0.02em;
   }
+  .head-link { font-size: 13px; font-weight: 650; color: var(--portal-accent); text-decoration: none; }
+  .head-link:hover { text-decoration: underline; }
   .sub {
     margin: 4px 0 0;
     font-size: 14px;

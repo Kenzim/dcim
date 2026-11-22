@@ -3,6 +3,7 @@
   import { navigate } from '../../lib/router.js';
   import { Alert, Button, Spinner, Tabs } from '../ui/index.js';
   import InvoiceStatusBadge from '../billing/InvoiceStatusBadge.svelte';
+  import InvoiceTaxPanel from '../billing/shared/InvoiceTaxPanel.svelte';
   import ClientInvoiceCredit from '../billing/client/ClientInvoiceCredit.svelte';
   import ClientNotes from '../billing/client/ClientNotes.svelte';
   import { clientGetCredit } from '../../lib/billingClientApi.js';
@@ -191,6 +192,7 @@
             <div><dt>Due</dt><dd>{selected.data.due_at ? new Date(selected.data.due_at).toLocaleDateString() : '—'}</dd></div>
             <div><dt>Created</dt><dd>{new Date(selected.data.created_at).toLocaleString()}</dd></div>
           </dl>
+          <InvoiceTaxPanel invoice={selected.data} />
           <ClientInvoiceCredit invoice={selected.data} {credit} {impersonating} on:applied={creditApplied} />
           <div class="actions">
             <Button variant="secondary" on:click={downloadPdf} disabled={working}>Download PDF</Button>

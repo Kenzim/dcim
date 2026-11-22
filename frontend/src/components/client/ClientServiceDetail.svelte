@@ -8,9 +8,12 @@
   import BareMetalServiceView from './BareMetalServiceView.svelte';
   import ProxyServiceView from './ProxyServiceView.svelte';
   import PluginPanels from '../PluginPanels.svelte';
+  import ServiceCancelPanel from '../billing/client/ServiceCancelPanel.svelte';
 
   /** @type {number} */
   export let serviceId;
+  /** Switches off cancelling while an administrator views the portal as this client. */
+  export let impersonating = false;
 
   let detail = null;
   let loading = true;
@@ -121,6 +124,8 @@
         <PluginPanels {serviceId} audience="client" />
       {/if}
     </div>
+
+    <ServiceCancelPanel {serviceId} serviceName={detail.name} {impersonating} />
   {/if}
 </div>
 
