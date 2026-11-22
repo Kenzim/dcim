@@ -174,24 +174,46 @@ def test_paid_between_plan_and_execute_skips(db_session, env):
     assert lifecycle.calls == [] and db_session.query(BillingJobAction).count() == 0
 
 
-def test_payment_unsuspends_after_commit(db_session, env):
+def test_money_received_between_plan_and_execute_skips(db_session, env):
+    _, billing, lifecycle, job = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=40))
+    run = make_run("nonpayment_suspension")
+    action = job.plan(db_session, run, billing.id)
+    # The money is recorded but the status has not moved yet.
+    db_session.add(Payment(
+        invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.SUCCEEDED,
+        amount_cents=invoice.amount_cents, refunded_cents=0, currency="USD", payment_metadata={},
+    ))
+    db_session.commit()
+    assert job.execute(db_session, run, action) == "skipped"
+    assert lifecycle.calls == [] and db_session.query(BillingJobAction).count() == 0
+
+
+def test_payment_unsuspends_after_commit(db_session, env, monkeypatch):
+    from app.services.service_lifecycle import ServiceLifecycle
+
     _, billing, lifecycle, job = env
     invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=40))
     run_job(db_session, job, make_run("nonpayment_suspension"))
 
-    seen_inside: list[ServiceStatus] = []
+    order: list[str] = []
+    real_commit, real_unsuspend = db_session.commit, ServiceLifecycle.unsuspend
 
-    def spy(db, event):
-        seen_inside.append(db.get(Service, billing.service_id).status)
+    def commit():
+        order.append("commit")
+        real_commit()
 
-    settlement.subscribe_invoice_paid("p2l-spy", spy)
-    try:
-        _pay(db_session, db_session.get(Invoice, invoice.id))
-    finally:
-        settlement.unsubscribe_invoice_paid("p2l-spy")
+    async def unsuspend(self, db, service, *, reason):
+        order.append("unsuspend")
+        return await real_unsuspend(self, db, service, reason=reason)
 
-    # Inside the settlement transaction the service is still suspended.
-    assert seen_inside == [ServiceStatus.SUSPENDED]
+    monkeypatch.setattr(db_session, "commit", commit)
+    monkeypatch.setattr(ServiceLifecycle, "unsuspend", unsuspend)
+    _pay(db_session, db_session.get(Invoice, invoice.id))
+    monkeypatch.undo()
+
+    # The settlement is committed before the lifecycle call.
+    assert "unsuspend" in order and order.index("commit") < order.index("unsuspend")
     assert _service(db_session, billing).status == ServiceStatus.ACTIVE
     assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.ACTIVE
     assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspended").count() == 1
