@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -194,25 +194,40 @@ def get_template(template_id: int, db: DbDep):
 
 
 class UpdateBody(BaseModel):
+    """The full text, or only ``enabled`` to switch the template on or off.
+
+    A save whose text equals the stored text keeps the version number and
+    writes no version row.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    subject: str = Field(max_length=templates_admin.MAX_SUBJECT_SOURCE)
-    body_text: str
+    subject: Optional[str] = Field(default=None, max_length=templates_admin.MAX_SUBJECT_SOURCE)
+    body_text: Optional[str] = None
     body_html: Optional[str] = None
     enabled: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _text_comes_whole(self) -> "UpdateBody":
+        if (self.subject is None) != (self.body_text is None):
+            raise ValueError("subject and body_text are sent together")
+        if self.subject is None and ("body_html" in self.model_fields_set or self.enabled is None):
+            raise ValueError("send the text (subject and body_text), or only enabled")
+        return self
 
 
 @router.put("/{template_id}", responses=COMMON_ERROR_RESPONSES)
 def update_template(template_id: int, body: UpdateBody, auth: AdminDep, db: DbDep):
     row = _get(db, template_id, lock=True)
     was_enabled = bool(row.enabled)
+    text_sent = body.subject is not None
     try:
         templates_admin.save_template(
             db,
             row,
-            subject=body.subject,
-            body_text=body.body_text,
-            body_html=body.body_html,
+            subject=body.subject if text_sent else row.subject,
+            body_text=body.body_text if text_sent else row.body_text,
+            body_html=body.body_html if text_sent else row.body_html,
             enabled=body.enabled,
             actor_user_id=auth["user_id"],
         )
