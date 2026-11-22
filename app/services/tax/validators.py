@@ -52,12 +52,13 @@ ERROR_CODES = {
     "rate_limited": "RATE_LIMITED",
     "circuit_open": "CIRCUIT_OPEN",
     "invalid_answer": "INVALID_ANSWER",
+    "busy": "PLUGIN_BUSY",
 }
 DEFAULT_ERROR_CODE = "PLUGIN_ERROR"
 
 # Reasons that say the validator is configured and enabled but failing now: it stays a
 # candidate, so the check is ``unavailable`` rather than ``unchecked``.
-_TRANSIENT = {"timeout", "rate_limited", "circuit_open", "invalid_answer", "error"}
+_TRANSIENT = {"timeout", "rate_limited", "circuit_open", "invalid_answer", "error", "busy"}
 
 
 class TaxIdUnverifiable(Exception):
@@ -74,9 +75,12 @@ def _call_check_online(db: Session, ref: str, request: Any) -> Any:
     """The one call of ``check_online``, with the setting as an upper bound on the timeout.
 
     The host uses the lower of this and the provider's manifest ``timeout_seconds`` (design 8.6).
+    ``db`` lets the host record the call's health inside this transaction on SQLite.
     """
     timeout = int(get_setting(db, "billing_tax_id_check_timeout_seconds"))
-    return plugin_providers.call_provider(VALIDATOR_KIND, ref, "check_online", request, timeout_seconds=timeout)
+    return plugin_providers.call_provider(
+        VALIDATOR_KIND, ref, "check_online", request, timeout_seconds=timeout, db=db
+    )
 
 
 def _now(now: Optional[datetime]) -> datetime:
@@ -108,13 +112,14 @@ def _supporting_validators(db: Session, country: str, id_type: str) -> list[str]
     A validator whose ``supports`` call fails for a transient reason (open circuit,
     timeout, rate limit, error) is kept after those that answered, so its failure is
     recorded as ``unavailable``. One that is disabled, not installed or unknown is left out.
+    A busy validator (all its call slots in use) also stays a candidate.
     ``providers_of`` is not used to filter, because it omits providers with an open circuit.
     """
     answered: list[str] = []
     failing: list[str] = []
     for ref in configured_validators(db):
         try:
-            if plugin_providers.call_provider(VALIDATOR_KIND, ref, "supports", country, id_type) is True:
+            if plugin_providers.call_provider(VALIDATOR_KIND, ref, "supports", country, id_type, db=db) is True:
                 answered.append(ref)
         except ProviderUnavailable as exc:
             if exc.reason in _TRANSIENT:

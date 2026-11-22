@@ -121,11 +121,12 @@ def test_valid_horizon_follows_the_setting(db_session, profile, host):
     assert row.expires_at.replace(tzinfo=timezone.utc) == NOW + timedelta(days=10)
 
 
-def test_check_timeout_setting_reaches_the_call(db_session, profile, host):
+def test_check_timeout_setting_and_session_reach_the_call(db_session, profile, host):
     set_setting(db_session, "billing_tax_id_check_timeout_seconds", 4)
     TaxIdService.check(db_session, profile, now=NOW)
-    assert ("check_online", {"timeout_seconds": 4}) in host["kwargs"]
-    assert all(kw == {} for method, kw in host["kwargs"] if method == "supports")
+    assert ("check_online", {"timeout_seconds": 4, "db": db_session}) in host["kwargs"]
+    supports = [kw for method, kw in host["kwargs"] if method == "supports"]
+    assert supports and all(kw == {"db": db_session} for kw in supports)
 
 
 def test_cache_hit_reuses_the_row_and_its_check_time(db_session, profile, host):
@@ -171,6 +172,7 @@ def test_format_invalid_stops_before_any_validator(db_session, profile, host):
         ("rate_limited", "RATE_LIMITED"),
         ("circuit_open", "CIRCUIT_OPEN"),
         ("invalid_answer", "INVALID_ANSWER"),
+        ("busy", "PLUGIN_BUSY"),
         ("error", "PLUGIN_ERROR"),
         ("disabled", "PLUGIN_ERROR"),
         ("not_installed", "PLUGIN_ERROR"),
@@ -189,7 +191,16 @@ def test_provider_failure_is_unavailable_with_a_code(db_session, profile, host, 
     assert profile.tax_id_status == "unavailable"
 
 
-@pytest.mark.parametrize("reason", ["circuit_open", "timeout", "rate_limited", "error", "invalid_answer"])
+# The VIES plugin's own unavailable codes are stored as it gave them.
+@pytest.mark.parametrize("code", ["MISMATCHED_RESPONSE", "BAD_RESPONSE", "NETWORK_ERROR", "HTTP_503"])
+def test_a_validators_unavailable_code_is_kept(db_session, profile, host, code):
+    host["answer"] = Answer("unavailable", error_code=code)
+    row = TaxIdService.check(db_session, profile, now=NOW)
+    assert (row.status, row.error_code, row.registered_name) == ("unavailable", code, None)
+    assert profile.tax_id_status == "unavailable"
+
+
+@pytest.mark.parametrize("reason", ["circuit_open", "timeout", "rate_limited", "error", "invalid_answer", "busy"])
 def test_a_transient_supports_failure_keeps_the_validator(db_session, profile, host, reason):
     def failing(country, id_type):
         raise ProviderUnavailable(reason)

@@ -1,20 +1,59 @@
-"""TaxIdService through the real plugin host and P2-K's fixture validator (design 7.4, 8.5 to 8.7)."""
+"""TaxIdService through the real plugin host and P2-K's fixture validator (design 7.4, 8.5 to 8.7).
+
+These run on a file-backed SQLite database. The shared in-memory test engine has one connection
+for every session, so the host's own sessions closing would roll back the caller's uncommitted
+work; here, as in production, the host's health records join the caller's transaction (``db=``).
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import sessionmaker
 
 from app.models.commerce_account import BillingAccount, BillingProfile
 from app.models.plugin_host import PluginInstallation
+from app.models.tax import TaxIdCheck
 from app.plugin_host import common, health
 from app.services.settings_store import set_setting
 from app.services.tax.validators import TaxIdService
+from tests.plugin_host.test_provider_hardening import release, wait_idle  # noqa: F401 - the release fixture
 from tests.plugin_host.test_provider_kinds import VALIDATOR, setup_plugin
 
 NOW = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
 REF = f"{VALIDATOR}:fixture"
+
+
+@pytest.fixture
+def file_engine(tmp_path):
+    import app.models  # noqa: F401
+    from app.core import database
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'rackflow.db'}", connect_args={"check_same_thread": False, "timeout": 2})
+    database.Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def db_session(file_engine):
+    session = sessionmaker(autocommit=False, autoflush=False, bind=file_engine)()
+    yield session
+    session.close()
+
+
+@pytest.fixture(autouse=True)
+def host_on_the_file_db(plugin_env, file_engine, monkeypatch):
+    from app.core import database
+
+    monkeypatch.setattr(database, "engine", file_engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(autocommit=False, autoflush=False, bind=file_engine))
+
+
+def rows(db):
+    return db.scalar(select(func.count()).select_from(TaxIdCheck))
 
 
 @pytest.fixture
@@ -31,10 +70,7 @@ def profile(db_session, test_user):
 
 
 def check(db, profile, **kw):
-    row = TaxIdService.check(db, profile, force=True, now=NOW, **kw)
-    # The host records failures in its own session; under SQLite an open write here would block it.
-    db.commit()
-    return row
+    return TaxIdService.check(db, profile, force=True, now=NOW, **kw)
 
 
 def test_valid_answer_is_stored_with_its_evidence(plugin_env, db_session, profile):
@@ -89,16 +125,33 @@ def test_open_circuit_is_unavailable_not_unchecked(plugin_env, db_session, profi
     assert profile.tax_id_status == "unavailable"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the host's record_success on supports() resets consecutive_failures, so failing check_online "
-    "calls made through TaxIdService never open the circuit (reported to the manager for P2-K)",
-)
 def test_repeated_check_online_failures_open_the_circuit(plugin_env, db_session, profile):
-    setup_plugin(plugin_env, db_session, VALIDATOR, mode="raise")
+    inst = setup_plugin(plugin_env, db_session, VALIDATOR, mode="raise")
     for _ in range(health.FAILURES_TO_OPEN):
         assert check(db_session, profile).error_code == "PLUGIN_ERROR"
+    # Counted in this transaction, next to its own rows.
+    inst = db_session.get(PluginInstallation, inst.id)
+    assert inst.consecutive_failures == health.FAILURES_TO_OPEN and health.circuit_open(inst)
+    assert rows(db_session) == health.FAILURES_TO_OPEN
+    # The host reads the circuit on its own session, so the next request sees it once this one commits.
+    db_session.commit()
     assert check(db_session, profile).error_code == "CIRCUIT_OPEN"
+
+
+def test_a_validator_with_every_call_slot_hung_is_unavailable_busy(
+    plugin_env, db_session, profile, release, monkeypatch  # noqa: F811 - the imported fixture
+):
+    monkeypatch.setattr(health, "FAILURES_TO_OPEN", 50)  # so the circuit does not answer first
+    setup_plugin(plugin_env, db_session, VALIDATOR, mode="block")
+    set_setting(db_session, "billing_tax_id_check_timeout_seconds", 1)
+    db_session.commit()
+    assert [check(db_session, profile).error_code for _ in range(2)] == ["TIMEOUT", "TIMEOUT"]
+    row = check(db_session, profile)
+    assert (row.status, row.error_code, row.validator) == ("unavailable", "PLUGIN_BUSY", REF)
+    assert rows(db_session) == 3
+    db_session.commit()
+    release.touch()
+    wait_idle(VALIDATOR)
 
 
 def test_unsupported_country_and_unknown_validator_leave_the_number_unchecked(plugin_env, db_session, profile):
