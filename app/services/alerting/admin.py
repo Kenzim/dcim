@@ -47,6 +47,14 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() + "Z" if value else None
 
 
+def _finish(db: Session, commit: bool) -> None:
+    """Commit, or only flush when the caller commits together with its own writes (an audit row)."""
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+
+
 # ------------------------------------------------------------------ alerts
 
 
@@ -226,6 +234,7 @@ def create_silence(
     duration_minutes: Optional[int] = None,
     ends_at: Optional[datetime] = None,
     reason: Optional[str] = None,
+    commit: bool = True,
 ) -> AlertSilence:
     now = utcnow()
     if alert_type and alert_type not in CATALOGUE:
@@ -256,7 +265,7 @@ def create_silence(
         created_by=user_id,
     )
     db.add(row)
-    db.commit()
+    _finish(db, commit)
     return row
 
 
@@ -279,12 +288,12 @@ def list_silences(db: Session, *, include_expired: bool = False) -> list[dict[st
     return [serialise_silence(s, now) for s in q.order_by(AlertSilence.ends_at.desc()).limit(500).all()]
 
 
-def delete_silence(db: Session, silence_id: int) -> None:
+def delete_silence(db: Session, silence_id: int, *, commit: bool = True) -> None:
     row = db.get(AlertSilence, silence_id)
     if row is None:
         raise NotFound("Silence not found")
     db.delete(row)
-    db.commit()
+    _finish(db, commit)
 
 
 # ------------------------------------------------------------------ channels
@@ -352,6 +361,7 @@ def create_channel(
     addresses: Optional[list[str]] = None,
     url: Optional[str] = None,
     secret: Optional[str] = None,
+    commit: bool = True,
 ) -> AlertChannel:
     name = (name or "").strip()
     if not name or len(name) > 128:
@@ -372,7 +382,7 @@ def create_channel(
     )
     channel.config = _config_for(kind, {}, addresses=addresses, url=url, secret=secret, creating=True)
     db.add(channel)
-    db.commit()
+    _finish(db, commit)
     return channel
 
 
@@ -401,7 +411,7 @@ def _config_for(
     return cfg
 
 
-def update_channel(db: Session, channel_id: int, **fields: Any) -> AlertChannel:
+def update_channel(db: Session, channel_id: int, *, commit: bool = True, **fields: Any) -> AlertChannel:
     channel = db.get(AlertChannel, channel_id)
     if channel is None:
         raise NotFound("Channel not found")
@@ -429,16 +439,16 @@ def update_channel(db: Session, channel_id: int, **fields: Any) -> AlertChannel:
         url=fields.get("url"),
         secret=fields.get("secret"),
     )
-    db.commit()
+    _finish(db, commit)
     return channel
 
 
-def delete_channel(db: Session, channel_id: int) -> None:
+def delete_channel(db: Session, channel_id: int, *, commit: bool = True) -> None:
     channel = db.get(AlertChannel, channel_id)
     if channel is None:
         raise NotFound("Channel not found")
     db.delete(channel)
-    db.commit()
+    _finish(db, commit)
 
 
 def send_test_notice(db: Session, channel_id: int, sender: Any = None) -> dict[str, Any]:
@@ -511,7 +521,7 @@ def list_recipients(db: Session) -> list[dict[str, Any]]:
     return out
 
 
-def set_recipient(db: Session, user_id: int, *, enabled: bool, min_severity: str) -> None:
+def set_recipient(db: Session, user_id: int, *, enabled: bool, min_severity: str, commit: bool = True) -> None:
     if min_severity not in AlertSeverity.ALL:
         raise AlertError("min_severity must be info, warning or critical")
     user = db.get(User, user_id)
@@ -525,7 +535,7 @@ def set_recipient(db: Session, user_id: int, *, enabled: bool, min_severity: str
         db.add(row)
     row.enabled = enabled
     row.min_severity = min_severity
-    db.commit()
+    _finish(db, commit)
 
 
 # ------------------------------------------------------------------ deliveries
