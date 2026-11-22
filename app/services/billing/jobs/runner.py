@@ -312,8 +312,10 @@ def run_job(
     dry run works from any mode. Before each item the run renews its lease
     once half of it is spent and re-reads the job's state; it stops as
     ``aborted`` when the lease is lost or the mode, ``live_since`` or
-    ``dry_run_since`` changed. Returns status ``complete``, ``failed``,
-    ``aborted``, or, with no run row, ``off``, ``not_live``, ``not_due`` or
+    ``dry_run_since`` changed. A live run whose job has unmet
+    ``live_preconditions`` records a run with status ``skipped`` and acts on
+    nothing. Returns status ``complete``, ``failed``, ``aborted``,
+    ``skipped``, or, with no run row, ``off``, ``not_live``, ``not_due`` or
     ``locked``.
     """
     job = get_job(name)
@@ -350,6 +352,31 @@ def run_job(
             watermark = effective_watermark(state, dry_run=dry_run, now=now, current_hash=current_hash)
             if not dry_run and watermark is None:
                 return JobRunResult(None, name, "not_live")
+            unmet = [] if dry_run else live_preconditions(sdb, job)
+            if unmet:
+                # The job stays live and resumes once they hold; the run row
+                # shows the operator why nothing was done.
+                error = "preconditions not met: " + "; ".join(unmet)
+                started_at = datetime.now(timezone.utc)
+                skipped = BillingJobRun(
+                    job=name,
+                    mode=BillingJobRunMode.LIVE,
+                    trigger=trigger_kind,
+                    owner=owner[:128],
+                    started_at=started_at,
+                    finished_at=started_at,
+                    status=BillingJobRunStatus.SKIPPED,
+                    now_at=now,
+                    watermark_at=watermark,
+                    counts={},
+                    error=error[:_ERROR_LIMIT],
+                )
+                sdb.add(skipped)
+                sdb.flush()
+                state.last_run_id = skipped.id
+                sdb.commit()
+                logger.warning("Billing job %s run %s skipped: %s", name, skipped.id, error)
+                return JobRunResult(skipped.id, name, BillingJobRunStatus.SKIPPED.value, {}, error[:_ERROR_LIMIT])
             records_hash = not dry_run or (
                 trigger_kind == BillingJobTrigger.SCHEDULE and state.mode == BillingJobMode.DRY_RUN
             )

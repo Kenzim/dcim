@@ -173,6 +173,29 @@ def test_mode_rules(factory, job, monkeypatch):
         _mode(factory, "off", T0 + timedelta(hours=3))
 
 
+def test_a_live_run_with_unmet_preconditions_is_skipped_and_shown(factory, job, monkeypatch):
+    _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
+    job.subjects = {1: T0 + timedelta(minutes=10)}
+    monkeypatch.setattr(job, "live_preconditions", lambda db: ["the invoice engine must be v2"], raising=False)
+    at = T0.replace(minute=6) + timedelta(hours=1)
+    assert periodic.run_automation_jobs(owner="w", now=at, session_factory=factory) == {job.name: "skipped"}
+    # One skipped run per slot, not one per worker pass.
+    assert periodic.run_automation_jobs(owner="w", now=at + timedelta(minutes=5), session_factory=factory) == {
+        job.name: None
+    }
+    admin = _live(factory, job, at + timedelta(minutes=10))
+    assert admin.status == "skipped" and "invoice engine must be v2" in admin.error
+    assert job.executed == [] and _effects(factory) == []
+    db = factory()
+    runs = db.query(BillingJobRun).filter_by(mode="live").order_by(BillingJobRun.id).all()
+    assert [(run.status.value, run.trigger.value) for run in runs] == [("skipped", "schedule"), ("skipped", "admin")]
+    assert db.get(BillingJobState, job.name).mode.value == "live"
+    db.close()
+    monkeypatch.setattr(job, "live_preconditions", lambda db: [], raising=False)
+    assert _live(factory, job, at + timedelta(minutes=20)).status == "complete"
+    assert job.executed == [1]
+
+
 def test_live_to_dry_run_is_refused(factory, job):
     _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
     with pytest.raises(runner.JobModeError, match="switch it off first"):

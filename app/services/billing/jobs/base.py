@@ -19,8 +19,10 @@ Conventions every job follows on top of the protocol:
   effect, then ``JobRun.finish`` with ``done`` or ``failed`` and commit.
 
 Optional job attributes the runner and the mode endpoint look up:
-``live_preconditions(db) -> list[str]`` (unmet preconditions, design 10) and
-``config_extra(db)`` (data hashed with the settings, such as policy rows).
+``live_preconditions(db) -> list[str]`` (unmet preconditions, design 10;
+checked when going live and at the start of every live run, which is recorded
+as ``skipped`` with the reasons while any is unmet) and ``config_extra(db)``
+(data hashed with the settings, such as policy rows).
 """
 
 from __future__ import annotations

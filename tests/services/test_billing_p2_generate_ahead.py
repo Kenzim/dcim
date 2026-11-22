@@ -102,6 +102,20 @@ def test_live_needs_the_v2_invoice_engine(factory):
         _mode(factory, "live", T0)
 
 
+def test_a_live_job_skips_its_runs_after_the_invoice_engine_goes_back_to_legacy(factory):
+    due = T0 + timedelta(days=10)
+    billing_id, _ = _seed(factory, "rollback", due)
+    _go_live(factory, T0)
+    db = factory()
+    db.query(app.models.commerce_account.SystemSetting).filter_by(
+        key="billing_engine_switch:invoice").update({"value": {"mode": "legacy"}})
+    db.commit()
+    db.close()
+    result = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=due - timedelta(days=6))
+    assert result.status == "skipped" and "invoice engine must be v2" in result.error
+    assert _cycles(factory, billing_id) == []
+
+
 @pytest.mark.asyncio
 async def test_generated_ahead_then_charged_at_due_once_for_a_reseller(factory):
     due = T0 + timedelta(days=10)

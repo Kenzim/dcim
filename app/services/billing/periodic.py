@@ -212,7 +212,7 @@ def slot_start(db: Session, name: str, now: datetime) -> datetime:
 
 
 def slot_due(db: Session, name: str, now: datetime) -> bool:
-    """No scheduled run of ``name`` completed or failed in the current slot.
+    """No scheduled run of ``name`` completed, failed or was skipped in the current slot.
 
     A missed slot is not repeated: after an outage the job runs once, in the
     latest slot, and catches up within ``billing_job_max_catch_up_days``.
@@ -227,7 +227,9 @@ def slot_due(db: Session, name: str, now: datetime) -> bool:
         .where(
             BillingJobRun.job == name,
             BillingJobRun.trigger == BillingJobTrigger.SCHEDULE,
-            BillingJobRun.status.in_([BillingJobRunStatus.COMPLETE, BillingJobRunStatus.FAILED]),
+            BillingJobRun.status.in_(
+                [BillingJobRunStatus.COMPLETE, BillingJobRunStatus.FAILED, BillingJobRunStatus.SKIPPED]
+            ),
             BillingJobRun.now_at >= start,
         )
         .limit(1)
