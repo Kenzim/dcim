@@ -1058,21 +1058,25 @@ class RecurringBillingService:
     def _void_cancelled_cycle_invoice(db: Session, invoice: Invoice) -> None:
         """Void the invoice of a cancelled cycle where the invoice engine allows it.
 
-        Legacy and shadow void every invoice that is not ``paid``, as they
-        always have. In ``v2`` only ``InvoiceService.void()`` voids (design
-        3.4): an ``open`` or ``overdue`` invoice with nothing paid, pending,
-        noted or being refunded. Any other invoice is left as it is, so money
-        already on it stays visible for a credit note or refund, and the
-        cancellation goes ahead.
+        The invoice is locked (after the service billing, and in ``v2`` after
+        the reseller and billing account, LOCK_ORDER) and decided from the
+        re-read row. Legacy and shadow void every invoice that is not
+        ``paid`` or ``void``, as they always have. In ``v2`` only
+        ``InvoiceService.void()`` voids (design 3.4): an ``open`` or
+        ``overdue`` invoice with nothing paid, pending, noted or being
+        refunded. An unpaid invoice it refuses is credited for what is still
+        owed when no money is held, else recorded for refund review
+        (``close_kept_invoice_v2``); the cancellation goes ahead either way.
         """
+        from app.services.billing.order_refunds import (
+            close_kept_invoice_v2,
+            void_cancelled_invoice_v2,
+        )
         from app.services.billing_shadow import billing_engine_mode
-        from app.services.invoice_service import InvoiceTransitionError
 
-        if invoice.status in (InvoiceStatus.PAID, InvoiceStatus.VOID):
-            return
         if billing_engine_mode(db, "invoice") != "v2":
             locked = BillingLocks.for_invoice(db, invoice.id) or invoice
-            if locked.status != InvoiceStatus.PAID:
+            if locked.status not in (InvoiceStatus.PAID, InvoiceStatus.VOID):
                 InvoiceService.transition(
                     db,
                     locked,
@@ -1081,14 +1085,17 @@ class RecurringBillingService:
                     reason="Service billing cancelled",
                 )
             return
-        if invoice.status not in (InvoiceStatus.OPEN, InvoiceStatus.OVERDUE):
+        locked = (
+            BillingLocks.for_invoice(db, invoice.id, reseller=True, billing_account=True)
+            or invoice
+        )
+        if void_cancelled_invoice_v2(
+            db, locked, reason="Service billing cancelled", actor_user_id=None
+        ):
             return
-        try:
-            InvoiceService.void(db, invoice, reason="Service billing cancelled")
-        except InvoiceTransitionError:
-            logger.info(
-                "Cancelled cycle invoice %s kept: it has payments, notes or a refund", invoice.id
-            )
+        close_kept_invoice_v2(
+            db, locked, reason="service_billing_cancelled", actor_user_id=None
+        )
 
     @staticmethod
     def _mark_manual(

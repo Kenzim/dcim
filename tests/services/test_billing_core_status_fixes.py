@@ -240,3 +240,137 @@ def test_b3_legacy_failed_payment_still_reopens_the_invoice(db_session, account,
 
     db_session.refresh(invoice)
     assert invoice.status == S.OPEN
+
+
+# ------------------------------------------------------------------ B4 and R3
+
+
+def _order_invoice(db, suffix, amount=2500):
+    import uuid
+
+    from app.dao.commerce_dao import BillingAccountDAO
+    from app.models.commerce_order import Order, OrderStatus
+    from app.models.user import User
+
+    user = User(username=f"b4-{suffix}", email=f"b4-{suffix}@example.test")
+    db.add(user)
+    db.flush()
+    account = BillingAccountDAO.ensure_client_account(db, user.id)
+    order = Order(
+        order_number=int(uuid.uuid4().int % 10**12), billing_account_id=account.id,
+        user_id=user.id, status=OrderStatus.PENDING_PAYMENT, currency="USD", tax_cents=0,
+        total_cents=amount, checkout_nonce=uuid.uuid4().hex,
+    )
+    db.add(order)
+    db.flush()
+    invoice = Invoice(
+        invoice_number=int(uuid.uuid4().int % 10**9), billing_account_id=account.id,
+        order_id=order.id, purpose=InvoicePurpose.DEPLOY_CHARGE, status=S.OPEN,
+        amount_cents=amount, currency="USD",
+    )
+    db.add(invoice)
+    db.flush()
+    order.invoice_id = invoice.id
+    db.flush()
+    return order, invoice
+
+
+def _reviews(db, invoice):
+    return [
+        event.event_metadata["reason"]
+        for event in db.execute(
+            select(UserAuditEvent).where(
+                UserAuditEvent.action == "billing.refund_review",
+                UserAuditEvent.resource_id == str(invoice.id),
+            )
+        ).scalars()
+    ]
+
+
+def test_b4_v2_cancelling_an_order_with_money_held_does_not_void_it(db_session):
+    from app.services.billing import order_refunds
+
+    _v2(db_session)
+    order, invoice = _order_invoice(db_session, "held")
+    payment = _gateway_payment(db_session, invoice, 1000, "pi_b4_held", status=PaymentStatus.SUCCEEDED)
+    InvoiceService.recompute(db_session, invoice, cause="payment", payment=payment)
+    assert invoice.status == S.PARTIALLY_PAID
+    db_session.commit()
+
+    order_refunds.cancel_order(db_session, order)
+
+    db_session.refresh(invoice)
+    # Default refund policy is manual review: the money stays and staff decide.
+    assert invoice.status == S.PARTIALLY_PAID
+    assert InvoiceService.balance(db_session, invoice).paid_net_cents == 1000
+    assert _reviews(db_session, invoice) == ["order_cancelled", "order_cancelled_invoice_open"]
+
+
+def test_b4_v2_cancelling_an_order_on_a_refunded_invoice_does_not_raise(db_session):
+    from app.services.billing import order_refunds
+
+    _v2(db_session)
+    order, invoice = _order_invoice(db_session, "refunded")
+    _set_status(db_session, invoice, S.REFUNDED)
+    db_session.commit()
+
+    order_refunds.cancel_order(db_session, order)
+
+    db_session.refresh(invoice)
+    assert invoice.status == S.REFUNDED
+
+
+def test_b4_v2_cancelling_an_unpaid_order_still_voids_it(db_session):
+    from app.services.billing import order_refunds
+
+    _v2(db_session)
+    order, invoice = _order_invoice(db_session, "unpaid")
+    db_session.commit()
+
+    order_refunds.cancel_order(db_session, order)
+
+    db_session.refresh(invoice)
+    assert invoice.status == S.VOID
+    assert _reviews(db_session, invoice) == []
+
+
+def test_b4_v2_cancelled_cycle_invoice_with_money_held_is_kept_and_reviewed(db_session, lock_calls):
+    from app.services.recurring_billing_service import RecurringBillingService
+
+    _v2(db_session)
+    reseller = _reseller(db_session, preference="payment_first")
+    invoice = InvoiceService.create_deploy(
+        db_session, reseller_id=reseller.id, amount_cents=1000, description="Cycle"
+    )
+    payment = _gateway_payment(db_session, invoice, 400, "pi_b4_cycle", status=PaymentStatus.SUCCEEDED)
+    InvoiceService.recompute(db_session, invoice, cause="payment", payment=payment)
+    assert invoice.status == S.PARTIALLY_PAID
+
+    calls = lock_calls
+    RecurringBillingService._void_cancelled_cycle_invoice(db_session, invoice)
+
+    db_session.refresh(invoice)
+    assert invoice.status == S.PARTIALLY_PAID
+    assert InvoiceService.balance(db_session, invoice).paid_net_cents == 400
+    assert _reviews(db_session, invoice) == ["service_billing_cancelled_invoice_open"]
+    assert "invoice" in [kind for kind, _ in calls]
+    _assert_lock_order(calls)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_b4_legacy_cancelled_cycle_invoice_is_still_voided(db_session, mode, lock_calls):
+    from app.services.recurring_billing_service import RecurringBillingService
+
+    set_setting(db_session, "billing_invoice_engine", mode)
+    reseller = _reseller(db_session, preference="payment_first")
+    invoice = InvoiceService.create_deploy(
+        db_session, reseller_id=reseller.id, amount_cents=1000, description="Cycle"
+    )
+    _gateway_payment(db_session, invoice, 400, f"pi_b4_{mode}", status=PaymentStatus.SUCCEEDED)
+
+    calls = lock_calls
+    RecurringBillingService._void_cancelled_cycle_invoice(db_session, invoice)
+
+    db_session.refresh(invoice)
+    assert invoice.status == S.VOID
+    assert "invoice" in [kind for kind, _ in calls]
