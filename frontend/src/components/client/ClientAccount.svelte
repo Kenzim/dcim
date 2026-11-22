@@ -1,11 +1,12 @@
 <script>
   import { onMount } from 'svelte';
-  import { Alert, Button, Spinner, Tabs } from '../ui/index.js';
+  import { Alert, Badge, Button, Spinner, Tabs } from '../ui/index.js';
   import TwoFactorPanel from '../TwoFactorPanel.svelte';
   import ClientMcpKeys from './ClientMcpKeys.svelte';
   import ClientNotifications from './ClientNotifications.svelte';
   import ClientCreditPanel from '../billing/client/ClientCreditPanel.svelte';
   import { clientGetCredit } from '../../lib/billingClientApi.js';
+  import { TAX_ID_TYPE_OPTIONS, taxIdStatusInfo } from '../../lib/billingTaxFormat.js';
   import {
     clientCommerceDiscordAuthorizeUrl,
     clientCommerceDiscordUnlink,
@@ -28,6 +29,18 @@
   let working = false;
   let error = '';
   let success = '';
+  /** The tax ID and country as last loaded or saved: changing either makes the save run a check. */
+  let savedTaxId = '';
+  let savedCountry = '';
+
+  $: taxChanged = (profile.tax_id || '').trim() !== savedTaxId || (profile.country || '').toUpperCase() !== savedCountry;
+  $: checking = working && taxChanged && Boolean((profile.tax_id || '').trim());
+  $: taxStatus = taxIdStatusInfo(profile.tax_id_status || 'unchecked', Boolean(profile.tax_id));
+
+  function rememberTax(saved) {
+    savedTaxId = (saved?.tax_id || '').trim();
+    savedCountry = (saved?.country || '').toUpperCase();
+  }
 
   onMount(load);
 
@@ -41,6 +54,7 @@
         clientCommerceListEmails().catch(() => []),
         loadCredit(),
       ]);
+      rememberTax(profile);
       if (tab === 'credit' && !credit) tab = 'profile';
     } catch (err) {
       error = err.message || 'Failed to load account data';
@@ -64,6 +78,7 @@
   }
 
   async function saveProfile() {
+    const wasChecked = taxChanged && Boolean((profile.tax_id || '').trim());
     working = true;
     error = '';
     success = '';
@@ -77,10 +92,15 @@
         postal_code: profile.postal_code || null,
         country: profile.country || null,
         phone: profile.phone || null,
-        tax_id: profile.tax_id || null,
+        tax_id: profile.tax_id?.trim() || null,
+        tax_id_type: profile.tax_id_type || null,
+        is_business: Boolean(profile.is_business),
         invoice_email: profile.invoice_email || null,
       });
-      success = 'Profile saved.';
+      rememberTax(profile);
+      success = wasChecked
+        ? `Profile saved. ${taxIdStatusInfo(profile.tax_id_status || 'unchecked', true).text}`
+        : 'Profile saved.';
     } catch (err) {
       error = err.message || 'Failed to save profile';
     } finally {
@@ -165,9 +185,42 @@
         <label>Region <input bind:value={profile.region} /></label>
         <label>Postal code <input bind:value={profile.postal_code} /></label>
         <label>Country (2-letter) <input bind:value={profile.country} maxlength="2" /></label>
-        <label>Tax ID <input bind:value={profile.tax_id} /></label>
       </div>
-      <Button on:click={saveProfile} disabled={working}>Save profile</Button>
+
+      <h3>VAT and tax</h3>
+      <label class="check">
+        <input type="checkbox" bind:checked={profile.is_business} />
+        I am buying as a business
+      </label>
+      <div class="grid">
+        <label>Type of tax number
+          <select bind:value={profile.tax_id_type}>
+            <option value={null}>Work it out from the number</option>
+            {#each TAX_ID_TYPE_OPTIONS as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </select>
+        </label>
+        <label>Tax number <input bind:value={profile.tax_id} autocomplete="off" /></label>
+      </div>
+      <div class="tax-status" aria-live="polite">
+        {#if checking}
+          <Spinner />
+          <span>Checking your VAT number with the tax authority. This can take a few seconds…</span>
+        {:else}
+          <Badge variant={taxStatus.variant} caps={false}>{taxStatus.label}</Badge>
+          <span>
+            {taxStatus.text}
+            {#if profile.tax_id_checked_at && profile.tax_id}
+              Last checked {new Date(profile.tax_id_checked_at).toLocaleString()}.
+            {/if}
+            {#if taxChanged && profile.tax_id}
+              It will be checked when you save.
+            {/if}
+          </span>
+        {/if}
+      </div>
+      <Button on:click={saveProfile} disabled={working}>{checking ? 'Saving and checking…' : 'Save profile'}</Button>
 
       <h3>Email history</h3>
       {#if emails.length === 0}
@@ -241,6 +294,9 @@
   h3 { margin: 24px 0 10px; font-size: 15px; }
   .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px; }
   label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
+  select { padding: 9px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); }
+  .check { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-weight: 500; }
+  .tax-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; font-size: 13px; color: var(--text-secondary); }
   input { padding: 9px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
   .simple-list { list-style: none; margin: 0; padding: 0; }

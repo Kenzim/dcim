@@ -9,6 +9,8 @@
     clientCommerceQuote,
   } from '../../lib/api.js';
   import { formatMoney } from '../../lib/resellerMoney.js';
+  import { hasTaxDetail } from '../../lib/billingTaxFormat.js';
+  import TaxBreakdown from '../billing/shared/TaxBreakdown.svelte';
 
   export let impersonating = false;
 
@@ -23,6 +25,8 @@
   let couponCode = '';
   let termsAccepted = false;
   let confirmOpen = false;
+  /** True when the last order attempt failed in a way a fresh quote can fix. */
+  let requote = false;
   let config = {
     price_plan_id: '',
     cycle_interval: '',
@@ -69,11 +73,18 @@
   }
 
   $: selectedPlan = product?.price_plans?.find((p) => String(p.id) === config.price_plan_id);
+  $: taxDetail = hasTaxDetail(quote);
+
+  /** A 409, or a refusal that says the tax moved or to try again, is cured by quoting again. */
+  function isRequoteError(err) {
+    return err?.status === 409 || /try again|quoted|changed|exchange rate/i.test(err?.message || '');
+  }
 
   async function runQuote() {
     if (!product) return;
     working = true;
     error = '';
+    requote = false;
     try {
       quote = await clientCommerceQuote({
         frontend_product_id: product.id,
@@ -121,6 +132,7 @@
       navigate(order.invoice_id ? `/client/billing/${order.invoice_id}` : '/client/billing');
     } catch (err) {
       error = err.message || 'Checkout failed';
+      requote = isRequoteError(err);
       confirmOpen = false;
     } finally {
       working = false;
@@ -140,6 +152,12 @@
   </div>
 
   {#if error}<Alert type="danger">{error}</Alert>{/if}
+  {#if requote && step === 'checkout'}
+    <div class="requote">
+      <p>Your order was not placed. Get a new quote to see the current price, then place the order again.</p>
+      <Button variant="secondary" on:click={runQuote} disabled={working}>{working ? 'Getting a new quote…' : 'Get a new quote'}</Button>
+    </div>
+  {/if}
   {#if success}<Alert type="success">{success}</Alert>{/if}
 
   {#if loading}
@@ -215,10 +233,13 @@
       </ul>
       <dl>
         <div><dt>Subtotal</dt><dd>{formatMoney(quote.subtotal_cents, quote.currency)}</dd></div>
-        <div><dt>Tax</dt><dd>{formatMoney(quote.tax_cents, quote.currency)}</dd></div>
+        <div><dt>{taxDetail ? 'Tax (VAT)' : 'Tax'}</dt><dd>{formatMoney(quote.tax_cents, quote.currency)}</dd></div>
         <div><dt>Discount</dt><dd>{formatMoney(quote.discount_cents, quote.currency)}</dd></div>
         <div><dt>Total due now</dt><dd>{formatMoney(quote.total_cents, quote.currency)}</dd></div>
       </dl>
+      {#if taxDetail}
+        <TaxBreakdown source={quote} currency={quote.currency} />
+      {/if}
       <label class="check"><input type="checkbox" bind:checked={termsAccepted} /> I agree to the terms of service</label>
       <Button on:click={openConfirm} disabled={working || impersonating}>Place order</Button>
       {#if impersonating}<p class="hint">Checkout disabled during impersonation.</p>{/if}
@@ -270,6 +291,8 @@
   dt { font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; }
   dd { margin: 4px 0 0; font-weight: 700; }
   .check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+  .requote { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-secondary); }
+  .requote p { margin: 0; font-size: 14px; color: var(--text-secondary); }
   .hint { font-size: 12px; color: var(--text-tertiary); margin-top: 8px; }
   .empty { text-align: center; padding: 48px 24px; border: 1px dashed var(--border-color); border-radius: var(--radius-lg); }
   .empty h2 { margin: 0 0 8px; }
