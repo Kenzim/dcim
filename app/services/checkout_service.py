@@ -62,6 +62,9 @@ class CheckoutError(ValueError):
     pass
 
 
+TAX_QUOTE_CHANGED_MESSAGE = "The tax on this order changed since it was quoted; please review the new quote and try again"
+
+
 @dataclass(frozen=True)
 class QuoteLine:
     description: str
@@ -555,21 +558,33 @@ class CheckoutService:
         v2_lines = CheckoutService._v2_invoice_lines(quote, order_item_id, tax_class_id=tax_class_id)
         v2 = engine_mode(db) == "v2"
         tax_v2 = v2 and CheckoutService._tax_mode(db) == "v2"
-        invoice = InvoiceService.create(
-            db,
-            reseller_id=reseller_id,
-            billing_account_id=account.id,
-            order_id=order.id,
-            purpose=InvoicePurpose.ORDER_CHARGE,
-            amount_cents=int(quote.total_cents),
-            currency=quote.currency,
-            description=f"Order #{order.order_number}",
-            due_at=datetime.now(timezone.utc),
-            lines=v2_lines if v2 else legacy_lines,
-            shadow_lines=v2_lines,
-            prices_include_tax=tax_v2 and CheckoutService._prices_include_tax(db),
-            tax_result=quote.tax_result if tax_v2 else None,
-        )
+        from app.services.invoice_service import TaxQuoteChanged
+        from app.services.tax.invoice_tax import TAX_RULES_CHANGED_MESSAGE, TaxRuleChanged
+
+        try:
+            invoice = InvoiceService.create(
+                db,
+                reseller_id=reseller_id,
+                billing_account_id=account.id,
+                order_id=order.id,
+                purpose=InvoicePurpose.ORDER_CHARGE,
+                amount_cents=int(quote.total_cents),
+                currency=quote.currency,
+                description=f"Order #{order.order_number}",
+                due_at=datetime.now(timezone.utc),
+                lines=v2_lines if v2 else legacy_lines,
+                shadow_lines=v2_lines,
+                prices_include_tax=tax_v2 and CheckoutService._prices_include_tax(db),
+                tax_result=quote.tax_result if tax_v2 else None,
+            )
+        except TaxRuleChanged as exc:
+            raise CheckoutError(TAX_RULES_CHANGED_MESSAGE) from exc
+        except TaxQuoteChanged as exc:
+            raise CheckoutError(TAX_QUOTE_CHANGED_MESSAGE) from exc
+        if tax_v2 and quote.tax_result is not None:
+            # The prepared result was used only if its context still matched (design 4.7).
+            if (invoice.tax_evidence or {}).get("context_hash") != quote.tax_result.context_hash:
+                raise CheckoutError(TAX_QUOTE_CHANGED_MESSAGE)
         if not tax_v2 and quote.tax_result is not None:
             from app.services.tax.shadow import compare_checkout
 
@@ -614,6 +629,9 @@ class CheckoutService:
         totals by the largest remainder rule; a negative option total is
         written as a discount line, since only discounts may be negative. In
         tax engine ``v2`` the engine replaces that spread with its own rows.
+        Every line carries the product's tax class, the discount included: a
+        discount reduces that product's taxable amount, and the quote's tax
+        context gives it the same class.
         """
         from app.services.billing.rounding import tax_split_largest_remainder
 
@@ -635,7 +653,7 @@ class CheckoutService:
                 kind=kind,
                 tax_cents=tax_of.get(index, 0),
                 taxable=kind != InvoiceLineKind.DISCOUNT,
-                tax_class_id=tax_class_id if kind != InvoiceLineKind.DISCOUNT else None,
+                tax_class_id=tax_class_id,
                 order_item_id=(
                     order_item_id if line.kind in {"setup", "product", "option"} else None
                 ),

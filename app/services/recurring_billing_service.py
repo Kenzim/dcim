@@ -43,6 +43,7 @@ from app.services.notification_service import NotificationEvent, NotificationSer
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
+from app.services.tax.invoice_tax import TaxRuleChanged
 
 logger = logging.getLogger(__name__)
 
@@ -302,9 +303,18 @@ class RecurringBillingService:
             )
             if billing is None:
                 continue
-            outcome = await self._process_billing(
-                db, billing=billing, now=now, owner=owner
-            )
+            try:
+                outcome = await self._process_billing(
+                    db, billing=billing, now=now, owner=owner
+                )
+            except TaxRuleChanged:
+                # Nothing of this billing is kept; it is still due on the next pass.
+                db.rollback()
+                logger.warning(
+                    "Recurring billing %s: a tax rule changed while its invoice was issued; retried next pass",
+                    billing_id,
+                )
+                continue
             result["processed"] += 1
             if outcome in result:
                 result[outcome] += 1

@@ -7,13 +7,13 @@ path (``TaxEngine.calculate``), so no network call happens under a lock.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models.tax import InvoiceLineTax, SellerTaxRegistration
+from app.models.tax import InvoiceLineTax, SellerTaxRegistration, TaxRule
 from app.services.tax import shadow as tax_shadow
 from app.services.tax.context import TaxContextBuilder, line_key
 from app.services.tax.engine import LEGACY_TAXED_PURPOSES, SCOPE_OUT, TaxEngine
@@ -22,6 +22,27 @@ from app.services.tax.result import TaxResult
 logger = logging.getLogger(__name__)
 
 ENGINE_LEGACY = "legacy"
+
+TAX_RULES_CHANGED_MESSAGE = "Tax rates changed while this invoice was being issued; please try again"
+# The 409 detail of a route that turns ``TaxRuleChanged`` into a conflict.
+TAX_RULES_CHANGED_DETAIL = {"code": "tax_rules_changed", "message": TAX_RULES_CHANGED_MESSAGE}
+
+
+class TaxRuleChanged(RuntimeError):
+    """A rule the result uses was closed or superseded by the tax point (design 4.9).
+
+    Retryable: the caller rolls back and runs its whole transaction again,
+    which reads the rules afresh. Recalculating in the same transaction would
+    read the same old snapshot on MariaDB (REPEATABLE READ).
+    """
+
+    def __init__(self, rule_ids: Sequence[int]) -> None:
+        self.rule_ids = tuple(rule_ids)
+        super().__init__(f"tax rules {', '.join(map(str, self.rule_ids))} changed before the tax point")
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def _purpose(invoice: Any) -> str:
@@ -53,8 +74,65 @@ def calculate_verified(
     return pure
 
 
-def write_rows(db: Session, invoice: Any, lines: Sequence[Any], result: TaxResult) -> None:
-    """Replace the draft's ``invoice_line_taxes`` and set each line's ``tax_cents`` from ``result``."""
+def rule_lock_statement(ids: Sequence[int]):
+    """``SELECT id, valid_from, valid_to ... WHERE id IN (ids) ORDER BY id LOCK IN SHARE MODE``.
+
+    Filtered on the primary key alone and read through it on MySQL and
+    MariaDB, so the rows are locked in id order whatever other indexes exist.
+    """
+    statement = (
+        select(TaxRule.id, TaxRule.valid_from, TaxRule.valid_to)
+        .where(TaxRule.id.in_(sorted(ids)))
+        .order_by(TaxRule.id)
+        .with_for_update(read=True)
+    )
+    for dialect in ("mysql", "mariadb"):
+        statement = statement.with_hint(TaxRule, "FORCE INDEX (PRIMARY)", dialect_name=dialect)
+    return statement
+
+
+def lock_rules(db: Session, result: TaxResult, at: datetime) -> None:
+    """Share-lock the rules ``result`` uses, in id order, and check them at the tax point ``at``.
+
+    One locking read by primary key, so every publish and every import that
+    locks rules in ascending id order takes them in the same order. A locking
+    read returns the latest committed rows whatever the snapshot, and every
+    supersede closes the old row (``valid_to``) under its own lock, so a rule
+    closed after this transaction read it is seen here. A rule not in force
+    at ``at``, or with an enabled successor in force by then, raises
+    ``TaxRuleChanged``.
+    """
+    ids = sorted({int(p.rule_id) for line in result.lines.values() for p in line.parts if p.rule_id is not None})
+    if not ids:
+        return
+    at = _aware(at)
+    rows = db.execute(rule_lock_statement(ids)).all()
+    changed = set(ids) - {int(row.id) for row in rows}
+    changed.update(
+        int(row.id)
+        for row in rows
+        if _aware(row.valid_from) > at or (row.valid_to is not None and _aware(row.valid_to) <= at)
+    )
+    # A plain read: a locking read on supersedes_id could scan and lock rows out of id order.
+    changed.update(
+        int(old_id)
+        for old_id in db.execute(
+            select(TaxRule.supersedes_id).where(
+                TaxRule.supersedes_id.in_(ids), TaxRule.enabled.is_(True), TaxRule.valid_from <= at
+            )
+        ).scalars()
+    )
+    if changed:
+        raise TaxRuleChanged(sorted(changed))
+
+
+def write_rows(db: Session, invoice: Any, lines: Sequence[Any], result: TaxResult, at: datetime) -> None:
+    """Replace the draft's ``invoice_line_taxes`` and set each line's ``tax_cents`` from ``result``.
+
+    The rules are locked and checked at the tax point ``at`` before the first
+    insert (``lock_rules``).
+    """
+    lock_rules(db, result, at)
     db.execute(delete(InvoiceLineTax).where(InvoiceLineTax.invoice_id == invoice.id))
     for index, line in enumerate(lines):
         line_tax = result.line(line_key(index, line))
@@ -77,6 +155,37 @@ def write_rows(db: Session, invoice: Any, lines: Sequence[Any], result: TaxResul
                     source=part.source[:128],
                 )
             )
+    db.flush()
+
+
+def reset_to_legacy(db: Session, invoice: Any, lines: Sequence[Any]) -> None:
+    """Make a draft written by tax ``v2`` a plain legacy draft (design 5); for a publish in another mode.
+
+    Only a draft with ``invoice_line_taxes`` rows changes: the rows go, prices
+    exclude tax, and the lines get the tax legacy gives the invoice's purpose:
+    ``CheckoutService._tax_cents`` on the untaxed total for a purpose legacy
+    taxes, spread over the charged lines by the largest remainder as checkout
+    spreads it, else none.
+    """
+    removed = db.execute(delete(InvoiceLineTax).where(InvoiceLineTax.invoice_id == invoice.id)).rowcount
+    if not removed:
+        return
+    from app.services.billing.rounding import tax_split_largest_remainder
+    from app.services.checkout_service import CheckoutService
+    from app.services.tax.context import invoice_account
+
+    invoice.prices_include_tax = False
+    charged = [line for line in lines if str(getattr(line.kind, "value", line.kind)) != "discount"]
+    tax = 0
+    if _purpose(invoice) in LEGACY_TAXED_PURPOSES:
+        account, _profile = invoice_account(db, invoice)
+        if account is not None:
+            tax = CheckoutService._tax_cents(db, account, sum(int(line.total_cents) for line in lines))
+    shares = tax_split_largest_remainder(tax, [int(line.total_cents) for line in charged]) if charged else []
+    for line in lines:
+        line.tax_cents = 0
+    for line, share in zip(charged, shares):
+        line.tax_cents = int(share)
     db.flush()
 
 

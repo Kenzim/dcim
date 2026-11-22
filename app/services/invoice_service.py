@@ -199,6 +199,10 @@ class InvoiceTransitionError(InvoiceError):
     """An edge that is not in the transition table of the current engine mode."""
 
 
+class TaxQuoteChanged(InvoiceError):
+    """``create`` discarded a prepared ``tax_result`` whose context changed, and the total moved with it."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -551,10 +555,11 @@ class InvoiceService:
         tax_v2 = mode == "v2" and invoice_tax.effective_mode(db, invoice) == "v2"
         verified_tax = None
         if tax_v2:
+            created_at = _utcnow()
             verified_tax = invoice_tax.calculate_verified(
-                db, invoice, line_rows, _utcnow(), tax_result, "create"
+                db, invoice, line_rows, created_at, tax_result, "create"
             )
-            invoice_tax.write_rows(db, invoice, line_rows, verified_tax)
+            invoice_tax.write_rows(db, invoice, line_rows, verified_tax, created_at)
         if mode == "shadow":
             totals = compute_totals(
                 shadow_lines if shadow_lines is not None else lines,
@@ -572,7 +577,8 @@ class InvoiceService:
             totals = compute_totals(line_rows, prices_include_tax=prices_include_tax)
             untaxed = totals.subtotal_cents - totals.discount_cents
             if int(amount_cents) not in (totals.amount_cents, untaxed):
-                raise InvoiceError(
+                discarded = tax_result is not None and verified_tax is not tax_result
+                raise (TaxQuoteChanged if discarded else InvoiceError)(
                     f"invoice lines add up to {untaxed} before tax and {totals.amount_cents} with it, "
                     f"not {int(amount_cents)}"
                 )
@@ -673,10 +679,13 @@ class InvoiceService:
             tax_result = verified_tax or invoice_tax.calculate_verified(
                 db, invoice, lines, now, None, "publish"
             )
-            invoice_tax.write_rows(db, invoice, lines, tax_result)
+            invoice_tax.write_rows(db, invoice, lines, tax_result, now)
             invoice_tax.stamp_published(db, invoice, tax_result, now)
-        elif tax_mode != "legacy":
-            invoice_tax.shadow_publish(db, invoice, lines, now)
+        else:
+            if v2:
+                invoice_tax.reset_to_legacy(db, invoice, lines)
+            if tax_mode != "legacy":
+                invoice_tax.shadow_publish(db, invoice, lines, now)
         if v2:
             prices_include_tax = bool(invoice.prices_include_tax)
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)

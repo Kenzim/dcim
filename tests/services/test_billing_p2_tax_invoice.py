@@ -161,6 +161,55 @@ def test_draft_rows_are_recalculated_at_the_tax_point(db_session, gb_account, ta
     assert published.amount_cents == 1250
 
 
+def _draft_order_charge(db, account):
+    """A checkout-like draft in tax v2: prices include tax, a product and a coupon."""
+    return InvoiceService.create(
+        db, billing_account_id=account.id, purpose=InvoicePurpose.ORDER_CHARGE, amount_cents=900,
+        currency="GBP", publish=False, prices_include_tax=True,
+        lines=[NewLine(description="Server", unit_cents=1000, kind=InvoiceLineKind.PRODUCT),
+               NewLine(description="Coupon", unit_cents=-100, kind=InvoiceLineKind.DISCOUNT, taxable=False)],
+    )
+
+
+def _published_lines(db, invoice):
+    return [
+        line.tax_cents
+        for line in db.execute(
+            select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id).order_by(InvoiceLine.sort_order)
+        ).scalars()
+    ]
+
+
+def test_draft_from_tax_v2_published_after_a_rollback_is_a_legacy_invoice(db_session, gb_account, tax_v2):
+    from app.models.commerce_coupon_tax import TaxRate
+
+    db_session.add(TaxRate(name="GB legacy 10%", country="GB", rate_bps=1000, enabled=True))
+    draft = _draft_order_charge(db_session, gb_account)
+    assert _rows(db_session, draft) and draft.prices_include_tax is True
+    set_engine(db_session, "tax", "shadow")
+    published = InvoiceService.publish(db_session, draft)
+    assert _rows(db_session, published) == []
+    assert _published_lines(db_session, published) == [90, 0]
+    assert (published.subtotal_cents, published.discount_cents, published.tax_cents) == (1000, 100, 90)
+    assert published.amount_cents == 990 and published.prices_include_tax is False
+    assert (published.tax_engine, published.tax_summary, published.tax_point_at, published.legal_notes) == (None,) * 4
+    assert published.tax_evidence is None and published.seller_registration_id is None
+    assert "registration_tax_number" not in published.seller_snapshot
+
+
+def test_untaxed_purpose_from_tax_v2_published_in_legacy_has_no_tax(db_session, gb_account, tax_v2):
+    draft = InvoiceService.create(
+        db_session, billing_account_id=gb_account.id, purpose=InvoicePurpose.CYCLE_CHARGE, amount_cents=1000,
+        currency="GBP", publish=False,
+        lines=[NewLine(description="x", unit_cents=1000, kind=InvoiceLineKind.PRODUCT)],
+    )
+    assert [r.tax_cents for r in _rows(db_session, draft)] == [200]
+    set_engine(db_session, "tax", "legacy")
+    published = InvoiceService.publish(db_session, draft)
+    assert _rows(db_session, published) == [] and _published_lines(db_session, published) == [0]
+    assert published.tax_cents == 0 and published.amount_cents == 1000 and published.tax_summary is None
+
+
 def test_tax_result_with_a_stale_hash_is_discarded(db_session, gb_account, tax_v2, shadow):
     line = NewLine(description="x", unit_cents=1000, kind=InvoiceLineKind.PRODUCT)
     probe = InvoiceService.create(
