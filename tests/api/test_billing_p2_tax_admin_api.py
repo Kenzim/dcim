@@ -99,6 +99,52 @@ def test_superseding_a_mirrored_rule_is_refused(client, db_session, headers):
     assert db_session.query(TaxRule).count() == count
 
 
+RULE_NOT_NULL = (
+    "name", "tax_class_id", "customer_type", "rate_percent", "priority", "compound", "compound_order",
+    "jurisdiction", "reverse_charge", "rounding_point", "rounding_rule", "enabled",
+)
+REGISTRATION_NOT_NULL = ("jurisdiction", "scheme", "tax_number", "country", "valid_from", "enabled")
+
+
+def _standard(client, headers):
+    return next(c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json() if c["code"] == "standard")
+
+
+@pytest.mark.parametrize("field", RULE_NOT_NULL)
+def test_explicit_null_for_a_not_null_rule_field_is_refused(client, headers, field):
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+    created = client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_from": _later(days=1)}).json()
+    current = client.post(f"{BASE}/rules", headers=headers, json=body).json()
+    assert client.post(f"{BASE}/rules", headers=headers, json={**body, field: None}).status_code == 422
+    resp = client.put(f"{BASE}/rules/{created['id']}", headers=headers, json={field: None})
+    assert resp.status_code == 422, resp.text
+    resp = client.post(
+        f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={field: None, "valid_from": _later(hours=1)}
+    )
+    assert resp.status_code == 422, resp.text
+    assert client.get(f"{BASE}/rules/{created['id']}", headers=headers).json()[field] is not None
+
+
+@pytest.mark.parametrize("field", REGISTRATION_NOT_NULL)
+def test_explicit_null_for_a_not_null_registration_field_is_refused(client, headers, field):
+    body = {"jurisdiction": "GB", "scheme": "domestic", "tax_number": "GB1", "country": "GB"}
+    created = client.post(f"{BASE}/registrations", headers=headers, json=body)
+    assert created.status_code == 201, created.text
+    resp = client.post(f"{BASE}/registrations", headers=headers, json={**body, field: None})
+    assert resp.status_code == 422, resp.text
+    resp = client.put(f"{BASE}/registrations/{created.json()['id']}", headers=headers, json={field: None})
+    assert resp.status_code == 422, resp.text
+
+
+def test_explicit_null_class_name_is_refused(client, headers):
+    created = client.post(f"{BASE}/classes", headers=headers, json={"code": "books", "name": "Books"}).json()
+    resp = client.put(f"{BASE}/classes/{created['id']}", headers=headers, json={"name": None})
+    assert resp.status_code == 422, resp.text
+    resp = client.put(f"{BASE}/classes/{created['id']}", headers=headers, json={"description": None})
+    assert resp.status_code == 200, resp.text
+
+
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
     classes = {c["code"]: c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json()}
     assert client.delete(f"{BASE}/classes/{classes['standard']}", headers=headers).status_code == 409

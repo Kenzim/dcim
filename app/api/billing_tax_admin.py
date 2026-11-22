@@ -12,10 +12,10 @@ import re
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, ClassVar, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -103,6 +103,17 @@ def _json(value: Any) -> Any:
 
 class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # Fields that may be left out but not sent as null: their columns are NOT NULL.
+    not_null: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_nulls(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            nulls = sorted(name for name in cls.not_null if name in data and data[name] is None)
+            if nulls:
+                raise ValueError(f"{', '.join(nulls)} may not be null")
+        return data
 
 
 # --- classes ---
@@ -115,6 +126,8 @@ class ClassCreate(RequestModel):
 
 
 class ClassUpdate(RequestModel):
+    not_null: ClassVar[frozenset[str]] = frozenset({"name"})
+
     name: Optional[str] = Field(default=None, min_length=1, max_length=128)
     description: Optional[str] = Field(default=None, max_length=512)
 
@@ -182,6 +195,11 @@ RULE_FIELDS = (
 
 
 class RuleFields(RequestModel):
+    not_null: ClassVar[frozenset[str]] = frozenset({
+        "name", "tax_class_id", "customer_type", "rate_percent", "priority", "compound", "compound_order",
+        "jurisdiction", "reverse_charge", "rounding_point", "rounding_rule", "enabled",
+    })
+
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     country: Optional[str] = Field(default=None, min_length=2, max_length=2)
     region: Optional[str] = Field(default=None, max_length=128)
@@ -391,6 +409,10 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
 
 
 class RegistrationFields(RequestModel):
+    not_null: ClassVar[frozenset[str]] = frozenset(
+        {"jurisdiction", "scheme", "tax_number", "country", "valid_from", "enabled"}
+    )
+
     jurisdiction: Optional[str] = Field(default=None, min_length=2, max_length=16)
     scheme: Optional[TaxRegistrationScheme] = None
     tax_number: Optional[str] = Field(default=None, min_length=1, max_length=64)
