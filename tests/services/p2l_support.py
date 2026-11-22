@@ -97,11 +97,15 @@ def engine_v2(db) -> None:
     set_setting(db, "billing_invoice_engine", "v2")
     if db.get(SystemSetting, "billing_engine_switch:invoice") is None:
         db.add(SystemSetting(key="billing_engine_switch:invoice", value={"mode": "v2"}))
-    for code, document_type in (("CN", DocumentType.CREDIT_NOTE), ("DN", DocumentType.DEBIT_NOTE)):
+    for code, document_type in (
+        ("INV", DocumentType.INVOICE),
+        ("CN", DocumentType.CREDIT_NOTE),
+        ("DN", DocumentType.DEBIT_NOTE),
+    ):
         db.add(
             DocumentSeries(
                 code=code, document_type=document_type, name=code, format="{SERIES}-{NUMBER}",
-                number_source="own", gapless=False, reset_period="never", default_for=document_type.value,
+                number_source="own", gapless=document_type == DocumentType.INVOICE, reset_period="never", default_for=document_type.value,
             )
         )
     db.commit()

@@ -341,56 +341,65 @@ def cancel_unpaid_invoices(
 ) -> list[int]:
     """Cancel the service's unpaid cycle invoices for periods starting at or after ``from_period_start``.
 
-    A cycle's period starts at its ``due_at``; ``None`` takes every unpaid
-    cycle invoice. In ``v2`` each invoice goes through
+    A cycle's period starts at its ``due_at``, which its invoice carries;
+    ``None`` takes every unpaid cycle invoice. In ``v2`` each invoice goes through
     ``void_cancelled_invoice_v2`` and, when ``void()`` refuses,
     ``close_kept_invoice_v2`` (a ``cancel`` credit note when no money is
     held, else a refund review). In ``legacy`` and ``shadow`` it is the cycle
     cancellation path's decision (``_void_cancelled_cycle_invoice``). The
-    cycle becomes ``cancelled``. The caller holds the service billing lock.
-    Returns the ids of the invoices acted on.
+    cycle becomes ``cancelled``. The caller holds the service billing lock;
+    the invoices are chosen by a locking read after it (after the reseller
+    and billing account, in LOCK_ORDER), so an invoice another transaction
+    generated and committed before the billing lock was granted is seen
+    whatever snapshot the caller's session already holds (``BillingLocks.for_invoice``
+    is not used: its first read is a plain one, which under REPEATABLE READ
+    does not see such an invoice). Returns the ids of the invoices acted on.
     """
     from app.services.billing.order_refunds import close_kept_invoice_v2, void_cancelled_invoice_v2
-    from app.services.billing_locks import BillingLocks
+    from app.services.billing_locks import BillingLocks, _lock
     from app.services.billing_shadow import billing_engine_mode
     from app.services.invoice_service import UNPAID_STATUSES
     from app.services.recurring_billing_service import RecurringBillingService
 
+    billing = db.execute(
+        select(ServiceBilling).where(ServiceBilling.service_id == service_id)
+    ).scalar_one_or_none()
+    if billing is not None and billing.reseller_id is not None:
+        BillingLocks.reseller_and_account(db, int(billing.reseller_id))
+    elif billing is not None and billing.billing_account_id is not None:
+        BillingLocks.billing_account(db, int(billing.billing_account_id))
     statement = (
-        select(Invoice.id, BillingCycle.id)
-        .join(BillingCycle, BillingCycle.invoice_id == Invoice.id)
-        .join(ServiceBilling, ServiceBilling.id == BillingCycle.service_billing_id)
+        select(Invoice)
         .where(
-            ServiceBilling.service_id == service_id,
+            Invoice.service_id == service_id,
             Invoice.purpose == InvoicePurpose.CYCLE_CHARGE,
             Invoice.status.in_(list(UNPAID_STATUSES)),
         )
         .order_by(Invoice.id)
     )
-    if from_period_start is not None:
-        statement = statement.where(BillingCycle.due_at >= from_period_start)
-    rows = list(db.execute(statement).all())
-    if not rows:
+    invoices = list(_lock(db, "invoice", None, statement).scalars())
+    if not invoices:
         return []
     v2 = billing_engine_mode(db, "invoice") == "v2"
     acted: list[int] = []
-    for invoice_id, cycle_id in rows:
+    for candidate in invoices:
+        cycle = BillingLocks.billing_cycle(db, select(BillingCycle).where(BillingCycle.invoice_id == candidate.id))
+        if cycle is None:
+            continue
+        if from_period_start is not None and _utc(cycle.due_at) < _utc(from_period_start):
+            continue
+        invoice = candidate
         if v2:
-            invoice = BillingLocks.for_invoice(db, int(invoice_id), reseller=True, billing_account=True)
-            if invoice is None or invoice.status not in UNPAID_STATUSES:
+            if invoice.status not in UNPAID_STATUSES:
                 continue
             if not void_cancelled_invoice_v2(db, invoice, reason=f"Cancelled ({cause})", actor_user_id=None):
                 close_kept_invoice_v2(db, invoice, reason=cause, actor_user_id=None)
         else:
-            invoice = db.get(Invoice, int(invoice_id))
-            if invoice is None:
-                continue
             RecurringBillingService._void_cancelled_cycle_invoice(db, invoice)
-        cycle = BillingLocks.billing_cycle(db, select(BillingCycle).where(BillingCycle.id == cycle_id))
-        if cycle is not None and cycle.state not in (BillingCycleState.PAID, BillingCycleState.CANCELLED):
+        if cycle.state not in (BillingCycleState.PAID, BillingCycleState.CANCELLED):
             cycle.state = BillingCycleState.CANCELLED
             cycle.completed_at = datetime.now(timezone.utc)
             cycle.next_retry_at = None
-        acted.append(int(invoice_id))
+        acted.append(int(invoice.id))
     db.flush()
     return acted
