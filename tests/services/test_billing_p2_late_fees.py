@@ -111,6 +111,22 @@ def test_percentage_fee_is_one_debit_note_on_the_remaining_balance(db_session, e
     assert audit.resource_id == str(invoice.id)
 
 
+def test_the_late_fee_email_from_the_job_shows_the_fee(db_session, env):
+    from app.models.commerce_email import EmailMessage, EmailTemplate
+
+    _, billing = env
+    template = db_session.query(EmailTemplate).filter_by(event_key="late_fee_added", product_scope=0).one()
+    template.body_text = 'A late fee of {{ fee_cents|money(currency|default("USD", true)) }} was added.'
+    db_session.commit()
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=5), amount=1005)
+
+    assert run_job(db_session, LateFeesJob(), make_run("late_fees")) == {_key(invoice): "done"}
+
+    message = db_session.query(EmailMessage).filter_by(event="late_fee_added").one()
+    assert message.idempotency_key == _key(invoice)
+    assert message.body_text == f"A late fee of {invoice.currency} 1.01 was added."
+
+
 def test_a_failed_effect_leaves_no_claim_and_the_next_run_retries(db_session, env, monkeypatch):
     from app.services.invoice_adjustment_service import InvoiceAdjustmentService
 
