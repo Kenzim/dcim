@@ -102,14 +102,14 @@ FIELD_NOTES: dict[str, str] = {
     "Manifest.hooks": "Events with before hooks (needs `events.veto`).",
     "Manifest.tables": "Reserved. Refused in API 1.0.",
     "Manifest.provides": "Typed providers the plugin offers (API 1.1 and later). Each needs the permission of its kind and an `@plugin.provider(kind, id)` in `register`.",
-    "ProvideSpec.kind": "`tax_id_validator`, `tax_rule_pack` or `tax_provider`.",
+    "ProvideSpec.kind": "`tax_id_validator`, `tax_rule_pack`, `tax_provider` or `currency_rates`.",
     "ProvideSpec.id": "Unique with the kind inside the plugin. Billing refers to the provider as `<plugin id>:<provider id>`.",
     "ProvideSpec.label": "Shown to admins where they choose a provider.",
     "ProvideSpec.countries": "Upper case ISO alpha-2 codes the provider covers (`EL` for Greece at VIES). Empty means any.",
     "ProvideSpec.id_types": "Tax ID types the provider checks, such as `eu_vat`. Required for `tax_id_validator`, refused elsewhere.",
     "ProvideSpec.currencies": "Upper case ISO alpha-3 codes. Only for `tax_provider`; empty means any.",
     "ProvideSpec.timeout_seconds": "Wall-clock limit of one call. Billing may lower it for a call, never raise it.",
-    "ProvideSpec.rate_limit": "Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate` and `load`, not `supports` or `check_format`.",
+    "ProvideSpec.rate_limit": "Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate`, `load` and `rates`, not `supports` or `check_format`.",
     "ProvideSpec.pack": "Only for `tax_rule_pack`: the JSON file of the pack inside the package. It must exist and pass the pack schema at install.",
     "RateLimitSpec.calls": "Calls allowed in one window.",
     "RateLimitSpec.per_seconds": "Length of the window in seconds.",
@@ -321,6 +321,7 @@ KIND_NOTES: dict[str, str] = {
     "tax_id_validator": "Checks a customer's tax or VAT number. Billing asks `supports`, then `check_format`, then `check_online`.",
     "tax_rule_pack": "Offers a set of tax rules as data. An administrator reviews and applies it; nothing is applied automatically.",
     "tax_provider": "Calculates the tax of a basket. Billing falls back to its own rules when the provider fails.",
+    "currency_rates": "Offers the published exchange rates of one month. Billing stores each month once and never changes a stored rate.",
 }
 
 METHOD_NOTES: dict[str, str] = {
@@ -332,6 +333,7 @@ METHOD_NOTES: dict[str, str] = {
     "tax_rule_pack.load": "The pack JSON of one version. At most 1 MB.",
     "tax_provider.supports": "Whether the provider can handle this request (country, currency, lines).",
     "tax_provider.calculate": "Return a `TaxProviderResult` with every requested line key.",
+    "currency_rates.rates": "Return a `CurrencyRatesResult` for the requested month: units of each currency per one unit of `base`. A month not published yet is an empty `rates`, not an error.",
 }
 
 

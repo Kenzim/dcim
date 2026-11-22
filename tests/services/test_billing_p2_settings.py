@@ -26,7 +26,6 @@ DEFAULTS = {
     "billing_tax_id_max_age_days": 30,
     "billing_tax_id_recheck_batch": 200,
     "billing_tax_ip_country_header": "",
-    "billing_tax_allow_foreign_currency_gb": False,
     "billing_automation_time_utc": "09:00",
     "billing_job_lease_seconds": 600,
     "billing_job_max_catch_up_days": 3,

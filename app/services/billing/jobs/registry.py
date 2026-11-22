@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.services.billing.jobs.base import BillingJob
 from app.services.billing.jobs.cancellations import CancellationsJob
+from app.services.billing.jobs.exchange_rates_fetch import TaxExchangeRatesFetch
 from app.services.billing.jobs.generate_ahead import GenerateInvoicesAhead
 from app.services.billing.jobs.late_fees import LateFeesJob
 from app.services.billing.jobs.reminders import InvoiceReminders
@@ -26,5 +27,6 @@ JOBS: dict[str, BillingJob] = {
         CancellationsJob(),
         NonpaymentSuspensionJob(),
         NonpaymentTerminationJob(),
+        TaxExchangeRatesFetch(),
     )
 }

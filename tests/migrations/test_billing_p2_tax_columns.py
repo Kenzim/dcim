@@ -3,7 +3,13 @@
 from tests.migrations import helpers
 
 REVISION = "billing_p2_tax_columns"
-ADDED = {table: cols for table, cols in helpers.P2_COLUMNS.items() if table not in {"plugin_installations", "email_messages"}}
+# billing_p2_exchange_rates adds the sterling VAT columns of invoices later in the chain.
+FX_COLUMNS = {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents"}
+ADDED = {
+    table: cols - FX_COLUMNS
+    for table, cols in helpers.P2_COLUMNS.items()
+    if table not in {"plugin_installations", "email_messages"}
+}
 
 
 def test_up_down_up_with_data(p2_engine_at):

@@ -20,6 +20,7 @@ Generated from the code by `python -m app.plugin_host.testkit.reference --write`
 | `tax.validate_id` | Validate tax IDs | medium | Receive customers' tax identification numbers and countries to check them. |
 | `tax.rule_pack` | Offer tax rule packs | medium | Offer tax rules that an administrator may review and apply. |
 | `tax.calculate` | Calculate tax | high | Receive basket lines, amounts and the buyer's address and tax ID, and decide the tax on invoices. |
+| `currency.rates` | Offer exchange rates | medium | Offer published exchange rates that billing stores and uses to show tax in another currency. |
 
 ## Events
 
@@ -365,7 +366,7 @@ Service types: `vm`, `bare_metal`, `http_proxy`, `nfs_storage`, `backup_slot`. V
 
 | Field | Type | Default | Limits | Notes |
 |---|---|---|---|---|
-| `kind` | `"tax_id_validator"` or `"tax_rule_pack"` or `"tax_provider"` | required |  | `tax_id_validator`, `tax_rule_pack` or `tax_provider`. |
+| `kind` | `"tax_id_validator"` or `"tax_rule_pack"` or `"tax_provider"` or `"currency_rates"` | required |  | `tax_id_validator`, `tax_rule_pack`, `tax_provider` or `currency_rates`. |
 | `id` | string | required |  | Unique with the kind inside the plugin. Billing refers to the provider as `<plugin id>:<provider id>`. |
 | `label` | string | required | min length 1, max length 80 | Shown to admins where they choose a provider. |
 | `description` | string | `""` | max length 500 |  |
@@ -373,7 +374,7 @@ Service types: `vm`, `bare_metal`, `http_proxy`, `nfs_storage`, `backup_slot`. V
 | `id_types` | list of string | empty | max length 50 | Tax ID types the provider checks, such as `eu_vat`. Required for `tax_id_validator`, refused elsewhere. |
 | `currencies` | list of string | empty | max length 200 | Upper case ISO alpha-3 codes. Only for `tax_provider`; empty means any. |
 | `timeout_seconds` | integer | `8` | at least 1, at most 30 | Wall-clock limit of one call. Billing may lower it for a call, never raise it. |
-| `rate_limit` | [RateLimitSpec](#ratelimitspec) | none |  | Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate` and `load`, not `supports` or `check_format`. |
+| `rate_limit` | [RateLimitSpec](#ratelimitspec) | none |  | Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate`, `load` and `rates`, not `supports` or `check_format`. |
 | `pack` | [PackRef](#packref) | none |  | Only for `tax_rule_pack`: the JSON file of the pack inside the package. It must exist and pass the pack schema at install. |
 
 ### RateLimitSpec
@@ -438,9 +439,16 @@ A provider method receives only its arguments. To read settings, write the plugi
 
 | Kind | Permission | Methods | What it is for |
 |---|---|---|---|
+| `currency_rates` | `currency.rates` | `rates` | Offers the published exchange rates of one month. Billing stores each month once and never changes a stored rate. |
 | `tax_id_validator` | `tax.validate_id` | `supports`, `check_format`, `check_online` | Checks a customer's tax or VAT number. Billing asks `supports`, then `check_format`, then `check_online`. |
 | `tax_provider` | `tax.calculate` | `supports`, `calculate` | Calculates the tax of a basket. Billing falls back to its own rules when the provider fails. |
 | `tax_rule_pack` | `tax.rule_pack` | `pack_id`, `versions`, `load` | Offers a set of tax rules as data. An administrator reviews and applies it; nothing is applied automatically. |
+
+### currency_rates
+
+| Method | Arguments | Notes |
+|---|---|---|
+| `rates` | `(request: CurrencyRatesRequest) -> CurrencyRatesResult` | Return a `CurrencyRatesResult` for the requested month: units of each currency per one unit of `base`. A month not published yet is an empty `rates`, not an error. |
 
 ### tax_id_validator
 
@@ -500,6 +508,14 @@ A provider method receives only its arguments. To read settings, write the plugi
 | `TaxProviderPart` | `legal_note` | `str or None` | no |
 | `TaxProviderResult` | `lines` | `dict[str, tuple[TaxProviderPart, ...]]` | yes |
 | `TaxProviderResult` | `reference` | `str or None` | no |
+| `CurrencyRatesRequest` | `base` | `str` | yes |
+| `CurrencyRatesRequest` | `period` | `str` | yes |
+| `CurrencyRate` | `currency` | `str` | yes |
+| `CurrencyRate` | `units_per_base` | `str` | yes |
+| `CurrencyRatesResult` | `source` | `str` | yes |
+| `CurrencyRatesResult` | `period_start` | `date` | yes |
+| `CurrencyRatesResult` | `period_end` | `date` | yes |
+| `CurrencyRatesResult` | `rates` | `tuple[CurrencyRate, ...]` | yes |
 
 Billing checks every answer. A wrong type, an unknown status, a missing, extra or unreadable field, an `unavailable` answer without an `error_code`, or (for a tax provider) a missing or unknown line key, a negative amount, a rate that does not give the tax within one minor unit, or tax on a reverse charge part counts as a failure of the plugin, the same as a timeout or an exception.
 

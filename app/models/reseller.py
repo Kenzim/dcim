@@ -15,6 +15,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -626,6 +627,12 @@ class Invoice(Base):
         nullable=True,
         index=True,
     )
+    # Sterling VAT of a UK VAT invoice in another currency (design 4.10); NULL
+    # otherwise. ``fx_rate`` is the stored ``units_per_gbp`` of ``fx_period``.
+    fx_rate = Column(Numeric(18, 6), nullable=True)
+    fx_period = Column(String(7), nullable=True)
+    fx_source = Column(String(32), nullable=True)
+    tax_total_gbp_cents = Column(BigInteger, nullable=True)
 
     reseller = relationship("Reseller", back_populates="invoices")
     service = relationship("Service")

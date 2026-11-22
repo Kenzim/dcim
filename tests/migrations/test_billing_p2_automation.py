@@ -55,10 +55,10 @@ def test_up_down_up_with_data(p2_engine_at):
     assert ("billing_job_runs", "run_id", "id", "CASCADE") in helpers.sqlite_foreign_keys(
         engine, "billing_job_run_items"
     )
-    # The job list matches the model registry.
+    # The job list matches the model registry; billing_p2_exchange_rates adds its job later.
     from app.models.billing_jobs import BILLING_JOB_NAMES
 
-    assert set(BILLING_JOB_NAMES) == JOBS
+    assert set(BILLING_JOB_NAMES) == JOBS | {"tax_exchange_rates_fetch"}
 
     helpers.migrate(engine, helpers.before(REVISION))
     assert not TABLES & helpers.tables(engine)

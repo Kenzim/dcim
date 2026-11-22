@@ -47,6 +47,8 @@ from jinja2.tests import TESTS
 from jinja2.visitor import NodeTransformer
 from markupsafe import soft_str
 
+from app.services.billing.operator_currency import operator_currency
+
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_OUTPUT_CHARS = 256 * 1024
 MAX_VALUE_CHARS = 256 * 1024
@@ -199,10 +201,13 @@ def _guard(func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-def money_filter(cents: Any, currency: Any = "USD") -> str:
-    """Format minor units as ``GBP 12.34`` in integer arithmetic, as the built-in texts do."""
+def money_filter(cents: Any, currency: Any = None) -> str:
+    """Format minor units as ``GBP 12.34`` in integer arithmetic, as the built-in texts do.
+
+    Without a currency it prints the operator currency.
+    """
     value = int(cents or 0)
-    code = str(currency or "USD").upper()
+    code = str(currency or operator_currency()).upper()
     whole, fraction = divmod(abs(value), 100)
     return f"{code} {'-' if value < 0 else ''}{whole}.{fraction:02d}"
 

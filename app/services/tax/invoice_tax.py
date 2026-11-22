@@ -207,27 +207,26 @@ def registration_of(db: Session, result: TaxResult) -> Optional[SellerTaxRegistr
     return db.get(SellerTaxRegistration, int(result.registration_id))
 
 
-def check_currency(db: Session, invoice: Any, result: TaxResult) -> None:
-    """A UK-registered taxed invoice is in GBP unless ``billing_tax_allow_foreign_currency_gb``."""
-    from app.services.settings_store import get_setting
+def stamp_sterling_vat(db: Session, invoice: Any, result: TaxResult, now: datetime) -> None:
+    """Freeze the sterling VAT of a UK VAT invoice in another currency (design 4.10).
 
-    registration = registration_of(db, result)
-    if registration is None or (registration.jurisdiction or "").upper() != "GB":
-        return
-    if result.tax_cents <= 0 or str(invoice.currency).upper() == "GBP":
-        return
-    if get_setting(db, "billing_tax_allow_foreign_currency_gb"):
-        return
-    from app.services.invoice_service import InvoiceError
+    Reads only ``tax_exchange_rates``; raises ``ExchangeRateMissing`` (a
+    ``RetryableTaxPublishError``) when the month's rate is not stored.
+    """
+    from app.services.tax import exchange_rates
 
-    raise InvoiceError(
-        "a UK VAT invoice must be in GBP; set billing_tax_allow_foreign_currency_gb to print a GBP conversion"
+    conversion = exchange_rates.convert_at_publish(
+        db, registration_of(db, result), str(invoice.currency), int(result.tax_cents), now
     )
+    invoice.fx_rate = conversion.rate if conversion else None
+    invoice.fx_period = conversion.period if conversion else None
+    invoice.fx_source = conversion.source if conversion else None
+    invoice.tax_total_gbp_cents = conversion.tax_total_gbp_cents if conversion else None
 
 
 def stamp_published(db: Session, invoice: Any, result: TaxResult, now: datetime) -> None:
     """The frozen tax fields of a v2 publish (design 4.9); call before the snapshots are taken."""
-    check_currency(db, invoice, result)
+    stamp_sterling_vat(db, invoice, result, now)
     invoice.tax_engine = result.engine
     invoice.tax_point_at = now
     invoice.tax_summary = result.summary_json()

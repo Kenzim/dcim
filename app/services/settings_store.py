@@ -32,6 +32,7 @@ from app.core import config as app_config
 from app.dao.commerce_dao import SystemSettingDAO
 from app.models.commerce_account import SystemSetting
 from app.services.audit_service import AuditService
+from app.services.billing.operator_currency import operator_currency
 
 logger = logging.getLogger(__name__)
 
@@ -621,14 +622,6 @@ _DEFINITIONS = (
         fallback="",
     ),
     SettingDef(
-        "billing_tax_allow_foreign_currency_gb",
-        "bool",
-        "Allow GB VAT invoices in a currency other than GBP (the VAT amount in GBP must "
-        "then be shown).",
-        "billing_tax",
-        fallback=False,
-    ),
-    SettingDef(
         "billing_automation_time_utc",
         "str",
         "Time of day (UTC, HH:MM) the daily billing jobs run.",
@@ -749,7 +742,7 @@ _DEFINITIONS = (
         "billing_automation",
         max_length=3,
         validator=_validate_currency,
-        fallback="USD",
+        fallback=operator_currency(),
     ),
     SettingDef(
         "billing_late_fee_percent_bp",

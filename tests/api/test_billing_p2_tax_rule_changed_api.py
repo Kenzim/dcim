@@ -11,6 +11,7 @@ from app.services.commerce_lifecycle_service import CommerceLifecycleService
 from app.services.invoice_service import InvoiceService
 from app.services.settings_store import set_setting
 from app.services.tax.errors import RetryableTaxPublishError
+from app.services.tax.exchange_rates import FX_RATE_MISSING_MESSAGE, ExchangeRateMissing
 from app.services.tax.invoice_tax import TAX_RULES_CHANGED_DETAIL, TaxRuleChanged
 from tests.api.test_reseller_panel import _login
 from tests.services.test_billing_p1c_ledger import set_credit_mode
@@ -28,8 +29,12 @@ ERRORS = pytest.mark.parametrize(
     [
         (lambda: TaxRuleChanged([1]), TAX_RULES_CHANGED_DETAIL),
         (RateMissing, {"code": "test_rate_missing", "message": "No rate stored; please try again"}),
+        (
+            lambda: ExchangeRateMissing("USD", "2026-11"),
+            {"code": "tax_fx_rate_missing", "message": FX_RATE_MISSING_MESSAGE},
+        ),
     ],
-    ids=["rule_changed", "subclass"],
+    ids=["rule_changed", "subclass", "fx_rate_missing"],
 )
 
 

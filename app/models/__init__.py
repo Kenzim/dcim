@@ -168,6 +168,7 @@ from app.models.tax import (
     InvoiceProfile,
     SellerTaxRegistration,
     TaxClass,
+    TaxExchangeRate,
     TaxExemption,
     TaxIdCheck,
     TaxLegalNote,
@@ -370,6 +371,7 @@ __all__ += [
     "TaxClass",
     "TaxExemption",
     "TaxIdCheck",
+    "TaxExchangeRate",
     "TaxLegalNote",
     "TaxRule",
 ]

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 A0 = "billing_a0_renewals"
 P1_HEAD = "billing_p1_ledger_owner_check"
 # The single alembic head; the phase 2 chain follows the phase 1 head.
-HEAD = "billing_p2_email_templates"
+HEAD = "billing_p2_exchange_rates"
 CHAIN = [
     "billing_p1_series_shadow",
     "billing_p1_invoice_columns",
@@ -45,6 +45,7 @@ P2_CHAIN = [
     "billing_p2_tax_seed",
     "billing_p2_automation",
     "billing_p2_email_templates",
+    "billing_p2_exchange_rates",
 ]
 P2_NEW_TABLES = {
     "tax_classes",
@@ -64,11 +65,13 @@ P2_NEW_TABLES = {
     "cancellation_requests",
     "email_templates",
     "email_template_versions",
+    "tax_exchange_rates",
 }
 # Columns and indexes the phase 2 chain adds to existing tables.
 P2_COLUMNS = {
     "plugin_installations": {"effective_api"},
-    "invoices": {"tax_engine", "tax_point_at", "tax_summary", "tax_evidence", "legal_notes", "seller_registration_id"},
+    "invoices": {"tax_engine", "tax_point_at", "tax_summary", "tax_evidence", "legal_notes", "seller_registration_id",
+                 "fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents"},
     "orders": {"tax_evidence"},
     "billing_profiles": {"tax_id_type", "tax_id_status", "tax_id_checked_at", "tax_id_check_id", "is_business"},
     "billing_accounts": {"tax_exempt_reason", "billing_late_fee_exempt"},

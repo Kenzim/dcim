@@ -78,7 +78,7 @@ def _assert_head(engine):
         (8, Decimal("7.2500"), 10, 0, "ANY", "invoice_rate", "tax_floor", "tax_rates"),
     ]
     assert helpers.scalar(engine, "SELECT COUNT(*) FROM tax_classes WHERE `system` = 1") == 5
-    assert helpers.scalar(engine, "SELECT COUNT(*) FROM billing_job_states WHERE mode = 'off'") == 7
+    assert helpers.scalar(engine, "SELECT COUNT(*) FROM billing_job_states WHERE mode = 'off'") == 8  # seven jobs, plus tax_exchange_rates_fetch
     assert helpers.scalar(engine, "SELECT COUNT(*) FROM billing_nonpayment_policies") == 2
     assert helpers.scalar(engine, "SELECT COUNT(*) FROM email_templates WHERE enabled = 1") == 7
     assert helpers.scalar(engine, "SELECT tax_id_status FROM billing_profiles WHERE id = 41") == "unchecked"
