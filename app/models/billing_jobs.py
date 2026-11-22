@@ -41,6 +41,7 @@ BILLING_JOB_NAMES: tuple[str, ...] = (
     "nonpayment_termination",
     "cancellations",
     "tax_id_recheck",
+    "tax_exchange_rates_fetch",
 )
 
 

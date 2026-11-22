@@ -13,6 +13,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -430,3 +431,24 @@ class InvoiceAdjustmentLineTax(Base):
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class TaxExchangeRate(Base):
+    """A published exchange rate for one month (design 4.10): ``units_per_gbp`` units of
+    ``currency`` buy one unit of ``base``. Rows are written once and never updated."""
+
+    __tablename__ = "tax_exchange_rates"
+    __table_args__ = (
+        UniqueConstraint("source", "base", "currency", "period", name="uq_tax_exchange_rates_source_base_currency_period"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    source = Column(String(32), nullable=False)
+    base = Column(String(3), nullable=False, default="GBP", server_default="GBP")
+    currency = Column(String(3), nullable=False)
+    period = Column(String(7), nullable=False, index=True)
+    units_per_gbp = Column(Numeric(18, 6), nullable=False)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    fetched_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
