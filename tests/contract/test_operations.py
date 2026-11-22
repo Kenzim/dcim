@@ -148,21 +148,42 @@ def test_run_action_rejects_an_unknown_audience(whmcs):
     assert_error(response, 400)
 
 
-def test_known_mismatch_empty_php_array_bodies_are_rejected_with_422(whmcs):
-    """PHP `json_encode(array())` sends `[]`, which these routes refuse as a body.
+@pytest.mark.parametrize("empty_params", [{}, []], ids=["object", "list"])
+def test_run_action_accepts_empty_params_as_object_or_list(whmcs, monkeypatch, empty_params):
+    """PHP `json_encode(array())` sends `[]`; older module copies send `{"params": []}`.
 
-    `rackflow_runStrategyAction` sends `{"params": []}` for reset_network and
-    randomize_smbios, `rackflow_Reinstall` sends `[]` when neither a template nor
-    keys are given, and `rackflow_windowsPasswordReset` sends `[]` when no password
-    is given. This pins today's behaviour; if the API starts accepting the empty
-    list, update this test together with the module.
+    Both spellings of an empty option set reach the action as an empty dict.
     """
-    vm = whmcs.vm()
+    service = whmcs.vm()
+    run = AsyncMock(return_value={"status": "ok"})
+    monkeypatch.setattr("app.api.billing.run_action", run)
+    response = whmcs.call("run_action", service.id, action_name="reset_network", query=ADMIN,
+                          body={"params": empty_params})
+    assert response.status_code == 200, response.text
+    assert run.await_args.args[2:] == ("reset_network", {}, "admin")
+
+
+def test_run_action_still_rejects_a_non_empty_list_of_params(whmcs):
+    response = whmcs.call("run_action", whmcs.vm().id, action_name="reset_network", query=ADMIN,
+                          body={"params": ["x"]})
+    assert response.status_code == 422
+
+
+def test_vm_reinstall_accepts_an_empty_list_body_like_an_empty_object(whmcs):
+    """Older module copies send `[]` when neither a template nor keys are given."""
+    response = whmcs.call("vm_reinstall", whmcs.vm().id, query=ADMIN, body=[])
+    assert_error(response, 400)
+    assert response.json()["detail"] == "VM service has no vm_template_id"
+
+
+@pytest.mark.parametrize("empty_body", [{}, []], ids=["object", "list"])
+def test_windows_password_reset_accepts_an_empty_body_as_object_or_list(whmcs, monkeypatch, empty_body):
     bm = whmcs.bare_metal()
-    for_action = whmcs.call("run_action", vm.id, action_name="reset_network", query=ADMIN, body={"params": []})
-    assert for_action.status_code == 422
-    assert whmcs.call("vm_reinstall", vm.id, query=ADMIN, body=[]).status_code == 422
-    assert whmcs.call("windows_password_reset", bm.id, query=CLIENT, body=[]).status_code == 422
+    reset = AsyncMock(return_value={"status": "ok", "username": "Administrator", "generated": True, "password": "pw"})
+    monkeypatch.setattr("app.api.billing.perform_windows_password_reset", reset)
+    response = whmcs.call("windows_password_reset", bm.id, query=ADMIN, body=empty_body)
+    assert response.status_code == 200, response.text
+    assert reset.await_args.args[2].password is None
 
 
 def test_reinstall_os_errors(whmcs):
