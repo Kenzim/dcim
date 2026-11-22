@@ -5,7 +5,7 @@ Set ``RACKFLOW_TEST_MARIADB_URL`` to an empty database, for example
 recreates every table in it and drops them again afterwards, so it refuses a
 database that holds rows in ``users`` or ``invoices`` unless
 ``RACKFLOW_TEST_MARIADB_ALLOW_DROP=1``.
-``.forgejo/workflows/billing-mariadb.yml`` runs it against a ``mariadb:11``
+``.forgejo/workflows/billing-mariadb.yml`` runs it against a ``mariadb:11.8``
 service container.
 
 A fresh ``alembic upgrade`` cannot reach ``billing_a0_renewals`` on MariaDB
@@ -43,9 +43,9 @@ def _refuse_populated_database(conn) -> None:
 @pytest.fixture
 def mariadb():
     import app.models  # noqa: F401
-    from app.core.database import Base
+    from app.core.database import Base, configure_engine
 
-    engine = sa.create_engine(URL, pool_pre_ping=True)
+    engine = configure_engine(sa.create_engine(URL, pool_pre_ping=True))
     with engine.begin() as conn:
         _refuse_populated_database(conn)
     _drop_all(engine)

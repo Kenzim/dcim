@@ -1,7 +1,8 @@
-# Optional: billing phase 1 migrations on MariaDB 11.
+# Optional: billing phase 1 migrations on MariaDB 11.8.
 #
 # Runs tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
-# billing_p1_* chain) against a mariadb:11 service container. Manual trigger
+# billing_p1_* chain) and the snapshot isolation connect hook test against a
+# mariadb:11.8 service container, the version production runs. Manual trigger
 # only, so it never blocks other work; the SQLite migration tests in
 # tests/migrations run in the normal test suite.
 name: Billing migrations (MariaDB)
@@ -16,12 +17,12 @@ jobs:
       image: python:3.11-bookworm
     services:
       mariadb:
-        image: mariadb:11
+        image: mariadb:11.8
         env:
           MARIADB_ROOT_PASSWORD: rackflow-ci
-          MARIADB_DATABASE: rackflow
+          MARIADB_DATABASE: rackflow_test
     env:
-      RACKFLOW_TEST_MARIADB_URL: mysql+pymysql://root:rackflow-ci@mariadb:3306/rackflow
+      RACKFLOW_TEST_MARIADB_URL: mysql+pymysql://root:rackflow-ci@mariadb:3306/rackflow_test
       DATABASE_URL: sqlite:///:memory:
       INITIAL_ADMIN_USERNAME: ""
       INITIAL_ADMIN_PASSWORD: ""
@@ -46,4 +47,4 @@ jobs:
               raise SystemExit("MariaDB did not start")
           EOF
       - name: Billing phase 1 chain on MariaDB
-        run: python -m pytest tests/migrations/test_billing_p1_mariadb.py -q
+        run: python -m pytest tests/migrations/test_billing_p1_mariadb.py tests/core/test_database_snapshot_isolation.py -q
