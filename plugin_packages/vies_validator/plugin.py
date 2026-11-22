@@ -58,25 +58,52 @@ UNAVAILABLE = {
 }
 INVALID = {"INVALID_INPUT"}
 NO_DETAIL = {"", "---"}
+# VIES's requestDate is used as the check time only when it is this close to the plugin's own clock.
+REQUEST_DATE_WINDOW = timedelta(minutes=15)
 
 
 def _clean(value):
-    text = str(value or "").strip()
+    """A detail from the answer: text only, and None for VIES's placeholders."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
     return None if text in NO_DETAIL else text
 
 
 def _code(value):
     """An error code that fits the 64 character column and holds nothing but code characters."""
-    text = re.sub(r"[^A-Za-z0-9_]", "_", str(value or "")).strip("_").upper()
+    text = re.sub(r"[^A-Za-z0-9_]", "_", value if isinstance(value, str) else "").strip("_").upper()
     return text[:64] or "UNKNOWN"
 
 
 def _parse_time(text, fallback):
+    if not isinstance(text, str):
+        return fallback
     try:
-        moment = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return fallback
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _checked_at(request_date, now):
+    """VIES's own time of the check when it is close to ``now``, else ``now``."""
+    moment = _parse_time(request_date, now)
+    return moment if abs(moment - now) <= REQUEST_DATE_WINDOW else now
+
+
+def _normalised(value):
+    return re.sub(r"[\s.\-]", "", value).upper() if isinstance(value, str) else None
+
+
+def _answers_the_request(data, request):
+    """Whether the answer is about the number that was asked about."""
+    country = _normalised(data.get("countryCode"))
+    number = _normalised(data.get("vatNumber"))
+    asked = _normalised(request.tax_id)
+    if country != _normalised(request.country) or number is None or asked is None:
+        return False
+    return number in (asked, country + asked) or asked == country + number
 
 
 def unavailable(now, code):
@@ -107,7 +134,7 @@ def interpret(ctx, request, status, text, now):
     """Turn one VIES answer into a result. ``status`` is the HTTP status, ``text`` the body."""
     try:
         data = json.loads(text)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):  # RecursionError: nested too deeply to read
         data = None
     if not isinstance(data, dict):
         return unavailable(now, f"HTTP_{status}" if status != 200 else "BAD_RESPONSE")
@@ -129,7 +156,9 @@ def interpret(ctx, request, status, text, now):
     if status != 200 or not isinstance(data.get("valid"), bool):
         return unavailable(now, f"HTTP_{status}" if status != 200 else "BAD_RESPONSE")
 
-    checked_at = _parse_time(data.get("requestDate"), now)
+    if not _answers_the_request(data, request):
+        return unavailable(now, "MISMATCHED_RESPONSE")
+    checked_at = _checked_at(data.get("requestDate"), now)
     if not data["valid"]:
         return TaxIdCheckResult(status="invalid", checked_at=checked_at)
     return TaxIdCheckResult(
