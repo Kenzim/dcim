@@ -11,14 +11,21 @@ A re-check is due now rather than at a past moment, so its trigger is the
 run's ``now`` and the watermark never holds it back. The claim key carries the
 profile's current check id, so each check is re-checked once and the new
 check it produces is a new subject.
+
+The validator is an effect outside the database (design section 0): the
+profile is locked, re-checked and claimed, and that commits; the check then
+runs on a copy of the profile with no row lock held and nothing of the job
+uncommitted; finally the profile is locked again and takes the result only if
+its tax ID, type and country are still the ones checked.
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Iterable, Optional
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.commerce_account import BillingProfile
@@ -77,6 +84,48 @@ def _is_due(db: Session, run: JobRun, profile_id: int) -> bool:
     )
 
 
+def _lock_profile(db: Session, profile_id: int) -> Optional[BillingProfile]:
+    return db.execute(
+        select(BillingProfile)
+        .where(BillingProfile.id == profile_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+
+def _identity(profile) -> tuple:
+    return (profile.tax_id, profile.tax_id_type, profile.country)
+
+
+def _copy(profile: BillingProfile) -> SimpleNamespace:
+    """The fields ``TaxIdService.check`` reads and sets, off the session."""
+    return SimpleNamespace(
+        id=profile.id,
+        billing_account_id=profile.billing_account_id,
+        tax_id=profile.tax_id,
+        tax_id_type=profile.tax_id_type,
+        country=profile.country,
+        tax_id_status=profile.tax_id_status,
+        tax_id_checked_at=profile.tax_id_checked_at,
+        tax_id_check_id=profile.tax_id_check_id,
+    )
+
+
+def _release_claim(db: Session, run: JobRun, key: str) -> None:
+    """Drop the claim of a check that raised, so the next run tries again."""
+    from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus
+
+    db.execute(
+        delete(BillingJobAction).where(
+            BillingJobAction.job == run.job,
+            BillingJobAction.subject_key == key[:128],
+            BillingJobAction.status == BillingJobActionStatus.CLAIMED,
+        )
+    )
+    if key[:128] in run.claimed:
+        run.claimed.remove(key[:128])
+
+
 class TaxIdRecheck:
     name = NAME
     setting_keys = ("billing_tax_id_recheck_batch", "billing_tax_id_valid_days")
@@ -112,17 +161,38 @@ class TaxIdRecheck:
         from app.services.tax.validators import TaxIdService
 
         profile_id = int(action.detail["profile_id"])
-        profile = db.execute(
-            select(BillingProfile).where(BillingProfile.id == profile_id).with_for_update()
-        ).scalar_one_or_none()
+        profile = _lock_profile(db, profile_id)
         if profile is None:
             return "skipped:gone"
         if not _is_due(db, run, profile_id) or not run.in_window(action.trigger_at):
             return "skipped:not_due"
-        if not run.claim(db, subject_key(profile)):
+        key = subject_key(profile)
+        if not run.claim(db, key):
             return "already_done"
-        check = TaxIdService.check(db, profile, force=True)
-        db.flush()
-        # None: no check was made and the service set the profile ``unchecked``,
-        # so it leaves the job's scope; that status change commits.
+        checked = _copy(profile)
+        identity = _identity(profile)
+        db.commit()
+        try:
+            check = TaxIdService.check(db, checked, force=True)
+            db.flush()
+            db.commit()
+        except Exception:
+            db.rollback()
+            _release_claim(db, run, key)
+            db.commit()
+            raise
+        check_id = getattr(check, "id", None)
+        profile = _lock_profile(db, profile_id)
+        if profile is None or _identity(profile) != identity:
+            # The result belongs to the tax ID that was checked, not the new one.
+            run.finish(db, key, "done", {"check_id": check_id, "discarded": "tax_id_changed"})
+            db.commit()
+            return "done:tax_id_changed"
+        # None: no check was made and the service set the copy ``unchecked``,
+        # so the profile leaves the job's scope.
+        profile.tax_id_status = checked.tax_id_status
+        profile.tax_id_checked_at = checked.tax_id_checked_at
+        profile.tax_id_check_id = checked.tax_id_check_id
+        run.finish(db, key, "done", {"check_id": check_id})
+        db.commit()
         return "done" if check is not None else "done:no_check"

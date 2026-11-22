@@ -163,6 +163,69 @@ def test_recheck_age_follows_the_validity_setting(factory, checks, valid_days, a
     db.close()
 
 
+def test_validator_runs_without_a_lock_or_open_transaction_and_a_changed_tax_id_keeps_its_status(
+    factory, monkeypatch
+):
+    from app.models.billing_jobs import BillingJobAction, BillingJobRunItem
+
+    profile_id = _profile(factory, status="valid", checked_at=T0 - timedelta(days=26))
+    seen = {}
+
+    def check(db, profile, *, force=False):
+        seen["in_transaction"] = db.in_transaction()
+        other = factory()
+        seen["claim"] = other.query(BillingJobAction).filter_by(job=NAME).one().status.value
+        # Another session can write the profile, so no lock is held on it.
+        other.get(BillingProfile, profile_id).tax_id = "DE999999999"
+        other.commit()
+        other.close()
+        row = TaxIdCheck(country="DE", normalised_id=profile.tax_id, id_type="eu_vat", validator="t:v",
+                         status="invalid", checked_at=T0, expires_at=T0 + timedelta(days=1))
+        db.add(row)
+        db.flush()
+        profile.tax_id_status = "invalid"
+        profile.tax_id_checked_at = T0
+        profile.tax_id_check_id = row.id
+        return row
+
+    monkeypatch.setattr(TaxIdService, "check", staticmethod(check))
+    _go_live(factory, T0 - timedelta(hours=1))
+    result = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0)
+    assert seen == {"in_transaction": False, "claim": "claimed"}
+    assert result.counts == {"done": 1}
+    db = factory()
+    profile = db.get(BillingProfile, profile_id)
+    assert (profile.tax_id, profile.tax_id_status, profile.tax_id_check_id) == ("DE999999999", "valid", None)
+    item = db.query(BillingJobRunItem).filter_by(run_id=result.run_id).one()
+    assert item.detail["reason"] == "tax_id_changed"
+    claim = db.query(BillingJobAction).filter_by(job=NAME).one()
+    assert claim.status.value == "done" and claim.detail["discarded"] == "tax_id_changed"
+    assert db.query(TaxIdCheck).count() == 1  # the check of the old number is kept
+    db.close()
+
+
+def test_a_check_that_raises_releases_its_claim_for_the_next_run(factory, checks, monkeypatch):
+    from app.models.billing_jobs import BillingJobAction
+
+    profile_id = _profile(factory, status="valid", checked_at=T0 - timedelta(days=26))
+    working = TaxIdService.check
+
+    def broken(db, profile, *, force=False):
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(TaxIdService, "check", staticmethod(broken))
+    _go_live(factory, T0 - timedelta(hours=1))
+    assert runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0).counts == {"failed": 1}
+    db = factory()
+    assert db.query(BillingJobAction).count() == 0
+    db.close()
+    monkeypatch.setattr(TaxIdService, "check", staticmethod(working))
+    assert runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0 + timedelta(hours=1)).counts == {
+        "done": 1
+    }
+    assert checks == [profile_id]
+
+
 def test_unavailable_retry_is_fifteen_minutes():
     from app.services.billing.jobs import tax_id_recheck
 
