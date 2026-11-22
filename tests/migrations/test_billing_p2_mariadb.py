@@ -14,6 +14,8 @@ an email message), the chain is driven up, down and up again.
 """
 
 import os
+import subprocess
+import sys
 from decimal import Decimal
 
 import pytest
@@ -95,6 +97,42 @@ def _assert_head(engine, models_shape):
     assert helpers.scalar(engine, "SELECT COUNT(*) FROM email_templates WHERE enabled = 1") == 7
     assert helpers.scalar(engine, "SELECT tax_id_status FROM billing_profiles WHERE id = 41") == "unchecked"
     assert helpers.scalar(engine, "SELECT render_fallback FROM email_messages WHERE id = 41") == 0
+
+
+def _alembic_upgrade_head() -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=helpers.ROOT,
+        env={**os.environ, "DATABASE_URL": URL},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+
+
+def test_failed_data_revision_keeps_the_last_completed_version_on_mariadb(mariadb):
+    """``alembic upgrade head`` stopped by the seed check leaves ``alembic_version`` at
+    the revision before it, so the rerun after the fix needs no manual stamp."""
+    engine, _models_shape = mariadb
+    helpers.seed_p2_data(engine)
+    helpers.execute(
+        engine,
+        "INSERT INTO tax_rates (id, country, region, rate_bps, name, enabled) "
+        "VALUES (9, 'XX', NULL, 10000000, 'Bad', 1)",
+    )
+
+    failed = _alembic_upgrade_head()
+    assert failed.returncode != 0
+    assert "id 9 has rate_bps 10000000" in failed.stderr
+    assert helpers.current(engine) == helpers.before("billing_p2_tax_seed")
+    assert "tax_id_status" in helpers.columns(engine, "billing_profiles")
+    assert helpers.scalar(engine, "SELECT COUNT(*) FROM tax_classes") == 0
+
+    helpers.execute(engine, "UPDATE tax_rates SET rate_bps = 2000 WHERE id = 9")
+    rerun = _alembic_upgrade_head()
+    assert rerun.returncode == 0, rerun.stderr[-3000:]
+    assert helpers.current(engine) == helpers.HEAD
+    assert helpers.scalar(engine, "SELECT COUNT(*) FROM tax_rules WHERE source = 'tax_rates'") == 3
 
 
 def test_p2_chain_up_down_up_on_mariadb(mariadb):

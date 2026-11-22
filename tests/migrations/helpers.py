@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Optional
 
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from alembic.runtime.environment import EnvironmentContext
 from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -112,23 +112,21 @@ def current(engine: sa.Engine) -> Optional[str]:
 
 
 def migrate(engine: sa.Engine, target: str) -> None:
-    """Upgrade or downgrade ``engine`` to ``target`` through the real revision files."""
-    directory = script()
+    """Upgrade or downgrade ``engine`` to ``target`` through the real revision files.
+
+    Runs ``alembic/env.py`` itself on a connection of ``engine``, so the tests
+    use the transaction configuration of a real ``alembic upgrade``.
+    """
     start = current(engine)
     revisions = [A0, *CHAIN, *P2_CHAIN]
-    upward = start is None or revisions.index(target) >= revisions.index(start)
-
-    def steps(rev, _context):
+    upward = start is None or start not in revisions or revisions.index(target) >= revisions.index(start)
+    config = alembic_config()
+    with engine.connect() as conn:
+        config.attributes["connection"] = conn
         if upward:
-            return directory._upgrade_revs(target, rev)
-        return directory._downgrade_revs(target, rev)
-
-    with EnvironmentContext(alembic_config(), directory, fn=steps, destination_rev=target) as env:
-        with engine.connect() as conn:
-            env.configure(connection=conn, transaction_per_migration=True)
-            with env.begin_transaction():
-                env.run_migrations()
-            conn.commit()
+            command.upgrade(config, target)
+        else:
+            command.downgrade(config, target)
 
 
 def build_a0_database(engine: sa.Engine) -> None:
