@@ -420,6 +420,7 @@
         "mcp_tools",
         "name",
         "permissions",
+        "provides",
         "rackflow_api",
         "schedules",
         "services",
@@ -460,6 +461,14 @@
         "value"
       ]
     },
+    "PackRef": {
+      "fields": [
+        "file"
+      ],
+      "required": [
+        "file"
+      ]
+    },
     "Panel": {
       "fields": [
         "audience",
@@ -493,6 +502,35 @@
         "key",
         "label",
         "type"
+      ]
+    },
+    "ProvideSpec": {
+      "fields": [
+        "countries",
+        "currencies",
+        "description",
+        "id",
+        "id_types",
+        "kind",
+        "label",
+        "pack",
+        "rate_limit",
+        "timeout_seconds"
+      ],
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ]
+    },
+    "RateLimitSpec": {
+      "fields": [
+        "calls",
+        "per_seconds"
+      ],
+      "required": [
+        "calls",
+        "per_seconds"
       ]
     },
     "ScheduleSpec": {
@@ -577,6 +615,213 @@
     "plugin",
     "reseller"
   ],
+  "provider_kinds": {
+    "context": "current_context",
+    "kinds": {
+      "tax_id_validator": {
+        "metered": [
+          "check_online"
+        ],
+        "methods": {
+          "check_format": 2,
+          "check_online": 1,
+          "supports": 2
+        },
+        "permission": "tax.validate_id"
+      },
+      "tax_provider": {
+        "metered": [
+          "calculate"
+        ],
+        "methods": {
+          "calculate": 1,
+          "supports": 1
+        },
+        "permission": "tax.calculate"
+      },
+      "tax_rule_pack": {
+        "metered": [
+          "load"
+        ],
+        "methods": {
+          "load": 1,
+          "pack_id": 0,
+          "versions": 0
+        },
+        "permission": "tax.rule_pack"
+      }
+    },
+    "module": "rackflow_plugin.kinds",
+    "types": {
+      "TaxIdCheckRequest": [
+        {
+          "name": "country",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "tax_id",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "id_type",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "requester_country",
+          "required": false,
+          "type": "str or None"
+        },
+        {
+          "name": "requester_tax_id",
+          "required": false,
+          "type": "str or None"
+        }
+      ],
+      "TaxIdCheckResult": [
+        {
+          "name": "status",
+          "required": true,
+          "type": "\"valid\" or \"invalid\" or \"unavailable\""
+        },
+        {
+          "name": "checked_at",
+          "required": true,
+          "type": "datetime"
+        },
+        {
+          "name": "request_ref",
+          "required": false,
+          "type": "str or None"
+        },
+        {
+          "name": "registered_name",
+          "required": false,
+          "type": "str or None"
+        },
+        {
+          "name": "registered_address",
+          "required": false,
+          "type": "str or None"
+        },
+        {
+          "name": "error_code",
+          "required": false,
+          "type": "str or None"
+        }
+      ],
+      "TaxProviderLine": [
+        {
+          "name": "key",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "net_cents",
+          "required": true,
+          "type": "int"
+        },
+        {
+          "name": "tax_class",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "kind",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "product_code",
+          "required": false,
+          "type": "str or None"
+        }
+      ],
+      "TaxProviderPart": [
+        {
+          "name": "name",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "rate_percent",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "jurisdiction",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "base_cents",
+          "required": true,
+          "type": "int"
+        },
+        {
+          "name": "tax_cents",
+          "required": true,
+          "type": "int"
+        },
+        {
+          "name": "reverse_charge",
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "name": "legal_note",
+          "required": false,
+          "type": "str or None"
+        }
+      ],
+      "TaxProviderRequest": [
+        {
+          "name": "tax_point_at",
+          "required": true,
+          "type": "datetime"
+        },
+        {
+          "name": "currency",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "prices_include_tax",
+          "required": true,
+          "type": "bool"
+        },
+        {
+          "name": "seller",
+          "required": true,
+          "type": "dict"
+        },
+        {
+          "name": "buyer",
+          "required": true,
+          "type": "dict"
+        },
+        {
+          "name": "lines",
+          "required": true,
+          "type": "tuple[TaxProviderLine, ...]"
+        }
+      ],
+      "TaxProviderResult": [
+        {
+          "name": "lines",
+          "required": true,
+          "type": "dict[str, tuple[TaxProviderPart, ...]]"
+        },
+        {
+          "name": "reference",
+          "required": false,
+          "type": "str or None"
+        }
+      ]
+    }
+  },
   "sdk": [
     "ctx.actor",
     "ctx.alter",

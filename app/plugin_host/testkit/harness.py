@@ -223,6 +223,8 @@ class Harness:
         self.plugins_dir = tmp_path / "plugins"
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(settings, "plugins_dir", str(self.plugins_dir))
+        # No bundled packages: a plugin under test must not clash with the copy Rackflow ships.
+        monkeypatch.setattr(settings, "bundled_plugins_dir", str(tmp_path / "bundled"))
         monkeypatch.setattr(settings, "require_service_instance_encryption", False)
         monkeypatch.setattr(settings, "plugin_http_allow_plain", False)
         self.http = FakeHttp()
