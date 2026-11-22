@@ -11,7 +11,7 @@ import inspect
 import json
 import re
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
@@ -211,14 +211,18 @@ _PACK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _RATE_RE = re.compile(r"^\d{1,3}(\.\d{1,4})?$")
 
 
+# Answers are checked by exact type (``type(x) is str``, not ``isinstance``) and rebuilt from new
+# objects, so no subclass a plugin defines, with its own __eq__ or properties, ever reaches billing.
+
+
 def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    return type(value) is int
 
 
 def _text(value: Any, label: str, limit: int, *, optional: bool = False, required: bool = False) -> Optional[str]:
     if value is None and optional:
         return None
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise InvalidAnswer(f"{label} must be text")
     if required and not value:
         raise InvalidAnswer(f"{label} must not be empty")
@@ -228,27 +232,41 @@ def _text(value: Any, label: str, limit: int, *, optional: bool = False, require
 
 
 def _bool(value: Any, label: str) -> bool:
-    if not isinstance(value, bool):
+    if type(value) is not bool:
         raise InvalidAnswer(f"{label} must be true or false")
     return value
 
 
-def _tax_id_result(value: Any) -> TaxIdCheckResult:
-    if not isinstance(value, TaxIdCheckResult):
-        raise InvalidAnswer("check_online must return a TaxIdCheckResult")
-    if value.status not in ("valid", "invalid", "unavailable"):
-        raise InvalidAnswer(f"unknown status {value.status!r}")
-    if not isinstance(value.checked_at, datetime):
+def _checked_at(value: Any) -> datetime:
+    if type(value) is not datetime:
         raise InvalidAnswer("checked_at must be a datetime")
-    checked_at = value.checked_at if value.checked_at.tzinfo else value.checked_at.replace(tzinfo=timezone.utc)
+    try:
+        moment = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise InvalidAnswer("checked_at has an unusable time zone") from exc
+    if type(moment) is not datetime:
+        raise InvalidAnswer("checked_at must be a datetime")
+    return datetime(
+        moment.year, moment.month, moment.day, moment.hour, moment.minute, moment.second, moment.microsecond,
+        tzinfo=timezone.utc,
+    )
+
+
+def _tax_id_result(value: Any) -> TaxIdCheckResult:
+    if type(value) is not TaxIdCheckResult:
+        raise InvalidAnswer("check_online must return a TaxIdCheckResult")
+    status = value.status
+    if type(status) is not str or status not in ("valid", "invalid", "unavailable"):
+        raise InvalidAnswer("unknown status" + (f" {status!r}" if type(status) is str else ""))
+    checked_at = _checked_at(value.checked_at)
     error_code = _text(value.error_code, "error_code", 64, optional=True)
-    if value.status == "unavailable" and not error_code:
+    if status == "unavailable" and not error_code:
         raise InvalidAnswer("an unavailable answer needs an error_code")
     request_ref = _text(value.request_ref, "request_ref", 64, optional=True)
     name = _text(value.registered_name, "registered_name", 100_000, optional=True)
     address = _text(value.registered_address, "registered_address", 100_000, optional=True)
-    return replace(
-        value,
+    return TaxIdCheckResult(
+        status=status,  # type: ignore[arg-type]
         checked_at=checked_at,
         request_ref=request_ref,
         registered_name=name[:512] if name is not None else None,
@@ -258,9 +276,9 @@ def _tax_id_result(value: Any) -> TaxIdCheckResult:
 
 
 def _pack_versions(value: Any) -> list[str]:
-    if not isinstance(value, (list, tuple)) or len(value) > MAX_VERSIONS:
+    if type(value) not in (list, tuple) or len(value) > MAX_VERSIONS:
         raise InvalidAnswer(f"versions must be a list of at most {MAX_VERSIONS} texts")
-    return [_text(v, "a version", 32, required=True) for v in value]  # type: ignore[misc]
+    return [_text(v, "a version", 32, required=True) for v in list(value)]  # type: ignore[misc]
 
 
 def _pack_json(value: Any) -> dict:
@@ -276,46 +294,58 @@ def _pack_json(value: Any) -> dict:
 
 
 def _part(value: Any, key: str) -> TaxProviderPart:
-    if not isinstance(value, TaxProviderPart):
+    if type(value) is not TaxProviderPart:
         raise InvalidAnswer(f"line {key!r} holds something that is not a TaxProviderPart")
-    _text(value.name, "name", 255, required=True)
-    _text(value.jurisdiction, "jurisdiction", 64, required=True)
-    _text(value.legal_note, "legal_note", 2000, optional=True)
-    _bool(value.reverse_charge, "reverse_charge")
-    if not _is_int(value.base_cents) or not _is_int(value.tax_cents):
+    name = _text(value.name, "name", 255, required=True)
+    jurisdiction = _text(value.jurisdiction, "jurisdiction", 64, required=True)
+    legal_note = _text(value.legal_note, "legal_note", 2000, optional=True)
+    reverse_charge = _bool(value.reverse_charge, "reverse_charge")
+    base_cents, tax_cents, rate_percent = value.base_cents, value.tax_cents, value.rate_percent
+    if not _is_int(base_cents) or not _is_int(tax_cents):
         raise InvalidAnswer(f"line {key!r} has an amount that is not an integer")
-    if value.base_cents < 0 or value.tax_cents < 0:
+    if base_cents < 0 or tax_cents < 0:
         raise InvalidAnswer(f"line {key!r} has a negative amount")
-    if not isinstance(value.rate_percent, str) or not _RATE_RE.match(value.rate_percent):
+    if type(rate_percent) is not str or not _RATE_RE.match(rate_percent):
         raise InvalidAnswer(f"line {key!r} has a rate that is not a percentage with at most four decimals")
-    if value.reverse_charge:
-        if value.tax_cents != 0:
+    if reverse_charge:
+        if tax_cents != 0:
             raise InvalidAnswer(f"line {key!r} is reverse charge with tax")
     else:
         try:
-            exact = Decimal(value.rate_percent) * value.base_cents / 100
+            exact = Decimal(rate_percent) * base_cents / 100
         except InvalidOperation as exc:
             raise InvalidAnswer(f"line {key!r} has an unreadable rate") from exc
-        if abs(exact - value.tax_cents) > 1:
+        if abs(exact - tax_cents) > 1:
             raise InvalidAnswer(f"line {key!r} has tax that its rate and base do not give")
-    return value
+    return TaxProviderPart(
+        name=name,  # type: ignore[arg-type]
+        rate_percent=rate_percent,
+        jurisdiction=jurisdiction,  # type: ignore[arg-type]
+        base_cents=base_cents,
+        tax_cents=tax_cents,
+        reverse_charge=reverse_charge,
+        legal_note=legal_note,
+    )
 
 
 def _tax_result(value: Any, request: Any) -> TaxProviderResult:
-    if not isinstance(value, TaxProviderResult):
+    if type(value) is not TaxProviderResult:
         raise InvalidAnswer("calculate must return a TaxProviderResult")
-    if not isinstance(value.lines, dict):
+    answered = value.lines
+    if type(answered) is not dict:
         raise InvalidAnswer("lines must be a dict by line key")
+    if any(type(key) is not str for key in answered):
+        raise InvalidAnswer("line keys must be text")
     wanted = {line.key for line in getattr(request, "lines", ())}
-    if set(value.lines) != wanted:
-        missing, extra = sorted(wanted - set(value.lines)), sorted(set(value.lines) - wanted)
+    if set(answered) != wanted:
+        missing, extra = sorted(wanted - set(answered)), sorted(set(answered) - wanted)
         raise InvalidAnswer(f"lines must hold exactly the requested keys (missing {missing}, unknown {extra})")
     lines: dict[str, tuple[TaxProviderPart, ...]] = {}
-    for key, parts in value.lines.items():
-        if not isinstance(parts, (tuple, list)):
+    for key, parts in answered.items():
+        if type(parts) not in (tuple, list):
             raise InvalidAnswer(f"line {key!r} must hold a tuple of parts")
-        lines[key] = tuple(_part(p, key) for p in parts)
-    return replace(value, lines=lines, reference=_text(value.reference, "reference", 128, optional=True))
+        lines[key] = tuple(_part(p, key) for p in list(parts))
+    return TaxProviderResult(lines=lines, reference=_text(value.reference, "reference", 128, optional=True))
 
 
 def validate_answer(kind: str, method: str, args: tuple, value: Any) -> Any:
