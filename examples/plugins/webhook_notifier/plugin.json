@@ -1,0 +1,22 @@
+{
+  "id": "webhook_notifier",
+  "name": "Chat webhook notifier",
+  "version": "1.0.0",
+  "description": "Posts new tickets, paid invoices and suspended services to a Discord or Slack channel through an incoming webhook.",
+  "author": "Rackflow",
+  "licence": "MIT",
+  "rackflow_api": ">=1.0,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["service.read", "billing.read", "support.read", "http.outbound"],
+  "services": {"types": ["vm", "bare_metal", "http_proxy", "nfs_storage", "backup_slot"], "enablement": "all"},
+  "settings": [
+    {"key": "webhook_url", "label": "Webhook URL", "type": "secret", "required": true,
+     "help": "The incoming webhook address from Discord (Channel settings, Integrations) or Slack (Incoming Webhooks). It is stored encrypted and never shown again."},
+    {"key": "format", "label": "Chat service", "type": "select", "default": "discord",
+     "options": [{"value": "discord", "label": "Discord"}, {"value": "slack", "label": "Slack"}]},
+    {"key": "notify_tickets", "label": "New tickets", "type": "boolean", "default": true},
+    {"key": "notify_invoices", "label": "Paid invoices", "type": "boolean", "default": true},
+    {"key": "notify_suspensions", "label": "Suspended services", "type": "boolean", "default": true}
+  ],
+  "events": ["ticket.created", "invoice.paid", "service.suspended"]
+}

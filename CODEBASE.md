@@ -300,6 +300,22 @@ Mirror models: `*_dao.py` (e.g. `server_dao.py`, `ipam_dao.py`, `service_instanc
 
 **Add a server plugin:** new module in `app/plugins/` implementing `ServerPlugin`, register via registry discovery, expose `CAPABILITIES` for UI.
 
+### Third-party plugins (plugin API 1.0) — `app/plugin_host/`
+
+Not the same as `app/plugins/` above. Admin-installed packages (`plugin.json` plus a Python entry module) in `settings.plugins_dir`. Contract: `docs/plugin-system.md`; author documentation: `docs/plugins/`.
+
+| Area | Where |
+|---|---|
+| Host (loader, manifest validation, lifecycle, settings with sealed secrets, state, event bus and outbox, before hooks, scheduler, SDK context `sdk.py`, declarative UI `ui.py`, circuit breaker `health.py`) | `app/plugin_host/`; API `app/api/plugin_host.py`; worker `app/workers/plugins.py`; tests `tests/plugin_host/` |
+| Author guide, API reference (generated), deprecation policy, changelog | `docs/plugins/README.md`, `api-reference.md`, `deprecation-policy.md`, `CHANGELOG.md`; frozen surface per API version `api-surface-<version>.json` |
+| Reference generator and drift checks | `app/plugin_host/testkit/reference.py` (`python -m app.plugin_host.testkit.reference --write` after changing the catalogue, manifest models or SDK); `tests/plugin_host/test_reference.py` fails when the docs and the code disagree or a minor version removes something; the one-line event, SDK and field descriptions are hand-written in that file |
+| Deprecation registry | `app/plugin_host/testkit/deprecations.py` (`DEPRECATIONS`); `check_package` warns authors who use a listed item |
+| Compatibility test kit (real host on in-memory SQLite, fakes for HTTP, VMs and Redis) | `app/plugin_host/testkit/` (`harness.py` the `rackflow` fixture, `check.py` package checks, `fakes.py`, `samples.py` event payloads); documented in `docs/plugins/testing.md`; tests `tests/plugin_host/test_testkit.py` |
+| Template and examples (each has `tests/` using the kit; `pytest examples` runs them, `pytest.ini` lists `examples` in `testpaths`) | `examples/plugins/plugin_template`, `uptime_reminder`, `webhook_notifier` (events and HTTP with a secret), `service_notes` (panel, actions, schedule, MCP tool) |
+| Admin UI, client portal, WHMCS, MCP | `frontend/src/components/PluginManager.svelte`, `PluginPanels.svelte`; WHMCS generic renderer and `plugin_action.php` in `whmcs/modules/servers/rackflow/`; staff MCP tool `plugins` |
+
+**Change the plugin API:** edit the host, then regenerate the reference; a new event needs an `EVENT_NOTES` line and a new SDK member an `SDK_NOTES` line in `reference.py`. Additions are minor versions; removals follow `docs/plugins/deprecation-policy.md`. Plugin kinds (`provides`) do not exist yet; the guide has a marked place for them.
+
 ### Billing integrations — `app/integrations/`
 
 | File | Role |
@@ -593,6 +609,7 @@ MCP tools live in `app/mcp/tools/` and call DAOs/services/plugins directly (not 
 
 - `INSTALL.md` — install, Docker, initial admin, DHCP/TFTP runners
 - `docs/deploy-runbook.md` — handing production deploys and infrastructure work to the `sauce-complex-deploy` agent: request template, deploy procedure, owner-confirmation list, how to check production when a Forge request id is unknown
+- `docs/plugins/` — plugin author guide, generated API reference, test kit guide and deprecation policy (index: `docs/plugins/README.md`); `docs/plugin-system.md` is the design contract
 - `os_templates/README.md` — template format
 - `isos/README.md` — ISO notes
 - `tests/SECURITY_TESTS.md` — security test guidance

@@ -1,0 +1,32 @@
+{
+  "id": "plugin_template",
+  "name": "Plugin template",
+  "version": "0.1.0",
+  "description": "A starting point for a Rackflow plugin: one setting, one event handler, one panel and one action.",
+  "author": "Your name",
+  "licence": "MIT",
+  "rackflow_api": ">=1.0,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["service.read", "ui.client"],
+  "services": {"types": ["vm", "bare_metal"], "enablement": "opt_in"},
+  "settings": [
+    {"key": "greeting", "label": "Greeting", "type": "string", "default": "Welcome", "max_length": 100,
+     "help": "Shown in the panel after a service is created or a client presses the button."}
+  ],
+  "events": ["service.created"],
+  "actions": [
+    {"id": "say_hello", "label": "Say hello", "audience": ["admin", "client"], "style": "primary",
+     "params": [{"key": "name", "label": "Your name", "type": "string", "max_length": 60}]}
+  ],
+  "ui": {"panels": [{
+    "id": "hello",
+    "title": "Plugin template",
+    "placement": "service",
+    "audience": ["admin", "client"],
+    "elements": [
+      {"type": "field", "label": "Message", "state": "message", "empty": "Nothing yet"},
+      {"type": "field", "label": "Hellos said", "state": "hellos", "format": "number", "empty": "0"},
+      {"type": "action", "action": "say_hello"}
+    ]
+  }]}
+}
