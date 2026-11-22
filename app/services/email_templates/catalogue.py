@@ -210,6 +210,15 @@ _SPECS = (
         sends_today=True,
     ),
     EventTemplateSpec(
+        "service_suspended_nonpayment",
+        "Service suspended for non-payment",
+        "Sent to a retail customer when the non-payment suspension job suspends their service.",
+        (_var("service_name", "string", "The service name", "vm-01", False),) + _INVOICE_VARIABLES,
+        "Your Rackflow service is suspended",
+        _SERVICE + " was suspended because invoice " + _INVOICE + " remains unpaid. "
+        "Sign in to the client area to pay it and restore the service.",
+    ),
+    EventTemplateSpec(
         "ticket_reply",
         "Support ticket reply",
         "Sent to the ticket owner when staff reply.",
@@ -399,6 +408,10 @@ def builtin_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
             f"{service} is suspended for non-payment and will be terminated on "
             f"{data.get('terminate_date') or 'the date shown in your account'} "
             f"unless invoice {invoice} is paid. Please sign in to pay."
+        ),
+        "service_suspended_nonpayment": (
+            f"{service} was suspended because invoice {invoice} remains unpaid. "
+            "Sign in to the client area to pay it and restore the service."
         ),
         "service_terminated": f"{service} was terminated for non-payment.",
         "cancellation_requested": (

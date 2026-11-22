@@ -732,16 +732,24 @@ def cancel_service(
     account: AccountDep,
     db: DbDep,
 ):
+    from uuid import uuid4
+
+    from app.services.billing.cancellations import CancellationError, CancellationService
+
     try:
-        result = CommerceLifecycleService.request_cancellation_sync(
+        CancellationService.check_owner(db, service_id, account_user_id=account.user_id)
+        request = CancellationService.request(
             db,
-            service_id,
-            account,
-            when=body.when,  # type: ignore[arg-type]
+            service_id=service_id,
+            type="immediate" if body.when == "immediate" else "end_of_period",
             reason=body.reason,
+            actor_user_id=account.user_id,
+            source="client",
+            idempotency_key=f"client:{service_id}:{uuid4().hex}",
         )
-    except CommerceLifecycleError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CancellationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    result = CancellationService.summary(db, request)
     db.commit()
     return result
 

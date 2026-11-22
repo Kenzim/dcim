@@ -67,6 +67,10 @@ jobs:
         run: python -m pytest tests/services/test_billing_core_status_mariadb.py -q
       - name: Billing phase 2 chain on MariaDB
         run: python -m pytest tests/migrations/test_billing_p2_mariadb.py -q
+      - name: Late fee job under concurrent runs and payments on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_late_fee_mariadb.py -q
+      - name: Cancellation request racing invoice generation on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_cancel_mariadb.py -q
       - name: Billing job claims and leases under concurrency on MariaDB
         run: python -m pytest tests/services/test_billing_p2_job_claim_mariadb.py -q
       - name: Invoices generated ahead racing the at-due worker on MariaDB
