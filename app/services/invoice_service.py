@@ -103,7 +103,7 @@ V2_EDGES: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
 LEGACY_EDGES: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
     S.DRAFT: frozenset({S.OPEN}),
     S.OPEN: frozenset({S.PAID, S.PENDING_ACTION, S.OVERDUE, S.VOID, S.FAILED}),
-    S.PENDING_ACTION: frozenset({S.PAID, S.OPEN, S.OVERDUE, S.VOID, S.FAILED}),
+    S.PENDING_ACTION: frozenset({S.PAID, S.OPEN, S.VOID, S.FAILED}),
     S.OVERDUE: frozenset({S.PAID, S.PENDING_ACTION, S.VOID, S.FAILED}),
     S.PAID: frozenset({S.OPEN, S.VOID, S.FAILED}),
     S.FAILED: frozenset({S.PAID, S.PENDING_ACTION, S.VOID}),
@@ -1105,7 +1105,8 @@ class InvoiceService:
         )
         if mode == "v2":
             if to == S.OVERDUE:
-                due = InvoiceService.balance(db, invoice).remaining_cents
+                # The caller holds the invoice lock: locking reads (REPEATABLE READ).
+                due = InvoiceService.balance(db, invoice, for_update=True).remaining_cents
                 settlement.fire(
                     db,
                     settlement.INVOICE_OVERDUE,
@@ -1118,7 +1119,7 @@ class InvoiceService:
                     settlement.InvoiceVoided(invoice=invoice, reason=invoice.void_reason),
                 )
             elif to == S.REFUNDED:
-                refunded = InvoiceService.balance(db, invoice).refunded_cents
+                refunded = InvoiceService.balance(db, invoice, for_update=True).refunded_cents
                 settlement.fire(
                     db,
                     settlement.INVOICE_REFUNDED,

@@ -419,11 +419,22 @@ class PaymentOrchestrator:
     def _lock_funding_rows(
         db: Session, reseller_id: int, invoice_id: int
     ) -> tuple[Reseller, Invoice]:
-        """Lock the reseller, its billing account, then the invoice (design 6.3)."""
+        """Lock the invoice's rows in LOCK_ORDER (design 6.3).
+
+        A cycle invoice's service billing first (as the renewal worker locks
+        it), then the reseller, its billing account and the invoice.
+        """
+        if db.get(Reseller, reseller_id) is None:
+            raise InvoiceError("Reseller not found")
+        owner_id = db.scalar(select(Invoice.reseller_id).where(Invoice.id == invoice_id))
+        if owner_id is None or owner_id != reseller_id:
+            raise InvoiceError("Invoice not found")
+        invoice = BillingLocks.for_invoice(
+            db, invoice_id, reseller=True, billing_account=True
+        )
         reseller, _account = BillingLocks.reseller_and_account(db, reseller_id)
         if reseller is None:
             raise InvoiceError("Reseller not found")
-        invoice = InvoiceService.get_for_update(db, invoice_id)
         if invoice is None or invoice.reseller_id != reseller.id:
             raise InvoiceError("Invoice not found")
         if invoice.status == InvoiceStatus.VOID or (

@@ -482,3 +482,89 @@ def test_b6_shadow_records_i1_decision_when_legacy_pays_a_terminal_invoice(
     assert decisions[0]["legacy"]["paid"] is True
     assert decisions[0]["v2"]["paid"] is False
     assert decisions[0]["v2"]["status"] == before.value
+
+
+# ------------------------------------------------------------------ R1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["legacy", "v2"])
+async def test_r1_reseller_paying_its_cycle_invoice_locks_service_billing_first(
+    db_session, lock_calls, mode
+):
+    from app.services.payments.orchestrator import PaymentOrchestrator
+    from app.services.payments.registry import PaymentGatewayRegistry
+    from tests.services.test_recurring_billing_service import (
+        FakeLifecycle,
+        MutableClock,
+        _billing,
+        _config,
+        _service,
+    )
+    from tests.services.test_recurring_billing_service import _reseller as _cycle_reseller
+
+    if mode == "v2":
+        _v2(db_session)
+    due = datetime(2027, 6, 1, 9, tzinfo=timezone.utc)
+    reseller = _cycle_reseller(db_session, f"r1-{mode}")
+    billing = _billing(db_session, reseller, f"r1-{mode}", due)
+    db_session.commit()
+    service = _service(
+        _config(), PaymentOrchestrator(PaymentGatewayRegistry()), FakeLifecycle(), MutableClock(due)
+    )
+    await service.process_batch(db_session, owner="r1")
+    cycle = db_session.execute(
+        select(BillingCycle).where(BillingCycle.service_billing_id == billing.id)
+    ).scalar_one()
+    db_session.commit()
+    lock_calls.clear()
+
+    result = PaymentOrchestrator(PaymentGatewayRegistry()).fund_invoice(
+        db_session, db_session.get(type(reseller), reseller.id), cycle.invoice
+    )
+
+    assert not result.funded
+    kinds = [kind for kind, _ in lock_calls]
+    assert kinds[0] == "service_billing", lock_calls
+    assert "reseller" in kinds and "invoice" in kinds
+    _assert_lock_order(lock_calls)
+
+
+# ------------------------------------------------------------------ R4
+
+
+def test_r4_overdue_and_refunded_event_payloads_use_locking_reads(db_session, account, monkeypatch):
+    from tests.services.test_billing_p1i_invoice_engine import _create
+
+    _v2(db_session)
+    invoice = _create(db_session, account)
+    seen = []
+    original = InvoiceService.balance
+
+    def recording(db, inv, *, for_update=False):
+        seen.append(for_update)
+        return original(db, inv, for_update=for_update)
+
+    monkeypatch.setattr(InvoiceService, "balance", staticmethod(recording))
+    InvoiceService.transition(db_session, invoice, S.OVERDUE, cause="renewal_past_due")
+    _set_status(db_session, invoice, S.PAID)
+    seen.clear()
+    InvoiceService.transition(db_session, invoice, S.REFUNDED, cause="refund")
+
+    assert seen and all(seen), seen
+
+
+# ------------------------------------------------------------------ Nit
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_nit_legacy_table_has_no_pending_action_to_overdue_edge(db_session, account, mode):
+    from app.services.invoice_service import InvoiceTransitionError
+    from tests.services.test_billing_p1i_invoice_engine import _create
+
+    set_setting(db_session, "billing_invoice_engine", mode)
+    invoice = _create(db_session, account)
+    InvoiceService.transition(db_session, invoice, S.PENDING_ACTION, cause="payment_requires_action")
+
+    with pytest.raises(InvoiceTransitionError):
+        InvoiceService.transition(db_session, invoice, S.OVERDUE, cause="renewal_past_due")
