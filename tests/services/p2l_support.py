@@ -1,23 +1,26 @@
-"""Shared fixtures for the P2-L job tests: a fake ``JobRun`` and retail cycle invoices."""
+"""Shared helpers for the P2-L job tests: a database per test, runs through the real runner, retail cycle invoices."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from itertools import count
-from typing import Optional
+from typing import Iterator, Optional
 
-from sqlalchemy.exc import IntegrityError
+import sqlalchemy as sa
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.dao.commerce_dao import BillingAccountDAO
 from app.models.billing_jobs import (
-    BillingJobAction,
-    BillingJobActionStatus,
+    BILLING_JOB_NAMES,
+    BillingJobMode,
+    BillingJobRunItem,
+    BillingJobState,
     BillingNonpaymentPolicy,
     NonpaymentPolicyScope,
 )
 from app.models.billing_series import DocumentSeries, DocumentType
 from app.models.commerce_account import SystemSetting
+from app.models.commerce_email import EmailTemplate
 from app.models.reseller import (
     BillingCycle,
     BillingCycleState,
@@ -37,60 +40,130 @@ _numbers = count(91000)
 _names = count(1)
 
 
-@dataclass
-class FakeRun(JobRun):
-    """The 14.3 run contract: ``W <= T <= now`` and a unique claim row per action."""
-
-    claims: Optional[list] = None
-
-    def in_window(self, trigger_at: datetime) -> bool:
-        if trigger_at.tzinfo is None:
-            trigger_at = trigger_at.replace(tzinfo=timezone.utc)
-        if trigger_at > self.now:
-            return False
-        return self.watermark is None or trigger_at >= self.watermark
-
-    def claim(self, db, subject_key: str) -> bool:
-        try:
-            with db.begin_nested():
-                db.add(
-                    BillingJobAction(
-                        job=self.job,
-                        subject_key=subject_key,
-                        run_id=None,
-                        status=BillingJobActionStatus.CLAIMED,
-                        claimed_at=self.now,
-                    )
-                )
-                db.flush()
-        except IntegrityError:
-            return False
-        if self.claims is not None:
-            self.claims.append(subject_key)
-        return True
+# The email templates the P2-L jobs need enabled to go live.
+JOB_TEMPLATES = (
+    "late_fee_added",
+    "service_suspended_nonpayment",
+    "service_termination_warning",
+    "service_terminated",
+    "cancellation_completed",
+)
 
 
-def make_run(job: str, *, now: datetime = NOW, watermark: Optional[datetime] = None) -> FakeRun:
-    return FakeRun(
-        run_id=1,
+def job_database(tmp_path, monkeypatch) -> Iterator[Session]:
+    """A file SQLite database of its own, so the runner's sessions are separate connections.
+
+    Every job has its state row (off). ``SessionLocal`` points at it for the
+    code that opens its own sessions (number counters, post-commit lifecycle
+    calls). Yields the test's session.
+    """
+    import app.core.database as database
+    from app.core.database import Base
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'p2l.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False)
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    db = factory()
+    for name in BILLING_JOB_NAMES:
+        db.add(BillingJobState(job=name))
+    db.commit()
+    try:
+        yield db
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def enable_templates(db, *events: str, enabled: bool = True) -> None:
+    """Give each event a default template (``enabled`` as given); all the P2-L job templates by default."""
+    for event in events or JOB_TEMPLATES:
+        row = db.query(EmailTemplate).filter_by(event_key=event, product_scope=0).one_or_none()
+        if row is None:
+            row = EmailTemplate(event_key=event, subject=f"{event} subject", body_text=f"{event} body")
+            db.add(row)
+        row.enabled = enabled
+    db.commit()
+
+
+def make_run(
+    job: str, *, now: datetime = NOW, watermark: Optional[datetime] = None, catch_up_days: int = 30
+) -> JobRun:
+    """A live run handle for calling ``plan`` and ``execute`` directly (claims have no run row)."""
+    return JobRun(
+        run_id=None,
         job=job,
         dry_run=False,
         now=now,
         watermark=watermark if watermark is not None else now - timedelta(days=365),
-        claims=[],
+        catch_up_days=catch_up_days,
     )
 
 
-def run_job(db, job, run) -> dict[int, str]:
-    """Plan and execute every candidate once, as the runner's live mode does."""
-    outcomes = {}
-    for subject in list(job.candidates(db, run)):
-        action = job.plan(db, run, subject)
-        if action is None:
-            continue
-        outcomes[subject] = job.execute(db, run, action)
-        db.commit()
-    return outcomes
+def run_items(db, run_id: int) -> dict[str, str]:
+    """``{subject_key: outcome}`` of a run; a skip reads ``skipped:<reason>``."""
+    items = {}
+    for item in db.query(BillingJobRunItem).filter_by(run_id=run_id).order_by(BillingJobRunItem.id):
+        outcome = item.outcome.value
+        reason = (item.detail or {}).get("skip_reason")
+        items[item.subject_key] = f"{outcome}:{reason}" if outcome == "skipped" and reason else outcome
+    return items
+
+
+def run_job(
+    db, job, run: JobRun, *, arm: bool = True, status: str = "complete", dry_run: bool = False
+) -> dict[str, str]:
+    """Run ``job`` once (live unless ``dry_run``) through ``runner.run_job`` at ``run.now``; returns ``run_items``.
+
+    With ``arm`` the job's state is set live with ``live_since`` and the
+    recorded config at ``run.watermark``, so the run's watermark is
+    ``run.watermark`` whatever changed before; without it the state is used as
+    it is. ``job`` (with its test lifecycle) stands in for the registered job
+    for the run. The run must end with ``status``.
+    """
+    from app.services.billing.jobs import registry, runner
+    from app.services.settings_store import set_setting
+
+    set_setting(db, "billing_job_max_catch_up_days", run.catch_up_days)
+    if arm:
+        state = db.get(BillingJobState, job.name)
+        state.mode = BillingJobMode.LIVE
+        state.live_since = run.watermark
+        state.dry_run_since = None
+        state.config_hash = runner.config_hash(db, job)
+        state.config_since = run.watermark
+    db.commit()
+    registered = registry.JOBS[job.name]
+    registry.JOBS[job.name] = job
+    try:
+        result = runner.run_job(
+            sessionmaker(bind=db.get_bind(), autoflush=False), job.name, dry_run=dry_run, trigger="admin", now=run.now
+        )
+    finally:
+        registry.JOBS[job.name] = registered
+    assert result.status == status, result
+    db.expire_all()
+    return run_items(db, result.run_id) if result.run_id is not None else {}
+
+
+def go_live(db, job, at: datetime) -> None:
+    """Take ``job`` from off to dry_run (one scheduled dry run) and live at ``at``, as an operator would."""
+    from app.services.billing.jobs import registry, runner
+
+    registered = registry.JOBS[job.name]
+    registry.JOBS[job.name] = job
+    factory = sessionmaker(bind=db.get_bind(), autoflush=False)
+    try:
+        for to, when in (("dry_run", at - timedelta(days=1)), ("live", at)):
+            with factory() as session:
+                runner.change_mode(session, job.name, to, now=when, actor_user_id=None)
+                session.commit()
+            if to == "dry_run":
+                result = runner.run_job(factory, job.name, dry_run=True, trigger="schedule", now=when)
+                assert result.status == "complete", result
+    finally:
+        registry.JOBS[job.name] = registered
+    db.expire_all()
 
 
 def engine_v2(db) -> None:

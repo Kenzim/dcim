@@ -7,6 +7,10 @@ unpaid cycle invoices for periods starting at or after ``effective_at`` when
 ``invoice_action`` is ``cancel_unpaid``, mark the request ``completed`` and
 queue ``cancellation_completed``. A request whose service is not yet
 terminated is left for a later run.
+
+One transaction: ``execute`` returns ``done`` for the runner to commit, and
+the ``billing.cancellation_completed`` audit entry records the cancelled
+invoice ids.
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.billing_jobs import (
-    BillingJobActionStatus,
     CancellationInvoiceAction,
     CancellationRequest,
     CancellationStatus,
@@ -26,12 +29,12 @@ from app.models.service import Service, ServiceStatus
 from app.services.billing.jobs.base import JobRun, PlannedAction
 from app.services.billing.jobs.nonpayment import (
     CANCELLATION_COMPLETED,
-    finish_action,
     send_billing_email,
     utc,
 )
 
 JOB = "cancellations"
+AUDIT_COMPLETED = "billing.cancellation_completed"
 
 
 class CancellationsJob:
@@ -71,7 +74,7 @@ class CancellationsJob:
         ):
             return None
         trigger = utc(request.effective_at)
-        if not run.in_window(trigger):
+        if not run.reached(trigger):
             return None
         service = db.get(Service, request.service_id)
         if service is None or service.status != ServiceStatus.TERMINATED:
@@ -87,10 +90,9 @@ class CancellationsJob:
         return self._evaluate(db, run, db.get(CancellationRequest, int(subject_id)))
 
     def execute(self, db: Session, run: JobRun, action: PlannedAction) -> str:
+        from app.services.audit_service import AuditService
         from app.services.billing.cancellations import _billing_for_service, cancel_unpaid_invoices
 
-        if action.action != "complete":
-            return "skipped"
         _billing_for_service(db, int(action.detail["service_id"]))
         db.flush()
         request = db.execute(
@@ -103,8 +105,8 @@ class CancellationsJob:
         if service is not None:
             db.refresh(service)
         current = self._evaluate(db, run, request)
-        if current is None or current.subject_key != action.subject_key:
-            return "skipped"
+        if current is None or current.subject_key != action.subject_key or not run.in_window(current.trigger_at):
+            return "skipped:outside_window"
         if not run.claim(db, current.subject_key):
             return "already_done"
         cancelled: list[int] = []
@@ -114,6 +116,14 @@ class CancellationsJob:
             )
         request.status = CancellationStatus.COMPLETED
         request.completed_at = run.now
+        AuditService.log(
+            db,
+            action=AUDIT_COMPLETED,
+            resource_type="cancellation_request",
+            resource_id=str(request.id),
+            billing_account_id=request.billing_account_id,
+            metadata={**current.detail, "cancelled_invoice_ids": cancelled, "subject_key": current.subject_key},
+        )
         send_billing_email(
             db,
             event=CANCELLATION_COMPLETED,
@@ -123,10 +133,6 @@ class CancellationsJob:
             reseller_id=request.reseller_id,
             related_type="service",
             related_id=str(request.service_id),
-        )
-        finish_action(
-            db, JOB, current.subject_key, BillingJobActionStatus.DONE, now=run.now,
-            detail={**current.detail, "cancelled_invoice_ids": cancelled},
         )
         return "done"
 

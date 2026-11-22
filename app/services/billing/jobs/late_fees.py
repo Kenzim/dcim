@@ -7,6 +7,10 @@ The amount is ``billing_late_fee_fixed_cents`` (only for invoices in
 remaining balance (rule ``late_fee_percentage``), clamped to
 ``billing_late_fee_min_cents`` and ``billing_late_fee_max_cents`` (0: no
 maximum). The fee line has tax class ``outside_scope``.
+
+One transaction: ``execute`` claims, issues the debit note, audits
+``billing.late_fee_added`` (with the debit note id) and queues
+``late_fee_added``, and returns ``done`` for the runner to commit.
 """
 
 from __future__ import annotations
@@ -17,14 +21,12 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.billing_jobs import BillingJobActionStatus
 from app.models.commerce_invoice_ext import InvoiceLineKind
 from app.models.invoice_adjustment import AdjustmentReason
 from app.models.reseller import Invoice, InvoiceDocumentType, InvoicePurpose, InvoiceStatus
 from app.services.billing.jobs.base import JobRun, PlannedAction
 from app.services.billing.jobs.nonpayment import (
     LATE_FEE_ADDED,
-    finish_action,
     send_billing_email,
     utc,
 )
@@ -32,6 +34,8 @@ from app.services.billing.rounding import late_fee_percentage
 from app.services.invoice_service import UNPAID_STATUSES, InvoiceService
 
 JOB = "late_fees"
+ACTION = "late_fee"
+AUDIT_LATE_FEE = "billing.late_fee_added"
 
 SETTING_KEYS = (
     "billing_late_fee_type",
@@ -150,7 +154,11 @@ class LateFeesJob:
     def _evaluate(
         self, db: Session, run: JobRun, invoice: Invoice, config: dict[str, Any], *, for_update: bool
     ) -> Optional[PlannedAction]:
-        """The action for ``invoice`` under ``config``, or None outside the window."""
+        """The action for ``invoice`` once its trigger is reached, else None.
+
+        ``detail["skip_reason"]`` is set when no fee is due. A stale trigger
+        gets a plain action, which the runner records as stale once.
+        """
         if invoice.status not in FEE_STATUSES or invoice.due_at is None:
             return None
         if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
@@ -163,17 +171,17 @@ class LateFeesJob:
         ):
             return None
         trigger = utc(invoice.due_at) + timedelta(days=int(config["billing_late_fee_days"]))
-        if not run.in_window(trigger):
+        fee_type = config["billing_late_fee_type"]
+        if fee_type not in ("fixed", "percent") or not run.reached(trigger):
             return None
         key = f"invoice:{invoice.id}:late_fee"
         detail: dict[str, Any] = {"invoice_id": invoice.id, "currency": invoice.currency}
+        if run.is_stale(trigger):
+            return PlannedAction(key, ACTION, trigger, detail)
 
         def skip(reason: str) -> PlannedAction:
-            return PlannedAction(key, "skip", trigger, {**detail, "reason": reason})
+            return PlannedAction(key, ACTION, trigger, {**detail, "skip_reason": reason})
 
-        fee_type = config["billing_late_fee_type"]
-        if fee_type not in ("fixed", "percent"):
-            return None
         if _exempt(db, invoice):
             return skip(SKIP_EXEMPT)
         if _disputed(db, invoice.id, for_update=for_update):
@@ -194,7 +202,7 @@ class LateFeesJob:
         )
         if fee <= 0:
             return skip(SKIP_ZERO)
-        return PlannedAction(key, "late_fee", trigger, {**detail, "fee_cents": fee, "fee_type": fee_type})
+        return PlannedAction(key, ACTION, trigger, {**detail, "fee_cents": fee, "fee_type": fee_type})
 
     def plan(self, db: Session, run: JobRun, subject_id: int) -> Optional[PlannedAction]:
         invoice = db.get(Invoice, int(subject_id))
@@ -203,21 +211,24 @@ class LateFeesJob:
         return self._evaluate(db, run, invoice, _settings(db), for_update=False)
 
     def execute(self, db: Session, run: JobRun, action: PlannedAction) -> str:
+        from app.services.audit_service import AuditService
         from app.services.billing_locks import BillingLocks
         from app.services.invoice_adjustment_service import InvoiceAdjustmentService
         from app.services.refund_service import invoice_engine_mode
 
-        if action.action == "skip":
-            return "skipped"
-        if invoice_engine_mode(db) != "v2":
-            return "skipped"
         invoice_id = int(action.detail["invoice_id"])
         invoice = BillingLocks.for_invoice(db, invoice_id, reseller=True, billing_account=True)
         if invoice is None:
-            return "skipped"
+            return "skipped:gone"
+        if invoice_engine_mode(db) != "v2":
+            return "skipped:invoice_engine"
+        if invoice.status not in FEE_STATUSES:
+            return "skipped:not_open"
         current = self._evaluate(db, run, invoice, _settings(db), for_update=True)
-        if current is None or current.action != "late_fee" or current.subject_key != action.subject_key:
-            return "skipped"
+        if current is None or current.subject_key != action.subject_key or not run.in_window(current.trigger_at):
+            return "skipped:outside_window"
+        if current.detail.get("skip_reason"):
+            return f"skipped:{current.detail['skip_reason']}"
         if not run.claim(db, current.subject_key):
             return "already_done"
         fee = int(current.detail["fee_cents"])
@@ -240,6 +251,16 @@ class LateFeesJob:
             idempotency_key=f"late_fee:{invoice.id}",
             reason_text="Late payment fee",
         )
+        # The claim row carries no detail in a one-transaction job; the audit
+        # entry records which debit note the fee became.
+        AuditService.log(
+            db,
+            action=AUDIT_LATE_FEE,
+            resource_type="invoice",
+            resource_id=str(invoice.id),
+            billing_account_id=invoice.billing_account_id,
+            metadata={**current.detail, "debit_note_id": note.id, "subject_key": current.subject_key},
+        )
         send_billing_email(
             db,
             event=LATE_FEE_ADDED,
@@ -255,14 +276,6 @@ class LateFeesJob:
             reseller_id=invoice.reseller_id,
             related_type="invoice",
             related_id=str(invoice.id),
-        )
-        finish_action(
-            db,
-            JOB,
-            current.subject_key,
-            BillingJobActionStatus.DONE,
-            now=run.now,
-            detail={**current.detail, "debit_note_id": note.id},
         )
         return "done"
 

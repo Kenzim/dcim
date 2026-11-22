@@ -1,10 +1,14 @@
-"""Job ``nonpayment_termination`` (P2-L, design 10.5): notice, its age, live runs, needs_review."""
+"""Job ``nonpayment_termination`` (P2-L, design 10.5): notice, its age, live runs, needs_review.
+
+The runs go through ``runner.run_job`` on a database of the test's own.
+"""
 
 from __future__ import annotations
 
 from datetime import timedelta
 
 import pytest
+from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.models.billing_jobs import (
@@ -13,6 +17,7 @@ from app.models.billing_jobs import (
     NonpaymentPolicyScope,
     UnpaidInvoiceAction,
 )
+from app.models.commerce_audit import UserAuditEvent
 from app.models.reseller import (
     BillingCycle,
     BillingCycleState,
@@ -27,10 +32,12 @@ from app.services.billing.jobs import termination as termination_module
 from app.services.billing.jobs.suspension import NonpaymentSuspensionJob
 from app.services.billing.jobs.termination import NonpaymentTerminationJob, notice_key, terminate_key
 from app.services.commerce_lifecycle_service import ServiceTerminationError
-from tests.conftest import TestingSessionLocal
 from tests.services.p2l_support import (
     NOW,
+    enable_templates,
     engine_v2,
+    go_live,
+    job_database,
     make_account,
     make_billing,
     make_cycle_invoice,
@@ -46,13 +53,16 @@ JOB = "nonpayment_termination"
 
 
 @pytest.fixture
-def env(db_session, monkeypatch):
-    import app.core.database as database
+def db_session(tmp_path, monkeypatch):
+    yield from job_database(tmp_path, monkeypatch)
 
-    monkeypatch.setattr(database, "SessionLocal", TestingSessionLocal)
+
+@pytest.fixture
+def env(db_session, monkeypatch):
     emitted: list[tuple[str, dict]] = []
     monkeypatch.setattr(plugin_events, "emit", lambda db, name, payload, **kw: emitted.append((name, payload)))
     engine_v2(db_session)
+    enable_templates(db_session)
     set_policy(db_session, suspend_after_days=5, terminate_after_days=30, termination_notice_days=7)
     account = make_account(db_session)
     billing = make_billing(db_session, account, make_service(db_session, account))
@@ -77,10 +87,14 @@ def test_notice_then_terminate_after_the_notice_age(db_session, env):
     due = NOW - timedelta(days=24)  # notice at due + 23, termination at due + 30
     invoice = _suspend_retail(db_session, billing, due)
     job = NonpaymentTerminationJob()
+    notice = notice_key(billing.service_id, invoice.id)
 
-    assert run_job(db_session, job, make_run(JOB, now=NOW)) == {billing.id: "done"}
+    assert run_job(db_session, job, make_run(JOB, now=NOW)) == {notice: "done"}
     claims = _claims(db_session)
-    assert list(claims) == [notice_key(billing.service_id, invoice.id)]
+    assert list(claims) == [notice]
+    # One transaction: the runner marks the notice done at the run's now.
+    assert claims[notice].status == BillingJobActionStatus.DONE
+    assert claims[notice].finished_at.replace(tzinfo=NOW.tzinfo) == NOW
     assert ("service.termination_scheduled", {
         "service_id": billing.service_id,
         "terminate_at": (due + timedelta(days=30)).isoformat(),
@@ -90,14 +104,54 @@ def test_notice_then_terminate_after_the_notice_age(db_session, env):
     # Due time reached, but the notice is only 6 days old.
     assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=6))) == {}
     # Seven days after the notice: terminated.
-    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {billing.id: "done"}
-    db_session.expire_all()
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {
+        terminate_key(billing.service_id): "done"
+    }
     assert db_session.get(Service, billing.service_id).status == ServiceStatus.TERMINATED
     row = db_session.get(ServiceBilling, billing.id)
     assert row.status == ServiceBillingStatus.CANCELLED
-    assert _claims(db_session)[terminate_key(billing.service_id)].status == BillingJobActionStatus.DONE
+    terminated = _claims(db_session)[terminate_key(billing.service_id)]
+    assert terminated.status == BillingJobActionStatus.DONE
+    assert terminated.detail["cancelled_invoice_ids"] == []
+    assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_terminated").count() == 1
     # keep (the default): the debt stays open.
     assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.OVERDUE
+
+
+def test_the_terminate_claim_commits_before_the_lifecycle_call(db_session, env, monkeypatch):
+    import app.services.commerce_lifecycle_service as lifecycle_module
+
+    _, billing, _ = env
+    _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    job = NonpaymentTerminationJob()
+    run_job(db_session, job, make_run(JOB, now=NOW))
+    real = lifecycle_module.terminate_service
+    seen = []
+
+    async def checking(db, service, **kwargs):
+        with sessionmaker(bind=db_session.get_bind())() as other:
+            seen.append(other.query(BillingJobAction).filter_by(subject_key=terminate_key(service.id)).one().status)
+        return await real(db, service, **kwargs)
+
+    monkeypatch.setattr(lifecycle_module, "terminate_service", checking)
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {
+        terminate_key(billing.service_id): "done"
+    }
+    assert seen == [BillingJobActionStatus.CLAIMED]
+
+
+def test_the_forecast_steps_day_by_day_to_the_notice_without_writing(db_session, env):
+    from app.services.billing.jobs import runner
+
+    _, billing, _ = env
+    due = NOW - timedelta(days=20)  # notice at due + 23 = NOW + 3
+    invoice = _suspend_retail(db_session, billing, due)
+    forecast = runner.forecast(db_session, JOB, now=NOW, days=5)
+    assert [(row["subject_key"], row["trigger_at"]) for row in forecast] == [
+        (notice_key(billing.service_id, invoice.id), (due + timedelta(days=23)).isoformat())
+    ]
+    assert _claims(db_session) == {}
+    assert db_session.get(Service, billing.service_id).status == ServiceStatus.SUSPENDED
 
 
 def test_no_termination_without_a_notice(db_session, env):
@@ -113,24 +167,42 @@ def test_no_termination_without_a_notice(db_session, env):
     assert invoice.id
 
 
-def test_a_dry_run_notice_does_not_count(db_session, env):
+def test_a_dry_run_plans_the_notice_but_leaves_no_claim(db_session, env):
     _, billing, _ = env
     invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
     job = NonpaymentTerminationJob()
-    run = make_run(JOB, now=NOW)
-    run.dry_run = True
-    action = job.plan(db_session, run, billing.id)
-    assert action is not None and action.action == "notice"
-    assert job.execute(db_session, run, action) == "skipped"
-    db_session.add(
-        BillingJobAction(
-            job=JOB, subject_key=notice_key(billing.service_id, invoice.id), status=BillingJobActionStatus.DONE,
-            claimed_at=NOW, finished_at=NOW - timedelta(days=30), detail={"dry_run": True},
-        )
-    )
-    db_session.commit()
-    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=10))) == {}
+    notice = notice_key(billing.service_id, invoice.id)
+    assert run_job(db_session, job, make_run(JOB, now=NOW), dry_run=True) == {notice: "planned"}
+    assert _claims(db_session) == {}
+    # The next live run still starts with the notice, not the termination.
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=1))) == {notice: "done"}
     assert db_session.get(Service, billing.service_id).status == ServiceStatus.SUSPENDED
+
+
+def test_a_disabled_warning_template_skips_the_notice_unclaimed(db_session, env):
+    _, billing, _ = env
+    invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    job, run = NonpaymentTerminationJob(), make_run(JOB, now=NOW)
+    action = job.plan(db_session, run, billing.id)
+    enable_templates(db_session, "service_termination_warning", enabled=False)
+    assert job.execute(db_session, run, action) == "skipped:template_disabled"
+    db_session.rollback()
+    assert _claims(db_session) == {}
+    # Sent once the template is enabled again.
+    enable_templates(db_session, "service_termination_warning")
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(hours=1))) == {
+        notice_key(billing.service_id, invoice.id): "done"
+    }
+
+
+def test_a_policy_change_moves_the_watermark(db_session, env):
+    _, billing, _ = env
+    _suspend_retail(db_session, billing, NOW - timedelta(days=24))  # notice at NOW - 1
+    job = NonpaymentTerminationJob()
+    go_live(db_session, job, NOW - timedelta(days=2))
+    set_policy(db_session, termination_notice_days=8)  # notice at NOW - 2
+    assert run_job(db_session, job, make_run(JOB, now=NOW), arm=False) == {}
+    assert _claims(db_session) == {}
 
 
 def test_paid_before_termination_is_not_terminated(db_session, env):
@@ -167,13 +239,14 @@ def test_failed_termination_needs_review_and_is_never_retried(db_session, env, m
     import app.services.commerce_lifecycle_service as lifecycle_module
 
     monkeypatch.setattr(lifecycle_module, "terminate_service", failing)
-    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=8))) == {billing.id: "failed"}
-    claim = _claims(db_session)[terminate_key(billing.service_id)]
+    terminate = terminate_key(billing.service_id)
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=8))) == {terminate: "failed"}
+    claim = _claims(db_session)[terminate]
     assert claim.status == BillingJobActionStatus.NEEDS_REVIEW
     assert "power off failed" in claim.detail["error"]
     assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.SUSPENDED_NONPAYMENT
     monkeypatch.undo()
-    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=9))) == {billing.id: "already_done"}
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=9))) == {terminate: "already_done"}
     assert db_session.get(Service, billing.service_id).status == ServiceStatus.SUSPENDED
 
 
@@ -184,17 +257,20 @@ def test_cancel_action_cancels_the_unpaid_invoices(db_session, env):
     job = NonpaymentTerminationJob()
     run_job(db_session, job, make_run(JOB, now=NOW))
     run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7)))
-    db_session.expire_all()
     assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.VOID
     cycle = db_session.query(BillingCycle).filter_by(invoice_id=invoice.id).one()
     assert cycle.state == BillingCycleState.CANCELLED
+    assert _claims(db_session)[terminate_key(billing.service_id)].detail["cancelled_invoice_ids"] == [invoice.id]
 
 
 def test_policy_null_never_terminates(db_session, env):
     _, billing, _ = env
     set_policy(db_session, terminate_after_days=None)
     _suspend_retail(db_session, billing, NOW - timedelta(days=60))
-    assert run_job(db_session, NonpaymentTerminationJob(), make_run(JOB, now=NOW)) == {}
+    job = NonpaymentTerminationJob()
+    assert job.plan(db_session, make_run(JOB, now=NOW), billing.id) is None
+    # No policy terminates, so a live run is skipped as a whole.
+    assert run_job(db_session, job, make_run(JOB, now=NOW), status="skipped") == {}
 
 
 def test_reseller_service_suspended_by_the_recurring_pass(db_session, env):
@@ -208,16 +284,16 @@ def test_reseller_service_suspended_by_the_recurring_pass(db_session, env):
     assert run_job(db_session, job, make_run(JOB, now=NOW)) == {}
     db_session.query(BillingCycle).filter_by(invoice_id=invoice.id).one().state = BillingCycleState.SUSPENDED
     db_session.commit()
-    assert run_job(db_session, job, make_run(JOB, now=NOW)) == {billing.id: "done"}
-    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {billing.id: "done"}
-    db_session.expire_all()
+    assert run_job(db_session, job, make_run(JOB, now=NOW)) == {notice_key(service.id, invoice.id): "done"}
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {terminate_key(service.id): "done"}
     assert db_session.get(Service, service.id).status == ServiceStatus.TERMINATED
 
 
 def test_live_preconditions(db_session, env):
-    problems = NonpaymentTerminationJob().live_preconditions(db_session)
-    assert not any("terminate_after_days" in problem for problem in problems)
-    assert any("service_termination_warning" in problem for problem in problems)
+    job = NonpaymentTerminationJob()
+    assert job.live_preconditions(db_session) == []
+    enable_templates(db_session, "service_termination_warning", enabled=False)
+    assert job.live_preconditions(db_session) == ["the service_termination_warning email template is not enabled"]
     assert termination_module.JOB == JOB
 
 

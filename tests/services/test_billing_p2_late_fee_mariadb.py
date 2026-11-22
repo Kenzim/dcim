@@ -86,17 +86,28 @@ def _notes(sessions, invoice_id: int) -> int:
 
 
 def _run_once(sessions, invoice_id: int, results: list, *, before_execute=None) -> None:
+    """One item as the runner does it: plan, a fresh transaction, execute, then commit on ``done`` only.
+
+    Two runs of one job are kept apart by the run lease, so the race is driven
+    one level below the runner to reach the claim and the invoice lock.
+    """
     from app.services.billing.jobs.late_fees import LateFeesJob
+    from app.services.billing.jobs.runner import _mark_claims_done
     from tests.services.p2l_support import make_run
 
     job, run = LateFeesJob(), make_run("late_fees")
     with sessions() as db:
         try:
             action = job.plan(db, run, invoice_id)
+            db.rollback()
             if before_execute is not None:
                 before_execute()
             outcome = job.execute(db, run, action) if action is not None else "none"
-            db.commit()
+            if outcome == "done":
+                _mark_claims_done(db, run)
+                db.commit()
+            else:
+                db.rollback()
             results.append(outcome)
         except Exception as exc:  # noqa: BLE001 - reported through results
             db.rollback()
@@ -157,7 +168,7 @@ def test_payment_committed_first_leaves_no_fee(sessions):
     runner.start()
     payer.join(30)
     runner.join(30)
-    assert results == ["skipped"], results
+    assert results == ["skipped:not_open"], results
     assert _notes(sessions, invoice_id) == 0
     with sessions() as db:
         assert db.get(Invoice, invoice_id).status == InvoiceStatus.PAID

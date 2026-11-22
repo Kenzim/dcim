@@ -1,9 +1,9 @@
 """Helpers shared by the late fee, non-payment and cancellation jobs (design 10.3 to 10.6).
 
-Policy lookup (``billing_nonpayment_policies``), the unpaid cycle invoices of a
-billing, the claim rows of ``billing_job_actions`` after the effect, whether a
-suspended service is suspended by the ``nonpayment_suspension`` job, and the
-emails these jobs send.
+Policy lookup (``billing_nonpayment_policies``) and the policy data hashed into
+the jobs' watermark, the unpaid cycle invoices of a billing, the claim rows of
+``billing_job_actions``, whether a suspended service is suspended by the
+``nonpayment_suspension`` job, and the emails these jobs send.
 """
 
 from __future__ import annotations
@@ -127,6 +127,27 @@ def policy_for_billing(db: Session, billing: ServiceBilling) -> Optional[Policy]
     return None
 
 
+def policy_config(db: Session, *, columns: tuple[str, ...], exclude_scope: Optional[NonpaymentPolicyScope] = None) -> list:
+    """The enabled policy rows as data for a job's ``config_extra``.
+
+    A change to any of them moves the job's watermark, so a new or edited
+    policy never acts on triggers that came before it.
+    """
+    statement = select(BillingNonpaymentPolicy).where(BillingNonpaymentPolicy.enabled.is_(True))
+    if exclude_scope is not None:
+        statement = statement.where(BillingNonpaymentPolicy.scope != exclude_scope)
+    rows = db.execute(statement.order_by(BillingNonpaymentPolicy.id)).scalars()
+    return [
+        {
+            "id": int(row.id),
+            "scope": getattr(row.scope, "value", row.scope),
+            "product_id": int(row.product_id),
+            **{name: getattr(getattr(row, name), "value", getattr(row, name)) for name in columns},
+        }
+        for row in rows
+    ]
+
+
 # ---------------------------------------------------------------- invoices
 
 
@@ -164,42 +185,10 @@ def cycle_billing_id(db: Session, invoice_id: int) -> Optional[int]:
 # ---------------------------------------------------------------- claim rows
 
 
-def action_row(db: Session, job: str, subject_key: str, *, for_update: bool = False) -> Optional[BillingJobAction]:
-    statement = select(BillingJobAction).where(
-        BillingJobAction.job == job, BillingJobAction.subject_key == subject_key
-    )
-    if for_update:
-        db.flush()
-        statement = statement.with_for_update().execution_options(populate_existing=True)
-    return db.execute(statement).scalar_one_or_none()
-
-
-def finish_action(
-    db: Session,
-    job: str,
-    subject_key: str,
-    status: BillingJobActionStatus,
-    *,
-    now: datetime,
-    detail: Optional[dict[str, Any]] = None,
-) -> BillingJobAction:
-    """Set the claim row of an action to its final status, merging ``detail``."""
-    row = action_row(db, job, subject_key, for_update=True)
-    if row is None:
-        raise RuntimeError(f"no claim row for {job} {subject_key}")
-    row.status = status
-    row.finished_at = now
-    row.detail = {**(row.detail or {}), **(detail or {})}
-    db.flush()
-    return row
-
-
-def lease_held(db: Session, run: Any) -> bool:
-    """Whether the run still holds its job lease, when the run can tell."""
-    check = getattr(run, "holds_lease", None)
-    if check is None:
-        return True
-    return bool(check(db))
+def action_row(db: Session, job: str, subject_key: str) -> Optional[BillingJobAction]:
+    return db.execute(
+        select(BillingJobAction).where(BillingJobAction.job == job, BillingJobAction.subject_key == subject_key)
+    ).scalar_one_or_none()
 
 
 # ---------------------------------------------------------------- suspensions

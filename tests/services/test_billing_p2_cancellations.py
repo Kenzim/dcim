@@ -7,7 +7,8 @@ from datetime import timedelta
 import pytest
 
 import app.models  # noqa: F401
-from app.models.billing_jobs import BillingJobAction, CancellationRequest, CancellationStatus
+from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus, CancellationRequest, CancellationStatus
+from app.models.commerce_audit import UserAuditEvent
 from app.models.reseller import (
     BillingCycle,
     BillingCycleState,
@@ -23,12 +24,13 @@ from app.services.billing.cancellations import (
     CancellationService,
     cancel_unpaid_invoices,
 )
-from app.services.billing.jobs.cancellations import CancellationsJob
+from app.services.billing.jobs.cancellations import AUDIT_COMPLETED, CancellationsJob
 from app.services.settings_store import set_setting
-from tests.conftest import TestingSessionLocal
 from tests.services.p2l_support import (
     NOW,
+    enable_templates,
     engine_v2,
+    job_database,
     make_account,
     make_billing,
     make_cycle_invoice,
@@ -40,13 +42,16 @@ from tests.services.test_billing_p2_suspension import FakeLifecycle
 
 
 @pytest.fixture
-def env(db_session, monkeypatch):
-    import app.core.database as database
+def db_session(tmp_path, monkeypatch):
+    yield from job_database(tmp_path, monkeypatch)
 
-    monkeypatch.setattr(database, "SessionLocal", TestingSessionLocal)
+
+@pytest.fixture
+def env(db_session, monkeypatch):
     emitted: list[tuple[str, dict]] = []
     monkeypatch.setattr(plugin_events, "emit", lambda db, name, payload, **kw: emitted.append((name, payload)))
     engine_v2(db_session)
+    enable_templates(db_session)
     account = make_account(db_session)
     billing = make_billing(db_session, account, make_service(db_session, account), next_charge_at=NOW + timedelta(days=10))
     return account, billing, emitted
@@ -167,11 +172,17 @@ def test_job_completes_once_the_service_is_terminated(db_session, env):
     db_session.commit()
     # An invoice generated after the request for the cancelled period.
     stray = make_cycle_invoice(db_session, billing, due_at=NOW + timedelta(days=10), status=InvoiceStatus.OPEN)
-    assert run_job(db_session, job, later) == {request.id: "done"}
-    db_session.expire_all()
+    key = f"cancellation:{request.id}:complete"
+    assert run_job(db_session, job, later) == {key: "done"}
     assert db_session.get(CancellationRequest, request.id).status == CancellationStatus.COMPLETED
     assert db_session.get(Invoice, stray.id).status == InvoiceStatus.VOID
-    assert db_session.query(BillingJobAction).filter_by(job="cancellations").count() == 1
+    # One transaction: the runner marks the claim done; the audit entry lists the cancelled invoices.
+    claim = db_session.query(BillingJobAction).filter_by(job="cancellations").one()
+    assert claim.subject_key == key and claim.status == BillingJobActionStatus.DONE
+    audit = db_session.query(UserAuditEvent).filter_by(action=AUDIT_COMPLETED).one()
+    assert audit.resource_id == str(request.id)
+    assert audit.event_metadata["cancelled_invoice_ids"] == [stray.id]
+    assert run_job(db_session, job, make_run("cancellations", now=NOW + timedelta(days=12), watermark=NOW)) == {}
 
 
 def test_job_never_acts_before_its_watermark(db_session, env):

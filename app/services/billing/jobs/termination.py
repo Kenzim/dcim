@@ -5,16 +5,21 @@ Policy as for suspension, with ``terminate_after_days`` (NULL: never) and
 for non-payment, ``T_t = due_at + terminate_after_days`` and the notice time
 ``T_n = T_t - termination_notice_days``:
 
-- *notice*: when ``W <= T_n <= now``, claim
+- *notice* (one transaction): when ``W <= T_n <= now``, claim
   ``service:{id}:termination_notice:invoice:{invoice_id}``, queue
-  ``service_termination_warning`` and emit ``service.termination_scheduled``;
-- *terminate*: when the notice for the same invoice is ``done``, was sent by a
-  live run at least ``termination_notice_days`` before now, ``T_t <= now``, the
-  invoice still has a balance and the service is still suspended for
-  non-payment. Claim ``service:{id}:terminate``, commit, call
-  ``terminate_service``, then record ``done`` (ending the billing, applying
-  ``unpaid_invoice_action_on_terminate`` and queueing ``service_terminated``)
-  or ``needs_review``, never retried.
+  ``service_termination_warning`` and emit ``service.termination_scheduled``.
+  The email is the action, so while its template is disabled the notice is
+  skipped unclaimed (``template_disabled``) and sent once it is enabled;
+- *terminate* (two transactions): when the notice for the same invoice is
+  ``done``, was sent at least ``termination_notice_days`` before now,
+  ``T_t <= now``, the invoice still has a balance and the service is still
+  suspended for non-payment. Claim ``service:{id}:terminate``, commit, call
+  ``terminate_service``, then ``JobRun.finish`` with ``done`` (ending the
+  billing, applying ``unpaid_invoice_action_on_terminate`` and queueing
+  ``service_terminated``) or ``needs_review``, never retried.
+
+The enabled policies are part of the job's config hash, so a policy change
+moves the watermark.
 
 "Suspended for non-payment" is, for retail, billing ``suspended_nonpayment``
 with the service's suspension still the ``nonpayment_suspension`` job's; for a
@@ -47,12 +52,12 @@ from app.services.billing.jobs.nonpayment import (
     TERMINATION_JOB,
     Policy,
     action_row,
-    finish_action,
     latest_suspension_claim,
-    lease_held,
+    policy_config,
     policy_for_billing,
     send_billing_email,
     suspension_is_ours,
+    template_enabled,
     unpaid_cycle_invoices,
     utc,
 )
@@ -97,6 +102,12 @@ class NonpaymentTerminationJob:
     def __init__(self, lifecycle_factory: Optional[Callable[[], Any]] = None) -> None:
         self.lifecycle_factory = lifecycle_factory or _default_lifecycle
 
+    def config_extra(self, db: Session) -> list:
+        return policy_config(
+            db,
+            columns=("terminate_after_days", "termination_notice_days", "unpaid_invoice_action_on_terminate"),
+        )
+
     @staticmethod
     def _track(db: Session) -> str:
         from app.services.settings_store import get_setting
@@ -123,7 +134,11 @@ class NonpaymentTerminationJob:
     def _evaluate(
         self, db: Session, run: JobRun, billing: Optional[ServiceBilling], *, only_invoice: Optional[int] = None
     ) -> Optional[PlannedAction]:
-        """The next action for ``billing``: a terminate when one is due, else a notice."""
+        """The next action for ``billing``: a terminate when one is due, else a notice.
+
+        A stale notice is returned (the runner records it once) only when no
+        later invoice's notice is in the window.
+        """
         if billing is None or billing.service is None:
             return None
         track = self._track(db)
@@ -140,6 +155,7 @@ class NonpaymentTerminationJob:
             return None
         service_id = int(billing.service_id)
         notice_days = timedelta(days=int(policy.termination_notice_days))
+        stale: Optional[PlannedAction] = None
         for invoice in unpaid_cycle_invoices(db, billing.id):
             if only_invoice is not None and invoice.id != only_invoice:
                 continue
@@ -148,20 +164,23 @@ class NonpaymentTerminationJob:
             detail = self._detail(billing, invoice, policy, terminate_at)
             notice = action_row(db, JOB, notice_key(service_id, invoice.id))
             if notice is not None:
-                if notice.status != BillingJobActionStatus.DONE or (notice.detail or {}).get("dry_run"):
+                if notice.status != BillingJobActionStatus.DONE:
                     continue
                 sent_at = utc(notice.finished_at)
                 if sent_at is None or sent_at > run.now - notice_days or terminate_at > run.now:
                     return None
-                if not run.in_window(terminate_at) or not suspended_for_nonpayment(db, billing, invoice):
+                if not run.reached(terminate_at) or not suspended_for_nonpayment(db, billing, invoice):
                     return None
                 return PlannedAction(terminate_key(service_id), "terminate", terminate_at, detail)
             if notice_at > run.now:
                 break
-            if not run.in_window(notice_at) or not suspended_for_nonpayment(db, billing, invoice):
+            if not run.reached(notice_at) or not suspended_for_nonpayment(db, billing, invoice):
                 continue
-            return PlannedAction(notice_key(service_id, invoice.id), "notice", notice_at, detail)
-        return None
+            action = PlannedAction(notice_key(service_id, invoice.id), "notice", notice_at, detail)
+            if not run.is_stale(notice_at):
+                return action
+            stale = stale or action
+        return stale
 
     @staticmethod
     def _detail(billing: ServiceBilling, invoice: Invoice, policy: Policy, terminate_at: datetime) -> dict[str, Any]:
@@ -180,32 +199,36 @@ class NonpaymentTerminationJob:
     def execute(self, db: Session, run: JobRun, action: PlannedAction) -> str:
         from app.services.billing_locks import BillingLocks
 
-        if action.action not in ("notice", "terminate") or run.dry_run:
-            return "skipped"
         billing = BillingLocks.service_billing(db, int(action.detail["billing_id"]))
         invoice = BillingLocks.for_invoice(db, int(action.detail["invoice_id"]))
         if billing is None or invoice is None or billing.service is None:
-            return "skipped"
+            return "skipped:gone"
         db.refresh(billing.service)
         if invoice.status not in UNPAID_STATUSES:
-            return "skipped"
+            return "skipped:paid"
         if InvoiceService.balance(db, invoice, for_update=True).remaining_cents <= 0:
-            return "skipped"
+            return "skipped:paid"
         current = self._evaluate(db, run, billing, only_invoice=invoice.id)
-        if current is None or current.action != action.action or current.subject_key != action.subject_key:
-            return "skipped"
-        if not lease_held(db, run):
-            return "skipped"
+        if (
+            current is None
+            or current.action != action.action
+            or current.subject_key != action.subject_key
+            or not run.in_window(current.trigger_at)
+        ):
+            return "skipped:outside_window"
+        if current.action == "notice" and not template_enabled(db, SERVICE_TERMINATION_WARNING):
+            # Not claimed, so a later run sends it once the template is enabled.
+            return "skipped:template_disabled"
         if not run.claim(db, current.subject_key):
             return "already_done"
         if current.action == "notice":
-            return self._notice(db, run, billing, invoice, current)
+            return self._notice(db, billing, invoice, current)
+        # The claim commits before the lifecycle call.
         db.commit()
         return self._terminate(db, run, current)
 
-    def _notice(
-        self, db: Session, run: JobRun, billing: ServiceBilling, invoice: Invoice, action: PlannedAction
-    ) -> str:
+    def _notice(self, db: Session, billing: ServiceBilling, invoice: Invoice, action: PlannedAction) -> str:
+        """One transaction: the runner commits it and marks the claim ``done`` at the run's ``now``."""
         from app.plugin_host import events as plugin_events
 
         service = billing.service
@@ -219,7 +242,7 @@ class NonpaymentTerminationJob:
             },
             service_id=service.id,
         )
-        sent = send_billing_email(
+        send_billing_email(
             db,
             event=SERVICE_TERMINATION_WARNING,
             idempotency_key=action.subject_key,
@@ -236,10 +259,6 @@ class NonpaymentTerminationJob:
             related_type="service",
             related_id=str(service.id),
         )
-        finish_action(
-            db, JOB, action.subject_key, BillingJobActionStatus.DONE, now=run.now,
-            detail={**action.detail, "email_queued": sent, "dry_run": bool(run.dry_run)},
-        )
         return "done"
 
     def _terminate(self, db: Session, run: JobRun, action: PlannedAction) -> str:
@@ -252,8 +271,6 @@ class NonpaymentTerminationJob:
 
         detail = dict(action.detail)
         service_id = int(detail["service_id"])
-        if not lease_held(db, run):
-            return self._needs_review(db, run, action, "the run lost its lease before the termination")
         lifecycle = self.lifecycle_factory()
         service = db.get(Service, service_id)
         try:
@@ -271,9 +288,9 @@ class NonpaymentTerminationJob:
             return self._needs_review(db, run, action, f"{type(exc).__name__}: {exc}")
 
         cancelled = self._end_billing(db, detail)
-        finish_action(
-            db, JOB, action.subject_key, BillingJobActionStatus.DONE, now=run.now,
-            detail={**detail, "cancelled_invoice_ids": cancelled},
+        run.finish(
+            db, action.subject_key, BillingJobActionStatus.DONE.value,
+            {**detail, "cancelled_invoice_ids": cancelled},
         )
         AuditService.log(
             db,
@@ -320,9 +337,9 @@ class NonpaymentTerminationJob:
 
     @staticmethod
     def _needs_review(db: Session, run: JobRun, action: PlannedAction, error: str) -> str:
-        finish_action(
-            db, JOB, action.subject_key, BillingJobActionStatus.NEEDS_REVIEW, now=run.now,
-            detail={**action.detail, "error": error[:500]},
+        run.finish(
+            db, action.subject_key, BillingJobActionStatus.NEEDS_REVIEW.value,
+            {**action.detail, "error": error[:500]},
         )
         db.commit()
         return "failed"
