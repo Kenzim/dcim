@@ -442,3 +442,22 @@ def test_needs_review_and_stale_detectors(factory, job):
     assert billing_integrity.billing_job_stale(db, params, T0 + timedelta(hours=3)) == []
     assert billing_integrity.billing_job_stale(db, params, T0 + timedelta(hours=4, minutes=6)) != []
     db.close()
+
+
+def test_an_item_that_is_not_done_rolls_back_its_writes_and_claim(factory, job, monkeypatch):
+    _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
+    job.subjects = {1: T0 + timedelta(minutes=10)}
+
+    def write_then_skip(db, run, action):
+        assert run.claim(db, action.subject_key)
+        db.add(SystemSetting(key="fx-1", value=1))
+        db.flush()
+        return "skipped:changed_under_lock"
+
+    monkeypatch.setattr(job, "execute", write_then_skip)
+    result = _live(factory, job, T0 + timedelta(hours=1))
+    assert _items(factory, result.run_id) == [("s:1", "skipped", "changed_under_lock")]
+    assert _effects(factory) == []
+    db = factory()
+    assert db.query(BillingJobAction).count() == 0
+    db.close()
