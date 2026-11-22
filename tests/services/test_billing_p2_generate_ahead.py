@@ -223,6 +223,20 @@ def test_dry_run_plans_without_writing(factory):
     assert [entry["subject_key"] for entry in forecast] == [f"billing:{billing_id}:cycle:{due.isoformat()}"]
 
 
+def test_forecast_lists_a_billing_due_inside_the_period(factory):
+    db = factory()
+    set_setting(db, "billing_invoice_lead_days", 3)
+    db.commit()
+    db.close()
+    due = T0 + timedelta(days=5)
+    billing_id, _ = _seed(factory, "forecast", due)
+    _mode(factory, "dry_run", T0 - timedelta(days=1))
+    forecast = runner.forecast(factory(), NAME, now=T0, days=7)
+    assert [(entry["subject_key"], entry["trigger_at"]) for entry in forecast] == [
+        (f"billing:{billing_id}:cycle:{due.isoformat()}", (due - timedelta(days=3)).isoformat())
+    ]
+
+
 def _retail_seed(factory, due):
     from tests.services.test_billing_a0_renewals import _retail_billing
 

@@ -244,6 +244,25 @@ def test_invoice_paid_between_plan_and_execute_gets_no_reminder(factory, sent, m
     db.close()
 
 
+def test_forecast_lists_the_upcoming_reminder_of_an_invoice_due_inside_the_period(factory):
+    from app.services.settings_store import set_setting
+
+    db = factory()
+    set_setting(db, "billing_reminder_upcoming_days", 3)
+    db.commit()
+    db.close()
+    due = T0 + timedelta(days=5)
+    invoice_id = _invoice(factory, due)
+    db = factory()
+    runner.change_mode(db, NAME, "dry_run", now=T0 - timedelta(days=1), actor_user_id=None)
+    db.commit()
+    db.close()
+    forecast = runner.forecast(factory(), NAME, now=T0, days=7)
+    assert [(entry["subject_key"], entry["trigger_at"]) for entry in forecast] == [
+        (f"invoice:{invoice_id}:reminder:upcoming", (due - timedelta(days=3)).isoformat())
+    ]
+
+
 def test_a_stale_first_overdue_notice_is_recorded_once(factory, sent):
     from app.models.billing_jobs import BillingJobRunItem
 

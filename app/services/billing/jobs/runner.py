@@ -541,10 +541,13 @@ def change_mode(
 def forecast(db: Session, name: str, *, now: datetime, days: int) -> list[dict[str, Any]]:
     """Actions whose trigger falls in ``[now, now + days]``, as a live run would see them.
 
-    Read only: candidates and plans are evaluated with the clock at the end of
-    the period and the watermark a run would use now, then rolled back. Later
-    steps of a sequence (a second reminder) need the earlier step's claim, so
-    only the next step of each subject is shown.
+    Read only: candidates and plans are evaluated with the clock at ``now``
+    and then one day later each time up to the end of the period, with the
+    watermark a run would use now, then rolled back. Each subject is listed
+    once, with the first action whose trigger falls in the period, as the run
+    of that day would see it; a trigger that is actionable for less than a day
+    can be missed. Later steps of a sequence (a second reminder) need the
+    earlier step's claim, so only the next step of each subject is shown.
     """
     job = get_job(name)
     now = _utc(now)
@@ -553,23 +556,36 @@ def forecast(db: Session, name: str, *, now: datetime, days: int) -> list[dict[s
         return []
     watermark = effective_watermark(state, dry_run=True, now=now, current_hash=config_hash(db, job))
     end = now + timedelta(days=days)
-    handle = JobRun(run_id=0, job=name, dry_run=True, now=end, watermark=watermark, catch_up_days=days + 1)
     out: list[dict[str, Any]] = []
+    settled: set[int] = set()
     try:
-        for subject_id in list(job.candidates(db, handle)):
-            action = job.plan(db, handle, int(subject_id))
-            if action is None or action.detail.get("skip_reason"):
-                continue
-            trigger_at = _utc(action.trigger_at)
-            if now <= trigger_at <= end:
-                out.append(
-                    {
-                        "subject_key": action.subject_key,
-                        "action": action.action,
-                        "trigger_at": trigger_at.isoformat(),
-                        "detail": _jsonable(action.detail),
-                    }
-                )
+        for step in range(days + 1):
+            handle = JobRun(
+                run_id=0,
+                job=name,
+                dry_run=True,
+                now=now + timedelta(days=step),
+                watermark=watermark,
+                catch_up_days=days + 1,
+            )
+            for subject_id in list(job.candidates(db, handle)):
+                subject_id = int(subject_id)
+                if subject_id in settled:
+                    continue
+                action = job.plan(db, handle, subject_id)
+                if action is None or action.detail.get("skip_reason"):
+                    continue
+                trigger_at = _utc(action.trigger_at)
+                settled.add(subject_id)
+                if now <= trigger_at <= end:
+                    out.append(
+                        {
+                            "subject_key": action.subject_key,
+                            "action": action.action,
+                            "trigger_at": trigger_at.isoformat(),
+                            "detail": _jsonable(action.detail),
+                        }
+                    )
     finally:
         db.rollback()
     out.sort(key=lambda item: item["trigger_at"])
