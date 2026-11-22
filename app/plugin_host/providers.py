@@ -184,12 +184,18 @@ def _method_of(call: _Call) -> Any:
     return fn
 
 
-def _take_slot(plugin_id: str) -> bool:
+def _take_slot(plugin_id: str) -> Optional[str]:
+    """Take a slot: ``None`` when taken, else ``"in_flight"`` or ``"abandoned"``.
+
+    ``"abandoned"`` means every slot is held by a call that already timed out, so the plugin is
+    hung rather than busy.
+    """
     with _slots_lock:
-        if _running.get(plugin_id, 0) >= SLOTS_PER_PLUGIN:
-            return False
-        _running[plugin_id] = _running.get(plugin_id, 0) + 1
-        return True
+        running = _running.get(plugin_id, 0)
+        if running >= SLOTS_PER_PLUGIN:
+            return "abandoned" if _abandoned.get(plugin_id, 0) >= running else "in_flight"
+        _running[plugin_id] = running + 1
+        return None
 
 
 def _release_slot(call: _Call) -> None:
@@ -429,8 +435,17 @@ def _call(
         args=args,
         seconds=seconds,
     )
-    # A refused or unstarted call is the host's limit at work, not a failure of the plugin.
-    if not _take_slot(plugin_id):
+    # A refused or unstarted call is the host's limit at work, not a failure of the plugin, unless
+    # every slot is held by a call that timed out: then the plugin is hung, and each refusal counts
+    # so that its circuit opens and the operator hears of it.
+    refused = _take_slot(plugin_id)
+    if refused == "abandoned":
+        raise _fail(
+            plugin_id, provider, "busy",
+            f"{label} refused: all {SLOTS_PER_PLUGIN} of the plugin's calls timed out and are still running",
+            db=db,
+        )
+    if refused is not None:
         raise ProviderUnavailable("busy")
     try:
         threading.Thread(target=_work, args=(call,), name=f"rackflow-provider-{plugin_id}", daemon=True).start()

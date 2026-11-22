@@ -282,7 +282,7 @@ def test_a_hung_provider_neither_delays_nor_blames_other_plugins(plugin_env, db_
     assert other == ["TX-1"] * 5, "another plugin's calls are neither delayed nor failed"
     assert failures(db_session, TAX) == 0
     assert reasons == ["timeout", "timeout"] + ["busy"] * 6
-    assert failures(db_session, VALIDATOR) == 2, "busy is not a failure of the plugin"
+    assert failures(db_session, VALIDATOR) == 8, "busy behind calls that all timed out counts"
     assert providers._running[VALIDATOR] == 2 and providers._abandoned[VALIDATOR] == 2
 
     release.touch()
@@ -290,6 +290,101 @@ def test_a_hung_provider_neither_delays_nor_blames_other_plugins(plugin_env, db_
     assert VALIDATOR not in providers._running and VALIDATOR not in providers._abandoned
     assert sessions and all(s.info.get("closed") for s in sessions), "every session, abandoned calls' too, is closed"
     assert validator_call("supports", "DE", "eu_vat") is True, "the slots are free again"
+
+
+def test_a_provider_that_hangs_for_good_opens_its_circuit(plugin_env, db_session, release):
+    from sqlalchemy import select
+
+    from app.models.commerce_audit import UserAuditEvent
+    from app.models.plugin_host import PluginInstallation
+
+    setup_plugin(plugin_env, db_session, VALIDATOR, mode="block")
+    setup_plugin(plugin_env, db_session, TAX)
+    reasons = []
+    for _ in range(health.FAILURES_TO_OPEN + 2):
+        try:
+            validator_call(timeout_seconds=0.1)
+        except ProviderUnavailable as exc:
+            reasons.append(exc.reason)
+        assert tax_call(timeout_seconds=0.5).reference == "TX-1", "the healthy plugin is unaffected"
+    opened = health.FAILURES_TO_OPEN
+    assert reasons == ["timeout", "timeout"] + ["busy"] * (opened - 2) + ["circuit_open"] * 2
+    assert failures(db_session, VALIDATOR) == opened
+    assert failures(db_session, TAX) == 0
+    db_session.expire_all()
+    assert health.circuit_open(db_session.get(PluginInstallation, VALIDATOR))
+    audits = db_session.execute(
+        select(UserAuditEvent.event_metadata).where(UserAuditEvent.action == "plugin.provider_failed")
+    ).scalars().all()
+    assert len(audits) == 1 and audits[0]["provider"] == "tax_id_validator:fixture"
+
+
+BLOCK_CODE = """
+import os
+import time
+from datetime import datetime, timezone
+
+from rackflow_plugin.kinds import TaxIdCheckResult
+
+
+class Validator:
+    def supports(self, country, id_type):
+        return True
+
+    def check_format(self, country, tax_id):
+        return True
+
+    def check_online(self, request):
+        deadline = time.monotonic() + 30
+        while not os.path.exists(os.environ.get("RF_TEST_RELEASE", "")) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return TaxIdCheckResult(status="valid", checked_at=datetime.now(timezone.utc))
+
+
+def register(plugin):
+    plugin.provider("tax_id_validator", "slow")(Validator)
+"""
+
+
+def test_two_calls_in_flight_make_a_third_busy_without_a_failure(plugin_env, db_session, release):
+    # A provider that writes no plugin state, so the two calls in flight do not share a write on
+    # the test database's single connection.
+    manifest = base_manifest(
+        rackflow_api=">=1.1,<2",
+        permissions=["tax.validate_id"],
+        provides=[{"kind": "tax_id_validator", "id": "slow", "label": "S", "id_types": ["eu_vat"], "timeout_seconds": 20}],
+    )
+    write_plugin(plugin_env, manifest, BLOCK_CODE)
+    install(db_session, "demo_plugin")
+    request = kinds.TaxIdCheckRequest("DE", "1", "eu_vat")
+    results = []
+
+    def slow_call():
+        return call_provider("tax_id_validator", "demo_plugin:slow", "check_online", request)
+
+    def in_flight():
+        try:
+            results.append(slow_call().status)
+        except ProviderUnavailable as exc:
+            results.append(exc.reason)
+
+    callers = [threading.Thread(target=in_flight, daemon=True) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+    deadline = time.monotonic() + 10
+    while providers._running.get("demo_plugin", 0) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert providers._running.get("demo_plugin") == 2 and not providers._abandoned.get("demo_plugin")
+    for _ in range(3):
+        with pytest.raises(ProviderUnavailable) as err:
+            slow_call()
+        assert err.value.reason == "busy"
+    assert failures(db_session, "demo_plugin") == 0, "busy behind calls inside their limit is not a failure"
+    release.touch()
+    for caller in callers:
+        caller.join(20)
+    assert results == ["valid", "valid"]
+    assert failures(db_session, "demo_plugin") == 0
 
 
 SLOW_IMPORT_CODE = """
