@@ -285,14 +285,20 @@ class RecurringBillingService:
             )
             .limit(remaining)
         )
-        billings = list(
-            db.execute(self._locked(due_statement, db)).scalars()
-        )
-        for candidate in billings:
-            # The first commit in the loop releases the batch's locks, so each
-            # row is locked again and re-checked before it is processed.
+        billing_ids = [
+            candidate.id
+            for candidate in db.execute(self._locked(due_statement, db)).scalars()
+        ]
+        for billing_id in billing_ids:
+            # Each billing is processed in a transaction that starts with its
+            # lock, so the transaction's snapshot is taken after the lock and
+            # sees a cycle and invoice generated ahead (design 10.1) and
+            # committed by a job that held the lock before it. Ending the
+            # transaction also releases the batch's locks, so each row is
+            # locked again and re-checked before it is processed.
+            db.commit()
             billing = BillingLocks.service_billing(
-                db, candidate.id, where=due_conditions, skip_locked=True
+                db, billing_id, where=due_conditions, skip_locked=True
             )
             if billing is None:
                 continue
@@ -561,19 +567,15 @@ class RecurringBillingService:
     def _current_cycle(
         self, db: Session, billing: ServiceBilling
     ) -> Optional[BillingCycle]:
-        # A locking read under the held service billing lock, so a cycle
-        # generated ahead (design 10.1) and committed after this transaction's
-        # snapshot is found and reused rather than created again.
-        return BillingLocks.billing_cycle(
-            db,
+        return db.execute(
             select(BillingCycle)
             .where(
                 BillingCycle.service_billing_id == billing.id,
                 BillingCycle.state.not_in(list(_TERMINAL_STATES)),
             )
             .order_by(BillingCycle.due_at.desc(), BillingCycle.id.desc())
-            .limit(1),
-        )
+            .limit(1)
+        ).scalar_one_or_none()
 
     def _ensure_cycle(
         self,
