@@ -774,3 +774,30 @@ def test_todo_38f9_a_deposit_that_fails_to_settle_never_stalls_the_watcher(db_se
     assert db_session.get(Payment, fine[3].id).status == PaymentStatus.SUCCEEDED
     cursor = db_session.execute(select(UsdtChainCursor)).scalar_one()
     assert cursor.next_block > 100
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_todo_38f9_shadow_records_i1_decision_when_a_usdt_deposit_is_held(
+    db_session, shadow_records, mode
+):
+    from app.services.payments.usdt_watcher import UsdtWatcher
+    from tests.services.test_usdt_watcher import FakeRpc, _config
+
+    set_setting(db_session, "billing_invoice_engine", mode)
+    paid, _other, logs = _two_deposits_one_paid_by_card(db_session)
+    shadow_records.clear()
+
+    UsdtWatcher(FakeRpc(logs), _config()).run_once(db_session)
+
+    _reseller_, invoice, deposit, payment = paid
+    held = [r for r in shadow_records if r["context"] == "usdt_on_paid_invoice"]
+    if mode == "legacy":
+        assert held == []
+        return
+    assert len(held) == 1
+    record = held[0]
+    assert (record["engine"], record["check"], record["subject"]) == ("invoice", "i1_decision", ("invoice", invoice.id))
+    assert record["legacy"]["decision"] == "held_for_review"
+    assert record["legacy"]["payment_id"] == payment.id
+    assert record["legacy"]["usdt_deposit_id"] == deposit.id
+    assert record["v2"] == {"decision": "credit_excess", "overpaid_cents": 100, "status": "paid"}

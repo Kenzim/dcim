@@ -10,7 +10,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, settings
-from app.models.reseller import Payment, PaymentStatus
+from app.models.reseller import Invoice, InvoiceStatus, Payment, PaymentStatus
 from app.models.usdt import (
     UsdtChainCursor,
     UsdtDeposit,
@@ -607,7 +607,46 @@ class UsdtWatcher:
             deposit.id,
             invoice.id,
         )
+        if engine_mode(db) == "shadow":
+            UsdtWatcher._record_held_deposit_shadow(db, deposit, invoice, payment, allocated)
         return True
+
+    @staticmethod
+    def _record_held_deposit_shadow(
+        db: Session,
+        deposit: UsdtDeposit,
+        invoice: Invoice,
+        payment: Payment,
+        allocated: int,
+    ) -> None:
+        """Shadow check ``i1_decision`` for a held deposit, on its own session.
+
+        Legacy holds the USDT for review; v2 settles it and credits the excess
+        to the account (top-up overpayment), so the two decisions differ.
+        """
+        from app.services.billing_shadow import BillingShadowService
+
+        overpaid = allocated + int(payment.amount_cents) - int(invoice.amount_cents)
+        BillingShadowService.record(
+            "invoice",
+            "i1_decision",
+            "invoice",
+            int(invoice.id),
+            {
+                "decision": "held_for_review",
+                "review_reason": "usdt_on_paid_invoice",
+                "payment_id": int(payment.id),
+                "usdt_deposit_id": int(deposit.id),
+                "allocated_cents": int(allocated),
+                "amount_cents": int(invoice.amount_cents),
+            },
+            {
+                "decision": "credit_excess",
+                "overpaid_cents": overpaid,
+                "status": InvoiceStatus.PAID.value,
+            },
+            context="usdt_on_paid_invoice",
+        )
 
     def _recheck_recent_confirmations(
         self,
