@@ -266,3 +266,37 @@ def test_template_cannot_see_its_own_environment():
     assert text("{% for a in items %}{{ loop.first }}{{ loop.last }}{{ loop.length }}{% endfor %}") == (
         "TrueFalse3FalseFalse3FalseTrue3"
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{% set f = 'x'.format %}{{ f(name) }}",
+        "{% set f = name.format %}{{ f }}",
+        "{{ name.format }}",
+        "{{ name.format(name.__class__) }}",
+        "{{ '{0.__class__}'.format(name) }}",
+        "{{ '{0.__class__}'|format(name) }}",
+        "{% for f in [name.format] %}{{ f('{0.__class__}') }}{% endfor %}",
+        "{{ name|attr('format') }}",
+        "{{ name|attr('__class__') }}",
+        "{{ name|attr('format')('{0.__class__}') }}",
+        "{{ name|xmlattr }}",
+        "{{ {'a': name}|xmlattr }}",
+        "{{ name|map(attribute='__class__')|list }}",
+        "{{ items|map('format') }}",
+    ],
+)
+def test_format_and_attr_payloads_of_published_sandbox_escapes_are_refused(source):
+    """CVE-2024-56326, CVE-2025-27516, CVE-2024-22195 and CVE-2024-34064 need a call, a set, attr, xmlattr or format."""
+    with pytest.raises(EmailTemplateError):
+        render_source(source, DATA)
+    with pytest.raises(EmailTemplateError):
+        render_source(source, DATA, html=True)
+
+
+def test_attr_and_xmlattr_are_not_filters_of_the_sandbox():
+    for name in ("attr", "xmlattr", "format", "map", "select", "selectattr", "reject", "rejectattr", "groupby", "sum", "tojson"):
+        assert name not in sandbox.ALLOWED_FILTERS
+        assert name not in sandbox.TEXT_ENVIRONMENT.filters
+        assert name not in sandbox.HTML_ENVIRONMENT.filters
