@@ -18,7 +18,6 @@ from app.core.config import settings
 from app.plugin_host import kinds
 from app.plugin_host.catalogue import SUPPORTED_API_VERSIONS
 from app.plugin_host.manifest import Manifest, ManifestError, validate_manifest
-from app.services.tax.packs.schema import PackFormatError, validate_pack
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +161,10 @@ def _check_pack_files(path: Path, manifest: Manifest) -> list[str]:
 
 def _pack_schema_errors(name: str, data: Any) -> list[str]:
     """Validate a pack with the tax pack format (``app.services.tax.packs.schema``)."""
+    # Imported here: the schema imports app.models, whose package init loads
+    # app.plugin_host.listeners and through it this module.
+    from app.services.tax.packs.schema import PackFormatError, validate_pack
+
     if not isinstance(data, dict):
         return [f"pack file {name} must hold a JSON object"]
     try:
