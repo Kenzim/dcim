@@ -22,7 +22,7 @@ from app.services.billing_shadow import BillingShadowService
 from app.services.invoice_service import InvoiceError, InvoiceService
 from app.services.payments.base import GatewayChargeResult, GatewayResultStatus
 from app.services.settings_store import set_setting
-from tests.services.test_billing_p1i_invoice_engine import _v2
+from tests.services.test_billing_p1i_invoice_engine import _v2, account  # noqa: F401
 from tests.services.test_billing_w0e_review_fixes import _assert_lock_order, lock_calls  # noqa: F401
 from tests.services.test_invoice_payment_services import (
     FakeGateway,
@@ -163,3 +163,80 @@ async def test_b2_voided_cycle_invoice_goes_to_manual_review_and_the_worker_carr
     await service.process_batch(db_session, owner="b2")
     db_session.expire_all()
     assert db_session.get(Invoice, cycle.invoice_id).status == S.VOID
+
+
+# ------------------------------------------------------------------ B3
+
+
+def _gateway_payment(db, invoice, amount, ref, status=PaymentStatus.PENDING):
+    payment = Payment(
+        invoice_id=invoice.id, gateway="stripe", status=status, amount_cents=amount,
+        currency="USD", external_ref=ref, payment_metadata={},
+    )
+    db.add(payment)
+    db.flush()
+    return payment
+
+
+def _fail_webhook(db, ref):
+    import uuid
+
+    from app.services.payments.base import GatewayWebhookAction, NormalizedGatewayWebhookEvent
+    from app.services.payments.webhooks import PaymentWebhookService
+
+    event = NormalizedGatewayWebhookEvent(
+        event_id=f"evt_{uuid.uuid4().hex[:10]}",
+        event_type="payment_intent.payment_failed",
+        action=GatewayWebhookAction.PAYMENT_FAILED,
+        external_ref=ref,
+        failure_code="card_declined",
+    )
+    assert PaymentWebhookService.process(db, gateway="stripe", event=event, raw_payload=b"{}")
+
+
+def test_b3_v2_failed_payment_on_a_part_paid_invoice_leaves_it_partially_paid(db_session, account):
+    from tests.services.test_billing_p1i_invoice_engine import _create, _pay
+
+    _v2(db_session)
+    invoice = _create(db_session, account)
+    paid = _pay(db_session, invoice, 400)
+    InvoiceService.recompute(db_session, invoice, cause="payment", payment=paid)
+    _gateway_payment(db_session, invoice, 600, "pi_b3_part")
+    InvoiceService.recompute(db_session, invoice, cause="payment")
+    assert invoice.status == S.PENDING_ACTION
+
+    _fail_webhook(db_session, "pi_b3_part")
+
+    db_session.refresh(invoice)
+    assert invoice.status == S.PARTIALLY_PAID
+
+
+def test_b3_v2_failed_payment_with_another_still_pending_stays_pending_action(db_session, account):
+    from tests.services.test_billing_p1i_invoice_engine import _create
+
+    _v2(db_session)
+    invoice = _create(db_session, account)
+    _gateway_payment(db_session, invoice, 1000, "pi_b3_first")
+    _gateway_payment(db_session, invoice, 1000, "pi_b3_second")
+    InvoiceService.recompute(db_session, invoice, cause="payment")
+    assert invoice.status == S.PENDING_ACTION
+
+    _fail_webhook(db_session, "pi_b3_first")
+
+    db_session.refresh(invoice)
+    assert invoice.status == S.PENDING_ACTION
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_b3_legacy_failed_payment_still_reopens_the_invoice(db_session, account, mode):
+    from tests.services.test_billing_p1i_invoice_engine import _create
+
+    set_setting(db_session, "billing_invoice_engine", mode)
+    invoice = _create(db_session, account)
+    _gateway_payment(db_session, invoice, 1000, f"pi_b3_{mode}")
+    InvoiceService.transition(db_session, invoice, S.PENDING_ACTION, cause="payment_requires_action")
+
+    _fail_webhook(db_session, f"pi_b3_{mode}")
+
+    db_session.refresh(invoice)
+    assert invoice.status == S.OPEN
