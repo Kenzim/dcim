@@ -10,11 +10,10 @@ import pytest
 from app.plugin_host import providers
 from app.services.alerting import billing_integrity, catalogue as alert_catalogue
 from app.services.alerting import detectors
-from app.services.billing import cancellations, email_events
+from app.services.billing import cancellations
 from app.services.billing.jobs import base as job_base
 from app.services.billing.jobs import registry as job_registry
 from app.services.billing.jobs import runner
-from app.services.email_message_service import EmailMessageService
 from app.services.email_templates import render as email_render
 from app.services.invoice_adjustment_service import InvoiceAdjustmentService
 from app.services.invoice_service import InvoiceService
@@ -37,13 +36,7 @@ STUBS = [
     ),
     lambda: cancellations.CancellationService.withdraw(None, 1, actor_user_id=None),
     lambda: cancellations.cancel_unpaid_invoices(None, 1, from_period_start=None, cause="cancellation"),
-    lambda: email_events.send_service_provisioned(None, None),
-    lambda: email_events.send_welcome(None, None),
-    lambda: email_render.render(None, "welcome", locale="en", variables={}),
     lambda: InvoiceAdjustmentService.tax_base_rows(None, None, before_key="x"),
-    lambda: EmailMessageService.enqueue(
-        None, event="welcome", to_address="a@example.com", idempotency_key="k", variables={}
-    ),
 ]
 
 

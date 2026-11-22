@@ -142,9 +142,18 @@ def _check_pack_files(path: Path, manifest: Manifest) -> list[str]:
         if not pack_file.resolve().is_relative_to(path.resolve()) or not pack_file.is_file():
             errors.append(f"pack file {provide.pack.file} of provider {provide.id} is missing")
             continue
+        too_large = f"pack file {provide.pack.file} is larger than 1 MB"
         try:
-            data = json.loads(pack_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+            if pack_file.stat().st_size > kinds.MAX_PACK_BYTES:
+                errors.append(too_large)
+                continue
+            with pack_file.open("rb") as handle:
+                content = handle.read(kinds.MAX_PACK_BYTES + 1)  # the file may have grown since stat
+            if len(content) > kinds.MAX_PACK_BYTES:
+                errors.append(too_large)
+                continue
+            data = json.loads(content.decode("utf-8"))
+        except (OSError, ValueError, RecursionError) as exc:
             errors.append(f"pack file {provide.pack.file} is not valid JSON: {exc}")
             continue
         errors.extend(_pack_schema_errors(provide.pack.file, data))
@@ -162,21 +171,44 @@ def _pack_schema_errors(name: str, data: Any) -> list[str]:
     return []
 
 
-def _scan(root: Path, bundled: bool) -> list[Package]:
+def _package_dirs(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
+    return [
+        child for child in sorted(root.iterdir())
+        if child.is_dir() and not child.name.startswith(".") and (child / "plugin.json").exists()
+    ]
+
+
+def _scan(root: Path, bundled: bool) -> list[Package]:
     out = []
-    for child in sorted(root.iterdir()):
-        if child.is_dir() and not child.name.startswith(".") and (child / "plugin.json").exists():
-            package = read_package(child)
-            package.bundled = bundled
-            out.append(package)
+    for child in _package_dirs(root):
+        package = read_package(child)
+        package.bundled = bundled
+        out.append(package)
     return out
 
 
-def _conflict_message(directory: str) -> str:
+def _raw_id(raw: Any) -> Optional[str]:
+    value = raw.get("id") if isinstance(raw, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _claims(directory: str, raw: Any) -> set[str]:
+    """The plugin ids a package folder stands for: its manifest id, and its folder name."""
+    return {directory} | ({_raw_id(raw)} - {None})  # type: ignore[operator]
+
+
+def _manifest_id_at(path: Path) -> Optional[str]:
+    try:
+        return _raw_id(json.loads((path / "plugin.json").read_text(encoding="utf-8")))
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def _conflict_message(plugin_id: str) -> str:
     return (
-        f"the plugin {directory!r} exists in both the plugins folder and the bundled plugins folder; "
+        f"the plugin {plugin_id!r} exists in both the plugins folder and the bundled plugins folder; "
         "remove one copy before it can be installed or run"
     )
 
@@ -188,12 +220,14 @@ def discover(root: Optional[Path] = None) -> list[Package]:
     out: list[Package] = []
     for folder, bundled in package_roots():
         out.extend(_scan(folder, bundled))
-    count: dict[str, int] = {}
+    claims = {id(p): _claims(p.directory, p.raw) for p in out}
     for package in out:
-        count[package.directory] = count.get(package.directory, 0) + 1
-    for package in out:
-        if count[package.directory] > 1:
-            package.errors.append(_conflict_message(package.directory))
+        mine = claims[id(package)]
+        for other in out:
+            shared = mine & claims[id(other)]
+            if other.bundled != package.bundled and shared:
+                package.errors.append(_conflict_message(_raw_id(package.raw) or sorted(shared)[0]))
+                break
     return out
 
 
@@ -206,8 +240,13 @@ def find_package(directory: str, root: Optional[Path] = None) -> Package:
         raise PluginLoadError("Unknown plugin directory")
     package = read_package(found[0][0])
     package.bundled = found[0][1]
-    if len(found) > 1:
-        package.errors.append(_conflict_message(directory))
+    mine = _claims(directory, package.raw)
+    for base, bundled in roots:
+        if bundled == package.bundled:
+            continue
+        if any(child.name in mine or _manifest_id_at(child) in mine for child in _package_dirs(base)):
+            package.errors.append(_conflict_message(_raw_id(package.raw) or directory))
+            break
     return package
 
 

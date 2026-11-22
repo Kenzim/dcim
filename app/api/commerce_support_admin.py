@@ -14,6 +14,7 @@ from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.ticket_dao import TicketDAO, TicketDepartmentDAO, TicketMessageDAO
 from app.models.support_ticket import Ticket, TicketStatus
+from app.services.billing.email_events import send_ticket_reply
 from app.services.ticket_service import TicketService
 
 _MSG_TICKET_NOT_FOUND = "Ticket not found"
@@ -145,6 +146,8 @@ def reply_to_ticket(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not body.is_staff_note:
+        send_ticket_reply(db, ticket, message)
     db.commit()
     return _serialize_message(message)
 

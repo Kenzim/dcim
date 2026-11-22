@@ -20,7 +20,9 @@ config = context.config
 # Interpret the config file for Python logging.
 # disable_existing_loggers=False prevents disabling uvicorn.access when
 # env.py is imported during app startup (migrations run in lifespan).
-if config.config_file_name is not None:
+# A caller that passes its own connection (config.attributes["connection"], as the
+# migration tests do) keeps its own logging.
+if config.config_file_name is not None and "connection" not in config.attributes:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Set the database URL from settings
@@ -83,13 +85,42 @@ def _create_wide_version_table(connection) -> None:
     connection.commit()
 
 
+def run_migrations_on(connection) -> None:
+    """Run the migrations on ``connection``, committing each revision with its version bump.
+
+    MySQL/MariaDB commit DDL implicitly, so a revision that fails after an
+    earlier one in the same transaction would leave that earlier revision's
+    schema in place with its ``alembic_version`` update rolled back. The
+    transaction the version table inspection began is ended before
+    ``configure``; otherwise alembic treats the connection as inside an outer
+    transaction and never commits per revision.
+    """
+    _create_wide_version_table(connection)
+    connection.commit()
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transaction_per_migration=True,
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+    # MySQL DDL is not transactional, so nothing above commits the final
+    # alembic_version update; without this the last step's bump is rolled back.
+    connection.commit()
+
+
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
 
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
+    Uses the connection in ``config.attributes["connection"]`` when the caller
+    gives one, otherwise an engine built from the configured URL.
     """
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        run_migrations_on(connection)
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -98,16 +129,7 @@ def run_migrations_online() -> None:
     configure_engine(connectable)
 
     with connectable.connect() as connection:
-        _create_wide_version_table(connection)
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
-        # MySQL DDL is not transactional, so nothing above commits the final
-        # alembic_version update; without this the last step's bump is rolled back.
-        connection.commit()
+        run_migrations_on(connection)
 
 
 if context.is_offline_mode():

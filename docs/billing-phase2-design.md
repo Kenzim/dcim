@@ -1096,7 +1096,7 @@ In `app/services/billing/rounding.py` beside P1 appendix B; pure integer functio
 | `round_down(n, d)` | primitive | floor division for `n >= 0` |
 | `tax_floor` | the mirrored `tax_rates` rules | `round_down`; reproduces `(taxable * rate_bps) // 10_000` (`checkout_service.py:229`) |
 | `tax_exclusive(base, rate_ppm, rule)` | tax added to a net amount | `rule(base * rate_ppm, 1_000_000)` |
-| `tax_inclusive(gross, rate_ppm, rule)` | tax inside a gross amount | `gross - rule(gross * 1_000_000, 1_000_000 + rate_ppm)` |
+| `tax_inclusive(gross, rate_ppm, rule)` | tax inside a gross amount | for `tax_floor` and `round_down` the tax is floored in both modes: tax `rule(gross * rate_ppm, 1_000_000 + rate_ppm)` (the floor of the exact tax) and net `gross` minus that tax; for the other rules the rule rounds the net: tax `gross - rule(gross * 1_000_000, 1_000_000 + rate_ppm)`. Exclusive mode is unchanged |
 | `tax_invoice_rate(bases, rate_ppm, rule)` | rounding point `invoice_rate` | tax on Σ bases by the rule above, spread over the lines with `tax_split_largest_remainder` weighted by base |
 | `late_fee_percentage(remaining, bp)` | B5 | `round_half_up(remaining * bp, 10_000)`, then clamped to the minimum and maximum |
 

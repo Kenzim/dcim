@@ -20,9 +20,10 @@ Plugin id `vies_validator`, provider `tax_id_validator:vies`, ID type `eu_vat`, 
 | `INVALID_INPUT` | `invalid`, `error_code` `INVALID_INPUT` |
 | `MS_UNAVAILABLE`, `SERVICE_UNAVAILABLE`, `TIMEOUT`, `MS_MAX_CONCURRENT_REQ`, `GLOBAL_MAX_CONCURRENT_REQ` and their `_TIME` variants | `unavailable` with the code |
 | `INVALID_REQUESTER_INFO`, `VAT_BLOCKED`, `IP_BLOCKED` | `unavailable` with the code; they say nothing about the customer's number. `INVALID_REQUESTER_INFO` also writes an error line to the plugin log asking the operator to fix the requester settings. |
-| Any other code, an unreadable body, a missing `valid` flag, an HTTP error without a VIES error code, a network failure | `unavailable` with the code, `HTTP_<status>`, `BAD_RESPONSE` or `NETWORK_ERROR` |
+| Any other code, an unreadable body (including JSON nested too deeply to read), a missing `valid` flag, an HTTP error without a VIES error code, a network failure | `unavailable` with the code, `HTTP_<status>`, `BAD_RESPONSE` or `NETWORK_ERROR` |
+| An answer whose `countryCode` or `vatNumber` is missing or is not the number asked about (spaces, case and a country prefix are ignored) | `unavailable` with `MISMATCHED_RESPONSE` |
 
-An unavailable answer is never turned into `invalid`. After `MS_UNAVAILABLE` for a member state, the plugin answers `unavailable` (`MS_UNAVAILABLE`) for that state for five minutes without calling VIES. The rate limit (60 calls per 60 seconds) and the circuit breaker belong to the host; the host reports a refused call as `rate_limited` or `circuit_open`, without calling the plugin.
+The check time is VIES's `requestDate` when it is within 15 minutes of the plugin's clock, else the plugin's clock. `name`, `address` and `requestIdentifier` are used only when they are text. An unavailable answer is never turned into `invalid`. After `MS_UNAVAILABLE` for a member state, the plugin answers `unavailable` (`MS_UNAVAILABLE`) for that state for five minutes without calling VIES. The rate limit (60 calls per 60 seconds) and the circuit breaker belong to the host; the host reports a refused call as `rate_limited` or `circuit_open`, without calling the plugin.
 
 Results are cached by Rackflow, not by the plugin. The plugin keeps only the back-off times.
 

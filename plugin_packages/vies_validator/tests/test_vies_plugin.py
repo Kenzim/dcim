@@ -48,8 +48,12 @@ def replay_test_service(rackflow):
     """Answer the way the Commission's test service does: by the number that was posted."""
 
     def handler(request):
-        case = RECORDED[request.json()["vatNumber"]]
-        return case["status"], json.dumps(case["body"])
+        asked = request.json()
+        case = RECORDED[asked["vatNumber"]]
+        body = dict(case["body"])
+        if "countryCode" in body:  # the recordings were made for DE; the service echoes the country asked about
+            body["countryCode"] = asked["countryCode"]
+        return case["status"], json.dumps(body)
 
     rackflow.http.respond_with("rest-api", handler)
 
@@ -186,6 +190,7 @@ def test_invalid_requester_info_tells_the_operator(rackflow, plugin):
 
 
 def test_a_consultation_number_becomes_the_request_ref(rackflow, plugin):
+    plugin.harness.clock.set(datetime(2026, 11, 22, 13, 2, 12, tzinfo=timezone.utc))
     rackflow.http.respond_with("rest-api", answer_with(CONSTRUCTED["valid_with_consultation_number"]))
     result = check("FR", "12345678901")
     assert result.status == "valid"
@@ -222,6 +227,55 @@ def test_other_answers(rackflow, plugin, name, status, code):
     rackflow.http.respond_with("rest-api", answer_with(CONSTRUCTED[name]))
     result = check()
     assert (result.status, result.error_code) == (status, code)
+
+
+def answer_body(rackflow, **changes):
+    body = dict(CONSTRUCTED["valid_with_consultation_number"]["body"], **changes)
+    body = {k: v for k, v in body.items() if v is not None}
+    rackflow.http.respond_with("rest-api", lambda _request: (200, json.dumps(body)))
+
+
+def test_a_deeply_nested_answer_is_unavailable_and_not_a_failure(rackflow, plugin):
+    rackflow.http.respond_with("rest-api", lambda _request: (200, "[" * 100_000 + "]" * 100_000))
+    result = check()
+    assert (result.status, result.error_code) == ("unavailable", "BAD_RESPONSE")
+    deep = '{"actionSucceed": false, "errorWrappers": [{"error": ' + "[" * 50_000 + "]" * 50_000 + "}]}"
+    rackflow.http.respond_with("rest-api", lambda _request: (200, deep))
+    assert (check().status, check().error_code) == ("unavailable", "BAD_RESPONSE")
+    plugin.harness.db.expire_all()
+    assert plugin.installation.consecutive_failures == 0
+
+
+def test_a_request_date_far_from_now_is_not_used(rackflow, plugin):
+    now = datetime(2026, 11, 22, 13, 0, tzinfo=timezone.utc)
+    plugin.harness.clock.set(now)
+    for far in ("9999-12-31T00:00:00Z", "2001-01-01T00:00:00Z", "2026-11-22T14:00:00Z"):
+        answer_body(rackflow, countryCode="FR", vatNumber="12345678901", requestDate=far)
+        assert check("FR", "12345678901").checked_at == now, far
+    answer_body(rackflow, countryCode="FR", vatNumber="12345678901", requestDate="2026-11-22T13:05:00Z")
+    assert check("FR", "12345678901").checked_at == datetime(2026, 11, 22, 13, 5, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"countryCode": "DE"}, {"vatNumber": "99999999999"}, {"countryCode": None}, {"vatNumber": None}, {"vatNumber": 12345678901}],
+)
+def test_an_answer_about_another_number_is_unavailable(rackflow, plugin, changes):
+    answer_body(rackflow, **changes)
+    result = check("FR", "12345678901")
+    assert (result.status, result.error_code, result.registered_name) == ("unavailable", "MISMATCHED_RESPONSE", None)
+
+
+def test_the_echoed_number_may_differ_in_spacing_case_and_prefix(rackflow, plugin):
+    for echoed in ("12345678901", "FR12345678901", "123 456 789 01"):
+        answer_body(rackflow, countryCode="fr", vatNumber=echoed)
+        assert check("FR", "12345678901").status == "valid", echoed
+
+
+def test_name_and_address_must_be_text(rackflow, plugin):
+    answer_body(rackflow, name={"a": 1}, address=["1 RUE"], requestIdentifier=7)
+    result = check("FR", "12345678901")
+    assert (result.status, result.registered_name, result.registered_address, result.request_ref) == ("valid", None, None, None)
 
 
 def test_a_network_failure_is_unavailable(rackflow, plugin):
