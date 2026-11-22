@@ -163,6 +163,132 @@ def test_evidence_and_not_registered_detectors(db_session, invoice):
     assert [f.resource_id for f in bi.tax_not_registered(db_session, PARAMS, _now())] == [str(invoice.id)]
 
 
+def test_buyer_country_missing_detector(db_session, invoice):
+    assert bi.tax_buyer_country_missing(db_session, PARAMS, _now()) == []
+    evidence = dict(invoice.tax_evidence)
+    db_session.execute(
+        Invoice.__table__.update().where(Invoice.id == invoice.id).values(
+            tax_evidence={**evidence, "buyer_country": None, "notes": ["buyer_country_missing"]}
+        )
+    )
+    db_session.expire_all()
+    (finding,) = bi.tax_buyer_country_missing(db_session, PARAMS, _now())
+    assert finding.resource_id == str(invoice.id) and finding.details["taxed_as"] == "GB"
+    db_session.execute(Invoice.__table__.update().where(Invoice.id == invoice.id).values(tax_engine="legacy"))
+    db_session.expire_all()
+    assert bi.tax_buyer_country_missing(db_session, PARAMS, _now()) == []
+
+
+def test_no_rule_for_class_detector(db_session, invoice):
+    assert bi.tax_no_rule_for_class(db_session, PARAMS, _now()) == []
+    evidence = dict(invoice.tax_evidence)
+    missing = [{"tax_class": "reduced", "jurisdiction": "GB", "country": "GB"}]
+    db_session.execute(
+        Invoice.__table__.update().where(Invoice.id == invoice.id).values(
+            tax_evidence={**evidence, "notes": ["no_rule_for_class"], "no_rule_for_class": missing}
+        )
+    )
+    db_session.expire_all()
+    (finding,) = bi.tax_no_rule_for_class(db_session, PARAMS, _now())
+    assert finding.resource_id == str(invoice.id) and finding.details["missing"] == missing
+    assert "reduced" in finding.message
+
+
+def test_switch_lists_products_whose_class_has_no_rule_where_registered(db_session):
+    from app.models.product_catalog import Product
+
+    classes = seed_classes(db_session)
+    enable_tax(db_session, "GB")
+    add_registration(db_session, "GB")
+    add_registration(db_session, "EU_OSS", scheme="oss_non_union")
+    add_rule(db_session, name="UK 20%", jurisdiction="GB", source="pack")
+    add_rule(db_session, name="OSS FR", country="FR", jurisdiction="EU_OSS", source="pack")
+    db_session.add_all([
+        Product(name="Plain", code="plain"),
+        Product(name="Book", code="book", tax_class_id=classes["reduced"]),
+        Product(name="Old", code="old", tax_class_id=classes["zero"], enabled=False),
+        Product(name="Fee", code="fee", tax_class_id=classes["exempt"]),
+    ])
+    db_session.flush()
+    item = _items(db_session)["product_classes_have_rules"]
+    assert not item["ok"]
+    assert [(m["product_code"], m["tax_class"], m["jurisdiction"]) for m in item["missing"]] == [
+        ("book", "reduced", "EU_OSS"), ("book", "reduced", "GB"),
+    ]
+    add_rule(db_session, name="UK 5%", rate="5", tax_class="reduced", jurisdiction="GB", source="pack")
+    add_rule(db_session, name="OSS FR 5.5", rate="5.5", country="FR", tax_class="reduced", jurisdiction="EU_OSS",
+             source="pack")
+    assert _items(db_session)["product_classes_have_rules"]["ok"]
+
+
+def test_switch_needs_the_adviser_signoff(db_session):
+    from app.services.settings_store import set_setting
+
+    seed_classes(db_session)
+    item = _items(db_session)["adviser_signoff"]
+    assert not item["ok"] and item["setting"] == "billing_tax_adviser_signoff"
+    assert any(c.startswith("18 q8") for c in item["covers"]) and any(c.startswith("18 q10") for c in item["covers"])
+    assert sum(c.startswith("18.1 q") for c in item["covers"]) == 9
+    set_setting(db_session, "billing_tax_adviser_signoff", "   ")
+    assert not _items(db_session)["adviser_signoff"]["ok"]
+    set_setting(db_session, "billing_tax_adviser_signoff", "Smith & Co ref VAT-12, 2026-12-01")
+    item = _items(db_session)["adviser_signoff"]
+    assert item["ok"] and item["signoff"] == "Smith & Co ref VAT-12, 2026-12-01"
+
+
+def _home(db, now=None):
+    return [f.resource_id for f in bi.tax_home_registration_missing(db, {}, now or _now())]
+
+
+@pytest.mark.parametrize("mode", ["shadow", "v2"])
+def test_home_registration_missing_fires_in_shadow_and_v2(db_session, mode):
+    from app.models.tax import SellerTaxRegistration
+
+    seed_classes(db_session)
+    set_engine(db_session, "tax", mode)
+    enable_tax(db_session, "DE")
+    assert _home(db_session) == ["tax_registration:DE"]
+    add_registration(db_session, "EU_OSS", scheme="oss_union", country="DE")
+    assert _home(db_session) == ["tax_registration:DE"]
+    home = add_registration(db_session, "DE")
+    assert _home(db_session) == []
+    home.enabled = False
+    db_session.flush()
+    assert _home(db_session) == ["tax_registration:DE"]
+    assert db_session.get(SellerTaxRegistration, home.id) is not None
+
+
+def test_home_registration_missing_is_silent_with_tax_legacy_or_not_set_up(db_session):
+    from app.services.alerting.catalogue import CATALOGUE
+    from app.services.settings_store import set_setting
+
+    assert CATALOGUE["billing_tax_home_registration_missing"].enabled_by_default is True
+    seed_classes(db_session)
+    set_engine(db_session, "tax", "shadow")
+    assert _home(db_session) == []
+    enable_tax(db_session, "GB")
+    set_engine(db_session, "tax", "legacy")
+    assert _home(db_session) == []
+    set_engine(db_session, "tax", "v2")
+    set_setting(db_session, "billing_tax_enabled", False)
+    assert _home(db_session) == []
+
+
+def test_a_tax_id_country_mismatch_raises_the_evidence_conflict_alert(db_session, invoice):
+    evidence = dict(invoice.tax_evidence)
+    db_session.execute(
+        Invoice.__table__.update().where(Invoice.id == invoice.id).values(
+            tax_cents=0,
+            tax_evidence={**evidence, "reasons": ["tax_id_country_mismatch"], "tax_id_country": "DE",
+                          "tax_id_country_mismatch": True},
+        )
+    )
+    db_session.expire_all()
+    (finding,) = bi.tax_evidence_conflict(db_session, PARAMS, _now())
+    assert finding.resource_id == str(invoice.id)
+    assert finding.details["tax_id_country"] == "DE" and "DE" in finding.message
+
+
 def test_tax_is_iterated_and_its_non_blocking_checks_do_not_block(db_session):
     assert "tax" in billing_shadow.ENGINES
     assert {"t1_rule_divergence", "t2_uncovered", "t5_context_changed"} <= billing_shadow.EXPECTED_DIFFERENCE_KEYS

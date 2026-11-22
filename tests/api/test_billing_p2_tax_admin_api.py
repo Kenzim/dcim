@@ -195,6 +195,30 @@ def test_rule_country_xi_is_refused_with_a_pointer_to_gb(client, headers):
     assert client.get(f"{BASE}/rules/{future.json()['id']}", headers=headers).json()["country"] == "GB"
 
 
+@pytest.mark.parametrize(("code", "country", "error"), [("IM", "GB", "country_im"), ("MC", "FR", "country_mc")])
+def test_rule_country_im_and_mc_are_refused_with_a_pointer(client, headers, code, country, error):
+    """The Isle of Man is taxed by GB rules and Monaco by FR rules; a rule for either would never match."""
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+    resp = client.post(f"{BASE}/rules", headers=headers, json={**body, "country": code.lower()})
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == error and country in detail["message"]
+
+
+@pytest.mark.parametrize(("code", "right"), [("EL", "GR"), ("XI", "GB"), ("IM", "GB"), ("MC", "FR"), ("UK", "GB")])
+def test_registration_jurisdiction_codes_that_never_match_are_refused(client, headers, code, right):
+    body = {"jurisdiction": code.lower(), "scheme": "domestic", "tax_number": "X1", "country": right}
+    resp = client.post(f"{BASE}/registrations", headers=headers, json=body)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "invalid_registration_jurisdiction" and right in detail["message"]
+    created = client.post(f"{BASE}/registrations", headers=headers, json={**body, "jurisdiction": right})
+    assert created.status_code == 201, created.text
+    resp = client.put(f"{BASE}/registrations/{created.json()['id']}", headers=headers, json={"jurisdiction": code})
+    assert resp.status_code == 422 and resp.json()["detail"]["code"] == "invalid_registration_jurisdiction"
+
+
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
     classes = {c["code"]: c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json()}
     assert client.delete(f"{BASE}/classes/{classes['standard']}", headers=headers).status_code == 409
@@ -341,6 +365,12 @@ def test_tax_switch_refused_then_accepted_and_rollback_lists_open_invoices(clien
     _seed_quiet_history(db_session, "tax", 14, datetime.now(timezone.utc))
     set_engine(db_session, "invoice", "v2")
     db_session.commit()
+    unsigned = client.post(f"{engines}/tax/switch", headers=headers, json={"to": "v2", "confirm_mirrored_only": True})
+    assert unsigned.status_code == 409 and unsigned.json()["detail"]["failing"] == ["adviser_signoff"]
+    signed = client.put(
+        "/api/admin/settings/billing_tax_adviser_signoff", headers=headers, json={"value": "Adviser ref 12, 2026-12-01"}
+    )
+    assert signed.status_code == 200, signed.text
     accepted = client.post(
         f"{engines}/tax/switch", headers=headers, json={"to": "v2", "confirm_mirrored_only": True}
     )

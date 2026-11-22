@@ -45,6 +45,24 @@ def _invoice(db, account):
     )
 
 
+def test_an_oss_registration_number_is_headed_as_the_one_stop_shop_number(db_session, account):
+    from app.dao.commerce_dao import BillingProfileDAO
+
+    set_engine(db_session, "tax", "v2")
+    enable_tax(db_session, "GB")
+    add_registration(db_session, "GB", number="GB999999973")
+    add_registration(db_session, "EU_OSS", scheme="oss_non_union", number="EU372000041")
+    add_rule(db_session, name="FR VAT 20%", country="FR", jurisdiction="EU_OSS", source="pack")
+    BillingProfileDAO.upsert(db_session, account.id, country="FR")
+    db_session.flush()
+    invoice = _invoice(db_session, account)
+    assert invoice.tax_cents == 200
+    content = tax_pdf.for_invoice(db_session, invoice)
+    assert content.seller_lines == ["One Stop Shop VAT identification number: EU372000041"]
+    note_snapshot = {"registration_tax_number": "DE123456789", "registration_jurisdiction": "EU_OSS"}
+    assert tax_pdf._seller_lines(note_snapshot) == ["One Stop Shop VAT identification number: DE123456789"]
+
+
 def test_legacy_and_shadow_pdfs_have_no_tax_content(db_session, account):
     invoice = _invoice(db_session, account)
     assert tax_pdf.for_invoice(db_session, invoice) is None
