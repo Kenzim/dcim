@@ -359,7 +359,7 @@ class PaymentWebhookService:
         payment.processed_at = datetime.now(timezone.utc)
         invoice = payment.invoice
         if invoice.status == InvoiceStatus.PENDING_ACTION:
-            invoice.status = InvoiceStatus.OPEN
+            InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause="payment_failed")
 
     @staticmethod
     def _reverse_payment(

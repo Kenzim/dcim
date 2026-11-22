@@ -343,7 +343,6 @@ def cancel_order(
 ) -> tuple[Order, Optional[RefundDecision]]:
     """Cancel an order, void its unpaid invoice, and apply the refund policy to money received."""
     from app.services.invoice_service import InvoiceService
-    from app.services.refund_service import set_invoice_status
 
     if order.invoice_id is not None and _automatic_policy(db, "order_cancelled") is not None:
         # Refunds write the account's ledger, whose lock comes before the order's.
@@ -362,7 +361,9 @@ def cancel_order(
             InvoiceStatus.PAID,
             InvoiceStatus.VOID,
         }:
-            set_invoice_status(db, invoice, InvoiceStatus.VOID, cause="order_cancelled", actor_user_id=actor_user_id)
+            InvoiceService.transition(
+                db, invoice, InvoiceStatus.VOID, cause="order_cancelled", actor_user_id=actor_user_id
+            )
         decision = apply_order_refund_policy(
             db, locked, reason="order_cancelled", actor_user_id=actor_user_id
         )

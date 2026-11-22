@@ -39,6 +39,7 @@ from app.models.reseller import (
     PaymentStatus,
 )
 from app.services.audit_service import AuditService
+from app.services.billing.rounding import refund_tax_proportional
 from app.services.billing_locks import BillingLocks
 from app.services.payments.base import (
     GatewayNotConfiguredError,
@@ -92,39 +93,6 @@ def _registry(registry: Any) -> Any:
     from app.services.payments.registry import payment_gateway_registry
 
     return payment_gateway_registry
-
-
-def set_invoice_status(
-    db: Session, invoice: Invoice, to: InvoiceStatus, *, cause: str, actor_user_id: Optional[int] = None
-) -> None:
-    """Move an invoice through ``InvoiceService.transition``.
-
-    While ``transition`` is still the phase 1 stub the status is written
-    directly, as the refund paths did before phase 1.
-    """
-    from app.services.invoice_service import InvoiceService
-
-    try:
-        InvoiceService.transition(db, invoice, to, cause=cause, actor_user_id=actor_user_id)
-    except NotImplementedError:
-        invoice.status = to
-    if to != InvoiceStatus.PAID:
-        invoice.paid_at = None
-
-
-def proportional_tax(amount: int, invoice_tax: int, invoice_total: int) -> int:
-    """Tax part of ``amount`` in proportion to the invoice's tax, rounded half to even."""
-    try:
-        from app.services.billing.rounding import refund_tax_proportional
-    except ImportError:
-        # Until app/services/billing/rounding.py is on this branch.
-        if invoice_total == 0:
-            return 0
-        quotient, remainder = divmod(amount * invoice_tax, invoice_total)
-        if remainder * 2 > invoice_total or (remainder * 2 == invoice_total and quotient % 2 == 1):
-            quotient += 1
-        return quotient
-    return refund_tax_proportional(amount, invoice_tax, invoice_total)
 
 
 def _line_value(line: Any, name: str) -> Any:
@@ -730,8 +698,13 @@ class RefundService:
             InvoiceService.recompute(db, invoice, cause=cause)
             if (refund.refund_metadata or {}).get("dispute_policy") == "debit_balance" and not _is_topup(invoice):
                 RefundService._dispute_debit_balance(db, refund, invoice)
-        else:
-            set_invoice_status(db, invoice, InvoiceStatus.FAILED, cause=legacy_reason)
+        elif invoice.status != InvoiceStatus.VOID:
+            # A void invoice (a payment that arrived after it was voided) stays
+            # void: the legacy table has no void to failed edge.
+            from app.services.invoice_service import InvoiceService
+
+            InvoiceService.transition(db, invoice, InvoiceStatus.FAILED, cause=legacy_reason)
+            invoice.paid_at = None
         db.flush()
 
     @staticmethod
@@ -907,11 +880,11 @@ class RefundService:
         already = sum(
             int((meta or {}).get("tax_cents"))
             if (meta or {}).get("tax_cents") is not None
-            else proportional_tax(min(int(amount), invoice_total), invoice_tax, invoice_total)
+            else refund_tax_proportional(min(int(amount), invoice_total), invoice_tax, invoice_total)
             for amount, meta in previous
         )
         through = min(previous_cents + int(refund.amount_cents), invoice_total)
-        tax = proportional_tax(through, invoice_tax, invoice_total) - already
+        tax = refund_tax_proportional(through, invoice_tax, invoice_total) - already
         return max(0, min(tax, int(refund.amount_cents)))
 
     @staticmethod
