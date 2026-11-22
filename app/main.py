@@ -458,6 +458,8 @@ api_router.include_router(billing_refunds_admin_api.router, tags=["billing-refun
 # Billing engines: modes, shadow mismatches, scans and the v2 switch
 from app.api import billing_engines_admin as billing_engines_admin_api
 api_router.include_router(billing_engines_admin_api.router, tags=["billing-engines-admin"])
+from app.api import billing_jobs_admin as billing_jobs_admin_api
+api_router.include_router(billing_jobs_admin_api.router, tags=["billing-jobs-admin"])
 
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api
