@@ -277,3 +277,55 @@ def test_create_a_locale_and_a_product_variant(client, seeded, headers):
     assert client.post(BASE, headers=headers, json={"event_key": "welcome", "locale": "../x", "subject": "x", "body_text": "x"}).status_code == 422
     assert client.post(BASE, headers=headers, json={"event_key": "welcome", "locale": "fr", "subject": "x", "body_text": "{{ bad"}).status_code == 422
     assert _actions(seeded).count("billing.email_template.create") == 2
+
+
+def test_test_send_locks_the_admin_before_it_counts(seeded, test_admin_user, monkeypatch):
+    """Counting then inserting without a lock let 5 threads with 9 earlier sends make 14 in the hour.
+
+    SQLite ignores FOR UPDATE, so this asserts the statements: the admin's user
+    row is locked first, and the count itself is a locking read (MariaDB
+    repeatable read would otherwise count from an older snapshot).
+    """
+    from sqlalchemy.dialects import mysql
+
+    row = seeded.get(EmailTemplate, _id(seeded, "ticket_reply"))
+    seen = []
+    real_execute = seeded.execute
+
+    def recording_execute(statement, *args, **kwargs):
+        seen.append(statement)
+        return real_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(seeded, "execute", recording_execute)
+    templates_admin.queue_test_send(seeded, row, admin_user_id=test_admin_user.id, to_address="a@example.com")
+    locking = [statement for statement in seen if getattr(statement, "_for_update_arg", None) is not None]
+    assert len(locking) == 2
+    first, second = (str(statement.compile(dialect=mysql.dialect())) for statement in locking)
+    assert "FROM users" in first and first.rstrip().endswith("FOR UPDATE")
+    assert "FROM email_messages" in second and second.rstrip().endswith("FOR UPDATE")
+    assert seen.index(locking[0]) < seen.index(locking[1])
+
+
+def test_every_test_send_is_audited_with_its_address(client, seeded, headers):
+    template_id = _id(seeded, "ticket_reply")
+    for address in ("one@example.org", "two@example.net"):
+        assert client.post(f"{BASE}/{template_id}/test-send", headers=headers, json={"to_address": address}).status_code == 201
+    audits = seeded.execute(select(UserAuditEvent).where(UserAuditEvent.action == "billing.email_template.test_send").order_by(UserAuditEvent.id)).scalars().all()
+    assert [audit.event_metadata["to_address"] for audit in audits] == ["one@example.org", "two@example.net"]
+    assert all(audit.event_metadata["message_id"] for audit in audits)
+
+
+def test_preview_is_limited_per_admin_per_minute(client, seeded, headers, mock_redis, monkeypatch):
+    import app.core.rate_limit as rate_limit_module
+    from app.api import email_templates_admin as api
+
+    monkeypatch.setattr(rate_limit_module, "redis_client", mock_redis)
+    template_id = _id(seeded, "invoice_paid")
+    assert api.PREVIEW_LIMIT == 60 and api.PREVIEW_WINDOW_SECONDS == 60
+    for _ in range(api.PREVIEW_LIMIT):
+        assert client.post(f"{BASE}/{template_id}/preview", headers=headers).status_code == 200
+    limited = client.post(f"{BASE}/{template_id}/preview", headers=headers)
+    assert limited.status_code == 429
+    assert int(limited.headers["Retry-After"]) > 0
+    # Saving, listing and test sending are not affected by the preview counter.
+    assert client.get(BASE, headers=headers).status_code == 200

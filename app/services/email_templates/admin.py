@@ -19,6 +19,7 @@ from app.models.commerce_email import (
     EmailTemplate,
     EmailTemplateVersion,
 )
+from app.models.user import User
 from app.services.email_templates import catalogue
 from app.services.email_templates.render import render_stored
 from app.services.email_templates.sandbox import (
@@ -247,17 +248,25 @@ def _test_key_prefix(admin_user_id: int) -> str:
     return f"{TEST_KEY_PREFIX}:{int(admin_user_id)}:"
 
 
-def remaining_test_sends(db: Session, admin_user_id: int, now: datetime) -> tuple[int, int]:
-    """How many test sends the admin has left this hour, and seconds until the oldest one ages out."""
+def remaining_test_sends(
+    db: Session, admin_user_id: int, now: datetime, *, locking: bool = False
+) -> tuple[int, int]:
+    """How many test sends the admin has left this hour, and seconds until the oldest one ages out.
+
+    ``locking`` reads the sends with ``FOR UPDATE``, so the count sees every
+    send committed so far even when the transaction already holds an older
+    snapshot (MariaDB repeatable read).
+    """
     since = now - TEST_SEND_WINDOW
     prefix = _test_key_prefix(admin_user_id)
-    times = list(
-        db.execute(
-            select(EmailMessage.created_at)
-            .where(EmailMessage.idempotency_key.startswith(prefix), EmailMessage.created_at >= since)
-            .order_by(EmailMessage.created_at)
-        ).scalars()
+    stmt = (
+        select(EmailMessage.created_at)
+        .where(EmailMessage.idempotency_key.startswith(prefix), EmailMessage.created_at >= since)
+        .order_by(EmailMessage.created_at)
     )
+    if locking:
+        stmt = stmt.with_for_update()
+    times = list(db.execute(stmt).scalars())
     left = max(0, TEST_SEND_LIMIT - len(times))
     retry = 0
     if not left and times:
@@ -277,9 +286,14 @@ def queue_test_send(
     variables: Optional[Mapping[str, Any]] = None,
     now: Optional[datetime] = None,
 ) -> EmailMessage:
-    """Queue one marked test message rendered from the stored template, within the hourly limit."""
+    """Queue one marked test message rendered from the stored template, within the hourly limit.
+
+    The admin's user row is locked until the caller commits, so concurrent
+    test sends of one admin count and insert one after another.
+    """
     now = now or datetime.now(timezone.utc)
-    left, retry = remaining_test_sends(db, admin_user_id, now)
+    db.execute(select(User.id).where(User.id == admin_user_id).with_for_update())
+    left, retry = remaining_test_sends(db, admin_user_id, now, locking=True)
     if left <= 0:
         raise SendRateLimited(retry)
     data = sample_variables(row.event_key, variables)

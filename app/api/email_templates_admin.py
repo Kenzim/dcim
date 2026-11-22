@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import require_admin
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
+from app.core.rate_limit import enforce_rate_limit
 from app.models.commerce_email import EmailTemplate, EmailTemplateVersion
 from app.models.product_catalog import Product
 from app.models.user import User
@@ -41,6 +42,8 @@ router = APIRouter(
 _LOCALE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
 _ADDRESS = re.compile(r"^[^@\s,;<>\"'\\]+@[^@\s,;<>\"'\\]+\.[^@\s,;<>\"'\\]+$")
 _NOT_FOUND = "Email template not found"
+PREVIEW_LIMIT = 60
+PREVIEW_WINDOW_SECONDS = 60
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -232,8 +235,12 @@ class PreviewBody(BaseModel):
 
 
 @router.post("/{template_id}/preview", responses=COMMON_ERROR_RESPONSES)
-def preview_template(template_id: int, db: DbDep, body: Optional[PreviewBody] = None):
-    """Render the template, or a draft sent with the request, against samples. Never sends."""
+def preview_template(template_id: int, auth: AdminDep, db: DbDep, body: Optional[PreviewBody] = None):
+    """Render the template, or a draft sent with the request, against samples. Never sends.
+
+    Limited to 60 previews per admin per minute.
+    """
+    enforce_rate_limit(f"email_template_preview:{auth['user_id']}", PREVIEW_LIMIT, PREVIEW_WINDOW_SECONDS)
     row = _get(db, template_id)
     body = body or PreviewBody()
     draft_html: Any = body.body_html if "body_html" in body.model_fields_set else templates_admin.KEEP
