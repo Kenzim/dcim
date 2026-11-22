@@ -1349,6 +1349,102 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
     return out
 
 
+def _nonpayment_billings(db: Session, service_status_clause) -> list:
+    """Retail billings ``suspended_nonpayment`` whose service matches ``service_status_clause``, by id."""
+    from app.models.reseller import ServiceBilling, ServiceBillingStatus
+    from app.models.service import Service
+
+    return list(
+        db.execute(
+            select(ServiceBilling, Service.status)
+            .join(Service, Service.id == ServiceBilling.service_id)
+            .where(
+                ServiceBilling.reseller_id.is_(None),
+                ServiceBilling.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT,
+                service_status_clause(Service.status),
+            )
+            .order_by(ServiceBilling.id)
+        ).all()
+    )
+
+
+def nonpayment_suspension_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A retail billing ``suspended_nonpayment`` whose service is not suspended.
+
+    The suspension job marks the billing first and then powers the service
+    off; when that fails (``needs_review``, perhaps later settled) the
+    service keeps running while billing treats it as suspended, and the
+    termination job never acts on it. The state decides, not the claim.
+    """
+    del now
+    from app.models.service import ServiceStatus
+
+    rows = _nonpayment_billings(
+        db, lambda status: status.not_in([ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED])
+    )
+    shown = rows[: params["max_rows"]]
+    out = [
+        Finding(
+            "billing_nonpayment_suspension_failed",
+            "service",
+            str(billing.service_id),
+            f"Service {billing.service_id}",
+            f"Service {billing.service_id} is marked suspended for non-payment but is "
+            f"{getattr(status, 'value', status)}",
+            "The non-payment suspension did not take effect on the service. Suspend it by hand, or set "
+            "its billing back to active if the client has paid.",
+            details={
+                "service_id": int(billing.service_id),
+                "billing_id": billing.id,
+                "service_status": getattr(status, "value", status),
+            },
+        )
+        for billing, status in shown
+    ]
+    if len(rows) > len(shown):
+        out.append(_overflow("billing_nonpayment_suspension_failed", "service",
+                             "services not suspended", len(rows) - len(shown), len(shown)))
+    return out
+
+
+def nonpayment_suspended_paid(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A retail service suspended for non-payment with no cycle invoice owed.
+
+    Payment lifts a suspension only when billing can tell it is the job's
+    own (``suspension_is_ours``); otherwise, or when the unsuspension failed,
+    the client has paid and the service stays down. The state decides: the
+    service is suspended, its billing ``suspended_nonpayment``, and no unpaid
+    cycle invoice is due by now (one generated ahead and not yet due keeps
+    the suspension after payment, so it is reported too).
+    """
+    from app.models.service import ServiceStatus
+    from app.services.billing.jobs.nonpayment import unpaid_cycle_invoices
+
+    found = [
+        billing
+        for billing, _ in _nonpayment_billings(db, lambda status: status == ServiceStatus.SUSPENDED)
+        if not unpaid_cycle_invoices(db, billing.id, due_by=now)
+    ]
+    shown = found[: params["max_rows"]]
+    out = [
+        Finding(
+            "billing_nonpayment_suspended_paid",
+            "service",
+            str(billing.service_id),
+            f"Service {billing.service_id}",
+            f"Service {billing.service_id} is still suspended for non-payment with nothing overdue",
+            "No cycle invoice of the service is unpaid and due, yet it is suspended for non-payment and nothing "
+            "will unsuspend it automatically. Unsuspend it by hand after checking the audit log.",
+            details={"service_id": int(billing.service_id), "billing_id": billing.id},
+        )
+        for billing in shown
+    ]
+    if len(found) > len(shown):
+        out.append(_overflow("billing_nonpayment_suspended_paid", "service",
+                             "paid services still suspended", len(found) - len(shown), len(shown)))
+    return out
+
+
 def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A live billing job whose last scheduled run is older than twice its cadence."""
     del params
@@ -1612,6 +1708,8 @@ BILLING_DETECTORS = {
     "billing_job_needs_review": billing_job_needs_review,
     "billing_job_stale": billing_job_stale,
     "billing_nonpayment_termination_unsettled": nonpayment_termination_unsettled,
+    "billing_nonpayment_suspension_failed": nonpayment_suspension_failed,
+    "billing_nonpayment_suspended_paid": nonpayment_suspended_paid,
     "billing_email_template_render_failed": email_template_render_failed,
     "billing_tax_fx_rate_missing": tax_fx_rate_missing,
     "billing_tax_buyer_country_missing": tax_buyer_country_missing,

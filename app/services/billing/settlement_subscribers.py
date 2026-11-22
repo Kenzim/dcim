@@ -217,7 +217,9 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
     billing = BillingLocks.service_billing(db, billing_id) if billing_id is not None else None
     if billing is None or billing.reseller_id is not None:
         return
-    claim = latest_suspension_claim(db, billing.service_id, in_flight=True, for_share=True)
+    from app.models.reseller import ServiceBillingStatus
+
+    claim = latest_suspension_claim(db, billing.service_id, in_flight=True, for_share=True, settled=True)
     if claim is not None and claim.status == BillingJobActionStatus.CLAIMED:
         # The job is between its claim and its provider call's end: it sees
         # this payment when it re-checks the invoice and lifts the suspension.
@@ -227,7 +229,14 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
         .where(Service.id == billing.service_id)
         .with_for_update(read=True)
     ).scalar_one_or_none()
+    owed = unpaid_cycle_invoices(db, billing.id, exclude_invoice_id=invoice.id)
     if status != ServiceStatus.SUSPENDED:
+        # A suspension whose power-off failed leaves the service running and
+        # the billing suspended_nonpayment: with nothing owed the billing
+        # is active again.
+        if status is not None and billing.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT and not owed:
+            billing.status = ServiceBillingStatus.ACTIVE
+            db.flush()
         return
     service = billing.service
     if claim is None:
@@ -235,6 +244,13 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
     ours, reason = suspension_is_ours(db, service.id, claim)
     if not ours:
         from app.services.audit_service import AuditService
+
+        # Settlement has set the billing active; the service stays down, so
+        # the billing keeps saying why and ``billing_nonpayment_suspended_paid``
+        # reports it.
+        if billing.status != ServiceBillingStatus.CANCELLED:
+            billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+            db.flush()
 
         AuditService.log(
             db,
@@ -246,11 +262,9 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
             metadata={"invoice_id": invoice.id, "reason": reason},
         )
         return
-    from app.models.reseller import ServiceBillingStatus
-
     if billing.status == ServiceBillingStatus.CANCELLED:
         return
-    if unpaid_cycle_invoices(db, billing.id, exclude_invoice_id=invoice.id):
+    if owed:
         billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
         db.flush()
         return
@@ -291,7 +305,7 @@ def unsuspend_paid_service(db: Session, service_id: int, *, lifecycle=None) -> b
         return False
     if service.status != ServiceStatus.SUSPENDED or billing.status == ServiceBillingStatus.CANCELLED:
         return False
-    ours, _ = suspension_is_ours(db, service_id, latest_suspension_claim(db, service_id))
+    ours, _ = suspension_is_ours(db, service_id, latest_suspension_claim(db, service_id, settled=True))
     if not ours or unpaid_cycle_invoices(db, billing.id):
         return False
     runner = lifecycle or ServiceLifecycle()

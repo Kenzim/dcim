@@ -6,7 +6,8 @@ unique ``(job, subject_key)`` key still stops every job from claiming the
 subject again, and no job reads a row's status to retry it. The only reads
 of the status are termination's notice rule (a notice claim must be ``done``
 before it terminates, design 10.5) and the unsuspend-after-payment check,
-which also needs the ``suspended`` mark only the job writes.
+which needs the ``suspended`` mark only the job writes or, for a suspension
+claim settled here, the marks recorded with the settlement.
 """
 
 from __future__ import annotations
@@ -88,6 +89,15 @@ def list_actions(
     return list(rows), total
 
 
+def _settlement_marks(db: Session, row: BillingJobAction) -> dict:
+    """For a suspension claim, the marks at settlement: ``suspension_is_ours`` counts changes after them."""
+    from app.services.billing.jobs.nonpayment import SUSPENSION_JOB, suspension_marks
+
+    if row.job != SUSPENSION_JOB:
+        return {}
+    return {"marks": suspension_marks(db)}
+
+
 def resolve_action(
     db: Session, action_id: int, *, to: str, note: str, actor_user_id: Optional[int], now: datetime
 ) -> tuple[BillingJobAction, str]:
@@ -113,6 +123,7 @@ def resolve_action(
             "note": note,
             "by_user_id": actor_user_id,
             "at": _iso(now),
+            **_settlement_marks(db, row),
         },
     }
     row.status = BillingJobActionStatus(to)

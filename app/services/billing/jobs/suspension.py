@@ -311,11 +311,12 @@ class NonpaymentSuspensionJob:
     def live_preconditions(self, db: Session) -> list[str]:
         """Unmet preconditions for ``live``: a retail policy that suspends, and its email template."""
         from app.models.billing_jobs import BillingNonpaymentPolicy, NonpaymentPolicyScope
-        from app.services.billing.jobs.nonpayment import template_enabled
+        from app.services.billing.jobs.nonpayment import stuck_service_alerts_problems, template_enabled
 
         problems = []
         if not template_enabled(db, SERVICE_SUSPENDED_NONPAYMENT):
             problems.append(f"the {SERVICE_SUSPENDED_NONPAYMENT} email template is not enabled")
+        problems.extend(stuck_service_alerts_problems(db))
         count = db.scalar(
             select(BillingNonpaymentPolicy.id)
             .where(

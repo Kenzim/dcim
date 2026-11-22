@@ -68,11 +68,24 @@ def job_database(tmp_path, monkeypatch) -> Iterator[Session]:
     for name in BILLING_JOB_NAMES:
         db.add(BillingJobState(job=name))
     db.commit()
+    enable_stuck_service_alerts(db)
     try:
         yield db
     finally:
         db.close()
         engine.dispose()
+
+
+def enable_stuck_service_alerts(db, *keys: str, enabled: bool = True) -> None:
+    """Turn the stuck-service alerts on (all, or ``keys``): the non-payment jobs' live precondition."""
+    from app.models.alerting import AlertTypeSetting
+    from app.services.billing.jobs.nonpayment import STUCK_SERVICE_ALERTS
+
+    for key in keys or STUCK_SERVICE_ALERTS:
+        row = db.get(AlertTypeSetting, key) or AlertTypeSetting(alert_type=key, params={})
+        row.enabled = enabled
+        db.add(row)
+    db.commit()
 
 
 def enable_templates(db, *events: str, enabled: bool = True) -> None:
