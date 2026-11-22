@@ -91,6 +91,8 @@ GUARDED_COLUMNS = FROZEN_COLUMNS | ONCE_SET_COLUMNS | {"document_type"}
 NOTE_FROZEN_COLUMNS = frozenset(
     {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"}
 )
+# Written once when a pending sterling VAT is filled (``_sterling_fill``).
+STERLING_FILL_COLUMNS = frozenset({"fx_rate", "fx_source", "tax_total_gbp_cents", "fx_rate_id"})
 
 MODES = ("log", "enforce")
 PROFORMA_CONVERSION = "proforma_conversion"
@@ -325,6 +327,24 @@ def _record(records: list[dict]) -> None:
         )
 
 
+def _sterling_fill(state, committed: _Committed) -> bool:
+    """A pending sterling VAT filled in once (design 4.10, ``sterling_conversion``).
+
+    The row is pending (``fx_period`` set and kept, ``fx_rate`` NULL), and
+    each of the four other sterling columns goes from NULL to a value in the
+    same flush. The values judged are those the session loaded (the fill
+    loads the row with a locking read), not a plain read of the stored row,
+    which under REPEATABLE READ may show an older snapshot.
+    """
+    if state.obj().fx_period is None or _old_value(state, "fx_period", committed)[0]:
+        return False
+    for name in STERLING_FILL_COLUMNS:
+        changed, old, new = _old_value(state, name, committed)
+        if not changed or old is not None or new is None:
+            return False
+    return True
+
+
 def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
     state = inspect(target)
     committed = _Committed(connection, target.id)
@@ -332,9 +352,12 @@ def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
     if old_status == _DRAFT:
         return
     allowance = _allowance.get()
+    fill = _sterling_fill(state, committed)
     for name in sorted(GUARDED_COLUMNS):
         changed, old, new = _old_value(state, name, committed)
         if not changed or _allowed(name, old, new, allowance, target.id):
+            continue
+        if fill and name in STERLING_FILL_COLUMNS:
             continue
         _violation(
             connection,

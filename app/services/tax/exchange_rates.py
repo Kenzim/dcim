@@ -168,6 +168,9 @@ def note_rate(db: Session, invoice: Any, tax_cents: int) -> Optional[NoteRate]:
     """
     if int(tax_cents or 0) <= 0 or invoice is None or not _engine_taxed(invoice):
         return None
+    if invoice.fx_period is not None and invoice.fx_rate is None:
+        # A proforma paid in a month whose rate is not stored yet (sterling_conversion).
+        raise ExchangeRateMissing(str(invoice.currency or "").upper(), str(invoice.fx_period))
     if invoice.fx_rate is not None:
         rate_id = int(invoice.fx_rate_id) if invoice.fx_rate_id is not None else None
         return NoteRate(Decimal(invoice.fx_rate), str(invoice.fx_period), str(invoice.fx_source), rate_id)
@@ -255,6 +258,7 @@ class StoreOutcome:
     inserted: tuple[str, ...]
     unchanged: tuple[str, ...]
     conflicts: tuple[tuple[str, Decimal, Decimal], ...]  # currency, stored, offered
+    filled: tuple[int, ...] = ()  # invoices whose pending sterling VAT the new rates filled
 
 
 def store_month(
@@ -270,7 +274,9 @@ def store_month(
 
     A stored rate that differs from the one offered is reported in
     ``conflicts`` and kept. ``hand_entered`` marks the inserted rows as typed
-    in by an administrator. Runs in the caller's transaction, which commits;
+    in by an administrator. Each inserted rate fills the invoices whose
+    sterling VAT waits for it (``sterling_conversion.fill_pending``), in the
+    same transaction. Runs in the caller's transaction, which commits;
     a row stored meanwhile by another writer makes the flush raise
     ``IntegrityError`` (the unique key), and the caller rolls back.
     """
@@ -310,4 +316,11 @@ def store_month(
         existing[code] = rate
         inserted.append(code)
     db.flush()
-    return StoreOutcome(tuple(inserted), tuple(unchanged), tuple(conflicts))
+    from app.services.tax.sterling_conversion import fill_pending
+
+    filled: list[int] = []
+    for code in inserted:
+        row = stored_rate(db, code, period, source)
+        if row is not None:
+            filled.extend(fill_pending(db, row))
+    return StoreOutcome(tuple(inserted), tuple(unchanged), tuple(conflicts), tuple(filled))

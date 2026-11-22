@@ -15,6 +15,11 @@ the source's file: a difference is the same conflict (``needs_review``,
 audited, never overwritten). Either way the rate's ``compared_at`` is set, so
 the month is not fetched again; a month not published yet is asked for again.
 
+A month with paid invoices whose sterling VAT waits for its rate
+(``sterling_conversion``) is fetched while the rate is missing, and once it
+is stored the pending invoices are swept (filled) on each daily run, in
+case the store that should have filled them missed one.
+
 The provider call is a read outside the database: the item's read transaction
 is ended before it, and the rows are written and claimed after it in one
 transaction. Subjects are months as ``YYYYMM`` numbers.
@@ -33,6 +38,7 @@ from app.services.billing.jobs.base import JobRun, PlannedAction, _utc
 NAME = "tax_exchange_rates_fetch"
 ACTION = "fetch_exchange_rates"
 COMPARE_ACTION = "compare_exchange_rate"
+FILL_ACTION = "fill_pending_sterling"
 PROVIDER_KIND = "currency_rates"
 PROVIDER_REF = "hmrc_exchange_rates:hmrc_monthly"
 MONTH_OFFSETS = (0, 1)
@@ -64,6 +70,10 @@ def compare_key(period: str, currency: str) -> str:
     return f"compare:{period}:{currency}"
 
 
+def fill_key(period: str, currency: str, run: JobRun) -> str:
+    return f"fill:{period}:{currency}:{_utc(run.now):%Y-%m-%d}"
+
+
 def _missing(db: Session, period: str, currency: str) -> bool:
     from app.services.tax.exchange_rates import SOURCE_HMRC, has_rate
 
@@ -85,6 +95,12 @@ def _uncompared(db: Session, currency: str, period: Optional[str] = None):
     if period is not None:
         stmt = stmt.where(TaxExchangeRate.period == period)
     return db.scalars(stmt.order_by(TaxExchangeRate.period))
+
+
+def _pending(db: Session, currency: str) -> list[tuple[str, str, int]]:
+    from app.services.tax.sterling_conversion import pending_months
+
+    return pending_months(db, currency)
 
 
 def _provider_available() -> bool:
@@ -143,6 +159,7 @@ class TaxExchangeRatesFetch:
         periods = {period_for(run, offset) for offset in MONTH_OFFSETS}
         wanted = {period for period in periods if _missing(db, period, currency)}
         wanted |= {row.period for row in _uncompared(db, currency)}
+        wanted |= {period for period, _currency, _count in _pending(db, currency)}
         return sorted(subject_of(period) for period in wanted)
 
     def plan(self, db: Session, run: JobRun, subject_id: int) -> Optional[PlannedAction]:
@@ -157,9 +174,30 @@ class TaxExchangeRatesFetch:
             return PlannedAction(subject_key(period, currency), ACTION, _utc(run.now), detail)
         if next(iter(_uncompared(db, currency, period)), None) is not None:
             return PlannedAction(compare_key(period, currency), COMPARE_ACTION, _utc(run.now), detail)
+        if any(p == period for p, _c, _n in _pending(db, currency)):
+            return PlannedAction(fill_key(period, currency, run), FILL_ACTION, _utc(run.now), detail)
         return None
 
     def execute(self, db: Session, run: JobRun, action: PlannedAction) -> str:
+        if action.action == FILL_ACTION:
+            return self._fill(db, run, action)
+        return self._fetch(db, run, action)
+
+    @staticmethod
+    def _fill(db: Session, run: JobRun, action: PlannedAction) -> str:
+        from app.services.tax.sterling_conversion import sweep
+
+        period = str(action.detail["period"])
+        currency = str(action.detail["currency"])
+        if not run.in_window(action.trigger_at):
+            return "skipped:not_due"
+        if not run.claim(db, action.subject_key):
+            return "already_done"
+        filled = sweep(db, period, currency)
+        run.finish(db, action.subject_key, "done", {"period": period, "currency": currency, "filled": filled})
+        return "done"
+
+    def _fetch(self, db: Session, run: JobRun, action: PlannedAction) -> str:
         from app.plugin_host.kinds import CurrencyRatesRequest
         from app.plugin_host.providers import ProviderUnavailable, call_provider
         from app.services.tax import exchange_rates

@@ -246,3 +246,61 @@ def test_going_live_needs_the_provider(factory, monkeypatch):
 def test_a_dry_run_never_calls_the_source(factory, source):
     result = runner.run_job(factory, NAME, dry_run=True, trigger="admin", now=T0)
     assert result.counts == {"planned": 2} and source.calls == []
+
+
+def _pending_invoice(factory, period: str) -> int:
+    db = factory()
+    db.execute(
+        sa.text(
+            "INSERT INTO invoices (id, invoice_number, purpose, status, amount_cents, currency, tax_cents, fx_period) "
+            "VALUES (71, 71, 'upgrade', 'paid', 1200, 'USD', 200, :period)"
+        ),
+        {"period": period},
+    )
+    db.commit()
+    db.close()
+    return 71
+
+
+def _invoice_sterling(factory, invoice_id: int) -> tuple:
+    db = factory()
+    try:
+        return tuple(
+            db.execute(
+                sa.text("SELECT fx_rate, fx_period, tax_total_gbp_cents, fx_rate_id FROM invoices WHERE id = :id"),
+                {"id": invoice_id},
+            ).one()
+        )
+    finally:
+        db.close()
+
+
+def test_a_pending_months_rate_is_fetched_and_fills_the_invoice(factory, source):
+    invoice_id = _pending_invoice(factory, "2026-09")
+    source.months = {"2026-09": {"USD": "1.3456"}, "2026-11": {"USD": "1.3396"}, "2026-12": {"USD": "1.3158"}}
+    _go_live(factory, T0 - timedelta(hours=1))
+    assert _run(factory).counts == {"done": 3}
+    assert "2026-09" in source.calls
+    rate_id = _row(factory, "2026-09").id
+    assert _invoice_sterling(factory, invoice_id)[1:] == ("2026-09", 149, rate_id)
+    assert _run(factory, T0 + timedelta(days=1)).counts == {}
+
+
+def test_the_daily_sweep_fills_a_pending_invoice_whose_rate_is_stored(factory, source):
+    for period, rate in (("2026-11", "1.3396"), ("2026-12", "1.3158")):
+        db = factory()
+        exchange_rates.store_month(db, period, [("USD", rate)], fetched_at=T0)
+        db.commit()
+        db.close()
+    invoice_id = _pending_invoice(factory, "2026-12")
+    _go_live(factory, T0 - timedelta(hours=1))
+    assert _run(factory).counts == {"done": 1}
+    assert source.calls == []
+    assert _invoice_sterling(factory, invoice_id)[2:] == (152, _row(factory, "2026-12").id)
+    db = factory()
+    action = db.scalars(sa.select(BillingJobAction).where(BillingJobAction.subject_key == "fill:2026-12:USD:2026-11-22")).one()
+    assert action.detail["filled"] == [invoice_id]
+    filled = db.scalars(sa.select(UserAuditEvent).where(UserAuditEvent.action == "billing.tax.sterling_filled")).all()
+    assert len(filled) == 1
+    db.close()
+    assert _run(factory, T0 + timedelta(days=1)).counts == {}
