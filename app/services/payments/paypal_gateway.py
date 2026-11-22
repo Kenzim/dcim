@@ -7,6 +7,7 @@ import json
 import threading
 import time
 import uuid
+from urllib.parse import quote
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Optional
 
@@ -72,6 +73,12 @@ def _money_to_cents(value: Any) -> int:
     if cents != cents.to_integral_value():
         raise PaymentGatewayError("PayPal returned an invalid amount precision")
     return int(cents)
+
+
+def _optional_cents(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    return _money_to_cents(value)
 
 
 class PayPalGateway:
@@ -399,17 +406,21 @@ class PayPalGateway:
         if response.status_code in {200, 201}:
             status = str(data.get("status") or "").upper()
             refund_id = str(data.get("id") or "") or None
+            amount_cents = _optional_cents(_mapping(data.get("amount")).get("value"))
             if status in {"COMPLETED", "PENDING"}:
                 return GatewayRefundResult(
                     status=GatewayResultStatus.SUCCEEDED,
                     external_ref=refund_id,
                     metadata={"paypal_refund_status": status.lower()},
+                    pending=status != "COMPLETED",
+                    amount_cents=amount_cents,
                 )
             return GatewayRefundResult(
                 status=GatewayResultStatus.DECLINED,
                 external_ref=refund_id,
                 failure_code=status.lower() or "refund_failed",
                 failure_message=_PAYPAL_DECLINED,
+                amount_cents=amount_cents,
             )
         issue = self._issue(data, "refund_failed")
         if response.status_code in _TRANSIENT_STATUS_CODES or response.status_code >= 500:
@@ -463,6 +474,31 @@ class PayPalGateway:
                 failure_code="paypal_unavailable",
                 failure_message=_GATEWAY_UNAVAILABLE,
             )
+        return self._refund_result_from_response(response, data)
+
+    def lookup_refund(
+        self,
+        *,
+        external_ref: str,
+        idempotency_key: str,
+        refund_ref: Optional[str] = None,
+    ) -> Optional[GatewayRefundResult]:
+        # PayPal has no search by request id; without a refund id the caller
+        # re-sends the refund with the same PayPal-Request-Id instead.
+        if not refund_ref:
+            return None
+        try:
+            response, data = self._request(
+                "GET", f"/v2/payments/refunds/{quote(refund_ref, safe='')}"
+            )
+        except (httpx.TimeoutException, httpx.RequestError):
+            return GatewayRefundResult(
+                status=GatewayResultStatus.TRANSIENT_ERROR,
+                failure_code="paypal_unavailable",
+                failure_message=_GATEWAY_UNAVAILABLE,
+            )
+        if response.status_code == 404:
+            return None
         return self._refund_result_from_response(response, data)
 
     def charge_off_session(
@@ -788,6 +824,8 @@ class PayPalGateway:
         amount_cents: Optional[int] = None
         currency: Optional[str] = None
         failure_code: Optional[str] = None
+        refund_ref: Optional[str] = None
+        refund_status: Optional[str] = None
 
         if event_type == "PAYMENT.CAPTURE.COMPLETED":
             action = GatewayWebhookAction.PAYMENT_COMPLETED
@@ -808,9 +846,29 @@ class PayPalGateway:
         }:
             action = GatewayWebhookAction.PAYMENT_REVERSED
             external_ref = self._related_capture_id(resource)
+            if event_type == "PAYMENT.CAPTURE.REFUNDED" and external_ref != str(
+                resource.get("id") or ""
+            ):
+                refund_ref = str(resource.get("id") or "") or None
+            refund_status = str(resource.get("status") or "completed").lower()
+            if refund_status == "completed" or event_type == "PAYMENT.CAPTURE.REVERSED":
+                refund_status = "succeeded"
+            amount = _mapping(resource.get("amount"))
+            amount_cents = _optional_cents(amount.get("value"))
+            currency = str(amount.get("currency_code") or "").upper() or None
+        elif event_type == "PAYMENT.REFUND.FAILED":
+            action = GatewayWebhookAction.PAYMENT_REVERSED
+            external_ref = self._related_capture_id(resource)
+            refund_ref = str(resource.get("id") or "") or None
+            refund_status = "failed"
+            failure_code = "refund_failed"
         elif event_type == "CUSTOMER.DISPUTE.CREATED":
             action = GatewayWebhookAction.PAYMENT_DISPUTED
             external_ref = self._disputed_capture_id(resource)
+            refund_ref = str(resource.get("dispute_id") or resource.get("id") or "") or None
+            amount = _mapping(resource.get("dispute_amount"))
+            amount_cents = _optional_cents(amount.get("value"))
+            currency = str(amount.get("currency_code") or "").upper() or None
 
         return NormalizedGatewayWebhookEvent(
             event_id=event_id,
@@ -821,6 +879,8 @@ class PayPalGateway:
             amount_cents=amount_cents,
             currency=currency,
             failure_code=failure_code,
+            refund_ref=refund_ref,
+            refund_status=refund_status,
         )
 
     @staticmethod

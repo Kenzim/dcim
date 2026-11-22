@@ -450,10 +450,12 @@ These modes keep today's behaviour byte for byte, so the table is today's edges,
 | `open`, `pending_action`, `overdue` | `paid` | `mark_paid_if_fully_allocated` (`invoice_service.py:211-213`), admin mark-paid (`commerce_admin.py:439`; W0a moves it onto the settlement function) |
 | `paid` | `open` | `mark_paid_if_fully_allocated` when allocation drops (`invoice_service.py:214-216`) |
 | `open` | `pending_action` | `orchestrator.py:607` |
-| `pending_action` | `open` | `webhooks.py:239-240` |
+| `pending_action` | `open` | `webhooks.py` `_payment_failed` (cause `payment_failed`) |
 | `open`, `pending_action` | `overdue` | `recurring_billing_service.py:557-558` |
-| `open`, `pending_action`, `overdue` | `void` | `commerce_admin.py:479`, `reseller_billing_service.py:795`, `recurring_billing_service.py:883` |
-| any except `void`, `draft` | `failed` | refunds and reversals (`refunds.py:196`, `webhooks.py:301`) |
+| `open`, `pending_action`, `overdue` | `void` | `commerce_admin.py:479`, `reseller_billing_service.py:795`, `recurring_billing_service.py:883`; `order_refunds.cancel_order` (cause `order_cancelled`, also from `failed`) |
+| any except `void`, `draft` | `failed` | `RefundService` completion (causes `admin_refund`, `refund`, `dispute`) |
+
+As built (P1-R): before phase 1, a refund or dispute of a late payment on a `void` invoice wrote `failed` anyway. There is no `void` to `failed` edge, so such an invoice now stays `void`; the payment, refund and ledger effects still apply. This is a deliberate change from the pre-phase-1 behaviour in `legacy` and `shadow`, listed in the phase 1 report.
 
 In these modes `create()` still writes `draft` first and publishes in the same transaction (so drafts become real from phase 1 for admin-built invoices, A5 later), and the publish side effects of 3.3 apply with two differences: `amount_cents` is the legacy amount, and `model_version`, `subtotal_cents`, `discount_cents` and `tax_cents` stay NULL (the v2 totals are computed only for the `i3_totals` comparison). Lines with their new columns, snapshots, `issued_at`, the number columns and `invoice.created` are written in every mode, since they are additive and harmless. So `model_version = 2` means exactly "its totals were decided by the v2 engine", and the PDF and the E2 totals detector rely on that. New statuses (`partially_paid`, `refunded`, `collections`) are never written in these modes, so `/api/reseller-panel` and `/api/client/commerce` see no new status values until the switch (open question 4).
 
@@ -742,6 +744,8 @@ Settings are in appendix A; defaults follow spec A3.
 5. `InvoiceService.recompute(db, invoice, cause="refund")` (engine `v2`), or `transition(..., to=FAILED)` for a full refund in `legacy`/`shadow`.
 6. Fire the internal event `payment.refunded` (section 9); `credit_note.issued` and `invoice.refunded` fire from their own code paths in the same transaction.
 
+As built (P1-R): a partial refund's tax is `refund_tax_proportional(previous + this) - tax already refunded`, stored in `refund_metadata.tax_cents` and passed to the credit note as explicit lines, so rounding never refunds more tax than the invoice carries. A legacy or shadow refund of a payment on a `void` invoice leaves the invoice `void` (3.4); the payment and ledger effects still apply. Outside `v2`, a partial refund reported by the gateway is recorded as a full refund, as before phase 1 (7.1 allows only full refunds there).
+
 ### 7.3 Idempotency keys
 
 | Key | Where | Format |
@@ -753,6 +757,8 @@ Settings are in appendix A; defaults follow spec A3.
 | Credit note | `invoice_adjustments.idempotency_key` | `refund-cn:<refund_id>` |
 
 Stripe keeps idempotency keys for at least 24 hours and PayPal request ids for a limited period, so the reconciler stops retrying the gateway call after 24 hours (7.4) instead of relying on them indefinitely.
+
+As built (P1-R): staff `Idempotency-Key` values are stored as `admin:<value>`, so they never replay or collide with system keys.
 
 ### 7.4 Reconciler
 
@@ -768,6 +774,8 @@ The gateway webhook for a refund (`charge.refunded`, PayPal `PAYMENT.CAPTURE.REF
 
 E2 detectors added by P1-R: `billing_refund_stuck` (any refund in `review`, or `pending` for more than 1 hour) and `billing_refund_mismatch` (a payment whose `refunded_cents` differs from the sum of its succeeded refunds, or exceeds its amount).
 
+As built (P1-R): a refund event without a gateway reference completes an open gateway refund only when exactly one open refund has the event's amount. A Stripe `charge.refunded` without a refunds list reports `amount_refunded` as a running total; only the part beyond the refunds already succeeded is recorded.
+
 ### 7.5 Chargebacks (disputes)
 
 A chargeback event (`charge.dispute.created`, PayPal `CUSTOMER.DISPUTE.CREATED` resolved against the merchant; today `webhooks.py:195-209` and `:245-301`) goes through the same completion step:
@@ -775,6 +783,8 @@ A chargeback event (`charge.dispute.created`, PayPal `CUSTOMER.DISPUTE.CREATED` 
 - refund row: `reason = 'dispute'`, `destination = 'gateway'`, `status = 'succeeded'` (the money has already left), `issue_credit_note = false`, idempotency key `<gateway>-dispute:<event_id>`, amount from the event (default: the whole refundable amount);
 - no credit note: the invoice was correct, the customer just took the money back, so `paid_net` falls and `due` rises;
 - then the track's dispute policy (7.6).
+
+As built (P1-R): in `legacy` and `shadow`, and for reseller invoices in `v2`, the services linked to a disputed invoice are suspended after the dispute's transaction commits, each in its own transaction with no billing lock held. A failed suspension is rolled back, logged and audited as `billing.dispute_suspend_failed`; it does not undo the dispute or stop the other suspensions. The webhook routes run `process` in a worker thread. Before phase 1 this suspension ran inside the async webhook routes through `asyncio.run`, which raised, so a dispute on an invoice with linked services returned 500 and was never recorded (to-do 13e91a6c, an existing production bug fixed by phase 1).
 
 ### 7.6 Dispute policies
 
@@ -788,6 +798,8 @@ A dispute later won by the merchant is recorded by staff as a manual payment (W0
 ### 7.7 Order cancellation
 
 W0a's `billing_order_refund_policy` (`manual_review`, `original_method`, `credit`; W0a's `app/services/billing/order_refunds.py` holds `original_method` and `credit` for manual review "until the refund engine exists") becomes real in P1-R when the invoice engine is `v2`: `original_method` calls `RefundService.request(destination='gateway', reason='cancellation')` for each succeeded payment of the order's invoice (credit payments go to `credit`), `credit` uses `destination='credit'`. Both issue credit notes. In `legacy` and `shadow` the manual review behaviour stays.
+
+As built (P1-R): gateway refunds from order cancellation are only reserved in the cancel transaction and sent afterwards by dispatch or the reconciler. Staff resolve a refund review by refunding to card, crediting the account, or dismissing with a note, through `/api/admin/billing/refund-reviews`; each resolution is idempotent and audited.
 
 ## 8. D1: cycles
 

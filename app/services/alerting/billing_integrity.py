@@ -10,10 +10,9 @@ Coverage notes:
 * Retail ``billing_accounts.credit_balance_cents`` has no ledger to compare with
   (``credit_ledger_entries`` is keyed by reseller only), so the credit check
   covers resellers. A reseller's billing account mirror is not compared.
-* There is no refund table yet. ``billing_refund_stuck`` reads a table named
-  ``refunds`` with ``id``, ``status`` and ``created_at`` columns when it exists
-  and reports nothing otherwise, so it is correct before and after refunds are
-  recorded in their own table.
+* ``billing_refund_stuck`` reads the ``refunds`` table through reflection (it
+  needs ``id``, ``status`` and ``created_at``) and reports nothing when the
+  table is missing.
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ logger = logging.getLogger(__name__)
 OVERFLOW_ID = "overflow"
 _REFUNDS_TABLE = "refunds"
 _PENDING = "pending"
+_REVIEW = "review"
 
 
 def _limited(db: Session, stmt: Select, max_rows: int) -> tuple[list[Any], int]:
@@ -333,13 +333,21 @@ def _refunds_table(db: Session) -> Table | None:
 
 
 def refund_stuck(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Refunds that have been pending longer than ``pending_after_minutes``."""
+    """Refunds in ``review``, or ``pending`` for longer than ``pending_after_minutes``."""
     table = _refunds_table(db)
     if table is None:
         return []
     stmt = (
         select(*(table.c[name] for name in ("id", "status", "created_at") + _optional(table)))
-        .where(table.c.status == _PENDING, table.c.created_at <= _cutoff(now, params, "pending_after_minutes", "minutes"))
+        .where(
+            or_(
+                table.c.status == _REVIEW,
+                and_(
+                    table.c.status == _PENDING,
+                    table.c.created_at <= _cutoff(now, params, "pending_after_minutes", "minutes"),
+                ),
+            )
+        )
         .order_by(table.c.id)
     )
     rows, remaining = _limited(db, stmt, params["max_rows"])
@@ -353,14 +361,21 @@ def refund_stuck(db: Session, params: dict, now: datetime) -> list[Finding]:
                 None if value is None else str(value)
             )
         details["created_at"] = _naive(data["created_at"]).isoformat() if data["created_at"] is not None else None
+        details["status"] = str(data["status"])
+        in_review = str(data["status"]) == _REVIEW
         out.append(
             Finding(
                 "billing_refund_stuck",
                 "refund",
                 str(data["id"]),
                 f"Refund {data['id']}",
-                f"Refund {data['id']} is still pending",
-                "A refund was started but has not been confirmed or failed; check the gateway before retrying.",
+                f"Refund {data['id']} needs staff review" if in_review else f"Refund {data['id']} is still pending",
+                (
+                    "The gateway gave no definitive answer within 24 hours; check the gateway and "
+                    "resolve the refund from the admin refunds page."
+                    if in_review
+                    else "A refund was started but has not been confirmed or failed; check the gateway before retrying."
+                ),
                 details=details,
             )
         )
@@ -881,8 +896,49 @@ def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
 
 
 def refund_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Payments whose refunded_cents disagrees with their succeeded refunds, property P5 (P1-R)."""
-    return []
+    """Payments whose refunded_cents disagrees with their succeeded refunds, or exceeds
+    the payment amount (property P5)."""
+    from app.models.refund import Refund, RefundStatus
+
+    if _refunds_table(db) is None:
+        return []
+    succeeded = (
+        select(Refund.payment_id, func.sum(Refund.amount_cents).label("refunds_cents"))
+        .where(Refund.status == RefundStatus.SUCCEEDED)
+        .group_by(Refund.payment_id)
+        .subquery()
+    )
+    refunded = func.coalesce(Payment.refunded_cents, 0)
+    refunds_cents = func.coalesce(succeeded.c.refunds_cents, 0)
+    stmt = (
+        select(Payment.id, Payment.invoice_id, Payment.amount_cents, refunded.label("refunded_cents"), refunds_cents.label("refunds_cents"))
+        .outerjoin(succeeded, succeeded.c.payment_id == Payment.id)
+        .where(or_(refunded != refunds_cents, refunded > Payment.amount_cents))
+        .order_by(Payment.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_refund_mismatch",
+            "payment",
+            str(row.id),
+            f"Payment {row.id}",
+            f"Payment {row.id} records {_money(row.refunded_cents)} refunded, its refunds add up to {_money(row.refunds_cents)}",
+            "The payment's refunded amount must equal its succeeded refunds and not exceed the payment; "
+            "check the refunds of the payment before changing anything.",
+            details={
+                "payment_id": int(row.id),
+                "invoice_id": int(row.invoice_id),
+                "amount_cents": _money(row.amount_cents),
+                "refunded_cents": _money(row.refunded_cents),
+                "refunds_cents": _money(row.refunds_cents),
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_refund_mismatch", "payment", "payments", remaining, len(rows)))
+    return out
 
 
 def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]:
