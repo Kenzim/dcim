@@ -429,6 +429,11 @@ class TaxEngine:
             "tax_id_type": buyer.tax_id_type,
             "tax_id_status": buyer.tax_id_status,
             "tax_id_check_id": buyer.tax_id_check_id,
+            "buyer_postcode": buyer.postcode,
+            "exempt_all": bool(buyer.exempt_all),
+            "exempt_reason": buyer.exempt_reason,
+            "exemption_ids": list(buyer.exemption_ids),
+            "tax_id_checked_at": _aware(buyer.tax_id_checked_at).isoformat() if buyer.tax_id_checked_at else None,
         }
         for key, value in (context.evidence or {}).items():
             evidence.setdefault(str(key), value)

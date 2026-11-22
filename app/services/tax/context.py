@@ -229,6 +229,47 @@ class TaxContextBuilder:
         )
 
     @staticmethod
+    def for_stored(db: Session, invoice: Any, lines: Sequence[Any]) -> TaxContext:
+        """The context of a published invoice rebuilt from its frozen evidence, at ``tax_point_at``.
+
+        Used to re-run the engine for ``t6_scan``: the buyer facts are those
+        recorded at publish, not the profile as it is now.
+        """
+        from datetime import timezone
+
+        stored = dict(invoice.tax_evidence or {})
+        checked_at = stored.get("tax_id_checked_at")
+        if isinstance(checked_at, str):
+            checked_at = datetime.fromisoformat(checked_at)
+        at = invoice.tax_point_at
+        if at is not None and at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        purpose = _kind_value(invoice.purpose)
+        return TaxContext(
+            tax_point_at=at,
+            currency=_currency(invoice.currency),
+            prices_include_tax=bool(invoice.prices_include_tax),
+            buyer=BuyerTaxFacts(
+                country=stored.get("buyer_country"),
+                region=stored.get("buyer_region"),
+                postcode=stored.get("buyer_postcode"),
+                is_business=bool(stored.get("is_business")),
+                tax_id=stored.get("tax_id"),
+                tax_id_type=stored.get("tax_id_type"),
+                tax_id_status=str(stored.get("tax_id_status") or "unchecked"),
+                tax_id_check_id=stored.get("tax_id_check_id"),
+                exempt_all=bool(stored.get("exempt_all")),
+                exemption_ids=tuple(int(i) for i in stored.get("exemption_ids") or ()),
+                tax_id_checked_at=checked_at,
+                exempt_reason=stored.get("exempt_reason"),
+            ),
+            lines=line_inputs(db, lines, purpose=purpose),
+            purpose=purpose,
+            owner="reseller" if getattr(invoice, "reseller_id", None) is not None else "retail",
+            evidence={k: v for k, v in stored.items() if k in ("ip_country", "ip_address", "billing_country")},
+        )
+
+    @staticmethod
     def for_adjustment(
         db: Session, invoice: Any, adjustment_lines: Sequence[Any], *, now: Optional[datetime] = None
     ) -> TaxContext:

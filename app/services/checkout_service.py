@@ -253,6 +253,15 @@ class CheckoutService:
         return (taxable_cents * int(rate.rate_bps)) // 10_000
 
     @staticmethod
+    def _ensure_tax_checkout_allowed(db: Session, account: BillingAccount) -> None:
+        """Design 7.4's "block checkout" tax ID policy; owned by the packs and tax ID worker.
+
+        A no-op until ``app.services.tax.validators.ensure_checkout_allowed``
+        exists; then this is the one line that calls it.
+        """
+        return None
+
+    @staticmethod
     def _tax_mode(db: Session) -> str:
         """The checkout's tax mode: ``v2`` needs the invoice engine in ``v2`` too."""
         from app.services.tax.mode import tax_engine_mode
@@ -714,6 +723,8 @@ class CheckoutService:
             raise CheckoutError("Price plan is unavailable")
         normalized_options, _ = CheckoutService._normalize_options(product, options)
         tax_mode = CheckoutService._tax_mode(db)
+        if tax_mode == "v2":
+            CheckoutService._ensure_tax_checkout_allowed(db, account)
         evidence = (
             CheckoutService._tax_evidence(db, account, client_ip, ip_country) if tax_mode != "legacy" else {}
         )

@@ -209,3 +209,31 @@ def test_product_tax_class(client, db_session, headers):
         f"{STORE}/products/{product.id}/tax-class", headers=headers, json={"tax_class_id": 99999}
     ).status_code == 422
     assert "billing.tax.product_class" in _actions(db_session)
+
+
+# --- the tax engine switch (design 5) ---
+
+
+def test_tax_switch_refused_then_accepted_and_rollback_lists_open_invoices(client, db_session, headers):
+    from app.models.commerce_audit import UserAuditEvent as Event
+
+    engines = "/api/admin/billing/engines"
+    refused = client.post(f"{engines}/tax/switch", headers=headers, json={"to": "v2"})
+    assert refused.status_code == 409, refused.text
+    assert {"invoice_engine_v2", "tax_enabled_or_mirrored_only_confirmed"} <= set(refused.json()["detail"]["failing"])
+    from datetime import datetime, timezone
+
+    from tests.api.test_billing_p1c_engines_api import _seed_quiet_history
+
+    _seed_quiet_history(db_session, "tax", 14, datetime.now(timezone.utc))
+    set_engine(db_session, "invoice", "v2")
+    db_session.commit()
+    accepted = client.post(
+        f"{engines}/tax/switch", headers=headers, json={"to": "v2", "confirm_mirrored_only": True}
+    )
+    assert accepted.status_code == 200, accepted.text
+    back = client.post(f"{engines}/tax/switch", headers=headers, json={"to": "shadow"})
+    assert back.status_code == 200 and back.json()["rollback"] == {"open_v2_taxed_invoices": 0}
+    db_session.expire_all()
+    events = db_session.scalars(select(Event).where(Event.action == "billing.engine.switch")).all()
+    assert [e.resource_id for e in events][-2:] == ["tax", "tax"]

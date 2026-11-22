@@ -16,7 +16,6 @@ from app.services.billing.jobs import registry as job_registry
 from app.services.billing.jobs import runner
 from app.services.email_message_service import EmailMessageService
 from app.services.email_templates import render as email_render
-from app.services.invoice_adjustment_service import InvoiceAdjustmentService
 from app.services.invoice_service import InvoiceService
 from app.services.tax import context, engine, legal_notes, mode, pack_import, result, validators
 from app.services.tax.packs import registry as pack_registry
@@ -43,7 +42,6 @@ STUBS = [
     lambda: email_events.send_service_provisioned(None, None),
     lambda: email_events.send_welcome(None, None),
     lambda: email_render.render(None, "welcome", locale="en", variables={}),
-    lambda: InvoiceAdjustmentService.tax_base_rows(None, None, before_key="x"),
     lambda: EmailMessageService.enqueue(
         None, event="welcome", to_address="a@example.com", idempotency_key="k", variables={}
     ),
