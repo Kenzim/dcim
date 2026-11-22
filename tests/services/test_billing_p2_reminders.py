@@ -244,6 +244,26 @@ def test_invoice_paid_between_plan_and_execute_gets_no_reminder(factory, sent, m
     db.close()
 
 
+def test_a_stale_first_overdue_notice_is_recorded_once(factory, sent):
+    from app.models.billing_jobs import BillingJobRunItem
+
+    due = T0 + timedelta(days=2)
+    invoice_id = _invoice(factory, due)
+    _go_live(factory, T0)
+    # The job does not run until overdue_1 (due + 1 day) is past the catch-up limit.
+    for day in range(0, 21):
+        _run(factory, due + timedelta(days=5 + day, hours=1))
+    db = factory()
+    stale = [
+        item for item in db.query(BillingJobRunItem).filter_by(subject_key=f"invoice:{invoice_id}:reminder:overdue_1")
+        if item.outcome.value == "skipped" and item.detail["skip_reason"] == "stale"
+    ]
+    db.close()
+    assert len(stale) == 1
+    # The blocked sequence stays blocked.
+    assert _kinds(sent, invoice_id) == []
+
+
 def _kinds(sent, invoice_id):
     prefix = f"invoice:{invoice_id}:reminder:"
     return [call["idempotency_key"][len(prefix):] for call in sent if call["idempotency_key"].startswith(prefix)]

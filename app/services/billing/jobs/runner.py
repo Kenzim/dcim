@@ -171,7 +171,25 @@ class _Run:
         self.row = row
         self.job = job
         self.handle = handle
+        self.mode = row.mode
         self.items: dict[tuple[str, str], int] = {}
+
+    def stale_recorded(self, subject_key: str) -> bool:
+        """An earlier run of this job and mode already recorded ``subject_key`` as stale."""
+        details = self.sdb.scalars(
+            select(BillingJobRunItem.detail)
+            .join(BillingJobRun, BillingJobRun.id == BillingJobRunItem.run_id)
+            .where(
+                BillingJobRun.job == self.handle.job,
+                BillingJobRun.mode == self.mode,
+                BillingJobRun.id != self.row.id,
+                BillingJobRunItem.outcome == BillingJobItemOutcome.SKIPPED,
+                BillingJobRunItem.subject_key == subject_key[:128],
+            )
+        )
+        found = any((detail or {}).get("skip_reason") == "stale" for detail in details)
+        self.sdb.rollback()
+        return found
 
     def record(self, action: str, subject_key: str, outcome: str, detail: Optional[dict]) -> None:
         self.sdb.add(
@@ -249,6 +267,9 @@ def _process(wdb: Session, run: _Run, subject_id: int) -> None:
             skip_reason = "outside_window"
     detail.setdefault("trigger_at", _utc(action.trigger_at))
     if skip_reason is not None:
+        if skip_reason == "stale" and run.stale_recorded(action.subject_key):
+            # A stale step stays blocked; it is recorded once, not every run.
+            return
         detail["skip_reason"] = skip_reason
         run.record(action.action, action.subject_key, "skipped", detail)
         return
