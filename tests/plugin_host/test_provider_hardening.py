@@ -200,6 +200,16 @@ def test_cheap_answers_do_not_reset_the_circuit(plugin_env, db_session):
     assert err.value.reason == "circuit_open"
 
 
+def test_the_answer_is_checked_against_billings_own_request(plugin_env, db_session):
+    setup_plugin(plugin_env, db_session, TAX, mode="shrink_request")
+    request = tax_request()
+    with pytest.raises(ProviderUnavailable) as err:
+        tax_call(request)
+    assert err.value.reason == "invalid_answer"
+    assert [line.key for line in request.lines] == ["a", "b"]
+    assert failures(db_session, TAX) == 1
+
+
 def test_two_kinds_with_the_same_provider_id_have_separate_rate_limits(plugin_env, db_session):
     limit = {"calls": 1, "per_seconds": 3600}
     manifest = base_manifest(

@@ -95,11 +95,15 @@ def _finish(ctx: PluginContext, ok: bool) -> None:
         ctx._close()
 
 
-def _run(ctx: PluginContext, fn: Any, kind: str, method: str, args: tuple, timeout: float) -> Any:
-    """Worker thread body: call the method, wait for a coroutine, validate, then commit the plugin's state."""
+def _run(ctx: PluginContext, fn: Any, kind: str, method: str, call_args: tuple, args: tuple, timeout: float) -> Any:
+    """Worker thread body: call the method, wait for a coroutine, validate, then commit the plugin's state.
+
+    The plugin gets ``call_args`` (copies); the answer is checked against billing's own ``args``,
+    so a plugin that changes its copy of the request cannot change what its answer must cover.
+    """
     token = kinds._bind_context(ctx)
     try:
-        value = fn(*args)
+        value = fn(*call_args)
         if inspect.isawaitable(value):
             value = asyncio.run(_await(value, timeout))
         answer = kinds.validate_answer(kind, method, args, value)
@@ -205,7 +209,7 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
         granted=set(inst.granted_permissions or []),
         kind="provider",
     )
-    future = _executor.submit(_run, ctx, fn, kind, method, call_args, seconds)
+    future = _executor.submit(_run, ctx, fn, kind, method, call_args, args, seconds)
     try:
         answer = future.result(seconds)
     except (FutureTimeout, asyncio.TimeoutError):
