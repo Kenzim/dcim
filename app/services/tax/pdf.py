@@ -141,6 +141,9 @@ def for_adjustment(db: Session, invoice: Any, note: Any) -> Optional[TaxPdf]:
     title = snapshot.get("credit_note_title") if kind == "credit" else None
     summary_lines = _summary_lines(note.currency, summary)
     sterling = sterling_line(note, note.tax_total_gbp_cents)
+    if sterling is None and note.fx_period is not None and note.fx_rate is None:
+        source = SOURCE_LABELS["hmrc_monthly"]
+        sterling = f"VAT total in sterling: to follow ({source} for {note.fx_period} not yet stored)"
     if sterling:
         summary_lines.append(sterling)
     return TaxPdf(
