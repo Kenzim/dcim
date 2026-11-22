@@ -14,7 +14,8 @@
 # invoice under concurrency), tests/services/test_tax_pack_import_mariadb.py
 # (a tax pack import and a publish locking the same rules wait instead of
 # deadlocking) and tests/services/test_billing_p2_exchange_rates_mariadb.py (an
-# exchange rate deleted or stored twice during a publish) against a mariadb:11.8
+# exchange rate deleted or stored twice during a publish, and stored during a
+# proforma payment whose month's rate is missing) against a mariadb:11.8
 # service container, the
 # version production runs. Manual trigger only, so it never blocks other work;
 # the SQLite migration tests in tests/migrations run in the normal test suite.
@@ -85,5 +86,5 @@ jobs:
         run: python -m pytest tests/services/test_billing_p2_job_claim_mariadb.py -q
       - name: Invoices generated ahead racing the at-due worker on MariaDB
         run: python -m pytest tests/services/test_billing_p2_generate_ahead_mariadb.py -q
-      - name: Exchange rate deleted or stored during a publish on MariaDB
+      - name: Exchange rate deleted or stored during a publish or a proforma payment on MariaDB
         run: python -m pytest tests/services/test_billing_p2_exchange_rates_mariadb.py -q
