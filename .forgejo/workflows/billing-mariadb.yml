@@ -1,9 +1,10 @@
-# Optional: billing phase 1 migrations on MariaDB 11.8.
+# Optional: billing phase 1 and phase 2 migrations on MariaDB 11.8.
 #
 # Runs tests/core/test_alembic_fresh_mariadb.py (the whole Alembic chain,
 # phase 1 included, from an empty database),
 # tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
-# billing_p1_* chain), the snapshot isolation connect hook test,
+# billing_p1_* chain), tests/migrations/test_billing_p2_mariadb.py (up, down,
+# up of the billing phase 2 chain, with data present), the snapshot isolation connect hook test,
 # tests/services/test_billing_p1i_numbering_mariadb.py (series counters under
 # concurrency), tests/services/test_billing_p1i_settlement_mariadb.py (two
 # payments settling one invoice at once) and
@@ -64,3 +65,5 @@ jobs:
         run: python -m pytest tests/services/test_billing_p1c_credit_mariadb.py -q
       - name: Core invoice status fixes under concurrency on MariaDB
         run: python -m pytest tests/services/test_billing_core_status_mariadb.py -q
+      - name: Billing phase 2 chain on MariaDB
+        run: python -m pytest tests/migrations/test_billing_p2_mariadb.py -q

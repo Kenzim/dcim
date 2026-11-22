@@ -22,7 +22,8 @@ def _entry(engine, key, *, reseller_id=None, billing_account_id=None):
 def test_chain_position_and_head():
     directory = helpers.script()
     assert directory.get_revision(REVISION).down_revision == helpers.before(REVISION)
-    assert directory.get_heads() == [REVISION]
+    assert REVISION == helpers.P1_HEAD
+    assert directory.get_heads() == [helpers.HEAD]
 
 
 def test_owner_check_refuses_entries_without_owner(engine_at):
