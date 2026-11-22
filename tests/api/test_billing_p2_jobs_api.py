@@ -42,6 +42,7 @@ def test_list_shows_every_registered_job_off(client, states):
         "cancellations": "off",
         "nonpayment_suspension": "off",
         "nonpayment_termination": "off",
+        "tax_exchange_rates_fetch": "off",
     }
     assert all(item["next_run_at"] is None for item in body["items"])
 

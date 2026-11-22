@@ -190,6 +190,7 @@ AUTOMATION_JOBS: tuple[tuple[str, str], ...] = (
     ("cancellations", HOURLY),
     ("nonpayment_suspension", HOURLY),
     ("nonpayment_termination", HOURLY),
+    ("tax_exchange_rates_fetch", DAILY),
 )
 CADENCE: dict[str, str] = dict(AUTOMATION_JOBS)
 CADENCE_PERIOD = {HOURLY: timedelta(hours=1), DAILY: timedelta(days=1)}
