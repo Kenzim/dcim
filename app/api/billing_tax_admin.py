@@ -281,7 +281,12 @@ def _rule_payload(row: TaxRule) -> dict:
     return payload
 
 
-def _check_rule(db: Session, values: dict) -> None:
+def _check_rule(db: Session, values: dict, valid_from: datetime) -> None:
+    """Checks shared by create, update and supersede; ``valid_from`` is the start of the row written."""
+    valid_to = values.get("valid_to")
+    # A rule holds on [valid_from, valid_to): an end at or before the start leaves it empty.
+    if valid_to is not None and _aware(valid_to) <= _aware(valid_from):
+        raise _unprocessable("valid_to_not_after_valid_from", "valid_to must be after valid_from")
     if values.get("tax_class_id") is not None and db.get(TaxClass, values["tax_class_id"]) is None:
         raise _unprocessable("unknown_tax_class", "Unknown tax class")
     jurisdiction = values.get("jurisdiction") or JURISDICTION_ANY
@@ -324,13 +329,10 @@ def create_rule(body: RuleCreate, auth: AdminDep, db: DbDep):
     now = _now()
     values = body.model_dump(exclude={"valid_from"})
     values = {k: v for k, v in values.items() if v is not None}
-    _check_rule(db, values)
+    valid_from = _not_in_past(body.valid_from, now) if body.valid_from is not None else now
+    _check_rule(db, values, valid_from)
     values.setdefault("jurisdiction", JURISDICTION_ANY)
-    row = TaxRule(
-        **values,
-        valid_from=_not_in_past(body.valid_from, now) if body.valid_from is not None else now,
-        source=TaxRuleSource.ADMIN.value,
-    )
+    row = TaxRule(**values, valid_from=valid_from, source=TaxRuleSource.ADMIN.value)
     db.add(row)
     db.flush()
     _audit(db, auth, "rule.created", "tax_rule", row.id, _json(body.model_dump(exclude_unset=True)))
@@ -357,7 +359,7 @@ def update_rule(rule_id: int, body: RuleFields, auth: AdminDep, db: DbDep):
     if row.legacy_tax_rate_id is not None:
         raise _conflict("tax_rule_mirrored", "A mirrored rule changes through /tax-rates")
     data = body.model_dump(exclude_unset=True)
-    _check_rule(db, {**{name: getattr(row, name) for name in RULE_FIELDS}, **data})
+    _check_rule(db, {**{name: getattr(row, name) for name in RULE_FIELDS}, **data}, row.valid_from)
     for name, value in data.items():
         setattr(row, name, value)
     _audit(db, auth, "rule.updated", "tax_rule", row.id, _json(data))
@@ -383,7 +385,7 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
     values = {name: getattr(old, name) for name in RULE_FIELDS}
     values.update(changes)
     values["valid_to"] = changes.get("valid_to", old.valid_to)
-    _check_rule(db, values)
+    _check_rule(db, values, at)
     old.valid_to = at
     db.flush()
     new = TaxRule(

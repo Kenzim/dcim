@@ -145,6 +145,37 @@ def test_explicit_null_class_name_is_refused(client, headers):
     assert resp.status_code == 200, resp.text
 
 
+def test_rule_valid_to_must_be_after_valid_from(client, headers):
+    """A rule holds on the half-open ``[valid_from, valid_to)``, so an equal ``valid_to`` is empty too."""
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+    start = _later(days=1)
+
+    def refused(resp):
+        return resp.status_code == 422 and resp.json()["detail"]["code"] == "valid_to_not_after_valid_from"
+
+    assert refused(client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_from": start, "valid_to": start}))
+    assert refused(client.post(
+        f"{BASE}/rules", headers=headers, json={**body, "valid_from": start, "valid_to": _later(hours=1)}
+    ))
+    assert refused(client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_to": _later(hours=-1)}))
+    future = client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_from": start, "valid_to": _later(days=2)})
+    assert future.status_code == 201, future.text
+    assert refused(client.put(f"{BASE}/rules/{future.json()['id']}", headers=headers, json={"valid_to": _later(hours=1)}))
+    assert client.put(
+        f"{BASE}/rules/{future.json()['id']}", headers=headers, json={"valid_to": _later(days=3)}
+    ).status_code == 200
+    current = client.post(f"{BASE}/rules", headers=headers, json=body).json()
+    at = _later(hours=2)
+    for valid_to in (at, _later(hours=1)):
+        assert refused(client.post(
+            f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={"valid_from": at, "valid_to": valid_to}
+        ))
+    assert client.post(
+        f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={"valid_from": at, "valid_to": _later(hours=3)}
+    ).status_code == 201
+
+
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
     classes = {c["code"]: c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json()}
     assert client.delete(f"{BASE}/classes/{classes['standard']}", headers=headers).status_code == 409
