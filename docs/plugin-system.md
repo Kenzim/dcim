@@ -5,6 +5,8 @@ Audience: Rackflow maintainers, plugin authors (this file is the public contract
 
 This document is the contract between Rackflow and third-party plugins. Everything a plugin may rely on is written here: the package format, the manifest, the events, the permissions, the SDK, the UI contribution language and the HTTP shapes every surface (admin UI, client portal, WHMCS, MCP) renders from. Anything not written here is internal and may change without notice.
 
+To write a plugin, start with the [author guide](plugins/README.md); the [API reference](plugins/api-reference.md) is generated from the code, and the [deprecation policy](plugins/deprecation-policy.md) says how this contract changes.
+
 ## 1. Goals and trust model
 
 - **Admins only.** Plugins are installed, enabled, configured, upgraded and removed only by staff. Clients never install plugins; at most they see what a plugin shows on their own services and press the buttons it offers them.
