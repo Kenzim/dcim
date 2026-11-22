@@ -24,7 +24,12 @@ from app.models.reseller import (
 )
 from app.services.billing_locks import BillingLocks
 from app.services.credit_ledger_service import CreditLedgerService
-from app.services.invoice_service import InvoiceError, InvoiceService
+from app.services.invoice_service import (
+    TERMINAL_V2,
+    InvoiceError,
+    InvoiceService,
+    engine_mode,
+)
 from app.services.payments.base import (
     GatewayPaymentMethod,
     GatewayResultStatus,
@@ -421,7 +426,10 @@ class PaymentOrchestrator:
         invoice = InvoiceService.get_for_update(db, invoice_id)
         if invoice is None or invoice.reseller_id != reseller.id:
             raise InvoiceError("Invoice not found")
-        if invoice.status == InvoiceStatus.VOID:
+        if invoice.status == InvoiceStatus.VOID or (
+            invoice.status in TERMINAL_V2 and engine_mode(db) == "v2"
+        ):
+            # Refused before any gateway call: a terminal v2 invoice takes no payment.
             raise InvoiceError("Invoice cannot be paid in its current state")
         return reseller, invoice
 

@@ -98,14 +98,15 @@ V2_EDGES: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
 # Engines legacy and shadow (design 3.4): today's edges, plus the ones today's
 # writers reach that 3.4 does not list (an overdue invoice that starts a card
 # payment, a reseller deploy charge voided after a failed deploy, a reseller
-# invoice paid after it was voided, a cancelled cycle whose invoice had failed).
+# invoice paid after it was voided, a cancelled cycle whose invoice had failed,
+# a 3-D Secure card charge on a failed invoice).
 LEGACY_EDGES: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
     S.DRAFT: frozenset({S.OPEN}),
     S.OPEN: frozenset({S.PAID, S.PENDING_ACTION, S.OVERDUE, S.VOID, S.FAILED}),
     S.PENDING_ACTION: frozenset({S.PAID, S.OPEN, S.OVERDUE, S.VOID, S.FAILED}),
     S.OVERDUE: frozenset({S.PAID, S.PENDING_ACTION, S.VOID, S.FAILED}),
     S.PAID: frozenset({S.OPEN, S.VOID, S.FAILED}),
-    S.FAILED: frozenset({S.PAID, S.VOID}),
+    S.FAILED: frozenset({S.PAID, S.PENDING_ACTION, S.VOID}),
     S.VOID: frozenset({S.PAID}),
 }
 # Statuses only v2 writes, read as their legacy counterpart if the engine is
