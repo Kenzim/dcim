@@ -72,10 +72,6 @@ def _unprocessable(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=422, detail={"code": code, "message": message})
 
 
-def _not_built(exc: NotImplementedError) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
-
-
 def _audit(db: Session, auth: dict, action: str, resource_type: str, resource_id: Any, metadata: dict) -> None:
     AuditService.log(
         db,
@@ -589,14 +585,36 @@ class PackApply(PackPreview):
     diff_hash: str = Field(min_length=8, max_length=128)
 
 
+# PackImportError codes that are not 422: an unknown pack is 404, a stale preview is 409.
+_PACK_ERROR_STATUS = {"pack_not_found": 404, "pack_changed": 409}
+# MariaDB lock wait timeout and deadlock: the rule rows were held by another change.
+_LOCK_ERRORS = {1205, 1213}
+
+
+def _pack_error(exc: Exception) -> Optional[HTTPException]:
+    """The answer for a refused preview or apply, or None for an unexpected error."""
+    from sqlalchemy.exc import OperationalError
+
+    from app.services.tax.pack_import import PackImportError
+
+    if isinstance(exc, PackImportError):
+        status_code = _PACK_ERROR_STATUS.get(exc.code, 422)
+        return HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message})
+    orig = getattr(exc, "orig", None)
+    if isinstance(exc, OperationalError) and getattr(orig, "args", (None,))[0] in _LOCK_ERRORS:
+        return _conflict("tax_rules_busy", "Another change held the tax rules; nothing was applied. Try again.")
+    return None
+
+
 @router.get("/tax/packs")
 def list_packs(db: DbDep):
     from app.services.tax.packs.registry import PackRegistry
 
-    try:
-        return _json(PackRegistry.list(db))
-    except NotImplementedError as exc:
-        raise _not_built(exc) from None
+    return _json(PackRegistry.list(db))
+
+
+# A preview and an apply pass effective_from to the importer as given: it is part of the
+# diff hash, and the importer refuses a time in the past (a pack never changes a past tax point).
 
 
 @router.post("/tax/packs/{pack_id}/preview")
@@ -604,26 +622,37 @@ def preview_pack(pack_id: str, body: PackPreview, db: DbDep):
     from app.services.tax.pack_import import PackImporter
 
     try:
-        diff = PackImporter.preview(db, pack_id, body.version, _not_in_past(body.effective_from, _now()))
-    except NotImplementedError as exc:
-        raise _not_built(exc) from None
+        diff = PackImporter.preview(db, pack_id, body.version, _aware(body.effective_from), now=_now())
+    except Exception as exc:
+        db.rollback()
+        mapped = _pack_error(exc)
+        if mapped is None:
+            raise
+        raise mapped from None
     db.rollback()
     return _json(diff)
 
 
 @router.post("/tax/packs/{pack_id}/apply")
 def apply_pack(pack_id: str, body: PackApply, auth: AdminDep, db: DbDep):
+    """Apply a previewed diff. The importer writes the only audit entry (with the diff).
+
+    Any error rolls the whole transaction back, audit entry included; nothing is retried here.
+    """
     from app.services.tax.pack_import import PackImporter
 
     try:
         diff = PackImporter.apply(
-            db, pack_id, body.version, _not_in_past(body.effective_from, _now()),
-            diff_hash=body.diff_hash, actor_user_id=auth["user_id"],
+            db, pack_id, body.version, _aware(body.effective_from),
+            diff_hash=body.diff_hash, actor_user_id=auth["user_id"], now=_now(),
         )
-    except NotImplementedError as exc:
-        raise _not_built(exc) from None
-    _audit(db, auth, "pack.applied", "tax_pack", pack_id, {"version": body.version, "diff_hash": body.diff_hash})
-    db.commit()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        mapped = _pack_error(exc)
+        if mapped is None:
+            raise
+        raise mapped from None
     return _json(diff)
 
 
@@ -707,10 +736,7 @@ def recheck_tax_id(body: Recheck, auth: AdminDep, db: DbDep):
     ).scalar_one_or_none()
     if profile is None or not profile.tax_id:
         raise HTTPException(status_code=404, detail="No tax ID on this billing account")
-    try:
-        check = TaxIdService.check(db, profile, force=True)
-    except NotImplementedError as exc:
-        raise _not_built(exc) from None
+    check = TaxIdService.check(db, profile, force=True)
     _audit(db, auth, "id_check.recheck", "billing_profile", profile.id,
            {"billing_account_id": body.billing_account_id, "status": _json(getattr(check, "status", None))})
     db.commit()

@@ -258,10 +258,6 @@ def test_preview_answers_without_writing(client, db_session, headers):
     assert db_session.scalar(select(TaxRule.id).order_by(TaxRule.id.desc())) == before
 
 
-def test_packs_and_id_checks_answer_501_until_built(client, headers):
-    assert client.get(f"{BASE}/packs", headers=headers).status_code == 501
-
-
 def test_legal_note_edit_is_audited(client, db_session, headers):
     resp = client.put(f"{BASE}/legal-notes", headers=headers, json={"key": "outside_scope", "text": "Outside."})
     assert resp.status_code == 200 and resp.json()["edited_by_admin"] is True
