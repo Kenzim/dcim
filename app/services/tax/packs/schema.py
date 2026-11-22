@@ -128,8 +128,10 @@ class PackRule(BaseModel):
     @field_validator("jurisdiction")
     @classmethod
     def _jurisdiction(cls, value: str) -> str:
-        if value not in JURISDICTION_SPECIAL and value not in EU_MEMBER_STATES:
-            raise ValueError("must be ANY, GB, EU_OSS, ANY_EU or an EU member state code")
+        if value not in JURISDICTION_SPECIAL and not _COUNTRY.fullmatch(value):
+            raise ValueError("must be ANY, GB, EU_OSS, ANY_EU or an ISO 3166-1 alpha-2 country code")
+        if value == "XI":
+            raise ValueError("XI is not used: Northern Ireland is GB")
         return value
 
     @field_validator("reverse_charge_zone")
