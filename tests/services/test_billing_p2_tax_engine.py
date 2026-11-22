@@ -323,6 +323,35 @@ def test_eu_seller_eu_business_reverse_charge_without_a_pack_rule_has_the_eu_not
     assert result.tax_cents == 0 and result.legal_note_keys == ("eu_reverse_charge",)
 
 
+@pytest.mark.parametrize(
+    "seller,buyer_country,note,name",
+    [
+        ("IE", "FR", "eu_reverse_charge", "Reverse charge"),
+        ("GB", "DE", "gb_outside_scope_b2b", "Outside the scope of UK VAT"),
+        ("GB", "US", "outside_scope", "Outside the scope of VAT"),
+    ],
+)
+def test_reverse_charge_without_a_rule_gets_a_zero_tax_reverse_charge_part(db_session, seller, buyer_country, note, name):
+    enable_tax(db_session, seller)
+    registration = add_registration(db_session, seller)
+    add_rule(db_session, name="ANY 10%", rate="10", country=buyer_country, source="admin")
+    result = _calc(
+        db_session,
+        [line("a", 1000), line("b", 500, tax_class="reduced"), line("c", 300, tax_class="outside_scope"),
+         line("d", -100, kind="discount")],
+        facts=valid_business(buyer_country),
+    )
+    # The discount of 100 spreads over a, b and c by largest remainder: 55, 28 and 17.
+    for key, base in (("a", 945), ("b", 472)):
+        (part,) = result.lines[key].parts
+        assert (part.name, part.reverse_charge, part.tax_cents, part.base_cents) == (name, True, 0, base)
+        assert (part.rule_id, part.jurisdiction, part.legal_note_key) == (None, seller, note)
+    assert result.lines["c"].parts == () and result.lines["d"].parts == ()
+    assert result.tax_cents == 0 and result.legal_note_keys == (note,)
+    assert result.registration_id == registration.id
+    assert result.evidence.values["explained_by"] == ["reverse_charge"]
+
+
 def test_no_seller_country_only_any_rules_apply(db_session):
     enable_tax(db_session, "")
     add_rule(db_session, name="pack", jurisdiction="GB", source="pack")

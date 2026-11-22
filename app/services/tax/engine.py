@@ -163,6 +163,32 @@ def _part_of(rule: rules_repo.RuleView) -> _Part:
     )
 
 
+# Names of the zero-tax part a reverse charge gets when no reverse charge rule matches, by legal note.
+REVERSE_CHARGE_NAMES = {
+    NOTE_EU_REVERSE_CHARGE: "Reverse charge",
+    NOTE_GB_OUTSIDE_SCOPE_B2B: "Outside the scope of UK VAT",
+    NOTE_OUTSIDE_SCOPE: "Outside the scope of VAT",
+}
+
+
+def _reverse_charge_part(place: "_Place") -> _Part:
+    """Design 4.3 step 2.2 without a reverse charge rule: a zero-tax part under the establishment registration."""
+    note = place.fallback_note or NOTE_OUTSIDE_SCOPE
+    return _Part(
+        rule=None,
+        name=REVERSE_CHARGE_NAMES.get(note, REVERSE_CHARGE_NAMES[NOTE_OUTSIDE_SCOPE]),
+        rate_percent=Decimal("0.0000"),
+        rate_ppm=0,
+        jurisdiction=place.registration.jurisdiction if place.registration else JURISDICTION_ANY,
+        reverse_charge=True,
+        legal_note_key=note,
+        rounding_point="line",
+        rounding_rule="round_half_up",
+        compound=False,
+        source=SOURCE_RULES,
+    )
+
+
 def _tax_id_freshness(db: Session, context: TaxContext, settings: TaxSettings) -> tuple[bool, Optional[str], Optional[str]]:
     """``(valid_and_fresh, reason_if_not, checked_at)`` for the buyer's tax ID (design 4.3 step 5)."""
     buyer = context.buyer
@@ -529,6 +555,9 @@ class TaxEngine:
                     ))
                     and (place.registration is None or buyer_country != place.registration.country)
                 ][:1]
+                if not rules and line.tax_class_code != TaxClassCode.OUTSIDE_SCOPE.value:
+                    parts_by_line[line.key] = [_reverse_charge_part(place)]
+                    continue
             else:
                 rules = rules_repo.select_rules(
                     candidates,

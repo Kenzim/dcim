@@ -192,6 +192,29 @@ def test_shadow_records_a_rule_divergence_the_engine_explains(db_session, shadow
     assert record["v2"]["explained_by"] == [f"rule:{db_session.scalar(select(TaxRule.id).where(TaxRule.name == 'admin 25%'))}"]
 
 
+def _valid_business_profile(db, account):
+    from datetime import datetime, timezone
+
+    BillingProfileDAO.upsert(
+        db, account.id, is_business=True, tax_id="DE123456789", tax_id_status="valid",
+        tax_id_checked_at=datetime.now(timezone.utc),
+    )
+
+
+def test_shadow_counts_a_reverse_charge_without_a_rule_as_explained(db_session, shadow):
+    _rate(db_session, "DE", None, 1900)
+    enable_tax(db_session, "GB")
+    add_registration(db_session, "GB")
+    user, account = _buyer(db_session, "DE")
+    _valid_business_profile(db_session, account)
+    product, plan = _product(db_session, price_cents=1000)
+    _place(db_session, account, user, product, plan)
+    (record,) = [r for r in shadow if r["engine"] == "tax"]
+    assert record["check"] == "t1_rule_divergence"
+    assert record["legacy"] == {"tax_cents": 190} and record["v2"]["tax_cents"] == 0
+    assert record["v2"]["explained_by"] == ["reverse_charge"]
+
+
 def test_shadow_records_legacy_raising_as_its_own_outcome(db_session, shadow, monkeypatch):
     _rate(db_session, "GB", None, 2000)
     _user, account = _buyer(db_session, "GB")
@@ -286,6 +309,21 @@ def test_v2_quote_carries_reverse_charge_and_notes(db_session, tax_v2):
     quote = _quote(db_session, account, product, plan)
     assert quote.reverse_charge is True and quote.tax_cents == 0
     assert quote.legal_notes == ["gb_outside_scope_b2b"]
+
+
+def test_v2_reverse_charge_without_a_rule_sets_the_quote_flag_and_the_rows(db_session, tax_v2):
+    user, account = _buyer(db_session, "DE")
+    _valid_business_profile(db_session, account)
+    product, plan = _product(db_session)
+    quote = _quote(db_session, account, product, plan)
+    assert quote.reverse_charge is True and quote.tax_cents == 0
+    assert quote.legal_notes == ["gb_outside_scope_b2b"]
+    assert {item["name"] for item in quote.tax_lines} == {"Outside the scope of UK VAT"}
+    order = _place(db_session, account, user, product, plan)
+    rows = db_session.execute(
+        select(InvoiceLineTax).where(InvoiceLineTax.invoice_id == order.invoice_id)
+    ).scalars().all()
+    assert rows and all(r.reverse_charge and r.tax_cents == 0 and r.tax_rule_id is None for r in rows)
 
 
 def test_v2_needs_invoice_engine_v2(db_session):
