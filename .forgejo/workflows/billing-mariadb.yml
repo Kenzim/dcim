@@ -17,7 +17,9 @@
 # exchange rate deleted or stored twice during a publish, stored during a
 # proforma payment whose month's rate is missing, a credit note's sterling
 # after another note committed, and the guard refusing a second sterling
-# fill) against a mariadb:11.8
+# fill), tests/services/test_billing_p2_suspension_mariadb.py (a payment
+# landing before, during and after the suspension job's locked re-check)
+# against a mariadb:11.8
 # service container, the
 # version production runs. Manual trigger only, so it never blocks other work;
 # the SQLite migration tests in tests/migrations run in the normal test suite.
@@ -82,6 +84,8 @@ jobs:
         run: python -m pytest tests/services/test_billing_p2_tax_publish_mariadb.py -q
       - name: Late fee job under concurrent runs and payments on MariaDB
         run: python -m pytest tests/services/test_billing_p2_late_fee_mariadb.py -q
+      - name: Payment racing the non-payment suspension's provider call on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_suspension_mariadb.py -q
       - name: Cancellation request racing invoice generation on MariaDB
         run: python -m pytest tests/services/test_billing_p2_cancel_mariadb.py -q
       - name: Billing job claims and leases under concurrency on MariaDB

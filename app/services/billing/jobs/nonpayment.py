@@ -194,17 +194,30 @@ def action_row(db: Session, job: str, subject_key: str) -> Optional[BillingJobAc
 # ---------------------------------------------------------------- suspensions
 
 
-def latest_suspension_claim(db: Session, service_id: int) -> Optional[BillingJobAction]:
-    return db.execute(
+def latest_suspension_claim(
+    db: Session, service_id: int, *, in_flight: bool = False, for_share: bool = False
+) -> Optional[BillingJobAction]:
+    """The service's latest ``done`` suspension claim; with ``in_flight`` a ``claimed`` one counts too.
+
+    ``for_share`` makes it a locking read (latest committed row) that also
+    refreshes the session's copy.
+    """
+    statuses = [BillingJobActionStatus.DONE]
+    if in_flight:
+        statuses.append(BillingJobActionStatus.CLAIMED)
+    statement = (
         select(BillingJobAction)
         .where(
             BillingJobAction.job == SUSPENSION_JOB,
             BillingJobAction.subject_key.like(f"service:{int(service_id)}:suspend:%"),
-            BillingJobAction.status == BillingJobActionStatus.DONE,
+            BillingJobAction.status.in_(statuses),
         )
         .order_by(BillingJobAction.id.desc())
         .limit(1)
-    ).scalar_one_or_none()
+    )
+    if for_share:
+        statement = statement.with_for_update(read=True).execution_options(populate_existing=True)
+    return db.execute(statement).scalar_one_or_none()
 
 
 def suspension_marks(db: Session) -> dict[str, int]:
