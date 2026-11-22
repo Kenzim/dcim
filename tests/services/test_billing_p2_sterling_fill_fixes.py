@@ -6,7 +6,7 @@ notes, once, cumulatively, so the notes still add up exactly. The invoice
 guard accepts a fill only with the values the fill computes.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -263,3 +263,75 @@ def test_the_guard_refuses_a_note_fill_with_another_figure(db_session, proforma,
         assert not refused(db_session, note, right)
     finally:
         invoice_guard.set_mode_override(None)
+
+
+# --- L1: the conversion allowance covers the sterling columns only while converting ---
+
+STERLING = ("fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id")
+BACK_TO_PENDING = {"fx_period": "2027-01", "fx_rate": None, "fx_source": None, "tax_total_gbp_cents": None,
+                   "fx_rate_id": None}
+
+
+def restamp_refused(db, invoice) -> bool:
+    with invoice_guard.allow(invoice_guard.PROFORMA_CONVERSION, STERLING, invoice.id):
+        return refused(db, invoice, BACK_TO_PENDING)
+
+
+def test_the_conversion_restamps_in_enforce_mode(db_session, proforma, monkeypatch):
+    exchange_rates.store_month(db_session, "2026-12", [("USD", str(DEC_RATE))], fetched_at=DEC_2)
+    invoice_guard.set_mode_override("enforce")
+    try:
+        pay_card_filled = Payment(
+            invoice_id=proforma.id, gateway="manual", status=PaymentStatus.SUCCEEDED,
+            amount_cents=int(proforma.amount_cents), refunded_cents=0, currency="USD", payment_metadata={},
+        )
+        at(monkeypatch, DEC_2)
+        db_session.add(pay_card_filled)
+        db_session.flush()
+        InvoiceService.recompute(db_session, proforma, cause="payment")
+    finally:
+        invoice_guard.set_mode_override(None)
+    assert frozen(proforma) == (DEC_RATE, "2026-12", "hmrc_monthly", 152)
+    assert len(audits(db_session, "billing.tax.sterling_reconverted")) == 1
+
+
+def test_a_second_restamp_of_a_converted_invoice_is_refused(db_session, proforma, monkeypatch):
+    exchange_rates.store_month(db_session, "2026-12", [("USD", str(DEC_RATE))], fetched_at=DEC_2)
+    pay_card_filled = Payment(
+        invoice_id=proforma.id, gateway="manual", status=PaymentStatus.SUCCEEDED,
+        amount_cents=int(proforma.amount_cents), refunded_cents=0, currency="USD", payment_metadata={},
+    )
+    at(monkeypatch, DEC_2)
+    db_session.add(pay_card_filled)
+    db_session.flush()
+    InvoiceService.recompute(db_session, proforma, cause="payment")
+    assert frozen(proforma) == (DEC_RATE, "2026-12", "hmrc_monthly", 152)
+    invoice_guard.set_mode_override("enforce")
+    try:
+        assert restamp_refused(db_session, proforma)
+    finally:
+        invoice_guard.set_mode_override(None)
+
+
+def test_a_restamp_of_an_ordinary_invoice_is_refused(db_session, account, uk_vat, monkeypatch):
+    from tests.services.test_billing_p2_sterling_vat import NOV_15, issue, store
+
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account)
+    assert frozen(invoice) == (Decimal("1.3396"), "2026-11", "hmrc_monthly", 149)
+    invoice_guard.set_mode_override("enforce")
+    try:
+        assert restamp_refused(db_session, invoice)
+    finally:
+        invoice_guard.set_mode_override(None)
+
+
+def test_the_restamp_refuses_an_invoice_that_is_not_a_proforma(db_session, account, uk_vat, monkeypatch):
+    from tests.services.test_billing_p2_sterling_vat import NOV_15, issue, store
+
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account)
+    with pytest.raises(ValueError):
+        sterling_conversion.plan_restamp(db_session, invoice, DEC_2)

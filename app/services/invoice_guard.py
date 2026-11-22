@@ -93,6 +93,9 @@ NOTE_FROZEN_COLUMNS = frozenset(
 )
 # Written once when a pending sterling VAT is filled (``_sterling_fill``).
 STERLING_FILL_COLUMNS = frozenset({"fx_rate", "fx_source", "tax_total_gbp_cents", "fx_rate_id"})
+# Re-stamped by the proforma conversion, only in the flush that makes the
+# stored proforma its VAT invoice (``_allowed``).
+STERLING_COLUMNS = STERLING_FILL_COLUMNS | {"fx_period"}
 
 MODES = ("log", "enforce")
 PROFORMA_CONVERSION = "proforma_conversion"
@@ -250,10 +253,13 @@ def _allowed(
     new: Any,
     allowance: Optional[tuple[str, frozenset, int]],
     invoice_id: Optional[int],
+    converting: bool = False,
 ) -> bool:
     if allowance is not None and name in allowance[1] and invoice_id == allowance[2]:
         if name == "document_type":
             return _plain(old) == "proforma" and _plain(new) == "invoice"
+        if name in STERLING_COLUMNS:
+            return converting
         return True
     if name in ONCE_SET_COLUMNS and old is None:
         return True
@@ -375,9 +381,11 @@ def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
         return
     allowance = _allowance.get()
     fill = _sterling_fill(state, connection, committed)
+    type_changed, old_type, new_type = _old_value(state, "document_type", committed)
+    converting = type_changed and _plain(old_type) == "proforma" and _plain(new_type) == "invoice"
     for name in sorted(GUARDED_COLUMNS):
         changed, old, new = _old_value(state, name, committed)
-        if not changed or _allowed(name, old, new, allowance, target.id):
+        if not changed or _allowed(name, old, new, allowance, target.id, converting):
             continue
         if fill and name in STERLING_FILL_COLUMNS:
             continue

@@ -14,7 +14,6 @@ from app.services.invoice_guard import FrozenInvoiceError
 from app.services.invoice_service import InvoiceService
 from app.services.settings_store import set_setting
 from app.services.tax import exchange_rates, sterling_conversion
-from app.services.tax.exchange_rates import ExchangeRateMissing
 from app.services.tax import pdf as tax_pdf
 from tests.services.test_billing_p1i_invoice_engine import _series
 from tests.services.test_billing_p2_sterling_vat import (  # noqa: F401 - fixtures
@@ -200,6 +199,8 @@ def test_the_fetch_jobs_sweep_fills_one_the_store_missed(db_session, proforma, m
     db_session.flush()
     assert sterling_conversion.is_pending(proforma)
     assert sterling_conversion.pending_months(db_session) == [("2026-12", "USD", 1)]
+    (finding,) = _fx_findings(db_session, DEC_2)
+    assert finding.details["rate_stored"] is True and "daily sweep" in finding.title
     assert sterling_conversion.sweep(db_session, "2026-12", "USD") == [proforma.id]
     assert frozen(proforma) == (Decimal("1.3158"), "2026-12", "hmrc_monthly", 152)
     assert sterling_conversion.pending_months(db_session) == []

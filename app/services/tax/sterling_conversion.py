@@ -17,6 +17,7 @@ computes, and nothing else.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
@@ -27,7 +28,6 @@ from sqlalchemy.orm import Session
 from app.models.invoice_adjustment import InvoiceAdjustment
 from app.models.reseller import Invoice
 from app.models.tax import TaxExchangeRate
-from app.services import invoice_guard
 from app.services.tax import exchange_rates
 
 STERLING_COLUMNS = ("fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id")
@@ -57,37 +57,63 @@ def _sterling(invoice: Any) -> dict:
     }
 
 
-def restamp_at_conversion(db: Session, invoice: Invoice, at: datetime) -> None:
-    """Stamp the sterling VAT of a proforma becoming a VAT invoice at ``at``, its tax point.
+@dataclass(frozen=True)
+class Restamp:
+    """The sterling VAT a proforma takes on as its VAT invoice, and what it had."""
+
+    before: dict
+    values: dict
+    pending: bool
+
+
+def plan_restamp(db: Session, invoice: Invoice, at: datetime) -> Optional[Restamp]:
+    """The sterling VAT of a proforma becoming a VAT invoice at ``at``, its tax point; None when it keeps its own.
 
     Only a proforma that froze a sterling VAT at publish (a GB registration,
-    VAT above zero, a currency other than sterling) is stamped again. Runs
-    with the invoice locked, so the rate's share lock comes after it, as at
-    publish. Reads only the table and never refuses: a missing rate leaves
-    the sterling VAT pending.
+    VAT above zero, a currency other than sterling) is stamped again, and
+    only when the payment falls in another UK month. Called by
+    ``InvoiceService.convert_proforma`` while the invoice is still a
+    proforma, with the invoice locked and the series counter allocated, so
+    the rate's share lock comes after them, as at publish; anything else
+    raises ``ValueError``. Reads only the table and never refuses: a missing
+    rate leaves the sterling VAT pending. Writes nothing: the conversion
+    applies the values (``apply_restamp``) in the flush that makes the
+    proforma its VAT invoice, the only flush the invoice guard lets change
+    them in.
     """
+    from app.models.reseller import InvoiceDocumentType
+
+    if invoice.document_type != InvoiceDocumentType.PROFORMA:
+        raise ValueError(f"invoice {invoice.id} is not a proforma being converted")
     if invoice.fx_period is None:
-        return
+        return None
     period = exchange_rates.period_of(at)
     if period == invoice.fx_period:
-        return
-    before = _sterling(invoice)
+        return None
     row = exchange_rates.stored_rate(db, str(invoice.currency), period, share_lock=True)
-    tax_cents = int(invoice.tax_cents or 0)
-    with invoice_guard.allow(invoice_guard.PROFORMA_CONVERSION, STERLING_COLUMNS, invoice.id):
-        invoice.fx_period = period
-        if row is None:
-            invoice.fx_rate = None
-            invoice.fx_source = None
-            invoice.tax_total_gbp_cents = None
-            invoice.fx_rate_id = None
-        else:
-            rate = Decimal(row.units_per_gbp)
-            invoice.fx_rate = rate
-            invoice.fx_source = row.source
-            invoice.tax_total_gbp_cents = exchange_rates.to_gbp_cents(tax_cents, rate)
-            invoice.fx_rate_id = int(row.id)
-        db.flush()
+    if row is None:
+        values = {"fx_rate": None, "fx_period": period, "fx_source": None, "tax_total_gbp_cents": None,
+                  "fx_rate_id": None}
+    else:
+        rate = Decimal(row.units_per_gbp)
+        values = {
+            "fx_rate": rate,
+            "fx_period": period,
+            "fx_source": row.source,
+            "tax_total_gbp_cents": exchange_rates.to_gbp_cents(int(invoice.tax_cents or 0), rate),
+            "fx_rate_id": int(row.id),
+        }
+    return Restamp(before=_sterling(invoice), values=values, pending=row is None)
+
+
+def apply_restamp(invoice: Invoice, restamp: Restamp) -> None:
+    """Write the planned sterling VAT on the invoice; the caller flushes it with the conversion."""
+    for name, value in restamp.values.items():
+        setattr(invoice, name, value)
+
+
+def audit_restamp(db: Session, invoice: Invoice, restamp: Restamp) -> None:
+    """``billing.tax.sterling_reconverted`` with the sterling VAT before and after."""
     from app.services.audit_service import AuditService
 
     AuditService.log(
@@ -96,7 +122,7 @@ def restamp_at_conversion(db: Session, invoice: Invoice, at: datetime) -> None:
         action="billing.tax.sterling_reconverted",
         resource_type="invoice",
         resource_id=str(invoice.id),
-        metadata={"before": before, "after": _sterling(invoice), "pending": row is None},
+        metadata={"before": restamp.before, "after": _sterling(invoice), "pending": restamp.pending},
     )
 
 
