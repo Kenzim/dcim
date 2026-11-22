@@ -9,7 +9,12 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from app.models.billing_series import DocumentSeries, DocumentType, series_counter_name
+from app.models.billing_series import (
+    DocumentSeries,
+    DocumentType,
+    series_counter_name,
+    series_start_name,
+)
 from app.models.reseller import InvoiceSequence
 
 MAX_DISPLAY_LENGTH = 64
@@ -72,14 +77,11 @@ class InvoiceNumbering:
         return series
 
     @staticmethod
-    def _increment(db: Session, name: str) -> int:
-        """Take the next value of counter ``name`` (created at 1) in ``db``'s transaction."""
+    def _increment(db: Session, series_id: int, period: str) -> int:
+        """Take the next value of the series' counter (created at 1) in ``db``'s transaction."""
         if db.get_bind().dialect.name == "sqlite":
-            db.execute(
-                sqlite_insert(InvoiceSequence)
-                .values(name=name, next_value=1)
-                .on_conflict_do_nothing(index_elements=["name"])
-            )
+            name = series_counter_name(series_id, period)
+            _insert_if_missing(db, name, 1)
             allocated = db.scalar(
                 update(InvoiceSequence)
                 .where(InvoiceSequence.name == name)
@@ -88,9 +90,11 @@ class InvoiceNumbering:
             )
             if allocated is None:
                 raise NumberingError(f"could not allocate from counter {name}")
+            if allocated == 1:
+                _insert_if_missing(db, series_start_name(series_id, period), 1)
             return int(allocated)
 
-        counter = lock_counter(db, name)
+        counter = lock_series_counter(db, series_id, period)
         allocated = int(counter.next_value)
         counter.next_value = allocated + 1
         db.flush()
@@ -120,13 +124,12 @@ class InvoiceNumbering:
             value = int(invoice_number)
             return period, value, InvoiceNumbering.format_number(series, value, at)
 
-        name = series_counter_name(series.id, period)
         if series.gapless:
-            value = InvoiceNumbering._increment(db, name)
+            value = InvoiceNumbering._increment(db, series.id, period)
         else:
             session = (session_factory or _default_session)()
             try:
-                value = InvoiceNumbering._increment(session, name)
+                value = InvoiceNumbering._increment(session, series.id, period)
                 session.commit()
             except Exception:
                 session.rollback()
@@ -242,13 +245,15 @@ def set_counter_at_least(db: Session, series: DocumentSeries, value: int, at: da
     """Raise the series' counter for the period of ``at`` so it gives ``value`` next.
 
     Counters only go up: a ``value`` below the counter, or at or below a number
-    already issued in that period, raises ``NumberingError``. Returns the new
-    next value. Takes the counter row lock on MySQL.
+    already issued in that period, raises ``NumberingError``. So does raising a
+    gapless counter once the period has issued numbers, as that leaves a gap.
+    Before anything is issued the start row moves with the counter. Returns the
+    new next value. Takes the counter row lock on MySQL.
     """
     if type(value) is not int or value < 1:
         raise NumberingError("start_value must be a positive integer")
     period = InvoiceNumbering.period(series, at)
-    counter = lock_counter(db, series_counter_name(series.id, period))
+    counter = lock_series_counter(db, series.id, period)
     issued = series_max_value(db, series.id, period)
     if value <= issued:
         raise NumberingError(
@@ -258,13 +263,22 @@ def set_counter_at_least(db: Session, series: DocumentSeries, value: int, at: da
         raise NumberingError(
             f"start_value {value} is below the counter's next value {counter.next_value}"
         )
+    if series.gapless and issued and value > int(counter.next_value):
+        raise NumberingError(
+            f"series {series.code} is gapless and has issued numbers up to {issued}; "
+            f"raising its counter to {value} would leave a gap"
+        )
     counter.next_value = value
+    if not issued:
+        start = series_start_name(series.id, period)
+        _insert_if_missing(db, start, value)
+        db.execute(update(InvoiceSequence).where(InvoiceSequence.name == start).values(next_value=value))
     db.flush()
     return value
 
 
-def _create_counter_if_missing(db: Session, name: str) -> None:
-    """Insert counter ``name`` at 1 unless it exists; safe when transactions race.
+def _insert_if_missing(db: Session, name: str, value: int) -> None:
+    """Insert counter ``name`` at ``value`` unless it exists; safe when transactions race.
 
     On MySQL and MariaDB this is ``INSERT ... ON DUPLICATE KEY UPDATE`` with no
     read first. It takes the row's exclusive lock at once, so racing creators
@@ -275,7 +289,7 @@ def _create_counter_if_missing(db: Session, name: str) -> None:
     another session commits the row.
     """
     dialect = db.get_bind().dialect.name
-    values = {"name": name, "next_value": 1}
+    values = {"name": name, "next_value": value}
     if dialect == "sqlite":
         db.execute(sqlite_insert(InvoiceSequence).values(**values).on_conflict_do_nothing(index_elements=["name"]))
     elif dialect in ("mysql", "mariadb"):
@@ -293,14 +307,22 @@ def _create_counter_if_missing(db: Session, name: str) -> None:
             pass
 
 
-def lock_counter(db: Session, name: str) -> InvoiceSequence:
-    """Counter ``name``, created at 1 if missing, locked for the caller's transaction."""
+def lock_series_counter(db: Session, series_id: int, period: str) -> InvoiceSequence:
+    """The series' counter for ``period``, created at 1 if missing, locked for the caller's transaction.
+
+    While the counter is at 1 nothing has been handed out, so its start row is
+    created at 1 too, under the counter's lock. A counter already past 1 with
+    no start row is left without one, and the gapless check reports it.
+    """
     from app.services.billing_locks import BillingLocks
 
-    _create_counter_if_missing(db, name)
+    name = series_counter_name(series_id, period)
+    _insert_if_missing(db, name, 1)
     counter = BillingLocks.number_counter(db, name)
     if counter is None:
         raise NumberingError(f"could not create counter {name}")
+    if int(counter.next_value) == 1:
+        _insert_if_missing(db, series_start_name(series_id, period), 1)
     return counter
 
 
@@ -314,7 +336,7 @@ def lock_series_numbering(db: Session, series: DocumentSeries, at: datetime) -> 
     """
     if db.get_bind().dialect.name != "sqlite":
         db.execute(select(InvoiceSequence).where(InvoiceSequence.name == "invoice").with_for_update())
-    lock_counter(db, series_counter_name(series.id, InvoiceNumbering.period(series, at)))
+    lock_series_counter(db, series.id, InvoiceNumbering.period(series, at))
 
 
 def invoice_number_floor(db: Session) -> int:
@@ -324,11 +346,14 @@ def invoice_number_floor(db: Session) -> int:
 
 
 def delete_series_counters(db: Session, series_id: int) -> None:
-    """Remove every counter of a series (only for a series that issued nothing)."""
-    from sqlalchemy import delete
+    """Remove every counter and start row of a series (only for a series that issued nothing)."""
+    from sqlalchemy import delete, or_
 
     db.execute(
         delete(InvoiceSequence).where(
-            InvoiceSequence.name.like(series_counter_name(series_id, "") + "%")
+            or_(
+                InvoiceSequence.name.like(series_counter_name(series_id, "") + "%"),
+                InvoiceSequence.name.like(series_start_name(series_id, "") + "%"),
+            )
         )
     )

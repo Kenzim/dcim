@@ -42,6 +42,8 @@ class DocumentSeries(Base):
 
     Counter rows are named ``series:<id>:<period>``, where the period is ``''``
     for ``reset_period = never`` and the four-digit UTC year for ``yearly``.
+    Each counter has a start row ``series-start:<id>:<period>`` holding the
+    first number it hands out, which the gapless check counts from.
     """
 
     __tablename__ = "document_series"
@@ -85,3 +87,11 @@ class DocumentSeries(Base):
 def series_counter_name(series_id: int, period: str) -> str:
     """Name of the ``invoice_sequences`` row that counts one series and period."""
     return f"series:{int(series_id)}:{period}"
+
+
+SERIES_START_PREFIX = "series-start:"
+
+
+def series_start_name(series_id: int, period: str) -> str:
+    """Name of the ``invoice_sequences`` row whose ``next_value`` is the first number of a series and period."""
+    return f"{SERIES_START_PREFIX}{int(series_id)}:{period}"

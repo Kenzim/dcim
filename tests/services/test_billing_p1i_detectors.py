@@ -58,6 +58,15 @@ def _series(db, code, gapless=True):
     return series
 
 
+def _start(db, series, value=1, period=""):
+    """Record where a series' numbering began, as counter creation does."""
+    from app.models.billing_series import series_start_name
+    from app.models.reseller import InvoiceSequence
+
+    db.add(InvoiceSequence(name=series_start_name(series.id, period), next_value=value))
+    db.flush()
+
+
 def _numbered(db, account, series, value, period=""):
     """A legacy-path published invoice carrying a raw legal number (test seeding only)."""
     invoice = Invoice(invoice_number=next(_numbers), billing_account_id=account.id,
@@ -148,6 +157,9 @@ def test_numbering_gaps_clean_gap_duplicate_and_non_gapless(db_session, account)
     gap = _series(db_session, "B")
     duplicate = _series(db_session, "C")
     loose = _series(db_session, "D", gapless=False)
+    for series in (clean, gap, duplicate):
+        _start(db_session, series)
+    _start(db_session, clean, period="2027")
     for value in (1, 2, 3):
         _numbered(db_session, account, clean, value)
     for value in (1, 3):
@@ -172,6 +184,7 @@ def test_numbering_gaps_clean_gap_duplicate_and_non_gapless(db_session, account)
 def test_numbering_gaps_overflow(db_session, account):
     for code in ("E", "F", "G"):
         series = _series(db_session, code)
+        _start(db_session, series)
         _numbered(db_session, account, series, 1)
         _numbered(db_session, account, series, 3)
     findings = bi.numbering_gaps(db_session, _params("billing_numbering_gaps", max_rows=2), NOW)
@@ -197,21 +210,66 @@ def test_legacy_pdf_still_renders(db_session, account):
     assert InvoicePdfService.render_pdf_bytes(db_session, invoice).startswith(b"%PDF")
 
 
-def test_numbering_gaps_accepts_a_series_started_above_one(db_session, account):
+def test_numbering_gaps_counts_from_the_recorded_start(db_session, account):
     started = _series(db_session, "H")
+    _start(db_session, started, 50)
     for value in (50, 51, 52):
         _numbered(db_session, account, started, value)
-    holed = _series(db_session, "J")
-    for value in (50, 52):
+    first_missing = _series(db_session, "J")
+    _start(db_session, first_missing, 50)
+    for value in (51, 52):
+        _numbered(db_session, account, first_missing, value)
+    findings = bi.numbering_gaps(db_session, _params("billing_numbering_gaps"), NOW)
+    assert [(f.resource_id, f.details["missing"], f.details["start_value"]) for f in findings] == [
+        (f"{first_missing.id}:", 1, 50)
+    ]
+
+
+def test_numbering_gaps_reports_a_missing_start_row_on_its_own(db_session, account):
+    unrecorded = _series(db_session, "L")
+    for value in (51, 52):
+        _numbered(db_session, account, unrecorded, value)
+    holed = _series(db_session, "M")
+    for value in (1, 3):
         _numbered(db_session, account, holed, value)
     findings = bi.numbering_gaps(db_session, _params("billing_numbering_gaps"), NOW)
-    assert [(f.resource_id, f.details["missing"]) for f in findings] == [(f"{holed.id}:", 1)]
+    assert [f.resource_id for f in findings] == [
+        f"{unrecorded.id}::start", f"{holed.id}::start", f"{holed.id}:"
+    ]
+    assert findings[0].details["missing_start"] is True and findings[2].details["missing"] == 1
+
+
+def test_published_gapless_numbers_record_their_start_and_check_clean(db_session, account, v2):
+    from app.models.billing_series import series_start_name
+    from app.models.reseller import InvoiceSequence
+
+    first, second = _v2_invoice(db_session, account), _v2_invoice(db_session, account)
+    assert (first.number_value, second.number_value) == (1, 2)
+    assert db_session.get(InvoiceSequence, series_start_name(first.series_id, "")).next_value == 1
+    assert bi.numbering_gaps(db_session, _params("billing_numbering_gaps"), NOW) == []
+
+
+def test_raising_a_gapless_counter_moves_the_start_until_a_number_is_issued(db_session, account):
+    from app.models.billing_series import series_start_name
+    from app.models.reseller import InvoiceSequence
+    from app.services.invoice_numbering import InvoiceNumbering, NumberingError, set_counter_at_least
+
+    series = _series(db_session, "N")
+    assert set_counter_at_least(db_session, series, 50, NOW) == 50
+    assert set_counter_at_least(db_session, series, 60, NOW) == 60
+    assert db_session.get(InvoiceSequence, series_start_name(series.id, "")).next_value == 60
+    assert InvoiceNumbering.allocate(db_session, series, at=NOW)[1] == 60
+    _numbered(db_session, account, series, 60)
+    with pytest.raises(NumberingError, match="would leave a gap"):
+        set_counter_at_least(db_session, series, 70, NOW)
+    assert set_counter_at_least(db_session, series, 61, NOW) == 61
+    assert db_session.get(InvoiceSequence, series_start_name(series.id, "")).next_value == 60
 
 
 def test_series_max_value_counts_a_null_period_as_the_empty_period(db_session, account):
     from app.services.invoice_numbering import NumberingError, series_max_value, set_counter_at_least
 
-    series = _series(db_session, "K")
+    series = _series(db_session, "K", gapless=False)
     _numbered(db_session, account, series, 5, period=None)
     assert series_max_value(db_session, series.id, "") == 5
     with pytest.raises(NumberingError):

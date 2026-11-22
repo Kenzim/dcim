@@ -13,7 +13,7 @@ os.environ["COMMERCE_RETAIL_ENABLED"] = "true"
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.dao.commerce_dao import BillingAccountDAO
-from app.models.billing_series import DocumentSeries, DocumentType, series_counter_name
+from app.models.billing_series import DocumentSeries, DocumentType, series_counter_name, series_start_name
 from app.models.commerce_audit import UserAuditEvent
 from app.models.commerce_account import SystemSetting
 from app.models.reseller import Invoice, InvoicePurpose, InvoiceSequence, InvoiceStatus, Payment
@@ -147,7 +147,7 @@ def test_used_series_keeps_code_and_reset_period_and_cannot_be_deleted(client, d
 
 
 def test_start_value_only_moves_the_counter_up(client, db_session, admin, account):
-    series_id = _new(client, admin, gapless=True).json()["id"]
+    series_id = _new(client, admin).json()["id"]
     client.post(f"{SERIES}/{series_id}/make-default", headers=admin)
     _invoice(db_session, account)
     _invoice(db_session, account)
@@ -156,6 +156,19 @@ def test_start_value_only_moves_the_counter_up(client, db_session, admin, accoun
     assert response.status_code == 200 and response.json()["next_value"] == 100
     assert client.patch(f"{SERIES}/{series_id}", headers=admin, json={"start_value": 50}).status_code == 409
     assert _invoice(db_session, account).number_display == "INV-100"
+
+
+def test_gapless_start_value_moves_the_start_row_then_refuses_once_numbers_are_issued(
+    client, db_session, admin, account
+):
+    series_id = _new(client, admin, gapless=True, start_value=50).json()["id"]
+    start = series_start_name(series_id, "")
+    assert db_session.scalar(select(InvoiceSequence.next_value).where(InvoiceSequence.name == start)) == 50
+    client.post(f"{SERIES}/{series_id}/make-default", headers=admin)
+    assert _invoice(db_session, account).number_display == "INV-50"
+    response = client.patch(f"{SERIES}/{series_id}", headers=admin, json={"start_value": 100})
+    assert response.status_code == 409 and "would leave a gap" in response.json()["detail"]
+    assert client.get(f"{SERIES}/{series_id}", headers=admin).json()["next_value"] == 51
 
 
 def test_switch_from_invoice_number_to_own_starts_above_the_largest_number(client, db_session, admin, account):
@@ -264,11 +277,11 @@ def test_v2_mark_paid_partial_and_write_off(client, db_session, admin, account):
 
 def test_delete_removes_the_series_counters(client, db_session, admin):
     series_id = _new(client, admin, start_value=40).json()["id"]
-    name = series_counter_name(series_id, "")
-    assert db_session.scalar(select(InvoiceSequence).where(InvoiceSequence.name == name)) is not None
+    names = [series_counter_name(series_id, ""), series_start_name(series_id, "")]
+    assert len(db_session.scalars(select(InvoiceSequence).where(InvoiceSequence.name.in_(names))).all()) == 2
     assert client.delete(f"{SERIES}/{series_id}", headers=admin).status_code == 204
     db_session.expire_all()
-    assert db_session.scalar(select(InvoiceSequence).where(InvoiceSequence.name == name)) is None
+    assert db_session.scalars(select(InvoiceSequence).where(InvoiceSequence.name.in_(names))).all() == []
 
 
 def test_switch_to_own_starts_above_every_allocated_invoice_number(client, db_session, admin, account):

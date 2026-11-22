@@ -644,74 +644,103 @@ def _issued_numbers():
 
 
 def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Gapless series with a gap or a duplicate number, property P7 (design 5.1).
+    """Gapless series with a gap, a duplicate or no recorded start, property P7 (design 5.1).
 
     Per (series, period) the issued values are clean when they are distinct and
-    run without a hole from the smallest to the largest. The smallest need not
-    be 1: an admin may start a series higher (``start_value``), and the counter
-    keeps no record of that start, so a missing first number is not detected.
+    run without a hole from the recorded start to the largest, so a missing
+    first number is a gap. The start is the ``series-start:<id>:<period>`` row
+    of ``invoice_sequences`` (``series_start_name``), written when the counter
+    is created and moved only while nothing is issued. Issued numbers with no
+    start row get a finding of their own (resource id ``<id>:<period>:start``),
+    and their run is then checked from the smallest number.
+
+    The series periods are aggregated in SQL; the comparison with the start
+    rows and the ``max_rows`` limit are applied in Python, as there is one row
+    per gapless series and period.
     """
-    from app.models.billing_series import DocumentSeries
+    from app.models.billing_series import SERIES_START_PREFIX, DocumentSeries, series_start_name
+    from app.models.reseller import InvoiceSequence
 
     issued = _issued_numbers()
-    count = func.count(issued.c.value)
-    distinct = func.count(func.distinct(issued.c.value))
-    smallest = func.min(issued.c.value)
-    largest = func.max(issued.c.value)
     stmt = (
         select(
             DocumentSeries.id,
             DocumentSeries.code,
             issued.c.period,
-            count.label("issued"),
-            distinct.label("distinct"),
-            smallest.label("smallest"),
-            largest.label("largest"),
+            func.count(issued.c.value).label("issued"),
+            func.count(func.distinct(issued.c.value)).label("distinct"),
+            func.min(issued.c.value).label("smallest"),
+            func.max(issued.c.value).label("largest"),
         )
         .select_from(issued)
         .join(DocumentSeries, DocumentSeries.id == issued.c.series_id)
         .where(DocumentSeries.gapless.is_(True))
         .group_by(DocumentSeries.id, DocumentSeries.code, issued.c.period)
-        .having(or_(count != distinct, distinct != largest - smallest + 1))
         .order_by(DocumentSeries.id, issued.c.period)
     )
-    rows, remaining = _limited(db, stmt, params["max_rows"])
+    starts = dict(
+        db.execute(
+            select(InvoiceSequence.name, InvoiceSequence.next_value).where(
+                InvoiceSequence.name.like(SERIES_START_PREFIX + "%")
+            )
+        ).all()
+    )
     out = []
-    for row in rows:
+    for row in db.execute(stmt).all():
         issued_count, distinct_count = int(row.issued), int(row.distinct)
-        duplicates = issued_count - distinct_count
-        missing = max(0, int(row.largest) - int(row.smallest) + 1 - distinct_count)
+        smallest, largest = int(row.smallest), int(row.largest)
         period = row.period or "all time"
+        recorded = starts.get(series_start_name(row.id, row.period))
+        start = int(recorded) if recorded is not None else None
+        base = {"series_id": row.id, "code": row.code, "period": row.period,
+                "min_value": smallest, "max_value": largest, "start_value": start}
+        if start is None:
+            out.append(
+                Finding(
+                    "billing_numbering_gaps",
+                    "document_series",
+                    f"{row.id}:{row.period}:start",
+                    f"Series {row.code}",
+                    f"Series {row.code} ({period}) has no recorded start",
+                    f"{issued_count} numbers issued, from {smallest} to {largest}, but no start row "
+                    "records the series' first number, so a missing first number cannot be ruled out.",
+                    details={**base, "issued": issued_count, "missing_start": True},
+                )
+            )
+        low = min(smallest, start) if start is not None else smallest
+        duplicates = issued_count - distinct_count
+        missing = max(0, largest - low + 1 - distinct_count)
+        below_start = start is not None and smallest < start
+        if not (duplicates or missing or below_start):
+            continue
         problems = []
         if duplicates:
-            problems.append(f"{duplicates} repeated")
+            problems.append(f"{duplicates} repeated numbers")
         if missing:
-            problems.append(f"{missing} missing")
+            problems.append(f"{missing} missing numbers")
+        if below_start:
+            problems.append(f"numbers below its recorded start {start}")
+        title = f"Series {row.code} ({period}) has {' and '.join(problems)}"
+        first = f"its recorded start {start}" if start is not None else "its smallest number"
         out.append(
             Finding(
                 "billing_numbering_gaps",
                 "document_series",
                 f"{row.id}:{row.period}",
                 f"Series {row.code}",
-                f"Series {row.code} ({period}) has {' and '.join(problems)} numbers",
-                f"{issued_count} numbers issued, {distinct_count} distinct, from {row.smallest} "
-                f"to {row.largest}; a gapless series must issue every number from its first to its largest once each.",
-                details={
-                    "series_id": row.id,
-                    "code": row.code,
-                    "period": row.period,
-                    "issued": issued_count,
-                    "distinct": distinct_count,
-                    "min_value": int(row.smallest),
-                    "max_value": int(row.largest),
-                    "duplicates": duplicates,
-                    "missing": missing,
-                },
+                title,
+                f"{issued_count} numbers issued, {distinct_count} distinct, from {smallest} to {largest}; "
+                f"a gapless series must issue every number from {first} to its largest once each.",
+                details={**base, "issued": issued_count, "distinct": distinct_count,
+                         "duplicates": duplicates, "missing": missing},
             )
         )
-    if remaining:
+    limit = params["max_rows"]
+    if len(out) > limit:
+        remaining = len(out) - limit
+        out = out[:limit]
         out.append(_overflow("billing_numbering_gaps", "document_series",
-                             "series periods with gaps or repeats", remaining, len(rows)))
+                             "numbering problems in gapless series", remaining, limit))
     return out
 
 
