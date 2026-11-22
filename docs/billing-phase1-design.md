@@ -438,6 +438,8 @@ Every edge not listed is refused. "Recompute" in the trigger column means the ed
 
 The four rows above `void` by admin were added during P1-I: an exhaustive test of the status rule (3.2) found it can reach them, so without them `transition()` would raise. The test pins this table to the rule, so the two cannot drift apart again.
 
+As built (core status review fixes): order cancellation and service billing cancellation void only through `void()` in `v2`, under the reseller, account and invoice locks (`order_refunds.void_cancelled_invoice_v2`, `close_kept_invoice_v2`). When `void()` refuses an unpaid invoice, a `cancel` credit note covers what is still owed if no money is held; otherwise the invoice is recorded for refund review as `<reason>_invoice_open`. Without a credit note series the credit note cannot be issued, and the invoice goes to refund review instead. A failed reseller deploy in `v2` refunds each payment to credit through `RefundService`, so the invoice ends `refunded`. `transition()` refuses `paid` to `void` while `paid_net` is above 0, so only the status rule's `credited` move voids a paid invoice. In `v2` the payment-failed webhook calls `recompute()` (cause `payment_failed`) instead of writing `open`.
+
 Statuses `failed` (legacy) and `void`, `refunded` are terminal in `v2`. Nothing in `v2` writes `failed`; existing `failed` rows stay as they are (they are reversed payments under the legacy model).
 
 ### 3.4 Transition table (engine `legacy` and `shadow`)
@@ -449,13 +451,15 @@ These modes keep today's behaviour byte for byte, so the table is today's edges,
 | (none) | `open` | `InvoiceService.create` (`invoice_service.py:109`), checkout (`checkout_service.py:335`), upgrade quote (`commerce_lifecycle_service.py:185`) |
 | `open`, `pending_action`, `overdue` | `paid` | `mark_paid_if_fully_allocated` (`invoice_service.py:211-213`), admin mark-paid (`commerce_admin.py:439`; W0a moves it onto the settlement function) |
 | `paid` | `open` | `mark_paid_if_fully_allocated` when allocation drops (`invoice_service.py:214-216`) |
-| `open` | `pending_action` | `orchestrator.py:607` |
+| `open`, `overdue`, `failed` | `pending_action` | `orchestrator.py:607` (`failed`: a 3-D Secure card charge on a disputed or reversed reseller invoice, as before phase 1) |
 | `pending_action` | `open` | `webhooks.py` `_payment_failed` (cause `payment_failed`) |
-| `open`, `pending_action` | `overdue` | `recurring_billing_service.py:557-558` |
+| `open` | `overdue` | `recurring_billing_service.py:557-558` |
 | `open`, `pending_action`, `overdue` | `void` | `commerce_admin.py:479`, `reseller_billing_service.py:795`, `recurring_billing_service.py:883`; `order_refunds.cancel_order` (cause `order_cancelled`, also from `failed`) |
 | any except `void`, `draft` | `failed` | `RefundService` completion (causes `admin_refund`, `refund`, `dispute`) |
 
 As built (P1-R): before phase 1, a refund or dispute of a late payment on a `void` invoice wrote `failed` anyway. There is no `void` to `failed` edge, so such an invoice now stays `void`; the payment, refund and ledger effects still apply. This is a deliberate change from the pre-phase-1 behaviour in `legacy` and `shadow`, listed in the phase 1 report.
+
+As built (core status review fixes): the pre-phase-1 code never wrote `pending_action` to `overdue`, so that edge is not in the table. In every mode, `_lock_funding_rows` refuses to fund a `void` invoice before any gateway call, and in `v2` also a `refunded` or `failed` one. A failed renewal charge locks the invoice and moves it to `overdue` only from `open` or `partially_paid`; a `void`, `refunded`, `failed` or `draft` invoice sends the cycle to manual review (`invoice_<status>`) and the batch carries on. Before phase 1 the worker wrote `overdue` over a voided reseller cycle invoice and the next retry charged it (to-do ba305b55, an existing production bug for reseller cycle invoices, fixed by phase 1).
 
 In these modes `create()` still writes `draft` first and publishes in the same transaction (so drafts become real from phase 1 for admin-built invoices, A5 later), and the publish side effects of 3.3 apply with two differences: `amount_cents` is the legacy amount, and `model_version`, `subtotal_cents`, `discount_cents` and `tax_cents` stay NULL (the v2 totals are computed only for the `i3_totals` comparison). Lines with their new columns, snapshots, `issued_at`, the number columns and `invoice.created` are written in every mode, since they are additive and harmless. So `model_version = 2` means exactly "its totals were decided by the v2 engine", and the PDF and the E2 totals detector rely on that. New statuses (`partially_paid`, `refunded`, `collections`) are never written in these modes, so `/api/reseller-panel` and `/api/client/commerce` see no new status values until the switch (open question 4).
 
@@ -635,6 +639,7 @@ The PDF for a v2 invoice reads only the snapshots. Legacy invoices (`model_versi
 - `PaymentRefundService.refund` (`refunds.py:72-75`) and `PaymentWebhookService._payment_for_update` (`webhooks.py:121-144`) lock the payment first and the reseller later (through the ledger), the reverse of the orchestrator's order, which can deadlock today. P1-D replaces both with `BillingLocks` (account, invoice, payment) in section 7.
 - Retail settlement (W0a) locks the account, then the invoice, then the payment.
 - Number allocation in gapless mode comes last in every transaction.
+- As built (core status review fixes): funding locks through `BillingLocks.for_invoice`: a cycle invoice's service billing first, then the reseller, its billing account and the invoice, the same order as the renewal worker. No funding charges an invoice while a live pending gateway payment exists on it (409 `invoice_payment_pending` at the pay routes; an expired USDT deposit does not count); a `pending_action` invoice returns its pending payment instead. This refusal is a deliberate change in `legacy` and `shadow`; no WHMCS route reuses an invoice for funding.
 
 ### 6.4 Shadow comparisons
 
@@ -792,6 +797,12 @@ A chargeback event (`charge.dispute.created`, PayPal `CUSTOMER.DISPUTE.CREATED` 
 - then the track's dispute policy (7.6).
 
 As built (P1-R): in `legacy` and `shadow`, and for reseller invoices in `v2`, the services linked to a disputed invoice are suspended after the dispute's transaction commits, each in its own transaction with no billing lock held. A failed suspension is rolled back, logged and audited as `billing.dispute_suspend_failed`; it does not undo the dispute or stop the other suspensions. The webhook routes run `process` in a worker thread. Before phase 1 this suspension ran inside the async webhook routes through `asyncio.run`, which raised, so a dispute on an invoice with linked services returned 500 and was never recorded (to-do 13e91a6c, an existing production bug fixed by phase 1).
+
+### 7.5.1 USDT deposits on an already paid invoice (as built)
+
+Before phase 1, a reseller could open a USDT deposit for a top-up and then pay the same top-up by card; when the transfer confirmed, settlement raised and the watcher retried the deposit on every tick (to-do 38f9e762, an existing production bug for resellers, fixed by phase 1). Now card funding is refused while the deposit is live (6.3), and the watcher settles each deposit in its own savepoint, so a deposit that fails goes to manual review with its transfer events kept and the others carry on. In `legacy` and `shadow`, USDT that would overpay an already paid reseller invoice stays a pending payment and is recorded as refund review `usdt_on_paid_invoice`; in `shadow` an `i1_decision` mismatch is recorded on its own session (legacy `held_for_review`, v2 `credit_excess` with the overpaid cents), so the switch criterion sees it. In `v2` settlement credits the excess to the account (4.3).
+
+Known limit: nothing in phase 1 resolves a held `usdt_on_paid_invoice` deposit. The refund review's credit and refund actions refuse a pending payment, dismissing leaves the payment pending and the deposit in manual review, and reconciling holds it again. Staff can credit the reseller by hand (`/api/admin/resellers/{id}/credit-adjustments`) and dismiss the review; the payment stays pending, which also blocks `void()` on that invoice. A resolution action is a follow-up (to-do in the ledger).
 
 ### 7.6 Dispute policies
 
