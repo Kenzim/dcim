@@ -125,9 +125,12 @@ class CancellationService:
 
         Locks the service billing first, then delegates to
         ``CommerceLifecycleService.request_cancellation`` (``cancel_at`` at the
-        end of the period, or termination at once). Every unpaid cycle
-        invoice for a period starting at or after ``effective_at`` is
-        cancelled through ``cancel_unpaid_invoices``. The caller checks that
+        end of the period, or termination at once). ``effective_at`` is
+        never before ``now``, so a cycle whose period has started stays owed.
+        An immediate request cancels every unpaid cycle invoice for a period
+        starting at or after ``effective_at`` through
+        ``cancel_unpaid_invoices``; an end-of-period request leaves that to
+        its completion. The caller checks that
         the actor may cancel the service, and commits.
         """
         from app.services.commerce_lifecycle_service import (
@@ -164,7 +167,10 @@ class CancellationService:
 
         if kind == CancellationType.END_OF_PERIOD:
             effective_at = _utc(billing.cancel_at or billing.next_charge_at) if billing is not None else None
-            effective_at = effective_at or current
+            # A past-due billing's next_charge_at is the unpaid cycle's due
+            # date: the period has started, so the request takes effect now
+            # and that cycle stays owed.
+            effective_at = max(effective_at or current, current)
         else:
             effective_at = current
         try:
@@ -179,6 +185,13 @@ class CancellationService:
             )
         except CommerceLifecycleError as exc:
             raise CancellationError(str(exc)) from exc
+        if (
+            kind == CancellationType.END_OF_PERIOD
+            and billing is not None
+            and billing.cancel_at is not None
+            and _utc(billing.cancel_at) < effective_at
+        ):
+            billing.cancel_at = effective_at
 
         request = CancellationRequest(
             service_id=service_id,
@@ -203,7 +216,11 @@ class CancellationService:
         db.add(request)
         db.flush()
 
-        if action == CancellationInvoiceAction.CANCEL_UNPAID:
+        # An end-of-period request leaves invoices generated ahead in place:
+        # they are cancelled when it takes effect (the recurring pass at
+        # cancel_at, then the cancellations job), so withdrawing it has
+        # nothing to undo.
+        if action == CancellationInvoiceAction.CANCEL_UNPAID and kind == CancellationType.IMMEDIATE:
             cancel_unpaid_invoices(
                 db, service_id, from_period_start=effective_at, cause="cancellation_request"
             )

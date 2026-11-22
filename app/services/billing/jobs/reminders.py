@@ -184,6 +184,10 @@ class InvoiceReminders:
             return "not_open"
         if not _track_ok(db, invoice):
             return "track"
+        from app.services.billing.jobs.nonpayment import period_being_cancelled
+
+        if period_being_cancelled(db, invoice):
+            return "cancelled_period"
         if InvoiceService.balance(db, invoice, for_update=for_update).remaining_cents <= 0:
             return "no_balance"
         return None

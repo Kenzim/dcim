@@ -66,7 +66,7 @@ def _request(db, billing, kind="end_of_period", key="k1", **values):
     return request
 
 
-def test_end_of_period_schedules_and_cancels_invoices_generated_ahead(db_session, env):
+def test_end_of_period_schedules_and_leaves_invoices_generated_ahead_to_its_completion(db_session, env):
     _, billing, emitted = env
     current = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
     ahead = make_cycle_invoice(db_session, billing, due_at=NOW + timedelta(days=10), status=InvoiceStatus.OPEN)
@@ -77,8 +77,9 @@ def test_end_of_period_schedules_and_cancels_invoices_generated_ahead(db_session
     assert request.effective_at.replace(tzinfo=None) == (NOW + timedelta(days=10)).replace(tzinfo=None)
     db_session.expire_all()
     assert db_session.get(ServiceBilling, billing.id).cancel_at is not None
-    assert db_session.get(Invoice, ahead.id).status == InvoiceStatus.VOID
-    assert db_session.query(BillingCycle).filter_by(invoice_id=ahead.id).one().state == BillingCycleState.CANCELLED
+    # Cancelled when the request takes effect, so a withdrawal has nothing to undo.
+    assert db_session.get(Invoice, ahead.id).status == InvoiceStatus.OPEN
+    assert db_session.query(BillingCycle).filter_by(invoice_id=ahead.id).one().state != BillingCycleState.CANCELLED
     # The period the client had stays owed.
     assert db_session.get(Invoice, current.id).status == InvoiceStatus.OVERDUE
     assert ("service.cancellation_requested", {
@@ -133,7 +134,11 @@ def test_partly_paid_invoice_ahead_goes_to_a_cancel_credit_note_or_review(db_ses
         refunded_cents=0, currency="USD", payment_metadata={},
     ))
     db_session.commit()
-    _request(db_session, billing)
+    request = _request(db_session, billing)
+    db_session.get(Service, billing.service_id).status = ServiceStatus.TERMINATED
+    db_session.commit()
+    later = make_run("cancellations", now=NOW + timedelta(days=11), watermark=NOW)
+    assert run_job(db_session, CancellationsJob(), later) == {f"cancellation:{request.id}:complete": "done"}
     db_session.expire_all()
     # void() refuses an invoice with money on it; it is left for a refund review.
     assert db_session.get(Invoice, ahead.id).status != InvoiceStatus.VOID

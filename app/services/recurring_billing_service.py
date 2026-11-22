@@ -436,7 +436,9 @@ class RecurringBillingService:
                 billing.last_failure_code = "end_of_period_terminate_failed"
                 billing.last_failure_message = str(exc)[:500]
                 return False
-        self._cancel_billing(db, billing, now)
+        # A cycle whose period started before the cancel date was the
+        # client's: it stays owed.
+        self._cancel_billing(db, billing, now, from_period_start=billing.cancel_at)
         billing.last_failure_code = "end_of_cycle_cancel"
         return True
 
@@ -1077,7 +1079,11 @@ class RecurringBillingService:
 
     @staticmethod
     def _cancel_billing(
-        db: Session, billing: ServiceBilling, now: datetime
+        db: Session,
+        billing: ServiceBilling,
+        now: datetime,
+        *,
+        from_period_start: Optional[datetime] = None,
     ) -> None:
         billing.status = ServiceBillingStatus.CANCELLED
         billing.next_charge_at = None
@@ -1096,6 +1102,12 @@ class RecurringBillingService:
             .order_by(BillingCycle.id.desc())
             .limit(1)
         ).scalar_one_or_none()
+        if (
+            cycle is not None
+            and from_period_start is not None
+            and _utc(cycle.due_at) < _utc(from_period_start)
+        ):
+            cycle = None
         if cycle is not None:
             cycle.state = BillingCycleState.CANCELLED
             cycle.completed_at = now

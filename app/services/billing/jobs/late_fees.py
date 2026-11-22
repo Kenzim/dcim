@@ -27,6 +27,7 @@ from app.models.reseller import Invoice, InvoiceDocumentType, InvoicePurpose, In
 from app.services.billing.jobs.base import JobRun, PlannedAction
 from app.services.billing.jobs.nonpayment import (
     LATE_FEE_ADDED,
+    period_being_cancelled,
     send_billing_email,
     utc,
 )
@@ -126,6 +127,11 @@ def _outside_scope_class_id(db: Session) -> Optional[int]:
     return int(value) if value is not None else None
 
 
+# Only a billing's recurring cycle invoices take a late fee; checkout, top-up,
+# upgrade and other one-off invoices never do (billing manager's decision).
+FEE_PURPOSES = (InvoicePurpose.CYCLE_CHARGE, InvoicePurpose.RENEWAL)
+
+
 class LateFeesJob:
     name = JOB
     setting_keys = SETTING_KEYS
@@ -139,7 +145,7 @@ class LateFeesJob:
             select(Invoice.id)
             .where(
                 Invoice.status.in_(list(FEE_STATUSES)),
-                Invoice.purpose != InvoicePurpose.CREDIT_TOPUP,
+                Invoice.purpose.in_(list(FEE_PURPOSES)),
                 Invoice.document_type == InvoiceDocumentType.INVOICE,
                 Invoice.due_at.is_not(None),
                 Invoice.due_at <= latest_due,
@@ -161,9 +167,11 @@ class LateFeesJob:
         """
         if invoice.status not in FEE_STATUSES or invoice.due_at is None:
             return None
-        if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
+        if invoice.purpose not in FEE_PURPOSES:
             return None
         if invoice.document_type != InvoiceDocumentType.INVOICE:
+            return None
+        if period_being_cancelled(db, invoice):
             return None
         track = config["billing_job_tracks_late_fees"]
         if (track == "retail" and invoice.reseller_id is not None) or (

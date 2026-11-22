@@ -175,6 +175,23 @@ def unpaid_cycle_invoices(
     ]
 
 
+def period_being_cancelled(db: Session, invoice: Invoice) -> bool:
+    """Whether ``invoice`` is a cycle invoice for a period at or after its billing's ``cancel_at``.
+
+    Such an invoice (generated ahead before an end-of-period cancellation)
+    is cancelled when the cancellation takes effect; until then it gets no
+    reminder and no late fee.
+    """
+    if invoice.purpose != InvoicePurpose.CYCLE_CHARGE or invoice.due_at is None:
+        return False
+    cancel_at = db.scalar(
+        select(ServiceBilling.cancel_at)
+        .join(BillingCycle, BillingCycle.service_billing_id == ServiceBilling.id)
+        .where(BillingCycle.invoice_id == invoice.id)
+    )
+    return cancel_at is not None and utc(invoice.due_at) >= utc(cancel_at)
+
+
 def cycle_billing_id(db: Session, invoice_id: int) -> Optional[int]:
     value = db.scalar(
         select(BillingCycle.service_billing_id).where(BillingCycle.invoice_id == invoice_id)
