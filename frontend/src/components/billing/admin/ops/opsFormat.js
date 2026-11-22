@@ -5,8 +5,12 @@ export function label(value) {
   return String(value ?? '').replaceAll('_', ' ');
 }
 
+/** Some timestamps arrive without a zone; the server stores UTC, so they are read as UTC. */
 export function when(value) {
-  return value ? new Date(value).toLocaleString() : '-';
+  if (!value) return '-';
+  const text = String(value);
+  const zoned = /(Z|[+-]\d\d:?\d\d)$/.test(text) || !/T\d\d:\d\d/.test(text);
+  return new Date(zoned ? text : `${text}Z`).toLocaleString();
 }
 
 /** Money in the record's own currency; the bare amount when the currency is unknown or not valid. */
