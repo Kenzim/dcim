@@ -138,12 +138,7 @@
     problems = [];
     message = null;
     try {
-      const row = await saveEmailTemplate(templateId, {
-        subject: savedSubject,
-        body_text: savedText,
-        body_html: savedHtml.trim() ? savedHtml : null,
-        enabled: !template.enabled,
-      });
+      const row = await saveEmailTemplate(templateId, { enabled: !template.enabled });
       template = { ...template, enabled: row.enabled, version: row.version, updated_at: row.updated_at };
       message = row.enabled ? 'The template is enabled; this email will be sent.' : 'The template is disabled; this email will not be sent.';
       confirming = null;
@@ -403,7 +398,7 @@
       {:else}
         <p>Once enabled, <strong>{template.event_title}</strong> ({variantName}) is sent to clients whenever the event happens.</p>
       {/if}
-      <p class="ba-hint">This saves the template again as a new version with the same text.</p>
+      <p class="ba-hint">This changes only whether the email is sent. The text and its version stay as they are.</p>
     {:else if confirming.kind === 'reset'}
       <p>
         The subject and bodies are replaced with the built-in text of this event, and the HTML body is cleared. It is saved as a new version, so the current text stays in the history.

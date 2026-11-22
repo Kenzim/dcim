@@ -224,3 +224,52 @@ def test_a_run_that_loses_its_lease_stops(factory, job, monkeypatch):
     result = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0 + timedelta(hours=1))
     assert (result.status, result.error) == ("aborted", "lease lost")
     assert _effects(factory) == ["fx-1"]
+
+
+def test_two_admins_resolving_one_needs_review_action_settle_it_once(factory):
+    """The second resolve waits for the row lock, then finds the action settled and refuses."""
+    from app.models.billing_jobs import BillingJobAction
+    from app.services.billing.jobs.actions import ActionNotResolvable, resolve_action
+
+    with factory() as db:
+        row = BillingJobAction(job="nonpayment_termination", subject_key="service:1:terminate",
+                               status="needs_review", claimed_at=T0)
+        db.add(row)
+        db.commit()
+        action_id = row.id
+
+    first_holds_lock = threading.Event()
+    second_started = threading.Event()
+    results: dict[str, object] = {}
+
+    def first():
+        with factory() as db:
+            resolve_action(db, action_id, to="done", note="first", actor_user_id=1, now=T0)
+            first_holds_lock.set()
+            second_started.wait(10)
+            threading.Event().wait(0.5)
+            db.commit()
+            results["first"] = "ok"
+
+    def second():
+        first_holds_lock.wait(10)
+        with factory() as db:
+            second_started.set()
+            try:
+                resolve_action(db, action_id, to="failed", note="second", actor_user_id=2, now=T0)
+                db.commit()
+                results["second"] = "ok"
+            except ActionNotResolvable as exc:
+                db.rollback()
+                results["second"] = str(exc)
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert results["first"] == "ok"
+    assert results["second"] == "the action is done, not needs_review"
+    with factory() as db:
+        row = db.get(BillingJobAction, action_id)
+        assert row.status == "done" and row.detail["resolution"]["note"] == "first"

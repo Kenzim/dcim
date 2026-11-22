@@ -14,6 +14,8 @@ import app.models  # noqa: F401
 from app.models.billing_jobs import (
     BillingJobAction,
     BillingJobActionStatus,
+    BillingJobMode,
+    BillingJobState,
     NonpaymentPolicyScope,
     UnpaidInvoiceAction,
 )
@@ -247,6 +249,138 @@ def test_failed_termination_needs_review_and_is_never_retried(db_session, env, m
     assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.SUSPENDED_NONPAYMENT
     monkeypatch.undo()
     assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=9))) == {terminate: "already_done"}
+    assert db_session.get(Service, billing.service_id).status == ServiceStatus.SUSPENDED
+
+
+@pytest.mark.parametrize("to", ["done", "failed"])
+def test_a_resolved_termination_is_never_retried_and_its_effect_never_run(db_session, env, monkeypatch, to):
+    from app.services.billing.jobs.actions import resolve_action
+
+    _, billing, _ = env
+    invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    job = NonpaymentTerminationJob()
+    run_job(db_session, job, make_run(JOB, now=NOW))
+    terminate = terminate_key(billing.service_id)
+    calls = []
+
+    async def failing(db, service, **kwargs):
+        calls.append(service.id)
+        raise ServiceTerminationError("power off failed")
+
+    import app.services.commerce_lifecycle_service as lifecycle_module
+
+    monkeypatch.setattr(lifecycle_module, "terminate_service", failing)
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=8))) == {terminate: "failed"}
+    assert calls == [billing.service_id]
+    claim = _claims(db_session)[terminate]
+    resolve_action(db_session, claim.id, to=to, note="checked", actor_user_id=None, now=NOW + timedelta(days=8))
+    db_session.commit()
+    assert _claims(db_session)[terminate].status.value == to
+
+    monkeypatch.undo()
+
+    async def must_not_run(db, service, **kwargs):
+        raise AssertionError("resolving must not retry the termination")
+
+    monkeypatch.setattr(lifecycle_module, "terminate_service", must_not_run)
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=9))) == {terminate: "already_done"}
+    assert db_session.get(Service, billing.service_id).status == ServiceStatus.SUSPENDED
+    assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.SUSPENDED_NONPAYMENT
+    # Resolving moved no service, invoice or billing state; only the claim row changed.
+    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.OVERDUE
+    assert db_session.get(ServiceBilling, billing.id).cancel_at is None
+
+
+def test_a_settled_termination_with_the_service_still_suspended_is_alerted(db_session, env, monkeypatch):
+    from app.services.alerting import billing_integrity
+    from app.services.billing.jobs.actions import resolve_action
+
+    _, billing, _ = env
+    invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    job = NonpaymentTerminationJob()
+    run_job(db_session, job, make_run(JOB, now=NOW))
+    terminate = terminate_key(billing.service_id)
+
+    async def failing(db, service, **kwargs):
+        raise ServiceTerminationError("power off failed")
+
+    import app.services.commerce_lifecycle_service as lifecycle_module
+
+    monkeypatch.setattr(lifecycle_module, "terminate_service", failing)
+    run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=8)))
+    from app.services.settings_store import get_setting, set_setting
+
+    set_setting(db_session, "billing_tax_engine", "legacy")
+    assert get_setting(db_session, "billing_tax_engine") == "legacy"
+    params = {"max_rows": 10}
+    detect = billing_integrity.nonpayment_termination_unsettled
+    # In review, the needs_review alert covers it, not this one.
+    assert detect(db_session, params, NOW) == []
+    resolve_action(
+        db_session, _claims(db_session)[terminate].id, to="failed", note="still running", actor_user_id=None,
+        now=NOW + timedelta(days=8),
+    )
+    db_session.commit()
+    # Tax is on legacy and the detector does not look at it.
+    (finding,) = detect(db_session, params, NOW)
+    assert finding.resource_id == str(billing.service_id)
+    assert finding.details["claim_status"] == "failed"
+    # Switching the job off does not silence it: the stuck service is the condition.
+    state = db_session.get(BillingJobState, JOB)
+    state.mode = BillingJobMode.OFF
+    state.live_since = None
+    db_session.commit()
+    assert [f.resource_id for f in detect(db_session, params, NOW)] == [str(billing.service_id)]
+    # The service's own state decides: no longer suspended, or nothing left unpaid, and it is quiet.
+    service = db_session.get(Service, billing.service_id)
+    service.status = ServiceStatus.ACTIVE
+    db_session.commit()
+    assert detect(db_session, params, NOW) == []
+    service.status = ServiceStatus.SUSPENDED
+    db_session.commit()
+    assert len(detect(db_session, params, NOW)) == 1
+    invoice.status = InvoiceStatus.PAID
+    db_session.commit()
+    assert detect(db_session, params, NOW) == []
+
+
+def test_a_resolved_notice_gates_termination_by_its_resolution_time(db_session, env):
+    from app.services.billing.jobs.actions import resolve_action
+
+    _, billing, _ = env
+    invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    job = NonpaymentTerminationJob()
+    notice = notice_key(billing.service_id, invoice.id)
+    run_job(db_session, job, make_run(JOB, now=NOW))
+    row = _claims(db_session)[notice]
+    row.status = BillingJobActionStatus.NEEDS_REVIEW
+    row.finished_at = None
+    db_session.commit()
+    # A notice in review blocks termination.
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=8))) == {}
+    resolved_at = NOW + timedelta(days=8)
+    resolve_action(db_session, row.id, to="done", note="sent by hand", actor_user_id=None, now=resolved_at)
+    db_session.commit()
+    # The notice counts as sent when it was resolved: a full notice period must pass from then.
+    assert run_job(db_session, job, make_run(JOB, now=resolved_at + timedelta(days=6))) == {}
+    assert run_job(db_session, job, make_run(JOB, now=resolved_at + timedelta(days=7))) == {
+        terminate_key(billing.service_id): "done"
+    }
+
+
+def test_a_notice_resolved_as_failed_never_terminates(db_session, env):
+    from app.services.billing.jobs.actions import resolve_action
+
+    _, billing, _ = env
+    invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    job = NonpaymentTerminationJob()
+    run_job(db_session, job, make_run(JOB, now=NOW))
+    row = _claims(db_session)[notice_key(billing.service_id, invoice.id)]
+    row.status = BillingJobActionStatus.NEEDS_REVIEW
+    db_session.commit()
+    resolve_action(db_session, row.id, to="failed", note="not sent", actor_user_id=None, now=NOW + timedelta(days=1))
+    db_session.commit()
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=30))) == {}
     assert db_session.get(Service, billing.service_id).status == ServiceStatus.SUSPENDED
 
 

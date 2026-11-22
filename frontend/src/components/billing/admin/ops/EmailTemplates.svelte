@@ -4,7 +4,6 @@
   import { Alert, Button, Modal, Spinner } from '../../../ui/index.js';
   import {
     createEmailTemplate,
-    getEmailTemplate,
     listEmailEvents,
     listEmailTemplates,
     saveEmailTemplate,
@@ -63,13 +62,7 @@
     working = true;
     toggleError = [];
     try {
-      const full = await getEmailTemplate(toggling.id);
-      await saveEmailTemplate(toggling.id, {
-        subject: full.subject,
-        body_text: full.body_text,
-        body_html: full.body_html || null,
-        enabled: !toggling.enabled,
-      });
+      await saveEmailTemplate(toggling.id, { enabled: !toggling.enabled });
       success = `${toggling.event_title} (${toggling.locale}) is now ${toggling.enabled ? 'disabled' : 'enabled'}.`;
       toggling = null;
       await load();
@@ -200,7 +193,7 @@
     {:else}
       <p>Once enabled, <strong>{toggling.event_title}</strong> ({toggling.locale}, {scope(toggling).toLowerCase()}) is sent whenever the event happens.</p>
     {/if}
-    <p class="ba-hint">The template is saved again as a new version with the same text.</p>
+    <p class="ba-hint">This changes only whether the email is sent. The text and its version stay as they are.</p>
     {#if toggleError.length}
       <div class="ba-error"><ul>{#each toggleError as line}<li>{line}</li>{/each}</ul></div>
     {/if}

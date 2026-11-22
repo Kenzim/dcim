@@ -145,16 +145,61 @@ def test_put_refuses_empty_texts_and_unknown_fields(client, seeded, headers):
     assert client.put(f"{BASE}/99999", headers=headers, json={"subject": "s", "body_text": "x"}).status_code == 404
 
 
-def test_enabling_a_template_is_a_save(client, seeded, headers):
+def _versions(db, template_id):
+    return sorted(
+        db.execute(select(EmailTemplateVersion.version).where(EmailTemplateVersion.template_id == template_id)).scalars()
+    )
+
+
+def test_enabling_a_template_with_unchanged_text_keeps_its_version(client, seeded, headers):
     template_id = _id(seeded, "ticket_reply")
     row = client.get(f"{BASE}/{template_id}", headers=headers).json()
     response = client.put(
         f"{BASE}/{template_id}", headers=headers,
-        json={"subject": row["subject"], "body_text": row["body_text"], "enabled": True},
+        json={"subject": row["subject"], "body_text": row["body_text"], "body_html": row["body_html"], "enabled": True},
     )
-    assert response.json()["enabled"] is True and response.json()["version"] == 2
+    assert response.status_code == 200, response.text
+    assert response.json()["enabled"] is True and response.json()["version"] == row["version"] == 1
+    assert _versions(seeded, template_id) == [1]
     metadata = seeded.execute(select(UserAuditEvent).where(UserAuditEvent.action == "billing.email_template.update")).scalar_one().event_metadata
-    assert (metadata["enabled_before"], metadata["enabled_after"]) == (False, True)
+    assert (metadata["enabled_before"], metadata["enabled_after"], metadata["version"]) == (False, True, 1)
+
+
+def test_a_toggle_needs_only_the_enabled_flag(client, seeded, headers):
+    template_id = _id(seeded, "ticket_reply")
+    before = client.get(f"{BASE}/{template_id}", headers=headers).json()
+    on = client.put(f"{BASE}/{template_id}", headers=headers, json={"enabled": True})
+    assert on.status_code == 200, on.text
+    assert on.json()["enabled"] is True and on.json()["version"] == 1
+    assert (on.json()["subject"], on.json()["body_text"]) == (before["subject"], before["body_text"])
+    off = client.put(f"{BASE}/{template_id}", headers=headers, json={"enabled": False})
+    assert off.json()["enabled"] is False and off.json()["version"] == 1
+    assert _versions(seeded, template_id) == [1]
+    assert _actions(seeded).count("billing.email_template.update") == 2
+
+
+def test_changing_the_text_still_saves_a_version_whether_or_not_enabled_changes(client, seeded, headers):
+    template_id = _id(seeded, "ticket_reply")
+    row = client.get(f"{BASE}/{template_id}", headers=headers).json()
+    edited = client.put(
+        f"{BASE}/{template_id}", headers=headers,
+        json={"subject": row["subject"] + " (edited)", "body_text": row["body_text"], "enabled": True},
+    )
+    assert edited.json()["version"] == 2 and edited.json()["enabled"] is True
+    html = client.put(
+        f"{BASE}/{template_id}", headers=headers,
+        json={"subject": edited.json()["subject"], "body_text": row["body_text"], "body_html": "<p>Hi</p>"},
+    )
+    assert html.json()["version"] == 3
+    assert _versions(seeded, template_id) == [1, 2, 3]
+
+
+def test_a_put_with_only_one_of_subject_and_body_text_is_refused(client, seeded, headers):
+    template_id = _id(seeded, "ticket_reply")
+    assert client.put(f"{BASE}/{template_id}", headers=headers, json={"subject": "s"}).status_code == 422
+    assert client.put(f"{BASE}/{template_id}", headers=headers, json={"body_text": "x"}).status_code == 422
+    assert client.put(f"{BASE}/{template_id}", headers=headers, json={"body_html": "<p>x</p>"}).status_code == 422
+    assert client.put(f"{BASE}/{template_id}", headers=headers, json={}).status_code == 422
 
 
 def test_preview_never_sends_and_takes_overrides_and_drafts(client, seeded, headers):

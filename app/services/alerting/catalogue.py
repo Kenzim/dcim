@@ -479,6 +479,16 @@ _SPECS = (
         enabled_by_default=False,
     ),
     AlertTypeSpec(
+        "billing_nonpayment_termination_unsettled",
+        "Termination settled but service still suspended",
+        "A non-payment termination was settled by an admin as done or failed, yet the service is still "
+        "suspended for non-payment with an unpaid invoice, and no job will act on it again.",
+        _W,
+        "service",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
         "billing_job_stale",
         "Billing job overdue",
         "A live billing job has not run on schedule for more than twice its cadence.",

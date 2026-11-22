@@ -12,7 +12,7 @@ export { newIdempotencyKey };
  * `detail` are kept; `errors` lists the field, line and message of each template
  * error when the API answers 422 `template_invalid`.
  */
-async function request(path, { method = 'GET', body, headers, errorMessage } = {}) {
+async function request(path, { method = 'GET', body, headers, errorMessage, withTotal = false } = {}) {
   const requestHeaders = new Headers(headers);
   if (body !== undefined && !requestHeaders.has('Content-Type')) {
     requestHeaders.set('Content-Type', 'application/json');
@@ -34,7 +34,10 @@ async function request(path, { method = 'GET', body, headers, errorMessage } = {
     throw error;
   }
   if (response.status === 204) return null;
-  return response.json();
+  const data = await response.json();
+  if (!withTotal) return data;
+  const total = Number(response.headers.get('X-Total-Count'));
+  return { items: data, total: Number.isFinite(total) && response.headers.has('X-Total-Count') ? total : null };
 }
 
 function query(filters = {}) {
@@ -68,6 +71,14 @@ export const listJobRuns = (job, filters = {}) =>
   });
 export const getJobRun = (runId, filters = {}) =>
   request(`/admin/billing/jobs/runs/${runId}${query(filters)}`, { errorMessage: 'Failed to load the run' });
+export const listJobActions = (filters = {}) =>
+  request(`/admin/billing/jobs/actions${query(filters)}`, { errorMessage: 'Failed to load the actions needing review' });
+export const resolveJobAction = (id, to, note) =>
+  request(`/admin/billing/jobs/actions/${id}/resolve`, {
+    method: 'POST',
+    body: { to, note, confirm: true },
+    errorMessage: 'Failed to record the decision',
+  });
 export const getJobForecast = (job, days = 7) =>
   request(`/admin/billing/jobs/${encodeURIComponent(job)}/forecast${query({ days })}`, {
     errorMessage: 'Failed to load the forecast',
@@ -88,9 +99,11 @@ export const listPolicyProducts = () =>
 
 // --- Cancellation requests (app/api/billing_cancellations.py) ---
 
+/** One page of the queue as `{ items, total }`; `total` counts every request matching the filters. */
 export const listCancellationRequests = (filters = {}) =>
   request(`/admin/billing/cancellation-requests${query(filters)}`, {
     errorMessage: 'Failed to load the cancellation requests',
+    withTotal: true,
   });
 export const requestCancellation = (body, key) =>
   request('/admin/billing/cancellation-requests', {
