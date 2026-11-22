@@ -23,7 +23,10 @@ from app.models.reseller import (
     ResellerPaymentMethod,
 )
 from app.services.billing_locks import BillingLocks
-from app.services.credit_ledger_service import CreditLedgerService
+from app.services.credit_ledger_service import (
+    CreditLedgerService,
+    InvoicePaymentPendingError,
+)
 from app.services.invoice_service import (
     TERMINAL_V2,
     InvoiceError,
@@ -447,13 +450,23 @@ class PaymentOrchestrator:
     def _pending_funding_result(
         self, db: Session, invoice: Invoice
     ) -> Optional[InvoiceFundingResult]:
-        if invoice.status != InvoiceStatus.PENDING_ACTION:
-            return None
+        """Never charge while a gateway payment of the invoice may still settle it.
+
+        A ``pending_action`` invoice returns its pending payment for the
+        client to complete, as before. Any other invoice with a live pending
+        payment (an open USDT deposit on a top-up, say) raises
+        ``InvoicePaymentPendingError``: a second funding would overpay it when
+        the first completes. An expired USDT deposit does not count.
+        """
         pending_payment = CreditLedgerService.live_pending_payment(
             db, CreditLedgerService.lock_invoice_payments(db, invoice.id)
         )
         if pending_payment is None:
             return None
+        if invoice.status != InvoiceStatus.PENDING_ACTION:
+            raise InvoicePaymentPendingError(
+                invoice_id=invoice.id, payment_id=pending_payment.id
+            )
         return self._result(
             db,
             invoice,

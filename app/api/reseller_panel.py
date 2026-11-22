@@ -1175,6 +1175,16 @@ def pay_invoice(
         )
     except PaymentMethodOwnershipError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvoicePaymentPendingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "invoice_payment_pending",
+                "invoice_id": exc.invoice_id,
+                "payment_id": exc.payment_id,
+            },
+        ) from exc
     except (InvoiceError, PaymentGatewayError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     commit_and_fulfil(db)

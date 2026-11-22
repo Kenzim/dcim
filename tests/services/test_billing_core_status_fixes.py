@@ -568,3 +568,67 @@ def test_nit_legacy_table_has_no_pending_action_to_overdue_edge(db_session, acco
 
     with pytest.raises(InvoiceTransitionError):
         InvoiceService.transition(db_session, invoice, S.OVERDUE, cause="renewal_past_due")
+
+
+# ------------------------------------------------------------------ To-do 38f9e762, part 1
+
+
+def _usdt_topup(db, reseller, amount=1000, *, expired=False):
+    from app.models.usdt import UsdtDeposit, UsdtDepositStatus
+
+    invoice = InvoiceService.create_topup(db, reseller_id=reseller.id, amount_cents=amount)
+    deposit = UsdtDeposit(
+        invoice_id=invoice.id, reseller_id=reseller.id, derivation_index=0, chain_id=11155111,
+        contract_address="0x" + "1" * 40, deposit_address="0x" + "3" * 40,
+        expected_token_units=amount * 10_000,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=-1 if expired else 1),
+    )
+    if expired:
+        deposit.status = UsdtDepositStatus.EXPIRED
+    db.add(deposit)
+    db.flush()
+    payment = Payment(
+        invoice_id=invoice.id, gateway="usdt", status=PaymentStatus.PENDING, amount_cents=amount,
+        currency="USD", external_ref=f"usdt-deposit:{deposit.id}",
+        payment_metadata={"usdt_deposit_id": deposit.id},
+    )
+    db.add(payment)
+    db.flush()
+    return invoice, deposit, payment
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow", "v2"])
+def test_todo_38f9_card_funding_is_refused_while_a_usdt_deposit_is_open(db_session, mode):
+    from app.services.credit_ledger_service import InvoicePaymentPendingError
+
+    if mode == "v2":
+        _v2(db_session)
+    else:
+        set_setting(db_session, "billing_invoice_engine", mode)
+    reseller = _reseller(db_session, preference="payment_first")
+    method = _method(db_session, reseller, "pm_usdt_open", 1)
+    invoice, _deposit, payment = _usdt_topup(db_session, reseller)
+    assert invoice.status == S.OPEN
+    gateway = FakeGateway({"pm_usdt_open": [GatewayChargeResult(status=GatewayResultStatus.SUCCEEDED, external_ref="pi_card")]})
+
+    with pytest.raises(InvoicePaymentPendingError) as raised:
+        _orchestrator(gateway).fund_invoice(
+            db_session, reseller, invoice, payment_method_id=method.id
+        )
+
+    assert raised.value.payment_id == payment.id
+    assert gateway.calls == []
+
+
+def test_todo_38f9_an_expired_usdt_deposit_does_not_block_card_funding(db_session):
+    reseller = _reseller(db_session, preference="payment_first")
+    method = _method(db_session, reseller, "pm_usdt_expired", 1)
+    invoice, _deposit, _payment = _usdt_topup(db_session, reseller, expired=True)
+    gateway = FakeGateway({"pm_usdt_expired": [GatewayChargeResult(status=GatewayResultStatus.SUCCEEDED, external_ref="pi_card_ok")]})
+
+    result = _orchestrator(gateway).fund_invoice(
+        db_session, reseller, invoice, payment_method_id=method.id
+    )
+
+    assert result.funded is True
+    assert len(gateway.calls) == 1
