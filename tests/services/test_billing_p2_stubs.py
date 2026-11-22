@@ -12,8 +12,8 @@ from app.services.alerting import billing_integrity, catalogue as alert_catalogu
 from app.services.alerting import detectors
 from app.services.billing import cancellations
 from app.services.billing.jobs import base as job_base
+from app.models.billing_jobs import BILLING_JOB_NAMES
 from app.services.billing.jobs import registry as job_registry
-from app.services.billing.jobs import runner
 from app.services.email_templates import render as email_render
 from app.services.invoice_service import InvoiceService
 from app.services.tax import context, engine, legal_notes, mode, pack_import, result, validators
@@ -28,9 +28,6 @@ STUBS = [
     lambda: pack_import.PackImporter.preview(None, "uk_vat", "2026.1", NOW),
     lambda: pack_import.PackImporter.apply(None, "uk_vat", "2026.1", NOW, diff_hash="x", actor_user_id=None),
     lambda: legal_notes.render_legal_note(None, "outside_scope", "en"),
-    lambda: runner.run_job(lambda: None, "late_fees", dry_run=True, trigger="admin", now=NOW),
-    lambda: job_base.JobRun(1, "late_fees", True, NOW, None).in_window(NOW),
-    lambda: job_base.JobRun(1, "late_fees", True, NOW, None).claim(None, "invoice:1"),
     lambda: cancellations.CancellationService.request(
         None, service_id=1, type="immediate", reason=None, actor_user_id=None, source="admin", idempotency_key="k"
     ),
@@ -46,7 +43,7 @@ def test_stubs_raise_not_implemented(call):
 
 
 def test_types_and_registry_exist():
-    assert job_registry.JOBS == {}
+    assert set(job_registry.JOBS) <= set(BILLING_JOB_NAMES)
     assert issubclass(providers.ProviderUnavailable, Exception)
     assert providers.ProviderUnavailable("timeout").reason == "timeout"
     assert providers.ProviderRef("vies_validator", "vies", "tax_id_validator").ref == "vies_validator:vies"

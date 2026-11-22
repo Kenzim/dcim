@@ -10,7 +10,7 @@ import uuid
 
 from app.core.config import Settings, settings
 from app.core.database import SessionLocal
-from app.services.billing.periodic import run_periodic_jobs
+from app.services.billing.periodic import run_automation_jobs, run_periodic_jobs
 from app.services.recurring_billing_service import RecurringBillingService
 from app.services.settings_store import effective_config, get_setting
 
@@ -105,6 +105,12 @@ async def run_recurring_billing_worker(
             raise
         except Exception:
             logger.exception("Periodic billing jobs failed")
+        try:
+            await asyncio.to_thread(run_automation_jobs, owner=owner)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Billing automation jobs failed")
         await asyncio.sleep(await asyncio.to_thread(_current_interval_seconds, config))
 
 

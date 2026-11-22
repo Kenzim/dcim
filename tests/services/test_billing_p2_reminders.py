@@ -1,0 +1,498 @@
+"""invoice_reminders (B4, design 10.2): schedule, anchoring, sequence, idempotency, no status change."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.orm import sessionmaker
+
+import app.models  # noqa: F401
+from app.core.database import Base
+from app.models.billing_jobs import BILLING_JOB_NAMES, BillingJobAction, BillingJobState
+from app.models.commerce_email import EmailTemplate
+from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
+from app.services.billing.jobs import reminders, runner
+from app.services.email_message_service import EmailMessageService
+from tests.services.test_recurring_billing_service import _reseller
+
+NAME = "invoice_reminders"
+T0 = datetime(2027, 6, 1, 9, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def factory(tmp_path):
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'rem.db'}")
+    Base.metadata.create_all(engine)
+    make = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    db = make()
+    for name in BILLING_JOB_NAMES:
+        db.add(BillingJobState(job=name))
+    for event in reminders.TEMPLATE_EVENTS:
+        db.add(EmailTemplate(event_key=event, subject="s", body_text="b", enabled=True))
+    db.commit()
+    db.close()
+    yield make
+    engine.dispose()
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    calls: list[dict] = []
+
+    def enqueue(db, **kwargs):
+        assert kwargs["variables"] is not None
+        calls.append(kwargs)
+
+    monkeypatch.setattr(EmailMessageService, "enqueue", staticmethod(enqueue))
+    return calls
+
+
+_numbers = iter(range(9000, 100000))
+
+
+def _invoice(factory, due, *, amount=2000, status=InvoiceStatus.OPEN, suffix=None):
+    db = factory()
+    reseller = _reseller(db, suffix or str(next(_numbers)))
+    invoice = Invoice(
+        invoice_number=next(_numbers),
+        reseller_id=reseller.id,
+        purpose=InvoicePurpose.ADJUSTMENT,
+        status=status,
+        amount_cents=amount,
+        currency="USD",
+        due_at=due,
+    )
+    db.add(invoice)
+    db.commit()
+    invoice_id = invoice.id
+    db.close()
+    return invoice_id
+
+
+def _go_live(factory, at):
+    for to, when in (("dry_run", at - timedelta(days=1)), ("live", at)):
+        db = factory()
+        runner.change_mode(db, NAME, to, now=when, actor_user_id=None)
+        db.commit()
+        db.close()
+        if to == "dry_run":
+            assert runner.run_job(factory, NAME, dry_run=True, trigger="schedule", now=when).status == "complete"
+
+
+def _run(factory, now):
+    return runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=now)
+
+
+@pytest.fixture
+def events(monkeypatch):
+    from app.plugin_host import events as plugin_events
+
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(plugin_events, "emit", lambda db, name, payload, *a, **k: seen.append((name, payload)))
+    return seen
+
+
+def _overdue_events(events, invoice_id):
+    return [payload for name, payload in events if name == "invoice.overdue" and payload["invoice_id"] == invoice_id]
+
+
+def _retail_invoice(factory, due, *, amount=2000, status=InvoiceStatus.OPEN):
+    from app.models.commerce_account import BillingAccount, BillingAccountType
+    from app.models.user import User
+
+    db = factory()
+    number = next(_numbers)
+    user = User(username=f"retail-{number}", email=f"retail-{number}@example.com")
+    db.add(user)
+    db.flush()
+    account = BillingAccount(account_type=BillingAccountType.CLIENT, user_id=user.id)
+    db.add(account)
+    db.flush()
+    invoice = Invoice(invoice_number=number, billing_account_id=account.id, purpose=InvoicePurpose.ADJUSTMENT,
+                      status=status, amount_cents=amount, currency="USD", due_at=due)
+    db.add(invoice)
+    db.commit()
+    invoice_id = invoice.id
+    db.close()
+    return invoice_id
+
+
+def _configure(factory, *, v2):
+    from app.services.settings_store import set_setting
+    from tests.services.test_billing_p1i_invoice_engine import _v2
+
+    db = factory()
+    set_setting(db, reminders.TRACKS_SETTING, "both")
+    if v2:
+        _v2(db)
+    db.commit()
+    db.close()
+
+
+def _engine(factory):
+    from app.services.billing_shadow import billing_engine_mode
+
+    db = factory()
+    try:
+        return billing_engine_mode(db, "invoice")
+    finally:
+        db.close()
+
+
+def test_v2_retail_first_overdue_notice_fires_invoice_overdue_once(factory, sent, events):
+    _configure(factory, v2=True)
+    assert _engine(factory) == "v2"
+    invoice_id = _retail_invoice(factory, T0 + timedelta(days=5))
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["upcoming", "overdue_1", "overdue_2", "overdue_3"]
+    [event] = _overdue_events(events, invoice_id)
+    assert event["due_cents"] == 2000 and event["billing_account_id"] is not None
+    db = factory()
+    assert db.get(Invoice, invoice_id).status == InvoiceStatus.OPEN
+    db.close()
+
+
+def test_v2_invoice_already_overdue_gets_no_second_invoice_overdue(factory, sent, events):
+    _configure(factory, v2=True)
+    invoice_id = _invoice(factory, T0 + timedelta(days=2), status=InvoiceStatus.OVERDUE)
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["overdue_1", "overdue_2", "overdue_3"]
+    assert _overdue_events(events, invoice_id) == []
+
+
+def test_legacy_first_overdue_notice_fires_invoice_overdue_once(factory, sent, events):
+    _configure(factory, v2=False)
+    assert _engine(factory) != "v2"
+    invoice_id = _retail_invoice(factory, T0 + timedelta(days=2))
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["overdue_1", "overdue_2", "overdue_3"]
+    assert len(_overdue_events(events, invoice_id)) == 1
+
+
+def test_retail_invoice_reminders_go_to_the_account_user(factory, sent):
+    _configure(factory, v2=False)
+    invoice_id = _retail_invoice(factory, T0 + timedelta(days=5))
+    _go_live(factory, T0)
+    _run(factory, T0 + timedelta(days=2, hours=1))
+    [call] = sent
+    db = factory()
+    invoice = db.get(Invoice, invoice_id)
+    assert call["billing_account_id"] == invoice.billing_account_id
+    assert call["to_address"].startswith("retail-") and call["related_id"] == str(invoice_id)
+    assert call["event"] == "invoice_reminder"
+    db.close()
+
+
+def test_dry_run_writes_only_job_tables(factory):
+    job_tables = {"billing_job_states", "billing_job_runs", "billing_job_run_items", "billing_job_actions",
+                  "recurring_billing_leases"}
+
+    def counts():
+        db = factory()
+        try:
+            names = sa.inspect(db.get_bind()).get_table_names()
+            return {n: db.execute(sa.text(f'SELECT COUNT(*) FROM "{n}"')).scalar() for n in names
+                    if n not in job_tables}
+        finally:
+            db.close()
+
+    _invoice(factory, T0 + timedelta(days=5))
+    db = factory()
+    runner.change_mode(db, NAME, "dry_run", now=T0, actor_user_id=None)
+    db.commit()
+    db.close()
+    before = counts()
+    result = runner.run_job(factory, NAME, dry_run=True, trigger="schedule", now=T0 + timedelta(days=2, hours=1))
+    assert result.counts == {"planned": 1}
+    assert counts() == before
+    db = factory()
+    assert db.query(BillingJobAction).count() == 0
+    db.close()
+
+
+def test_invoice_paid_between_plan_and_execute_gets_no_reminder(factory, sent, monkeypatch):
+    from app.models.billing_jobs import BillingJobRunItem
+
+    invoice_id = _invoice(factory, T0 + timedelta(days=5))
+    _go_live(factory, T0)
+    plan = reminders.InvoiceReminders.plan
+
+    def plan_then_pay(self, db, run, subject_id):
+        action = plan(self, db, run, subject_id)
+        other = factory()
+        other.add(Payment(invoice_id=invoice_id, gateway="manual", status=PaymentStatus.SUCCEEDED,
+                          amount_cents=2000, currency="USD", payment_metadata={}))
+        other.commit()
+        other.close()
+        return action
+
+    monkeypatch.setattr(reminders.InvoiceReminders, "plan", plan_then_pay)
+    result = _run(factory, T0 + timedelta(days=2, hours=1))
+    assert result.counts == {"skipped": 1} and sent == []
+    db = factory()
+    item = db.query(BillingJobRunItem).filter_by(run_id=result.run_id).one()
+    assert item.detail["skip_reason"] == "no_balance"
+    assert db.query(BillingJobAction).count() == 0
+    db.close()
+
+
+def test_forecast_lists_the_upcoming_reminder_of_an_invoice_due_inside_the_period(factory):
+    from app.services.settings_store import set_setting
+
+    db = factory()
+    set_setting(db, "billing_reminder_upcoming_days", 3)
+    db.commit()
+    db.close()
+    due = T0 + timedelta(days=5)
+    invoice_id = _invoice(factory, due)
+    db = factory()
+    runner.change_mode(db, NAME, "dry_run", now=T0 - timedelta(days=1), actor_user_id=None)
+    db.commit()
+    db.close()
+    forecast = runner.forecast(factory(), NAME, now=T0, days=7)
+    assert [(entry["subject_key"], entry["trigger_at"]) for entry in forecast] == [
+        (f"invoice:{invoice_id}:reminder:upcoming", (due - timedelta(days=3)).isoformat())
+    ]
+
+
+def test_a_stale_first_overdue_notice_is_recorded_once(factory, sent):
+    from app.models.billing_jobs import BillingJobRunItem
+
+    due = T0 + timedelta(days=2)
+    invoice_id = _invoice(factory, due)
+    _go_live(factory, T0)
+    # The job does not run until overdue_1 (due + 1 day) is past the catch-up limit.
+    for day in range(0, 21):
+        _run(factory, due + timedelta(days=5 + day, hours=1))
+    db = factory()
+    stale = [
+        item for item in db.query(BillingJobRunItem).filter_by(subject_key=f"invoice:{invoice_id}:reminder:overdue_1")
+        if item.outcome.value == "skipped" and item.detail["skip_reason"] == "stale"
+    ]
+    db.close()
+    assert len(stale) == 1
+    # The blocked sequence stays blocked.
+    assert _kinds(sent, invoice_id) == []
+
+
+def _kinds(sent, invoice_id):
+    prefix = f"invoice:{invoice_id}:reminder:"
+    return [call["idempotency_key"][len(prefix):] for call in sent if call["idempotency_key"].startswith(prefix)]
+
+
+def test_a_reminder_whose_template_is_disabled_mid_run_is_sent_once_it_is_enabled(
+    factory, sent, events, monkeypatch
+):
+    _configure(factory, v2=True)
+    due = T0 + timedelta(days=2)
+    invoice_id = _retail_invoice(factory, due)
+    _go_live(factory, T0)
+    original = reminders.InvoiceReminders.plan
+
+    def disable_then_plan(self, db, run, subject_id):
+        # After the run's precondition check: the template is switched off mid-run.
+        other = factory()
+        other.query(EmailTemplate).filter_by(event_key="invoice_overdue").update({"enabled": False})
+        other.commit()
+        other.close()
+        return original(self, db, run, subject_id)
+
+    monkeypatch.setattr(reminders.InvoiceReminders, "plan", disable_then_plan)
+    first = _run(factory, due + timedelta(days=1, hours=1))
+    monkeypatch.setattr(reminders.InvoiceReminders, "plan", original)
+    assert first.counts == {"skipped": 1}
+    assert _kinds(sent, invoice_id) == [] and events == []
+    db = factory()
+    assert db.query(BillingJobAction).count() == 0
+    db.query(EmailTemplate).filter_by(event_key="invoice_overdue").update({"enabled": True})
+    db.commit()
+    db.close()
+    second = _run(factory, due + timedelta(days=1, hours=2))
+    assert second.counts == {"done": 1}
+    assert _kinds(sent, invoice_id) == ["overdue_1"]
+    assert [name for name, _ in events] == ["invoice.reminder_sent", "invoice.overdue"]
+
+
+def test_live_needs_both_templates_enabled(factory):
+    db = factory()
+    db.query(EmailTemplate).filter_by(event_key="invoice_overdue").update({"enabled": False})
+    db.commit()
+    db.close()
+    with pytest.raises(runner.JobModeError, match="invoice_overdue email template"):
+        _go_live(factory, T0)
+
+
+def test_full_sequence_after_going_live_once_each(factory, sent):
+    due = T0 + timedelta(days=5)
+    invoice_id = _invoice(factory, due)
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["upcoming", "overdue_1", "overdue_2", "overdue_3"]
+    db = factory()
+    assert db.get(Invoice, invoice_id).status == InvoiceStatus.OPEN
+    keys = sorted(row.subject_key for row in db.query(BillingJobAction))
+    db.close()
+    assert keys == [f"invoice:{invoice_id}:reminder:{k}" for k in ("overdue_1", "overdue_2", "overdue_3", "upcoming")]
+    assert sent[0]["idempotency_key"] == f"invoice:{invoice_id}:reminder:upcoming"
+    assert sent[1]["event"] == "invoice_overdue" and "due_date" not in sent[1]["variables"]
+    assert sent[0]["event"] == "invoice_reminder" and sent[0]["variables"]["due_date"] == "2027-06-06"
+
+
+def test_sequence_is_anchored_at_the_first_overdue_notice(factory, sent):
+    # overdue_1 (due + 1 day) fell before going live: no overdue notice ever, even
+    # though overdue_2 and overdue_3 fall after the watermark.
+    old = _invoice(factory, T0 - timedelta(days=3))
+    # upcoming trigger before live, overdue_1 after: only the overdue sequence.
+    fresh = _invoice(factory, T0 + timedelta(days=1))
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, old) == []
+    assert _kinds(sent, fresh) == ["overdue_1", "overdue_2", "overdue_3"]
+
+
+def test_a_later_notice_needs_the_earlier_one(factory, sent):
+    due = T0 + timedelta(days=2)
+    invoice_id = _invoice(factory, due)
+    _go_live(factory, T0)
+    # The job does not run between overdue_1 and overdue_2: overdue_1 goes
+    # first (inside the catch-up limit), then overdue_2 on the next run.
+    _run(factory, due + timedelta(days=3, hours=1))
+    assert _kinds(sent, invoice_id) == ["overdue_1"]
+    _run(factory, due + timedelta(days=7, hours=1))
+    assert _kinds(sent, invoice_id) == ["overdue_1", "overdue_2"]
+
+
+def test_paid_and_draft_invoices_get_nothing(factory, sent):
+    due = T0 + timedelta(days=2)
+    paid = _invoice(factory, due)
+    draft = _invoice(factory, due, status=InvoiceStatus.DRAFT)
+    db = factory()
+    db.add(Payment(invoice_id=paid, gateway="manual", status=PaymentStatus.SUCCEEDED, amount_cents=2000,
+                   currency="USD", payment_metadata={}))
+    db.commit()
+    db.close()
+    _go_live(factory, T0)
+    for day in range(0, 20):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, paid) == [] and _kinds(sent, draft) == []
+
+
+def test_upcoming_disabled_and_overdue_list_from_settings(factory, sent):
+    from app.services.settings_store import set_setting
+
+    db = factory()
+    set_setting(db, "billing_reminder_upcoming_days", 0)
+    set_setting(db, "billing_reminder_overdue_days", "2")
+    db.commit()
+    db.close()
+    invoice_id = _invoice(factory, T0 + timedelta(days=4))
+    _go_live(factory, T0)
+    for day in range(0, 20):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["overdue_1"]
+
+
+def test_failed_enqueue_rolls_back_the_claim(factory, monkeypatch):
+    invoice_id = _invoice(factory, T0 + timedelta(days=5))
+    _go_live(factory, T0)
+
+    def broken(db, **kwargs):
+        raise NotImplementedError("templates")
+
+    monkeypatch.setattr(EmailMessageService, "enqueue", staticmethod(broken))
+    result = _run(factory, T0 + timedelta(days=2, hours=1))
+    assert result.counts == {"failed": 1}
+    db = factory()
+    assert db.query(BillingJobAction).filter(BillingJobAction.subject_key.like(f"invoice:{invoice_id}:%")).count() == 0
+    db.close()
+
+
+def _seed_real_templates(factory):
+    from tests.services.test_email_templates import seed
+
+    db = factory()
+    db.query(EmailTemplate).delete()
+    db.commit()
+    seed(db, only=set(reminders.TEMPLATE_EVENTS))
+    # Seeded disabled (nothing new is sent at deploy); the admin enables them to go live.
+    db.query(EmailTemplate).update({"enabled": True})
+    db.commit()
+    db.close()
+
+
+def test_seeded_templates_render_with_the_variables_passed(factory, monkeypatch):
+    from app.models.commerce_email import EmailMessage
+    from app.services.email_templates import catalogue
+
+    _seed_real_templates(factory)
+    invoice_id = _invoice(factory, T0 + timedelta(days=5), amount=2000)
+    db = factory()
+    db.add(Payment(invoice_id=invoice_id, gateway="manual", status=PaymentStatus.SUCCEEDED, amount_cents=500,
+                   currency="USD", payment_metadata={}))
+    db.commit()
+    number = db.get(Invoice, invoice_id).invoice_number
+    db.close()
+    calls = []
+    original = EmailMessageService.enqueue_for_reseller
+
+    def spy(db, **kwargs):
+        calls.append(kwargs)
+        return original(db, **kwargs)
+
+    monkeypatch.setattr(EmailMessageService, "enqueue_for_reseller", staticmethod(spy))
+    _go_live(factory, T0)
+    _run(factory, T0 + timedelta(days=2, hours=1))
+    _run(factory, T0 + timedelta(days=6, hours=1))
+    assert [call["event"] for call in calls] == ["invoice_reminder", "invoice_overdue"]
+    for call in calls:
+        allowed = {variable.name for variable in catalogue.EVENTS[call["event"]].variables}
+        assert set(call["variables"]) <= allowed
+        required = {variable.name for variable in catalogue.EVENTS[call["event"]].variables if variable.required}
+        assert required <= set(call["variables"])
+    db = factory()
+    rows = db.query(EmailMessage).order_by(EmailMessage.id).all()
+    assert [(row.event, row.status.value, row.render_fallback) for row in rows] == [
+        ("invoice_reminder", "queued", False),
+        ("invoice_overdue", "queued", False),
+    ]
+    assert all(row.template_id is not None for row in rows)
+    assert rows[0].body_text == f"Invoice {number} for USD 15.00 is due on 2027-06-06. Please sign in to pay."
+    assert rows[1].body_text == f"Invoice {number} for USD 15.00 is overdue. Please sign in to pay."
+    assert rows[0].user_id is not None and rows[0].idempotency_key == f"invoice:{invoice_id}:reminder:upcoming"
+    assert [(row.related_type, row.related_id) for row in rows] == [("invoice", str(invoice_id))] * 2
+    db.close()
+
+
+def test_enqueue_for_reseller_passes_variables(factory):
+    from app.models.commerce_email import EmailMessage
+    from app.models.reseller import Reseller
+
+    _seed_real_templates(factory)
+    invoice_id = _invoice(factory, T0)
+    db = factory()
+    reseller = db.get(Reseller, db.get(Invoice, invoice_id).reseller_id)
+    row = EmailMessageService.enqueue_for_reseller(
+        db, reseller=reseller, event="invoice_overdue", idempotency_key="k1",
+        variables={"invoice_number": "INV-9", "amount_cents": 250, "currency": "GBP"},
+        related_type="invoice", related_id=str(invoice_id),
+    )
+    plain = EmailMessageService.enqueue_for_reseller(
+        db, reseller=reseller, event="invoice_overdue", idempotency_key="k2", data={"invoice_number": "INV-9"},
+    )
+    db.commit()
+    assert row.template_id is not None and row.body_text == "Invoice INV-9 for GBP 2.50 is overdue. Please sign in to pay."
+    assert row.user_id == reseller.user_id and row.to_address == reseller.user.email
+    assert (row.related_type, row.related_id, row.billing_account_id) == ("invoice", str(invoice_id), None)
+    assert plain.template_id is None and (plain.related_type, plain.related_id) == (None, None)
+    assert db.query(EmailMessage).count() == 2
+    db.close()

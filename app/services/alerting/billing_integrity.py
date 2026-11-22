@@ -1165,12 +1165,91 @@ def tax_not_registered(db: Session, params: dict, now: datetime) -> list[Finding
 
 def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A billing job action left in ``needs_review``."""
-    return []
+    del now
+    from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus
+
+    stmt = (
+        select(
+            BillingJobAction.id,
+            BillingJobAction.job,
+            BillingJobAction.subject_key,
+            BillingJobAction.run_id,
+            BillingJobAction.claimed_at,
+        )
+        .where(BillingJobAction.status == BillingJobActionStatus.NEEDS_REVIEW)
+        .order_by(BillingJobAction.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_job_needs_review",
+            "system",
+            f"billing_job_action:{row.id}",
+            f"{row.job} {row.subject_key}",
+            f"Billing job {row.job} left {row.subject_key} part way",
+            "The action was claimed and did not finish; check its effect, then mark it done or failed.",
+            details={
+                "action_id": row.id,
+                "job": row.job,
+                "subject_key": row.subject_key,
+                "run_id": row.run_id,
+                "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_job_needs_review", "system", "job actions needing review", remaining, len(out)))
+    return out
 
 
 def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A live billing job whose last scheduled run is older than twice its cadence."""
-    return []
+    del params
+    from app.models.billing_jobs import (
+        BillingJobMode,
+        BillingJobRun,
+        BillingJobRunStatus,
+        BillingJobState,
+        BillingJobTrigger,
+    )
+    from app.services.billing.periodic import CADENCE, CADENCE_PERIOD, DAILY
+
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    out = []
+    for state in db.scalars(
+        select(BillingJobState).where(BillingJobState.mode == BillingJobMode.LIVE).order_by(BillingJobState.job)
+    ):
+        limit = 2 * CADENCE_PERIOD[CADENCE.get(state.job, DAILY)]
+        since = state.live_since
+        if since is None:
+            continue
+        since = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        if now - since <= limit:
+            continue
+        last = db.scalar(
+            select(func.max(BillingJobRun.now_at)).where(
+                BillingJobRun.job == state.job,
+                BillingJobRun.trigger == BillingJobTrigger.SCHEDULE,
+                BillingJobRun.status == BillingJobRunStatus.COMPLETE,
+            )
+        )
+        if last is not None:
+            last = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+            if now - last <= limit:
+                continue
+        out.append(
+            Finding(
+                "billing_job_stale",
+                "system",
+                f"billing_job:{state.job}",
+                f"Billing job {state.job}",
+                f"Billing job {state.job} has not completed a scheduled run in {int(limit.total_seconds() // 3600)} hours",
+                "Last completed scheduled run: " + (last.isoformat() if last else "never") + ".",
+                details={"job": state.job, "last_run_at": last.isoformat() if last else None},
+            )
+        )
+    return out
 
 
 def tax_context_changed(db: Session, params: dict, now: datetime) -> list[Finding]:
