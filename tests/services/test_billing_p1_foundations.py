@@ -459,11 +459,12 @@ def test_a_failing_job_is_logged_and_does_not_stop_the_others(file_db, caplog):
     assert "Periodic billing job p1s_test_job failed" in caplog.text
 
 
-def test_shipped_job_bodies_are_stubs(file_db):
+def test_shipped_job_bodies_run_in_dry_run(file_db):
     db = file_db()
-    with pytest.raises(NotImplementedError):
-        periodic._run_refund_reconciler(db, NOW, True)
     assert periodic._run_shadow_scan(db, NOW, True)["dry_run"] is True
+    assert periodic._run_refund_reconciler(db, NOW, True) == {
+        "seen": 0, "succeeded": 0, "failed": 0, "pending": 0, "review": 0, "skipped": 0, "planned": [],
+    }
 
 
 # ------------------------------------------------------------------ cycles
