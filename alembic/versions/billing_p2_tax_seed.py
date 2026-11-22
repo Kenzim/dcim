@@ -14,13 +14,17 @@ refuses, before inserting anything, while a ``tax_rates`` row has a rate below
 
 The downgrade deletes exactly the rows this revision inserted: the mirrored
 rules (``source = tax_rates``), the system classes, the ``default`` profile and
-the seeded English notes. It refuses while other rows still use them.
+the seeded English notes. It refuses while other rows still use them (products,
+non-mirrored rules or ``tax_exemptions.tax_class_ids`` naming a system class,
+line tax rows of a mirrored rule, ``seller_tax_registrations`` with the
+``default`` profile) or while a seeded note has ``edited_by_admin`` set.
 
 Revision ID: billing_p2_tax_seed
 Revises: billing_p2_tax_columns
 Create Date: 2026-11-22 12:15:00.000000
 """
 
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Sequence, Union
@@ -227,11 +231,52 @@ def _blocking_rows(bind) -> list[str]:
         checks.append(
             (label, sa.select(sa.func.count()).select_from(target).where(target.c[column].in_(ids)))
         )
+    profiles = sa.table("invoice_profiles", sa.column("id"), sa.column("name"))
+    registrations = sa.table("seller_tax_registrations", sa.column("invoice_profile_id"))
+    checks.append(
+        (
+            "seller_tax_registrations using the default invoice profile",
+            sa.select(sa.func.count()).select_from(registrations).where(
+                registrations.c.invoice_profile_id.in_(
+                    sa.select(profiles.c.id).where(profiles.c.name == DEFAULT_PROFILE["name"])
+                )
+            ),
+        )
+    )
+    checks.append(
+        (
+            "seeded legal notes edited by an admin",
+            sa.select(sa.func.count()).select_from(tax_legal_notes).where(
+                tax_legal_notes.c.locale == "en",
+                tax_legal_notes.c.key.in_([key for key, _text in LEGAL_NOTES]),
+                tax_legal_notes.c.edited_by_admin == sa.true(),
+            ),
+        )
+    )
     found = []
     for label, statement in checks:
         count = bind.execute(statement).scalar_one()
         if count:
             found.append(f"{count} {label}")
+    exemptions = _exemptions_naming(bind, set(system_ids))
+    if exemptions:
+        found.append(
+            f"{len(exemptions)} tax_exemptions naming a system tax class in tax_class_ids (ids "
+            + ", ".join(str(exemption_id) for exemption_id in exemptions) + ")"
+        )
+    return found
+
+
+def _exemptions_naming(bind, class_ids: set[int]) -> list[int]:
+    """Ids of ``tax_exemptions`` whose JSON ``tax_class_ids`` list holds one of ``class_ids``."""
+    exemptions = sa.table("tax_exemptions", sa.column("id"), sa.column("tax_class_ids", sa.JSON()))
+    found = []
+    for row in bind.execute(sa.select(exemptions.c.id, exemptions.c.tax_class_ids).order_by(exemptions.c.id)):
+        named = row.tax_class_ids or []
+        if isinstance(named, str):
+            named = json.loads(named)
+        if any(int(class_id) in class_ids for class_id in named):
+            found.append(row.id)
     return found
 
 
@@ -240,7 +285,9 @@ def downgrade() -> None:
     blocking = _blocking_rows(bind)
     if blocking:
         raise RuntimeError(
-            "billing_p2_tax_seed downgrade refused: " + "; ".join(blocking) + ". Remove them first."
+            "billing_p2_tax_seed downgrade refused: " + "; ".join(blocking) + ". "
+            "Remove or change them first (an edited legal note would be lost: reset edited_by_admin "
+            "or delete the note to accept that)."
         )
     bind.execute(sa.text("UPDATE tax_rules SET supersedes_id = NULL WHERE supersedes_id IN "
                          "(SELECT id FROM (SELECT id FROM tax_rules WHERE source = 'tax_rates') AS mirrored)"))

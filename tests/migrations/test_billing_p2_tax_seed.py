@@ -107,6 +107,63 @@ def test_rate_percent_is_exact():
     assert module.rate_percent_of(10_000) == "100.0000"
 
 
+def _exemption(engine, class_ids_json):
+    helpers.execute(
+        engine,
+        "INSERT INTO tax_exemptions (id, billing_account_id, reason, valid_from, tax_class_ids) "
+        "VALUES (60, 41, 'charity', '2026-01-01', :c)",
+        c=class_ids_json,
+    )
+
+
+def _registration(engine, profile_id):
+    helpers.execute(
+        engine,
+        "INSERT INTO seller_tax_registrations (id, jurisdiction, scheme, tax_number, country, valid_from, "
+        "invoice_profile_id) VALUES (70, 'GB', 'domestic', 'GB999', 'GB', '2026-01-01', :p)",
+        p=profile_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "block, message, unblock",
+    [
+        (
+            lambda e, ids: _exemption(e, f"[999, {ids['exempt']}]"),
+            r"1 tax_exemptions naming a system tax class in tax_class_ids \(ids 60\)",
+            lambda e, ids: helpers.execute(e, "UPDATE tax_exemptions SET tax_class_ids = '[999]'"),
+        ),
+        (
+            lambda e, ids: _registration(e, ids["profile"]),
+            "1 seller_tax_registrations using the default invoice profile",
+            lambda e, ids: helpers.execute(e, "UPDATE seller_tax_registrations SET invoice_profile_id = NULL"),
+        ),
+        (
+            lambda e, ids: helpers.execute(
+                e, "UPDATE tax_legal_notes SET text = 'Edited.', edited_by_admin = 1 WHERE key = 'outside_scope'"
+            ),
+            "1 seeded legal notes edited by an admin",
+            lambda e, ids: helpers.execute(e, "UPDATE tax_legal_notes SET edited_by_admin = 0"),
+        ),
+    ],
+    ids=["exemption", "registration", "edited_note"],
+)
+def test_downgrade_refuses_while_seeded_rows_are_referenced_or_edited(p2_engine_at, block, message, unblock):
+    engine = p2_engine_at(REVISION)
+    ids = {
+        "exempt": helpers.scalar(engine, "SELECT id FROM tax_classes WHERE code = 'exempt'"),
+        "profile": helpers.scalar(engine, "SELECT id FROM invoice_profiles WHERE name = 'default'"),
+    }
+    block(engine, ids)
+    with pytest.raises(RuntimeError, match=message):
+        helpers.migrate(engine, helpers.before(REVISION))
+    assert helpers.current(engine) == REVISION
+    assert helpers.scalar(engine, "SELECT COUNT(*) FROM tax_classes") == 5
+    unblock(engine, ids)
+    helpers.migrate(engine, helpers.before(REVISION))
+    assert helpers.scalar(engine, "SELECT COUNT(*) FROM tax_classes") == 0
+
+
 def test_downgrade_refuses_while_a_product_uses_a_system_class(p2_engine_at):
     engine = p2_engine_at(REVISION)
     standard = helpers.scalar(engine, "SELECT id FROM tax_classes WHERE code = 'standard'")

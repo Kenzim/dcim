@@ -164,10 +164,19 @@ def test_p2_chain_up_down_up_on_mariadb(mariadb):
         "VALUES (90, 'VPS', 'vps-p2', '{}', 1, :c)",
         c=standard,
     )
-    with pytest.raises(RuntimeError, match="products with a system tax class"):
+    helpers.execute(
+        engine,
+        "INSERT INTO tax_exemptions (id, billing_account_id, reason, valid_from, tax_class_ids) "
+        "VALUES (60, 41, 'charity', '2026-01-01', :c)",
+        c=f"[{standard}]",
+    )
+    with pytest.raises(
+        RuntimeError, match=r"products with a system tax class; 1 tax_exemptions naming a system tax class"
+    ):
         helpers.migrate(engine, helpers.P1_HEAD)
     assert helpers.current(engine) == "billing_p2_tax_seed"
     helpers.execute(engine, "UPDATE products SET tax_class_id = NULL")
+    helpers.execute(engine, "DELETE FROM tax_exemptions")
 
     helpers.migrate(engine, helpers.P1_HEAD)
     assert helpers.current(engine) == helpers.P1_HEAD
