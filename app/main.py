@@ -451,6 +451,10 @@ api_router.include_router(billing_adjustments_api.router)
 from app.api import settings_admin as settings_admin_api
 api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
 
+# Refunds and refund reviews (retail and reseller payments)
+from app.api import billing_refunds_admin as billing_refunds_admin_api
+api_router.include_router(billing_refunds_admin_api.router, tags=["billing-refunds-admin"])
+
 # Billing engines: modes, shadow mismatches, scans and the v2 switch
 from app.api import billing_engines_admin as billing_engines_admin_api
 api_router.include_router(billing_engines_admin_api.router, tags=["billing-engines-admin"])
