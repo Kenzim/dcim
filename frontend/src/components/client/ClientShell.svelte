@@ -14,7 +14,7 @@
 
   $: path = $currentRoute || '/client';
   $: onDashboard = path === '/client' || path === '/client/';
-  $: onServices = path.startsWith('/client/services');
+  $: onServices = path.startsWith('/client/services') || path.startsWith('/client/cancellations');
   $: onNetworks = path.startsWith('/client/networks');
   $: onStorage = path.startsWith('/client/storage');
   $: onBackupSlots = path.startsWith('/client/backup-slots');

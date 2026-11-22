@@ -14,6 +14,7 @@
   import ClientNetworks from '../components/client/ClientNetworks.svelte';
   import ClientStorage from '../components/client/ClientStorage.svelte';
   import ClientBackupSlots from '../components/client/ClientBackupSlots.svelte';
+  import ClientCancellations from '../components/client/ClientCancellations.svelte';
 
   let authChecked = false;
   let impersonating = false;
@@ -65,6 +66,8 @@
         routeName = 'storage';
       } else if (parts[1] === 'backup-slots') {
         routeName = 'backup-slots';
+      } else if (parts[1] === 'cancellations') {
+        routeName = 'cancellations';
       } else if (parts[1] === 'account') {
         routeName = 'account';
         if (parts[2] === 'credit') accountTab = 'credit';
@@ -119,7 +122,7 @@
       {#if routeName === 'services'}
         <ClientServiceList />
       {:else if routeName === 'service-detail' && serviceId != null}
-        <ClientServiceDetail {serviceId} />
+        <ClientServiceDetail {serviceId} {impersonating} />
       {:else if routeName === 'billing' || routeName === 'orders' || routeName === 'notes'}
         <ClientBilling
           {impersonating}
@@ -136,6 +139,8 @@
         <ClientStorage />
       {:else if routeName === 'backup-slots'}
         <ClientBackupSlots />
+      {:else if routeName === 'cancellations'}
+        <ClientCancellations {impersonating} />
       {:else if routeName === 'account'}
         <ClientAccount {impersonating} initialTab={accountTab} />
       {:else}
