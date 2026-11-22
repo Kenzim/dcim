@@ -60,6 +60,8 @@
   import NotesList from '../components/billing/admin/NotesList.svelte';
   import CreditAdmin from '../components/billing/admin/CreditAdmin.svelte';
   import BillingJobs from '../components/billing/admin/ops/BillingJobs.svelte';
+  import NonpaymentPolicies from '../components/billing/admin/ops/NonpaymentPolicies.svelte';
+  import CancellationQueue from '../components/billing/admin/ops/CancellationQueue.svelte';
   import CommerceTransactions from '../components/commerce/CommerceTransactions.svelte';
   import CommerceGatewayLogs from '../components/commerce/CommerceGatewayLogs.svelte';
   import CommerceEmailLog from '../components/commerce/CommerceEmailLog.svelte';
@@ -418,6 +420,10 @@
         <CreditAdmin />
       {:else if routeName === 'billing-jobs'}
         <BillingJobs />
+      {:else if routeName === 'billing-nonpayment'}
+        <NonpaymentPolicies />
+      {:else if routeName === 'billing-cancellations'}
+        <CancellationQueue />
       {:else if routeName === 'commerce/transactions'}
         <CommerceTransactions />
       {:else if routeName === 'commerce/gateway-logs'}

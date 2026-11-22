@@ -93,6 +93,8 @@
   $: isBillingNotesActive = currentPath.startsWith('/admin/billing-notes');
   $: isBillingCreditActive = currentPath.startsWith('/admin/billing-credit');
   $: isBillingJobsActive = currentPath.startsWith('/admin/billing-jobs');
+  $: isBillingNonpaymentActive = currentPath.startsWith('/admin/billing-nonpayment');
+  $: isBillingCancellationsActive = currentPath.startsWith('/admin/billing-cancellations');
   $: isCommerceTransactionsActive = currentPath.startsWith('/admin/commerce/transactions');
   $: isCommerceGatewayLogsActive = currentPath.startsWith('/admin/commerce/gateway-logs');
   $: isCommerceEmailLogActive = currentPath.startsWith('/admin/commerce/email-log');
@@ -505,6 +507,22 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             <span>Billing Jobs</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-nonpayment" class="nav-link" class:active={isBillingNonpaymentActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <span>Non-payment Policies</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-cancellations" class="nav-link" class:active={isBillingCancellationsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            <span>Cancellations</span>
           </a>
         </li>
         <li class="nav-item">
