@@ -141,6 +141,45 @@ def test_shadow_engine_matches_tax_cents_on_mirrored_rules(db_session, shadow, l
     assert not [r for r in shadow if r["engine"] == "tax"]
 
 
+@pytest.mark.parametrize(
+    "rows,profile",
+    [
+        ([("DE", None, 1900), ("DE", None, 700)], ("DE", None)),
+        # tax_rates is unique on (country, region), so only national rows (NULL region) repeat.
+        ([("US", None, 500), ("US", None, 600), ("US", "CA", 725)], ("US", "TX")),
+    ],
+    ids=["duplicate national rows", "profile region over duplicate national rows"],
+)
+def test_shadow_ties_on_the_tax_rates_row_after_a_supersede(db_session, shadow, rows, profile):
+    first, *_rest = [_rate(db_session, country, region, bps) for country, region, bps in rows]
+    old_rule = TaxRuleMirror.current(db_session, first.id)
+    first.name = "renamed"
+    new_rule = TaxRuleMirror.sync(db_session, first)
+    assert new_rule.supersedes_id == old_rule.id
+    user, account = _buyer(db_session, *profile)
+    product, plan = _product(db_session, price_cents=10_000)
+    quote = _quote(db_session, account, product, plan)
+    assert CheckoutService._tax_rate(db_session, account).id == first.id
+    expected = 10_000 * first.rate_bps // 10_000
+    assert quote.tax_cents == expected
+    assert quote.tax_result.tax_cents == expected
+    (part,) = quote.tax_result.line("line:0").parts
+    assert part.rule_id == new_rule.id
+    _place(db_session, account, user, product, plan)
+    assert not [r for r in shadow if r["engine"] == "tax"]
+
+
+def test_shadow_xi_consumer_with_tax_disabled_equals_legacy(db_session, shadow):
+    _rate(db_session, "GB", None, 2000)
+    _rate(db_session, "XI", None, 1500)
+    user, account = _buyer(db_session, "XI")
+    product, plan = _product(db_session, price_cents=1000)
+    quote = _quote(db_session, account, product, plan)
+    assert quote.tax_cents == quote.tax_result.tax_cents == 150
+    _place(db_session, account, user, product, plan)
+    assert not [r for r in shadow if r["engine"] == "tax"]
+
+
 def test_shadow_records_t1_checkout_when_the_engine_differs(db_session, shadow, monkeypatch):
     _rate(db_session, "GB", None, 2000)
     user, account = _buyer(db_session, "GB")
@@ -162,6 +201,29 @@ def test_shadow_records_a_rule_divergence_the_engine_explains(db_session, shadow
     (record,) = [r for r in shadow if r["engine"] == "tax"]
     assert record["check"] == "t1_rule_divergence"
     assert record["v2"]["explained_by"] == [f"rule:{db_session.scalar(select(TaxRule.id).where(TaxRule.name == 'admin 25%'))}"]
+
+
+def _valid_business_profile(db, account):
+    from datetime import datetime, timezone
+
+    BillingProfileDAO.upsert(
+        db, account.id, is_business=True, tax_id="DE123456789", tax_id_status="valid",
+        tax_id_checked_at=datetime.now(timezone.utc),
+    )
+
+
+def test_shadow_counts_a_reverse_charge_without_a_rule_as_explained(db_session, shadow):
+    _rate(db_session, "DE", None, 1900)
+    enable_tax(db_session, "GB")
+    add_registration(db_session, "GB")
+    user, account = _buyer(db_session, "DE")
+    _valid_business_profile(db_session, account)
+    product, plan = _product(db_session, price_cents=1000)
+    _place(db_session, account, user, product, plan)
+    (record,) = [r for r in shadow if r["engine"] == "tax"]
+    assert record["check"] == "t1_rule_divergence"
+    assert record["legacy"] == {"tax_cents": 190} and record["v2"]["tax_cents"] == 0
+    assert record["v2"]["explained_by"] == ["reverse_charge"]
 
 
 def test_shadow_records_legacy_raising_as_its_own_outcome(db_session, shadow, monkeypatch):
@@ -260,6 +322,21 @@ def test_v2_quote_carries_reverse_charge_and_notes(db_session, tax_v2):
     assert quote.legal_notes == ["gb_outside_scope_b2b"]
 
 
+def test_v2_reverse_charge_without_a_rule_sets_the_quote_flag_and_the_rows(db_session, tax_v2):
+    user, account = _buyer(db_session, "DE")
+    _valid_business_profile(db_session, account)
+    product, plan = _product(db_session)
+    quote = _quote(db_session, account, product, plan)
+    assert quote.reverse_charge is True and quote.tax_cents == 0
+    assert quote.legal_notes == ["gb_outside_scope_b2b"]
+    assert {item["name"] for item in quote.tax_lines} == {"Outside the scope of UK VAT"}
+    order = _place(db_session, account, user, product, plan)
+    rows = db_session.execute(
+        select(InvoiceLineTax).where(InvoiceLineTax.invoice_id == order.invoice_id)
+    ).scalars().all()
+    assert rows and all(r.reverse_charge and r.tax_cents == 0 and r.tax_rule_id is None for r in rows)
+
+
 def test_v2_needs_invoice_engine_v2(db_session):
     set_engine(db_session, "tax", "v2")
     assert CheckoutService._tax_mode(db_session) == "shadow"
@@ -285,6 +362,22 @@ def test_mirror_keeps_an_empty_region_literal(db_session):
     rate = _rate(db_session, "FR", "", 2000)
     rule = TaxRuleMirror.current(db_session, rate.id)
     assert rule.region == "" and rule.priority == 0
+
+
+@pytest.mark.parametrize("before,after", [(None, ""), ("", None)])
+def test_mirror_sees_a_change_between_no_region_and_an_empty_region(db_session, before, after):
+    rate = _rate(db_session, "FR", before, 2000)
+    old = TaxRuleMirror.current(db_session, rate.id)
+    rate.region = after
+    new = TaxRuleMirror.sync(db_session, rate)
+    assert new.id != old.id and new.supersedes_id == old.id
+    assert new.region == after
+    # Legacy and engine still agree for a buyer with and without a region (a literal '' matches no region only).
+    for profile in (("FR", None), ("FR", "Paris")):
+        _user, account = _buyer(db_session, *profile)
+        product, plan = _product(db_session, price_cents=10_000)
+        quote = _quote(db_session, account, product, plan)
+        assert quote.tax_result.tax_cents == quote.tax_cents
 
 
 def test_prices_include_tax_setting_is_read(db_session):

@@ -151,6 +151,61 @@ def test_inclusive_with_two_taxes_adds_up_to_the_gross(db_session):
     assert parts[0].base_cents + sum(p.tax_cents for p in parts) == 11_549
 
 
+def test_inclusive_with_three_taxes_adds_up_to_the_gross(db_session):
+    for name, rate in (("a", "5"), ("b", "7"), ("c", "3")):
+        add_rule(db_session, name=name, rate=rate, country="CA", rounding_point="line")
+        db_session.flush()
+    # Three plain taxes of the same specificity: only the first applies; make b and c compound.
+    from app.models.tax import TaxRule
+
+    for order, name in enumerate(("b", "c"), start=1):
+        rule = db_session.query(TaxRule).filter_by(name=name).one()
+        rule.compound, rule.compound_order = True, order
+    db_session.flush()
+    for gross in (1, 2, 3, 99, 101, 1_000):
+        parts = _calc(db_session, [line("a", gross)], facts=buyer("CA"), inclusive=True).lines["a"].parts
+        assert len(parts) == 3
+        assert parts[0].base_cents + sum(p.tax_cents for p in parts) == gross
+
+
+INCLUSIVE_COMBINATIONS = [
+    # (rate_percent, compound, reverse_charge) per part, in compound order.
+    [("5", False, False), ("7", False, False), ("3", False, False)],
+    [("5", False, False), ("9.975", True, False)],
+    [("5", False, False), ("7", False, False), ("9.975", True, False)],
+    [("20", False, False), ("0", False, True), ("5", True, False)],
+    [("1", False, False), ("1", False, False), ("1", False, False), ("1", True, False)],
+    [("33.3333", False, False), ("33.3333", False, False), ("33.3333", True, False)],
+    [("0", False, True), ("0", False, True)],
+]
+
+
+@pytest.mark.parametrize("rule", ["round_half_up", "tax_floor", "round_half_even"])
+@pytest.mark.parametrize("rates", INCLUSIVE_COMBINATIONS)
+def test_inclusive_multi_always_adds_up_to_the_gross(rates, rule):
+    from app.services.tax.engine import _inclusive_multi, _Part
+
+    for gross in range(0, 501):
+        parts = [
+            _Part(
+                rule=None, name=f"t{i}", rate_percent=Decimal(rate), rate_ppm=0 if rc else rate_ppm(rate),
+                jurisdiction="ANY", reverse_charge=rc, legal_note_key=None, rounding_point="line",
+                rounding_rule=rule, compound=compound, source="rules",
+            )
+            for i, (rate, compound, rc) in enumerate(rates)
+        ]
+        _inclusive_multi(parts, gross)
+        net = parts[0].base
+        assert net + sum(p.tax for p in parts) == gross, (gross, [(p.base, p.tax) for p in parts])
+        assert all(p.tax >= 0 for p in parts) and net >= 0
+        assert all(p.tax == 0 for p in parts if p.reverse_charge)
+        for index, part in enumerate(parts):
+            if part.compound:
+                assert part.base == net + sum(p.tax for p in parts[:index])
+            else:
+                assert part.base == net
+
+
 def test_discount_reduces_each_line_base_by_its_share(db_session):
     add_rule(db_session, rate="20", rounding_point="line", rounding_rule="round_half_up")
     result = _calc(
@@ -286,6 +341,22 @@ def test_reverse_charge_needs_each_condition(db_session, facts, reason):
     assert result.evidence.values.get("notes") == ["not_registered"]
 
 
+def test_tax_id_freshness_has_one_verdict_per_tax_point_date(db_session):
+    _uk_seller(db_session)
+    morning, evening = NOW.replace(hour=9), NOW.replace(hour=23, minute=59)
+    # Exactly 30 days old at 10:00 on the tax point's date.
+    turning = buyer("DE", business=True, tax_id="1", status="valid", checked_at=NOW.replace(hour=10) - timedelta(days=30))
+    quote = _calc(db_session, [line("a", 1000)], facts=turning, at=morning)
+    publish = _calc(db_session, [line("a", 1000)], facts=turning, at=NOW)
+    assert quote.context_hash == publish.context_hash
+    for result in (quote, publish):
+        assert "tax_id_stale" in result.evidence.values["reasons"]
+        assert not any(p.reverse_charge for p in result.lines["a"].parts)
+    fresh = buyer("DE", business=True, tax_id="1", status="valid", checked_at=NOW.replace(hour=10) - timedelta(days=29))
+    for at in (morning, evening):
+        assert _calc(db_session, [line("a", 1000)], facts=fresh, at=at).lines["a"].parts[0].reverse_charge
+
+
 def test_consumer_is_not_reverse_charged(db_session):
     _uk_seller(db_session)
     result = _calc(db_session, [line("a", 1000)], facts=buyer("DE"))
@@ -321,6 +392,88 @@ def test_eu_seller_eu_business_reverse_charge_without_a_pack_rule_has_the_eu_not
     add_registration(db_session, "IE")
     result = _calc(db_session, [line("a", 1000)], facts=valid_business("FR"))
     assert result.tax_cents == 0 and result.legal_note_keys == ("eu_reverse_charge",)
+
+
+@pytest.mark.parametrize(
+    "seller,buyer_country,note,name",
+    [
+        ("IE", "FR", "eu_reverse_charge", "Reverse charge"),
+        ("GB", "DE", "gb_outside_scope_b2b", "Outside the scope of UK VAT"),
+        ("GB", "US", "outside_scope", "Outside the scope of VAT"),
+    ],
+)
+def test_reverse_charge_without_a_rule_gets_a_zero_tax_reverse_charge_part(db_session, seller, buyer_country, note, name):
+    enable_tax(db_session, seller)
+    registration = add_registration(db_session, seller)
+    add_rule(db_session, name="ANY 10%", rate="10", country=buyer_country, source="admin")
+    result = _calc(
+        db_session,
+        [line("a", 1000), line("b", 500, tax_class="reduced"), line("c", 300, tax_class="outside_scope"),
+         line("d", -100, kind="discount")],
+        facts=valid_business(buyer_country),
+    )
+    # The discount of 100 spreads over a, b and c by largest remainder: 55, 28 and 17.
+    for key, base in (("a", 945), ("b", 472)):
+        (part,) = result.lines[key].parts
+        assert (part.name, part.reverse_charge, part.tax_cents, part.base_cents) == (name, True, 0, base)
+        assert (part.rule_id, part.jurisdiction, part.legal_note_key) == (None, seller, note)
+    assert result.lines["c"].parts == () and result.lines["d"].parts == ()
+    assert result.tax_cents == 0 and result.legal_note_keys == (note,)
+    assert result.registration_id == registration.id
+    assert result.evidence.values["explained_by"] == ["reverse_charge"]
+
+
+# --- Northern Ireland: XI is the UK for services (appendix C, owner question 11) ---
+
+
+def test_xi_consumer_gets_uk_vat(db_session):
+    _uk_seller(db_session)
+    result = _calc(db_session, [line("a", 1000)], facts=buyer("XI"))
+    assert (result.tax_cents, result.legal_note_keys) == (200, ())
+    values = result.evidence.values
+    assert (values["buyer_country"], values["buyer_country_declared"]) == ("GB", "XI")
+    assert values["place_of_supply"] == "seller_country"
+
+
+def test_xi_business_with_an_xi_number_is_a_uk_business(db_session):
+    _uk_seller(db_session)
+    facts = buyer("XI", business=True, tax_id="XI123456789", status="valid", checked_at=NOW - timedelta(days=1))
+    result = _calc(db_session, [line("a", 1000)], facts=facts)
+    assert result.tax_cents == 200 and result.legal_note_keys == ()
+    assert not any(p.reverse_charge for p in result.lines["a"].parts)
+
+
+def test_xi_business_from_an_eu_seller_is_outside_scope_without_eu_reverse_charge(db_session):
+    enable_tax(db_session, "IE")
+    add_registration(db_session, "IE")
+    add_rule(db_session, name="IE VAT 23%", rate="23", country="IE", jurisdiction="IE", source="pack")
+    result = _calc(db_session, [line("a", 1000)], facts=valid_business("XI"))
+    assert result.tax_cents == 0 and result.legal_note_keys == ("outside_scope",)
+    (part,) = result.lines["a"].parts
+    assert part.name == "Outside the scope of VAT" and part.legal_note_key == "outside_scope"
+
+
+def test_xi_billing_country_with_a_gb_ip_is_no_evidence_conflict(db_session):
+    _uk_seller(db_session)
+    result = _calc(db_session, [line("a", 1000)], facts=buyer("XI"), evidence={"ip_country": "GB"})
+    assert "conflict" not in result.evidence.values
+    gb = _calc(db_session, [line("a", 1000)], facts=buyer("GB"), evidence={"ip_country": "XI"})
+    assert "conflict" not in gb.evidence.values and "buyer_country_declared" not in gb.evidence.values
+
+
+def test_a_rule_stored_as_xi_applies_as_gb_when_tax_is_enabled(db_session):
+    add_rule(db_session, name="XI rule", rate="20", country="XI")
+    for country in ("GB", "XI"):
+        assert [p.name for p in _calc(db_session, [line("a", 1000)], facts=buyer(country)).lines["a"].parts] == ["XI rule"]
+
+
+def test_xi_keeps_its_literal_code_when_tax_is_disabled(db_session):
+    set_setting(db_session, "billing_tax_enabled", False)
+    add_rule(db_session, name="GB mirror", rate="20", country="GB", source="tax_rates", rounding_rule="tax_floor")
+    add_rule(db_session, name="XI mirror", rate="15", country="XI", source="tax_rates", rounding_rule="tax_floor")
+    result = _calc(db_session, [line("a", 1000)], facts=buyer("XI"))
+    assert [p.name for p in result.lines["a"].parts] == ["XI mirror"]
+    assert result.evidence.values["buyer_country"] == "XI" and "buyer_country_declared" not in result.evidence.values
 
 
 def test_no_seller_country_only_any_rules_apply(db_session):

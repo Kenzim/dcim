@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Sequence
 
@@ -62,12 +62,7 @@ DISCOUNT_KIND = "discount"
 LEGACY_TAXED_PURPOSES = frozenset({"order_charge", "quote"})
 
 
-def normalise_country(country: Optional[str]) -> Optional[str]:
-    """Upper case ISO alpha-2; the VIES code ``EL`` is Greece (``GR``)."""
-    value = (country or "").strip().upper()
-    if not value:
-        return None
-    return "GR" if value == "EL" else value
+normalise_country = rules_repo.normalise_country
 
 
 def _aware(value: Optional[datetime]) -> Optional[datetime]:
@@ -163,8 +158,39 @@ def _part_of(rule: rules_repo.RuleView) -> _Part:
     )
 
 
+# Names of the zero-tax part a reverse charge gets when no reverse charge rule matches, by legal note.
+REVERSE_CHARGE_NAMES = {
+    NOTE_EU_REVERSE_CHARGE: "Reverse charge",
+    NOTE_GB_OUTSIDE_SCOPE_B2B: "Outside the scope of UK VAT",
+    NOTE_OUTSIDE_SCOPE: "Outside the scope of VAT",
+}
+
+
+def _reverse_charge_part(place: "_Place") -> _Part:
+    """Design 4.3 step 2.2 without a reverse charge rule: a zero-tax part under the establishment registration."""
+    note = place.fallback_note or NOTE_OUTSIDE_SCOPE
+    return _Part(
+        rule=None,
+        name=REVERSE_CHARGE_NAMES.get(note, REVERSE_CHARGE_NAMES[NOTE_OUTSIDE_SCOPE]),
+        rate_percent=Decimal("0.0000"),
+        rate_ppm=0,
+        jurisdiction=place.registration.jurisdiction if place.registration else JURISDICTION_ANY,
+        reverse_charge=True,
+        legal_note_key=note,
+        rounding_point="line",
+        rounding_rule="round_half_up",
+        compound=False,
+        source=SOURCE_RULES,
+    )
+
+
 def _tax_id_freshness(db: Session, context: TaxContext, settings: TaxSettings) -> tuple[bool, Optional[str], Optional[str]]:
-    """``(valid_and_fresh, reason_if_not, checked_at)`` for the buyer's tax ID (design 4.3 step 5)."""
+    """``(valid_and_fresh, reason_if_not, checked_at)`` for the buyer's tax ID (design 4.3 step 5).
+
+    Fresh means checked within ``max_age_days`` of the end of the tax point's
+    date, the date ``context_hash`` takes, so one context hash has one verdict
+    all day: a check that turns too old during the day is stale from its start.
+    """
     buyer = context.buyer
     if not buyer.tax_id:
         return False, "tax_id_missing", None
@@ -181,7 +207,9 @@ def _tax_id_freshness(db: Session, context: TaxContext, settings: TaxSettings) -
         checked_at = _aware(check.checked_at) if check is not None else None
     if checked_at is None:
         return False, "tax_id_unchecked", None
-    if checked_at < _aware(context.tax_point_at) - timedelta(days=settings.max_age_days):
+    at = _aware(context.tax_point_at)
+    day_end = datetime.combine(at.date() + timedelta(days=1), time.min, tzinfo=at.tzinfo)
+    if checked_at < day_end - timedelta(days=settings.max_age_days):
         return False, "tax_id_stale", checked_at.isoformat()
     return True, None, checked_at.isoformat()
 
@@ -321,8 +349,10 @@ def _inclusive_multi(parts: list[_Part], gross: int) -> None:
 
     Plain taxes share the net as base; compound taxes add the earlier taxes.
     The total tax is rounded with the first rule (so ``tax_floor`` floors the
-    tax, not the net); the last taxed part takes the unit left over so that
-    net plus taxes equals the gross exactly.
+    tax, not the net). The parts' own roundings may add up to a unit or two
+    more or less than that total: the difference is taken from (or given to)
+    the largest taxed part, then the next largest, never below zero, so net
+    plus taxes equals the gross exactly. Compound bases follow the final taxes.
     """
     plain_ppm = sum(p.rate_ppm for p in parts if not p.compound and not p.reverse_charge)
     numerator = PPM + plain_ppm
@@ -337,9 +367,18 @@ def _inclusive_multi(parts: list[_Part], gross: int) -> None:
         part.base = base
         part.tax = 0 if part.reverse_charge else tax_exclusive(base, part.rate_ppm, part.rounding_rule)
     taxed = [p for p in parts if not p.reverse_charge and p.rate_ppm]
-    if taxed:
-        taxed[-1].tax += gross - net - sum(p.tax for p in parts)
-        taxed[-1].tax = max(0, taxed[-1].tax)
+    leftover = gross - net - sum(p.tax for p in parts)
+    if taxed and leftover > 0:
+        max(taxed, key=lambda p: p.tax).tax += leftover
+    for part in sorted(taxed, key=lambda p: -p.tax):
+        if leftover >= 0:
+            break
+        taken = min(part.tax, -leftover)
+        part.tax -= taken
+        leftover += taken
+    for index, part in enumerate(parts):
+        if part.compound:
+            part.base = net + sum(p.tax for p in parts[:index])
 
 
 def _canonical(value: Any) -> Any:
@@ -419,7 +458,10 @@ class TaxEngine:
         settings = TaxSettings.read(db)
         at = _aware(context.tax_point_at)
         buyer = context.buyer
-        buyer_country = normalise_country(buyer.country)
+        # Place of supply runs on mapped codes (XI is GB); tax disabled keeps today's literal lookup.
+        mapped = settings.enabled
+        buyer_country = normalise_country(buyer.country, mapped=mapped)
+        declared = normalise_country(buyer.country, mapped=False)
         classes = rules_repo.class_ids(db)
         evidence: dict[str, Any] = {
             "buyer_country": buyer_country,
@@ -435,9 +477,11 @@ class TaxEngine:
             "exemption_ids": list(buyer.exemption_ids),
             "tax_id_checked_at": _aware(buyer.tax_id_checked_at).isoformat() if buyer.tax_id_checked_at else None,
         }
+        if declared != buyer_country:
+            evidence["buyer_country_declared"] = declared
         for key, value in (context.evidence or {}).items():
             evidence.setdefault(str(key), value)
-        ip_country = normalise_country(evidence.get("ip_country"))
+        ip_country = normalise_country(evidence.get("ip_country"), mapped=mapped)
         if ip_country is not None and buyer_country is not None and ip_country != buyer_country:
             evidence["conflict"] = True
         evidence["tax_enabled"] = settings.enabled
@@ -520,6 +564,7 @@ class TaxEngine:
                     postcode=buyer.postcode,
                     is_business=bool(buyer.is_business),
                     reverse_charge=True,
+                    mapped_countries=mapped,
                 )
                 rules = [
                     rule
@@ -529,6 +574,9 @@ class TaxEngine:
                     ))
                     and (place.registration is None or buyer_country != place.registration.country)
                 ][:1]
+                if not rules and line.tax_class_code != TaxClassCode.OUTSIDE_SCOPE.value:
+                    parts_by_line[line.key] = [_reverse_charge_part(place)]
+                    continue
             else:
                 rules = rules_repo.select_rules(
                     candidates,
@@ -538,6 +586,7 @@ class TaxEngine:
                     postcode=buyer.postcode,
                     is_business=bool(buyer.is_business),
                     reverse_charge=False,
+                    mapped_countries=mapped,
                 )
             parts_by_line[line.key] = [_part_of(rule) for rule in rules]
 
