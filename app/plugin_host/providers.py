@@ -219,5 +219,8 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
         raise _fail(
             plugin_id, provider, "error", f"{label} failed: {type(exc).__name__}: {exc}"[:500], _trace(exc)
         ) from None
-    health.record_success(plugin_id)
+    if method in spec.metered:
+        # Only the methods that do real work prove the plugin healthy; a cheap supports() answer
+        # before every failing check_online must not keep resetting the circuit.
+        health.record_success(plugin_id)
     return answer

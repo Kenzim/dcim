@@ -182,6 +182,24 @@ def test_a_pack_with_nan_or_infinity_is_not_json(number):
         kinds.validate_answer("tax_rule_pack", "load", ("1",), {"rules": [{"rate": number}]})
 
 
+def test_cheap_answers_do_not_reset_the_circuit(plugin_env, db_session):
+    from app.models.plugin_host import PluginInstallation
+    from app.plugin_host import health
+
+    setup_plugin(plugin_env, db_session, VALIDATOR, mode="raise")
+    for _ in range(health.FAILURES_TO_OPEN):
+        assert validator_call("supports", "DE", "eu_vat") is True
+        with pytest.raises(ProviderUnavailable) as err:
+            validator_call()
+        assert err.value.reason == "error"
+    assert failures(db_session, VALIDATOR) == health.FAILURES_TO_OPEN
+    db_session.expire_all()
+    assert health.circuit_open(db_session.get(PluginInstallation, VALIDATOR))
+    with pytest.raises(ProviderUnavailable) as err:
+        validator_call("supports", "DE", "eu_vat")
+    assert err.value.reason == "circuit_open"
+
+
 def test_two_kinds_with_the_same_provider_id_have_separate_rate_limits(plugin_env, db_session):
     limit = {"calls": 1, "per_seconds": 3600}
     manifest = base_manifest(
