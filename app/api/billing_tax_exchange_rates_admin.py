@@ -3,8 +3,10 @@
 The fallback when HMRC's site is down: an administrator enters HMRC's
 published rate for a month by hand. It is stored as source ``hmrc_monthly``
 like a fetched rate, since it is the same published figure, and the audit
-entry records who entered it. A stored rate is never changed. A rate no
-published invoice has frozen may be deleted, to correct a typing mistake.
+entry records who entered it. It is marked ``hand_entered``, and the fetch
+job compares it with HMRC's file once. A stored rate is never changed. A
+rate no published invoice or note has frozen may be deleted, to correct a
+typing mistake.
 """
 
 from __future__ import annotations
@@ -52,6 +54,8 @@ def _payload(row: TaxExchangeRate) -> dict:
         "period_start": row.period_start.isoformat(),
         "period_end": row.period_end.isoformat(),
         "fetched_at": row.fetched_at.isoformat() if row.fetched_at else None,
+        "hand_entered": bool(row.hand_entered),
+        "compared_at": row.compared_at.isoformat() if row.compared_at else None,
     }
 
 
@@ -119,7 +123,8 @@ def create_rate(body: RateCreate, auth: AdminDep, db: DbDep):
         raise _exists(body)
     try:
         exchange_rates.store_month(
-            db, body.period, [(body.currency, body.units_per_gbp)], fetched_at=datetime.now(timezone.utc)
+            db, body.period, [(body.currency, body.units_per_gbp)], fetched_at=datetime.now(timezone.utc),
+            hand_entered=True,
         )
     except IntegrityError:
         db.rollback()

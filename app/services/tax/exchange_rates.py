@@ -264,11 +264,13 @@ def store_month(
     *,
     source: str = SOURCE_HMRC,
     fetched_at: Optional[datetime] = None,
+    hand_entered: bool = False,
 ) -> StoreOutcome:
     """Insert each currency of ``period`` that is not stored yet; never change a stored one.
 
     A stored rate that differs from the one offered is reported in
-    ``conflicts`` and kept. Runs in the caller's transaction, which commits;
+    ``conflicts`` and kept. ``hand_entered`` marks the inserted rows as typed
+    in by an administrator. Runs in the caller's transaction, which commits;
     a row stored meanwhile by another writer makes the flush raise
     ``IntegrityError`` (the unique key), and the caller rolls back.
     """
@@ -302,6 +304,7 @@ def store_month(
                 period_start=start,
                 period_end=end,
                 fetched_at=fetched_at,
+                hand_entered=hand_entered,
             )
         )
         existing[code] = rate

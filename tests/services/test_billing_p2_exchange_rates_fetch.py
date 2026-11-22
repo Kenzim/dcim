@@ -158,6 +158,68 @@ def test_never_overwrites_a_stored_month(factory, source):
     db.close()
 
 
+def _hand_enter(factory, period: str, rate: str, currency: str = "USD") -> None:
+    db = factory()
+    exchange_rates.store_month(db, period, [(currency, rate)], fetched_at=T0, hand_entered=True)
+    db.commit()
+    db.close()
+
+
+def _row(factory, period: str, currency: str = "USD"):
+    db = factory()
+    try:
+        return exchange_rates.stored_rate(db, currency, period)
+    finally:
+        db.close()
+
+
+def test_a_hand_entered_rate_that_matches_is_compared_once(factory, source):
+    _hand_enter(factory, "2026-11", "1.3396")
+    _hand_enter(factory, "2026-12", "1.3158")
+    source.months = {"2026-11": {"USD": "1.3396", "EUR": "1.1930"}, "2026-12": {"USD": "1.3158"}}
+    _go_live(factory, T0 - timedelta(hours=1))
+    assert _run(factory).counts == {"done": 2}
+    assert sorted(source.calls) == ["2026-11", "2026-12"]
+    assert _row(factory, "2026-11").compared_at is not None
+    assert ("2026-11", "EUR") in _rates(factory), "the rest of the month is stored as usual"
+    assert _run(factory, T0 + timedelta(days=1)).counts == {} and len(source.calls) == 2
+
+
+def test_a_hand_entered_rate_that_differs_is_a_conflict_and_kept(factory, source):
+    _hand_enter(factory, "2026-09", "1.3500")  # any month, not only the current and the next
+    source.months = {
+        "2026-09": {"USD": "1.3456"}, "2026-11": {"USD": "1.3396"}, "2026-12": {"USD": "1.3158"},
+    }
+    _go_live(factory, T0 - timedelta(hours=1))
+    result = _run(factory)
+    assert result.counts == {"done": 3}
+    assert sorted(source.calls) == ["2026-09", "2026-11", "2026-12"]
+    assert _rates(factory)[("2026-09", "USD")] == Decimal("1.3500"), "never overwritten"
+    assert _row(factory, "2026-09").compared_at is not None
+    db = factory()
+    action = db.scalars(
+        sa.select(BillingJobAction).where(BillingJobAction.subject_key == "compare:2026-09:USD")
+    ).one()
+    assert action.status == "needs_review"
+    assert action.detail["conflicts"] == [{"currency": "USD", "stored": "1.350000", "offered": "1.345600"}]
+    audit = db.scalars(sa.select(UserAuditEvent).where(UserAuditEvent.action == "billing.tax.exchange_rate_conflict")).one()
+    assert audit.resource_id == "2026-09"
+    db.close()
+    assert _run(factory, T0 + timedelta(days=1)).counts == {} and len(source.calls) == 3
+
+
+def test_a_hand_entered_rate_not_published_yet_is_compared_later(factory, source):
+    _hand_enter(factory, "2026-11", "1.3396")
+    _hand_enter(factory, "2026-12", "1.3158")
+    source.months = {"2026-11": {"USD": "1.3396"}}
+    _go_live(factory, T0 - timedelta(hours=1))
+    assert _run(factory).counts == {"done": 1, "skipped": 1}
+    assert _row(factory, "2026-12").compared_at is None
+    source.months["2026-12"] = {"USD": "1.3158"}
+    assert _run(factory, T0 + timedelta(days=1)).counts == {"done": 1}
+    assert _row(factory, "2026-12").compared_at is not None
+
+
 def test_gbp_as_the_operator_currency_needs_nothing(factory, source, monkeypatch):
     monkeypatch.setattr(settings, "commerce_default_currency", "GBP")
     _go_live(factory, T0 - timedelta(hours=1))

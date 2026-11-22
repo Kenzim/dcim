@@ -39,6 +39,7 @@ def test_enter_list_and_refuse_a_second_value(client, db_session, headers):
         "source": "hmrc_monthly", "base": "GBP", "currency": "USD", "period": "2026-11",
         "units_per_gbp": "1.339600", "period_start": "2026-11-01", "period_end": "2026-11-30",
     }
+    assert (body["hand_entered"], body["compared_at"]) == (True, None)
     (audit,) = _audits(db_session, "billing.tax.exchange_rate_created")
     assert audit.resource_id == str(body["id"])
     again = client.post(BASE, headers=headers, json={"period": "2026-11", "currency": "USD", "units_per_gbp": "1.4"})

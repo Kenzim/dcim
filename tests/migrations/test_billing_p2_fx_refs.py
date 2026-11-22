@@ -5,6 +5,7 @@ from tests.migrations import helpers
 REVISION = "billing_p2_fx_refs"
 INVOICE_COLUMNS = {"fx_rate_id"}
 NOTE_COLUMNS = {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"}
+RATE_COLUMNS = {"hand_entered", "compared_at"}
 
 
 def _rate_and_invoice(engine) -> None:
@@ -35,6 +36,8 @@ def test_up_down_up_and_the_frozen_rate_is_found(p2_engine_at):
     helpers.migrate(engine, REVISION)
     assert INVOICE_COLUMNS <= helpers.columns(engine, "invoices")
     assert NOTE_COLUMNS <= helpers.columns(engine, "invoice_adjustments")
+    assert RATE_COLUMNS <= helpers.columns(engine, "tax_exchange_rates")
+    assert helpers.scalar(engine, "SELECT hand_entered FROM tax_exchange_rates WHERE id = 5") == 0
     assert ("ix_invoices_fx_rate_id", False, ("fx_rate_id", "fx_period")) in helpers.sqlite_indexes(
         engine, "invoices"
     )
@@ -47,5 +50,6 @@ def test_up_down_up_and_the_frozen_rate_is_found(p2_engine_at):
     helpers.migrate(engine, helpers.before(REVISION))
     assert not INVOICE_COLUMNS & helpers.columns(engine, "invoices")
     assert not NOTE_COLUMNS & helpers.columns(engine, "invoice_adjustments")
+    assert not RATE_COLUMNS & helpers.columns(engine, "tax_exchange_rates")
     helpers.migrate(engine, REVISION)
     assert helpers.scalar(engine, "SELECT fx_rate_id FROM invoices WHERE id = 61") == 5

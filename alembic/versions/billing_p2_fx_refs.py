@@ -13,7 +13,12 @@ with its foreign key), so each credit or debit note keeps the sterling VAT
 it was issued with. Notes issued before this revision keep NULL; their PDF
 then prints no sterling line.
 
-The columns are nullable, so on MariaDB 11 each ADD COLUMN is instant. The
+Adds ``tax_exchange_rates.hand_entered`` (an administrator typed the rate
+in) and ``compared_at`` (when the fetch job compared that rate with the
+source's file). Rates stored before this revision count as fetched.
+
+The columns are nullable or have a constant default, so on MariaDB 11 each
+ADD COLUMN is instant. The
 foreign key is added with ``foreign_key_checks = 0`` on MySQL, as in
 ``billing_p2_tax_columns``; on SQLite the column is plain, as SQLite cannot
 add a foreign key to an existing table.
@@ -45,6 +50,10 @@ def columns() -> dict[str, list[sa.Column]]:
             sa.Column("fx_source", sa.String(32), nullable=True),
             sa.Column("tax_total_gbp_cents", sa.BigInteger(), nullable=True),
             sa.Column("fx_rate_id", sa.Integer(), nullable=True),
+        ],
+        "tax_exchange_rates": [
+            sa.Column("hand_entered", sa.Boolean(), nullable=False, server_default="0"),
+            sa.Column("compared_at", sa.DateTime(timezone=True), nullable=True),
         ],
     }
 
