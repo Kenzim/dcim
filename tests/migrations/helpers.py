@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 A0 = "billing_a0_renewals"
 P1_HEAD = "billing_p1_ledger_owner_check"
 # The single alembic head; the phase 2 chain follows the phase 1 head.
-HEAD = "billing_p2_fx_refs"
+HEAD = "billing_p2_email_money"
 CHAIN = [
     "billing_p1_series_shadow",
     "billing_p1_invoice_columns",
@@ -47,6 +47,7 @@ P2_CHAIN = [
     "billing_p2_email_templates",
     "billing_p2_exchange_rates",
     "billing_p2_fx_refs",
+    "billing_p2_email_money",
 ]
 P2_NEW_TABLES = {
     "tax_classes",

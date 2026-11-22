@@ -78,7 +78,7 @@ class EventTemplateSpec:
         }
 
 
-_MONEY = '{{ amount_cents|default(0, true)|money(currency|default("USD", true)) }}'
+_MONEY = '{{ amount_cents|default(0, true)|money(currency|default(none)) }}'
 _INVOICE = '{{ invoice_number|default(invoice_id|default(""), true) }}'
 _ORDER = '{{ order_number|default(order_id|default(""), true) }}'
 _SERVICE = '{{ service_name|default("your service", true) }}'
@@ -99,7 +99,7 @@ _INVOICE_VARIABLES = (
 )
 _MONEY_VARIABLES = (
     _var("amount_cents", "integer", "The amount in minor units (cents)", 1234, False),
-    _var("currency", "string", "ISO 4217 currency code, USD when absent", "GBP", False),
+    _var("currency", "string", "ISO 4217 currency code, the operator currency when absent", "GBP", False),
 )
 
 _SPECS = (
@@ -247,10 +247,10 @@ _SPECS = (
         _INVOICE_VARIABLES
         + (
             _var("fee_cents", "integer", "The late fee in minor units (cents)", 250),
-            _var("currency", "string", "ISO 4217 currency code, USD when absent", "GBP", False),
+            _var("currency", "string", "ISO 4217 currency code, the operator currency when absent", "GBP", False),
         ),
         "Late fee added to your Rackflow invoice",
-        'A late fee of {{ fee_cents|money(currency|default("USD", true)) }} was added to invoice '
+        'A late fee of {{ fee_cents|money(currency|default(none)) }} was added to invoice '
         + _INVOICE
         + ", which is overdue. Please sign in to pay.",
     ),

@@ -28,6 +28,7 @@ from app.models.reseller import (
 )
 from app.models.service import ServiceStatus
 from app.services.billing.intervals import advance_months
+from app.services.billing.operator_currency import operator_currency
 from app.services.billing_locks import BillingLocks
 from app.services.billing.renewals import (
     AccountFunder,
@@ -78,7 +79,7 @@ def cycle_snapshot(billing: ServiceBilling) -> tuple[int, str, bool]:
     valid_currency = len(currency) == 3 and currency.isalpha()
     return (
         max(0, int(amount or 0)),
-        currency if valid_currency else "USD",
+        currency if valid_currency else operator_currency(),
         valid_amount and valid_currency,
     )
 

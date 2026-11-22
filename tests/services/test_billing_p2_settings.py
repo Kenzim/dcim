@@ -158,3 +158,25 @@ def test_generic_settings_endpoint_refuses_the_tax_engine(client, db_session, te
     assert items["billing_tax_enabled"]["read_only"] is False
     ok = client.put(f"{BASE}/billing_tax_seller_country", headers=headers, json={"value": "gb"})
     assert ok.status_code == 200 and ok.json()["value"] == "GB"
+
+
+def test_the_late_fee_currency_default_follows_the_operator_currency_at_use(db_session, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "commerce_default_currency", "eur")
+    assert get_setting(db_session, "billing_late_fee_currency") == "EUR"
+    monkeypatch.setattr(settings, "commerce_default_currency", "GBP")
+    assert get_setting(db_session, "billing_late_fee_currency") == "GBP"
+    set_setting(db_session, "billing_late_fee_currency", "jpy")
+    assert get_setting(db_session, "billing_late_fee_currency") == "JPY"
+
+
+def test_a_cycle_without_a_valid_currency_falls_back_to_the_operator_currency(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core.config import settings
+    from app.services.recurring_billing_service import cycle_snapshot
+
+    monkeypatch.setattr(settings, "commerce_default_currency", "EUR")
+    assert cycle_snapshot(SimpleNamespace(monthly_price_cents=500, currency="")) == (500, "EUR", False)
+    assert cycle_snapshot(SimpleNamespace(monthly_price_cents=500, currency="gbp")) == (500, "GBP", True)
