@@ -176,6 +176,25 @@ def test_rule_valid_to_must_be_after_valid_from(client, headers):
     ).status_code == 201
 
 
+def test_rule_country_xi_is_refused_with_a_pointer_to_gb(client, headers):
+    """Northern Ireland is taxed by the GB rules; an XI rule would never match a buyer."""
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+
+    def refused(resp):
+        detail = resp.json()["detail"] if resp.status_code == 422 else {}
+        return detail.get("code") == "country_xi" and "GB" in detail.get("message", "")
+
+    assert refused(client.post(f"{BASE}/rules", headers=headers, json={**body, "country": "xi"}))
+    future = client.post(f"{BASE}/rules", headers=headers, json={**body, "country": "GB", "valid_from": _later(days=1)})
+    assert refused(client.put(f"{BASE}/rules/{future.json()['id']}", headers=headers, json={"country": "XI"}))
+    current = client.post(f"{BASE}/rules", headers=headers, json={**body, "country": "GB"}).json()
+    assert refused(client.post(
+        f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={"country": "XI", "valid_from": _later(hours=1)}
+    ))
+    assert client.get(f"{BASE}/rules/{future.json()['id']}", headers=headers).json()["country"] == "GB"
+
+
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
     classes = {c["code"]: c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json()}
     assert client.delete(f"{BASE}/classes/{classes['standard']}", headers=headers).status_code == 409

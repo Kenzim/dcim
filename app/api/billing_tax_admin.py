@@ -287,6 +287,9 @@ def _check_rule(db: Session, values: dict, valid_from: datetime) -> None:
     # A rule holds on [valid_from, valid_to): an end at or before the start leaves it empty.
     if valid_to is not None and _aware(valid_to) <= _aware(valid_from):
         raise _unprocessable("valid_to_not_after_valid_from", "valid_to must be after valid_from")
+    # Buyers in Northern Ireland are matched as GB, so a rule for XI would never apply.
+    if values.get("country") == "XI":
+        raise _unprocessable("country_xi", "Northern Ireland (XI) is taxed by GB rules; use country GB")
     if values.get("tax_class_id") is not None and db.get(TaxClass, values["tax_class_id"]) is None:
         raise _unprocessable("unknown_tax_class", "Unknown tax class")
     jurisdiction = values.get("jurisdiction") or JURISDICTION_ANY
