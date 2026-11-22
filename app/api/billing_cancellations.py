@@ -9,6 +9,7 @@ behalf, ``POST .../{id}/withdraw``, and ``GET``/``PUT``
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Literal, Optional
 from uuid import uuid4
 
@@ -108,6 +109,18 @@ def _withdraw(db: Session, request_id: int, actor_user_id: Optional[int]) -> dic
     return result
 
 
+def _reseller_key(reseller_id: int, key: Optional[str]) -> Optional[str]:
+    """A reseller's Idempotency-Key, scoped to that reseller.
+
+    Keys are unique across all requests, so a key another reseller used is a
+    different key here, and its existence is never revealed. The header is
+    hashed so the stored key stays within 128 characters.
+    """
+    if key is None or not key.strip():
+        return None
+    return f"reseller:{int(reseller_id)}:{hashlib.sha256(key.strip().encode()).hexdigest()}"
+
+
 def _request(db: Session, body: CancellationBody, *, actor_user_id: Optional[int], source: str, key: Optional[str]) -> dict:
     try:
         request = CancellationService.request(
@@ -188,7 +201,9 @@ def reseller_request_cancellation(
         CancellationService.check_owner(db, body.service_id, reseller_id=reseller.id)
     except CancellationError as exc:
         raise _http(exc) from exc
-    return _request(db, body, actor_user_id=reseller.user_id, source="reseller", key=idempotency_key)
+    return _request(
+        db, body, actor_user_id=reseller.user_id, source="reseller", key=_reseller_key(reseller.id, idempotency_key)
+    )
 
 
 @reseller_router.post("/cancellation-requests/{request_id}/withdraw")

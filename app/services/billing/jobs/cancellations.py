@@ -37,6 +37,37 @@ JOB = "cancellations"
 AUDIT_COMPLETED = "billing.cancellation_completed"
 
 
+def _review_paid_cancelled_periods(db: Session, service_id: int, effective_at) -> list[int]:
+    """Record a refund review for each paid cycle invoice of a period starting at or after ``effective_at``.
+
+    An invoice generated ahead stays payable until the cancellation takes
+    effect; money paid for a period the client will not have needs a
+    refund decision by staff.
+    """
+    from app.models.reseller import BillingCycle, Invoice, InvoicePurpose, InvoiceStatus
+    from app.services.billing.order_refunds import record_refund_review
+
+    invoices = db.execute(
+        select(Invoice)
+        .join(BillingCycle, BillingCycle.invoice_id == Invoice.id)
+        .where(
+            Invoice.service_id == service_id,
+            Invoice.purpose == InvoicePurpose.CYCLE_CHARGE,
+            Invoice.status == InvoiceStatus.PAID,
+        )
+        .order_by(Invoice.id)
+    ).scalars()
+    reviewed = []
+    for invoice in invoices:
+        if invoice.due_at is None or utc(invoice.due_at) < effective_at:
+            continue
+        record_refund_review(
+            db, invoice=invoice, amount_cents=int(invoice.amount_cents), reason="paid_period_cancelled"
+        )
+        reviewed.append(int(invoice.id))
+    return reviewed
+
+
 class CancellationsJob:
     name = JOB
     setting_keys: tuple[str, ...] = ("billing_job_tracks_cancellations",)
@@ -114,6 +145,9 @@ class CancellationsJob:
             cancelled = cancel_unpaid_invoices(
                 db, request.service_id, from_period_start=utc(request.effective_at), cause="cancellation_request"
             )
+            reviewed = _review_paid_cancelled_periods(db, request.service_id, utc(request.effective_at))
+            if reviewed:
+                current.detail["refund_review_invoice_ids"] = reviewed
         request.status = CancellationStatus.COMPLETED
         request.completed_at = run.now
         AuditService.log(

@@ -53,6 +53,8 @@ PHASE2_TYPES = (
     "billing_job_needs_review",
     "billing_job_stale",
     "billing_nonpayment_termination_unsettled",
+    "billing_nonpayment_suspension_failed",
+    "billing_nonpayment_suspended_paid",
     "billing_email_template_render_failed",
 )
 _numbers = iter(range(9000, 100000))

@@ -64,6 +64,24 @@ TEMPLATE_GATED_EVENTS = frozenset(
 _STATUS_ACTIVITY_ACTIONS = ("suspend", "unsuspend", "update_service_status")
 
 
+# The alerts that report a client service stuck part way through non-payment
+# handling. The suspension and termination jobs cannot go live while any is
+# off: each detects a state no job will leave on its own.
+STUCK_SERVICE_ALERTS = (
+    "billing_nonpayment_suspension_failed",
+    "billing_nonpayment_suspended_paid",
+    "billing_nonpayment_termination_unsettled",
+)
+
+
+def stuck_service_alerts_problems(db: Session) -> list[str]:
+    """One precondition problem per alert of ``STUCK_SERVICE_ALERTS`` that is not enabled."""
+    from app.services.alerting.catalogue import effective_settings
+
+    effective = effective_settings(db)
+    return [f"the {key} alert is not enabled" for key in STUCK_SERVICE_ALERTS if not effective[key].enabled]
+
+
 def utc(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
@@ -152,9 +170,17 @@ def policy_config(db: Session, *, columns: tuple[str, ...], exclude_scope: Optio
 
 
 def unpaid_cycle_invoices(
-    db: Session, billing_id: int, *, exclude_invoice_id: Optional[int] = None
+    db: Session,
+    billing_id: int,
+    *,
+    exclude_invoice_id: Optional[int] = None,
+    due_by: Optional[datetime] = None,
 ) -> list[Invoice]:
-    """The billing's unpaid cycle invoices that still have a balance, earliest due first."""
+    """The billing's unpaid cycle invoices that still have a balance, earliest due first.
+
+    ``due_by`` keeps only those due at or before it (what the client owes
+    now, not an invoice generated ahead).
+    """
     statement = (
         select(Invoice)
         .join(BillingCycle, BillingCycle.invoice_id == Invoice.id)
@@ -168,11 +194,30 @@ def unpaid_cycle_invoices(
     )
     if exclude_invoice_id is not None:
         statement = statement.where(Invoice.id != exclude_invoice_id)
+    if due_by is not None:
+        statement = statement.where(Invoice.due_at <= due_by)
     return [
         invoice
         for invoice in db.execute(statement).scalars()
         if InvoiceService.balance(db, invoice).remaining_cents > 0
     ]
+
+
+def period_being_cancelled(db: Session, invoice: Invoice) -> bool:
+    """Whether ``invoice`` is a cycle invoice for a period at or after its billing's ``cancel_at``.
+
+    Such an invoice (generated ahead before an end-of-period cancellation)
+    is cancelled when the cancellation takes effect; until then it gets no
+    reminder and no late fee.
+    """
+    if invoice.purpose != InvoicePurpose.CYCLE_CHARGE or invoice.due_at is None:
+        return False
+    cancel_at = db.scalar(
+        select(ServiceBilling.cancel_at)
+        .join(BillingCycle, BillingCycle.service_billing_id == ServiceBilling.id)
+        .where(BillingCycle.invoice_id == invoice.id)
+    )
+    return cancel_at is not None and utc(invoice.due_at) >= utc(cancel_at)
 
 
 def cycle_billing_id(db: Session, invoice_id: int) -> Optional[int]:
@@ -194,17 +239,34 @@ def action_row(db: Session, job: str, subject_key: str) -> Optional[BillingJobAc
 # ---------------------------------------------------------------- suspensions
 
 
-def latest_suspension_claim(db: Session, service_id: int) -> Optional[BillingJobAction]:
-    return db.execute(
+def latest_suspension_claim(
+    db: Session, service_id: int, *, in_flight: bool = False, for_share: bool = False, settled: bool = False
+) -> Optional[BillingJobAction]:
+    """The service's latest ``done`` suspension claim.
+
+    With ``in_flight`` a ``claimed`` one counts too; with ``settled`` also
+    ``failed`` and ``needs_review``, so the latest claim of any status.
+    ``for_share`` makes it a locking read (latest committed row) that also
+    refreshes the session's copy.
+    """
+    statuses = [BillingJobActionStatus.DONE]
+    if in_flight:
+        statuses.append(BillingJobActionStatus.CLAIMED)
+    if settled:
+        statuses += [BillingJobActionStatus.FAILED, BillingJobActionStatus.NEEDS_REVIEW]
+    statement = (
         select(BillingJobAction)
         .where(
             BillingJobAction.job == SUSPENSION_JOB,
             BillingJobAction.subject_key.like(f"service:{int(service_id)}:suspend:%"),
-            BillingJobAction.status == BillingJobActionStatus.DONE,
+            BillingJobAction.status.in_(statuses),
         )
         .order_by(BillingJobAction.id.desc())
         .limit(1)
-    ).scalar_one_or_none()
+    )
+    if for_share:
+        statement = statement.with_for_update(read=True).execution_options(populate_existing=True)
+    return db.execute(statement).scalar_one_or_none()
 
 
 def suspension_marks(db: Session) -> dict[str, int]:
@@ -222,11 +284,17 @@ def suspension_marks(db: Session) -> dict[str, int]:
 def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobAction]) -> tuple[bool, str]:
     """Whether the service's current suspension is the one ``claim`` records.
 
-    The claim must have suspended the service itself, and nothing may have
-    changed the service's status since: no staff or WHMCS status change in
-    the service activity log, no unsuspension by billing after the claim, and
-    no chargeback on an invoice of the service. "Since" means rows with ids
-    above the marks the claim recorded (``suspension_marks``). Returns
+    A claim the job finished must have suspended the service itself; a
+    claim an admin settled (``done`` or ``failed`` from ``needs_review``,
+    ``detail.resolution``) counts from its settlement: whatever staff did to
+    the service before settling it was part of handling the job's action. A
+    claim still in ``needs_review`` is not ours (the ``billing_job_needs_review``
+    alert lists it). Then nothing may have changed the service's status
+    since: no staff or WHMCS status change in the service activity log, no
+    unsuspension by billing, and no chargeback on an invoice of the service.
+    "Since" means rows with ids above the marks the job recorded
+    (``suspension_marks``), or, for a settled claim, above the marks taken
+    when it was settled (``resolution.marks``). Returns
     ``(ours, reason)``.
     """
     from app.models.refund import Refund, RefundReason
@@ -234,17 +302,25 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
 
     if claim is None:
         return False, "no_suspension_by_job"
+    if claim.status == BillingJobActionStatus.NEEDS_REVIEW:
+        return False, "needs_review"
     detail = claim.detail or {}
-    if not detail.get("suspended"):
+    resolution = detail.get("resolution") or {}
+    settled = bool(resolution) and "marks" in resolution
+    if not settled and not detail.get("suspended"):
         return False, "suspended_before_job"
-    marks = detail.get("marks") or {}
+    marks = (resolution.get("marks") if settled else detail.get("marks")) or {}
+
+    def since(model, mark):
+        return model.id > int(marks.get(mark, 0))
+
     staff_change = db.scalar(
         select(
             exists().where(
                 ServerActivity.service_id == int(service_id),
                 ServerActivity.event_type == ServerActivityEventType.SERVICE,
                 ServerActivity.action.in_(_STATUS_ACTIVITY_ACTIONS),
-                ServerActivity.id > int(marks.get("activity_id", 0)),
+                since(ServerActivity, "activity_id"),
             )
         )
     )
@@ -256,7 +332,7 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
                 UserAuditEvent.action == AUDIT_UNSUSPENDED,
                 UserAuditEvent.resource_type == "service",
                 UserAuditEvent.resource_id == str(int(service_id)),
-                UserAuditEvent.id > int(marks.get("audit_id", 0)),
+                since(UserAuditEvent, "audit_id"),
             )
         )
     )
@@ -269,7 +345,7 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
                     Refund.invoice_id == Invoice.id,
                     Invoice.service_id == int(service_id),
                     Refund.reason == RefundReason.DISPUTE,
-                    Refund.id > int(marks.get("refund_id", 0)),
+                    since(Refund, "refund_id"),
                 )
             )
         )

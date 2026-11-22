@@ -345,7 +345,7 @@ class NonpaymentTerminationJob:
     def live_preconditions(self, db: Session) -> list[str]:
         """Unmet preconditions for ``live``: a policy that terminates, and both email templates."""
         from app.models.billing_jobs import BillingNonpaymentPolicy
-        from app.services.billing.jobs.nonpayment import template_enabled
+        from app.services.billing.jobs.nonpayment import stuck_service_alerts_problems, template_enabled
 
         problems = []
         found = db.scalar(
@@ -361,4 +361,5 @@ class NonpaymentTerminationJob:
         for event in (SERVICE_TERMINATION_WARNING, SERVICE_TERMINATED):
             if not template_enabled(db, event):
                 problems.append(f"the {event} email template is not enabled")
+        problems.extend(stuck_service_alerts_problems(db))
         return problems

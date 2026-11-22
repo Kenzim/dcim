@@ -219,27 +219,30 @@ class NonpaymentSuspensionJob:
             )
             db.commit()
             return "failed"
-        run.finish(
-            db, subject_key, BillingJobActionStatus.DONE.value,
-            {**detail, "suspended": bool(changed), "marks": suspension_marks(db)},
-        )
+        service_name = service.name
+        # The lifecycle's change commits on its own. The claim stays
+        # ``claimed`` until the step below, and ``unsuspend_after_payment``
+        # leaves a service with a claimed suspension to this job.
+        db.commit()
+        settled = self._finish_under_lock(db, run, subject_key, detail, changed)
         AuditService.log(
             db,
             action="billing.nonpayment_suspended",
             resource_type="service",
             resource_id=str(service_id),
             billing_account_id=account_id,
-            metadata={**detail, "suspended": bool(changed)},
+            metadata={**detail, "suspended": bool(changed), "settled_during_suspension": settled is not None},
         )
-        if changed:
+        email_invoice = (detail["invoice_id"], invoice_number) if settled is None else settled
+        if changed and email_invoice != (None, None):
             send_billing_email(
                 db,
                 event=SERVICE_SUSPENDED_NONPAYMENT,
                 idempotency_key=subject_key,
                 variables={
-                    "service_name": service.name,
-                    "invoice_id": detail["invoice_id"],
-                    "invoice_number": invoice_number,
+                    "service_name": service_name,
+                    "invoice_id": email_invoice[0],
+                    "invoice_number": email_invoice[1],
                 },
                 billing_account_id=account_id,
                 reseller_id=None,
@@ -247,16 +250,73 @@ class NonpaymentSuspensionJob:
                 related_id=str(service_id),
             )
         db.commit()
+        if changed and settled == (None, None):
+            self._lift(db, service_id, lifecycle)
         return "done"
+
+    @staticmethod
+    def _finish_under_lock(
+        db: Session, run: JobRun, subject_key: str, detail: dict[str, Any], changed: Any
+    ) -> Optional[tuple[Any, Any]]:
+        """Mark the claim done and re-check the invoice in one transaction under the service billing lock.
+
+        Settlement takes the same lock (``BillingLocks.for_invoice`` of a
+        cycle invoice) before ``unsuspend_after_payment`` reads the claim, so
+        a payment either committed before this step, and is seen here, or
+        waits for it and then sees the ``done`` claim. The lock is the first
+        statement of a fresh transaction, so the reads after it are not from
+        an older snapshot.
+
+        Returns None when the invoice is still unpaid. When it was settled
+        meanwhile: ``(id, number)`` of the earliest other unpaid cycle
+        invoice, which keeps the billing ``suspended_nonpayment``, or
+        ``(None, None)`` when none is left and the suspension is to be lifted.
+        """
+        from app.services.billing_locks import BillingLocks
+
+        billing = BillingLocks.service_billing(db, int(detail["billing_id"]))
+        run.finish(
+            db, subject_key, BillingJobActionStatus.DONE.value,
+            {**detail, "suspended": bool(changed), "marks": suspension_marks(db)},
+        )
+        invoice = BillingLocks.for_invoice(db, int(detail["invoice_id"]))
+        if (
+            invoice is not None
+            and invoice.status in UNPAID_STATUSES
+            and InvoiceService.balance(db, invoice, for_update=True).remaining_cents > 0
+        ):
+            return None
+        remaining = unpaid_cycle_invoices(db, int(detail["billing_id"])) if billing is not None else []
+        if remaining:
+            billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+            db.flush()
+            first = remaining[0]
+            return first.id, first.number_display or first.invoice_number
+        return None, None
+
+    @staticmethod
+    def _lift(db: Session, service_id: int, lifecycle: Any) -> None:
+        """Lift a suspension whose invoice was paid during the provider call, as a payment would."""
+        from app.services.billing.settlement import _audit_unsuspend_failure
+        from app.services.billing.settlement_subscribers import unsuspend_paid_service
+
+        try:
+            unsuspend_paid_service(db, service_id, lifecycle=lifecycle)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - the suspension is recorded; staff see the failure
+            db.rollback()
+            logger.exception("Unsuspension of service %s paid during its suspension failed", service_id)
+            _audit_unsuspend_failure(db, service_id, exc)
 
     def live_preconditions(self, db: Session) -> list[str]:
         """Unmet preconditions for ``live``: a retail policy that suspends, and its email template."""
         from app.models.billing_jobs import BillingNonpaymentPolicy, NonpaymentPolicyScope
-        from app.services.billing.jobs.nonpayment import template_enabled
+        from app.services.billing.jobs.nonpayment import stuck_service_alerts_problems, template_enabled
 
         problems = []
         if not template_enabled(db, SERVICE_SUSPENDED_NONPAYMENT):
             problems.append(f"the {SERVICE_SUSPENDED_NONPAYMENT} email template is not enabled")
+        problems.extend(stuck_service_alerts_problems(db))
         count = db.scalar(
             select(BillingNonpaymentPolicy.id)
             .where(

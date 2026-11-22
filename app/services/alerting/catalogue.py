@@ -508,6 +508,26 @@ _SPECS = (
         enabled_by_default=False,
     ),
     AlertTypeSpec(
+        "billing_nonpayment_suspension_failed",
+        "Suspended for non-payment but still running",
+        "A client service's billing is suspended for non-payment while the service itself is not "
+        "suspended, usually because the power-off failed.",
+        _W,
+        "service",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_nonpayment_suspended_paid",
+        "Suspended for non-payment with nothing overdue",
+        "A client service is suspended for non-payment, yet none of its cycle invoices is unpaid and due, and "
+        "nothing will unsuspend it automatically.",
+        _W,
+        "service",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
         "billing_job_stale",
         "Billing job overdue",
         "A live billing job has not run on schedule for more than twice its cadence.",

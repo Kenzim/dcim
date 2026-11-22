@@ -196,29 +196,61 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
     A suspension the job made that something else has since taken over is
     left in place and audited for staff.
     """
-    from app.models.reseller import ServiceBilling, ServiceBillingStatus
-    from app.models.service import ServiceStatus
+    from sqlalchemy import select
+
+    from app.models.billing_jobs import BillingJobActionStatus
+    from app.models.service import Service, ServiceStatus
     from app.services.billing.jobs.nonpayment import (
         cycle_billing_id,
         latest_suspension_claim,
         suspension_is_ours,
         unpaid_cycle_invoices,
     )
+    from app.services.billing_locks import BillingLocks
 
     invoice = event.invoice
     billing_id = cycle_billing_id(db, invoice.id)
-    billing = db.get(ServiceBilling, billing_id) if billing_id is not None else None
+    # Settlement holds this lock already (``for_invoice``); the job marks its
+    # claim done and re-checks the invoice under it. The claim and the
+    # service status are locking reads, so they show what committed before
+    # the lock was granted, not this transaction's older snapshot.
+    billing = BillingLocks.service_billing(db, billing_id) if billing_id is not None else None
     if billing is None or billing.reseller_id is not None:
         return
-    service = billing.service
-    if service is None or service.status != ServiceStatus.SUSPENDED:
+    from app.models.reseller import ServiceBillingStatus
+
+    claim = latest_suspension_claim(db, billing.service_id, in_flight=True, for_share=True, settled=True)
+    if claim is not None and claim.status == BillingJobActionStatus.CLAIMED:
+        # The job is between its claim and its provider call's end: it sees
+        # this payment when it re-checks the invoice and lifts the suspension.
         return
-    claim = latest_suspension_claim(db, service.id)
+    status = db.execute(
+        select(Service.status)
+        .where(Service.id == billing.service_id)
+        .with_for_update(read=True)
+    ).scalar_one_or_none()
+    owed = unpaid_cycle_invoices(db, billing.id, exclude_invoice_id=invoice.id)
+    if status != ServiceStatus.SUSPENDED:
+        # A suspension whose power-off failed leaves the service running and
+        # the billing suspended_nonpayment: with nothing owed the billing
+        # is active again.
+        if status is not None and billing.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT and not owed:
+            billing.status = ServiceBillingStatus.ACTIVE
+            db.flush()
+        return
+    service = billing.service
     if claim is None:
         return
     ours, reason = suspension_is_ours(db, service.id, claim)
     if not ours:
         from app.services.audit_service import AuditService
+
+        # Settlement has set the billing active; the service stays down, so
+        # the billing keeps saying why and ``billing_nonpayment_suspended_paid``
+        # reports it.
+        if billing.status != ServiceBillingStatus.CANCELLED:
+            billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+            db.flush()
 
         AuditService.log(
             db,
@@ -232,9 +264,12 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
         return
     if billing.status == ServiceBillingStatus.CANCELLED:
         return
-    if unpaid_cycle_invoices(db, billing.id, exclude_invoice_id=invoice.id):
-        billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
-        db.flush()
+    # The billing stays suspended_nonpayment until the service is lifted:
+    # ``unsuspend_paid_service`` sets it active, and if that fails the
+    # ``billing_nonpayment_suspended_paid`` alert reports the service.
+    billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+    db.flush()
+    if owed:
         return
     settlement.defer_unsuspension(db, int(service.id))
 
@@ -259,15 +294,21 @@ def unsuspend_paid_service(db: Session, service_id: int, *, lifecycle=None) -> b
     from app.services.commerce_lifecycle_service import run_lifecycle_sync
     from app.services.service_lifecycle import ServiceLifecycle
 
-    service = db.get(Service, service_id)
+    # Re-read even when the session already holds these rows: they may have
+    # been loaded from the settlement transaction's snapshot.
+    service = db.execute(
+        select(Service).where(Service.id == service_id).execution_options(populate_existing=True)
+    ).scalar_one_or_none()
     billing = db.execute(
-        select(ServiceBilling).where(ServiceBilling.service_id == service_id)
+        select(ServiceBilling)
+        .where(ServiceBilling.service_id == service_id)
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if service is None or billing is None or billing.reseller_id is not None:
         return False
     if service.status != ServiceStatus.SUSPENDED or billing.status == ServiceBillingStatus.CANCELLED:
         return False
-    ours, _ = suspension_is_ours(db, service_id, latest_suspension_claim(db, service_id))
+    ours, _ = suspension_is_ours(db, service_id, latest_suspension_claim(db, service_id, settled=True))
     if not ours or unpaid_cycle_invoices(db, billing.id):
         return False
     runner = lifecycle or ServiceLifecycle()

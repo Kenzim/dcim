@@ -72,6 +72,14 @@ class FakeLifecycle:
         db.flush()
         return True
 
+    async def unsuspend(self, db, service, *, reason):
+        self.calls.append(("unsuspend", service.id))
+        if service.status != ServiceStatus.SUSPENDED:
+            return False
+        service.status = ServiceStatus.ACTIVE
+        db.flush()
+        return True
+
 
 @pytest.fixture
 def db_session(tmp_path, monkeypatch):
@@ -341,6 +349,76 @@ def test_payment_unsuspends_after_commit(db_session, env, monkeypatch):
     assert _service(db_session, billing).status == ServiceStatus.ACTIVE
     assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.ACTIVE
     assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspended").count() == 1
+
+
+def _pay_elsewhere(db_session, invoice_id):
+    with sessionmaker(bind=db_session.get_bind(), autoflush=False)() as other:
+        _pay(other, other.get(Invoice, invoice_id))
+
+
+def _emails(db_session, event):
+    from app.models.commerce_email import EmailMessage
+
+    return db_session.query(EmailMessage).filter_by(event=event).count()
+
+
+def test_payment_during_the_provider_call_lifts_the_suspension(db_session, env):
+    _, billing, lifecycle, job = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    lifecycle.on_suspend = lambda db, service: _pay_elsewhere(db_session, invoice.id)
+
+    assert run_job(db_session, job, make_run(JOB)) == {_key(billing, invoice): "done"}
+
+    assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.PAID
+    assert lifecycle.calls == [("suspend", billing.service_id), ("unsuspend", billing.service_id)]
+    assert _service(db_session, billing).status == ServiceStatus.ACTIVE
+    assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.ACTIVE
+    claim = db_session.query(BillingJobAction).one()
+    assert claim.status == BillingJobActionStatus.DONE and claim.detail["suspended"] is True
+    assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspended").count() == 1
+    assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspend_skipped").count() == 0
+    assert _emails(db_session, "service_suspended_nonpayment") == 0
+    # Nothing is left for a later run.
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(hours=1))) == {}
+
+
+def test_payment_after_the_service_is_suspended_but_before_the_claim_is_done_lifts_it(db_session, env, monkeypatch):
+    from app.services.billing.jobs import suspension
+
+    _, billing, lifecycle, job = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    real_finish = suspension.NonpaymentSuspensionJob._finish_under_lock
+
+    def pay_first(db, *args):
+        # The service is suspended and committed; the claim is still claimed.
+        assert _service(db_session, billing).status == ServiceStatus.SUSPENDED
+        _pay_elsewhere(db_session, invoice.id)
+        return real_finish(db, *args)
+
+    monkeypatch.setattr(suspension.NonpaymentSuspensionJob, "_finish_under_lock", staticmethod(pay_first))
+    assert run_job(db_session, job, make_run(JOB)) == {_key(billing, invoice): "done"}
+    assert _service(db_session, billing).status == ServiceStatus.ACTIVE
+    # The payment left the in-flight suspension to the job, without a skip for staff.
+    assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspend_skipped").count() == 0
+    assert _emails(db_session, "service_suspended_nonpayment") == 0
+
+
+def test_payment_during_the_provider_call_keeps_the_suspension_while_another_cycle_is_unpaid(db_session, env):
+    _, billing, lifecycle, job = env
+    first = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    second = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=10))
+    lifecycle.on_suspend = lambda db, service: _pay_elsewhere(db_session, first.id)
+
+    assert run_job(db_session, job, make_run(JOB)) == {_key(billing, first): "done"}
+
+    assert _service(db_session, billing).status == ServiceStatus.SUSPENDED
+    assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.SUSPENDED_NONPAYMENT
+    assert lifecycle.calls == [("suspend", billing.service_id)]
+    # The suspension stands for the other cycle, so its email is sent.
+    assert _emails(db_session, "service_suspended_nonpayment") == 1
+    # Paying the second invoice lifts it through the payment path.
+    _pay(db_session, db_session.get(Invoice, second.id))
+    assert _service(db_session, billing).status == ServiceStatus.ACTIVE
 
 
 def test_another_unpaid_invoice_keeps_the_service_suspended(db_session, env):
