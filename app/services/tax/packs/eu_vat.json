@@ -48,17 +48,31 @@
       {
         "title": "European Commission, Taxes in Europe Database (TEDB)",
         "url": "https://ec.europa.eu/taxation_customs/tedb/#/vat-search"
+      },
+      {
+        "title": "Financial Administration of the Slovak Republic, Sadzby dane (23%, 19%, 5%)",
+        "url": "https://www.financnasprava.sk/sk/podnikatelia/dane/dan-z-pridanej-hodnoty/sadzby-dane"
+      },
+      {
+        "title": "Financial Administration of the Slovak Republic, Guide 1/DPH/2026/I on the VAT amendments from 1 January 2027 (no rate change)",
+        "url": "https://www.financnasprava.sk/_img/pfsedit/Dokumenty_PFS/Zverejnovanie_dok/Dane/Novinky_leg/Nepriame_dane/2026/2026.01.14_001_DPH_2026_I.pdf"
+      },
+      {
+        "title": "Council Directive (EU) 2025/516 (ViDA), Article 2(4): Article 59c threshold amended from 1 January 2027",
+        "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32025L0516"
       }
     ],
     "unconfirmed": [
       "No change of a standard rate scheduled after 2026-11-22 was found. This was not confirmed against the Commission's TEDB, whose search page could not be read.",
-      "The start dates of the current standard rates come from general knowledge, not from the sources above. They have no effect on apply, which refuses past dates."
+      "The start dates of the current standard rates come from general knowledge, not from the sources above. They have no effect on apply, which refuses past dates.",
+      "Slovakia on 1 January 2027: a secondary source lists a 'VAT rates update' without detail; the Financial Administration's guide on the amendments from that date describes invoicing, reporting and payment measures and no rate change (guide not read in full). The pack keeps 23%."
     ],
     "assumptions": [
       "Only standard rates: everything Rackflow sells is treated as standard rated electronically supplied services (owner question 8).",
       "Rows ending _seller_state have no country and a priority of -10: under a member state's domestic registration they charge that state's rate to a buyer in another member state who is not reverse charged (the seller below the 10,000 euro threshold without OSS, appendix C). The threshold itself is not tracked.",
       "Regional rates (Azores, Madeira) and territories outside the EU VAT area (for example the Canary Islands, Ceuta, Melilla, the Aland Islands, Mount Athos and the French overseas departments) are not covered: the buyer's billing country decides.",
-      "The wording of the legal notes needs an adviser's confirmation (owner question 10)."
+      "The wording of the legal notes needs an adviser's confirmation (owner question 10).",
+      "The 10,000 euro threshold behind the _seller_state rows is amended by Directive 2025/516 from 1 January 2027; as read, the change concerns distance sales of goods only. The operator must check the national transposition (docs/billing-tax-packs.md 1.4)."
     ]
   },
   "legal_notes": {
