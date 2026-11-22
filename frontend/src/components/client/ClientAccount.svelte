@@ -208,16 +208,18 @@
           <Spinner />
           <span>Checking your VAT number with the tax authority. This can take a few seconds…</span>
         {:else}
-          <Badge variant={taxStatus.variant} caps={false}>{taxStatus.label}</Badge>
-          <span>
-            {taxStatus.text}
-            {#if profile.tax_id_checked_at && profile.tax_id}
-              Last checked {new Date(profile.tax_id_checked_at).toLocaleString()}.
-            {/if}
-            {#if taxChanged && profile.tax_id}
-              It will be checked when you save.
-            {/if}
-          </span>
+          {#if taxChanged && profile.tax_id}
+            <Badge variant="muted" caps={false}>Not checked</Badge>
+            <span>Your number will be checked with the tax authority when you save.</span>
+          {:else}
+            <Badge variant={taxStatus.variant} caps={false}>{taxStatus.label}</Badge>
+            <span>
+              {taxStatus.text}
+              {#if profile.tax_id_checked_at && profile.tax_id}
+                Last checked {new Date(profile.tax_id_checked_at).toLocaleString()}.
+              {/if}
+            </span>
+          {/if}
         {/if}
       </div>
       <Button on:click={saveProfile} disabled={working}>{checking ? 'Saving and checking…' : 'Save profile'}</Button>

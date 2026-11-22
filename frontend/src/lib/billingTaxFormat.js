@@ -161,9 +161,9 @@ export function cancellationSourceLabel(source, viewer = 'client') {
 
 export const cancellationInvoiceActionLabel = (action) => (
   action === 'cancel_unpaid'
-    ? 'Unpaid invoices for the period after cancellation are cancelled'
+    ? 'Cancels unpaid invoices for later periods'
     : action === 'keep'
-      ? 'Unpaid invoices are kept'
+      ? 'Keeps unpaid invoices'
       : humanise(action)
 );
 

@@ -143,16 +143,16 @@
 
 <style>
   .panel { margin-top: 16px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--portal-card-bg, var(--bg-primary)); padding: 16px; box-shadow: var(--shadow-sm); }
-  .bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .bar { display: flex; justify-content: space-between; align-items: center; gap: 12px 24px; flex-wrap: wrap; margin-bottom: 12px; }
   .bar :global(p) { margin: 0; font-size: 14px; color: var(--text-secondary); }
-  label { font-size: 13px; font-weight: 600; }
+  label { display: flex; align-items: center; font-size: 13px; font-weight: 600; }
   select { margin-left: 8px; padding: 6px 8px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); }
   .state { min-height: 120px; display: grid; place-items: center; gap: 12px; }
   .scroll { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 14px; }
   th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border-color); vertical-align: top; }
   th { font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); white-space: nowrap; }
-  td small { display: block; margin-top: 3px; max-width: 280px; color: var(--text-tertiary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+  td small { display: block; margin-top: 3px; max-width: 240px; color: var(--text-tertiary); font-size: 12px; }
   td a { color: var(--portal-accent); font-weight: 600; }
   .act { text-align: right; white-space: nowrap; }
   .empty { padding: 24px; color: var(--text-tertiary); text-align: center; }
