@@ -28,6 +28,7 @@ from app.models.reseller import (
 from app.models.service import Service
 from app.services.audit_service import AuditService
 from app.services.credit_ledger_service import CreditLedgerService
+from app.services.billing.email_events import send_payment_failed
 from app.services.email_message_service import EmailEvent, EmailMessageService
 from app.services.invoice_service import InvoiceService, engine_mode
 from app.services.payments.base import (
@@ -363,6 +364,7 @@ class PaymentWebhookService:
             InvoiceService.recompute(db, invoice, cause="payment_failed", payment=payment)
         elif invoice.status == InvoiceStatus.PENDING_ACTION:
             InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause="payment_failed")
+        send_payment_failed(db, payment)
 
     @staticmethod
     def _reverse_payment(
