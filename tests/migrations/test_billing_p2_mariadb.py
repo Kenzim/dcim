@@ -7,10 +7,10 @@ recreates every table in it and drops them again afterwards.
 ``.forgejo/workflows/billing-mariadb.yml`` runs it against a ``mariadb:11.8``
 service container.
 
-As in ``test_billing_p1_mariadb.py``, the schema is created from the models,
-stamped at the head and taken down to the phase 1 head through the real phase 2
-downgrades; then, with data present (two ``tax_rates`` rows, a billing profile,
-an email message), the chain is driven up, down and up again.
+The empty database is taken to the phase 1 head by the real ``alembic/env.py``
+upgrade; then, with data present (two ``tax_rates`` rows, a billing profile,
+an email message), the phase 2 chain is driven up, down and up again, and the
+head schema is compared with the models by alembic ``compare_metadata``.
 """
 
 import os
@@ -20,7 +20,6 @@ from decimal import Decimal
 
 import pytest
 import sqlalchemy as sa
-from alembic.migration import MigrationContext
 
 from tests.migrations import helpers
 
@@ -31,20 +30,15 @@ pytestmark = pytest.mark.skipif(not URL, reason="RACKFLOW_TEST_MARIADB_URL is no
 
 @pytest.fixture
 def mariadb():
-    import app.models  # noqa: F401
-    from app.core.database import Base, configure_engine
+    from app.core.database import configure_engine
 
     database = sa.engine.make_url(URL).database or ""
     if not database.startswith("rackflow_test"):
         pytest.fail(f"RACKFLOW_TEST_MARIADB_URL database {database!r} must start with rackflow_test")
     engine = configure_engine(sa.create_engine(URL, pool_pre_ping=True))
     _drop_all(engine)
-    Base.metadata.create_all(engine)
-    models_shape = _head_shape(engine)
-    with engine.begin() as conn:
-        MigrationContext.configure(conn).stamp(helpers.script(), helpers.HEAD)
     helpers.migrate(engine, helpers.P1_HEAD)
-    yield engine, models_shape
+    yield engine
     _drop_all(engine)
     engine.dispose()
 
@@ -65,23 +59,15 @@ def _foreign_keys(engine, table):
         }
 
 
-def _head_shape(engine):
-    """Columns and named foreign keys of every table the phase 2 chain creates or alters."""
-    return {
-        table: (helpers.columns(engine, table), _foreign_keys(engine, table))
-        for table in (*helpers.P2_COLUMNS, *helpers.P2_NEW_TABLES)
-    }
-
-
 def _shape(engine):
     return {
         table: (helpers.columns(engine, table), _foreign_keys(engine, table)) for table in helpers.P2_COLUMNS
     }
 
 
-def _assert_head(engine, models_shape):
+def _assert_head(engine):
     assert helpers.current(engine) == helpers.HEAD
-    assert _head_shape(engine) == models_shape
+    assert helpers.p2_schema_diffs(engine) == []
     rules = helpers.execute(
         engine,
         "SELECT legacy_tax_rate_id, rate_percent, priority, enabled, jurisdiction, rounding_point, rounding_rule, "
@@ -113,7 +99,7 @@ def _alembic_upgrade_head() -> subprocess.CompletedProcess:
 def test_failed_data_revision_keeps_the_last_completed_version_on_mariadb(mariadb):
     """``alembic upgrade head`` stopped by the seed check leaves ``alembic_version`` at
     the revision before it, so the rerun after the fix needs no manual stamp."""
-    engine, _models_shape = mariadb
+    engine = mariadb
     helpers.seed_p2_data(engine)
     helpers.execute(
         engine,
@@ -136,14 +122,14 @@ def test_failed_data_revision_keeps_the_last_completed_version_on_mariadb(mariad
 
 
 def test_p2_chain_up_down_up_on_mariadb(mariadb):
-    engine, models_shape = mariadb
+    engine = mariadb
     assert helpers.current(engine) == helpers.P1_HEAD
     assert not helpers.P2_NEW_TABLES & helpers.tables(engine)
     at_p1 = _shape(engine)
     helpers.seed_p2_data(engine)
 
     helpers.migrate(engine, helpers.HEAD)
-    _assert_head(engine, models_shape)
+    _assert_head(engine)
 
     # MariaDB enforces the policy scope check.
     for scope, product_id in (("product", 0), ("retail_default", 90)):
@@ -186,4 +172,4 @@ def test_p2_chain_up_down_up_on_mariadb(mariadb):
     assert helpers.scalar(engine, "SELECT tax_id FROM billing_profiles WHERE id = 41") == "GB123456789"
 
     helpers.migrate(engine, helpers.HEAD)
-    _assert_head(engine, models_shape)
+    _assert_head(engine)

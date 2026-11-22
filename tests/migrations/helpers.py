@@ -236,6 +236,83 @@ def scalar(engine: sa.Engine, sql: str, **params):
         return conn.execute(sa.text(sql), params).scalar()
 
 
+P2_TABLES = P2_NEW_TABLES | set(P2_COLUMNS)
+
+
+def _p2_object(obj, name, type_, _reflected, _compare_to) -> bool:
+    """Compare the tables phase 2 creates whole, and only the phase 2 columns of the tables it alters."""
+    if type_ == "table":
+        return name in P2_TABLES
+    table = getattr(obj, "table", None)
+    if table is None or table.name not in P2_TABLES:
+        return False
+    if table.name in P2_NEW_TABLES:
+        return True
+    added = P2_COLUMNS[table.name]
+    if type_ == "column":
+        return name in added
+    columns = {column.name for column in getattr(obj, "columns", ())}
+    if type_ == "foreign_key_constraint":
+        columns = {element.parent.name for element in obj.elements}
+    return bool(columns & added)
+
+
+def raw_p2_schema_diffs(engine: sa.Engine) -> list:
+    """``compare_metadata`` of the migrated phase 2 schema against the models."""
+    import app.models  # noqa: F401
+    import app.models.plugin  # noqa: F401  (server_plugins, which env.py's plugin_categories refers to)
+    from alembic.autogenerate import compare_metadata
+    from app.core.database import Base
+
+    with engine.connect() as conn:
+        context = MigrationContext.configure(
+            conn,
+            opts={"compare_type": True, "compare_server_default": True, "include_object": _p2_object},
+        )
+        return compare_metadata(context, Base.metadata)
+
+
+# Foreign keys the phase 2 revisions deliberately leave off the tables they alter on SQLite.
+SQLITE_OMITTED_FOREIGN_KEYS = {
+    ("billing_profiles", "fk_billing_profiles_tax_id_check_id"),
+    ("email_messages", "fk_email_messages_template_id"),
+    ("invoices", "fk_invoices_seller_registration_id"),
+    ("products", "fk_products_tax_class_id"),
+}
+
+
+def _is_reflection_noise(dialect: str, diff) -> bool:
+    if isinstance(diff, list) and len(diff) == 1:
+        diff = diff[0]
+    kind = diff[0]
+    if kind == "modify_default":
+        # MariaDB reflects server_default=func.now() as current_timestamp().
+        reflected, model = diff[5], diff[6]
+        reflected_text = str(getattr(getattr(reflected, "arg", None), "text", "")).lower()
+        return (
+            dialect in ("mysql", "mariadb")
+            and reflected_text in ("current_timestamp()", "current_timestamp")
+            and isinstance(getattr(model, "arg", None), sa.sql.functions.now)
+        )
+    if kind == "add_fk" and dialect == "sqlite":
+        constraint = diff[1]
+        return (constraint.table.name, constraint.name) in SQLITE_OMITTED_FOREIGN_KEYS
+    return False
+
+
+def p2_schema_diffs(engine: sa.Engine) -> list[str]:
+    """Differences between the migrated phase 2 schema and the models, minus known reflection noise.
+
+    Types, nullability, server defaults, indexes, unique keys and foreign keys
+    are compared on the tables phase 2 creates and on the columns it adds.
+    """
+    return [
+        repr(diff)
+        for diff in raw_p2_schema_diffs(engine)
+        if not _is_reflection_noise(engine.dialect.name, diff)
+    ]
+
+
 def load_revision(revision_id: str):
     """Import one revision file as a module (to reach its constants)."""
     import importlib.util
