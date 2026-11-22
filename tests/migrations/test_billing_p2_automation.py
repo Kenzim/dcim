@@ -68,6 +68,27 @@ def test_up_down_up_with_data(p2_engine_at):
     _assert_seeded(engine)
 
 
+@pytest.mark.parametrize(
+    "scope, product_id, allowed",
+    [
+        ("product", 0, False),
+        ("retail_default", 5, False),
+        ("reseller_default", 5, False),
+        ("product", -1, False),
+        ("product", 5, True),
+    ],
+)
+def test_policy_scope_matches_product_id(p2_engine_at, scope, product_id, allowed):
+    engine = p2_engine_at(REVISION)
+    sql = "INSERT INTO billing_nonpayment_policies (scope, product_id) VALUES (:s, :p)"
+    if allowed:
+        helpers.execute(engine, sql, s=scope, p=product_id)
+        assert helpers.scalar(engine, "SELECT COUNT(*) FROM billing_nonpayment_policies") == 3
+    else:
+        with pytest.raises(sa.exc.IntegrityError, match="ck_billing_nonpayment_policies_scope_product|CHECK"):
+            helpers.execute(engine, sql, s=scope, p=product_id)
+
+
 def test_unique_keys(p2_engine_at):
     engine = p2_engine_at(REVISION)
     with pytest.raises(sa.exc.IntegrityError):
