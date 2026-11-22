@@ -135,13 +135,11 @@ async def _await(awaitable: Any, timeout: float) -> Any:
 class _Call:
     """One provider call, shared by the caller and the thread that runs it."""
 
-    plugin_id: str
-    plugin_version: str
+    inst: PluginInstallation  # detached from its session
     manifest: Manifest
-    granted: set
     kind: str
+    provider_id: str
     method: str
-    fn: Any
     call_args: tuple  # the plugin's copies
     args: tuple  # billing's own arguments, which the answer is checked against
     seconds: float
@@ -152,6 +150,29 @@ class _Call:
     abandoned: bool = False  # set under _slots_lock when the caller stops waiting
     answer: Any = None
     failure: Optional[tuple[str, str, Optional[str]]] = None  # reason, message, traceback
+    refusal: Optional[str] = None  # a reason that is not the plugin's failure
+
+    @property
+    def plugin_id(self) -> str:
+        return self.inst.id
+
+
+class _Refused(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _method_of(call: _Call) -> Any:
+    """Load the plugin (its import and factories are plugin code, so this runs on the call's thread) and find the method."""
+    loaded = runtime.load_installed(call.inst)
+    if loaded is None:  # load_installed has already marked the plugin failed or changed
+        raise _Refused("not_loaded")
+    obj = loaded.handlers.providers.get((call.kind, call.provider_id))
+    fn = getattr(obj, call.method, None) if obj is not None else None
+    if not callable(fn):
+        raise _Refused("unknown_provider")
+    return fn
 
 
 def _take_slot(plugin_id: str) -> bool:
@@ -191,19 +212,20 @@ def _abandon(call: _Call) -> bool:
 
 def _execute(call: _Call) -> Any:
     """Run the plugin's method in a context of its own, validate the answer, then commit or roll back."""
+    fn = _method_of(call)
     ctx = PluginContext(
         new_session(),
         plugin_id=call.plugin_id,
-        plugin_version=call.plugin_version,
+        plugin_version=call.inst.version,
         manifest=call.manifest,
-        granted=set(call.granted),
+        granted=set(call.inst.granted_permissions or []),
         kind="provider",
     )
     ok = False
     try:
         token = kinds._bind_context(ctx)
         try:
-            value = call.fn(*call.call_args)
+            value = fn(*call.call_args)
             if inspect.isawaitable(value):
                 left = call.seconds - (time.monotonic() - call.started_at)
                 value = asyncio.run(_await(value, max(0.01, left)))
@@ -230,6 +252,8 @@ def _work(call: _Call) -> None:
         call.started_at = time.monotonic()
         call.started.set()
         call.answer = _execute(call)
+    except _Refused as exc:
+        call.refusal = exc.reason
     except kinds.InvalidAnswer as exc:
         call.failure = ("invalid_answer", f"gave an invalid answer: {_text_of(exc)}", None)
     except asyncio.TimeoutError:
@@ -248,8 +272,8 @@ def _fail(plugin_id: str, provider: str, reason: str, message: str, detail: Opti
     return ProviderUnavailable(reason)
 
 
-def _resolve(kind: str, plugin_id: str, provider_id: str, method: str):
-    """The installation, manifest entry and provider object to call, or ``ProviderUnavailable``."""
+def _resolve(kind: str, plugin_id: str, provider_id: str):
+    """The installation, manifest and manifest entry to call, or ``ProviderUnavailable``."""
     db = new_session()
     try:
         inst = db.get(PluginInstallation, plugin_id)
@@ -271,14 +295,7 @@ def _resolve(kind: str, plugin_id: str, provider_id: str, method: str):
         raise ProviderUnavailable("unknown_provider")
     if kinds.KINDS[kind].permission not in (inst.granted_permissions or []):
         raise ProviderUnavailable("not_permitted")
-    loaded = runtime.load_installed(inst)
-    if loaded is None:
-        raise ProviderUnavailable("not_loaded")
-    obj = loaded.handlers.providers.get((kind, provider_id))
-    fn = getattr(obj, method, None) if obj is not None else None
-    if not callable(fn):
-        raise ProviderUnavailable("unknown_provider")
-    return inst, manifest, provide, fn
+    return inst, manifest, provide
 
 
 def call_provider(kind: str, provider_ref: str, method: str, *args: Any, timeout_seconds: Optional[float] = None) -> Any:
@@ -306,7 +323,7 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
     plugin_id, separator, provider_id = (provider_ref or "").partition(":")
     if not separator or not plugin_id or not provider_id:
         raise ProviderUnavailable("unknown_provider")
-    inst, manifest, provide, fn = _resolve(kind, plugin_id, provider_id, method)
+    inst, manifest, provide = _resolve(kind, plugin_id, provider_id)
 
     if method in spec.metered and provide.rate_limit is not None:
         limit = provide.rate_limit
@@ -325,13 +342,11 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
     provider = f"{kind}:{provider_id}"
     label = f"provider {provider} {method}"
     call = _Call(
-        plugin_id=plugin_id,
-        plugin_version=inst.version,
+        inst=inst,
         manifest=manifest,
-        granted=set(inst.granted_permissions or []),
         kind=kind,
+        provider_id=provider_id,
         method=method,
-        fn=fn,
         call_args=call_args,
         args=args,
         seconds=seconds,
@@ -351,6 +366,8 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
     if not call.done.wait(max(0.0, left)) and _abandon(call):
         raise _fail(plugin_id, provider, "timeout", f"{label} timed out after {seconds:g}s")
     call.done.wait()  # finished just as the time ran out: the outcome is being stored
+    if call.refusal is not None:
+        raise ProviderUnavailable(call.refusal)
     if call.failure is not None:
         reason, message, detail = call.failure
         raise _fail(plugin_id, provider, reason, f"{label} {message}"[:500], detail)

@@ -19,7 +19,7 @@ from tests.plugin_host.test_provider_kinds import (  # noqa: F401 - shared helpe
 
 import pytest
 
-from app.plugin_host import health, kinds, providers
+from app.plugin_host import health, kinds, providers, runtime
 from app.plugin_host.providers import ProviderUnavailable, call_provider
 
 SAME_ID_CODE = """
@@ -289,6 +289,33 @@ def test_a_hung_provider_neither_delays_nor_blames_other_plugins(plugin_env, db_
     assert VALIDATOR not in providers._running and VALIDATOR not in providers._abandoned
     assert sessions and all(s.info.get("closed") for s in sessions), "every session, abandoned calls' too, is closed"
     assert validator_call("supports", "DE", "eu_vat") is True, "the slots are free again"
+
+
+SLOW_IMPORT_CODE = """
+import os
+import time
+
+if os.environ.get("RF_TEST_SLOW_IMPORT"):
+    time.sleep(3)
+""" + SAME_ID_CODE.replace('    plugin.provider("tax_provider", "same")(Tax)\n', "")
+
+
+def test_loading_the_plugin_counts_within_the_call_time_limit(plugin_env, db_session, monkeypatch):
+    manifest = base_manifest(
+        rackflow_api=">=1.1,<2",
+        permissions=["tax.validate_id"],
+        provides=[{"kind": "tax_id_validator", "id": "same", "label": "V", "id_types": ["eu_vat"], "timeout_seconds": 1}],
+    )
+    write_plugin(plugin_env, manifest, SLOW_IMPORT_CODE)
+    install(db_session, "demo_plugin")
+    runtime.reset_all()  # a fresh process: the first call imports the plugin
+    monkeypatch.setenv("RF_TEST_SLOW_IMPORT", "1")
+    started = time.monotonic()
+    with pytest.raises(ProviderUnavailable) as err:
+        call_provider("tax_id_validator", "demo_plugin:same", "supports", "DE", "eu_vat")
+    assert err.value.reason == "timeout"
+    assert time.monotonic() - started < 2.0
+    assert failures(db_session, "demo_plugin") == 1
 
 
 def test_two_kinds_with_the_same_provider_id_have_separate_rate_limits(plugin_env, db_session):
