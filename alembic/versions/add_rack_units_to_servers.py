@@ -22,7 +22,14 @@ def upgrade():
     if 'rack_units' not in columns:
         op.add_column('servers', sa.Column('rack_units', sa.Integer(), nullable=True))
         op.execute(sa.text("UPDATE servers SET rack_units = 1 WHERE rack_units IS NULL"))
-        op.alter_column('servers', 'rack_units', nullable=False, server_default=sa.text('1'))
+        op.alter_column(
+            'servers',
+            'rack_units',
+            existing_type=sa.Integer(),
+            existing_nullable=True,
+            nullable=False,
+            server_default=sa.text('1'),
+        )
 
 
 def downgrade():

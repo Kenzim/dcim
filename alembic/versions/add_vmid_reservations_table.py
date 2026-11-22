@@ -43,15 +43,19 @@ def upgrade() -> None:
     op.create_index("ix_vmid_reservations_vmid", "vmid_reservations", ["vmid"])
 
     # Backfill from existing VM placements where both cluster/vmid are set.
+    if conn.dialect.name in ("mysql", "mariadb"):
+        insert_head, insert_tail = "INSERT IGNORE INTO", ""
+    else:
+        insert_head, insert_tail = "INSERT INTO", "ON CONFLICT DO NOTHING"
     op.execute(
         sa.text(
-            """
-            INSERT INTO vmid_reservations (cluster_id, service_id, vmid)
+            f"""
+            {insert_head} vmid_reservations (cluster_id, service_id, vmid)
             SELECT sv.proxmox_cluster_id, sv.service_id, sv.proxmox_vmid
             FROM service_vm sv
             WHERE sv.proxmox_cluster_id IS NOT NULL
               AND sv.proxmox_vmid IS NOT NULL
-            ON CONFLICT DO NOTHING
+            {insert_tail}
             """
         )
     )
