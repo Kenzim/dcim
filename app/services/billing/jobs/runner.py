@@ -474,6 +474,8 @@ def change_mode(
         state.config_hash = config_hash(db, job)
         state.config_since = now
     elif target == BillingJobMode.DRY_RUN:
+        if previous != BillingJobMode.OFF:
+            raise JobModeError("a job goes to dry_run only from off; switch it off first")
         state.dry_run_since = now
         state.live_since = None
         state.config_hash = config_hash(db, job)

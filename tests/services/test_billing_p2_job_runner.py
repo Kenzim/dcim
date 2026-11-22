@@ -173,6 +173,18 @@ def test_mode_rules(factory, job, monkeypatch):
         _mode(factory, "off", T0 + timedelta(hours=3))
 
 
+def test_live_to_dry_run_is_refused(factory, job):
+    _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
+    with pytest.raises(runner.JobModeError, match="switch it off first"):
+        _mode(factory, "dry_run", T0 + timedelta(hours=1))
+    db = factory()
+    state = db.get(BillingJobState, job.name)
+    assert state.mode.value == "live" and state.live_since is not None
+    db.close()
+    _mode(factory, "off", T0 + timedelta(hours=1))
+    _mode(factory, "dry_run", T0 + timedelta(hours=2))
+
+
 # ------------------------------------------------------------------ watermark
 
 
