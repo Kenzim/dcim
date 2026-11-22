@@ -1290,21 +1290,28 @@ def tax_fx_rate_missing(db: Session, params: dict, now: datetime) -> list[Findin
 
     Silent unless tax is in ``shadow`` or ``v2``, a ``GB`` registration is in
     force and the operator currency is not GBP, so a system without UK tax
-    never sees it.
+    never sees it. Also raised, whatever the mode, for each month and
+    currency with paid invoices whose sterling VAT waits for the rate
+    (``sterling_conversion``).
     """
     del params
     from app.services.billing_shadow import billing_engine_mode
     from app.services.tax import exchange_rates
+    from app.services.tax.sterling_conversion import pending_months
 
+    pending = _pending_fx_findings(pending_months(db))
     if billing_engine_mode(db, "tax") not in ("shadow", "v2"):
-        return []
+        return pending
     now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     currency = exchange_rates.rates_needed(db, now)
     if currency is None:
-        return []
+        return pending
     current = exchange_rates.period_of(now)
     out = []
+    taken = {finding.resource_id for finding in pending}
     for period in exchange_rates.missing_periods(db, now):
+        if f"tax_exchange_rate:{period}:{currency}" in taken:
+            continue
         when = "this month" if period == current else "next month"
         out.append(
             Finding(
@@ -1319,7 +1326,31 @@ def tax_fx_rate_missing(db: Session, params: dict, now: datetime) -> list[Findin
                 details={"currency": currency, "period": period, "source": exchange_rates.SOURCE_HMRC},
             )
         )
-    return out
+    return pending + out
+
+
+def _pending_fx_findings(months: list[tuple[str, str, int]]) -> list[Finding]:
+    from app.services.tax import exchange_rates
+
+    return [
+        Finding(
+            "billing_tax_fx_rate_missing",
+            "system",
+            f"tax_exchange_rate:{period}:{currency}",
+            f"HMRC rate {currency} {period}",
+            f"{count} paid invoices in {currency} wait for the HMRC rate for {period} to show their sterling VAT",
+            "Proformas paid as VAT invoices in that month print their VAT in sterling once the rate is stored: "
+            "check the tax_exchange_rates_fetch job and the HMRC exchange rates plugin, or enter HMRC's "
+            "published rate under Billing, Tax, Exchange rates. Storing it fills those invoices.",
+            details={
+                "currency": currency,
+                "period": period,
+                "source": exchange_rates.SOURCE_HMRC,
+                "pending_invoices": count,
+            },
+        )
+        for period, currency, count in months
+    ]
 
 
 def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:

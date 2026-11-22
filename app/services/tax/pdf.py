@@ -54,7 +54,10 @@ SOURCE_LABELS = {"hmrc_monthly": "HMRC monthly exchange rate"}
 
 
 def sterling_line(invoice: Any, gbp_cents: Optional[int]) -> Optional[str]:
-    """The VAT total in sterling with the frozen rate, its month and its source (design 4.10)."""
+    """The VAT total in sterling with the frozen rate, its month and its source (design 4.10).
+
+    ``invoice`` is the invoice or the note whose frozen fields are printed.
+    """
     if gbp_cents is None or invoice.fx_rate is None:
         return None
     rate = format(Decimal(str(invoice.fx_rate)).normalize(), "f")
@@ -108,13 +111,12 @@ def for_invoice(db: Session, invoice: Any) -> Optional[TaxPdf]:
 def for_adjustment(db: Session, invoice: Any, note: Any) -> Optional[TaxPdf]:
     """A note on an engine-taxed invoice: its rows by rate, the invoice's legal notes, its reference.
 
-    A note on an invoice with a frozen sterling VAT converts its VAT at that
-    invoice's rate (design 4.10).
+    A note with a sterling VAT prints the figure frozen on it at issue
+    (design 4.10).
     """
     if invoice is None or not engine_taxed(invoice):
         return None
     from app.models.tax import InvoiceAdjustmentLineTax
-    from app.services.tax.exchange_rates import note_gbp_cents
 
     totals: dict[tuple, list[int]] = {}
     for row in db.execute(
@@ -138,8 +140,7 @@ def for_adjustment(db: Session, invoice: Any, note: Any) -> Optional[TaxPdf]:
     notes.append(_reference_note(db, invoice, kind, reference))
     title = snapshot.get("credit_note_title") if kind == "credit" else None
     summary_lines = _summary_lines(note.currency, summary)
-    note_tax = sum(v[1] for v in totals.values())
-    sterling = sterling_line(invoice, note_gbp_cents(invoice, note_tax)) if note_tax else None
+    sterling = sterling_line(note, note.tax_total_gbp_cents)
     if sterling:
         summary_lines.append(sterling)
     return TaxPdf(

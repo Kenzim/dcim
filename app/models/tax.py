@@ -435,7 +435,10 @@ class InvoiceAdjustmentLineTax(Base):
 
 class TaxExchangeRate(Base):
     """A published exchange rate for one month (design 4.10): ``units_per_gbp`` units of
-    ``currency`` buy one unit of ``base``. Rows are written once and never updated."""
+    ``currency`` buy one unit of ``base``. The rate is written once and never changed.
+
+    ``hand_entered`` marks a rate an administrator typed in; the fetch job
+    compares it with the source's own file once and sets ``compared_at``."""
 
     __tablename__ = "tax_exchange_rates"
     __table_args__ = (
@@ -451,4 +454,6 @@ class TaxExchangeRate(Base):
     period_start = Column(Date, nullable=False)
     period_end = Column(Date, nullable=False)
     fetched_at = Column(DateTime(timezone=True), nullable=False)
+    hand_entered = Column(Boolean, nullable=False, default=False, server_default="0")
+    compared_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

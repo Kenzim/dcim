@@ -17,6 +17,7 @@ from app.services.email_templates.render import RENDER_FAILED_ACTION, render
 from tests.migrations import helpers
 
 REVISION = "billing_p2_email_templates"
+MONEY_REVISION = "billing_p2_email_money"
 ENABLED_TODAY = {
     "verify_email",
     "password_reset",
@@ -46,10 +47,13 @@ SENDERS_TODAY_SAMPLES = [
 
 
 def seed(db, *, only=None):
+    """The seeded templates as a migrated database holds them (the money text as ``billing_p2_email_money`` left it)."""
     module = helpers.load_revision(REVISION)
+    money = helpers.load_revision(MONEY_REVISION)
     for event, subject, body, enabled in module.SEED_TEMPLATES:
         if only and event not in only:
             continue
+        body = money.updated(body)
         row = EmailTemplate(event_key=event, locale="en", product_scope=0, subject=subject, body_text=body, enabled=enabled)
         db.add(row)
         db.flush()
@@ -77,7 +81,11 @@ def template(db, event, **fields):
 
 def test_catalogue_defaults_equal_the_seeded_templates():
     module = helpers.load_revision(REVISION)
-    seeded = {event: (subject, body, enabled) for event, subject, body, enabled in module.SEED_TEMPLATES}
+    money = helpers.load_revision(MONEY_REVISION)
+    seeded = {
+        event: (subject, money.updated(body), enabled) for event, subject, body, enabled in module.SEED_TEMPLATES
+    }
+    assert {event for event, (_s, body, _e) in seeded.items() if money.NEW in body} == set(money.EVENTS)
     assert set(seeded) == set(catalogue.EVENTS)
     for key, spec in catalogue.EVENTS.items():
         assert (spec.default_subject, spec.default_body) == seeded[key][:2], key
@@ -119,6 +127,21 @@ def test_new_event_texts_equal_the_built_in_text_with_samples():
         from app.services.email_templates.sandbox import render_source
 
         assert render_source(spec.default_body, spec.samples) == text, key
+
+
+@pytest.mark.parametrize("event", ["invoice_created", "late_fee_added"])
+def test_a_seeded_amount_without_a_currency_prints_the_operator_currency(db_session, monkeypatch, event):
+    from app.core.config import settings
+    from app.services.email_templates.sandbox import render_source
+
+    monkeypatch.setattr(settings, "commerce_default_currency", "EUR")
+    seed(db_session, only={event})
+    row = db_session.scalars(select(EmailTemplate).where(EmailTemplate.event_key == event)).one()
+    variables = {k: v for k, v in catalogue.EVENTS[event].samples.items() if k != "currency"}
+    assert "EUR " in render_source(row.body_text, variables)
+    assert "GBP " in render_source(row.body_text, {**variables, "currency": "gbp"})
+    old = helpers.load_revision(MONEY_REVISION).OLD
+    assert old not in row.body_text
 
 
 # ------------------------------------------------------------------ selection

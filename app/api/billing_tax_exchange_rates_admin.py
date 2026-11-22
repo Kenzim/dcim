@@ -3,8 +3,10 @@
 The fallback when HMRC's site is down: an administrator enters HMRC's
 published rate for a month by hand. It is stored as source ``hmrc_monthly``
 like a fetched rate, since it is the same published figure, and the audit
-entry records who entered it. A stored rate is never changed. A rate no
-published invoice has frozen may be deleted, to correct a typing mistake.
+entry records who entered it. It is marked ``hand_entered``, and the fetch
+job compares it with HMRC's file once. A stored rate is never changed. A
+rate no published invoice or note has frozen may be deleted, to correct a
+typing mistake.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import require_admin
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
+from app.models.invoice_adjustment import InvoiceAdjustment
 from app.models.reseller import Invoice
 from app.models.tax import TaxExchangeRate
 from app.services.audit_service import AuditService
@@ -51,6 +54,8 @@ def _payload(row: TaxExchangeRate) -> dict:
         "period_start": row.period_start.isoformat(),
         "period_end": row.period_end.isoformat(),
         "fetched_at": row.fetched_at.isoformat() if row.fetched_at else None,
+        "hand_entered": bool(row.hand_entered),
+        "compared_at": row.compared_at.isoformat() if row.compared_at else None,
     }
 
 
@@ -118,7 +123,8 @@ def create_rate(body: RateCreate, auth: AdminDep, db: DbDep):
         raise _exists(body)
     try:
         exchange_rates.store_month(
-            db, body.period, [(body.currency, body.units_per_gbp)], fetched_at=datetime.now(timezone.utc)
+            db, body.period, [(body.currency, body.units_per_gbp)], fetched_at=datetime.now(timezone.utc),
+            hand_entered=True,
         )
     except IntegrityError:
         db.rollback()
@@ -129,22 +135,36 @@ def create_rate(body: RateCreate, auth: AdminDep, db: DbDep):
     return _payload(row)
 
 
+def _in_use() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": "tax_exchange_rate_in_use", "message": "An invoice has frozen this rate"},
+    )
+
+
 @router.delete("/{rate_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_rate(rate_id: int, auth: AdminDep, db: DbDep):
-    # Exclusive: waits for a publish holding the rate (shared) to commit, so its invoice is seen below.
+    """Delete a rate no invoice or note references through ``fx_rate_id``.
+
+    The rate is locked for update first, so a publish holding it (shared)
+    commits before this goes on. The read below may still miss that publish
+    when this transaction's snapshot is older; the foreign keys ``ON DELETE
+    RESTRICT`` then refuse the delete itself, which answers the same 409.
+    """
     row = db.get(TaxExchangeRate, rate_id, with_for_update=True)
     if row is None:
         raise HTTPException(status_code=404, detail="Exchange rate not found")
-    used = db.scalar(
-        select(Invoice.id)
-        .where(Invoice.fx_period == row.period, Invoice.fx_source == row.source, Invoice.currency == row.currency)
-        .limit(1)
-    )
-    if used is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "tax_exchange_rate_in_use", "message": "An invoice has frozen this rate"},
-        )
+    if (
+        db.scalar(select(Invoice.id).where(Invoice.fx_rate_id == row.id).limit(1)) is not None
+        or db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.fx_rate_id == row.id).limit(1))
+        is not None
+    ):
+        raise _in_use()
     _audit(db, auth, "deleted", row)
     db.delete(row)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise _in_use() from None
     db.commit()

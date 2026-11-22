@@ -784,7 +784,9 @@ class InvoiceService:
 
         Runs inside the settlement transaction under the guard's
         ``proforma_conversion`` allowance; the proforma number and the
-        snapshots stay.
+        snapshots stay, and so do the VAT and the tax rows. The sterling VAT
+        follows the VAT invoice's tax point, ``at`` (design 4.10,
+        ``sterling_conversion.restamp_at_conversion``).
         """
         from app.models.billing_series import DocumentType
         from app.services.invoice_numbering import InvoiceNumbering
@@ -809,7 +811,9 @@ class InvoiceService:
             db.flush()
         if invoice.tax_engine is not None:
             from app.services.tax import invoice_tax
+            from app.services.tax.sterling_conversion import restamp_at_conversion
 
+            restamp_at_conversion(db, invoice, at)
             lines = list(
                 db.execute(
                     select(InvoiceLine)

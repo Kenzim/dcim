@@ -9,6 +9,11 @@ A publish that freezes a sterling VAT total share-locks the stored rate
 update first, so it waits for that publish to commit and then sees its
 invoice and refuses. A publish is not held up by another holding the rate. A rate stored twice at once (the job and an administrator) leaves one
 row: the unique key refuses the second.
+
+A proforma paid in a month whose rate is missing leaves its sterling VAT
+pending; a rate stored meanwhile waits for the payment (the payment's share
+lock on the missing row) and then fills the invoice, and a payment during a
+store waits for it and takes the new rate.
 """
 
 from __future__ import annotations
@@ -117,12 +122,22 @@ def _publish(db, invoice_id: int):
     return invoice
 
 
-def _delete(sessions, rate_id: int, outcome: dict) -> threading.Thread:
+def _delete(sessions, rate_id: int, outcome: dict, *, read_first: bool = False) -> threading.Thread:
+    """The admin delete in a thread; ``read_first`` makes a plain read before it.
+
+    Under REPEATABLE READ that read fixes the transaction's snapshot before
+    the publish commits, so a plain in-use check after it would not see the
+    publish's invoice.
+    """
     from app.api.billing_tax_exchange_rates_admin import delete_rate
+    from app.models.reseller import Invoice
 
     def run():
         with sessions() as db:
             db.execute(sa.text("SET SESSION innodb_lock_wait_timeout = 20"))
+            if read_first:
+                db.execute(sa.select(sa.func.count(Invoice.id))).scalar()
+                outcome["read"] = True
             try:
                 delete_rate(rate_id, {"user_id": None}, db)
                 outcome["result"] = "deleted"
@@ -135,7 +150,8 @@ def _delete(sessions, rate_id: int, outcome: dict) -> threading.Thread:
     return thread
 
 
-def test_a_delete_during_a_publish_waits_and_then_refuses(sessions):
+@pytest.mark.parametrize("read_first", [False, True], ids=["no_earlier_read", "earlier_plain_read"])
+def test_a_delete_during_a_publish_waits_and_then_refuses(sessions, read_first):
     from app.models.tax import TaxExchangeRate
 
     rate_id, (invoice_id,) = _seed(sessions)
@@ -143,8 +159,8 @@ def test_a_delete_during_a_publish_waits_and_then_refuses(sessions):
     outcome: dict = {}
     try:
         invoice = _publish(publisher, invoice_id)
-        assert (invoice.fx_period, invoice.tax_total_gbp_cents) == (_period(), 149)
-        thread = _delete(sessions, rate_id, outcome)
+        assert (invoice.fx_period, invoice.tax_total_gbp_cents, invoice.fx_rate_id) == (_period(), 149, rate_id)
+        thread = _delete(sessions, rate_id, outcome, read_first=read_first)
         time.sleep(1.5)
         assert thread.is_alive(), outcome
         publisher.commit()
@@ -227,3 +243,93 @@ def test_the_same_rate_stored_twice_at_once_leaves_one_row(sessions):
     with sessions() as db:
         rows = db.scalars(sa.select(TaxExchangeRate).where(TaxExchangeRate.period == "2030-01")).all()
         assert [(r.currency, str(r.units_per_gbp)) for r in rows] == [("USD", "1.300000")]
+
+
+def _published(sessions) -> int:
+    rate_id, (invoice_id,) = _seed(sessions)
+    with sessions() as db:
+        _publish(db, invoice_id)
+        db.commit()
+    return invoice_id
+
+
+def _convert(db, invoice_id: int, at: datetime):
+    """The payment side of a proforma conversion: the invoice locked, then its sterling stamped at ``at``."""
+    from app.models.reseller import Invoice
+    from app.services.tax.sterling_conversion import restamp_at_conversion
+
+    invoice = db.get(Invoice, invoice_id, with_for_update=True)
+    restamp_at_conversion(db, invoice, at)
+    return invoice
+
+
+LATER = datetime(2031, 3, 10, 12, tzinfo=timezone.utc)
+
+
+def test_a_rate_stored_during_a_pending_payment_waits_and_then_fills_it(sessions):
+    """The payment's share lock on the missing rate holds the store back until the payment commits."""
+    from app.models.reseller import Invoice
+    from app.services.tax import exchange_rates
+
+    invoice_id = _published(sessions)
+    payer, storer = sessions(), sessions()
+    outcome: dict = {}
+    try:
+        invoice = _convert(payer, invoice_id, LATER)
+        assert (invoice.fx_period, invoice.fx_rate) == ("2031-03", None)
+        storer.execute(sa.text("SET SESSION innodb_lock_wait_timeout = 20"))
+
+        def store():
+            outcome["filled"] = exchange_rates.store_month(storer, "2031-03", [("USD", "1.3158")]).filled
+            storer.commit()
+
+        thread = threading.Thread(target=store)
+        thread.start()
+        time.sleep(1.5)
+        assert thread.is_alive(), "the store did not wait for the payment"
+        payer.commit()
+        thread.join(timeout=20)
+        assert not thread.is_alive()
+    finally:
+        payer.close()
+        storer.close()
+    assert outcome["filled"] == (invoice_id,)
+    with sessions() as db:
+        invoice = db.get(Invoice, invoice_id)
+        rate = exchange_rates.stored_rate(db, "USD", "2031-03")
+        assert (invoice.fx_period, invoice.tax_total_gbp_cents, invoice.fx_rate_id) == ("2031-03", 152, rate.id)
+
+
+def test_a_payment_during_a_store_waits_for_it_and_takes_the_rate(sessions):
+    """The store's new row holds the payment's share lock back; the store's fill is not held by the payment."""
+    from app.models.reseller import Invoice
+    from app.services.tax import exchange_rates
+
+    invoice_id = _published(sessions)
+    payer, storer = sessions(), sessions()
+    stored = threading.Event()
+
+    def store():
+        exchange_rates.store_month(storer, "2031-03", [("USD", "1.3158")])
+        stored.set()
+        time.sleep(1.5)
+        storer.commit()
+
+    try:
+        payer.execute(sa.text("SET SESSION innodb_lock_wait_timeout = 20"))
+        payer.get(Invoice, invoice_id, with_for_update=True)
+        thread = threading.Thread(target=store)
+        thread.start()
+        assert stored.wait(timeout=20), "the store was held up by the locked invoice"
+        started = time.monotonic()
+        invoice = _convert(payer, invoice_id, LATER)
+        assert time.monotonic() - started > 0.5, "the payment did not wait for the store"
+        rate_id = invoice.fx_rate_id
+        assert (invoice.fx_period, invoice.tax_total_gbp_cents) == ("2031-03", 152)
+        payer.commit()
+        thread.join(timeout=20)
+    finally:
+        payer.close()
+        storer.close()
+    with sessions() as db:
+        assert exchange_rates.stored_rate(db, "USD", "2031-03").id == rate_id

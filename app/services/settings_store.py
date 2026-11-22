@@ -61,7 +61,8 @@ class SettingDef:
 
     ``key`` is also the attribute name on ``Settings`` that supplies the
     default. ``fallback`` is used only when ``Settings`` has no such attribute
-    (a setting whose config field is added by another change).
+    (a setting whose config field is added by another change); a callable
+    fallback is called each time the default is read.
     ``requires_restart`` marks a value that is only read at process start-up.
     """
 
@@ -86,7 +87,9 @@ class SettingDef:
         source = base if base is not None else app_config.settings
         if self.fallback is _NO_FALLBACK:
             return getattr(source, self.key)
-        return getattr(source, self.key, self.fallback)
+        if hasattr(source, self.key):
+            return getattr(source, self.key)
+        return self.fallback() if callable(self.fallback) else self.fallback
 
     def validate(self, value: Any) -> Any:
         """Return the normalised value or raise ``SettingValidationError``."""
@@ -742,7 +745,7 @@ _DEFINITIONS = (
         "billing_automation",
         max_length=3,
         validator=_validate_currency,
-        fallback=operator_currency(),
+        fallback=operator_currency,
     ),
     SettingDef(
         "billing_late_fee_percent_bp",

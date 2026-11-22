@@ -48,6 +48,7 @@ class Conversion:
     period: str
     source: str
     tax_total_gbp_cents: int
+    rate_id: int
 
 
 def _aware(value: datetime) -> datetime:
@@ -139,14 +140,83 @@ def convert_at_publish(
     if row is None:
         raise ExchangeRateMissing(str(currency).upper(), period)
     rate = Decimal(row.units_per_gbp)
-    return Conversion(rate, period, row.source, to_gbp_cents(int(tax_cents), rate))
+    return Conversion(rate, period, row.source, to_gbp_cents(int(tax_cents), rate), int(row.id))
 
 
-def note_gbp_cents(invoice: Any, tax_cents: int) -> Optional[int]:
-    """The sterling VAT of a credit or debit note at its invoice's frozen rate, None without one."""
-    if invoice is None or invoice.fx_rate is None:
+@dataclass(frozen=True)
+class NoteRate:
+    """The rate a credit or debit note converts its VAT at, and the row it was read from."""
+
+    rate: Decimal
+    period: str
+    source: str
+    rate_id: Optional[int]
+
+
+def _engine_taxed(invoice: Any) -> bool:
+    return bool(invoice.tax_engine) and invoice.tax_engine != "legacy"
+
+
+def note_rate(db: Session, invoice: Any, tax_cents: int) -> Optional[NoteRate]:
+    """The rate of a note with VAT ``tax_cents`` on ``invoice``, None when it needs no sterling.
+
+    A note uses its invoice's frozen rate. On a UK VAT invoice in another
+    currency that froze none because its own VAT was zero, a taxed note uses
+    the stored rate of the UK month of the invoice's tax point (the rule of
+    publish), share-locked after the invoice as publish does, and raises
+    ``ExchangeRateMissing`` when that is not stored.
+    """
+    if int(tax_cents or 0) <= 0 or invoice is None or not _engine_taxed(invoice):
         return None
-    return to_gbp_cents(int(tax_cents), Decimal(invoice.fx_rate))
+    if invoice.fx_period is not None and invoice.fx_rate is None:
+        # A proforma paid in a month whose rate is not stored yet (sterling_conversion).
+        raise ExchangeRateMissing(str(invoice.currency or "").upper(), str(invoice.fx_period))
+    if invoice.fx_rate is not None:
+        rate_id = int(invoice.fx_rate_id) if invoice.fx_rate_id is not None else None
+        return NoteRate(Decimal(invoice.fx_rate), str(invoice.fx_period), str(invoice.fx_source), rate_id)
+    registration = (
+        db.get(SellerTaxRegistration, int(invoice.seller_registration_id))
+        if invoice.seller_registration_id is not None
+        else None
+    )
+    currency = str(invoice.currency or "").upper()
+    if not needs_conversion(registration, currency, int(tax_cents)):
+        return None
+    period = period_of(invoice.tax_point_at or invoice.issued_at)
+    row = stored_rate(db, currency, period, share_lock=True)
+    if row is None:
+        raise ExchangeRateMissing(currency, period)
+    return NoteRate(Decimal(row.units_per_gbp), period, row.source, int(row.id))
+
+
+def credited_gbp_cents(invoice_tax_cents: int, credited_tax_cents: int, rate: Decimal) -> int:
+    """The sterling of ``credited_tax_cents`` of VAT credited in all on an invoice.
+
+    The part up to the invoice's own VAT converts as the invoice's VAT does,
+    and the rest (VAT of debit notes) as the debit notes' VAT does, so
+    crediting everything gives exactly the invoice's sterling VAT plus its
+    debit notes' sterling VAT.
+    """
+    on_invoice = max(0, min(int(credited_tax_cents), int(invoice_tax_cents)))
+    return to_gbp_cents(on_invoice, rate) + to_gbp_cents(int(credited_tax_cents) - on_invoice, rate)
+
+
+def note_gbp_cents(
+    *, credit: bool, invoice_tax_cents: int, before_cents: int, tax_cents: int, rate: Decimal
+) -> int:
+    """A note's sterling VAT, worked out cumulatively over the invoice's notes of its kind.
+
+    ``before_cents`` is the VAT of the notes of the same kind issued before
+    it (in id order, as ``tax_base_rows`` counts them). The note gets the
+    sterling of everything so far, itself included, less the sterling of
+    what came before, so the notes' figures never drift from the total.
+    """
+    def total(cents: int) -> int:
+        if credit:
+            return credited_gbp_cents(invoice_tax_cents, cents, rate)
+        return to_gbp_cents(cents, rate)
+
+    return total(int(before_cents) + int(tax_cents)) - total(int(before_cents))
 
 
 def gb_registration_active(db: Session, at: datetime) -> bool:
@@ -188,6 +258,7 @@ class StoreOutcome:
     inserted: tuple[str, ...]
     unchanged: tuple[str, ...]
     conflicts: tuple[tuple[str, Decimal, Decimal], ...]  # currency, stored, offered
+    filled: tuple[int, ...] = ()  # invoices whose pending sterling VAT the new rates filled
 
 
 def store_month(
@@ -197,11 +268,15 @@ def store_month(
     *,
     source: str = SOURCE_HMRC,
     fetched_at: Optional[datetime] = None,
+    hand_entered: bool = False,
 ) -> StoreOutcome:
     """Insert each currency of ``period`` that is not stored yet; never change a stored one.
 
     A stored rate that differs from the one offered is reported in
-    ``conflicts`` and kept. Runs in the caller's transaction, which commits;
+    ``conflicts`` and kept. ``hand_entered`` marks the inserted rows as typed
+    in by an administrator. Each inserted rate fills the invoices whose
+    sterling VAT waits for it (``sterling_conversion.fill_pending``), in the
+    same transaction. Runs in the caller's transaction, which commits;
     a row stored meanwhile by another writer makes the flush raise
     ``IntegrityError`` (the unique key), and the caller rolls back.
     """
@@ -235,9 +310,17 @@ def store_month(
                 period_start=start,
                 period_end=end,
                 fetched_at=fetched_at,
+                hand_entered=hand_entered,
             )
         )
         existing[code] = rate
         inserted.append(code)
     db.flush()
-    return StoreOutcome(tuple(inserted), tuple(unchanged), tuple(conflicts))
+    from app.services.tax.sterling_conversion import fill_pending
+
+    filled: list[int] = []
+    for code in inserted:
+        row = stored_rate(db, code, period, source)
+        if row is not None:
+            filled.extend(fill_pending(db, row))
+    return StoreOutcome(tuple(inserted), tuple(unchanged), tuple(conflicts), tuple(filled))

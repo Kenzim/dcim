@@ -528,6 +528,9 @@ class Invoice(Base):
         ),
         Index("ix_invoices_reseller_status_due", "reseller_id", "status", "due_at"),
         Index("ix_invoices_account_status_due", "billing_account_id", "status", "due_at"),
+        # Serves the foreign key, and finds the invoices whose sterling VAT
+        # waits for a month's rate (fx_rate_id NULL, fx_period set).
+        Index("ix_invoices_fx_rate_id", "fx_rate_id", "fx_period"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -628,11 +631,17 @@ class Invoice(Base):
         index=True,
     )
     # Sterling VAT of a UK VAT invoice in another currency (design 4.10); NULL
-    # otherwise. ``fx_rate`` is the stored ``units_per_gbp`` of ``fx_period``.
+    # otherwise. ``fx_rate`` is the stored ``units_per_gbp`` of ``fx_period``,
+    # read from the ``tax_exchange_rates`` row ``fx_rate_id``.
     fx_rate = Column(Numeric(18, 6), nullable=True)
     fx_period = Column(String(7), nullable=True)
     fx_source = Column(String(32), nullable=True)
     tax_total_gbp_cents = Column(BigInteger, nullable=True)
+    fx_rate_id = Column(
+        Integer,
+        ForeignKey("tax_exchange_rates.id", ondelete="RESTRICT", name="fk_invoices_fx_rate_id"),
+        nullable=True,
+    )
 
     reseller = relationship("Reseller", back_populates="invoices")
     service = relationship("Service")

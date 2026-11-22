@@ -49,6 +49,7 @@ from app.services.invoice_adjustment_service import (
     InvoiceAdjustmentService,
     new_idempotency_key,
 )
+from app.services.tax.errors import RetryableTaxPublishError
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -258,6 +259,9 @@ def _issue(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="The note conflicts with one just issued") from exc
+    except RetryableTaxPublishError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     db.refresh(note)
     return serialize_note(note, admin=True, with_lines=True)
 

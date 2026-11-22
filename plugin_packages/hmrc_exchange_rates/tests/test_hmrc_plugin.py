@@ -136,6 +136,9 @@ def test_malformed_entries_are_skipped(rackflow, plugin):
         ),
     )
     assert by_currency(rates()) == {"USD": "1.3396"}
+    warnings = plugin.log_messages("warning")
+    assert any("ABG" in message and "2026-11" in message for message in warnings), warnings
+    assert not any(code in message for message in warnings for code in ("ABC", "ABD", "ABE", "ABF"))
 
 
 # ------------------------------------------------------------------ failures raise, so billing asks again later

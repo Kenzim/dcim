@@ -3,8 +3,8 @@
 from tests.migrations import helpers
 
 REVISION = "billing_p2_tax_columns"
-# billing_p2_exchange_rates adds the sterling VAT columns of invoices later in the chain.
-FX_COLUMNS = {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents"}
+# billing_p2_exchange_rates and billing_p2_fx_refs add the sterling VAT columns of invoices later in the chain.
+FX_COLUMNS = {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"}
 ADDED = {
     table: cols - FX_COLUMNS
     for table, cols in helpers.P2_COLUMNS.items()

@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from hypothesis import given
+from hypothesis import settings as settings_h
+from hypothesis import strategies as st
 from sqlalchemy import func, select
 
 from app.core.config import settings
@@ -13,7 +16,7 @@ from app.models.billing_series import DocumentType
 from app.models.commerce_invoice_ext import InvoiceLineKind
 from app.models.invoice_adjustment import AdjustmentOutcome, AdjustmentReason
 from app.models.reseller import Invoice, InvoicePurpose
-from app.models.tax import InvoiceLineTax
+from app.models.tax import InvoiceLineTax, SellerTaxRegistration
 from app.services import invoice_guard
 from app.services.adjustment_pdf_service import build_document
 from app.services.billing.operator_currency import operator_currency
@@ -114,6 +117,7 @@ def test_usd_invoice_freezes_the_sterling_vat_and_prints_it(db_session, account,
     invoice = issue(db_session, account)
     assert invoice.tax_cents == 200 and invoice.currency == "USD"
     assert frozen(invoice) == (Decimal("1.3396"), "2026-11", "hmrc_monthly", 149)
+    assert invoice.fx_rate_id == exchange_rates.stored_rate(db_session, "USD", "2026-11").id
     db_session.expire(invoice)
     assert frozen(invoice) == (Decimal("1.339600"), "2026-11", "hmrc_monthly", 149)
     content = tax_pdf.for_invoice(db_session, invoice)
@@ -239,7 +243,192 @@ def test_a_credit_note_keeps_the_invoices_rate_after_the_next_month_arrives(db_s
         "UK VAT 20% (20%) on USD 5.00: USD 1.00",
         "VAT total in sterling: GBP 0.75 (HMRC monthly exchange rate for 2026-11: USD 1.3396 = GBP 1)",
     ]
-    assert exchange_rates.note_gbp_cents(invoice, 100) == 75
+    assert (note.fx_rate, note.fx_period, note.tax_total_gbp_cents) == (Decimal("1.3396"), "2026-11", 75)
+    assert note.fx_rate_id == invoice.fx_rate_id
+
+
+def credit(db, invoice, amount: int, key: str):
+    return InvoiceAdjustmentService.issue_credit_note(
+        db, invoice, amount_cents=amount, reason=AdjustmentReason.GOODWILL,
+        outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key=key,
+    )
+
+
+def debit(db, invoice, unit_cents: int, key: str):
+    return InvoiceAdjustmentService.issue_debit_note(
+        db, invoice, lines=[{"description": "Extra", "unit_cents": unit_cents, "tax_cents": 0}],
+        reason=AdjustmentReason.CORRECTION, actor_user_id=None, idempotency_key=key,
+    )
+
+
+def test_three_credit_notes_add_up_to_the_invoices_sterling(db_session, account, uk_vat, monkeypatch):
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account, amount=5000)
+    # USD 10.00 at 1.3396 is GBP 7.46 (746.49).
+    assert (invoice.tax_cents, invoice.tax_total_gbp_cents) == (1000, 746)
+    notes = [credit(db_session, invoice, gross, f"fx-3-{n}") for n, gross in enumerate((1998, 1998, 2004))]
+    assert [n.tax_cents for n in notes] == [333, 333, 334]
+    # Each alone would be GBP 2.49 (248.58, 248.58, 249.33), 7.47 in all.
+    assert [n.tax_total_gbp_cents for n in notes] == [249, 248, 249]
+    assert sum(n.tax_total_gbp_cents for n in notes) == invoice.tax_total_gbp_cents
+    assert build_document(db_session, notes[1])["tax_summary"][-1] == (
+        "VAT total in sterling: GBP 2.48 (HMRC monthly exchange rate for 2026-11: USD 1.3396 = GBP 1)"
+    )
+
+
+def test_debit_and_credit_notes_add_up_on_their_own_sides(db_session, account, uk_vat, monkeypatch):
+    _series(db_session, DocumentType.DEBIT_NOTE, "DN")
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account, amount=5000)
+    debits = [debit(db_session, invoice, 1665, f"fx-dn-{n}") for n in range(3)]
+    assert [n.tax_cents for n in debits] == [333, 333, 333]
+    # 999 cents of debit VAT is GBP 7.46 (745.75); 333 alone would be 2.49.
+    assert [n.tax_total_gbp_cents for n in debits] == [249, 248, 249]
+    worth = int(invoice.amount_cents) + sum(int(n.total_cents) for n in debits)
+    credits = [credit(db_session, invoice, part, f"fx-cnd-{n}") for n, part in enumerate((worth // 2, worth - worth // 2))]
+    assert sum(n.tax_cents for n in credits) == 1999
+    assert sum(n.tax_total_gbp_cents for n in credits) == invoice.tax_total_gbp_cents + 746
+
+
+def zero_rated_invoice(db, account, monkeypatch, moment=NOV_15):
+    """A UK VAT invoice in USD whose only line is zero-rated, so it freezes no sterling."""
+    _series(db, DocumentType.DEBIT_NOTE, "DN")
+    classes = seed_classes(db)
+    add_rule(db, name="UK VAT 0%", rate="0", tax_class="zero", jurisdiction="GB", source="pack",
+             legal_note_key=None)
+    at(monkeypatch, moment)
+    invoice = InvoiceService.create(
+        db, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=1000, currency="USD",
+        lines=[NewLine("Book", 1000, kind=InvoiceLineKind.PRODUCT, tax_cents=0, tax_class_id=classes["zero"])],
+    )
+    assert invoice.tax_cents == 0 and invoice.seller_registration_id is not None
+    assert frozen(invoice) == (None,) * 4
+    return invoice
+
+
+def test_a_taxed_debit_note_on_a_zero_vat_invoice_uses_its_tax_points_month(
+    db_session, account, uk_vat, monkeypatch
+):
+    store(db_session, "2026-11", "1.3396")
+    invoice = zero_rated_invoice(db_session, account, monkeypatch)
+    store(db_session, "2026-12", "1.3158")
+    at(monkeypatch, datetime(2026, 12, 2, 12, tzinfo=timezone.utc))
+    note = debit(db_session, invoice, 500, "fx-zero-dn")
+    assert note.tax_cents == 100
+    assert (note.fx_rate, note.fx_period, note.fx_source, note.tax_total_gbp_cents) == (
+        Decimal("1.3396"), "2026-11", "hmrc_monthly", 75
+    )
+    assert note.fx_rate_id == exchange_rates.stored_rate(db_session, "USD", "2026-11").id
+    assert build_document(db_session, note)["tax_summary"][-1] == (
+        "VAT total in sterling: GBP 0.75 (HMRC monthly exchange rate for 2026-11: USD 1.3396 = GBP 1)"
+    )
+    back = credit(db_session, invoice, int(invoice.amount_cents) + int(note.total_cents), "fx-zero-cn")
+    assert (back.tax_cents, back.fx_period, back.tax_total_gbp_cents) == (100, "2026-11", 75)
+
+
+def test_a_taxed_debit_note_on_a_zero_vat_invoice_without_a_rate_is_refused(
+    db_session, account, uk_vat, monkeypatch
+):
+    from app.models.invoice_adjustment import InvoiceAdjustment
+
+    invoice = zero_rated_invoice(db_session, account, monkeypatch)
+    savepoint = db_session.begin_nested()
+    with pytest.raises(ExchangeRateMissing) as raised:
+        debit(db_session, invoice, 500, "fx-zero-missing")
+    savepoint.rollback()
+    assert (raised.value.currency, raised.value.period) == ("USD", "2026-11")
+    assert db_session.scalar(select(func.count(InvoiceAdjustment.id))) == 0
+
+
+def test_a_lower_case_currency_finds_the_stored_rate(db_session, account, uk_vat, monkeypatch):
+    store(db_session, "2026-11", "1.3396")
+    row = exchange_rates.stored_rate(db_session, "usd", "2026-11")
+    assert row is not None and row.currency == "USD"
+    assert exchange_rates.has_rate(db_session, "usd", "2026-11")
+    registration = db_session.scalars(select(SellerTaxRegistration)).one()
+    conversion = exchange_rates.convert_at_publish(db_session, registration, "usd", 200, NOV_15)
+    assert (conversion.rate, conversion.period, conversion.tax_total_gbp_cents, conversion.rate_id) == (
+        Decimal("1.3396"), "2026-11", 149, row.id
+    )
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_legacy_and_shadow_tax_never_stamp_sterling(db_session, account, uk_vat, monkeypatch, mode):
+    store(db_session, "2026-11", "1.3396")
+    set_engine(db_session, "tax", mode)
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account)
+    assert frozen(invoice) == (None,) * 4 and invoice.fx_rate_id is None
+    assert invoice.tax_engine in (None, "legacy")
+    content = tax_pdf.for_invoice(db_session, invoice)
+    assert content is None or not any("sterling" in line for line in content.summary_lines)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_legacy_and_shadow_tax_publish_without_a_rate(db_session, account, uk_vat, monkeypatch, mode):
+    set_engine(db_session, "tax", mode)
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account)
+    assert frozen(invoice) == (None,) * 4
+
+
+def test_an_invoice_with_a_discount_converts_its_vat_after_the_discount(db_session, account, uk_vat, monkeypatch):
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_15)
+    invoice = InvoiceService.create(
+        db_session, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=800, currency="USD",
+        lines=[
+            NewLine("Server", 1000, kind=InvoiceLineKind.PRODUCT, tax_cents=0),
+            NewLine("Coupon", -200, kind=InvoiceLineKind.DISCOUNT),
+        ],
+    )
+    assert (invoice.discount_cents, invoice.tax_cents) == (200, 160)
+    # USD 1.60 at 1.3396 is GBP 1.19 (119.44), not the GBP 1.49 of the undiscounted VAT.
+    assert frozen(invoice) == (Decimal("1.3396"), "2026-11", "hmrc_monthly", 119)
+    assert tax_pdf.for_invoice(db_session, invoice).summary_lines[-1] == (
+        "VAT total in sterling: GBP 1.19 (HMRC monthly exchange rate for 2026-11: USD 1.3396 = GBP 1)"
+    )
+    note = credit(db_session, invoice, 960, "fx-discount-cn")
+    assert (note.tax_cents, note.tax_total_gbp_cents) == (160, 119)
+
+
+@settings_h(max_examples=300, deadline=None)
+@given(
+    invoice_tax=st.integers(min_value=1, max_value=500_000),
+    rate=st.decimals(min_value=Decimal("0.5"), max_value=Decimal("300"), places=4),
+    notes=st.lists(st.tuples(st.booleans(), st.integers(min_value=1, max_value=100_000)), max_size=12),
+    debits=st.booleans(),
+)
+def test_cumulative_note_sterling_never_drifts(invoice_tax, rate, notes, debits):
+    """Notes in any order: full credit adds up exactly, a partial credit never exceeds."""
+    invoice_gbp = exchange_rates.to_gbp_cents(invoice_tax, rate)
+    credited = debited = credited_gbp = debited_gbp = 0
+    for is_debit, cents in notes:
+        if is_debit and debits:
+            debited_gbp += exchange_rates.note_gbp_cents(
+                credit=False, invoice_tax_cents=invoice_tax, before_cents=debited, tax_cents=cents, rate=rate
+            )
+            debited += cents
+            continue
+        cents = min(cents, invoice_tax + debited - credited)
+        if cents <= 0:
+            continue
+        gbp = exchange_rates.note_gbp_cents(
+            credit=True, invoice_tax_cents=invoice_tax, before_cents=credited, tax_cents=cents, rate=rate
+        )
+        assert gbp >= 0
+        credited += cents
+        credited_gbp += gbp
+        assert credited_gbp <= invoice_gbp + debited_gbp
+    assert debited_gbp == exchange_rates.to_gbp_cents(debited, rate)
+    rest = invoice_tax + debited - credited
+    if rest > 0:
+        credited_gbp += exchange_rates.note_gbp_cents(
+            credit=True, invoice_tax_cents=invoice_tax, before_cents=credited, tax_cents=rest, rate=rate
+        )
+    assert credited_gbp == invoice_gbp + debited_gbp
 
 
 def test_the_guard_freezes_the_sterling_columns_after_publish(db_session, account, uk_vat, monkeypatch):
@@ -254,12 +443,38 @@ def test_the_guard_freezes_the_sterling_columns_after_publish(db_session, accoun
             ("fx_source", "admin"),
             ("tax_total_gbp_cents", 150),
             ("fx_rate", None),
+            ("fx_rate_id", None),
         ):
             savepoint = db_session.begin_nested()
             setattr(invoice, column, value)
             with pytest.raises(FrozenInvoiceError):
                 db_session.flush()
             savepoint.rollback()
+    finally:
+        invoice_guard.set_mode_override(None)
+
+
+def test_the_guard_freezes_a_notes_sterling_columns(db_session, account, uk_vat, monkeypatch):
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account)
+    note = credit(db_session, invoice, 600, "fx-guard-cn")
+    invoice_guard.set_mode_override("enforce")
+    try:
+        for column, value in (
+            ("fx_rate", Decimal("1.5")),
+            ("fx_period", "2026-12"),
+            ("fx_source", "admin"),
+            ("tax_total_gbp_cents", 76),
+            ("fx_rate_id", None),
+        ):
+            savepoint = db_session.begin_nested()
+            setattr(note, column, value)
+            with pytest.raises(FrozenInvoiceError):
+                db_session.flush()
+            savepoint.rollback()
+        note.reason_text = "still editable"
+        db_session.flush()
     finally:
         invoice_guard.set_mode_override(None)
 

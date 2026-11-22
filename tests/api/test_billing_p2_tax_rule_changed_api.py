@@ -70,6 +70,20 @@ def test_reseller_topup_answers_409(client, db_session, monkeypatch, error, deta
 
 
 @ERRORS
+def test_reseller_deploy_charge_answers_409(client, db_session, monkeypatch, error, detail):
+    from tests.api.test_reseller_api import _allow, _create_body, _headers, _product, _reseller
+
+    reseller, key = _reseller(db_session, "tax-retry-deploy", credit_cents=10_000)
+    _allow(db_session, reseller, _product(db_session))
+    monkeypatch.setattr(InvoiceService, "create_deploy", staticmethod(_raiser(error)))
+    response = client.post(
+        "/api/reseller/bare-metal/services", headers=_headers(key, "tax-retry-deploy"), json=_create_body()
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == detail
+
+
+@ERRORS
 def test_client_credit_topup_answers_409(client, db_session, monkeypatch, error, detail):
     _client_login(client, db_session, monkeypatch, "rule-changed-credit")
     set_credit_mode(db_session, "v2")
