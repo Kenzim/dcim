@@ -171,15 +171,23 @@ def tax_exclusive(base: int, rate_ppm: int, rule: Union[str, RoundingRule]) -> i
     return rounding_rule(rule)(base * rate_ppm, PPM)
 
 
-def tax_inclusive(gross: int, rate_ppm: int, rule: Union[str, RoundingRule]) -> int:
-    """Tax inside the gross amount ``gross``.
+# Rules that floor the tax in both modes.
+FLOOR_RULES: frozenset[RoundingRule] = frozenset({tax_floor, round_down})
 
-    ``gross - rule(gross * 1_000_000, 1_000_000 + rate_ppm)``: the rule rounds
-    the net, and the tax is the rest, so net plus tax equals ``gross`` exactly.
+
+def tax_inclusive(gross: int, rate_ppm: int, rule: Union[str, RoundingRule]) -> int:
+    """Tax inside the gross amount ``gross``; the net is ``gross`` minus it.
+
+    A floor rule (``FLOOR_RULES``) floors the exact tax:
+    ``rule(gross * rate_ppm, 1_000_000 + rate_ppm)``. Any other rule rounds the
+    net, and the tax is the rest: ``gross - rule(gross * 1_000_000, 1_000_000 + rate_ppm)``.
     """
     _require_amount("gross", gross)
     _require_rate(rate_ppm)
-    return gross - rounding_rule(rule)(gross * PPM, PPM + rate_ppm)
+    primitive = rounding_rule(rule)
+    if primitive in FLOOR_RULES:
+        return primitive(gross * rate_ppm, PPM + rate_ppm)
+    return gross - primitive(gross * PPM, PPM + rate_ppm)
 
 
 def tax_invoice_rate(

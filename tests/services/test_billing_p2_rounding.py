@@ -88,6 +88,14 @@ def test_tax_inclusive_examples():
     assert tax_inclusive(999, 0, "round_half_up") == 0
 
 
+@pytest.mark.parametrize("rule", ["tax_floor", "round_down"])
+def test_tax_inclusive_floor_rules_floor_the_tax(rule):
+    # Exact tax 101 * 0.2 / 1.2 = 16.83: the tax is 16 and the net 85.
+    assert tax_inclusive(101, 200_000, rule) == 16
+    assert tax_inclusive(1200, 200_000, rule) == 200
+    assert tax_inclusive(1, 200_000, rule) == 0
+
+
 def test_rule_names_and_refusals():
     assert rounding_rule("tax_floor") is tax_floor
     assert rounding_rule(round_half_up) is round_half_up
