@@ -9,10 +9,8 @@
 # payments settling one invoice at once) and
 # tests/services/test_billing_p1c_credit_mariadb.py (credit applied to an
 # invoice under concurrency) against a mariadb:11.8 service container, the
-# version production
-# runs. Manual trigger
-# only, so it never blocks other work; the SQLite migration tests in
-# tests/migrations run in the normal test suite.
+# version production runs. Manual trigger only, so it never blocks other work;
+# the SQLite migration tests in tests/migrations run in the normal test suite.
 name: Billing migrations (MariaDB)
 
 on:
@@ -31,7 +29,7 @@ jobs:
           MARIADB_DATABASE: rackflow_test
     env:
       RACKFLOW_TEST_MARIADB_URL: mysql+pymysql://root:rackflow-ci@mariadb:3306/rackflow_test
-      DATABASE_URL: sqlite:///:memory:
+      DATABASE_URL: "sqlite:///:memory:"
       INITIAL_ADMIN_USERNAME: ""
       INITIAL_ADMIN_PASSWORD: ""
       REQUIRE_SERVICE_INSTANCE_ENCRYPTION: "false"
