@@ -3,20 +3,17 @@
   import PageHeader from '../PageHeader.svelte';
   import { Alert, Button, Modal, Spinner } from '../ui/index.js';
   import {
-    adminStoreCreatePlanCycle,
     adminStoreCreatePricePlan,
     adminStoreCreateProduct,
-    adminStoreDeletePlanCycle,
     adminStoreDeletePricePlan,
     adminStoreGetProduct,
     adminStoreListCategories,
     adminStoreListProducts,
-    adminStoreUpdatePlanCycle,
     adminStoreUpdatePricePlan,
     adminStoreUpdateProduct,
     listCatalogProducts,
   } from '../../lib/api.js';
-  import { formatMoney } from '../../lib/resellerMoney.js';
+  import CycleEditor from '../billing/admin/CycleEditor.svelte';
 
   let products = [];
   let categories = [];
@@ -30,7 +27,6 @@
   let showForm = false;
   let form = blankForm();
   let planForm = { name: 'Standard', currency: 'USD', pricing_model: 'recurring', setup_cents: 0, enabled: true };
-  let cycleForm = { interval: 'monthly', price_cents: 0, enabled: true };
 
   function blankForm() {
     return {
@@ -164,23 +160,6 @@
     }
   }
 
-  async function addCycle(planId) {
-    saving = true;
-    error = '';
-    try {
-      await adminStoreCreatePlanCycle(planId, {
-        ...cycleForm,
-        price_cents: Math.round(Number(cycleForm.price_cents) * 100) || 0,
-      });
-      await selectProduct(selectedId);
-      success = 'Billing cycle added.';
-    } catch (err) {
-      error = err.message || 'Failed to add cycle';
-    } finally {
-      saving = false;
-    }
-  }
-
   async function removePlan(planId) {
     saving = true;
     try {
@@ -193,17 +172,6 @@
     }
   }
 
-  async function removeCycle(cycleId) {
-    saving = true;
-    try {
-      await adminStoreDeletePlanCycle(cycleId);
-      await selectProduct(selectedId);
-    } catch (err) {
-      error = err.message || 'Failed to delete cycle';
-    } finally {
-      saving = false;
-    }
-  }
 </script>
 
 <PageHeader title="Store Products">
@@ -260,25 +228,7 @@
                 <span>{plan.pricing_model} · {plan.currency}</span>
                 <Button variant="danger" on:click={() => removePlan(plan.id)}>Remove</Button>
               </div>
-              <ul>
-                {#each plan.cycles || [] as cycle (cycle.id)}
-                  <li>
-                    <span>{cycle.interval}</span>
-                    <span>{formatMoney(cycle.price_cents, plan.currency)}</span>
-                    <button class="link" on:click={() => removeCycle(cycle.id)}>Remove</button>
-                  </li>
-                {/each}
-              </ul>
-              <div class="inline-form">
-                <select bind:value={cycleForm.interval}>
-                  <option value="monthly">Monthly</option>
-                  <option value="quarterly">Quarterly</option>
-                  <option value="semiannually">Semi-annually</option>
-                  <option value="annually">Annually</option>
-                </select>
-                <input type="number" step="0.01" bind:value={cycleForm.price_cents} placeholder="Price USD" />
-                <Button on:click={() => addCycle(plan.id)} disabled={saving}>Add cycle</Button>
-              </div>
+              <CycleEditor {plan} onChanged={() => selectProduct(selectedId)} />
             </div>
           {/each}
 
@@ -367,8 +317,6 @@
   h3 { margin: 18px 0 10px; font-size: 15px; }
   .plan { border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
   .plan-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
-  ul { list-style: none; margin: 0 0 10px; padding: 0; }
-  li { display: flex; gap: 12px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border-color); font-size: 14px; }
   .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .inline-form input, .inline-form select { padding: 8px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); }
   .plan-add { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-color); }
@@ -379,6 +327,5 @@
   .form-grid .full { grid-column: 1 / -1; }
   .form-grid input, .form-grid select, .form-grid textarea { padding: 9px 10px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); }
   .check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
-  .link { background: none; border: none; color: var(--danger-color); cursor: pointer; font-size: 12px; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
 </style>
