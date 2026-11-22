@@ -55,6 +55,7 @@ from app.services.private_network_service import PrivateNetworkService
 from app.services.retained_restore_service import power_block_reason
 from app.services import backup_slot_service
 from app.services.storage_service import StorageService
+from app.services.tax.errors import RetryableTaxPublishError
 from app.services.reseller_billing_service import (
     DeployCreditRequiredError,
     IdempotencyConflictError,
@@ -529,6 +530,8 @@ def _prepare_charge(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
+    except RetryableTaxPublishError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
 
 
 def _cleanup_failed_service(db, reseller, owner, body, service):
