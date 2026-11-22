@@ -458,9 +458,27 @@ def list_registrations(db: DbDep):
     return [_registration_payload(row) for row in rows]
 
 
+# Codes a registration may not take, with the code to use: the engine finds registrations by mapped ISO codes.
+REGISTRATION_CODES_REFUSED = {
+    "EL": "EL is the VAT prefix of Greece; use GR",
+    "UK": "UK is not an ISO code; use GB",
+    "XI": "Northern Ireland (XI) is in the UK registration; use GB",
+    "IM": "The Isle of Man (IM) is in the UK registration; use GB",
+    "MC": "Monaco (MC) is in the French registration; use FR",
+}
+
+
+def _check_registration(data: dict) -> None:
+    for name in ("jurisdiction", "country"):
+        code = data.get(name)
+        if code in REGISTRATION_CODES_REFUSED:
+            raise _unprocessable(f"invalid_registration_{name}", f"{name}: {REGISTRATION_CODES_REFUSED[code]}")
+
+
 @router.post("/tax/registrations", status_code=status.HTTP_201_CREATED)
 def create_registration(body: RegistrationCreate, auth: AdminDep, db: DbDep):
     data = body.model_dump(exclude_unset=True)
+    _check_registration(data)
     data["scheme"] = body.scheme.value
     data.setdefault("valid_from", _now())
     row = SellerTaxRegistration(**data)
@@ -477,6 +495,7 @@ def update_registration(registration_id: int, body: RegistrationFields, auth: Ad
     if row is None:
         raise HTTPException(status_code=404, detail="Registration not found")
     data = body.model_dump(exclude_unset=True)
+    _check_registration(data)
     if "scheme" in data and data["scheme"] is not None:
         data["scheme"] = TaxRegistrationScheme(data["scheme"]).value
     for name, value in data.items():

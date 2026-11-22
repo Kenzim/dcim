@@ -37,6 +37,22 @@ _MAPPED_COUNTRIES = {
     "MC": "MC is not used: Monaco is FR",
 }
 
+# Two-letter codes that are not a jurisdiction, with the code to use: a rule or registration under
+# them would never match a buyer or seller, whose countries are ISO codes mapped as the engine maps them.
+INVALID_JURISDICTIONS = {
+    "EL": "EL is the VAT prefix of Greece; use GR",
+    "UK": "UK is not an ISO code; use GB",
+    "EU": "EU is not a jurisdiction; use EU_OSS or a member state code",
+    "XI": "XI is not used: Northern Ireland is GB",
+    "IM": "IM is not used: the Isle of Man is GB",
+    "MC": "MC is not used: Monaco is FR",
+}
+
+
+def _check_jurisdiction_code(value: str) -> None:
+    if value in INVALID_JURISDICTIONS:
+        raise ValueError(INVALID_JURISDICTIONS[value])
+
 
 class PackFormatError(ValueError):
     """The pack does not follow the format of design 7.2."""
@@ -137,8 +153,7 @@ class PackRule(BaseModel):
     def _jurisdiction(cls, value: str) -> str:
         if value not in JURISDICTION_SPECIAL and not _COUNTRY.fullmatch(value):
             raise ValueError("must be ANY, GB, EU_OSS, ANY_EU or an ISO 3166-1 alpha-2 country code")
-        if value == "XI":
-            raise ValueError("XI is not used: Northern Ireland is GB")
+        _check_jurisdiction_code(value)
         return value
 
     @field_validator("reverse_charge_zone")
@@ -206,6 +221,13 @@ class PackSchema(BaseModel):
     legal_notes: dict[str, dict[str, str]] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     rules: list[PackRule]
+
+    @field_validator("jurisdictions")
+    @classmethod
+    def _jurisdictions(cls, value: list[str]) -> list[str]:
+        for code in value:
+            _check_jurisdiction_code(code)
+        return value
 
     @field_validator("legal_notes")
     @classmethod

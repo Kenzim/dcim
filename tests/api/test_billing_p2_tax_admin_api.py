@@ -206,6 +206,19 @@ def test_rule_country_im_and_mc_are_refused_with_a_pointer(client, headers, code
     assert detail["code"] == error and country in detail["message"]
 
 
+@pytest.mark.parametrize(("code", "right"), [("EL", "GR"), ("XI", "GB"), ("IM", "GB"), ("MC", "FR"), ("UK", "GB")])
+def test_registration_jurisdiction_codes_that_never_match_are_refused(client, headers, code, right):
+    body = {"jurisdiction": code.lower(), "scheme": "domestic", "tax_number": "X1", "country": right}
+    resp = client.post(f"{BASE}/registrations", headers=headers, json=body)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "invalid_registration_jurisdiction" and right in detail["message"]
+    created = client.post(f"{BASE}/registrations", headers=headers, json={**body, "jurisdiction": right})
+    assert created.status_code == 201, created.text
+    resp = client.put(f"{BASE}/registrations/{created.json()['id']}", headers=headers, json={"jurisdiction": code})
+    assert resp.status_code == 422 and resp.json()["detail"]["code"] == "invalid_registration_jurisdiction"
+
+
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
     classes = {c["code"]: c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json()}
     assert client.delete(f"{BASE}/classes/{classes['standard']}", headers=headers).status_code == 409
