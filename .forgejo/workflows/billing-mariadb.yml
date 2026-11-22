@@ -1,6 +1,7 @@
 # Optional: billing phase 1 migrations on MariaDB 11.8.
 #
-# Runs tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
+# Runs tests/core/test_alembic_fresh_mariadb.py (the whole Alembic chain,
+# phase 1 included, from an empty database), tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
 # billing_p1_* chain), the snapshot isolation connect hook test and
 # tests/services/test_billing_p1i_numbering_mariadb.py (series counters under
 # concurrency) and tests/services/test_billing_p1i_settlement_mariadb.py (two
@@ -49,6 +50,8 @@ jobs:
           else:
               raise SystemExit("MariaDB did not start")
           EOF
+      - name: Whole migration chain from an empty database on MariaDB
+        run: python -m pytest tests/core/test_alembic_fresh_mariadb.py -q
       - name: Billing phase 1 chain on MariaDB
         run: python -m pytest tests/migrations/test_billing_p1_mariadb.py tests/core/test_database_snapshot_isolation.py -q
       - name: Series counters under concurrency on MariaDB
