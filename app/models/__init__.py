@@ -123,7 +123,12 @@ from app.models.commerce_account import (
     SystemSetting,
 )
 from app.models.commerce_audit import UserAuditEvent
-from app.models.commerce_email import EmailMessage, EmailMessageStatus
+from app.models.commerce_email import (
+    EmailMessage,
+    EmailMessageStatus,
+    EmailTemplate,
+    EmailTemplateVersion,
+)
 from app.models.commerce_gateway_log import GatewayLogDirection, PaymentGatewayLog
 from app.models.storefront import (
     FrontendProduct,
@@ -157,6 +162,25 @@ from app.models.invoice_adjustment import (
 )
 from app.models.refund import Refund, RefundDestination, RefundReason, RefundStatus
 from app.models.billing_shadow import BillingShadowMismatch
+from app.models.tax import (
+    InvoiceAdjustmentLineTax,
+    InvoiceLineTax,
+    InvoiceProfile,
+    SellerTaxRegistration,
+    TaxClass,
+    TaxExemption,
+    TaxIdCheck,
+    TaxLegalNote,
+    TaxRule,
+)
+from app.models.billing_jobs import (
+    BillingJobAction,
+    BillingJobRun,
+    BillingJobRunItem,
+    BillingJobState,
+    BillingNonpaymentPolicy,
+    CancellationRequest,
+)
 from app.models.commerce_coupon_tax import (
     Coupon,
     CouponAppliesTo,
@@ -328,6 +352,26 @@ __all__ += [
     "RefundDestination",
     "RefundReason",
     "RefundStatus",
+]
+
+__all__ += [
+    "BillingJobAction",
+    "BillingJobRun",
+    "BillingJobRunItem",
+    "BillingJobState",
+    "BillingNonpaymentPolicy",
+    "CancellationRequest",
+    "EmailTemplate",
+    "EmailTemplateVersion",
+    "InvoiceAdjustmentLineTax",
+    "InvoiceLineTax",
+    "InvoiceProfile",
+    "SellerTaxRegistration",
+    "TaxClass",
+    "TaxExemption",
+    "TaxIdCheck",
+    "TaxLegalNote",
+    "TaxRule",
 ]
 
 __all__ += [
