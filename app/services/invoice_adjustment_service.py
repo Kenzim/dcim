@@ -673,9 +673,19 @@ def _credit_line_rows(
     being credited, so crediting what is left takes exactly what is left of
     every row. The line's tax becomes the sum of its rows; a caller's
     ``tax_cents`` is ignored for a line with tax rows.
+
+    Credits by amount and refund notes take from a rate group as a whole, not
+    from its lines, so each row is also bounded by what is left of its group
+    in ``tax_base_rows`` (see ``_bound_by_group``).
     """
     out: list[NoteLine] = []
     credits: dict[int, list[LineRowCredit]] = {}
+    groups = {
+        _group_key(r.name, r.rate_percent, r.jurisdiction, r.reverse_charge): r
+        for r in _tax_base_rows(db, invoice, key)
+        if r.name is not None
+    }
+    taken: dict[tuple, list[int]] = {}
     for index, line in enumerate(lines):
         left = _line_rows_left(db, line.invoice_line_id, key) if line.invoice_line_id else []
         if not left:
@@ -691,6 +701,10 @@ def _credit_line_rows(
         for row, base_left, tax_left in left:
             tax = refund_tax_proportional(max(0, min(net, net_left)), max(0, tax_left), net_left) if net_left > 0 else 0
             base = refund_tax_proportional(max(0, min(net, net_left)), max(0, base_left), net_left) if net_left > 0 else 0
+            group_key = _group_key(row.name, row.rate_percent, row.jurisdiction, row.reverse_charge)
+            tax = _bound_by_group(
+                groups[group_key], taken.setdefault(group_key, [0, 0]), base, tax, f"line {index + 1}"
+            )
             row_credits.append(
                 LineRowCredit(
                     source_line_tax_id=int(row.id), name=row.name, rate_percent=row.rate_percent,
@@ -701,6 +715,27 @@ def _credit_line_rows(
         credits[index] = row_credits
         out.append(replace(line, tax_cents=sum(c.tax_cents for c in row_credits)))
     return out, credits
+
+
+def _bound_by_group(group: RowBase, taken: list[int], base: int, tax: int, label: str) -> int:
+    """The tax of one row of a credit by lines, bounded by what is left of its rate group.
+
+    ``taken`` is the ``[base, tax]`` this note has already taken from the
+    group and is updated. A note may not credit more net than the group has
+    left; one that credits all of it takes exactly the group's remaining tax,
+    so the note that completes a rate leaves no cent behind or over.
+    """
+    net_left = int(group.worth_cents) - int(group.tax_cents)
+    tax_left = int(group.tax_cents) - taken[1]
+    taken[0] += base
+    if taken[0] > net_left:
+        raise AdjustmentConflictError(
+            f"{label} credits more than is left at {group.name} ({max(0, net_left)} cents net)"
+        )
+    tax = tax_left if taken[0] == net_left else min(tax, tax_left)
+    tax = max(0, tax)
+    taken[1] += tax
+    return tax
 
 
 def _credited_net(db: Session, invoice_line_id: int, key: str) -> int:
