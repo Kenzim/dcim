@@ -341,6 +341,22 @@ def test_reverse_charge_needs_each_condition(db_session, facts, reason):
     assert result.evidence.values.get("notes") == ["not_registered"]
 
 
+def test_tax_id_freshness_has_one_verdict_per_tax_point_date(db_session):
+    _uk_seller(db_session)
+    morning, evening = NOW.replace(hour=9), NOW.replace(hour=23, minute=59)
+    # Exactly 30 days old at 10:00 on the tax point's date.
+    turning = buyer("DE", business=True, tax_id="1", status="valid", checked_at=NOW.replace(hour=10) - timedelta(days=30))
+    quote = _calc(db_session, [line("a", 1000)], facts=turning, at=morning)
+    publish = _calc(db_session, [line("a", 1000)], facts=turning, at=NOW)
+    assert quote.context_hash == publish.context_hash
+    for result in (quote, publish):
+        assert "tax_id_stale" in result.evidence.values["reasons"]
+        assert not any(p.reverse_charge for p in result.lines["a"].parts)
+    fresh = buyer("DE", business=True, tax_id="1", status="valid", checked_at=NOW.replace(hour=10) - timedelta(days=29))
+    for at in (morning, evening):
+        assert _calc(db_session, [line("a", 1000)], facts=fresh, at=at).lines["a"].parts[0].reverse_charge
+
+
 def test_consumer_is_not_reverse_charged(db_session):
     _uk_seller(db_session)
     result = _calc(db_session, [line("a", 1000)], facts=buyer("DE"))

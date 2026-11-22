@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Sequence
 
@@ -190,7 +190,12 @@ def _reverse_charge_part(place: "_Place") -> _Part:
 
 
 def _tax_id_freshness(db: Session, context: TaxContext, settings: TaxSettings) -> tuple[bool, Optional[str], Optional[str]]:
-    """``(valid_and_fresh, reason_if_not, checked_at)`` for the buyer's tax ID (design 4.3 step 5)."""
+    """``(valid_and_fresh, reason_if_not, checked_at)`` for the buyer's tax ID (design 4.3 step 5).
+
+    Fresh means checked within ``max_age_days`` of the end of the tax point's
+    date, the date ``context_hash`` takes, so one context hash has one verdict
+    all day: a check that turns too old during the day is stale from its start.
+    """
     buyer = context.buyer
     if not buyer.tax_id:
         return False, "tax_id_missing", None
@@ -207,7 +212,9 @@ def _tax_id_freshness(db: Session, context: TaxContext, settings: TaxSettings) -
         checked_at = _aware(check.checked_at) if check is not None else None
     if checked_at is None:
         return False, "tax_id_unchecked", None
-    if checked_at < _aware(context.tax_point_at) - timedelta(days=settings.max_age_days):
+    at = _aware(context.tax_point_at)
+    day_end = datetime.combine(at.date() + timedelta(days=1), time.min, tzinfo=at.tzinfo)
+    if checked_at < day_end - timedelta(days=settings.max_age_days):
         return False, "tax_id_stale", checked_at.isoformat()
     return True, None, checked_at.isoformat()
 
