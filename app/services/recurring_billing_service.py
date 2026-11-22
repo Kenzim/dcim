@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -39,8 +40,11 @@ from app.services.billing.renewals import (
 )
 from app.services.invoice_service import InvoiceService
 from app.services.notification_service import NotificationEvent, NotificationService
+from app.services.credit_ledger_service import CreditLedgerService
 from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
+
+logger = logging.getLogger(__name__)
 
 
 _SAFE_CODE_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
@@ -55,6 +59,10 @@ _TERMINAL_STATES = {
     BillingCycleState.CANCELLED,
     BillingCycleState.MANUAL_REVIEW,
 }
+# Invoice statuses a failed renewal never chases: the cycle goes to manual review.
+_UNCHASED_INVOICE_STATUSES = frozenset(
+    {InvoiceStatus.VOID, InvoiceStatus.REFUNDED, InvoiceStatus.FAILED, InvoiceStatus.DRAFT}
+)
 
 
 def _utc(value: datetime) -> datetime:
@@ -668,6 +676,31 @@ class RecurringBillingService:
         if increment:
             cycle.attempts += 1
             cycle.last_attempt_at = now
+        # The invoice lock (after the service billing, LOCK_ORDER) re-reads the
+        # status, so a void or payment committed meanwhile is seen.
+        invoice = (
+            BillingLocks.for_invoice(db, cycle.invoice_id)
+            if cycle.invoice_id is not None
+            else None
+        )
+        if invoice is None or invoice.status in _UNCHASED_INVOICE_STATUSES:
+            cycle.claim_token = None
+            cycle.claim_expires_at = None
+            status = invoice.status.value if invoice is not None else "missing"
+            self._mark_manual(
+                billing,
+                cycle,
+                code=f"invoice_{status}",
+                message=(
+                    f"Renewal invoice is {status}; decide whether to reissue or cancel"
+                ),
+            )
+            return
+        if invoice.status == InvoiceStatus.PAID:
+            # Paid meanwhile: the paid-cycle recovery completes the cycle.
+            cycle.claim_token = None
+            cycle.claim_expires_at = None
+            return
         safe_code, safe_message = self._last_safe_failure(
             db, cycle.invoice_id, code=code, message=message
         )
@@ -689,8 +722,10 @@ class RecurringBillingService:
             if cycle.attempts == 1
             else BillingCycleState.GRACE
         )
-        if cycle.invoice.status != InvoiceStatus.PENDING_ACTION:
-            cycle.invoice.status = InvoiceStatus.OVERDUE
+        if invoice.status in (InvoiceStatus.OPEN, InvoiceStatus.PARTIALLY_PAID):
+            InvoiceService.transition(
+                db, invoice, InvoiceStatus.OVERDUE, cause="renewal_past_due"
+            )
         billing.status = (
             ServiceBillingStatus.PAST_DUE
             if cycle.attempts == 1
@@ -937,7 +972,7 @@ class RecurringBillingService:
 
         if not self._has_overdue_cycles(db, reseller.id, excluding=cycle.id):
             await self._restore_cascade(db, reseller)
-            if reseller.cached_balance_cents >= 0 and (
+            if CreditLedgerService.balance_cents(db, reseller) >= 0 and (
                 not reseller.billing_hold
                 or reseller.billing_hold_reason == "nonpayment"
             ):
@@ -1016,8 +1051,51 @@ class RecurringBillingService:
             cycle.state = BillingCycleState.CANCELLED
             cycle.completed_at = now
             cycle.next_retry_at = None
-            if cycle.invoice is not None and cycle.invoice.status != InvoiceStatus.PAID:
-                cycle.invoice.status = InvoiceStatus.VOID
+            if cycle.invoice is not None:
+                RecurringBillingService._void_cancelled_cycle_invoice(db, cycle.invoice)
+
+    @staticmethod
+    def _void_cancelled_cycle_invoice(db: Session, invoice: Invoice) -> None:
+        """Void the invoice of a cancelled cycle where the invoice engine allows it.
+
+        The invoice is locked (after the service billing, and in ``v2`` after
+        the reseller and billing account, LOCK_ORDER) and decided from the
+        re-read row. Legacy and shadow void every invoice that is not
+        ``paid`` or ``void``, as they always have. In ``v2`` only
+        ``InvoiceService.void()`` voids (design 3.4): an ``open`` or
+        ``overdue`` invoice with nothing paid, pending, noted or being
+        refunded. An unpaid invoice it refuses is credited for what is still
+        owed when no money is held, else recorded for refund review
+        (``close_kept_invoice_v2``); the cancellation goes ahead either way.
+        """
+        from app.services.billing.order_refunds import (
+            close_kept_invoice_v2,
+            void_cancelled_invoice_v2,
+        )
+        from app.services.billing_shadow import billing_engine_mode
+
+        if billing_engine_mode(db, "invoice") != "v2":
+            locked = BillingLocks.for_invoice(db, invoice.id) or invoice
+            if locked.status not in (InvoiceStatus.PAID, InvoiceStatus.VOID):
+                InvoiceService.transition(
+                    db,
+                    locked,
+                    InvoiceStatus.VOID,
+                    cause="service_billing_cancelled",
+                    reason="Service billing cancelled",
+                )
+            return
+        locked = (
+            BillingLocks.for_invoice(db, invoice.id, reseller=True, billing_account=True)
+            or invoice
+        )
+        if void_cancelled_invoice_v2(
+            db, locked, reason="Service billing cancelled", actor_user_id=None
+        ):
+            return
+        close_kept_invoice_v2(
+            db, locked, reason="service_billing_cancelled", actor_user_id=None
+        )
 
     @staticmethod
     def _mark_manual(

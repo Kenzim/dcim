@@ -37,7 +37,7 @@ def test_chained_from_plugin_system_and_single_head():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["billing_a0_renewals"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("billing_a0_renewals").down_revision == "plugin_system"
 
 

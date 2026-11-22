@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
@@ -63,10 +64,12 @@ from app.models.usdt import (
     UsdtDepositStatus,
     UsdtTransferEvent,
 )
+from app.services.billing_shadow import billing_engine_mode
 from app.services.credit_ledger_service import (
     CreditLedgerError,
     CreditLedgerService,
     InsufficientCreditError,
+    InvoicePaymentPendingError,
 )
 from app.services.billing.settlement import commit_and_fulfil
 from app.services.invoice_service import InvoiceService
@@ -310,6 +313,18 @@ def _group_payload(db: Session, group: ResellerGroup) -> dict:
     }
 
 
+# Invoices counted as open in the reseller summary: those shown publicly as
+# ``open`` or ``overdue`` (``pending_action`` is not counted, as before).
+_SUMMARY_OPEN_STATUSES = frozenset(
+    {
+        InvoiceStatus.OPEN,
+        InvoiceStatus.PARTIALLY_PAID,
+        InvoiceStatus.OVERDUE,
+        InvoiceStatus.COLLECTIONS,
+    }
+)
+
+
 def _invoice_summary(db: Session, reseller_id: int) -> dict:
     rows = list(
         db.execute(
@@ -318,10 +333,7 @@ def _invoice_summary(db: Session, reseller_id: int) -> dict:
     )
     return {
         "total": len(rows),
-        "open": sum(
-            row.status in {InvoiceStatus.OPEN, InvoiceStatus.OVERDUE}
-            for row in rows
-        ),
+        "open": sum(row.status in _SUMMARY_OPEN_STATUSES for row in rows),
         "paid": sum(row.status == InvoiceStatus.PAID for row in rows),
         "paid_total_cents": sum(
             row.amount_cents for row in rows if row.status == InvoiceStatus.PAID
@@ -393,7 +405,7 @@ def _reseller_payload(
         "billing_hold_at": reseller.billing_hold_at,
         "billing_hold_cleared_at": reseller.billing_hold_cleared_at,
         "billing_hold_reason": reseller.billing_hold_reason,
-        "balance_cents": reseller.cached_balance_cents,
+        "balance_cents": CreditLedgerService.balance_cents(db, reseller),
         "api_key_prefix": reseller.api_key_prefix,
         "last_used_at": reseller.last_used_at,
         "last_used_ip": reseller.last_used_ip,
@@ -683,7 +695,13 @@ def _invoice_payload(
     *,
     include_payments: bool = False,
 ) -> dict:
-    allocated = InvoiceService.allocated_cents(db, invoice.id)
+    balance = InvoiceService.balance(db, invoice)
+    if billing_engine_mode(db, "invoice") == "v2":
+        allocated = balance.paid_net_cents
+        remaining = balance.remaining_cents
+    else:
+        allocated = InvoiceService.allocated_cents(db, invoice.id)
+        remaining = max(0, invoice.amount_cents - allocated)
     result = {
         "id": invoice.id,
         "invoice_number": invoice.invoice_number,
@@ -693,9 +711,11 @@ def _invoice_payload(
         "service": _service_brief(invoice.service),
         "purpose": _enum_value(invoice.purpose),
         "status": _enum_value(invoice.status),
+        "status_detail": _enum_value(invoice.status),
         "amount_cents": invoice.amount_cents,
         "allocated_cents": allocated,
-        "remaining_cents": max(0, invoice.amount_cents - allocated),
+        "remaining_cents": remaining,
+        "balance": dataclasses.asdict(balance),
         "currency": invoice.currency,
         "description": invoice.description,
         "due_at": invoice.due_at,
@@ -1990,8 +2010,66 @@ async def adjust_reseller_credit(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     reseller = _reseller_or_404(db, reseller_id)
     return {
-        "new_balance_cents": reseller.cached_balance_cents,
+        "new_balance_cents": CreditLedgerService.balance_cents(db, reseller),
         "entry": _ledger_payload(entry),
+    }
+
+
+class ApplyCreditCreate(RequestModel):
+    amount_cents: Optional[StrictInt] = Field(default=None, gt=0)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/resellers/invoices/{invoice_id}/apply-credit", responses=COMMON_ERROR_RESPONSES)
+def apply_reseller_credit_to_invoice(
+    invoice_id: int,
+    body: ApplyCreditCreate,
+    auth: AdminDep,
+    db: DbDep,
+):
+    invoice = db.get(Invoice, invoice_id)
+    if invoice is None or invoice.reseller_id is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
+        raise HTTPException(status_code=400, detail="Credit cannot pay a credit top-up invoice")
+    try:
+        payment = CreditLedgerService.apply_to_invoice(
+            db,
+            invoice,
+            amount_cents=body.amount_cents,
+            actor_user_id=auth["user_id"],
+            idempotency_key=f"admin-apply-credit:{invoice.id}:{body.idempotency_key}",
+        )
+    except InsufficientCreditError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "insufficient_credit",
+                "available_cents": exc.available_cents,
+                "requested_cents": exc.requested_cents,
+            },
+        ) from exc
+    except InvoicePaymentPendingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "invoice_payment_pending",
+                "invoice_id": exc.invoice_id,
+                "payment_id": exc.payment_id,
+            },
+        ) from exc
+    except CreditLedgerError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    commit_and_fulfil(db)
+    db.refresh(invoice)
+    return {
+        "applied_cents": payment.amount_cents if payment is not None else 0,
+        "payment_id": payment.id if payment is not None else None,
+        "new_balance_cents": CreditLedgerService.balance_cents(db, invoice.reseller),
+        "invoice": _invoice_payload(db, invoice),
     }
 
 

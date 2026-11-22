@@ -16,21 +16,19 @@ from app.dao.order_dao import OrderDAO, OrderItemDAO, OrderStatusHistoryDAO
 from app.dao.storefront_dao import FrontendProductDAO
 from app.models.commerce_account import BillingAccount, BillingAccountType
 from app.models.commerce_coupon_tax import Coupon, CouponAppliesTo, TaxRate
-from app.models.commerce_invoice_ext import InvoiceLine
+from app.models.commerce_invoice_ext import InvoiceLineKind
 from app.models.commerce_order import (
     Order,
     OrderItemFulfillStatus,
     OrderStatus,
 )
 from app.models.product_catalog import Product
-from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus
+from app.models.reseller import Invoice, InvoicePurpose
 from app.models.service import ProvisioningSource, Service, ServiceType
 from app.models.storefront import (
     FrontendProduct,
     PricePlan,
     PricePlanCycle,
-    PricePlanInterval,
-    PricePlanPricingModel,
     ProductOption,
     ProductOptionValue,
 )
@@ -42,11 +40,12 @@ from app.services.billing.coupons import (
     record_coupon_usage,
     release_coupon_usage,
 )
+from app.services.billing.cycles import CycleError, resolve_cycle
 from app.services.billing.order_refunds import apply_order_refund_policy
 from app.services.commerce_recurring_service import CommerceRecurringService
 from app.plugin_host import events as plugin_events
 from app.services.email_message_service import EmailEvent, EmailMessageService
-from app.services.invoice_service import InvoiceService
+from app.services.invoice_service import InvoiceService, NewLine, engine_mode
 from app.services.provisioning import (
     ALLOWED_PROVISION_KEYS,
     ProvisionRequest,
@@ -102,25 +101,11 @@ class CheckoutService:
         plan: PricePlan,
         cycle_interval: Optional[str],
     ) -> tuple[int, int]:
-        setup = int(plan.setup_cents or 0)
-        if plan.pricing_model == PricePlanPricingModel.FREE:
-            return 0, 0
-        if plan.pricing_model == PricePlanPricingModel.ONE_TIME:
-            cycle = next((c for c in plan.cycles if c.enabled), None)
-            return setup, int(cycle.price_cents if cycle else 0)
-        if not cycle_interval:
-            raise CheckoutError("Billing cycle is required for recurring plans")
         try:
-            interval = PricePlanInterval(cycle_interval)
-        except ValueError as exc:
-            raise CheckoutError("Invalid billing cycle") from exc
-        cycle = next(
-            (c for c in plan.cycles if c.enabled and c.interval == interval),
-            None,
-        )
-        if cycle is None:
-            raise CheckoutError("Selected billing cycle is unavailable")
-        return setup, int(cycle.price_cents)
+            resolved = resolve_cycle(plan, cycle_interval)
+        except CycleError as exc:
+            raise CheckoutError(str(exc)) from exc
+        return resolved.setup_cents, resolved.recurring_cents
 
     @staticmethod
     def _normalize_options(
@@ -364,44 +349,90 @@ class CheckoutService:
             )
             else None
         )
-        invoice = Invoice(
-            invoice_number=InvoiceService.allocate_number(db),
+        legacy_lines = CheckoutService._legacy_invoice_lines(quote, order_item_id)
+        v2_lines = CheckoutService._v2_invoice_lines(quote, order_item_id)
+        v2 = engine_mode(db) == "v2"
+        invoice = InvoiceService.create(
+            db,
             reseller_id=reseller_id,
             billing_account_id=account.id,
             order_id=order.id,
             purpose=InvoicePurpose.ORDER_CHARGE,
-            status=InvoiceStatus.OPEN,
             amount_cents=int(quote.total_cents),
             currency=quote.currency,
             description=f"Order #{order.order_number}",
             due_at=datetime.now(timezone.utc),
+            lines=v2_lines if v2 else legacy_lines,
+            shadow_lines=v2_lines,
         )
-        db.add(invoice)
-        db.flush()
-        sort = 0
-        for line in quote.lines:
-            if line.total_cents == 0:
-                continue
-            db.add(
-                InvoiceLine(
-                    invoice_id=invoice.id,
-                    description=line.description[:512],
-                    quantity=line.quantity,
-                    unit_cents=line.unit_cents,
-                    total_cents=line.total_cents,
-                    tax_cents=line.total_cents if line.kind == "tax" else 0,
-                    sort_order=sort,
-                    order_item_id=(
-                        order_item_id
-                        if line.kind in {"setup", "product", "option"}
-                        else None
-                    ),
-                )
-            )
-            sort += 1
         order.invoice_id = invoice.id
         db.flush()
         return invoice
+
+    @staticmethod
+    def _legacy_invoice_lines(quote: QuoteResult, order_item_id: int) -> list[NewLine]:
+        """Today's lines: tax as its own line, no line kinds."""
+        return [
+            NewLine(
+                description=line.description[:512],
+                quantity=line.quantity,
+                unit_cents=line.unit_cents,
+                tax_cents=line.total_cents if line.kind == "tax" else 0,
+                order_item_id=(
+                    order_item_id if line.kind in {"setup", "product", "option"} else None
+                ),
+            )
+            for line in quote.lines
+            if line.total_cents != 0
+        ]
+
+    @staticmethod
+    def _v2_invoice_lines(quote: QuoteResult, order_item_id: int) -> list[NewLine]:
+        """Design 1.3.1: every line has a kind and the tax sits on the taxed lines.
+
+        The quote's tax is spread over the charged lines in proportion to their
+        totals by the largest remainder rule; a negative option total is
+        written as a discount line, since only discounts may be negative.
+        """
+        from app.services.billing.rounding import tax_split_largest_remainder
+
+        kinds = {
+            "setup": InvoiceLineKind.SETUP,
+            "product": InvoiceLineKind.PRODUCT,
+            "option": InvoiceLineKind.OPTION,
+            "discount": InvoiceLineKind.DISCOUNT,
+        }
+        priced = []
+        for line in quote.lines:
+            if line.kind == "tax" or line.total_cents == 0:
+                continue
+            kind = kinds.get(line.kind, InvoiceLineKind.OTHER)
+            if line.total_cents < 0:
+                kind = InvoiceLineKind.DISCOUNT
+            priced.append((line, kind))
+        charged = [
+            index
+            for index, (_line, kind) in enumerate(priced)
+            if kind != InvoiceLineKind.DISCOUNT
+        ]
+        shares = tax_split_largest_remainder(
+            int(quote.tax_cents), [int(priced[index][0].total_cents) for index in charged]
+        )
+        tax_of = dict(zip(charged, shares))
+        return [
+            NewLine(
+                description=line.description[:512],
+                quantity=line.quantity,
+                unit_cents=line.unit_cents,
+                kind=kind,
+                tax_cents=tax_of.get(index, 0),
+                taxable=kind != InvoiceLineKind.DISCOUNT,
+                order_item_id=(
+                    order_item_id if line.kind in {"setup", "product", "option"} else None
+                ),
+            )
+            for index, (line, kind) in enumerate(priced)
+        ]
 
     @staticmethod
     def _enqueue_checkout_emails(

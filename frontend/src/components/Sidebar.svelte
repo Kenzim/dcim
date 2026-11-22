@@ -87,6 +87,11 @@
   $: isStoreCouponsActive = currentPath.startsWith('/admin/store/coupons');
   $: isCommerceOrdersActive = currentPath.startsWith('/admin/commerce/orders');
   $: isCommerceInvoicesActive = currentPath.startsWith('/admin/commerce/invoices');
+  $: isBillingSeriesActive = currentPath.startsWith('/admin/billing-series');
+  $: isBillingEnginesActive = currentPath.startsWith('/admin/billing-engines');
+  $: isBillingRefundsActive = currentPath.startsWith('/admin/billing-refunds');
+  $: isBillingNotesActive = currentPath.startsWith('/admin/billing-notes');
+  $: isBillingCreditActive = currentPath.startsWith('/admin/billing-credit');
   $: isCommerceTransactionsActive = currentPath.startsWith('/admin/commerce/transactions');
   $: isCommerceGatewayLogsActive = currentPath.startsWith('/admin/commerce/gateway-logs');
   $: isCommerceEmailLogActive = currentPath.startsWith('/admin/commerce/email-log');
@@ -467,6 +472,46 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
             <span>Invoices</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-notes" class="nav-link" class:active={isBillingNotesActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+            </svg>
+            <span>Credit & Debit Notes</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-refunds" class="nav-link" class:active={isBillingRefundsActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+            </svg>
+            <span>Refunds</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-credit" class="nav-link" class:active={isBillingCreditActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
+            </svg>
+            <span>Account Credit</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-series" class="nav-link" class:active={isBillingSeriesActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
+            </svg>
+            <span>Document Series</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing-engines" class="nav-link" class:active={isBillingEnginesActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7m5 0l2 2 4-4" />
+            </svg>
+            <span>Billing Engines</span>
           </a>
         </li>
         <li class="nav-item">

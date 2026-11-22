@@ -54,6 +54,11 @@
   import StoreCoupons from '../components/store/StoreCoupons.svelte';
   import CommerceOrders from '../components/commerce/CommerceOrders.svelte';
   import CommerceInvoices from '../components/commerce/CommerceInvoices.svelte';
+  import SeriesSettings from '../components/billing/admin/SeriesSettings.svelte';
+  import BillingEngines from '../components/billing/admin/BillingEngines.svelte';
+  import RefundsAdmin from '../components/billing/admin/RefundsAdmin.svelte';
+  import NotesList from '../components/billing/admin/NotesList.svelte';
+  import CreditAdmin from '../components/billing/admin/CreditAdmin.svelte';
   import CommerceTransactions from '../components/commerce/CommerceTransactions.svelte';
   import CommerceGatewayLogs from '../components/commerce/CommerceGatewayLogs.svelte';
   import CommerceEmailLog from '../components/commerce/CommerceEmailLog.svelte';
@@ -400,6 +405,16 @@
         <CommerceOrders />
       {:else if routeName === 'commerce/invoices'}
         <CommerceInvoices />
+      {:else if routeName === 'billing-series'}
+        <SeriesSettings />
+      {:else if routeName === 'billing-engines'}
+        <BillingEngines />
+      {:else if routeName === 'billing-refunds'}
+        <RefundsAdmin />
+      {:else if routeName === 'billing-notes'}
+        <NotesList />
+      {:else if routeName === 'billing-credit'}
+        <CreditAdmin />
       {:else if routeName === 'commerce/transactions'}
         <CommerceTransactions />
       {:else if routeName === 'commerce/gateway-logs'}

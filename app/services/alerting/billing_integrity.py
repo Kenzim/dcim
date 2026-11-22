@@ -10,23 +10,23 @@ Coverage notes:
 * Retail ``billing_accounts.credit_balance_cents`` has no ledger to compare with
   (``credit_ledger_entries`` is keyed by reseller only), so the credit check
   covers resellers. A reseller's billing account mirror is not compared.
-* There is no refund table yet. ``billing_refund_stuck`` reads a table named
-  ``refunds`` with ``id``, ``status`` and ``created_at`` columns when it exists
-  and reports nothing otherwise, so it is correct before and after refunds are
-  recorded in their own table.
+* ``billing_refund_stuck`` reads the ``refunds`` table through reflection (it
+  needs ``id``, ``status`` and ``created_at``) and reports nothing when the
+  table is missing.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import MetaData, Table, and_, func, inspect, or_, select
+from sqlalchemy import MetaData, Table, and_, case, func, inspect, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
 from app.models.commerce_invoice_ext import InvoiceLine
+from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment, InvoiceAdjustmentLine
 from app.models.reseller import (
     CreditLedgerEntry,
     Invoice,
@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 OVERFLOW_ID = "overflow"
 _REFUNDS_TABLE = "refunds"
 _PENDING = "pending"
+_REVIEW = "review"
 
 
 def _limited(db: Session, stmt: Select, max_rows: int) -> tuple[list[Any], int]:
@@ -90,14 +91,18 @@ def invoice_lines_mismatch(db: Session, params: dict, now: datetime) -> list[Fin
     """An invoice that has lines whose totals do not add up to the invoice total.
 
     Invoices without lines are skipped (reseller invoices often have none), as are
-    draft and void invoices.
+    draft and void invoices, and model v2 invoices, whose tax sits on the lines
+    and whose totals ``invoice_totals`` checks.
     """
     line_sum = func.sum(InvoiceLine.total_cents)
     stmt = (
         select(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency, line_sum.label("lines"),
                func.count(InvoiceLine.id).label("line_count"))
         .join(InvoiceLine, InvoiceLine.invoice_id == Invoice.id)
-        .where(*_invoice_filters(params, now, _checked_invoices()))
+        .where(
+            *_invoice_filters(params, now, _checked_invoices()),
+            or_(Invoice.model_version.is_(None), Invoice.model_version != 2),
+        )
         .group_by(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency)
         .having(line_sum != Invoice.amount_cents)
         .order_by(Invoice.id)
@@ -328,13 +333,21 @@ def _refunds_table(db: Session) -> Table | None:
 
 
 def refund_stuck(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Refunds that have been pending longer than ``pending_after_minutes``."""
+    """Refunds in ``review``, or ``pending`` for longer than ``pending_after_minutes``."""
     table = _refunds_table(db)
     if table is None:
         return []
     stmt = (
         select(*(table.c[name] for name in ("id", "status", "created_at") + _optional(table)))
-        .where(table.c.status == _PENDING, table.c.created_at <= _cutoff(now, params, "pending_after_minutes", "minutes"))
+        .where(
+            or_(
+                table.c.status == _REVIEW,
+                and_(
+                    table.c.status == _PENDING,
+                    table.c.created_at <= _cutoff(now, params, "pending_after_minutes", "minutes"),
+                ),
+            )
+        )
         .order_by(table.c.id)
     )
     rows, remaining = _limited(db, stmt, params["max_rows"])
@@ -348,14 +361,21 @@ def refund_stuck(db: Session, params: dict, now: datetime) -> list[Finding]:
                 None if value is None else str(value)
             )
         details["created_at"] = _naive(data["created_at"]).isoformat() if data["created_at"] is not None else None
+        details["status"] = str(data["status"])
+        in_review = str(data["status"]) == _REVIEW
         out.append(
             Finding(
                 "billing_refund_stuck",
                 "refund",
                 str(data["id"]),
                 f"Refund {data['id']}",
-                f"Refund {data['id']} is still pending",
-                "A refund was started but has not been confirmed or failed; check the gateway before retrying.",
+                f"Refund {data['id']} needs staff review" if in_review else f"Refund {data['id']} is still pending",
+                (
+                    "The gateway gave no definitive answer within 24 hours; check the gateway and "
+                    "resolve the refund from the admin refunds page."
+                    if in_review
+                    else "A refund was started but has not been confirmed or failed; check the gateway before retrying."
+                ),
                 details=details,
             )
         )
@@ -368,6 +388,633 @@ def _optional(table: Table) -> tuple[str, ...]:
     return tuple(name for name in ("payment_id", "invoice_id", "amount_cents", "currency") if name in table.c)
 
 
+# Billing phase 1 detectors (docs/billing-phase1-design.md 10.4). Each alert
+# type ships disabled.
+
+
+def shadow_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """One finding per engine with open rows in ``billing_shadow_mismatches``."""
+    del now
+    from app.services.billing_shadow import ENGINES, open_mismatch_counts
+
+    out = []
+    for engine in ENGINES:
+        counts = open_mismatch_counts(db, engine)
+        if not counts:
+            continue
+        total = sum(counts.values())
+        listed = ", ".join(f"{key} {count}" for key, count in sorted(counts.items()))
+        out.append(
+            Finding(
+                "billing_shadow_mismatch",
+                "billing_shadow_mismatch",
+                engine,
+                f"{engine} engine",
+                f"{total} open shadow mismatches for the {engine} engine",
+                f"Open by check: {listed}. The {engine} engine cannot switch to v2 until they are resolved.",
+                details={"engine": engine, "open_by_check": counts, "open_total": total},
+            )
+        )
+    return out[: params["max_rows"]]
+
+
+def shadow_scan_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """An engine in ``shadow`` whose last daily scan finished over 26 hours ago, or never.
+
+    Only while the scheduled scan job is enabled, so an install with the job
+    off (the default) is quiet.
+    """
+    del params
+    from app.services.billing_shadow import (
+        ENGINES,
+        SCAN_FRESH_HOURS,
+        BillingShadowService,
+        _parse_time,
+        billing_engine_mode,
+    )
+    from app.services.settings_store import get_setting
+
+    if not get_setting(db, "billing_shadow_scan_enabled"):
+        return []
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    out = []
+    for engine in ENGINES:
+        if billing_engine_mode(db, engine) != "shadow":
+            continue
+        last = BillingShadowService.last_scan(db, engine)
+        finished = _parse_time(last.get("finished_at")) if last else None
+        if finished is not None and now - finished < timedelta(hours=SCAN_FRESH_HOURS):
+            continue
+        out.append(
+            Finding(
+                "billing_shadow_scan_stale",
+                "system",
+                f"shadow_scan:{engine}",
+                f"{engine} engine shadow scan",
+                f"The {engine} engine's shadow scan has not finished in the last {SCAN_FRESH_HOURS} hours",
+                "Last finished: " + (finished.isoformat() if finished else "never") + ".",
+                details={"engine": engine, "last_finished_at": finished.isoformat() if finished else None},
+            )
+        )
+    return out
+
+
+def ledger_chain_broken(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Billing accounts whose ledger chain is broken or whose last entry disagrees with the cache.
+
+    The cache compared is the authoritative one for the credit engine mode
+    (the reseller cache for reseller accounts until v2).
+    """
+    del now
+    from app.services.billing_shadow import (
+        account_chain_state,
+        authoritative_cache,
+        billing_engine_mode,
+        chain_breaks,
+    )
+
+    mode = billing_engine_mode(db, "credit")
+    breaks = chain_breaks(db)
+    account_ids = [
+        int(value)
+        for value in db.scalars(
+            select(CreditLedgerEntry.billing_account_id)
+            .where(CreditLedgerEntry.billing_account_id.is_not(None))
+            .group_by(CreditLedgerEntry.billing_account_id)
+        )
+    ]
+    offenders: list[tuple[int, dict]] = []
+    for start in range(0, len(account_ids), 1000):
+        states = account_chain_state(db, account_ids[start : start + 1000])
+        for account_id, state in states.items():
+            cache = authoritative_cache(state, mode)
+            if account_id in breaks or cache != state["last_balance_after"]:
+                offenders.append((account_id, {**state, "cache": cache}))
+    offenders.sort()
+    limit = params["max_rows"]
+    out = []
+    for account_id, state in offenders[:limit]:
+        broken = breaks.get(account_id)
+        details = {
+            "billing_account_id": account_id,
+            "cached_balance_cents": state["cache"],
+            "latest_balance_after_cents": state["last_balance_after"],
+            "first_broken_entry_id": broken[0] if broken else None,
+        }
+        out.append(
+            Finding(
+                "billing_ledger_chain_broken",
+                "billing_account",
+                str(account_id),
+                f"Billing account {account_id}",
+                f"Credit ledger of billing account {account_id} does not chain to its balance",
+                (f"Entry {broken[0]} should end at {broken[1]} but says {broken[2]}. " if broken else "")
+                + f"Cached balance {state['cache']}, newest entry says {state['last_balance_after']} (minor units).",
+                details=details,
+            )
+        )
+    if len(offenders) > limit:
+        out.append(_overflow("billing_ledger_chain_broken", "billing_account", "accounts with a broken ledger",
+                             len(offenders) - limit, limit))
+    return out
+
+
+def negative_retail_balance(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Retail billing accounts with a balance below zero."""
+    del now
+    from app.models.commerce_account import BillingAccount, BillingAccountType
+
+    stmt = (
+        select(BillingAccount.id, BillingAccount.credit_balance_cents, BillingAccount.currency)
+        .where(BillingAccount.account_type != BillingAccountType.RESELLER, BillingAccount.credit_balance_cents < 0)
+        .order_by(BillingAccount.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_negative_retail_balance",
+            "billing_account",
+            str(row.id),
+            f"Billing account {row.id}",
+            f"Credit balance of billing account {row.id} is negative",
+            f"Balance {int(row.credit_balance_cents)} {row.currency} minor units, usually after a chargeback "
+            "of a top-up that was already spent.",
+            details={"billing_account_id": row.id, "balance_cents": int(row.credit_balance_cents)},
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_negative_retail_balance", "billing_account", "negative retail balances",
+                             remaining, len(rows)))
+    return out
+
+
+_PUBLISHED = [status for status in InvoiceStatus if status != InvoiceStatus.DRAFT]
+
+
+def invoice_totals(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Model v2 invoices whose totals fail property P1 (design 1.3.1).
+
+    The stored subtotal, discount and tax must equal the sums over the lines,
+    and ``amount_cents`` must equal subtotal minus discount plus tax (tax not
+    added when prices include it) and never be negative.
+    """
+    from sqlalchemy import case
+
+    from app.models.commerce_invoice_ext import InvoiceLineKind
+
+    discount_kind = InvoiceLineKind.DISCOUNT
+    subtotal = func.coalesce(
+        func.sum(case((InvoiceLine.kind != discount_kind, InvoiceLine.total_cents), else_=0)), 0
+    )
+    discount = func.coalesce(
+        func.sum(case((InvoiceLine.kind == discount_kind, -InvoiceLine.total_cents), else_=0)), 0
+    )
+    tax = func.coalesce(func.sum(InvoiceLine.tax_cents), 0)
+    stmt = (
+        select(
+            Invoice.id,
+            Invoice.invoice_number,
+            Invoice.amount_cents,
+            Invoice.subtotal_cents,
+            Invoice.discount_cents,
+            Invoice.tax_cents,
+            Invoice.prices_include_tax,
+            Invoice.currency,
+            subtotal.label("line_subtotal"),
+            discount.label("line_discount"),
+            tax.label("line_tax"),
+        )
+        .select_from(Invoice)
+        .outerjoin(InvoiceLine, InvoiceLine.invoice_id == Invoice.id)
+        .where(Invoice.model_version == 2, *_invoice_filters(params, now, _PUBLISHED))
+        .group_by(
+            Invoice.id,
+            Invoice.invoice_number,
+            Invoice.amount_cents,
+            Invoice.subtotal_cents,
+            Invoice.discount_cents,
+            Invoice.tax_cents,
+            Invoice.prices_include_tax,
+            Invoice.currency,
+        )
+        .having(
+            or_(
+                Invoice.subtotal_cents.is_(None),
+                Invoice.discount_cents.is_(None),
+                Invoice.tax_cents.is_(None),
+                Invoice.amount_cents < 0,
+                subtotal != Invoice.subtotal_cents,
+                discount != Invoice.discount_cents,
+                tax != Invoice.tax_cents,
+                Invoice.amount_cents
+                != Invoice.subtotal_cents
+                - Invoice.discount_cents
+                + case((Invoice.prices_include_tax.is_(True), 0), else_=Invoice.tax_cents),
+            )
+        )
+        .order_by(Invoice.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = []
+    for row in rows:
+        expected = (
+            _money(row.line_subtotal)
+            - _money(row.line_discount)
+            + (0 if row.prices_include_tax else _money(row.line_tax))
+        )
+        out.append(
+            Finding(
+                "billing_invoice_totals",
+                "invoice",
+                str(row.id),
+                f"Invoice {row.invoice_number}",
+                f"Invoice {row.invoice_number} totals do not add up",
+                f"Lines give subtotal {_money(row.line_subtotal)}, discount {_money(row.line_discount)} "
+                f"and tax {_money(row.line_tax)}, a total of {expected}; the invoice stores "
+                f"{_money(row.amount_cents)} ({row.currency}, minor units).",
+                details={
+                    "invoice_id": row.id,
+                    "invoice_number": int(row.invoice_number),
+                    "amount_cents": _money(row.amount_cents),
+                    "subtotal_cents": row.subtotal_cents,
+                    "discount_cents": row.discount_cents,
+                    "tax_cents": row.tax_cents,
+                    "line_subtotal_cents": _money(row.line_subtotal),
+                    "line_discount_cents": _money(row.line_discount),
+                    "line_tax_cents": _money(row.line_tax),
+                    "expected_amount_cents": expected,
+                    "currency": row.currency,
+                },
+            )
+        )
+    if remaining:
+        out.append(_overflow("billing_invoice_totals", "invoice", "v2 invoices whose totals do not add up",
+                             remaining, len(rows)))
+    return out
+
+
+def invoice_status(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Model v2 invoices whose status disagrees with their balance, property P3 (design 3.2).
+
+    Payments and notes are aggregated per invoice in SQL; the status rule is
+    applied to each row. Terminal invoices (void, refunded, failed) are not
+    checked, and an overpaid invoice is always reported (it must have been
+    converted to account credit).
+    """
+    from types import SimpleNamespace
+
+    from sqlalchemy import case
+
+    from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment
+    from app.services.invoice_service import TERMINAL_V2, InvoiceBalance, InvoiceService
+
+    paid_statuses = (PaymentStatus.SUCCEEDED, PaymentStatus.PARTIALLY_REFUNDED, PaymentStatus.REFUNDED)
+    refunded = case(
+        (and_(Payment.status == PaymentStatus.REFUNDED, Payment.refunded_cents == 0), Payment.amount_cents),
+        (Payment.refunded_cents > Payment.amount_cents, Payment.amount_cents),
+        else_=Payment.refunded_cents,
+    )
+    payments = (
+        select(
+            Payment.invoice_id.label("invoice_id"),
+            func.coalesce(func.sum(case((Payment.status.in_(paid_statuses), Payment.amount_cents), else_=0)), 0)
+            .label("paid_gross"),
+            func.coalesce(func.sum(case((Payment.status.in_(paid_statuses), refunded), else_=0)), 0)
+            .label("refunded"),
+            func.coalesce(
+                func.sum(case((Payment.status == PaymentStatus.PENDING, Payment.amount_cents), else_=0)), 0
+            ).label("pending"),
+        )
+        .group_by(Payment.invoice_id)
+        .subquery()
+    )
+    notes = (
+        select(
+            InvoiceAdjustment.invoice_id.label("invoice_id"),
+            func.coalesce(
+                func.sum(case((InvoiceAdjustment.kind == AdjustmentKind.DEBIT, InvoiceAdjustment.total_cents),
+                              else_=0)), 0
+            ).label("debit"),
+            func.coalesce(
+                func.sum(case((InvoiceAdjustment.kind == AdjustmentKind.CREDIT, InvoiceAdjustment.total_cents),
+                              else_=0)), 0
+            ).label("credit"),
+        )
+        .group_by(InvoiceAdjustment.invoice_id)
+        .subquery()
+    )
+    checked = [status for status in _PUBLISHED if status not in TERMINAL_V2]
+    stmt = (
+        select(
+            Invoice.id,
+            Invoice.invoice_number,
+            Invoice.status,
+            Invoice.amount_cents,
+            Invoice.currency,
+            func.coalesce(payments.c.paid_gross, 0).label("paid_gross"),
+            func.coalesce(payments.c.refunded, 0).label("refunded"),
+            func.coalesce(payments.c.pending, 0).label("pending"),
+            func.coalesce(notes.c.debit, 0).label("debit"),
+            func.coalesce(notes.c.credit, 0).label("credit"),
+        )
+        .select_from(Invoice)
+        .outerjoin(payments, payments.c.invoice_id == Invoice.id)
+        .outerjoin(notes, notes.c.invoice_id == Invoice.id)
+        .where(Invoice.model_version == 2, *_invoice_filters(params, now, checked))
+        .order_by(Invoice.id)
+    )
+    out: list[Finding] = []
+    remaining = 0
+    for row in db.execute(stmt):
+        total = _money(row.amount_cents)
+        worth = total + _money(row.debit) - _money(row.credit)
+        paid_net = _money(row.paid_gross) - _money(row.refunded)
+        due = worth - paid_net
+        balance = InvoiceBalance(
+            total, _money(row.debit), _money(row.credit), worth, _money(row.paid_gross),
+            _money(row.refunded), paid_net, _money(row.pending), due, max(0, due),
+        )
+        expected = InvoiceService.target_status(
+            db, SimpleNamespace(status=row.status), balance, cause="integrity_scan"
+        )
+        if due >= 0 and expected == row.status:
+            continue
+        if len(out) >= params["max_rows"]:
+            remaining += 1
+            continue
+        expected_text = "account credit for the overpayment" if due < 0 else expected.value
+        out.append(
+            Finding(
+                "billing_invoice_status",
+                "invoice",
+                str(row.id),
+                f"Invoice {row.invoice_number}",
+                f"Invoice {row.invoice_number} is {row.status.value}, its balance says {expected_text}",
+                f"Worth {worth}, paid {paid_net} net, pending {_money(row.pending)}, due {due} "
+                f"({row.currency}, minor units).",
+                details={
+                    "invoice_id": row.id,
+                    "invoice_number": int(row.invoice_number),
+                    "status": row.status.value,
+                    "expected_status": None if due < 0 else expected.value,
+                    "balance": balance.as_dict(),
+                    "currency": row.currency,
+                },
+            )
+        )
+    if remaining:
+        out.append(_overflow("billing_invoice_status", "invoice", "v2 invoices whose status disagrees",
+                             remaining, len(out)))
+    return out
+
+
+def _issued_numbers():
+    """Every legal number issued: (series_id, period, value) from invoices, proformas and notes."""
+    from sqlalchemy import literal, union_all
+
+    from app.models.invoice_adjustment import InvoiceAdjustment
+
+    return union_all(
+        select(
+            Invoice.series_id.label("series_id"),
+            func.coalesce(Invoice.number_period, literal("")).label("period"),
+            Invoice.number_value.label("value"),
+        ).where(Invoice.series_id.is_not(None), Invoice.number_value.is_not(None)),
+        select(
+            Invoice.proforma_series_id.label("series_id"),
+            func.coalesce(Invoice.proforma_number_period, literal("")).label("period"),
+            Invoice.proforma_number_value.label("value"),
+        ).where(Invoice.proforma_series_id.is_not(None), Invoice.proforma_number_value.is_not(None)),
+        select(
+            InvoiceAdjustment.series_id.label("series_id"),
+            func.coalesce(InvoiceAdjustment.number_period, literal("")).label("period"),
+            InvoiceAdjustment.number_value.label("value"),
+        ).where(InvoiceAdjustment.series_id.is_not(None), InvoiceAdjustment.number_value.is_not(None)),
+    ).subquery()
+
+
+def numbering_gaps(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Gapless series with a gap, a duplicate or no recorded start, property P7 (design 5.1).
+
+    Per (series, period) the issued values are clean when they are distinct and
+    run without a hole from the recorded start to the largest, so a missing
+    first number is a gap. The start is the ``series-start:<id>:<period>`` row
+    of ``invoice_sequences`` (``series_start_name``), written when the counter
+    is created and moved only while nothing is issued. Issued numbers with no
+    start row get a finding of their own (resource id ``<id>:<period>:start``),
+    and their run is then checked from the smallest number.
+
+    The series periods are aggregated in SQL; the comparison with the start
+    rows and the ``max_rows`` limit are applied in Python, as there is one row
+    per gapless series and period.
+    """
+    from app.models.billing_series import SERIES_START_PREFIX, DocumentSeries, series_start_name
+    from app.models.reseller import InvoiceSequence
+
+    issued = _issued_numbers()
+    stmt = (
+        select(
+            DocumentSeries.id,
+            DocumentSeries.code,
+            issued.c.period,
+            func.count(issued.c.value).label("issued"),
+            func.count(func.distinct(issued.c.value)).label("distinct"),
+            func.min(issued.c.value).label("smallest"),
+            func.max(issued.c.value).label("largest"),
+        )
+        .select_from(issued)
+        .join(DocumentSeries, DocumentSeries.id == issued.c.series_id)
+        .where(DocumentSeries.gapless.is_(True))
+        .group_by(DocumentSeries.id, DocumentSeries.code, issued.c.period)
+        .order_by(DocumentSeries.id, issued.c.period)
+    )
+    starts = dict(
+        db.execute(
+            select(InvoiceSequence.name, InvoiceSequence.next_value).where(
+                InvoiceSequence.name.like(SERIES_START_PREFIX + "%")
+            )
+        ).all()
+    )
+    out = []
+    for row in db.execute(stmt).all():
+        issued_count, distinct_count = int(row.issued), int(row.distinct)
+        smallest, largest = int(row.smallest), int(row.largest)
+        period = row.period or "all time"
+        recorded = starts.get(series_start_name(row.id, row.period))
+        start = int(recorded) if recorded is not None else None
+        base = {"series_id": row.id, "code": row.code, "period": row.period,
+                "min_value": smallest, "max_value": largest, "start_value": start}
+        if start is None:
+            out.append(
+                Finding(
+                    "billing_numbering_gaps",
+                    "document_series",
+                    f"{row.id}:{row.period}:start",
+                    f"Series {row.code}",
+                    f"Series {row.code} ({period}) has no recorded start",
+                    f"{issued_count} numbers issued, from {smallest} to {largest}, but no start row "
+                    "records the series' first number, so a missing first number cannot be ruled out.",
+                    details={**base, "issued": issued_count, "missing_start": True},
+                )
+            )
+        low = min(smallest, start) if start is not None else smallest
+        duplicates = issued_count - distinct_count
+        missing = max(0, largest - low + 1 - distinct_count)
+        below_start = start is not None and smallest < start
+        if not (duplicates or missing or below_start):
+            continue
+        problems = []
+        if duplicates:
+            problems.append(f"{duplicates} repeated numbers")
+        if missing:
+            problems.append(f"{missing} missing numbers")
+        if below_start:
+            problems.append(f"numbers below its recorded start {start}")
+        title = f"Series {row.code} ({period}) has {' and '.join(problems)}"
+        first = f"its recorded start {start}" if start is not None else "its smallest number"
+        out.append(
+            Finding(
+                "billing_numbering_gaps",
+                "document_series",
+                f"{row.id}:{row.period}",
+                f"Series {row.code}",
+                title,
+                f"{issued_count} numbers issued, {distinct_count} distinct, from {smallest} to {largest}; "
+                f"a gapless series must issue every number from {first} to its largest once each.",
+                details={**base, "issued": issued_count, "distinct": distinct_count,
+                         "duplicates": duplicates, "missing": missing},
+            )
+        )
+    limit = params["max_rows"]
+    if len(out) > limit:
+        remaining = len(out) - limit
+        out = out[:limit]
+        out.append(_overflow("billing_numbering_gaps", "document_series",
+                             "numbering problems in gapless series", remaining, limit))
+    return out
+
+
+def refund_mismatch(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Payments whose refunded_cents disagrees with their succeeded refunds, or exceeds
+    the payment amount (property P5)."""
+    from app.models.refund import Refund, RefundStatus
+
+    if _refunds_table(db) is None:
+        return []
+    succeeded = (
+        select(Refund.payment_id, func.sum(Refund.amount_cents).label("refunds_cents"))
+        .where(Refund.status == RefundStatus.SUCCEEDED)
+        .group_by(Refund.payment_id)
+        .subquery()
+    )
+    refunded = func.coalesce(Payment.refunded_cents, 0)
+    refunds_cents = func.coalesce(succeeded.c.refunds_cents, 0)
+    stmt = (
+        select(Payment.id, Payment.invoice_id, Payment.amount_cents, refunded.label("refunded_cents"), refunds_cents.label("refunds_cents"))
+        .outerjoin(succeeded, succeeded.c.payment_id == Payment.id)
+        .where(or_(refunded != refunds_cents, refunded > Payment.amount_cents))
+        .order_by(Payment.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_refund_mismatch",
+            "payment",
+            str(row.id),
+            f"Payment {row.id}",
+            f"Payment {row.id} records {_money(row.refunded_cents)} refunded, its refunds add up to {_money(row.refunds_cents)}",
+            "The payment's refunded amount must equal its succeeded refunds and not exceed the payment; "
+            "check the refunds of the payment before changing anything.",
+            details={
+                "payment_id": int(row.id),
+                "invoice_id": int(row.invoice_id),
+                "amount_cents": _money(row.amount_cents),
+                "refunded_cents": _money(row.refunded_cents),
+                "refunds_cents": _money(row.refunds_cents),
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_refund_mismatch", "payment", "payments", remaining, len(rows)))
+    return out
+
+
+def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Invoices worth less than zero, or notes whose lines do not sum to their totals (P1-N).
+
+    One finding per invoice; a note with no lines counts as lines that sum to zero.
+    """
+    debits = func.coalesce(func.sum(case((InvoiceAdjustment.kind == AdjustmentKind.DEBIT, InvoiceAdjustment.total_cents), else_=0)), 0)
+    credits = func.coalesce(func.sum(case((InvoiceAdjustment.kind == AdjustmentKind.CREDIT, InvoiceAdjustment.total_cents), else_=0)), 0)
+    worth_stmt = (
+        select(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency,
+               debits.label("debits"), credits.label("credits"))
+        .join(InvoiceAdjustment, InvoiceAdjustment.invoice_id == Invoice.id)
+        .group_by(Invoice.id, Invoice.invoice_number, Invoice.amount_cents, Invoice.currency)
+        .having(Invoice.amount_cents + debits - credits < 0)
+        .order_by(Invoice.id)
+    )
+    line_totals = func.coalesce(func.sum(InvoiceAdjustmentLine.total_cents), 0)
+    line_tax = func.coalesce(func.sum(InvoiceAdjustmentLine.tax_cents), 0)
+    lines_stmt = (
+        select(InvoiceAdjustment.id.label("note_id"), InvoiceAdjustment.invoice_id, InvoiceAdjustment.number_display,
+               InvoiceAdjustment.subtotal_cents, InvoiceAdjustment.tax_cents,
+               line_totals.label("line_subtotal"), line_tax.label("line_tax"))
+        .outerjoin(InvoiceAdjustmentLine, InvoiceAdjustmentLine.adjustment_id == InvoiceAdjustment.id)
+        .group_by(InvoiceAdjustment.id, InvoiceAdjustment.invoice_id, InvoiceAdjustment.number_display,
+                  InvoiceAdjustment.subtotal_cents, InvoiceAdjustment.tax_cents)
+        .having(or_(line_totals != InvoiceAdjustment.subtotal_cents, line_tax != InvoiceAdjustment.tax_cents))
+        .order_by(InvoiceAdjustment.id)
+    )
+    max_rows = params["max_rows"]
+    worth_rows, worth_remaining = _limited(db, worth_stmt, max_rows)
+    line_rows, line_remaining = _limited(db, lines_stmt, max_rows)
+
+    details: dict[int, dict] = {}
+    for row in worth_rows:
+        details.setdefault(row.id, {"invoice_id": row.id})["worth_cents"] = (
+            _money(row.amount_cents) + _money(row.debits) - _money(row.credits)
+        )
+    for row in line_rows:
+        entry = details.setdefault(row.invoice_id, {"invoice_id": row.invoice_id})
+        entry.setdefault("notes_with_mismatched_lines", []).append(
+            {
+                "note_id": row.note_id,
+                "number": row.number_display,
+                "note_subtotal_cents": _money(row.subtotal_cents),
+                "lines_subtotal_cents": _money(row.line_subtotal),
+                "note_tax_cents": _money(row.tax_cents),
+                "lines_tax_cents": _money(row.line_tax),
+            }
+        )
+    out = []
+    for invoice_id in sorted(details):
+        entry = details[invoice_id]
+        problems = []
+        if "worth_cents" in entry:
+            problems.append(f"it is worth {entry['worth_cents']} after its notes")
+        if "notes_with_mismatched_lines" in entry:
+            problems.append("a note's lines do not add up to its totals")
+        out.append(
+            Finding(
+                "billing_adjustment_bounds",
+                "invoice",
+                str(invoice_id),
+                f"Invoice {invoice_id}",
+                f"Invoice {invoice_id} has out-of-bounds credit or debit notes",
+                "; ".join(problems).capitalize() + ".",
+                details=entry,
+            )
+        )
+    remaining = worth_remaining + line_remaining
+    if remaining:
+        out.append(_overflow("billing_adjustment_bounds", "invoice", "invoices with out-of-bounds notes",
+                             remaining, len(out)))
+    return out
+
+
 BILLING_DETECTORS = {
     "billing_invoice_lines_mismatch": invoice_lines_mismatch,
     "billing_paid_without_payment": paid_invoice_without_payment,
@@ -375,4 +1022,13 @@ BILLING_DETECTORS = {
     "billing_credit_drift": credit_ledger_drift,
     "billing_orphaned_payment": orphaned_payment,
     "billing_refund_stuck": refund_stuck,
+    "billing_shadow_mismatch": shadow_mismatch,
+    "billing_shadow_scan_stale": shadow_scan_stale,
+    "billing_ledger_chain_broken": ledger_chain_broken,
+    "billing_negative_retail_balance": negative_retail_balance,
+    "billing_invoice_totals": invoice_totals,
+    "billing_invoice_status": invoice_status,
+    "billing_numbering_gaps": numbering_gaps,
+    "billing_refund_mismatch": refund_mismatch,
+    "billing_adjustment_bounds": adjustment_bounds,
 }

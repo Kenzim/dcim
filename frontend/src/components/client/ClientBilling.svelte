@@ -2,6 +2,11 @@
   import { onMount } from 'svelte';
   import { navigate } from '../../lib/router.js';
   import { Alert, Button, Spinner, Tabs } from '../ui/index.js';
+  import InvoiceStatusBadge from '../billing/InvoiceStatusBadge.svelte';
+  import ClientInvoiceCredit from '../billing/client/ClientInvoiceCredit.svelte';
+  import ClientNotes from '../billing/client/ClientNotes.svelte';
+  import { clientGetCredit } from '../../lib/billingClientApi.js';
+  import { invoiceStatusLabel, invoiceStatusValue } from '../../lib/billingFormat.js';
   import {
     clientCommerceDownloadInvoicePdf,
     clientCommerceGetInvoice,
@@ -15,10 +20,13 @@
   export let impersonating = false;
   /** When set, open this invoice on load. */
   export let invoiceId = null;
-  /** 'invoices' | 'orders' */
+  /** 'invoices' | 'orders' | 'notes' */
   export let initialTab = 'invoices';
 
   let tab = initialTab;
+  /** The `/credit` summary while account credit is on, else null. */
+  let credit = null;
+  let success = '';
   let invoices = [];
   let orders = [];
   let selected = null;
@@ -39,7 +47,7 @@
     error = '';
     const filters = statusFilter ? { status: statusFilter } : {};
     try {
-      [invoices, orders] = await Promise.all([
+      [invoices, orders, credit] = await Promise.all([
         clientCommerceListInvoices(filters).catch((e) => {
           if (e.status === 503) return [];
           throw e;
@@ -48,6 +56,9 @@
           if (e.status === 503) return [];
           throw e;
         }),
+        clientGetCredit(1)
+          .then((summary) => (summary.enabled ? summary : null))
+          .catch(() => null),
       ]);
     } catch (err) {
       error = err.message || 'Failed to load billing data';
@@ -56,8 +67,20 @@
     }
   }
 
+  async function creditApplied(event) {
+    const { invoice, balance_cents: balance, applied_cents: applied } = event.detail;
+    selected = { type: 'invoice', data: invoice };
+    if (credit) credit = { ...credit, balance_cents: balance, available_cents: Math.max(0, balance) };
+    success = applied > 0
+      ? `${formatMoney(applied, invoice.currency)} of account credit applied.`
+      : 'No credit needed to be applied.';
+    const filters = statusFilter ? { status: statusFilter } : {};
+    invoices = await clientCommerceListInvoices(filters).catch(() => invoices);
+  }
+
   async function showInvoice(id) {
     working = true;
+    success = '';
     tab = 'invoices';
     try {
       selected = { type: 'invoice', data: await clientCommerceGetInvoice(id) };
@@ -105,21 +128,33 @@
     tabs={[
       { id: 'invoices', label: 'Invoices' },
       { id: 'orders', label: 'Orders' },
+      { id: 'notes', label: 'Credit and debit notes' },
     ]}
     bind:active={tab}
     on:change={(e) => {
       tab = e.detail.id;
       selected = null;
+      success = '';
       if (tab === 'orders') navigate('/client/orders');
+      else if (tab === 'notes') navigate('/client/notes');
       else navigate('/client/billing');
     }}
   />
 
   {#if error}<Alert type="danger">{error}</Alert>{/if}
+  {#if success}<Alert type="success">{success}</Alert>{/if}
 
-  {#if loading}
+  {#if tab === 'notes'}
+    <ClientNotes />
+  {:else if loading}
     <div class="state"><Spinner /><span>Loading…</span></div>
   {:else if tab === 'invoices'}
+    {#if credit}
+      <p class="credit-strip">
+        Account credit: <strong>{formatMoney(credit.available_cents, credit.currency)}</strong> available.
+        <a href="/client/account/credit">Manage credit</a>
+      </p>
+    {/if}
     <div class="layout">
       <div class="panel list">
         <label class="filter">Status
@@ -135,7 +170,7 @@
         {:else}
           {#each invoices as row (row.id)}
             <button class:selected={selected?.data?.id === row.id} on:click={() => showInvoice(row.id)}>
-              <span><strong>#{row.invoice_number}</strong><small>{row.status}</small></span>
+              <span><strong>#{row.invoice_number}</strong><small>{invoiceStatusLabel(invoiceStatusValue(row))}</small></span>
               <span>{formatMoney(row.amount_cents, row.currency)}</span>
             </button>
           {/each}
@@ -152,10 +187,11 @@
           </div>
           <dl>
             <div><dt>Total</dt><dd>{formatMoney(selected.data.amount_cents, selected.data.currency)}</dd></div>
-            <div><dt>Status</dt><dd>{selected.data.status}</dd></div>
+            <div><dt>Status</dt><dd><InvoiceStatusBadge invoice={selected.data} /></dd></div>
             <div><dt>Due</dt><dd>{selected.data.due_at ? new Date(selected.data.due_at).toLocaleDateString() : '—'}</dd></div>
             <div><dt>Created</dt><dd>{new Date(selected.data.created_at).toLocaleString()}</dd></div>
           </dl>
+          <ClientInvoiceCredit invoice={selected.data} {credit} {impersonating} on:applied={creditApplied} />
           <div class="actions">
             <Button variant="secondary" on:click={downloadPdf} disabled={working}>Download PDF</Button>
             {#if ['open', 'overdue', 'pending_action'].includes(selected.data.status)}
@@ -212,6 +248,8 @@
     font-size: 14px;
     color: var(--text-tertiary);
   }
+  .credit-strip { margin: 16px 0 0; font-size: 14px; color: var(--text-secondary); }
+  .credit-strip a { margin-left: 8px; color: var(--portal-accent); font-weight: 600; }
   .state { min-height: 200px; display: grid; place-items: center; gap: 12px; }
   .layout { display: grid; grid-template-columns: minmax(280px, .85fr) minmax(0, 1.15fr); gap: 18px; margin-top: 16px; }
   .panel { border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--portal-card-bg, var(--bg-primary)); box-shadow: var(--shadow-sm); }

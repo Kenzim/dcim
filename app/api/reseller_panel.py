@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Optional
 
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi import (
     APIRouter,
@@ -49,6 +50,14 @@ from app.models.service import Service, ServiceStatus
 from app.models.user import User
 from app.models.usdt import UsdtChainCursor, UsdtDeposit, UsdtTransferEvent
 from app.services.billing.settlement import commit_and_fulfil
+from app.services.credit_ledger_service import (
+    CreditLedgerError,
+    CreditLedgerService,
+    InsufficientCreditError,
+    InvoicePaymentPendingError,
+    statuses_for_status_filter,
+    unpaid_invoice_statuses,
+)
 from app.services.invoice_service import InvoiceError, InvoiceService
 from app.services.payments.base import (
     GatewayNotConfiguredError,
@@ -481,13 +490,7 @@ def dashboard(
     open_count = db.scalar(
         select(func.count(Invoice.id)).where(
             Invoice.reseller_id == reseller.id,
-            Invoice.status.in_(
-                [
-                    InvoiceStatus.OPEN,
-                    InvoiceStatus.PENDING_ACTION,
-                    InvoiceStatus.OVERDUE,
-                ]
-            ),
+            Invoice.status.in_(unpaid_invoice_statuses()),
         )
     )
     billings = ResellerDAO.list_service_billings(db, reseller.id)
@@ -505,7 +508,7 @@ def dashboard(
     ]
     return {
         "reseller_id": reseller.id,
-        "balance_cents": reseller.cached_balance_cents,
+        "balance_cents": CreditLedgerService.balance_cents(db, reseller),
         "currency": "USD",
         "charge_preference": reseller.charge_preference.value,
         "nonpayment_policy": reseller.nonpayment_policy.value,
@@ -751,9 +754,9 @@ def payment_config(
 
 
 @router.get("/balance", responses=COMMON_ERROR_RESPONSES)
-def balance(reseller: ResellerDep):
+def balance(reseller: ResellerDep, db: DbDep):
     return {
-        "balance_cents": reseller.cached_balance_cents,
+        "balance_cents": CreditLedgerService.balance_cents(db, reseller),
         "currency": "USD",
     }
 
@@ -769,15 +772,14 @@ def list_invoices(
     reseller: ResellerDep,
     db: DbDep,
 ):
+    stmt = select(Invoice).where(Invoice.reseller_id == reseller.id)
+    if invoice_status is not None:
+        stmt = stmt.where(Invoice.status.in_(statuses_for_status_filter(invoice_status)))
     return [
         InvoiceService.serialize(db, invoice)
-        for invoice in ResellerDAO.list_invoices(
-            db,
-            reseller.id,
-            status=invoice_status,
-            offset=offset,
-            limit=limit,
-        )
+        for invoice in db.execute(
+            stmt.order_by(Invoice.invoice_number.desc()).offset(offset).limit(limit)
+        ).scalars()
     ]
 
 
@@ -790,6 +792,71 @@ def get_invoice(
     return InvoiceService.serialize(
         db, _invoice_or_404(db, reseller, invoice_id), payments=True
     )
+
+
+class ApplyCreditBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    amount_cents: Optional[StrictInt] = Field(default=None, gt=0)
+
+
+@router.post("/invoices/{invoice_id}/apply-credit", responses=COMMON_ERROR_RESPONSES)
+def apply_credit_to_invoice(
+    invoice_id: int,
+    reseller: ResellerDep,
+    db: DbDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=128)],
+    request: Request,
+    body: Optional[ApplyCreditBody] = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    if _impersonated_by_from_token(_token_from_request(request, credentials)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Money actions are blocked during impersonation",
+        )
+    invoice = _invoice_or_404(db, reseller, invoice_id)
+    if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
+        raise HTTPException(status_code=400, detail="Credit cannot pay a credit top-up invoice")
+    try:
+        payment = CreditLedgerService.apply_to_invoice(
+            db,
+            invoice,
+            amount_cents=body.amount_cents if body is not None else None,
+            actor_user_id=reseller.user_id,
+            idempotency_key=f"reseller-apply-credit:{reseller.id}:{idempotency_key}",
+        )
+    except InsufficientCreditError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "insufficient_credit",
+                "available_cents": exc.available_cents,
+                "requested_cents": exc.requested_cents,
+            },
+        ) from exc
+    except InvoicePaymentPendingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "invoice_payment_pending",
+                "invoice_id": exc.invoice_id,
+                "payment_id": exc.payment_id,
+            },
+        ) from exc
+    except CreditLedgerError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    commit_and_fulfil(db)
+    db.refresh(invoice)
+    return {
+        "applied_cents": payment.amount_cents if payment is not None else 0,
+        "payment_id": payment.id if payment is not None else None,
+        "balance_cents": CreditLedgerService.balance_cents(db, reseller),
+        "invoice": InvoiceService.serialize(db, invoice, payments=True),
+    }
 
 
 @router.get("/invoices/{invoice_id}/payments", responses=COMMON_ERROR_RESPONSES)
@@ -1108,6 +1175,16 @@ def pay_invoice(
         )
     except PaymentMethodOwnershipError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvoicePaymentPendingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "invoice_payment_pending",
+                "invoice_id": exc.invoice_id,
+                "payment_id": exc.payment_id,
+            },
+        ) from exc
     except (InvoiceError, PaymentGatewayError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     commit_and_fulfil(db)
@@ -1156,7 +1233,8 @@ async def stripe_webhook(
             status_code=400, detail="Invalid Stripe webhook signature"
         ) from exc
     try:
-        processed = PaymentWebhookService.process(
+        processed = await run_in_threadpool(
+            PaymentWebhookService.process,
             db,
             gateway="stripe",
             event=normalized,
@@ -1194,7 +1272,8 @@ async def paypal_webhook(
             status_code=400, detail="Invalid PayPal webhook signature"
         ) from exc
     try:
-        processed = PaymentWebhookService.process(
+        processed = await run_in_threadpool(
+            PaymentWebhookService.process,
             db,
             gateway="paypal",
             event=normalized,

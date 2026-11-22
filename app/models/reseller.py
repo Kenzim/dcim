@@ -15,6 +15,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -95,6 +96,14 @@ class InvoiceStatus(str, enum.Enum):
     FAILED = "failed"
     PENDING_ACTION = "pending_action"
     OVERDUE = "overdue"
+    PARTIALLY_PAID = "partially_paid"
+    REFUNDED = "refunded"
+    COLLECTIONS = "collections"
+
+
+class InvoiceDocumentType(str, enum.Enum):
+    INVOICE = "invoice"
+    PROFORMA = "proforma"
 
 
 class PaymentStatus(str, enum.Enum):
@@ -102,6 +111,7 @@ class PaymentStatus(str, enum.Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     REFUNDED = "refunded"
+    PARTIALLY_REFUNDED = "partially_refunded"
 
 
 class CreditLedgerEntryType(str, enum.Enum):
@@ -494,8 +504,29 @@ class StockQuota(Base):
 class Invoice(Base):
     __tablename__ = "invoices"
     __table_args__ = (
-        CheckConstraint("amount_cents > 0", name="ck_invoices_positive_amount"),
+        CheckConstraint("amount_cents >= 0", name="ck_invoices_amount_nonnegative"),
+        CheckConstraint(
+            "model_version IS NULL OR (subtotal_cents IS NOT NULL AND discount_cents IS NOT NULL "
+            "AND tax_cents IS NOT NULL AND prices_include_tax IS NOT NULL)",
+            name="ck_invoices_v2_totals",
+        ),
+        CheckConstraint(
+            "model_version IS NULL OR status = 'draft' OR number_display IS NOT NULL "
+            "OR proforma_number_display IS NOT NULL",
+            name="ck_invoices_v2_number",
+        ),
+        UniqueConstraint(
+            "series_id", "number_period", "number_value", name="uq_invoices_series_number"
+        ),
+        UniqueConstraint("series_id", "number_display", name="uq_invoices_series_display"),
+        UniqueConstraint(
+            "proforma_series_id",
+            "proforma_number_period",
+            "proforma_number_value",
+            name="uq_invoices_proforma_number",
+        ),
         Index("ix_invoices_reseller_status_due", "reseller_id", "status", "due_at"),
+        Index("ix_invoices_account_status_due", "billing_account_id", "status", "due_at"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -538,6 +569,46 @@ class Invoice(Base):
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    # Invoice model v2 (billing phase 1). NULL on legacy rows; never backfilled.
+    model_version = Column(SmallInteger, nullable=True)
+    document_type = Column(
+        _string_enum(InvoiceDocumentType),
+        nullable=False,
+        default=InvoiceDocumentType.INVOICE,
+        server_default=InvoiceDocumentType.INVOICE.value,
+    )
+    subtotal_cents = Column(BigInteger, nullable=True)
+    discount_cents = Column(BigInteger, nullable=True)
+    tax_cents = Column(BigInteger, nullable=True)
+    prices_include_tax = Column(Boolean, nullable=True)
+    issued_at = Column(DateTime(timezone=True), nullable=True)
+    seller_snapshot = Column(JSON, nullable=True)
+    buyer_snapshot = Column(JSON, nullable=True)
+    customer_notes = Column(Text, nullable=True)
+    admin_notes = Column(Text, nullable=True)
+    locale = Column(String(16), nullable=True)
+    series_id = Column(
+        Integer,
+        ForeignKey("document_series.id", ondelete="RESTRICT", name="fk_invoices_series_id"),
+        nullable=True,
+        index=True,
+    )
+    number_period = Column(String(8), nullable=True)
+    number_value = Column(BigInteger, nullable=True)
+    number_display = Column(String(64), nullable=True)
+    proforma_series_id = Column(
+        Integer,
+        ForeignKey(
+            "document_series.id", ondelete="RESTRICT", name="fk_invoices_proforma_series_id"
+        ),
+        nullable=True,
+    )
+    proforma_number_period = Column(String(8), nullable=True)
+    proforma_number_value = Column(BigInteger, nullable=True)
+    proforma_number_display = Column(String(64), nullable=True)
+    status_changed_at = Column(DateTime(timezone=True), nullable=True)
+    voided_at = Column(DateTime(timezone=True), nullable=True)
+    void_reason = Column(String(255), nullable=True)
 
     reseller = relationship("Reseller", back_populates="invoices")
     service = relationship("Service")
@@ -593,6 +664,11 @@ class Payment(Base):
     payment_metadata = Column("metadata", JSON, nullable=False, default=dict)
     processed_at = Column(DateTime(timezone=True), nullable=True)
     refunded_at = Column(DateTime(timezone=True), nullable=True)
+    # Cache of the succeeded refunds of this payment. Billing phase 1 RefundService
+    # keeps it; older refund paths set status refunded without writing it.
+    refunded_cents = Column(BigInteger, nullable=False, default=0, server_default="0")
+    fee_cents = Column(BigInteger, nullable=True)
+    net_cents = Column(BigInteger, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -707,19 +783,34 @@ class CreditLedgerEntry(Base):
     __tablename__ = "credit_ledger_entries"
     __table_args__ = (
         CheckConstraint("amount_cents <> 0", name="ck_credit_ledger_nonzero_amount"),
+        CheckConstraint(
+            "reseller_id IS NOT NULL OR billing_account_id IS NOT NULL",
+            name="ck_credit_ledger_owner",
+        ),
         Index(
             "ix_credit_ledger_reseller_created",
             "reseller_id",
             "created_at",
         ),
+        Index("ix_credit_ledger_account_id", "billing_account_id", "id"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    # Nullable for retail entries, which carry only billing_account_id.
     reseller_id = Column(
         Integer,
         ForeignKey(_FK_RESELLERS, ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
         index=True,
+    )
+    billing_account_id = Column(
+        Integer,
+        ForeignKey(
+            "billing_accounts.id",
+            ondelete="RESTRICT",
+            name="fk_credit_ledger_billing_account_id",
+        ),
+        nullable=True,
     )
     entry_type = Column(
         _string_enum(CreditLedgerEntryType),

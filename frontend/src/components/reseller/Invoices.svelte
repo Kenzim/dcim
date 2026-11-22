@@ -9,6 +9,10 @@
     payResellerPanelInvoice,
   } from '../../lib/api.js';
   import { formatMoney } from '../../lib/resellerMoney.js';
+  import { billingErrorMessage } from '../../lib/billingClientApi.js';
+  import { invoiceStatusLabel, invoiceStatusValue } from '../../lib/billingFormat.js';
+  import InvoiceStatusBadge from '../billing/InvoiceStatusBadge.svelte';
+  import ResellerInvoiceCredit from '../billing/reseller/ResellerInvoiceCredit.svelte';
   import { Alert, Spinner } from '../ui/index.js';
 
   let invoices = [];
@@ -61,12 +65,27 @@
 
   async function showInvoice(id) {
     working = true;
+    success = '';
     try {
       selected = await getResellerPanelInvoice(id);
     } catch (err) {
       error = err.message || 'Invoice could not be loaded.';
     } finally {
       working = false;
+    }
+  }
+
+  async function creditApplied(event) {
+    const { invoice, applied_cents: applied } = event.detail;
+    selected = invoice;
+    error = '';
+    success = applied > 0
+      ? `${formatMoney(applied, invoice.currency)} of credit applied.`
+      : 'No credit needed to be applied.';
+    try {
+      invoices = await listResellerPanelInvoices(statusFilter ? { status: statusFilter } : {});
+    } catch (_) {
+      // The list refreshes on the next load; the applied credit already shows in the detail.
     }
   }
 
@@ -80,7 +99,8 @@
       success = 'Invoice paid.';
     } catch (err) {
       if (err.status !== 402 || !err.detail?.pending_action || !err.detail?.client_secret) {
-        error = err.message || 'Invoice payment failed.';
+        error = billingErrorMessage(err, 'Invoice payment failed.', { currency: selected?.currency });
+        success = '';
         return;
       }
       clientSecret = err.detail.client_secret;
@@ -122,7 +142,7 @@
           {#each invoices as invoice (invoice.id)}
             <button class:selected={selected?.id === invoice.id} on:click={() => showInvoice(invoice.id)}>
               <span><strong>#{invoice.invoice_number}</strong><small>{invoice.purpose.replaceAll('_', ' ')}</small></span>
-              <span class="right"><strong>{formatMoney(invoice.amount_cents, invoice.currency)}</strong><small>{invoice.status}</small></span>
+              <span class="right"><strong>{formatMoney(invoice.amount_cents, invoice.currency)}</strong><small>{invoiceStatusLabel(invoiceStatusValue(invoice))}</small></span>
             </button>
           {/each}
         {/if}
@@ -131,13 +151,16 @@
         {#if working && !selected}<Spinner />{:else if !selected}
           <p class="empty">Choose an invoice to view details.</p>
         {:else}
-          <div class="detail-heading"><div><h2>Invoice #{selected.invoice_number}</h2><p>{selected.description || selected.purpose.replaceAll('_', ' ')}</p></div><span>{selected.status}</span></div>
+          <div class="detail-heading"><div><h2>Invoice #{selected.invoice_number}</h2><p>{selected.description || selected.purpose.replaceAll('_', ' ')}</p></div><InvoiceStatusBadge invoice={selected} /></div>
           <dl>
             <div><dt>Total</dt><dd>{formatMoney(selected.amount_cents, selected.currency)}</dd></div>
             <div><dt>Allocated</dt><dd>{formatMoney(selected.allocated_cents, selected.currency)}</dd></div>
             <div><dt>Remaining</dt><dd>{formatMoney(selected.remaining_cents, selected.currency)}</dd></div>
             <div><dt>Created</dt><dd>{new Date(selected.created_at).toLocaleString()}</dd></div>
           </dl>
+          {#key selected.id}
+            <ResellerInvoiceCredit invoice={selected} on:applied={creditApplied} />
+          {/key}
           <h3>Payments</h3>
           {#if selected.payments?.length}
             <ul>{#each selected.payments as payment}<li><span>{payment.gateway} · {payment.status}</span><strong>{formatMoney(payment.amount_cents, payment.currency)}</strong></li>{/each}</ul>
@@ -167,7 +190,7 @@
   .panel { border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-primary); box-shadow: var(--shadow-sm); }.list-panel { overflow: hidden; }
   .list-panel > button { width: 100%; display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 0; border-bottom: 1px solid var(--border-color); background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
   .list-panel > button:hover, .list-panel > button.selected { background: var(--portal-accent-soft); }.list-panel small { display: block; margin-top: 4px; color: var(--text-tertiary); text-transform: capitalize; }.right { text-align: right; }
-  .detail { padding: 22px; }.detail-heading { display: flex; justify-content: space-between; gap: 14px; }.detail-heading h2 { margin: 0 0 5px; }.detail-heading p { margin: 0; color: var(--text-secondary); text-transform: capitalize; }.detail-heading > span { height: fit-content; padding: 5px 9px; border-radius: 999px; background: var(--portal-accent-soft); color: var(--portal-accent); text-transform: capitalize; font-size: 12px; font-weight: 750; }
+  .detail { padding: 22px; }.detail-heading { display: flex; justify-content: space-between; gap: 14px; }.detail-heading h2 { margin: 0 0 5px; }.detail-heading p { margin: 0; color: var(--text-secondary); text-transform: capitalize; }
   dl { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 22px 0; }dl div { padding: 11px; border-radius: 8px; background: var(--bg-secondary); }dt { color: var(--text-tertiary); font-size: 12px; }dd { margin: 4px 0 0; font-weight: 750; }h3 { margin: 20px 0 10px; font-size: 15px; }
   ul { list-style: none; margin: 0; padding: 0; }li { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border-color); text-transform: capitalize; }.pay-box { display: grid; gap: 8px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border-color); }.pay-box label { font-size: 13px; font-weight: 700; }.primary { justify-self: start; padding: 10px 15px; border: 0; border-radius: 8px; background: var(--portal-accent); color: var(--portal-accent-contrast); font-weight: 750; cursor: pointer; }.empty { padding: 18px; color: var(--text-tertiary); }
   @media (max-width: 780px) { .layout { grid-template-columns: 1fr; }.heading { align-items: flex-start; flex-direction: column; } }

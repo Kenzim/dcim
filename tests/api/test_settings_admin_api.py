@@ -87,6 +87,13 @@ def test_generic_commerce_settings_endpoints_still_work(client, test_admin_user)
     assert client.get("/api/admin/commerce/settings/company.name", headers=headers).json()["value"]["value"] == "Acme"
 
 
+def test_generic_endpoint_refuses_billing_engine_records(client, test_admin_user):
+    headers = admin_headers(client)
+    for key in ("billing_engine_switch:credit", "Billing_Engine_Switch:invoice", "billing_shadow_scan"):
+        resp = client.put(f"/api/admin/commerce/settings/{key}", headers=headers, json={"value": {"mode": "v2"}})
+        assert resp.status_code == 400, key
+
+
 def test_topup_limits_follow_the_store(client, db_session, test_admin_user):
     headers = admin_headers(client)
     assert client.put(f"{BASE}/reseller_topup_max_cents", headers=headers, json={"value": 2000}).status_code == 200

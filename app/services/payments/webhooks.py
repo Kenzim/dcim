@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import dataclasses
 import hashlib
 import logging
 from datetime import datetime, timezone
@@ -13,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.commerce_order import OrderItem
+from app.models.refund import Refund, RefundDestination, RefundReason
 from app.models.reseller import (
     CreditLedgerEntry,
     CreditLedgerEntryType,
@@ -26,7 +29,7 @@ from app.models.service import Service
 from app.services.audit_service import AuditService
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.email_message_service import EmailEvent, EmailMessageService
-from app.services.invoice_service import InvoiceService
+from app.services.invoice_service import InvoiceService, engine_mode
 from app.services.payments.base import (
     GatewayWebhookAction,
     NormalizedGatewayWebhookEvent,
@@ -38,12 +41,20 @@ from app.services.billing.settlement import (
     run_deferred_fulfilment,
 )
 from app.services.payments.orchestrator import PaymentOrchestrator
+from app.services.refund_service import (
+    OPEN_STATUSES,
+    RefundService,
+    invoice_engine_mode,
+)
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
 
 logger = logging.getLogger(__name__)
 
 
 class PaymentWebhookService:
+    # Session-info key for services a dispute queued for suspension after commit.
+    DEFERRED_SUSPENSION_KEY = "billing.deferred_dispute_suspension"
+
     @staticmethod
     def reverse_payment(
         db: Session,
@@ -101,6 +112,7 @@ class PaymentWebhookService:
             if db.info.get("billing.deferred_order_fulfilment"):
                 logger.warning("Dropping order fulfilment queued by an earlier, unfinished webhook")
             discard_deferred_fulfilment(db)
+            db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, None)
             with db.begin_nested():
                 db.add(record)
                 db.flush()
@@ -110,13 +122,7 @@ class PaymentWebhookService:
                 elif event.action == GatewayWebhookAction.PAYMENT_FAILED:
                     PaymentWebhookService._payment_failed(db, gateway, event)
                 elif event.action == GatewayWebhookAction.PAYMENT_REVERSED:
-                    PaymentWebhookService._reverse_payment(
-                        db,
-                        gateway,
-                        event.external_ref or "",
-                        event_id=event_id,
-                        reason="refund",
-                    )
+                    PaymentWebhookService._payment_refund_event(db, gateway, event)
                 elif event.action == GatewayWebhookAction.PAYMENT_DISPUTED:
                     PaymentWebhookService._handle_payment_disputed(
                         db, gateway, event, event_id=event_id
@@ -124,11 +130,14 @@ class PaymentWebhookService:
                 db.flush()
         except IntegrityError:
             discard_deferred_fulfilment(db)
+            db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, None)
             return False
         except Exception:
             discard_deferred_fulfilment(db)
+            db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, None)
             raise
         run_deferred_fulfilment(db)
+        PaymentWebhookService.run_deferred_suspensions(db)
         return True
 
     @staticmethod
@@ -153,7 +162,7 @@ class PaymentWebhookService:
             ).first()
             if found is None:
                 continue
-            BillingLocks.for_invoice(db, int(found.invoice_id), reseller=True)
+            BillingLocks.for_invoice(db, int(found.invoice_id), reseller=True, billing_account=True)
             locked = BillingLocks.payments(
                 db, select(Payment).where(Payment.id == found.id)
             )
@@ -202,20 +211,131 @@ class PaymentWebhookService:
         *,
         event_id: str,
     ) -> None:
-        PaymentWebhookService._reverse_payment(
-            db,
-            gateway,
-            event.external_ref or "",
-            event_id=event_id,
-            reason="dispute",
-        )
-        payment = PaymentWebhookService._payment_for_update(
+        """A chargeback: the money has left, so the refund is recorded as succeeded (design 7.5)."""
+        payment = PaymentWebhookService._refund_payment_for_update(
             db, gateway, event.external_ref or ""
         )
-        if payment is not None and payment.invoice is not None:
-            PaymentWebhookService._suspend_linked_services(
-                db, payment.invoice, reason="dispute"
+        if payment is None:
+            return
+        RefundService.record_gateway_refund(
+            db,
+            payment,
+            amount_cents=event.amount_cents,
+            reason=RefundReason.DISPUTE,
+            idempotency_key=f"{gateway}-dispute:{event_id}",
+            gateway_refund_ref=None,
+            confirmed=True,
+            metadata={
+                "legacy_reason": "dispute",
+                "event_id": event_id,
+                "dispute_ref": event.refund_ref,
+            },
+        )
+        invoice = payment.invoice
+        if invoice is None:
+            return
+        if invoice.reseller_id is None and invoice_engine_mode(db) == "v2":
+            # Phase 1 reopens a disputed retail invoice into collections and
+            # leaves suspension to billing automation.
+            return
+        PaymentWebhookService._suspend_linked_services(db, invoice, reason="dispute")
+
+    @staticmethod
+    def _refund_payment_for_update(
+        db: Session, gateway: str, external_ref: str
+    ) -> Optional[Payment]:
+        """Find the payment, then lock its chain through ``BillingLocks.for_payment``."""
+        if not external_ref:
+            return None
+        found = db.scalar(
+            select(Payment.id).where(
+                Payment.gateway == gateway, Payment.external_ref == external_ref
             )
+        )
+        if found is None:
+            return None
+        return BillingLocks.for_payment(
+            db, int(found), reseller=True, billing_account=True
+        )
+
+    @staticmethod
+    def _matching_refund(
+        db: Session, payment: Payment, event: NormalizedGatewayWebhookEvent
+    ) -> Optional[Refund]:
+        """The refund row a gateway refund event is about, if Rackflow asked for it."""
+        if event.refund_ref:
+            refund = db.execute(
+                select(Refund).where(
+                    Refund.payment_id == payment.id,
+                    Refund.gateway_refund_ref == event.refund_ref,
+                )
+            ).scalar_one_or_none()
+            if refund is not None:
+                return refund
+        candidates = [
+            refund
+            for refund in db.execute(
+                select(Refund).where(
+                    Refund.payment_id == payment.id,
+                    Refund.destination == RefundDestination.GATEWAY,
+                    Refund.status.in_(OPEN_STATUSES),
+                    Refund.gateway_refund_ref.is_(None),
+                )
+            ).scalars()
+            if int(refund.amount_cents) == int(event.amount_cents)
+        ] if event.amount_cents is not None else []
+        return candidates[0] if len(candidates) == 1 else None
+
+    @staticmethod
+    def _payment_refund_event(
+        db: Session, gateway: str, event: NormalizedGatewayWebhookEvent
+    ) -> None:
+        payment = PaymentWebhookService._refund_payment_for_update(
+            db, gateway, event.external_ref or ""
+        )
+        if payment is None:
+            return
+        if event.amount_cents is None and event.refunded_total_cents is not None:
+            # The gateway gave only the running total: this event is about what
+            # it reports beyond the refunds already recorded as succeeded.
+            event = dataclasses.replace(
+                event,
+                amount_cents=max(
+                    0, int(event.refunded_total_cents) - int(payment.refunded_cents or 0)
+                ),
+            )
+            if event.amount_cents == 0:
+                return
+        status = (event.refund_status or "succeeded").lower()
+        refund = PaymentWebhookService._matching_refund(db, payment, event)
+        if status in {"failed", "canceled", "cancelled"}:
+            if refund is not None and refund.status in OPEN_STATUSES:
+                RefundService.fail(
+                    db,
+                    refund.id,
+                    failure_code=event.failure_code or status,
+                    failure_message="The gateway reported the refund as failed",
+                )
+            return
+        confirmed = status == "succeeded"
+        if refund is not None:
+            if refund.status not in OPEN_STATUSES:
+                return
+            if confirmed:
+                RefundService.complete(db, refund.id, gateway_refund_ref=event.refund_ref)
+            elif event.refund_ref and not refund.gateway_refund_ref:
+                refund.gateway_refund_ref = event.refund_ref
+            return
+        RefundService.record_gateway_refund(
+            db,
+            payment,
+            amount_cents=event.amount_cents,
+            reason=RefundReason.GATEWAY_INITIATED,
+            idempotency_key=f"{gateway}-refund:{event.event_id}",
+            gateway_refund_ref=event.refund_ref,
+            confirmed=confirmed,
+            metadata={"legacy_reason": "refund", "event_id": event.event_id},
+        )
 
     @staticmethod
     def _payment_failed(
@@ -238,8 +358,11 @@ class PaymentWebhookService:
         payment.failure_message = "The payment could not be completed"
         payment.processed_at = datetime.now(timezone.utc)
         invoice = payment.invoice
-        if invoice.status == InvoiceStatus.PENDING_ACTION:
-            invoice.status = InvoiceStatus.OPEN
+        if engine_mode(db) == "v2":
+            # The status rule decides: part-paid, still pending or open.
+            InvoiceService.recompute(db, invoice, cause="payment_failed", payment=payment)
+        elif invoice.status == InvoiceStatus.PENDING_ACTION:
+            InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause="payment_failed")
 
     @staticmethod
     def _reverse_payment(
@@ -250,76 +373,22 @@ class PaymentWebhookService:
         event_id: str,
         reason: str,
     ) -> None:
-        payment = PaymentWebhookService._payment_for_update(
+        """Record a whole-payment reversal the gateway (or chain) made, through ``RefundService``."""
+        payment = PaymentWebhookService._refund_payment_for_update(
             db, gateway, external_ref
         )
-        if payment is None or payment.status == PaymentStatus.REFUNDED:
+        if payment is None:
             return
-        invoice = payment.invoice
-        if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
-            topup = db.execute(
-                select(CreditLedgerEntry).where(
-                    CreditLedgerEntry.payment_id == payment.id,
-                    CreditLedgerEntry.entry_type
-                    == CreditLedgerEntryType.TOPUP,
-                )
-            ).scalar_one_or_none()
-            if topup is not None:
-                CreditLedgerService.reverse(
-                    db,
-                    invoice.reseller_id,
-                    topup.id,
-                    description=(
-                        f"Gateway {reason} for top-up invoice "
-                        f"{invoice.invoice_number}"
-                    ),
-                    idempotency_key=f"{gateway}-{reason}:{event_id}",
-                    metadata={"gateway_event_id": event_id, "reason": reason},
-                )
-        elif invoice.reseller_id is None:
-            # Retail payments have no credit ledger; the reversal is recorded for an admin.
-            AuditService.log(
-                db,
-                actor_user_id=None,
-                billing_account_id=invoice.billing_account_id,
-                action="billing.payment_reversed",
-                resource_type="invoice",
-                resource_id=str(invoice.id),
-                metadata={
-                    "reason": reason,
-                    "gateway": gateway,
-                    "gateway_event_id": event_id,
-                    "payment_id": payment.id,
-                    "amount_cents": int(payment.amount_cents),
-                    "currency": payment.currency,
-                },
-            )
-        else:
-            CreditLedgerService.debit(
-                db,
-                invoice.reseller_id,
-                payment.amount_cents,
-                description=(
-                    f"Gateway {reason} for invoice {invoice.invoice_number}"
-                ),
-                invoice_id=invoice.id,
-                payment_id=payment.id,
-                service_id=invoice.service_id,
-                reference_type=f"gateway_{reason}",
-                reference_id=event_id,
-                idempotency_key=f"{gateway}-{reason}:{event_id}",
-                metadata={"gateway_event_id": event_id},
-                allow_negative_balance=True,
-            )
-        payment.status = PaymentStatus.REFUNDED
-        payment.refunded_at = datetime.now(timezone.utc)
-        payment.payment_metadata = {
-            **(payment.payment_metadata or {}),
-            "reversal_type": reason,
-            "gateway_event_id": event_id,
-        }
-        invoice.status = InvoiceStatus.FAILED
-        invoice.paid_at = None
+        RefundService.record_gateway_refund(
+            db,
+            payment,
+            amount_cents=None,
+            reason=RefundReason.GATEWAY_INITIATED,
+            idempotency_key=f"{gateway}-{reason}:{event_id}",
+            gateway_refund_ref=None,
+            confirmed=True,
+            metadata={"legacy_reason": reason, "event_id": event_id},
+        )
 
     @staticmethod
     def _linked_service_ids(db: Session, invoice) -> list[int]:
@@ -356,14 +425,8 @@ class PaymentWebhookService:
             service = db.get(Service, service_id)
             if service is None:
                 continue
-            try:
-                await lifecycle.suspend(db, service, reason=reason)
-            except ServiceLifecycleError as exc:
-                logger.warning(
-                    "Dispute suspend failed for service %s: %s",
-                    service_id,
-                    exc,
-                )
+            # Errors reach run_deferred_suspensions, which logs and audits them.
+            await lifecycle.suspend(db, service, reason=reason)
 
     @staticmethod
     def _run_suspend_services_for_dispute(
@@ -378,13 +441,15 @@ class PaymentWebhookService:
             )
 
         try:
-            asyncio.run(_run())
+            asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(_run())
-            finally:
-                loop.close()
+            asyncio.run(_run())
+            return
+        # Called from code already inside an event loop: run the coroutine on a
+        # loop of its own in a helper thread; this thread waits, so the session
+        # is still used by one thread at a time.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(asyncio.run, _run()).result()
 
     @staticmethod
     def _enqueue_dispute_suspend_email(db: Session, invoice, *, reason: str) -> None:
@@ -425,10 +490,50 @@ class PaymentWebhookService:
 
     @staticmethod
     def _suspend_linked_services(db: Session, invoice, *, reason: str) -> None:
+        """Queue the invoice's services for suspension once the transaction commits."""
         service_ids = PaymentWebhookService._linked_service_ids(db, invoice)
         if not service_ids:
             return
-        PaymentWebhookService._run_suspend_services_for_dispute(
-            db, service_ids, reason=reason
-        )
+        queued = db.info.setdefault(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, [])
+        queued.append((list(service_ids), reason))
         PaymentWebhookService._enqueue_dispute_suspend_email(db, invoice, reason=reason)
+
+    @staticmethod
+    def run_deferred_suspensions(db: Session) -> None:
+        """Commit, then suspend the services a dispute queued, each in its own transaction.
+
+        Lifecycle calls reach hypervisors and must not run while billing rows
+        are locked. A failed suspension is logged and left for staff; the
+        dispute itself is already committed.
+        """
+        pending = db.info.pop(PaymentWebhookService.DEFERRED_SUSPENSION_KEY, [])
+        if not pending:
+            return
+        db.commit()
+        for service_ids, reason in pending:
+            for service_id in service_ids:
+                try:
+                    PaymentWebhookService._run_suspend_services_for_dispute(
+                        db, [service_id], reason=reason
+                    )
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001 - one service must not stop the others
+                    db.rollback()
+                    logger.exception("Dispute suspend failed for service %s", service_id)
+                    PaymentWebhookService._audit_suspend_failure(db, service_id, reason, exc)
+
+    @staticmethod
+    def _audit_suspend_failure(db: Session, service_id: int, reason: str, exc: Exception) -> None:
+        try:
+            AuditService.log(
+                db,
+                actor_user_id=None,
+                action="billing.dispute_suspend_failed",
+                resource_type="service",
+                resource_id=str(service_id),
+                metadata={"reason": reason, "error": f"{type(exc).__name__}: {exc}"[:500]},
+            )
+            db.commit()
+        except Exception:  # noqa: BLE001 - the dispute is committed; the log line above remains
+            db.rollback()
+            logger.exception("Could not audit the failed dispute suspend of service %s", service_id)

@@ -349,7 +349,7 @@ The two locking revisions are last on purpose: if the rehearsal shows them over 
 
 The old code keeps running while revisions 7 and 8 execute during a rolling deploy, and it writes ledger entries without `billing_account_id` and without touching the account cache. Therefore:
 
-- the deploy runbook re-runs `python -m app.services.billing_backfill ledger_accounts` once no old process remains;
+- the deploy runbook re-runs `python -m app.services.billing_backfill accounts` (all four steps, idempotent) once no old process remains, because while the deploy rolls old processes write unlinked reseller entries and move only the reseller cache;
 - the credit engine stays in `shadow` until its switch criterion holds (6.5), and the first criterion is "no ledger entry with `reseller_id` set and `billing_account_id` NULL";
 - while the credit engine is not `v2`, an admin action "Resynchronise account caches from reseller balances" (P1-C) repeats step (b) for named accounts, audited. It is refused in `v2`.
 
@@ -430,7 +430,15 @@ Every edge not listed is refused. "Recompute" in the trigger column means the ed
 | `paid` | `refunded` | recompute after a full refund with credit note | emit `invoice.refunded` |
 | `partially_paid`, `overdue`, `collections` | `refunded` | recompute after refunds bring `paid_net` to 0 and credit notes bring `due` to 0 | emit `invoice.refunded` |
 | `open`, `overdue`, `collections`, `partially_paid` | `void` (`credited`) | recompute after a credit note brings `due` to 0 with nothing paid | `voided_at`, `void_reason = 'credited'`; emit `invoice.voided` |
+| `open`, `pending_action` | `refunded` | recompute when a refund's credit note arrives after a full refund with no credit note reopened the invoice | emit `invoice.refunded` |
+| `open` | `collections` | recompute after a dispute with policy `reopen_invoice` on an open invoice | none in phase 1 |
+| `pending_action` | `void` (`credited`) | recompute after a credit note brings `due` to 0 while a payment is still pending | `voided_at`, `void_reason = 'credited'`; emit `invoice.voided` |
+| `paid` | `pending_action`, `void` | recompute after a payment reversal leaves only a pending payment, or only a credit note | as the `pending_action` and `void` (`credited`) rows |
 | `open`, `overdue` | `void` | `InvoiceService.void(db, invoice, reason, actor)` by an admin, by order cancellation, or by billing cancellation (`recurring_billing_service.py:883`, `reseller_billing_service.py:795`) | allowed only if `paid_net_cents == 0`, `pending_cents == 0`, no adjustment exists and no refund is pending; `voided_at`, `void_reason`; the number is kept and never reused; emit `invoice.voided` |
+
+The four rows above `void` by admin were added during P1-I: an exhaustive test of the status rule (3.2) found it can reach them, so without them `transition()` would raise. The test pins this table to the rule, so the two cannot drift apart again.
+
+As built (core status review fixes): order cancellation and service billing cancellation void only through `void()` in `v2`, under the reseller, account and invoice locks (`order_refunds.void_cancelled_invoice_v2`, `close_kept_invoice_v2`). When `void()` refuses an unpaid invoice, a `cancel` credit note covers what is still owed if no money is held; otherwise the invoice is recorded for refund review as `<reason>_invoice_open`. Without a credit note series the credit note cannot be issued, and the invoice goes to refund review instead. A failed reseller deploy in `v2` refunds each payment to credit through `RefundService`, so the invoice ends `refunded`. `transition()` refuses `paid` to `void` while `paid_net` is above 0, so only the status rule's `credited` move voids a paid invoice. In `v2` the payment-failed webhook calls `recompute()` (cause `payment_failed`) instead of writing `open`.
 
 Statuses `failed` (legacy) and `void`, `refunded` are terminal in `v2`. Nothing in `v2` writes `failed`; existing `failed` rows stay as they are (they are reversed payments under the legacy model).
 
@@ -443,11 +451,15 @@ These modes keep today's behaviour byte for byte, so the table is today's edges,
 | (none) | `open` | `InvoiceService.create` (`invoice_service.py:109`), checkout (`checkout_service.py:335`), upgrade quote (`commerce_lifecycle_service.py:185`) |
 | `open`, `pending_action`, `overdue` | `paid` | `mark_paid_if_fully_allocated` (`invoice_service.py:211-213`), admin mark-paid (`commerce_admin.py:439`; W0a moves it onto the settlement function) |
 | `paid` | `open` | `mark_paid_if_fully_allocated` when allocation drops (`invoice_service.py:214-216`) |
-| `open` | `pending_action` | `orchestrator.py:607` |
-| `pending_action` | `open` | `webhooks.py:239-240` |
-| `open`, `pending_action` | `overdue` | `recurring_billing_service.py:557-558` |
-| `open`, `pending_action`, `overdue` | `void` | `commerce_admin.py:479`, `reseller_billing_service.py:795`, `recurring_billing_service.py:883` |
-| any except `void`, `draft` | `failed` | refunds and reversals (`refunds.py:196`, `webhooks.py:301`) |
+| `open`, `overdue`, `failed` | `pending_action` | `orchestrator.py:607` (`failed`: a 3-D Secure card charge on a disputed or reversed reseller invoice, as before phase 1) |
+| `pending_action` | `open` | `webhooks.py` `_payment_failed` (cause `payment_failed`) |
+| `open` | `overdue` | `recurring_billing_service.py:557-558` |
+| `open`, `pending_action`, `overdue` | `void` | `commerce_admin.py:479`, `reseller_billing_service.py:795`, `recurring_billing_service.py:883`; `order_refunds.cancel_order` (cause `order_cancelled`, also from `failed`) |
+| any except `void`, `draft` | `failed` | `RefundService` completion (causes `admin_refund`, `refund`, `dispute`) |
+
+As built (P1-R): before phase 1, a refund or dispute of a late payment on a `void` invoice wrote `failed` anyway. There is no `void` to `failed` edge, so such an invoice now stays `void`; the payment, refund and ledger effects still apply. This is a deliberate change from the pre-phase-1 behaviour in `legacy` and `shadow`, listed in the phase 1 report.
+
+As built (core status review fixes): the pre-phase-1 code never wrote `pending_action` to `overdue`, so that edge is not in the table. In every mode, `_lock_funding_rows` refuses to fund a `void` invoice before any gateway call, and in `v2` also a `refunded` or `failed` one. A failed renewal charge locks the invoice and moves it to `overdue` only from `open` or `partially_paid`; a `void`, `refunded`, `failed` or `draft` invoice sends the cycle to manual review (`invoice_<status>`) and the batch carries on. Before phase 1 the worker wrote `overdue` over a voided reseller cycle invoice and the next retry charged it (to-do ba305b55, an existing production bug for reseller cycle invoices, fixed by phase 1).
 
 In these modes `create()` still writes `draft` first and publishes in the same transaction (so drafts become real from phase 1 for admin-built invoices, A5 later), and the publish side effects of 3.3 apply with two differences: `amount_cents` is the legacy amount, and `model_version`, `subtotal_cents`, `discount_cents` and `tax_cents` stay NULL (the v2 totals are computed only for the `i3_totals` comparison). Lines with their new columns, snapshots, `issued_at`, the number columns and `invoice.created` are written in every mode, since they are additive and harmless. So `model_version = 2` means exactly "its totals were decided by the v2 engine", and the PDF and the E2 totals detector rely on that. New statuses (`partially_paid`, `refunded`, `collections`) are never written in these modes, so `/api/reseller-panel` and `/api/client/commerce` see no new status values until the switch (open question 4).
 
@@ -455,10 +467,11 @@ In these modes `create()` still writes `draft` first and publishes in the same t
 
 Once an invoice's status is not `draft`, these columns are frozen (writes raise):
 
-- `invoices`: `invoice_number`, `reseller_id`, `billing_account_id`, `service_id`, `order_id`, `purpose`, `amount_cents`, `subtotal_cents`, `discount_cents`, `tax_cents`, `prices_include_tax`, `currency`, `description`, `customer_notes`, `locale`, `seller_snapshot`, `buyer_snapshot`, `model_version`, `created_at`.
-- Frozen once set (NULL to a value is allowed once, a value never changes): `issued_at`, `series_id`, `number_period`, `number_value`, `number_display`, `proforma_series_id`, `proforma_number_period`, `proforma_number_value`, `proforma_number_display`.
+- `invoices`: `invoice_number`, `reseller_id`, `billing_account_id`, `order_id`, `purpose`, `amount_cents`, `subtotal_cents`, `discount_cents`, `tax_cents`, `prices_include_tax`, `currency`, `description`, `customer_notes`, `locale`, `seller_snapshot`, `buyer_snapshot`, `model_version`, `created_at`.
+- Frozen once set (NULL to a value is allowed once, a value never changes): `service_id`, `issued_at`, `series_id`, `number_period`, `number_value`, `number_display`, `proforma_series_id`, `proforma_number_period`, `proforma_number_value`, `proforma_number_display`.
 - `document_type`: frozen except `proforma` to `invoice` inside the proforma conversion (5.4).
-- Exception for foreign keys set to NULL: a change of `service_id` or `billing_account_id` to NULL is allowed (the database's ON DELETE SET NULL, `reseller.py:511-522`, may be mirrored by the ORM when the parent is deleted).
+- Deliberate deviation (P1-I): `service_id` may be set once, from NULL to a value, on a published invoice, because a reseller deploy charge is invoiced before the service it pays for exists; any later change or clearing through the ORM is refused (the database's ON DELETE SET NULL still clears it when the service is deleted).
+- Exception for foreign keys set to NULL: a change of `billing_account_id` to NULL is allowed (the database's ON DELETE SET NULL, `reseller.py:511-522`, may be mirrored by the ORM when the parent is deleted).
 - Always writable: `status` (through `transition()` only, enforced by review and a test that greps for `.status = InvoiceStatus` outside `invoice_service.py`), `paid_at`, `due_at` (through `InvoiceService.change_due_date`, audited), `admin_notes`, `status_changed_at`, `voided_at`, `void_reason`, `updated_at`.
 - `invoice_lines` of a non-draft invoice: no insert, update or delete at all. This applies to legacy invoices too, so every creator that adds lines after inserting the invoice must instead create it as `draft`, add the lines and then publish: checkout (`checkout_service.py:311-362`, which adds the tax line after the invoice row) and the upgrade quote (`commerce_lifecycle_service.py:185`) are the two known cases, both owned by P1-I.
 
@@ -469,7 +482,7 @@ Guard design, in `app/services/invoice_guard.py`, registered on import from `app
 - `event.listen(InvoiceLine, "before_insert" | "before_update" | "before_delete", ...)`: read the parent's committed status with `connection.execute(select(invoices.c.status).where(invoices.c.id == target.invoice_id))` (mapper events must use the passed connection, not the session); violation if it is not `draft`. Inserting lines for a brand-new invoice in the same flush is fine because the parent row is inserted as `draft` first.
 - An escape hatch for the proforma conversion only: a `contextvars.ContextVar` set by `with invoice_guard.allow("proforma_conversion", {"document_type", "issued_at", "series_id", ...}):` inside `InvoiceService`.
 - Core `update(Invoice)` statements bypass ORM events, so a test asserts no `update(Invoice)` or `update(InvoiceLine)` appears outside `invoice_service.py` and the backfill module.
-- What a violation does depends on the setting `billing_invoice_guard_mode` (appendix A): `enforce` raises `FrozenInvoiceError`; `log` logs an error with the invoice id, column and stack, and records shadow mismatch check `i4_frozen_write` (6.4), and lets the write proceed. The test suite always runs with `enforce` (a fixture sets it). The default in production is `log` while the invoice engine is not `v2`, and the guard is always `enforce` once the invoice engine is `v2`, so no stray writer that tests missed can break a production renewal before the switch, but none survives the switch.
+- What a violation does depends on the setting `billing_invoice_guard_mode` (appendix A): `enforce` raises `FrozenInvoiceError`; `log` logs an error with the invoice id, column and stack, and records shadow mismatch check `i4_frozen_write` (6.4), and lets the write proceed. If the guard cannot read its mode, it refuses the write. In `log` mode, snapshots, descriptions and notes are recorded only by size and other values are cut to 120 characters, and records are written only when the outermost transaction commits. The test suite always runs with `enforce` (a fixture sets it; the few tests that must write a published invoice in their setup are listed in `tests/conftest.py`). The default in production is `log` while the invoice engine is not `v2`, and the guard is always `enforce` once the invoice engine is `v2`, so no stray writer that tests missed can break a production renewal before the switch, but none survives the switch.
 
 ## 4. `InvoiceService.balance()`
 
@@ -524,6 +537,9 @@ Engine `v2` only. When `recompute()` finds `due_cents < 0` (two payments raced, 
 1. Issue a debit note on the invoice through `InvoiceAdjustmentService.issue_overpayment(db, invoice, excess, payment)`: reason `overpayment`, outcome `credited_to_balance`, one line (`kind` `adjustment`, "Overpayment credited to account balance", `unit_cents = excess`, tax 0), idempotency key `overpayment:<invoice_id>:<payment_id>` where the payment is the one whose success caused the overpayment.
 2. In the same call, credit the invoice's account with `excess` through `CreditLedgerService.credit_account` (entry type `adjustment`, reference `debit_note` / adjustment id, idempotency key `overpayment-credit:<adjustment_id>`) and set the debit note's `ledger_entry_id`.
 3. Evaluate the status again: the debit note raised `worth` by `excess`, so `due` is 0 and the invoice is `paid`.
+4. Proformas and top-ups. A proforma takes no notes (5.4), so an overpaid proforma is first marked `paid` and converted to an invoice, and the debit note of steps 1 and 2 is then issued on the converted invoice in the same transaction, with the same idempotency keys. A `credit_topup` invoice takes no debit note, because its payments are account credit already: the excess is credited straight to the billing account through `CreditLedgerService.credit_account`, with reference type `topup_overpayment`, linked to the invoice and to the overpaying payment, and idempotency key `overpayment-credit:topup:<invoice_id>:<payment_id>`. The top-up stays overpaid on record (`due_cents < 0`), so each settlement credits only the part of the excess not credited before, and a retry credits nothing more.
+
+Settlement reads the payments and notes it decides from with locking reads once the invoice lock is held: `balance(for_update=True)` in `v2`, and `_legacy_allocated_cents(for_update=True)` in `legacy` and `shadow`. Under REPEATABLE READ a plain read would use the transaction's first snapshot and miss a payment committed while it waited for the lock. Before phase 1 this happened in production: two payments settling one invoice at once could leave a fully paid invoice `open` (to-do 50b19ef6, an existing production bug fixed by phase 1).
 
 This is the spec's rule (A2: "the excess becomes account credit (A3) with a debit note"). It cannot loop: a debit note raises what the invoice is worth, so it never produces a new negative `due`. Both steps happen in the transaction that recorded the overpaying payment, after the account and invoice locks are held. This replaces the `InvoiceError` raised today (`invoice_service.py:209-210`), which inside a webhook rolls back and makes the gateway retry forever. In `legacy` and `shadow` the old raise stays, and the shadow recorder writes check `i1_decision` on its own session first (6.4), so the case is visible before the switch.
 
@@ -532,6 +548,7 @@ This is the spec's rule (A2: "the excess becomes account credit (A3) with a debi
 - A credit note with outcome `reduced_balance` must have `total_cents <= B.remaining_cents`, and is refused while `pending_cents > 0` (a pending payment could otherwise settle into an overpayment created by the note).
 - Credit notes with outcome `refunded` or `credited_to_balance` are only created by `RefundService`, together with their refund row, and their total equals the refund amount; the refund raises `refunded_cents`, so `paid_net` and `worth` fall by the same amount and `due` is unchanged. A refund that has no credit note (dispute, credit removal, refunds on a proforma) lowers `paid_net` only, so `due` rises.
 - In all cases `credit_cents` after the note must not exceed `total_cents + debit_cents` (worth never negative), and a credit note never makes `due` negative: `reduced_balance` notes are limited to `remaining_cents`, and refund-paired notes are limited by the refund rules in 7.1.
+- The tax of a credit note issued without explicit lines is taken in proportion to the invoice's tax base (`InvoiceAdjustmentService.tax_base`): its total and tax, plus debit notes, less earlier credit notes, counting only notes issued before this one so that a retry sees the same figures. Overpayment debit notes (reason `overpayment`) are left out of the tax base: they carry no tax and only move money paid beyond the invoice to account credit, so counting them would dilute the tax of every later credit note. Taxed debit notes, such as a late fee with tax, count. V2 refunds use the same base (7.2).
 
 ## 5. Numbering, series and proforma
 
@@ -557,7 +574,9 @@ This is the spec's rule (A2: "the excess becomes account credit (A3) with a debi
 - In every mode a void keeps its number, and published documents can never be deleted (3.5), so a number is never freed or reused.
 - Period: `''` when `reset_period = 'never'`, else the four-digit UTC year of `at` (the publish time, or the payment time for conversions).
 
-Admin rules (series API, P1-A): `format` must contain `{NUMBER}`, and also `{YEAR}` when `reset_period = 'yearly'`; the expanded number must fit 64 characters; a format change applies only to numbers allocated afterwards; switching a series from `invoice_number` to `own` sets the counter to one more than the largest `number_value` already in the series (or a higher start the admin gives); a series cannot be deleted once used, only disabled; there is always exactly one enabled default per document type.
+Admin rules (series API, P1-A): `format` must contain `{NUMBER}`, and also `{YEAR}` when `reset_period = 'yearly'`; the expanded number must fit 64 characters; a format change applies only to numbers allocated afterwards; switching a series from `invoice_number` to `own` sets the counter to one more than the largest `number_value` already in the series (or a higher start the admin gives); a series cannot be deleted once used, only disabled; there is always exactly one enabled default per document type. Switching to `own` also starts the counter above the next internal invoice number, under the publish locks, so an invoice being published cannot collide. Series changes take the series row, the global invoice number row and the series counter, in that order, as publish does.
+
+Counter creation is race-safe: on MySQL and MariaDB it is `INSERT ... ON DUPLICATE KEY UPDATE` with no read before it (`INSERT IGNORE` deadlocked on MariaDB 11.8). A gapless series records its first number per period in `invoice_sequences` as `series-start:<id>:<period>`. The start moves with `start_value` only while nothing is issued in that period, after which raising the counter is refused (409). `billing_numbering_gaps` requires the issued numbers to run unbroken from that start to the largest, and reports issued numbers without a start row as a separate finding.
 
 ### 5.3 Format tags
 
@@ -612,6 +631,7 @@ The PDF for a v2 invoice reads only the snapshots. Legacy invoices (`model_versi
   4. if a mirror exists and differs from `authoritative`, record check `c1_cache_pair` (6.4). The mirror is written as computed, not overwritten with the authoritative value, so drift stays visible to the daily scan until someone resolves it;
   5. insert the entry, then fire the internal credit event (`credit.added` for a positive entry, section 9.2).
 - `available_cents(db, account)` returns `max(0, authoritative cache)` by the same mode rule. Every reader listed in 6.6 uses it.
+- `apply_to_invoice`, `adjust_account` and `debit_account` take `allow_negative_balance` (default `False`). With `True`, `apply_to_invoice` is no longer capped by the available credit, only by the invoice's remaining amount, and the balance carries the shortfall (the reseller `debit_balance` dispute policy, 7.6). Every other caller keeps the default.
 
 ### 6.3 Lock order in practice
 
@@ -619,6 +639,7 @@ The PDF for a v2 invoice reads only the snapshots. Legacy invoices (`model_versi
 - `PaymentRefundService.refund` (`refunds.py:72-75`) and `PaymentWebhookService._payment_for_update` (`webhooks.py:121-144`) lock the payment first and the reseller later (through the ledger), the reverse of the orchestrator's order, which can deadlock today. P1-D replaces both with `BillingLocks` (account, invoice, payment) in section 7.
 - Retail settlement (W0a) locks the account, then the invoice, then the payment.
 - Number allocation in gapless mode comes last in every transaction.
+- As built (core status review fixes): funding locks through `BillingLocks.for_invoice`: a cycle invoice's service billing first, then the reseller, its billing account and the invoice, the same order as the renewal worker. No funding charges an invoice while a live pending gateway payment exists on it (409 `invoice_payment_pending` at the pay routes; an expired USDT deposit does not count); a `pending_action` invoice returns its pending payment instead. This refusal is a deliberate change in `legacy` and `shadow`; no WHMCS route reuses an invoice for funding.
 
 ### 6.4 Shadow comparisons
 
@@ -640,9 +661,11 @@ Two engines run in shadow during phase 1: the invoice engine (`billing_invoice_e
 | `c2_cache_vs_sum` | credit | daily scan | the authoritative cache equals Σ `amount_cents` of the account's entries |
 | `c2_chain_continuity` | credit | daily scan | for each entry, `balance_after_cents = previous balance_after_cents + amount_cents` (window function `LAG() OVER (PARTITION BY billing_account_id ORDER BY id)`, available on MariaDB 10.2+ and SQLite 3.25+); one mismatch row per account at its first broken entry |
 | `c2_mirror` | credit | daily scan | for reseller accounts, the mirror cache equals the authoritative cache |
+| `c2_cache_without_entries` | credit | daily scan | a non-zero reseller cache, account cache or retail account balance with no ledger entries behind it. No ledger write can explain it, so it blocks the switch to `v2` until an admin records an audited opening adjustment with `adjust_account` and a reason. Each reseller is reported once, with both caches, and not again as `c2_mirror`. The finding text starts `cache_without_entries:`. Counted on 2026-11-22: production had 0 resellers and 0 ledger entries, and dev's one reseller was consistent, so no opening adjustments were needed |
 | `c2_unlinked` | credit | daily scan | count of entries with `reseller_id` set and `billing_account_id` NULL is 0 (subject is the reseller) |
 | `i1_decision` | invoice | every call site of 4.2 in shadow mode | legacy `remaining_cents` and paid/not-paid decision against `balance().remaining_cents` and the `v2` status rule's paid/not-paid answer |
 | `i2_scan` | invoice | daily scan, invoices with `updated_at` in the last 48 hours plus every invoice with `id % 7` equal to the weekday number (a full sweep each week) | same as `i1` |
+| `i2_expected_partial_refund` | invoice | daily scan, as `i2_scan` | an `i2` difference that equals exactly the sum, over the invoice's partially refunded payments, of the amount minus `refunded_cents`; listed separately and not counted by the switch criterion (6.5), the quiet period or the mismatch alert. Any other difference stays `i2_scan` |
 | `i3_totals` | invoice | at publish in shadow mode | the legacy `amount_cents` against the total computed from v2 lines (1.3.1) |
 | `i4_frozen_write` | invoice | guard in `log` mode | a frozen column was written (3.5) |
 
@@ -662,14 +685,20 @@ An engine moves to `v2` only through `POST /api/admin/billing/engines/{engine}/s
 1. the engine is currently `shadow`;
 2. preconditions: for `credit`, check `c2_unlinked` is 0 right now and every reseller has an account; for `invoice`, revision 9 is applied (zero totals possible) and the credit engine is already `v2` or the operator confirms that overpayments will be credited to the reseller cache's chain (open question 6 recommends switching credit first);
 3. quiet period: `now - max(shadow_since, the latest last_seen_at of any mismatch row of this engine) >= billing_shadow_min_days` (default 14 days). Resolving a row does not shorten the period: the clock restarts at the last time any mismatch was seen;
-4. at least `billing_shadow_min_days` daily scans completed in the quiet period, the latest finished less than 26 hours ago, and the latest found 0 mismatches for the engine;
+4. every UTC calendar day of the quiet period, apart from the partial first day and today, has at least one scan that was scheduled, complete and found no blocking mismatch; the latest scheduled scan finished less than 26 hours ago and found 0 mismatches for the engine. On-demand admin scans never count and never push scheduled scans out of the stored history (each history entry records `scheduled` and `complete`). Entries stored before scans were marked scheduled count as not scheduled;
 5. no open mismatch rows for the engine.
 
 "Zero mismatches" therefore means: no mismatch of that engine, inline or scanned, for the whole quiet period, with a complete scan every day of it. `shadow_since` is recorded when the engine enters `shadow` (on first boot after the migration, or when an admin switches back to it).
 
 On success the endpoint writes the setting and a `system_settings` row `billing_engine_switch:<engine>` with the mode, time, admin and a copy of the criteria values. The engine treats the setting as `v2` only if that record agrees; a setting edited to `v2` by other means is treated as `shadow` and logged at ERROR.
 
-Rollback: switching the credit engine back to `shadow` is always allowed (both caches are written in every non-legacy mode). Switching the invoice engine back is refused once any credit note, debit note or partial refund exists, because the legacy rule ignores them; the only way forward then is a fix in `v2`. Switching to `legacy` is allowed only from `shadow`.
+Rollback (as built by P1-C; every switch is audited as `billing.engine.switch` with the admin and the from and to modes):
+
+- The credit engine may go from `v2` back to `shadow` or to `legacy` at any time. The reseller cache becomes authoritative again, and the response and audit record list any reseller accounts whose two caches differ at that moment, for staff to resynchronise.
+- The invoice engine may go from `v2` back to `shadow` or `legacy` only while no credit note, debit note or partial refund exists, because the legacy rule ignores them; the only way forward then is a fix in `v2`.
+- Going back to `shadow` restarts the quiet period; going to `legacy` clears `shadow_since`; `legacy` to `shadow` starts it. Deviation: the design first allowed `legacy` only from `shadow`; the direct `v2` to `legacy` path was added so both rollbacks exist.
+
+The engine settings change only through this endpoint: `PUT` and `DELETE` on `billing_credit_engine` and `billing_invoice_engine` in `/api/admin/settings` return 409 `setting_managed_elsewhere`, and its listing marks them `read_only` with `managed_by: "billing_engines"`.
 
 ### 6.6 Readers of the reseller cache
 
@@ -682,7 +711,7 @@ The retirement (contract step c2) is a later phase: once the credit engine has b
 Settings are in appendix A; defaults follow spec A3.
 
 - **Add funds (retail).** `POST /api/client/commerce/credit/top-up-invoices` creates a `credit_topup` invoice for the client's account through `InvoiceService.create_topup(billing_account_id=...)`, exactly as `POST /top-up-invoices` does for resellers (`reseller_panel.py:875-899`), within the minimum, maximum and maximum-balance settings, and only if the account has at least one order in status `fulfilled` when `billing_credit_require_approved_order` is on (spec A3 default: on). When it is paid, the settlement function credits the account: today's top-up credit in `finalize_success` (`orchestrator.py:633-650`) uses `invoice.reseller_id` and becomes `credit_account(invoice.billing_account_id, ...)` with the same idempotency key `topup-invoice:<id>`.
-- **Apply credit to an invoice.** `CreditLedgerService.apply_to_invoice(db, invoice, amount_cents=None, actor_user_id, idempotency_key)`: amount defaults to `min(available, remaining)`; creates `Payment(gateway="credit", status=succeeded)` and a debit entry exactly as `_apply_credit` does today (`orchestrator.py:474-523`, which P1-C moves here and calls from the orchestrator), then `recompute()`. Available to admins on both tracks and to clients (retail) and resellers in their panels.
+- **Apply credit to an invoice.** `CreditLedgerService.apply_to_invoice(db, invoice, amount_cents=None, actor_user_id, idempotency_key)`: amount defaults to `min(available, remaining)`; creates `Payment(gateway="credit", status=succeeded)` and a debit entry exactly as `_apply_credit` does today (`orchestrator.py:474-523`, which P1-C moves here and calls from the orchestrator), then `recompute()`. Available to admins on both tracks and to clients (retail) and resellers in their panels. As built (P1-C fixes): credit is refused with 409 `{"detail": {"code": "invoice_payment_pending", "invoice_id", "payment_id"}}` while a payment on the invoice is still pending at a gateway (a card awaiting 3-D Secure, or a USDT deposit that has not expired), whatever the invoice status, except under the dispute policy (`allow_negative_balance`). The payments and the remaining amount are read with locking reads after the invoice lock (`InvoiceService.balance(for_update=True)` in `v2`, `_legacy_allocated_cents(for_update=True)` otherwise). Reusing an idempotency key with a different `amount_cents` or `allow_negative_balance` is an error; an identical repeat returns the first payment. The reseller-panel route is refused during impersonation (403), as `pay_invoice` is. None of the three apply-credit routes is a WHMCS module route.
 - **Automatic application.** After publish, if the track's setting is on (`billing_credit_auto_apply_retail`, default off; resellers keep their `charge_preference`, `reseller.py:211`, read by the orchestrator as today).
 - **Remove credit from an invoice.** `remove_from_invoice(db, payment, amount_cents, actor)` calls `RefundService.refund(destination="credit", reason="credit_removed", issue_credit_note=False)` on the credit payment: the money returns to the balance and the invoice's due amount reopens.
 - **Overpayment** goes to credit (4.3).
@@ -725,6 +754,10 @@ Settings are in appendix A; defaults follow spec A3.
 5. `InvoiceService.recompute(db, invoice, cause="refund")` (engine `v2`), or `transition(..., to=FAILED)` for a full refund in `legacy`/`shadow`.
 6. Fire the internal event `payment.refunded` (section 9); `credit_note.issued` and `invoice.refunded` fire from their own code paths in the same transaction.
 
+As built (P1-I fixes): the tax of a v2 refund is taken in proportion to the invoice's refundable worth and tax, `InvoiceAdjustmentService.tax_base`: the invoice's own total and tax, plus debit notes (leaving out overpayment debit notes), less credit notes issued before this refund's credit note, which include the notes of earlier refunds. An earlier refund that issued no credit note, such as a dispute, has its amount and recorded tax taken off that base by the refund service; a refund with a note counts through its note only, so nothing is counted twice. Because the base shrinks by what each refund takes, partial refunds that add up to the base refund exactly its tax with no rounding drift, and no refund's tax is negative or above its amount. A taxed debit note, such as a late fee with tax, is refunded with its tax. The figure is stored as `refund_metadata.tax_cents` and on the credit note line, and a retry returns the same refund and note. In `legacy` and `shadow` no tax figure is recorded.
+
+As built (P1-R): a legacy or shadow refund of a payment on a `void` invoice leaves the invoice `void` (3.4); the payment and ledger effects still apply. Outside `v2`, a partial refund reported by the gateway is recorded as a full refund, as before phase 1 (7.1 allows only full refunds there).
+
 ### 7.3 Idempotency keys
 
 | Key | Where | Format |
@@ -736,6 +769,8 @@ Settings are in appendix A; defaults follow spec A3.
 | Credit note | `invoice_adjustments.idempotency_key` | `refund-cn:<refund_id>` |
 
 Stripe keeps idempotency keys for at least 24 hours and PayPal request ids for a limited period, so the reconciler stops retrying the gateway call after 24 hours (7.4) instead of relying on them indefinitely.
+
+As built (P1-R): staff `Idempotency-Key` values are stored as `admin:<value>`, so they never replay or collide with system keys.
 
 ### 7.4 Reconciler
 
@@ -751,6 +786,8 @@ The gateway webhook for a refund (`charge.refunded`, PayPal `PAYMENT.CAPTURE.REF
 
 E2 detectors added by P1-R: `billing_refund_stuck` (any refund in `review`, or `pending` for more than 1 hour) and `billing_refund_mismatch` (a payment whose `refunded_cents` differs from the sum of its succeeded refunds, or exceeds its amount).
 
+As built (P1-R): a refund event without a gateway reference completes an open gateway refund only when exactly one open refund has the event's amount. A Stripe `charge.refunded` without a refunds list reports `amount_refunded` as a running total; only the part beyond the refunds already succeeded is recorded.
+
 ### 7.5 Chargebacks (disputes)
 
 A chargeback event (`charge.dispute.created`, PayPal `CUSTOMER.DISPUTE.CREATED` resolved against the merchant; today `webhooks.py:195-209` and `:245-301`) goes through the same completion step:
@@ -758,6 +795,14 @@ A chargeback event (`charge.dispute.created`, PayPal `CUSTOMER.DISPUTE.CREATED` 
 - refund row: `reason = 'dispute'`, `destination = 'gateway'`, `status = 'succeeded'` (the money has already left), `issue_credit_note = false`, idempotency key `<gateway>-dispute:<event_id>`, amount from the event (default: the whole refundable amount);
 - no credit note: the invoice was correct, the customer just took the money back, so `paid_net` falls and `due` rises;
 - then the track's dispute policy (7.6).
+
+As built (P1-R): in `legacy` and `shadow`, and for reseller invoices in `v2`, the services linked to a disputed invoice are suspended after the dispute's transaction commits, each in its own transaction with no billing lock held. A failed suspension is rolled back, logged and audited as `billing.dispute_suspend_failed`; it does not undo the dispute or stop the other suspensions. The webhook routes run `process` in a worker thread. Before phase 1 this suspension ran inside the async webhook routes through `asyncio.run`, which raised, so a dispute on an invoice with linked services returned 500 and was never recorded (to-do 13e91a6c, an existing production bug fixed by phase 1).
+
+### 7.5.1 USDT deposits on an already paid invoice (as built)
+
+Before phase 1, a reseller could open a USDT deposit for a top-up and then pay the same top-up by card; when the transfer confirmed, settlement raised and the watcher retried the deposit on every tick (to-do 38f9e762, an existing production bug for resellers, fixed by phase 1). Now card funding is refused while the deposit is live (6.3), and the watcher settles each deposit in its own savepoint, so a deposit that fails goes to manual review with its transfer events kept and the others carry on. In `legacy` and `shadow`, USDT that would overpay an already paid reseller invoice stays a pending payment and is recorded as refund review `usdt_on_paid_invoice`; in `shadow` an `i1_decision` mismatch is recorded on its own session (legacy `held_for_review`, v2 `credit_excess` with the overpaid cents), so the switch criterion sees it. In `v2` settlement credits the excess to the account (4.3).
+
+Known limit: nothing in phase 1 resolves a held `usdt_on_paid_invoice` deposit. The refund review's credit and refund actions refuse a pending payment, dismissing leaves the payment pending and the deposit in manual review, and reconciling holds it again. Staff can credit the reseller by hand (`/api/admin/resellers/{id}/credit-adjustments`) and dismiss the review; the payment stays pending, which also blocks `void()` on that invoice. A resolution action is a follow-up (to-do in the ledger).
 
 ### 7.6 Dispute policies
 
@@ -771,6 +816,8 @@ A dispute later won by the merchant is recorded by staff as a manual payment (W0
 ### 7.7 Order cancellation
 
 W0a's `billing_order_refund_policy` (`manual_review`, `original_method`, `credit`; W0a's `app/services/billing/order_refunds.py` holds `original_method` and `credit` for manual review "until the refund engine exists") becomes real in P1-R when the invoice engine is `v2`: `original_method` calls `RefundService.request(destination='gateway', reason='cancellation')` for each succeeded payment of the order's invoice (credit payments go to `credit`), `credit` uses `destination='credit'`. Both issue credit notes. In `legacy` and `shadow` the manual review behaviour stays.
+
+As built (P1-R): gateway refunds from order cancellation are only reserved in the cancel transaction and sent afterwards by dispatch or the reconciler. Staff resolve a refund review by refunding to card, crediting the account, or dismissing with a note, through `/api/admin/billing/refund-reviews`; each resolution is idempotent and audited.
 
 ## 8. D1: cycles
 
@@ -993,7 +1040,7 @@ All ten are written by P1-S. Contract revisions (2.3) chain after them in a late
 
 ### 11.5 Rollout after phase 1 merges
 
-1. Deploy with both engines in `shadow` (the default), guard in `log`. Run `billing_backfill ledger_accounts` once the old processes are gone.
+1. Deploy with both engines in `shadow` (the default), guard in `log`. Run `billing_backfill accounts` once the old processes are gone.
 2. Watch `billing_shadow_mismatches` and the E2 alerts. Fix and redeploy until clean.
 3. After the quiet period, switch the credit engine to `v2` (6.5). Retail credit features (top-up, apply, remove) are available from this point; before it they are refused for retail with a clear error.
 4. After its own quiet period, switch the invoice engine to `v2`. Credit and debit notes, partial refunds, refunds to credit, overpayment to credit, `partially_paid`, `refunded` and `collections` become live, and the guard becomes `enforce`.

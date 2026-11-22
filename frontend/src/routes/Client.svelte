@@ -22,6 +22,7 @@
   let serviceId = null;
   let invoiceId = null;
   let ticketId = null;
+  let accountTab = 'profile';
 
   $: {
     const path = $currentRoute || window.location.pathname;
@@ -31,6 +32,7 @@
     serviceId = null;
     invoiceId = null;
     ticketId = null;
+    accountTab = 'profile';
 
     if (parts.length === 0 || (parts.length === 1 && parts[0] === 'client')) {
       routeName = 'dashboard';
@@ -48,6 +50,8 @@
         }
       } else if (parts[1] === 'orders') {
         routeName = 'orders';
+      } else if (parts[1] === 'notes') {
+        routeName = 'notes';
       } else if (parts[1] === 'checkout') {
         routeName = 'checkout';
       } else if (parts[1] === 'support') {
@@ -63,6 +67,7 @@
         routeName = 'backup-slots';
       } else if (parts[1] === 'account') {
         routeName = 'account';
+        if (parts[2] === 'credit') accountTab = 'credit';
       } else {
         routeName = 'dashboard';
       }
@@ -109,14 +114,18 @@
     <p>Loading…</p>
   </div>
 {:else if $isAuthenticated && !$user?.is_admin && !$user?.is_reseller}
-  {#key `${routeName}-${serviceId}-${invoiceId}-${ticketId}`}
+  {#key `${routeName}-${serviceId}-${invoiceId}-${ticketId}-${accountTab}`}
     <ClientShell {impersonating}>
       {#if routeName === 'services'}
         <ClientServiceList />
       {:else if routeName === 'service-detail' && serviceId != null}
         <ClientServiceDetail {serviceId} />
-      {:else if routeName === 'billing' || routeName === 'orders'}
-        <ClientBilling {impersonating} {invoiceId} initialTab={routeName === 'orders' ? 'orders' : 'invoices'} />
+      {:else if routeName === 'billing' || routeName === 'orders' || routeName === 'notes'}
+        <ClientBilling
+          {impersonating}
+          {invoiceId}
+          initialTab={routeName === 'orders' ? 'orders' : routeName === 'notes' ? 'notes' : 'invoices'}
+        />
       {:else if routeName === 'checkout'}
         <ClientCheckout {impersonating} />
       {:else if routeName === 'support'}
@@ -128,7 +137,7 @@
       {:else if routeName === 'backup-slots'}
         <ClientBackupSlots />
       {:else if routeName === 'account'}
-        <ClientAccount {impersonating} />
+        <ClientAccount {impersonating} initialTab={accountTab} />
       {:else}
         <ClientDashboard />
       {/if}

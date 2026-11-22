@@ -23,6 +23,7 @@ from app.dao.user_dao import UserDAO
 from app.dao.vm_config_dao import ProductVMConfigDAO
 from app.models.product_catalog import Product
 from app.models.reseller import (
+    Payment,
     CreditLedgerEntry,
     Invoice,
     InvoiceStatus,
@@ -234,7 +235,7 @@ class ResellerBillingService:
                 return None
             raise DeployCreditRequiredError(
                 required_cents=request.invoice.amount_cents,
-                available_cents=reseller.cached_balance_cents,
+                available_cents=CreditLedgerService.balance_cents(db, reseller),
                 invoice_id=request.invoice.id,
             )
         raise IdempotencyConflictError(
@@ -691,7 +692,7 @@ class ResellerBillingService:
         if idempotency is not None:
             idempotency.invoice_id = invoice.id
 
-        available_before = max(0, int(reseller.cached_balance_cents))
+        available_before = CreditLedgerService.available_cents(db, reseller)
         if payment_fallback is None:
             from app.services.payments.orchestrator import PaymentOrchestrator
 
@@ -777,6 +778,83 @@ class ResellerBillingService:
         charge: PreparedDeployCharge,
         error: Exception,
     ) -> None:
+        from app.services.billing_locks import BillingLocks
+        from app.services.invoice_service import engine_mode
+
+        # Reseller, account, then invoice (LOCK_ORDER), before the reversals
+        # or refunds lock the first two and the void needs the third.
+        invoice = (
+            BillingLocks.for_invoice(
+                db, charge.invoice.id, reseller=True, billing_account=True
+            )
+            or charge.invoice
+        )
+        if engine_mode(db) == "v2":
+            ResellerBillingService._refund_failed_deploy_v2(
+                db, reseller=reseller, invoice=invoice, error=error
+            )
+        else:
+            ResellerBillingService._reverse_failed_deploy_legacy(
+                db, reseller=reseller, charge=charge, invoice=invoice, error=error
+            )
+        if charge.idempotency is not None:
+            charge.idempotency.status = (
+                ResellerProvisioningRequestStatus.FAILED
+            )
+            charge.idempotency.error_message = str(error)[:2000]
+        db.commit()
+
+    @staticmethod
+    def _refund_failed_deploy_v2(
+        db: Session, *, reseller: Reseller, invoice: Invoice, error: Exception
+    ) -> None:
+        """Return every payment on the failed deploy's invoice to credit (design 7).
+
+        Each refund issues its credit note, so the status rule ends the invoice
+        ``refunded`` with ``paid_net`` 0; nothing voids it. The caller holds the
+        reseller, account and invoice locks.
+        """
+        from app.models.refund import RefundDestination, RefundReason
+        from app.services.refund_service import (
+            REFUNDABLE_PAYMENT_STATUSES,
+            RefundService,
+            refundable_cents,
+        )
+
+        payments = db.execute(
+            select(Payment)
+            .where(
+                Payment.invoice_id == invoice.id,
+                Payment.status.in_(REFUNDABLE_PAYMENT_STATUSES),
+            )
+            .order_by(Payment.id)
+            .with_for_update()
+        ).scalars().all()
+        for payment in payments:
+            amount = refundable_cents(db, payment, lock=True)
+            if amount <= 0:
+                continue
+            RefundService.request(
+                db,
+                payment_id=payment.id,
+                amount_cents=amount,
+                destination=RefundDestination.CREDIT,
+                reason=RefundReason.CANCELLATION,
+                actor_user_id=reseller.user_id,
+                idempotency_key=f"reseller-deploy-refund:{invoice.id}:payment:{payment.id}",
+                reason_text=f"Failed deploy: {str(error)[:200]}",
+                metadata={"reason": str(error)[:500]},
+            )
+
+    @staticmethod
+    def _reverse_failed_deploy_legacy(
+        db: Session,
+        *,
+        reseller: Reseller,
+        charge: PreparedDeployCharge,
+        invoice: Invoice,
+        error: Exception,
+    ) -> None:
         for ledger_entry in charge.ledger_entries:
             CreditLedgerService.reverse(
                 db,
@@ -792,10 +870,10 @@ class ResellerBillingService:
                 metadata={"reason": str(error)[:500]},
                 created_by_user_id=reseller.user_id,
             )
-        charge.invoice.status = InvoiceStatus.VOID
-        if charge.idempotency is not None:
-            charge.idempotency.status = (
-                ResellerProvisioningRequestStatus.FAILED
-            )
-            charge.idempotency.error_message = str(error)[:2000]
-        db.commit()
+        InvoiceService.transition(
+            db,
+            invoice,
+            InvoiceStatus.VOID,
+            cause="deploy_failed_credit_returned",
+            reason=str(error)[:500],
+        )
