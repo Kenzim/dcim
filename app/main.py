@@ -437,6 +437,8 @@ from app.api import commerce_support_admin as commerce_support_admin_api
 from app.api import commerce_auth_public as commerce_auth_public_api
 api_router.include_router(commerce_store_admin_api.router, tags=["commerce-store-admin"])
 api_router.include_router(commerce_admin_api.router, tags=["commerce-admin"])
+from app.api import billing_series_admin as billing_series_admin_api
+api_router.include_router(billing_series_admin_api.router)
 api_router.include_router(commerce_client_api.router, tags=["commerce-client"])
 api_router.include_router(commerce_support_admin_api.router, tags=["commerce-support-admin"])
 api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"])

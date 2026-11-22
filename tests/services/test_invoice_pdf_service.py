@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,7 +41,14 @@ def test_render_pdf_bytes_without_reportlab(db_session: Session):
         description="pdf test",
     )
     db_session.commit()
-    with patch.dict("sys.modules", {"reportlab": None, "reportlab.lib": None}):
+    # A submodule already imported by an earlier test on this worker would be found in
+    # sys.modules directly, so every reportlab module is hidden, loaded or not.
+    hidden = {
+        name: None
+        for name in set(sys.modules) | {"reportlab", "reportlab.lib", "reportlab.pdfgen"}
+        if name == "reportlab" or name.startswith("reportlab.")
+    }
+    with patch.dict("sys.modules", hidden):
         with pytest.raises(RuntimeError, match="reportlab"):
             InvoicePdfService.render_pdf_bytes(db_session, invoice)
 

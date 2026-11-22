@@ -58,6 +58,44 @@ def _no_background_dhcp_sync(monkeypatch):
     return calls
 
 
+# Tests whose own setup writes frozen columns of published invoices; they run
+# with the invoice guard in log mode (docs/billing-phase1-design.md 3.5).
+INVOICE_GUARD_LOG_MODE_TESTS: frozenset[str] = frozenset(
+    {
+        "tests/services/test_billing_a0_money_path.py::test_card_payment_amount_change_replaces_attempt",
+        "tests/services/test_billing_a0_money_path.py::"
+        "test_card_payment_amount_change_while_in_flight_creates_no_new_charge",
+        "tests/services/test_billing_a0_money_path.py::"
+        "test_late_success_on_replaced_attempt_is_recorded_and_flagged",
+        "tests/services/test_billing_integrity_detectors.py::test_findings_are_json_serialisable",
+        "tests/services/test_billing_integrity_detectors.py::test_lines_mismatch_found_with_ids",
+        "tests/services/test_billing_integrity_detectors.py::test_lines_mismatch_ignores_healthy_shapes",
+        "tests/services/test_billing_integrity_detectors.py::test_lines_mismatch_threshold_parameters",
+        "tests/services/test_billing_integrity_detectors.py::"
+        "test_row_limit_for_other_invoice_detectors[billing_invoice_lines_mismatch]",
+        "tests/services/test_billing_integrity_detectors.py::"
+        "test_row_limit_for_other_invoice_detectors[billing_overallocated]",
+        "tests/services/test_billing_w0e_review_fixes.py::test_lock_keeps_unflushed_changes_of_the_caller",
+        "tests/services/test_billing_p1n_adjustments.py::"
+        "test_credit_by_invoice_line_takes_defaults_and_caps_the_line",
+        "tests/services/test_billing_p1n_adjustments.py::"
+        "test_retry_of_a_line_credit_note_returns_the_note_even_when_the_line_is_used_up",
+        "tests/services/test_billing_p1n_adjustments.py::test_credit_lines_must_belong_to_the_invoice",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _invoice_guard_enforced(request):
+    """Every test runs with the frozen-invoice guard raising, unless allowlisted above."""
+    from app.services import invoice_guard
+
+    mode = "log" if request.node.nodeid in INVOICE_GUARD_LOG_MODE_TESTS else "enforce"
+    previous = invoice_guard.set_mode_override(mode)
+    yield mode
+    invoice_guard.set_mode_override(previous)
+
+
 @pytest.fixture(autouse=True)
 def boot_launcher_calls(monkeypatch):
     """Record scheduled vmedia launches/releases instead of talking to BMCs in tests."""
