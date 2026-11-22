@@ -79,6 +79,7 @@ P2_COLUMNS = {
     "products": {"tax_class_id"},
     "price_plan_cycles": {"invoice_lead_days"},
     "email_messages": {"template_id", "template_version", "render_fallback"},
+    "invoice_adjustments": {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"},
 }
 P2_INDEXES = {
     "ix_invoices_seller_registration_id",
@@ -86,6 +87,7 @@ P2_INDEXES = {
     "ix_products_tax_class_id",
     "ix_email_messages_template_id",
     "ix_invoices_fx_rate_id",
+    "ix_invoice_adjustments_fx_rate_id",
 }
 NEW_TABLES = {
     "document_series",
@@ -283,6 +285,7 @@ SQLITE_OMITTED_FOREIGN_KEYS = {
     ("email_messages", "fk_email_messages_template_id"),
     ("invoices", "fk_invoices_seller_registration_id"),
     ("invoices", "fk_invoices_fx_rate_id"),
+    ("invoice_adjustments", "fk_invoice_adjustments_fx_rate_id"),
     ("products", "fk_products_tax_class_id"),
 }
 

@@ -947,6 +947,41 @@ def _check_text(reason_text: Optional[str]) -> Optional[str]:
     return reason_text.strip() or None
 
 
+def _sterling(db: Session, invoice: Invoice, kind: AdjustmentKind, tax_cents: int) -> dict:
+    """The frozen sterling fields of a new note (design 4.10), empty when it needs none.
+
+    The note's figure is cumulative over the invoice's earlier notes of its
+    kind, in id order, so the credit notes that credit all the VAT add up to
+    the invoice's sterling VAT (and the debit notes' sterling VAT) exactly.
+    Runs with the invoice locked, so no other note of the invoice is issued
+    meanwhile.
+    """
+    from app.services.tax import exchange_rates
+
+    rate = exchange_rates.note_rate(db, invoice, tax_cents)
+    if rate is None:
+        return {}
+    before = db.scalar(
+        select(func.coalesce(func.sum(InvoiceAdjustment.tax_cents), 0)).where(
+            InvoiceAdjustment.invoice_id == invoice.id, InvoiceAdjustment.kind == kind
+        )
+    )
+    gbp = exchange_rates.note_gbp_cents(
+        credit=kind == AdjustmentKind.CREDIT,
+        invoice_tax_cents=int(invoice.tax_cents or 0),
+        before_cents=int(before or 0),
+        tax_cents=int(tax_cents),
+        rate=rate.rate,
+    )
+    return {
+        "fx_rate": rate.rate,
+        "fx_period": rate.period,
+        "fx_source": rate.source,
+        "tax_total_gbp_cents": gbp,
+        "fx_rate_id": rate.rate_id,
+    }
+
+
 def _insert_note(
     db: Session,
     invoice: Invoice,
@@ -971,6 +1006,7 @@ def _insert_note(
     tax = sum(line.tax_cents for line in lines)
     if subtotal + tax <= 0:
         raise InvoiceAdjustmentError("a note must total more than zero")
+    sterling = _sterling(db, invoice, kind, tax)
     seller, buyer = _snapshots(db, invoice, account_id, now)
     document_type = DocumentType.CREDIT_NOTE if kind == AdjustmentKind.CREDIT else DocumentType.DEBIT_NOTE
     series = InvoiceNumbering.default_series(db, document_type)
@@ -998,6 +1034,7 @@ def _insert_note(
         created_by_user_id=actor_user_id,
         idempotency_key=key,
         adjustment_metadata={_REQUEST_HASH: fingerprint},
+        **sterling,
     )
     db.add(note)
     db.flush()

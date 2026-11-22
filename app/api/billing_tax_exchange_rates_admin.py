@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import require_admin
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
+from app.models.invoice_adjustment import InvoiceAdjustment
 from app.models.reseller import Invoice
 from app.models.tax import TaxExchangeRate
 from app.services.audit_service import AuditService
@@ -148,7 +149,11 @@ def delete_rate(rate_id: int, auth: AdminDep, db: DbDep):
     row = db.get(TaxExchangeRate, rate_id, with_for_update=True)
     if row is None:
         raise HTTPException(status_code=404, detail="Exchange rate not found")
-    if db.scalar(select(Invoice.id).where(Invoice.fx_rate_id == row.id).limit(1)) is not None:
+    if (
+        db.scalar(select(Invoice.id).where(Invoice.fx_rate_id == row.id).limit(1)) is not None
+        or db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.fx_rate_id == row.id).limit(1))
+        is not None
+    ):
         raise _in_use()
     _audit(db, auth, "deleted", row)
     db.delete(row)

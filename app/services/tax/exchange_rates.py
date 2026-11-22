@@ -143,11 +143,61 @@ def convert_at_publish(
     return Conversion(rate, period, row.source, to_gbp_cents(int(tax_cents), rate), int(row.id))
 
 
-def note_gbp_cents(invoice: Any, tax_cents: int) -> Optional[int]:
-    """The sterling VAT of a credit or debit note at its invoice's frozen rate, None without one."""
-    if invoice is None or invoice.fx_rate is None:
+@dataclass(frozen=True)
+class NoteRate:
+    """The rate a credit or debit note converts its VAT at, and the row it was read from."""
+
+    rate: Decimal
+    period: str
+    source: str
+    rate_id: Optional[int]
+
+
+def _engine_taxed(invoice: Any) -> bool:
+    return bool(invoice.tax_engine) and invoice.tax_engine != "legacy"
+
+
+def note_rate(db: Session, invoice: Any, tax_cents: int) -> Optional[NoteRate]:
+    """The rate of a note with VAT ``tax_cents`` on ``invoice``, None when it needs no sterling.
+
+    A note uses its invoice's frozen rate.
+    """
+    if int(tax_cents or 0) <= 0 or invoice is None or not _engine_taxed(invoice):
         return None
-    return to_gbp_cents(int(tax_cents), Decimal(invoice.fx_rate))
+    if invoice.fx_rate is not None:
+        rate_id = int(invoice.fx_rate_id) if invoice.fx_rate_id is not None else None
+        return NoteRate(Decimal(invoice.fx_rate), str(invoice.fx_period), str(invoice.fx_source), rate_id)
+    return None
+
+
+def credited_gbp_cents(invoice_tax_cents: int, credited_tax_cents: int, rate: Decimal) -> int:
+    """The sterling of ``credited_tax_cents`` of VAT credited in all on an invoice.
+
+    The part up to the invoice's own VAT converts as the invoice's VAT does,
+    and the rest (VAT of debit notes) as the debit notes' VAT does, so
+    crediting everything gives exactly the invoice's sterling VAT plus its
+    debit notes' sterling VAT.
+    """
+    on_invoice = max(0, min(int(credited_tax_cents), int(invoice_tax_cents)))
+    return to_gbp_cents(on_invoice, rate) + to_gbp_cents(int(credited_tax_cents) - on_invoice, rate)
+
+
+def note_gbp_cents(
+    *, credit: bool, invoice_tax_cents: int, before_cents: int, tax_cents: int, rate: Decimal
+) -> int:
+    """A note's sterling VAT, worked out cumulatively over the invoice's notes of its kind.
+
+    ``before_cents`` is the VAT of the notes of the same kind issued before
+    it (in id order, as ``tax_base_rows`` counts them). The note gets the
+    sterling of everything so far, itself included, less the sterling of
+    what came before, so the notes' figures never drift from the total.
+    """
+    def total(cents: int) -> int:
+        if credit:
+            return credited_gbp_cents(invoice_tax_cents, cents, rate)
+        return to_gbp_cents(cents, rate)
+
+    return total(int(before_cents) + int(tax_cents)) - total(int(before_cents))
 
 
 def gb_registration_active(db: Session, at: datetime) -> bool:

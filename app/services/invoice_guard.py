@@ -27,6 +27,7 @@ from sqlalchemy import event, inspect, select
 from sqlalchemy.orm import Session, object_session
 
 from app.models.commerce_invoice_ext import InvoiceLine
+from app.models.invoice_adjustment import InvoiceAdjustment
 from app.models.reseller import Invoice, InvoiceStatus
 from app.models.tax import InvoiceLineTax
 
@@ -86,6 +87,10 @@ ONCE_SET_COLUMNS = frozenset(
 NULLABLE_FOREIGN_KEYS = frozenset({"billing_account_id"})
 LINE_NULLABLE_FOREIGN_KEYS = frozenset({"service_id", "service_billing_id", "order_item_id"})
 GUARDED_COLUMNS = FROZEN_COLUMNS | ONCE_SET_COLUMNS | {"document_type"}
+# Columns of ``invoice_adjustments`` frozen from insert (design 4.10).
+NOTE_FROZEN_COLUMNS = frozenset(
+    {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"}
+)
 
 MODES = ("log", "enforce")
 PROFORMA_CONVERSION = "proforma_conversion"
@@ -191,11 +196,12 @@ def _same(left: Any, right: Any) -> bool:
 
 
 class _Committed:
-    """The invoice row as stored, read through the flush's connection once, when needed."""
+    """The invoice (or note) row as stored, read through the flush's connection once, when needed."""
 
-    def __init__(self, connection, invoice_id: Optional[int]):
+    def __init__(self, connection, invoice_id: Optional[int], table: Any = None):
         self._connection = connection
         self._invoice_id = invoice_id
+        self._table = table if table is not None else Invoice.__table__
         self._row: Any = None
         self._loaded = False
 
@@ -203,7 +209,7 @@ class _Committed:
         if not self._loaded:
             self._loaded = True
             if self._invoice_id is not None:
-                table = Invoice.__table__
+                table = self._table
                 self._row = (
                     self._connection.execute(select(table).where(table.c.id == self._invoice_id))
                     .mappings()
@@ -223,7 +229,7 @@ def _old_value(state, name: str, committed: _Committed) -> tuple[bool, Any, Any]
     if history.deleted:
         old = history.deleted[0]
     else:
-        old = committed.get(Invoice.__table__.c[name].name)
+        old = committed.get(state.mapper.columns[name].name)
     return not _same(old, new), old, new
 
 
@@ -336,6 +342,23 @@ def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
             target.id,
             f"write to frozen column {name}",
             {"column": name, "old": old, "new": new, "status": old_status},
+        )
+
+
+def _guard_note_update(_mapper, connection, target: InvoiceAdjustment) -> None:
+    """A note's sterling VAT is frozen from insert (notes are never drafts)."""
+    state = inspect(target)
+    committed = _Committed(connection, target.id, InvoiceAdjustment.__table__)
+    for name in sorted(NOTE_FROZEN_COLUMNS):
+        changed, old, new = _old_value(state, name, committed)
+        if not changed:
+            continue
+        _violation(
+            connection,
+            target,
+            target.invoice_id,
+            f"write to frozen note column {name}",
+            {"column": name, "old": old, "new": new, "adjustment_id": target.id},
         )
 
 
@@ -463,6 +486,7 @@ def _clear_at_root_end(session: Session, transaction) -> None:
 _LISTENERS = (
     (Invoice, "before_update", _guard_invoice_update),
     (Invoice, "before_delete", _guard_invoice_delete),
+    (InvoiceAdjustment, "before_update", _guard_note_update),
     (InvoiceLine, "before_insert", _guard_line("insert")),
     (InvoiceLine, "before_update", _guard_line("update")),
     (InvoiceLine, "before_delete", _guard_line("delete")),

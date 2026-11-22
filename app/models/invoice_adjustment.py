@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -130,6 +131,22 @@ class InvoiceAdjustment(Base):
         Integer, ForeignKey("users.id", ondelete=_ON_DELETE_SET_NULL), nullable=True
     )
     idempotency_key = Column(String(255), nullable=False)
+    # Sterling VAT of a note on a UK VAT invoice in another currency (design
+    # 4.10), frozen at issue; NULL otherwise. ``tax_total_gbp_cents`` is the
+    # note's share of the sterling VAT, worked out cumulatively over the
+    # invoice's notes of its kind (``exchange_rates.note_gbp_cents``).
+    fx_rate = Column(Numeric(18, 6), nullable=True)
+    fx_period = Column(String(7), nullable=True)
+    fx_source = Column(String(32), nullable=True)
+    tax_total_gbp_cents = Column(BigInteger, nullable=True)
+    fx_rate_id = Column(
+        Integer,
+        ForeignKey(
+            "tax_exchange_rates.id", ondelete="RESTRICT", name="fk_invoice_adjustments_fx_rate_id"
+        ),
+        nullable=True,
+        index=True,
+    )
     adjustment_metadata = Column("metadata", JSON, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(

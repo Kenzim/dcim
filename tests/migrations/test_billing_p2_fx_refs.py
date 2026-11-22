@@ -4,6 +4,7 @@ from tests.migrations import helpers
 
 REVISION = "billing_p2_fx_refs"
 INVOICE_COLUMNS = {"fx_rate_id"}
+NOTE_COLUMNS = {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"}
 
 
 def _rate_and_invoice(engine) -> None:
@@ -28,15 +29,23 @@ def _rate_and_invoice(engine) -> None:
 def test_up_down_up_and_the_frozen_rate_is_found(p2_engine_at):
     engine = p2_engine_at(helpers.before(REVISION))
     assert not INVOICE_COLUMNS & helpers.columns(engine, "invoices")
+    assert not NOTE_COLUMNS & helpers.columns(engine, "invoice_adjustments")
     _rate_and_invoice(engine)
 
     helpers.migrate(engine, REVISION)
     assert INVOICE_COLUMNS <= helpers.columns(engine, "invoices")
-    assert ("ix_invoices_fx_rate_id", False, ("fx_rate_id",)) in helpers.sqlite_indexes(engine, "invoices")
+    assert NOTE_COLUMNS <= helpers.columns(engine, "invoice_adjustments")
+    assert ("ix_invoices_fx_rate_id", False, ("fx_rate_id", "fx_period")) in helpers.sqlite_indexes(
+        engine, "invoices"
+    )
+    assert ("ix_invoice_adjustments_fx_rate_id", False, ("fx_rate_id",)) in helpers.sqlite_indexes(
+        engine, "invoice_adjustments"
+    )
     assert helpers.scalar(engine, "SELECT fx_rate_id FROM invoices WHERE id = 61") == 5
     assert helpers.scalar(engine, "SELECT fx_rate_id FROM invoices WHERE id = 62") is None
 
     helpers.migrate(engine, helpers.before(REVISION))
     assert not INVOICE_COLUMNS & helpers.columns(engine, "invoices")
+    assert not NOTE_COLUMNS & helpers.columns(engine, "invoice_adjustments")
     helpers.migrate(engine, REVISION)
     assert helpers.scalar(engine, "SELECT fx_rate_id FROM invoices WHERE id = 61") == 5
