@@ -395,10 +395,23 @@ At publish in `v2` the invoice stores `tax_summary`, `legal_notes`, `seller_regi
 - the buyer's VAT number when the buyer is a business and has one (already printed as `Tax ID`, kept);
 - per line: net amount, rate and tax (a new column), with "Reverse charge" in the rate column for reverse-charged lines;
 - the summary per rate: net, rate, tax, then the totals as today;
-- totals in the invoice currency; if the currency is not GBP and the registration is `GB`, the total VAT in sterling is a legal requirement (owner question 4; deferred to D4 currencies, which owns exchange rates; phase 2 refuses to publish a GB-registered taxed invoice in another currency unless `billing_tax_allow_foreign_currency_gb` is set, default false, so a non-compliant invoice is never produced silently);
+- totals in the invoice currency; if the currency is not GBP, the registration is `GB` and the VAT is above zero, the total VAT in sterling with the HMRC rate, its month and its source (4.10);
 - the legal notes.
 
 Invoices before phase 2 and legacy and shadow invoices print exactly as today.
+
+### 4.10 Sterling VAT on invoices in another currency (owner question 4, decided 2026-11-22)
+
+Rackflow runs in one operator currency for the whole system (`settings.commerce_default_currency`, USD today; making it configurable is later work, not phase 2). A UK VAT invoice in that currency is published, never refused for its currency, and shows its VAT total in sterling at HMRC's published monthly exchange rate for the month of the tax point.
+
+- **Rates.** A core table `tax_exchange_rates` (`source`, `base` `GBP`, `currency`, `period` `YYYY-MM`, `units_per_gbp` `Numeric(18,6)`, `period_start`, `period_end`, `fetched_at`; unique on source, base, currency and period). Rows are written by the job `tax_exchange_rates_fetch` (9.1; daily, fetches the current and next month when missing, never overwrites a stored month: a different value for a stored month raises an alert and keeps the stored one) or by an audited admin entry (`/api/admin/billing/tax/exchange-rates`, `billing.tax.exchange_rate_*`), the fallback when the source is down. Only the stored table is read at publish; no network call happens under a lock (section 0).
+- **Source.** A `currency_rates` provider (8.5), shipped as the bundled plugin `plugin_packages/hmrc_exchange_rates/`, which reads HMRC's monthly file from the UK Trade Tariff (`/api/v2/exchange_rates/files/monthly_xml_<YYYY>-<M>.xml`, currency units per £1). The source is recorded as `hmrc_monthly`.
+- **Month.** The tax point's month in UK time (`Europe/London`), so a tax point at 00:30 BST on the 1st uses that month.
+- **At publish** (`invoice_tax.stamp_published`, replacing the old currency refusal): when the registration is `GB`, the invoice VAT is above zero and the currency is not GBP, the stored rate for that month and currency is required. The invoice freezes `fx_rate` (the stored `units_per_gbp`), `fx_period`, `fx_source` and `tax_total_gbp_cents = round_half_up(tax_cents / fx_rate)`, all guarded after publish by `invoice_guard`. Only the total VAT is converted; per-rate figures stay in the invoice currency.
+- **No rate yet.** The publish is refused with the retryable publish error of 4.7 (message: the HMRC rate for the month is not stored yet; try again later), so checkout, top-ups and upgrades answer 409 and the recurring worker retries that billing on its next pass. Nothing is guessed and no earlier month is used. The detector `billing_tax_fx_rate_missing` (enabled by default, since it can only fire while taxed sterling conversion is in use) raises when the current month's rate is missing, and from the 25th when next month's is.
+- **Notes.** Credit and debit notes on such an invoice convert their VAT at the invoice's frozen rate and print it the same way.
+- **Switch.** The tax switch to `v2` (5) lists, as a blocking item, a missing rate for the current month when a `GB` registration exists and the operator currency is not GBP.
+- **No new hard-coded currency.** Phase 2 code reads the operator currency from one helper instead of the literal `"USD"`.
 
 ## 5. Modes, shadow comparison, switch and rollback
 
@@ -542,7 +555,7 @@ This section is the complete list of additions for the plugin developer guide. E
 
 ```python
 class ProvideSpec(_Strict):
-    kind: Literal["tax_id_validator", "tax_rule_pack", "tax_provider"]
+    kind: Literal["tax_id_validator", "tax_rule_pack", "tax_provider", "currency_rates"]
     id: str                                   # ITEM_ID_RE, unique per (kind, id) within the plugin
     label: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
@@ -657,6 +670,8 @@ class TaxProvider(Protocol):
 
 Billing validates every answer: a validator result with an unknown status, or a provider result that misses a line key, has a negative amount, a rate that does not reproduce `tax_cents` from `base_cents` within one minor unit per part, or a part with `reverse_charge` and non-zero tax, is treated as a failure (8.6).
 
+**`currency_rates`** (added for 4.10 by P2-X; permission `currency.rates`; metered method `rates`): `rates(request: CurrencyRatesRequest) -> CurrencyRatesResult`. The request carries `base` (`GBP`) and `period` (`YYYY-MM`); the result carries `source`, `period_start`, `period_end` and a list of `(currency, units_per_base)` with `units_per_base` an ASCII decimal string above zero. The host checks the answer by exact type and rebuilds it, as for the tax kinds. A missing month is an empty list, not an error.
+
 ### 8.6 Calls, timeouts, failure isolation
 
 `app/plugin_host/providers.py` (new): `call_provider(kind, provider_ref, method, *args) -> Any`.
@@ -694,7 +709,7 @@ New catalogue entries (`app/plugin_host/catalogue.py`, permission `billing.read`
 
 ### 8.9 Not in 1.1
 
-Payment gateways, fraud checks, accounting export and notification channels stay off the kind mechanism. `tables` stays refused (`manifest.py:386-387`).
+Payment gateways, fraud checks, accounting export and notification channels stay off the kind mechanism. `tables` stays refused (`manifest.py:386-387`). `currency_rates` is in 1.1 only for the HMRC monthly source of 4.10; D4 currencies builds on it.
 
 ## 9. Scheduler and dry run (B2)
 
@@ -896,6 +911,7 @@ Templates for events that had no sender before phase 2 (`welcome`, `payment_fail
 
 - **Wave 1: P2-S, foundations** (alone). Every model and column of section 1; the migrations of 2.2 (chain in 14.4) with their tests (from empty included, 2.1); every setting of appendix A in `app/services/settings_store.py`; catalogue permissions and events of 8.3 and 8.8 in `app/plugin_host/catalogue.py`, together with the version bump of 8.1 (`API_VERSION = "1.1"`, `SUPPORTED_API_VERSIONS`, compatibility when a range allows any supported version, `effective_api` recorded), the regenerated `docs/plugins/api-reference.md` and a new `docs/plugins/api-surface-1.1.json` (`api-surface-1.0.json` stays as published). The developer kit's reference test pins the 1.0 surface, and its deprecation policy puts new permissions and events in a new minor version, so the additions and the bump land together; the rounding rules of appendix B with property tests (working, they are small); `billing_engine_mode(db, "tax")` and the managed-setting protection for `billing_tax_engine`; the public interfaces of 14.3 as stubs raising `NotImplementedError`; the new MariaDB tests registered in `.forgejo/workflows/billing-mariadb.yml`.
 - **Wave 2, in parallel, isolated branches after P2-S merges:** P2-T, P2-K, P2-P, P2-J, P2-L, P2-E. None adds a migration; a needed schema change goes to the manager, who chains a follow-up revision after the head.
+- **Wave 2 follow-up: P2-X, sterling VAT (4.10)**, after P2-T merges: the `tax_exchange_rates` table and its migration after the head, the `currency_rates` kind, the bundled `hmrc_exchange_rates` plugin, the fetch job, the admin rate routes, the publish and note conversion, the PDF line, the detector and the switch item, and the operator currency helper. Opus, high.
 - **Wave 3: P2-UI**, all screens, after the wave 2 APIs merge.
 - **Reviews:** an Opus 5.5 high reviewer on each area of section 17 before merge to main.
 
@@ -1030,7 +1046,7 @@ Each has a recommended default that phase 2 builds unless the owner decides othe
 1. **Tax rounding per pack.** *Recommended: UK and EU both per invoice per rate, half up.* HMRC also allows rounding the invoice's VAT down; some EU states have their own rules. Confirm with the adviser.
 2. **Tax on retail renewals.** Renewal invoices carry no tax today. *Recommended: taxed in `v2`* (`billing_tax_retail_renewals = true`), since VAT is due on every supply.
 3. **Late fees and VAT.** *Recommended: outside the scope of VAT* (compensation for late payment, not a supply), class `outside_scope`. Confirm.
-4. **Invoices in other currencies with UK VAT.** A UK VAT invoice in another currency must show the VAT total in sterling. *Recommended: refuse to publish such invoices until D4 brings exchange rates*, unless the operator sets `billing_tax_allow_foreign_currency_gb`.
+4. **Invoices in other currencies with UK VAT.** A UK VAT invoice in another currency must show the VAT total in sterling. *Decided by the owner (2026-11-22), replacing the recommendation to refuse until D4: never refused; the VAT total is shown in sterling at HMRC's monthly rate for the tax point's month, frozen at publish (4.10).*
 5. **Location evidence.** *Recommended: phase 2 records billing and IP country and flags conflicts; no automatic choice between them.*
 6. **Proforma and rate changes.** *Recommended: tax fixed at proforma publish; a rate change before payment is flagged for a manual note.*
 7. **Automatic pack updates.** *Recommended: no; an admin previews and applies every update.*
@@ -1064,7 +1080,6 @@ All `SettingDef` entries in `app/services/settings_store.py` with a `fallback`; 
 | `billing_tax_id_max_age_days` | int | 1 to 365 | 30 |
 | `billing_tax_id_recheck_batch` | int | 1 to 5,000 | 200 |
 | `billing_tax_ip_country_header` | str | header name or empty | `""` |
-| `billing_tax_allow_foreign_currency_gb` | bool | | false |
 | `billing_automation_time_utc` | str | `HH:MM` | `09:00` |
 | `billing_job_lease_seconds` | int | 60 to 3,600 | 600 |
 | `billing_job_max_catch_up_days` | int | 1 to 30 | 3 |
@@ -1128,4 +1143,4 @@ The engine produces documents; compliance advice is the operator's (spec 4). The
 
 **Legal note keys seeded in English:** `gb_outside_scope_b2b`: "Outside the scope of UK VAT: reverse charge. The customer accounts for any VAT due."; `eu_reverse_charge`: "Reverse charge: VAT to be accounted for by the customer (Article 196, Directive 2006/112/EC)."; `outside_scope`: "Outside the scope of VAT."; `exempt_customer`: "VAT exempt: {reason}."; `credit_note_reference`: "Credit note for invoice {number} dated {date}."
 
-**What a phase 2 VAT invoice shows** (UK full VAT invoice and EU Article 226 content): a unique sequential number (P1 series); issue date and the tax point when it differs; seller name, address and the registration's VAT number; buyer name and address, and the buyer's VAT number when reverse charged or a business; description, quantity, unit price excluding VAT, VAT rate and amount per line; totals excluding VAT, VAT per rate and total; discounts; the legal notes. Credit notes add the reference to the original invoice. Deferred: the sterling VAT total for foreign-currency invoices (question 4), simplified invoices, self-billing, languages other than English, threshold tracking for the OSS union scheme, HMRC VAT number checks, US sales tax (a `tax_provider` plugin later), and Making Tax Digital submission.
+**What a phase 2 VAT invoice shows** (UK full VAT invoice and EU Article 226 content): a unique sequential number (P1 series); issue date and the tax point when it differs; seller name, address and the registration's VAT number; buyer name and address, and the buyer's VAT number when reverse charged or a business; description, quantity, unit price excluding VAT, VAT rate and amount per line; totals excluding VAT, VAT per rate and total; discounts; the legal notes. Credit notes add the reference to the original invoice. The sterling VAT total for an invoice in another currency is printed as in 4.10. Deferred: simplified invoices, self-billing, languages other than English, threshold tracking for the OSS union scheme, HMRC VAT number checks, US sales tax (a `tax_provider` plugin later), and Making Tax Digital submission.
