@@ -805,6 +805,40 @@ def _debit_tax(
     return out, result
 
 
+def _retried_debit_note(
+    db: Session,
+    invoice: Invoice,
+    key: str,
+    reason: AdjustmentReason,
+    outcome: AdjustmentOutcome,
+    reason_text: Optional[str],
+    lines: Sequence[NoteLine],
+) -> Optional[InvoiceAdjustment]:
+    """The note already issued under ``key`` on an invoice taxed per row, before any tax is computed.
+
+    The engine taxed that note at its issue time; the rules may have changed
+    since, so a retry is matched against the tax the note was issued with.
+    Raises when the key was used for other parameters. Any other invoice
+    takes the caller's tax, so its retry is matched after ``_debit_tax``.
+    """
+    if not _has_tax_rows(db, invoice):
+        return None
+    existing = db.execute(
+        select(InvoiceAdjustment).where(InvoiceAdjustment.idempotency_key == key)
+    ).scalar_one_or_none()
+    if existing is None:
+        return None
+    issued = db.execute(
+        select(InvoiceAdjustmentLine.tax_cents)
+        .where(InvoiceAdjustmentLine.adjustment_id == existing.id)
+        .order_by(InvoiceAdjustmentLine.sort_order, InvoiceAdjustmentLine.id)
+    ).scalars().all()
+    if len(issued) == len(lines):
+        lines = [replace(line, tax_cents=int(tax)) for line, tax in zip(lines, issued)]
+    fingerprint = _fingerprint(AdjustmentKind.DEBIT, invoice.id, reason, outcome, reason_text, lines)
+    return _existing_note(db, key, fingerprint, invoice.id)
+
+
 def _write_debit_rows(db: Session, note: InvoiceAdjustment, result: Any) -> None:
     from app.models.tax import InvoiceAdjustmentLineTax
 
@@ -1156,8 +1190,11 @@ class InvoiceAdjustmentService:
         invoice = _lock_invoice(db, invoice, reseller=True, billing_account=True)
 
         note_lines = _normalise_lines(db, invoice, lines)
-        note_lines, debit_tax = _debit_tax(db, invoice, note_lines, reason)
         outcome = AdjustmentOutcome.INCREASED_BALANCE
+        retried = _retried_debit_note(db, invoice, key, reason, outcome, reason_text, note_lines)
+        if retried is not None:
+            return retried
+        note_lines, debit_tax = _debit_tax(db, invoice, note_lines, reason)
         fingerprint = _fingerprint(
             AdjustmentKind.DEBIT, invoice.id, reason, outcome, reason_text, note_lines
         )

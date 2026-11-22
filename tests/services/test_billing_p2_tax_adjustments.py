@@ -128,6 +128,44 @@ def test_debit_note_is_taxed_by_the_engine_and_a_late_fee_is_not(db_session, set
     assert _expected(db_session, invoice) == {RATE_20: 220, RATE_5: 17}
 
 
+def test_retried_debit_note_after_a_rate_change_returns_the_same_note(db_session, setup):
+    """A retry is matched against the tax the note was issued with, not against today's rules."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.tax import TaxRule
+
+    account, classes = setup
+    invoice, _total = _invoice(db_session, account, classes, debit=False)
+    request = dict(
+        lines=[{"description": "Extra", "unit_cents": 1000, "tax_cents": 0}],
+        reason=AdjustmentReason.CORRECTION, actor_user_id=None, idempotency_key="dn-retry",
+    )
+    note = InvoiceAdjustmentService.issue_debit_note(db_session, invoice, **request)
+    assert note.tax_cents == 200
+    rows = db_session.scalars(
+        select(InvoiceAdjustmentLineTax.id).where(InvoiceAdjustmentLineTax.invoice_adjustment_id == note.id)
+    ).all()
+    old = db_session.execute(select(TaxRule).where(TaxRule.name == RATE_20[0])).scalar_one()
+    at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    old.valid_to = at
+    add_rule(db_session, name="UK VAT 25%", rate="25", jurisdiction="GB", source="pack", rounding_point="line",
+             valid_from=at)
+    db_session.flush()
+    again = InvoiceAdjustmentService.issue_debit_note(db_session, invoice, **request)
+    assert (again.id, again.tax_cents) == (note.id, 200)
+    assert db_session.scalars(
+        select(InvoiceAdjustmentLineTax.id).where(InvoiceAdjustmentLineTax.invoice_adjustment_id == note.id)
+    ).all() == rows
+    from app.services.invoice_adjustment_service import AdjustmentIdempotencyError
+
+    with pytest.raises(AdjustmentIdempotencyError):
+        InvoiceAdjustmentService.issue_debit_note(
+            db_session, invoice, **{**request, "lines": [{"description": "Extra", "unit_cents": 999}]}
+        )
+    fresh = InvoiceAdjustmentService.issue_debit_note(db_session, invoice, **{**request, "idempotency_key": "dn-new"})
+    assert fresh.tax_cents == 250
+
+
 def test_full_credit_by_amount_takes_exactly_each_rate(db_session, setup):
     account, classes = setup
     invoice, total = _invoice(db_session, account, classes)
