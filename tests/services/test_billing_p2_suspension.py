@@ -386,3 +386,23 @@ def test_live_preconditions(db_session, env):
     assert job.live_preconditions(db_session) == [
         "the service_suspended_nonpayment email template is not enabled"
     ]
+
+
+def test_live_is_refused_while_the_suspension_template_is_disabled_but_dry_run_is_allowed(db_session, env):
+    from tests.services.p2l_support import refused_live
+
+    _, billing, lifecycle, job = env
+    # Trigger NOW - 1, the dry run's own start, so the dry run plans it.
+    make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=6))
+    enable_templates(db_session, "service_suspended_nonpayment", enabled=False)
+    assert refused_live(db_session, job, NOW) == (
+        "preconditions not met: the service_suspended_nonpayment email template is not enabled"
+    )
+    # The dry run planned the suspension and changed nothing.
+    from tests.services.p2l_support import run_items
+
+    row = db_session.query(BillingJobRun).filter_by(job=JOB, status="complete").one()
+    assert getattr(row.mode, "value", row.mode) == "dry_run"
+    assert list(run_items(db_session, row.id).values()) == ["planned"]
+    assert lifecycle.calls == [] and db_session.query(BillingJobAction).count() == 0
+    assert _service(db_session, billing).status == ServiceStatus.ACTIVE

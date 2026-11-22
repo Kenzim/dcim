@@ -297,6 +297,19 @@ def test_live_preconditions(db_session, env):
     assert termination_module.JOB == JOB
 
 
+@pytest.mark.parametrize("event", ["service_termination_warning", "service_terminated"])
+def test_live_is_refused_while_a_termination_template_is_disabled_but_dry_run_is_allowed(db_session, env, event):
+    from tests.services.p2l_support import refused_live
+
+    _, billing, _ = env
+    _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    enable_templates(db_session, event, enabled=False)
+    job = NonpaymentTerminationJob()
+    assert refused_live(db_session, job, NOW) == f"preconditions not met: the {event} email template is not enabled"
+    assert _claims(db_session) == {}
+    assert db_session.get(Service, billing.service_id).status == ServiceStatus.SUSPENDED
+
+
 def test_track_setting_limits_the_job(db_session, env):
     from app.services.settings_store import set_setting
 

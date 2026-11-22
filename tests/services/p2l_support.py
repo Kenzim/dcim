@@ -166,6 +166,37 @@ def go_live(db, job, at: datetime) -> None:
     db.expire_all()
 
 
+def refused_live(db, job, at: datetime) -> str:
+    """Take ``job`` from off to dry_run and run a scheduled dry run (both must succeed), then ask for live.
+
+    Returns the refusal message; the job must stay in dry_run.
+    """
+    from app.services.billing.jobs import registry, runner
+
+    registered = registry.JOBS[job.name]
+    registry.JOBS[job.name] = job
+    factory = sessionmaker(bind=db.get_bind(), autoflush=False)
+    try:
+        with factory() as session:
+            runner.change_mode(session, job.name, "dry_run", now=at - timedelta(days=1), actor_user_id=None)
+            session.commit()
+        result = runner.run_job(factory, job.name, dry_run=True, trigger="schedule", now=at - timedelta(days=1))
+        assert result.status == "complete", result
+        with factory() as session:
+            try:
+                runner.change_mode(session, job.name, "live", now=at, actor_user_id=None)
+            except runner.JobModeError as exc:
+                session.rollback()
+                message = str(exc)
+            else:
+                raise AssertionError("the job went live")
+    finally:
+        registry.JOBS[job.name] = registered
+    db.expire_all()
+    assert db.get(BillingJobState, job.name).mode == BillingJobMode.DRY_RUN
+    return message
+
+
 def engine_v2(db) -> None:
     set_setting(db, "billing_invoice_engine", "v2")
     if db.get(SystemSetting, "billing_engine_switch:invoice") is None:

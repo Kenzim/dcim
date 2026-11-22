@@ -27,6 +27,7 @@ EVENTS = ENABLED | {
     "ticket_reply",
     "invoice_reminder",
     "late_fee_added",
+    "service_suspended_nonpayment",
     "service_termination_warning",
     "service_terminated",
     "cancellation_requested",

@@ -23,6 +23,7 @@ from tests.services.test_email_templates import seed
 
 JOB_EMAILS = [
     ("late_fee_added", {"invoice_id": 41, "invoice_number": "INV-41", "fee_cents": 250, "currency": "GBP"}),
+    ("service_suspended_nonpayment", {"service_name": "vm-01", "invoice_id": 41, "invoice_number": "INV-41"}),
     ("service_termination_warning", {"service_name": "vm-01", "invoice_id": 41, "invoice_number": "INV-41", "terminate_date": "2027-04-01"}),
     ("service_terminated", {"service_name": "vm-01"}),
     ("cancellation_requested", {"service_name": "vm-01", "effective_date": "2027-04-30"}),
