@@ -338,24 +338,33 @@ def _sterling_fill(state, connection, committed: _Committed) -> bool:
     loaded before another transaction filled the row also shows NULL, so the
     stored row is then read with a locking read, which sees the latest
     committed row: its four columns must still be NULL and its ``fx_period``
-    the same.
+    the same. The values must be those the fill writes: ``fx_rate_id`` the
+    stored sterling rate of ``fx_period`` and the invoice's currency, with
+    ``fx_rate`` its value and ``fx_source`` its source, and
+    ``tax_total_gbp_cents`` the stored VAT converted at it.
     """
-    period = state.obj().fx_period
-    if period is None or _old_value(state, "fx_period", committed)[0]:
+    from decimal import Decimal
+
+    from app.services.tax.exchange_rates import to_gbp_cents
+
+    if not _filled_once(state, committed):
         return False
-    for name in STERLING_FILL_COLUMNS:
-        changed, old, new = _old_value(state, name, committed)
-        if not changed or old is not None or new is None:
-            return False
+    invoice = state.obj()
+    period = invoice.fx_period
     table = Invoice.__table__
     stored = connection.execute(
-        select(table.c.fx_period, *(table.c[name] for name in sorted(STERLING_FILL_COLUMNS)))
-        .where(table.c.id == state.obj().id)
+        select(table.c.fx_period, table.c.tax_cents, *(table.c[name] for name in sorted(STERLING_FILL_COLUMNS)))
+        .where(table.c.id == invoice.id)
         .with_for_update()
     ).first()
-    if stored is None or not _same(stored[0], period):
+    if stored is None or not _same(stored[0], period) or any(value is not None for value in stored[2:]):
         return False
-    return all(value is None for value in stored[1:])
+    if not _rate_row_matches(
+        connection, invoice.fx_rate_id, period=period, currency=invoice.currency, rate=invoice.fx_rate,
+        source=invoice.fx_source,
+    ):
+        return False
+    return invoice.tax_total_gbp_cents == to_gbp_cents(int(stored[1] or 0), Decimal(invoice.fx_rate))
 
 
 def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:

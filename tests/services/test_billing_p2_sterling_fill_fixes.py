@@ -187,3 +187,79 @@ def test_storing_the_rate_fills_the_invoice_and_its_notes_once_and_they_add_up(
     assert sterling_conversion.sweep(db_session, "2026-12", "USD") == []
     assert len(audits(db_session, "billing.tax.sterling_filled")) == count
     assert [note_frozen(n) for n in notes_of(db_session, proforma)] == [note_frozen(n) for n in notes]
+
+
+# --- M2: the guard accepts a fill only with the values the fill computes ---
+
+
+def unfilled_december_rate(db):
+    """December's rate stored without filling anything, as a store that missed the invoice would leave it."""
+    from app.models.tax import TaxExchangeRate
+
+    row = TaxExchangeRate(
+        source="hmrc_monthly", base="GBP", currency="USD", period="2026-12", units_per_gbp=DEC_RATE,
+        period_start=datetime(2026, 12, 1).date(), period_end=datetime(2026, 12, 31).date(), fetched_at=DEC_2,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def refused(db, target, values: dict) -> bool:
+    savepoint = db.begin_nested()
+    for column, value in values.items():
+        setattr(target, column, value)
+    try:
+        db.flush()
+    except FrozenInvoiceError:
+        return True
+    finally:
+        savepoint.rollback()
+    return False
+
+
+def test_the_guard_refuses_a_fill_with_values_the_fill_would_not_write(db_session, proforma, monkeypatch):
+    pay_card(db_session, proforma, monkeypatch)
+    note = debit(db_session, proforma, 500, "m2-dn")
+    november = exchange_rates.stored_rate(db_session, "USD", "2026-11")
+    december = unfilled_december_rate(db_session)
+    right = {"fx_rate": DEC_RATE, "fx_source": "hmrc_monthly", "tax_total_gbp_cents": 152, "fx_rate_id": december.id}
+    invoice_guard.set_mode_override("enforce")
+    try:
+        # The reviewer's probe: any rate, source and figure with another month's row.
+        assert refused(db_session, proforma, {
+            "fx_rate": Decimal("9.99"), "fx_source": "made-up", "tax_total_gbp_cents": 1, "fx_rate_id": november.id,
+        })
+        for wrong in (
+            {"fx_rate_id": november.id},
+            {"fx_rate": Decimal("1.3"), "tax_total_gbp_cents": exchange_rates.to_gbp_cents(200, Decimal("1.3"))},
+            {"fx_source": "admin"},
+            {"tax_total_gbp_cents": 151},
+        ):
+            assert refused(db_session, proforma, {**right, **wrong}), wrong
+        # A note before its invoice is filled, then with a figure that is not the cumulative one.
+        note_right = {"fx_rate": DEC_RATE, "fx_source": "hmrc_monthly", "tax_total_gbp_cents": 76,
+                      "fx_rate_id": december.id}
+        assert refused(db_session, note, note_right)
+        assert sterling_conversion.fill_pending(db_session, december) == [proforma.id]
+        db_session.refresh(note)
+        assert note_frozen(note) == (DEC_RATE, "2026-12", "hmrc_monthly", 76, december.id)
+    finally:
+        invoice_guard.set_mode_override(None)
+
+
+def test_the_guard_refuses_a_note_fill_with_another_figure(db_session, proforma, monkeypatch):
+    pay_card(db_session, proforma, monkeypatch)
+    note = debit(db_session, proforma, 500, "m2-dn-figure")
+    december = unfilled_december_rate(db_session)
+    invoice_guard.set_mode_override("enforce")
+    try:
+        proforma.fx_rate, proforma.fx_source = DEC_RATE, "hmrc_monthly"
+        proforma.tax_total_gbp_cents, proforma.fx_rate_id = 152, december.id
+        db_session.flush()
+        right = {"fx_rate": DEC_RATE, "fx_source": "hmrc_monthly", "tax_total_gbp_cents": 76, "fx_rate_id": december.id}
+        for wrong in ({"tax_total_gbp_cents": 75}, {"fx_source": "admin"}, {"fx_rate": Decimal("1.4")}):
+            assert refused(db_session, note, {**right, **wrong}), wrong
+        assert not refused(db_session, note, right)
+    finally:
+        invoice_guard.set_mode_override(None)
