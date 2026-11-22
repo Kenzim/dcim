@@ -200,3 +200,19 @@ def test_fees_off_selects_nothing(db_session, env):
 def test_live_preconditions(db_session, env):
     problems = LateFeesJob().live_preconditions(db_session)
     assert any("late_fee_added" in problem for problem in problems)
+
+
+def test_track_setting_limits_the_job(db_session, env):
+    from tests.services.p2l_support import make_reseller
+
+    _, billing = env
+    set_setting(db_session, "billing_job_tracks_late_fees", "reseller")
+    db_session.commit()
+    retail = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=5))
+    job, run = LateFeesJob(), make_run("late_fees")
+    assert job.plan(db_session, run, retail.id) is None
+    assert run_job(db_session, job, run) == {}
+    reseller = make_reseller(db_session)
+    reseller_billing = make_billing(db_session, None, make_service(db_session, None), reseller_id=reseller.id)
+    reseller_invoice = make_cycle_invoice(db_session, reseller_billing, due_at=NOW - timedelta(days=5))
+    assert run_job(db_session, job, run) == {reseller_invoice.id: "done"}

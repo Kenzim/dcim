@@ -219,3 +219,15 @@ def test_live_preconditions(db_session, env):
     assert not any("terminate_after_days" in problem for problem in problems)
     assert any("service_termination_warning" in problem for problem in problems)
     assert termination_module.JOB == JOB
+
+
+def test_track_setting_limits_the_job(db_session, env):
+    from app.services.settings_store import set_setting
+
+    _, billing, _ = env
+    _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    set_setting(db_session, "billing_job_tracks_nonpayment_termination", "reseller")
+    db_session.commit()
+    job = NonpaymentTerminationJob()
+    assert billing.id not in set(job.candidates(db_session, make_run(JOB)))
+    assert job.plan(db_session, make_run(JOB), billing.id) is None

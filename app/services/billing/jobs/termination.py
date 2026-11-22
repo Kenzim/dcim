@@ -92,10 +92,16 @@ def _default_lifecycle():
 
 class NonpaymentTerminationJob:
     name = JOB
-    setting_keys: tuple[str, ...] = ()
+    setting_keys: tuple[str, ...] = ("billing_job_tracks_nonpayment_termination",)
 
     def __init__(self, lifecycle_factory: Optional[Callable[[], Any]] = None) -> None:
         self.lifecycle_factory = lifecycle_factory or _default_lifecycle
+
+    @staticmethod
+    def _track(db: Session) -> str:
+        from app.services.settings_store import get_setting
+
+        return str(get_setting(db, "billing_job_tracks_nonpayment_termination"))
 
     def candidates(self, db: Session, run: JobRun) -> Iterable[int]:
         statement = (
@@ -107,6 +113,11 @@ class NonpaymentTerminationJob:
             )
             .order_by(ServiceBilling.id)
         )
+        track = self._track(db)
+        if track == "retail":
+            statement = statement.where(ServiceBilling.reseller_id.is_(None))
+        elif track == "reseller":
+            statement = statement.where(ServiceBilling.reseller_id.is_not(None))
         return [int(row) for row in db.execute(statement).scalars()]
 
     def _evaluate(
@@ -114,6 +125,11 @@ class NonpaymentTerminationJob:
     ) -> Optional[PlannedAction]:
         """The next action for ``billing``: a terminate when one is due, else a notice."""
         if billing is None or billing.service is None:
+            return None
+        track = self._track(db)
+        if (track == "retail" and billing.reseller_id is not None) or (
+            track == "reseller" and billing.reseller_id is None
+        ):
             return None
         if billing.status != ServiceBillingStatus.SUSPENDED_NONPAYMENT:
             return None

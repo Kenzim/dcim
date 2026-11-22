@@ -157,6 +157,11 @@ class LateFeesJob:
             return None
         if invoice.document_type != InvoiceDocumentType.INVOICE:
             return None
+        track = config["billing_job_tracks_late_fees"]
+        if (track == "retail" and invoice.reseller_id is not None) or (
+            track == "reseller" and invoice.reseller_id is None
+        ):
+            return None
         trigger = utc(invoice.due_at) + timedelta(days=int(config["billing_late_fee_days"]))
         if not run.in_window(trigger):
             return None

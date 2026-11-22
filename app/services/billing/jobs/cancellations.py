@@ -36,7 +36,13 @@ JOB = "cancellations"
 
 class CancellationsJob:
     name = JOB
-    setting_keys: tuple[str, ...] = ()
+    setting_keys: tuple[str, ...] = ("billing_job_tracks_cancellations",)
+
+    @staticmethod
+    def _track(db: Session) -> str:
+        from app.services.settings_store import get_setting
+
+        return str(get_setting(db, "billing_job_tracks_cancellations"))
 
     def candidates(self, db: Session, run: JobRun) -> Iterable[int]:
         statement = (
@@ -48,11 +54,21 @@ class CancellationsJob:
             )
             .order_by(CancellationRequest.id)
         )
+        track = self._track(db)
+        if track == "retail":
+            statement = statement.where(CancellationRequest.reseller_id.is_(None))
+        elif track == "reseller":
+            statement = statement.where(CancellationRequest.reseller_id.is_not(None))
         return [int(row) for row in db.execute(statement).scalars()]
 
-    @staticmethod
-    def _evaluate(db: Session, run: JobRun, request: Optional[CancellationRequest]) -> Optional[PlannedAction]:
+    @classmethod
+    def _evaluate(cls, db: Session, run: JobRun, request: Optional[CancellationRequest]) -> Optional[PlannedAction]:
         if request is None or request.status != CancellationStatus.SCHEDULED or request.effective_at is None:
+            return None
+        track = cls._track(db)
+        if (track == "retail" and request.reseller_id is not None) or (
+            track == "reseller" and request.reseller_id is None
+        ):
             return None
         trigger = utc(request.effective_at)
         if not run.in_window(trigger):
