@@ -473,10 +473,9 @@ class PaymentWebhookService:
                 to_address=recipient,
                 event=EmailEvent.SERVICE_SUSPENDED,
                 idempotency_key=f"dispute:suspend:invoice:{invoice.id}",
-                data={
+                variables={
                     "invoice_id": invoice.id,
                     "invoice_number": invoice.invoice_number,
-                    "reason": reason,
                 },
                 billing_account_id=invoice.billing_account_id,
                 user_id=account.user_id if account else None,
