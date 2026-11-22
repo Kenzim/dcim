@@ -47,6 +47,7 @@ PHASE2_TYPES = (
     "billing_tax_summary_consistent",
     "billing_tax_evidence_conflict",
     "billing_tax_not_registered",
+    "billing_tax_context_changed",
     "billing_job_needs_review",
     "billing_job_stale",
     "billing_email_template_render_failed",

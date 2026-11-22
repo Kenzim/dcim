@@ -1173,6 +1173,40 @@ def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]
     return []
 
 
+def tax_context_changed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """More than ``daily_threshold`` invoices with ``t5_context_changed`` seen in the last 24 hours (design 5).
+
+    Each invoice has one mismatch row, so the count is of invoices, resolved
+    or not; the finding clears once the rate falls back under the threshold.
+    """
+    from app.models.billing_shadow import BillingShadowMismatch
+    from app.services.tax.shadow import ENGINE, T5_CONTEXT_CHANGED
+
+    count = db.execute(
+        select(func.count(BillingShadowMismatch.id)).where(
+            BillingShadowMismatch.engine == ENGINE,
+            BillingShadowMismatch.check_key == T5_CONTEXT_CHANGED,
+            BillingShadowMismatch.last_seen_at >= now - timedelta(hours=24),
+        )
+    ).scalar_one()
+    threshold = params["daily_threshold"]
+    if count <= threshold:
+        return []
+    return [
+        Finding(
+            "billing_tax_context_changed",
+            "system",
+            "tax",
+            "Tax engine",
+            f"{count} invoices had their prepared tax result discarded in 24 hours",
+            f"{count} invoices (threshold {threshold}) were taxed again at create because a rule, exemption or "
+            "profile changed after their tax was prepared. Check for frequent rule or profile edits, or a "
+            "provider whose results go stale.",
+            details={"invoices": count, "threshold": threshold},
+        )
+    ]
+
+
 def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
     """Email messages queued with the built-in text because their stored template failed to render.
 
@@ -1236,6 +1270,7 @@ BILLING_DETECTORS = {
     "billing_tax_summary_consistent": tax_summary_consistent,
     "billing_tax_evidence_conflict": tax_evidence_conflict,
     "billing_tax_not_registered": tax_not_registered,
+    "billing_tax_context_changed": tax_context_changed,
     "billing_job_needs_review": billing_job_needs_review,
     "billing_job_stale": billing_job_stale,
     "billing_email_template_render_failed": email_template_render_failed,

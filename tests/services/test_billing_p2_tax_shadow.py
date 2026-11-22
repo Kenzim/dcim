@@ -64,6 +64,38 @@ def test_consistent_invoice_has_no_findings(db_session, invoice):
     assert billing_shadow._tax_scan(db_session, _now()) == (1, [])
 
 
+def _context_changed(db, subject_id, *, hours_ago=1, check=None):
+    from datetime import timedelta
+
+    from app.models.billing_shadow import BillingShadowMismatch
+    from app.services.tax.shadow import ENGINE, T5_CONTEXT_CHANGED
+
+    seen = _now() - timedelta(hours=hours_ago)
+    db.add(
+        BillingShadowMismatch(
+            engine=ENGINE, check_key=check or T5_CONTEXT_CHANGED, subject_type="invoice", subject_id=subject_id,
+            legacy_value={}, v2_value={}, first_seen_at=seen, last_seen_at=seen,
+        )
+    )
+    db.flush()
+
+
+def test_context_changed_alert_fires_above_ten_invoices_a_day(db_session):
+    from app.services.alerting import detectors
+    from app.services.alerting.catalogue import CATALOGUE
+
+    params = CATALOGUE["billing_tax_context_changed"].defaults()
+    assert params == {"daily_threshold": 10}
+    for subject_id in range(1, 11):
+        _context_changed(db_session, subject_id)
+    _context_changed(db_session, 100, hours_ago=25)
+    _context_changed(db_session, 101, check="t1_checkout")
+    assert bi.tax_context_changed(db_session, params, _now()) == []
+    _context_changed(db_session, 11)
+    (finding,) = detectors.DETECTORS["billing_tax_context_changed"](db_session, params, _now())
+    assert finding.details == {"invoices": 11, "threshold": 10}
+
+
 def test_broken_rows_are_found_by_scan_and_detectors(db_session, invoice):
     _break_row(db_session, invoice)
     checked, findings = billing_shadow._tax_scan(db_session, _now())
