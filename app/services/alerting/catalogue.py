@@ -461,6 +461,15 @@ _SPECS = (
         enabled_by_default=False,
     ),
     AlertTypeSpec(
+        "billing_tax_buyer_country_missing",
+        "Invoice taxed without the buyer's country",
+        "A buyer with no billing country was taxed as a consumer in the seller's country.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
         "billing_tax_context_changed",
         "Tax results often discarded at invoice create",
         "More invoices than the threshold had their prepared tax result discarded in the last 24 hours "

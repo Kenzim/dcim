@@ -55,6 +55,7 @@ NOTE_GB_OUTSIDE_SCOPE_B2B = "gb_outside_scope_b2b"
 NOTE_OUTSIDE_SCOPE = "outside_scope"
 NOTE_EXEMPT_CUSTOMER = "exempt_customer"
 EVIDENCE_NOT_REGISTERED = "not_registered"
+EVIDENCE_BUYER_COUNTRY_MISSING = "buyer_country_missing"
 
 DISCOUNT_KIND = "discount"
 
@@ -121,7 +122,8 @@ class _Place:
     reverse_charge: bool = False
     rc_countries: dict[str, Optional[str]] = field(default_factory=dict)
     fallback_note: Optional[str] = None  # legal note when no rule taxes any line
-    evidence_notes: list[str] = field(default_factory=list)
+    evidence_notes: list[str] = field(default_factory=list)  # recorded when no rule taxes any line
+    notes: list[str] = field(default_factory=list)  # recorded always
     label: str = "buyer_country"
 
 
@@ -262,7 +264,16 @@ def _place(
         return _Place(countries=any_only, label="no_seller_country")
     establishment = _domestic(registrations, seller)
     if buyer_country is None:
-        return _Place(countries=any_only, registration=establishment, label="buyer_country_missing")
+        # No evidence of where the buyer is: a consumer in the seller's country, so VAT is not left uncharged.
+        countries = {JURISDICTION_ANY: seller}
+        if establishment is not None:
+            countries[establishment.jurisdiction] = seller
+        return _Place(
+            countries=countries,
+            registration=establishment,
+            notes=[EVIDENCE_BUYER_COUNTRY_MISSING],
+            label="buyer_country_missing",
+        )
     if buyer_country == seller:
         countries = dict(any_only)
         if establishment is not None:
@@ -555,6 +566,8 @@ class TaxEngine:
             candidates = rules_repo.rules_valid_at(db, at, class_ids=wanted_classes, mirrored_only=True)
         exemptions = rules_repo.exemptions_by_id(db, buyer.exemption_ids, at)
         evidence["place_of_supply"] = place.label
+        if place.label == "buyer_country_missing":
+            evidence["buyer_country_assumed"] = settings.seller_country
         evidence["registration_jurisdiction"] = place.registration.jurisdiction if place.registration else None
         if reasons:
             evidence["reasons"] = reasons
@@ -649,8 +662,9 @@ class TaxEngine:
             lines[line.key] = LineTax(key=line.key, parts=parts, tax_cents=sum(p.tax_cents for p in parts))
         if place.fallback_note and not any_part:
             note_keys.append(place.fallback_note)
-        if place.evidence_notes and not any_part:
-            evidence["notes"] = list(place.evidence_notes)
+        evidence_notes = (list(place.evidence_notes) if not any_part else []) + list(place.notes)
+        if evidence_notes:
+            evidence["notes"] = list(dict.fromkeys(evidence_notes))
         if explained:
             evidence["explained_by"] = list(dict.fromkeys(explained))
         if note_values:

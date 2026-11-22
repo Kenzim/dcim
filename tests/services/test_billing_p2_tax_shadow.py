@@ -163,6 +163,22 @@ def test_evidence_and_not_registered_detectors(db_session, invoice):
     assert [f.resource_id for f in bi.tax_not_registered(db_session, PARAMS, _now())] == [str(invoice.id)]
 
 
+def test_buyer_country_missing_detector(db_session, invoice):
+    assert bi.tax_buyer_country_missing(db_session, PARAMS, _now()) == []
+    evidence = dict(invoice.tax_evidence)
+    db_session.execute(
+        Invoice.__table__.update().where(Invoice.id == invoice.id).values(
+            tax_evidence={**evidence, "buyer_country": None, "notes": ["buyer_country_missing"]}
+        )
+    )
+    db_session.expire_all()
+    (finding,) = bi.tax_buyer_country_missing(db_session, PARAMS, _now())
+    assert finding.resource_id == str(invoice.id) and finding.details["taxed_as"] == "GB"
+    db_session.execute(Invoice.__table__.update().where(Invoice.id == invoice.id).values(tax_engine="legacy"))
+    db_session.expire_all()
+    assert bi.tax_buyer_country_missing(db_session, PARAMS, _now()) == []
+
+
 def test_a_tax_id_country_mismatch_raises_the_evidence_conflict_alert(db_session, invoice):
     evidence = dict(invoice.tax_evidence)
     db_session.execute(

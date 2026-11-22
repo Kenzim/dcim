@@ -10,6 +10,7 @@ is the engine's choice, pending the design saying so).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -156,6 +157,13 @@ REVIEW = [
          registration="OSS_DE", tax_id="GB123456789", reasons=frozenset({"tax_id_country_mismatch"})),
     Case("de-to-uk-business-de-number", "DE", ("DE",), "GB", True, "valid", NONE, not_registered=True,
          registration="DE", tax_id="DE123456789", reasons=frozenset({"tax_id_country_mismatch"})),
+    # A buyer with no country is taxed as a consumer in the seller's country, and the evidence says so.
+    Case("uk-buyer-country-missing", "GB", ("GB",), None, False, "unchecked", GB20, "20.0000", registration="GB",
+         evidence_notes=frozenset({"buyer_country_missing"})),
+    Case("de-buyer-country-missing", "DE", ("DE", "OSS_DE"), None, False, "unchecked", DE19, "19.0000",
+         registration="DE", evidence_notes=frozenset({"buyer_country_missing"})),
+    Case("de-business-country-missing-valid-number", "DE", ("DE", "OSS_DE"), None, True, "valid", DE19, "19.0000",
+         registration="DE", tax_id="FR123456789", evidence_notes=frozenset({"buyer_country_missing"})),
 ]
 
 _REGISTRATIONS = {
@@ -255,6 +263,20 @@ def test_appendix_c(db_session, case):
     assert set(case.reasons) <= reasons
     assert ("tax_id_country_mismatch" in reasons) == ("tax_id_country_mismatch" in case.reasons)
     assert values.get("buyer_country_declared") == case.declared
+
+
+def test_a_tax_id_without_a_check_row_is_read_from_its_prefix(db_session):
+    """With no check row the number's own prefix gives its country: a GB number billed in Italy is a mismatch."""
+    case = Case("de-to-it-gb-number-no-check", "DE", ("DE", "OSS_DE"), "IT", False, "unchecked", IT22)
+    context, _regs = _setup(db_session, case)
+    facts = dataclasses.replace(
+        context.buyer, is_business=True, tax_id="GB123456789", tax_id_type="gb_vat", tax_id_status="valid",
+        tax_id_checked_at=FRESH,
+    )
+    result = TaxEngine.calculate(db_session, dataclasses.replace(context, buyer=facts))
+    assert [result.lines[key].tax_cents for key in ("line:0", "line:1")] == [2200, 440]
+    values = result.evidence.values
+    assert "tax_id_country_mismatch" in values["reasons"] and values["tax_id_country"] == "GB"
 
 
 def test_the_table_covers_every_row_of_appendix_c():

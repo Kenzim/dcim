@@ -1173,6 +1173,41 @@ def tax_not_registered(db: Session, params: dict, now: datetime) -> list[Finding
     return out
 
 
+def _invoices_with_note(db: Session, params: dict, now: datetime, note: str) -> list[tuple[Invoice, dict]]:
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
+    found = []
+    for invoice in db.scalars(stmt):
+        evidence = invoice.tax_evidence if isinstance(invoice.tax_evidence, dict) else {}
+        if note in (evidence.get("notes") or []):
+            found.append((invoice, evidence))
+    return found
+
+
+def tax_buyer_country_missing(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2-taxed invoice whose buyer had no country (evidence note ``buyer_country_missing``).
+
+    The engine taxes such a sale as one to a consumer in the seller's
+    country (4.3 step 2); the operator should get the buyer's address.
+    """
+    max_rows = params["max_rows"]
+    found = _invoices_with_note(db, params, now, "buyer_country_missing")
+    out = []
+    for invoice, evidence in found[:max_rows]:
+        taxed_as = evidence.get("buyer_country_assumed") or evidence.get("registration_jurisdiction")
+        where = taxed_as or "the seller's country"
+        out.append(Finding(
+            "billing_tax_buyer_country_missing", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} was taxed without the buyer's country",
+            f"The buyer's billing profile has no country, so the sale was taxed as one to a consumer in "
+            f"{where}. Record the buyer's address and check the tax.",
+            details={"invoice_id": invoice.id, "taxed_as": taxed_as, "tax_cents": _money(invoice.tax_cents)},
+        ))
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_buyer_country_missing", "invoice", "invoices", len(found) - max_rows,
+                             max_rows))
+    return out
+
+
 def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A billing job action left in ``needs_review``."""
     del now
@@ -1432,4 +1467,5 @@ BILLING_DETECTORS = {
     "billing_job_stale": billing_job_stale,
     "billing_email_template_render_failed": email_template_render_failed,
     "billing_tax_fx_rate_missing": tax_fx_rate_missing,
+    "billing_tax_buyer_country_missing": tax_buyer_country_missing,
 }
