@@ -174,7 +174,7 @@ def note_rate(db: Session, invoice: Any, tax_cents: int) -> Optional[NoteRate]:
     same month, and is filled with the invoice's. On a UK VAT invoice in
     another currency that froze none because its own VAT was zero, a taxed
     note uses the stored rate of the UK month of the invoice's tax point (the
-    rule of publish), share-locked
+    rule of publish; for a converted proforma, its payment), share-locked
     after the invoice as publish does, and raises ``ExchangeRateMissing``
     when that is not stored.
     """
@@ -193,11 +193,23 @@ def note_rate(db: Session, invoice: Any, tax_cents: int) -> Optional[NoteRate]:
     currency = str(invoice.currency or "").upper()
     if not needs_conversion(registration, currency, int(tax_cents)):
         return None
-    period = period_of(invoice.tax_point_at or invoice.issued_at)
+    period = period_of(_vat_tax_point(invoice))
     row = stored_rate(db, currency, period, share_lock=True)
     if row is None:
         raise ExchangeRateMissing(currency, period)
     return NoteRate(Decimal(row.units_per_gbp), period, row.source, int(row.id))
+
+
+def _vat_tax_point(invoice: Any) -> datetime:
+    """The tax point of the VAT invoice: for a converted proforma its payment, the conversion's ``issued_at``.
+
+    ``tax_point_at`` is set once, at proforma publish, so it never moves to
+    the payment.
+    """
+    document_type = str(getattr(invoice.document_type, "value", invoice.document_type) or "")
+    if invoice.proforma_number_display and document_type == "invoice" and invoice.issued_at is not None:
+        return invoice.issued_at
+    return invoice.tax_point_at or invoice.issued_at
 
 
 def credited_gbp_cents(invoice_tax_cents: int, credited_tax_cents: int, rate: Decimal) -> int:

@@ -335,3 +335,30 @@ def test_the_restamp_refuses_an_invoice_that_is_not_a_proforma(db_session, accou
     invoice = issue(db_session, account)
     with pytest.raises(ValueError):
         sterling_conversion.plan_restamp(db_session, invoice, DEC_2)
+
+
+# --- L3: a taxed note on a zero-VAT converted proforma uses the payment's month ---
+
+
+def test_a_taxed_note_on_a_zero_vat_converted_proforma_uses_the_payments_month(
+    db_session, account, uk_vat, monkeypatch
+):
+    from app.models.billing_series import DocumentType
+    from app.models.reseller import InvoiceDocumentType
+    from app.services.settings_store import set_setting
+    from tests.services.test_billing_p1i_invoice_engine import _series
+    from tests.services.test_billing_p2_proforma_sterling import NOV_30, pay
+    from tests.services.test_billing_p2_sterling_vat import store, zero_rated_invoice
+
+    set_setting(db_session, "billing_proforma_enabled", True)
+    _series(db_session, DocumentType.PROFORMA, "PF")
+    store(db_session, "2026-11", "1.3396")
+    store(db_session, "2026-12", str(DEC_RATE))
+    invoice = zero_rated_invoice(db_session, account, monkeypatch, moment=NOV_30)
+    assert invoice.document_type == InvoiceDocumentType.PROFORMA
+    pay(db_session, invoice, monkeypatch, DEC_2)
+    note = debit(db_session, invoice, 500, "l3-dn")
+    assert note.tax_cents == 100
+    assert note_frozen(note) == (
+        DEC_RATE, "2026-12", "hmrc_monthly", 76, exchange_rates.stored_rate(db_session, "USD", "2026-12").id
+    )
