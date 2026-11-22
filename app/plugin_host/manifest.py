@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from app.plugin_host.catalogue import API_VERSION, EVENTS, PERMISSIONS
+from app.plugin_host.catalogue import EVENTS, PERMISSIONS, SUPPORTED_API_VERSIONS
 
 PLUGIN_ID_RE = re.compile(r"^[a-z][a-z0-9_]{2,47}$")
 ITEM_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -73,6 +73,12 @@ def range_allows(spec: str, version: str) -> bool:
         "==": lambda a, b: a == b,
     }
     return all(checks[op](current, bound) for op, bound in parse_range(spec))
+
+
+def effective_api(spec: str) -> Optional[str]:
+    """The highest version of ``SUPPORTED_API_VERSIONS`` that the range ``spec`` allows, or None."""
+    allowed = [version for version in SUPPORTED_API_VERSIONS if range_allows(spec, version)]
+    return max(allowed, key=_version_tuple) if allowed else None
 
 
 def parse_duration(value: Union[str, int]) -> int:
@@ -456,7 +462,11 @@ class Manifest(_Strict):
         return next((s for s in self.schedules if s.id == schedule_id), None)
 
     def compatible(self) -> bool:
-        return range_allows(self.rackflow_api, API_VERSION)
+        return self.effective_api() is not None
+
+    def effective_api(self) -> Optional[str]:
+        """The highest supported plugin API version the ``rackflow_api`` range allows, or None."""
+        return effective_api(self.rackflow_api)
 
 
 def _format_errors(exc: ValidationError) -> list[str]:

@@ -5,8 +5,8 @@ from __future__ import annotations
 from app.plugin_host import catalogue
 
 
-def test_api_version_is_unchanged_until_the_plugin_api_worker_bumps_it():
-    assert catalogue.API_VERSION == "1.0"
+def test_api_version_is_1_1():
+    assert catalogue.API_VERSION == "1.1"
 
 
 def test_tax_permissions():

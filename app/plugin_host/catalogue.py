@@ -1,10 +1,13 @@
-"""Public catalogue of plugin API 1.0: version, permissions and events (docs/plugin-system.md sections 6 and 7)."""
+"""Public catalogue of the plugin API: version, permissions and events (docs/plugin-system.md sections 6 and 7)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-API_VERSION = "1.0"
+API_VERSION = "1.1"
+# Every plugin API version this Rackflow runs, oldest first. A plugin is
+# compatible when its ``rackflow_api`` range allows at least one of them.
+SUPPORTED_API_VERSIONS = ("1.0", "1.1")
 
 
 @dataclass(frozen=True)

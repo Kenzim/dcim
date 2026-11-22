@@ -56,7 +56,7 @@ def test_admin_api_requires_admin(client, test_user, sample):
 def test_admin_install_flow(client, db_session, test_admin_user, sample):
     headers = admin_headers(client)
     listing = client.get("/api/admin/plugins", headers=headers).json()
-    assert listing["api_version"] == "1.0" and listing["installed"] == []
+    assert listing["api_version"] == "1.1" and listing["installed"] == []
     available = listing["available"][0]
     assert available["id"] == "uptime_reminder" and available["valid"]
     keys = [p["key"] for p in available["permissions"]]
