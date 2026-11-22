@@ -632,3 +632,145 @@ def test_todo_38f9_an_expired_usdt_deposit_does_not_block_card_funding(db_sessio
 
     assert result.funded is True
     assert len(gateway.calls) == 1
+
+
+# ------------------------------------------------------------------ To-do 38f9e762, part 2
+
+
+def _watched_deposit(db, suffix, digit, amount=100):
+    from app.models.reseller import Reseller
+    from app.models.usdt import UsdtDeposit
+    from app.models.user import User
+    from tests.services.test_usdt_watcher import CONTRACT
+
+    reseller = Reseller(user=User(username=f"usdt-w-{suffix}", email=f"usdt-w-{suffix}@example.com", is_reseller=True))
+    db.add(reseller)
+    db.flush()
+    from app.dao.commerce_dao import BillingAccountDAO
+
+    BillingAccountDAO.ensure_reseller_account(db, reseller)
+    invoice = InvoiceService.create_topup(db, reseller_id=reseller.id, amount_cents=amount)
+    deposit = UsdtDeposit(
+        invoice_id=invoice.id, reseller_id=reseller.id, derivation_index=int(digit, 16),
+        chain_id=11155111, contract_address=CONTRACT, deposit_address="0x" + digit * 40,
+        expected_token_units=amount * 10_000,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    db.add(deposit)
+    db.flush()
+    payment = Payment(
+        invoice_id=invoice.id, gateway="usdt", status=PaymentStatus.PENDING, amount_cents=amount,
+        currency="USD", external_ref=f"usdt-deposit:{deposit.id}",
+        payment_metadata={"usdt_deposit_id": deposit.id},
+    )
+    db.add(payment)
+    db.flush()
+    return reseller, invoice, deposit, payment
+
+
+def _transfer(digit, tx_digit, log_index, units=1_000_000):
+    from tests.services.test_usdt_watcher import _log, _topic
+
+    row = _log(units, tx_digit=tx_digit, log_index=log_index)
+    row["topics"][2] = _topic("0x" + digit * 40)
+    return row
+
+
+def _two_deposits_one_paid_by_card(db):
+    from app.models.usdt import UsdtChainCursor
+    from tests.services.test_usdt_watcher import CONTRACT
+
+    paid = _watched_deposit(db, "paid", "4")
+    other = _watched_deposit(db, "other", "5")
+    db.add(UsdtChainCursor(chain_id=11155111, contract_address=CONTRACT, next_block=100))
+    _reseller_, invoice, _d, _p = paid
+    from app.services.payments.orchestrator import PaymentOrchestrator
+
+    card = _gateway_payment(db, invoice, 100, "pi_topup_card")
+    PaymentOrchestrator.finalize_success(db, card)
+    db.refresh(invoice)
+    assert invoice.status == S.PAID
+    db.commit()
+    rpc_logs = [_transfer("4", "a", 0), _transfer("5", "d", 1)]
+    return paid, other, rpc_logs
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_todo_38f9_legacy_usdt_on_a_card_paid_topup_is_held_for_review(db_session, mode):
+    from app.models.usdt import UsdtDepositStatus
+    from app.services.credit_ledger_service import CreditLedgerService
+    from app.services.payments.usdt_watcher import UsdtWatcher
+    from tests.services.test_usdt_watcher import FakeRpc, _config
+
+    set_setting(db_session, "billing_invoice_engine", mode)
+    paid, other, logs = _two_deposits_one_paid_by_card(db_session)
+
+    assert UsdtWatcher(FakeRpc(logs), _config()).run_once(db_session) == 2
+    db_session.commit()
+
+    reseller, invoice, deposit, payment = paid
+    db_session.expire_all()
+    deposit = db_session.get(type(deposit), deposit.id)
+    payment = db_session.get(Payment, payment.id)
+    assert deposit.status == UsdtDepositStatus.MANUAL_REVIEW
+    assert deposit.received_token_units == 1_000_000
+    assert payment.status == PaymentStatus.PENDING
+    assert "usdt_on_paid_invoice" in payment.payment_metadata["refund_review"]
+    assert _reviews(db_session, invoice) == ["usdt_on_paid_invoice"]
+    assert CreditLedgerService.balance_cents(db_session, db_session.get(type(reseller), reseller.id)) == 100
+    # The other deposit in the same chunk settles.
+    other_deposit = db_session.get(type(deposit), other[2].id)
+    assert other_deposit.status == UsdtDepositStatus.SWEEP_PENDING
+    assert db_session.get(Payment, other[3].id).status == PaymentStatus.SUCCEEDED
+
+
+def test_todo_38f9_v2_usdt_on_a_card_paid_topup_credits_the_account(db_session):
+    from app.models.usdt import UsdtDepositStatus
+    from app.services.credit_ledger_service import CreditLedgerService
+    from app.services.payments.usdt_watcher import UsdtWatcher
+    from tests.services.test_usdt_watcher import FakeRpc, _config
+
+    _v2(db_session)
+    paid, _other, logs = _two_deposits_one_paid_by_card(db_session)
+
+    UsdtWatcher(FakeRpc(logs), _config()).run_once(db_session)
+    db_session.commit()
+
+    reseller, invoice, deposit, payment = paid
+    db_session.expire_all()
+    assert db_session.get(Payment, payment.id).status == PaymentStatus.SUCCEEDED
+    assert db_session.get(type(deposit), deposit.id).status == UsdtDepositStatus.SWEEP_PENDING
+    assert CreditLedgerService.balance_cents(db_session, db_session.get(type(reseller), reseller.id)) == 200
+
+
+def test_todo_38f9_a_deposit_that_fails_to_settle_never_stalls_the_watcher(db_session, monkeypatch):
+    from app.models.usdt import UsdtChainCursor, UsdtDepositStatus
+    from app.services.payments.usdt_watcher import UsdtWatcher
+    from tests.services.test_usdt_watcher import CONTRACT, FakeRpc, _config
+
+    broken = _watched_deposit(db_session, "broken", "6")
+    fine = _watched_deposit(db_session, "fine", "7")
+    db_session.add(UsdtChainCursor(chain_id=11155111, contract_address=CONTRACT, next_block=100))
+    db_session.commit()
+    original = UsdtWatcher._settle_eligible_deposit
+
+    def flaky(self, db, deposit, events, now):
+        if deposit.id == broken[2].id:
+            raise ValueError("unexpected settlement failure")
+        return original(self, db, deposit, events, now)
+
+    monkeypatch.setattr(UsdtWatcher, "_settle_eligible_deposit", flaky)
+    logs = [_transfer("6", "a", 0), _transfer("7", "d", 1)]
+
+    UsdtWatcher(FakeRpc(logs), _config()).run_once(db_session)
+    db_session.commit()
+
+    db_session.expire_all()
+    broken_deposit = db_session.get(type(broken[2]), broken[2].id)
+    assert broken_deposit.status == UsdtDepositStatus.MANUAL_REVIEW
+    assert broken_deposit.received_token_units == 1_000_000
+    assert db_session.get(Payment, broken[3].id).status == PaymentStatus.PENDING
+    assert db_session.get(type(fine[2]), fine[2].id).status == UsdtDepositStatus.SWEEP_PENDING
+    assert db_session.get(Payment, fine[3].id).status == PaymentStatus.SUCCEEDED
+    cursor = db_session.execute(select(UsdtChainCursor)).scalar_one()
+    assert cursor.next_block > 100

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
@@ -29,6 +30,8 @@ from app.services.payments.usdt_rpc import (
     decode_transfer_log,
 )
 from app.services.payments.webhooks import PaymentWebhookService
+
+logger = logging.getLogger(__name__)
 
 
 _ADDRESS_BATCH_SIZE = 250
@@ -285,14 +288,42 @@ class UsdtWatcher:
         # Production and tests intentionally use autoflush=False sessions.
         # Persist event inserts before aggregation so split transfers are visible.
         db.flush()
-        for deposit_id in affected:
+        for deposit_id in sorted(affected):
+            self._reconcile_isolated(db, deposit_id, now)
+        return len(decoded)
+
+    def _reconcile_isolated(self, db: Session, deposit_id: int, now: datetime) -> None:
+        """Reconcile one deposit in a savepoint, so one deposit never stalls the scan.
+
+        An RPC error (the chain changed during finalisation) still aborts the
+        tick, which retries it. Any other error rolls back only this deposit's
+        settlement; its transfer events stay recorded and the deposit goes to
+        manual review, which the scan skips, while the other deposits settle.
+        """
+        try:
+            with db.begin_nested():
+                deposit = db.execute(
+                    select(UsdtDeposit)
+                    .where(UsdtDeposit.id == deposit_id)
+                    .with_for_update()
+                ).scalar_one()
+                self._reconcile(db, deposit, now)
+                db.flush()
+        except EthereumRpcError:
+            raise
+        except Exception:
+            logger.exception(
+                "USDT deposit %s could not be settled; held for manual review", deposit_id
+            )
             deposit = db.execute(
                 select(UsdtDeposit)
                 .where(UsdtDeposit.id == deposit_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             ).scalar_one()
-            self._reconcile(db, deposit, now)
-        return len(decoded)
+            self._summarize_events(deposit, self._active_events(db, deposit.id), now)
+            deposit.status = UsdtDepositStatus.MANUAL_REVIEW
+            db.flush()
 
     def _record_transfer(
         self,
@@ -518,6 +549,8 @@ class UsdtWatcher:
             if not all(self._event_is_canonical(event) for event in events):
                 deposit.status = UsdtDepositStatus.REORGED
                 return
+            if self._paid_another_way_legacy(db, deposit, payment):
+                return
             PaymentOrchestrator.finalize_success(db, payment)
             # A second canonical check closes the RPC/credit race window. An
             # exception rolls the enclosing DB transaction back.
@@ -531,6 +564,50 @@ class UsdtWatcher:
             deposit.status = UsdtDepositStatus.OVERPAID
         elif deposit.status not in _TERMINAL_SWEEP_STATUSES:
             deposit.status = UsdtDepositStatus.SWEEP_PENDING
+
+    @staticmethod
+    def _paid_another_way_legacy(
+        db: Session, deposit: UsdtDeposit, payment: Payment
+    ) -> bool:
+        """Legacy and shadow: hold USDT that would overpay a reseller invoice for review.
+
+        Legacy settlement refuses a reseller invoice whose allocations exceed
+        its total (a top-up already paid by card while its deposit was open).
+        The payment stays pending, the deposit goes to manual review and the
+        money is recorded for a refund review, so the receipt is kept and the
+        watcher carries on. In v2 settlement credits the excess instead.
+        Returns True when the deposit was held. The caller holds the invoice
+        and payment locks.
+        """
+        from app.services.billing.order_refunds import record_refund_review
+        from app.services.invoice_service import InvoiceService, engine_mode
+
+        if engine_mode(db) == "v2":
+            return False
+        invoice = deposit.invoice
+        if invoice is None or invoice.reseller_id is None:
+            return False
+        allocated = InvoiceService._legacy_allocated_cents(db, invoice.id, for_update=True)
+        if allocated + int(payment.amount_cents) <= int(invoice.amount_cents):
+            return False
+        record_refund_review(
+            db,
+            invoice=invoice,
+            amount_cents=int(payment.amount_cents),
+            reason="usdt_on_paid_invoice",
+            payment=payment,
+            detail=(
+                f"USDT deposit {deposit.id} arrived after the invoice was paid another way; "
+                "credit the reseller or return the USDT"
+            ),
+        )
+        deposit.status = UsdtDepositStatus.MANUAL_REVIEW
+        logger.warning(
+            "USDT deposit %s held for review: invoice %s is already paid",
+            deposit.id,
+            invoice.id,
+        )
+        return True
 
     def _recheck_recent_confirmations(
         self,
