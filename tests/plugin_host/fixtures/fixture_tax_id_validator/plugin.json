@@ -1,0 +1,23 @@
+{
+  "id": "fixture_tax_id_validator",
+  "name": "Fixture tax ID validator",
+  "version": "1.0.0",
+  "description": "Test plugin: a tax_id_validator whose behaviour the `mode` setting chooses.",
+  "rackflow_api": ">=1.1,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["tax.validate_id"],
+  "settings": [
+    {"key": "mode", "type": "string", "label": "Behaviour", "default": "valid"}
+  ],
+  "provides": [
+    {
+      "kind": "tax_id_validator",
+      "id": "fixture",
+      "label": "Fixture validator",
+      "countries": ["DE", "FR"],
+      "id_types": ["eu_vat"],
+      "timeout_seconds": 1,
+      "rate_limit": {"calls": 3, "per_seconds": 60}
+    }
+  ]
+}

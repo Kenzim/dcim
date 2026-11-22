@@ -10,6 +10,7 @@ fails when one is missing for something that exists or names something that does
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import re
@@ -21,7 +22,7 @@ from typing import Any, Optional, get_args, get_origin
 from pydantic import BaseModel
 
 from app.plugin_host import events as events_module
-from app.plugin_host import health, loader, manifest, outbox, scheduler, sdk, state, ui
+from app.plugin_host import health, kinds, loader, manifest, outbox, scheduler, sdk, state, ui
 from app.plugin_host.catalogue import API_VERSION, EVENT_LIST, PERMISSION_LIST, POWER_ACTIONS, POWER_SOURCES
 from app.plugin_host.testkit import deprecations
 
@@ -59,7 +60,7 @@ SDK_NOTES: dict[str, str] = {
     "ctx.plugin_id": "The plugin's id.",
     "ctx.plugin_version": "The installed version.",
     "ctx.api_version": "The plugin API version of the running Rackflow.",
-    "ctx.kind": "What is running: event, before, schedule, action, mcp_tool or lifecycle.",
+    "ctx.kind": "What is running: event, before, schedule, action, mcp_tool, lifecycle or provider.",
     "ctx.actor": "Who caused an action or tool call: type, user_id and via. None elsewhere.",
     "ctx.now": "The current time as a timezone-aware UTC datetime.",
     "ctx.in_window": "Whether a time falls inside a window setting. The time defaults to now.",
@@ -100,6 +101,19 @@ FIELD_NOTES: dict[str, str] = {
     "Manifest.events": "Events delivered to after handlers.",
     "Manifest.hooks": "Events with before hooks (needs `events.veto`).",
     "Manifest.tables": "Reserved. Refused in API 1.0.",
+    "Manifest.provides": "Typed providers the plugin offers (API 1.1 and later). Each needs the permission of its kind and an `@plugin.provider(kind, id)` in `register`.",
+    "ProvideSpec.kind": "`tax_id_validator`, `tax_rule_pack` or `tax_provider`.",
+    "ProvideSpec.id": "Unique with the kind inside the plugin. Billing refers to the provider as `<plugin id>:<provider id>`.",
+    "ProvideSpec.label": "Shown to admins where they choose a provider.",
+    "ProvideSpec.countries": "Upper case ISO alpha-2 codes the provider covers (`EL` for Greece at VIES). Empty means any.",
+    "ProvideSpec.id_types": "Tax ID types the provider checks, such as `eu_vat`. Required for `tax_id_validator`, refused elsewhere.",
+    "ProvideSpec.currencies": "Upper case ISO alpha-3 codes. Only for `tax_provider`; empty means any.",
+    "ProvideSpec.timeout_seconds": "Wall-clock limit of one call. Billing may lower it for a call, never raise it.",
+    "ProvideSpec.rate_limit": "Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate` and `load`, not `supports` or `check_format`.",
+    "ProvideSpec.pack": "Only for `tax_rule_pack`: the JSON file of the pack inside the package. It must exist and pass the pack schema at install.",
+    "RateLimitSpec.calls": "Calls allowed in one window.",
+    "RateLimitSpec.per_seconds": "Length of the window in seconds.",
+    "PackRef.file": "Relative path of a `.json` file inside the package.",
     "ServicesSpec.types": "Service types the plugin applies to.",
     "ServicesSpec.enablement": "`all`: active for every service of those types. `opt_in`: only where an admin or the plugin switches it on. `addon`: linked to a billing add-on.",
     "SettingField.type": "`secret` values are encrypted and never shown again. `window` holds days, start, end and a time zone.",
@@ -135,6 +149,9 @@ _MODELS: tuple[type[BaseModel], ...] = (
     manifest.Condition,
     manifest.BadgeStyle,
     manifest.McpToolSpec,
+    manifest.ProvideSpec,
+    manifest.RateLimitSpec,
+    manifest.PackRef,
 )
 
 # ------------------------------------------------------------------ manifest models
@@ -298,6 +315,110 @@ def _sdk_section() -> list[str]:
     return lines
 
 
+# ------------------------------------------------------------------ provider kinds
+
+KIND_NOTES: dict[str, str] = {
+    "tax_id_validator": "Checks a customer's tax or VAT number. Billing asks `supports`, then `check_format`, then `check_online`.",
+    "tax_rule_pack": "Offers a set of tax rules as data. An administrator reviews and applies it; nothing is applied automatically.",
+    "tax_provider": "Calculates the tax of a basket. Billing falls back to its own rules when the provider fails.",
+}
+
+METHOD_NOTES: dict[str, str] = {
+    "tax_id_validator.supports": "Whether the validator handles this country and ID type. Local and fast.",
+    "tax_id_validator.check_format": "Whether the number is well formed for the country. Local, no network.",
+    "tax_id_validator.check_online": "Ask the registry. Return a `TaxIdCheckResult`; `unavailable` needs an `error_code`.",
+    "tax_rule_pack.pack_id": "The pack's id, matching `^[a-z][a-z0-9_]{0,63}$`.",
+    "tax_rule_pack.versions": "Available versions, newest last.",
+    "tax_rule_pack.load": "The pack JSON of one version. At most 1 MB.",
+    "tax_provider.supports": "Whether the provider can handle this request (country, currency, lines).",
+    "tax_provider.calculate": "Return a `TaxProviderResult` with every requested line key.",
+}
+
+
+def _hint_text(tp: Any) -> str:
+    origin, args = get_origin(tp), get_args(tp)
+    if tp is type(None):
+        return "None"
+    if origin is typing.Literal:
+        return " or ".join(f'"{a}"' for a in args)
+    if origin is typing.Union:
+        return " or ".join(_hint_text(a) for a in args)
+    if origin is not None:
+        inner = ", ".join("..." if a is Ellipsis else _hint_text(a) for a in args)
+        return f"{getattr(origin, '__name__', str(origin))}[{inner}]"
+    return getattr(tp, "__name__", str(tp))
+
+
+def _dataclass_fields(cls: type) -> list[dict[str, Any]]:
+    hints = typing.get_type_hints(cls)
+    return [
+        {
+            "name": f.name,
+            "type": _hint_text(hints[f.name]),
+            "required": f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING,
+        }
+        for f in dataclasses.fields(cls)
+    ]
+
+
+def kinds_surface() -> dict[str, Any]:
+    return {
+        "kinds": {
+            kind: {
+                "permission": spec.permission,
+                "methods": {name: arity for name, arity in sorted(spec.methods.items())},
+                "metered": sorted(spec.metered),
+            }
+            for kind, spec in sorted(kinds.KINDS.items())
+        },
+        "types": {cls.__name__: _dataclass_fields(cls) for cls in kinds.DATA_TYPES},
+        "module": "rackflow_plugin.kinds",
+        "context": "current_context",
+    }
+
+
+def _kinds_section() -> list[str]:
+    lines = [
+        "## Provider kinds",
+        "",
+        "From API 1.1 a plugin can also offer typed providers that Rackflow calls directly. Declare each in the manifest "
+        "under `provides` and bind it in `register` with `@plugin.provider(kind, id)`. The decorated class (or a factory "
+        "function) is instantiated once per load with no arguments. The types below are importable from "
+        "`rackflow_plugin.kinds`; they are frozen dataclasses, amounts are integer minor units and tax rates are strings "
+        "with at most four decimals.",
+        "",
+        "A provider method receives only its arguments. To read settings, write the plugin log or make outbound HTTP "
+        "calls, a provider calls `rackflow_plugin.kinds.current_context()` while a method runs; it returns the usual "
+        "`ctx` (with `ctx.kind == \"provider\"`). A method may be a plain function or a coroutine.",
+        "",
+        "| Kind | Permission | Methods | What it is for |",
+        "|---|---|---|---|",
+    ]
+    for kind, spec in sorted(kinds.KINDS.items()):
+        methods = ", ".join(f"`{name}`" for name in spec.methods)
+        lines.append(f"| `{kind}` | `{spec.permission}` | {methods} | {KIND_NOTES.get(kind, '')} |")
+    lines.append("")
+    for kind, spec in sorted(kinds.KINDS.items()):
+        lines += [f"### {kind}", "", "| Method | Arguments | Notes |", "|---|---|---|"]
+        for name in spec.methods:
+            signature = str(inspect.signature(getattr(spec.protocol, name))).replace("'", "")
+            lines.append(f"| `{name}` | `{signature.replace('(self, ', '(').replace('(self)', '()')}` | {METHOD_NOTES.get(f'{kind}.{name}', '')} |")
+        lines.append("")
+    lines += ["### Types", "", "| Type | Field | Type of field | Required |", "|---|---|---|---|"]
+    for cls in kinds.DATA_TYPES:
+        for item in _dataclass_fields(cls):
+            lines.append(f"| `{cls.__name__}` | `{item['name']}` | `{item['type']}` | {'yes' if item['required'] else 'no'} |")
+    lines += [
+        "",
+        "Billing checks every answer. A wrong type, an unknown status, a missing, extra or unreadable field, an `unavailable` "
+        "answer without an `error_code`, or (for a tax provider) a missing or unknown line key, a negative amount, a rate that "
+        "does not give the tax within one minor unit, or tax on a reverse charge part counts as a failure of the plugin, the "
+        "same as a timeout or an exception.",
+        "",
+    ]
+    return lines
+
+
 # ------------------------------------------------------------------ the document
 
 
@@ -326,6 +447,9 @@ def _limits() -> list[tuple[str, str]]:
             f"{Settings.model_fields['plugin_guest_exec_per_minute'].default} per plugin and service, "
             f"{Settings.model_fields['plugin_guest_exec_per_minute_total'].default} per plugin",
         ),
+        ("Providers per plugin", str(manifest.Manifest.model_fields["provides"].metadata[0].max_length)),
+        ("Provider call time limit", "8 s by default, at most 30 s (`timeout_seconds`)"),
+        ("Provider rate limit", "set per provider in `rate_limit`, from 1 call per 86,400 s to 10,000 calls per second"),
         ("Failures that open the circuit", f"{health.FAILURES_TO_OPEN} in a row"),
         ("Failures that disable the plugin", f"{health.FAILURES_TO_DISABLE} in a row"),
         ("Circuit open time", f"{health.OPEN_BASE_SECONDS} s, doubling to {health.OPEN_MAX_SECONDS} s"),
@@ -393,6 +517,7 @@ def render_reference() -> str:
     for model in _MODELS:
         lines += _model_section(model)
     lines += _sdk_section()
+    lines += _kinds_section()
     lines += [
         "## Handlers",
         "",
@@ -406,6 +531,7 @@ def render_reference() -> str:
         "| `@plugin.schedule(id)` | `schedules` | `ctx, service` (a service dict, or `None` for a global schedule) |",
         "| `@plugin.action(id)` | `actions` | `ctx, request`; return `{\"message\": \"...\"}` |",
         "| `@plugin.mcp_tool(id)` | `mcp_tools` | `ctx, params` |",
+        "| `@plugin.provider(kind, id)` | `provides` | a class or factory with the methods of its kind; see Provider kinds |",
         "| `@plugin.lifecycle(step)` | none | `ctx, info`; steps: " + ", ".join(f"`{s}`" for s in loader.LIFECYCLE_NAMES) + " |",
         "",
         "Handlers may be plain functions or coroutines.",
@@ -468,6 +594,7 @@ def api_surface() -> dict[str, Any]:
         "errors": sorted(vars(sdk.errors)),
         "power_actions": sorted(POWER_ACTIONS),
         "power_sources": sorted(POWER_SOURCES),
+        "provider_kinds": kinds_surface(),
     }
 
 
