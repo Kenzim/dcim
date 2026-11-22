@@ -7,9 +7,10 @@ models and dropped afterwards.
 The generation side is what a generator must do under 10.1: lock the service
 billing, skip when ``cancel_at`` is set, else create the cycle invoice and
 commit. Whichever transaction gets the billing lock first, either no invoice
-exists for the cancelled period or it is cancelled in the request's
-transaction, even when the request's session read before the generator
-committed.
+exists for the cancelled period or it is left open while the request is
+pending and cancelled when the request completes (design 10.6: an
+end-of-period request cancels nothing when it is made), even when the
+request's session read before the generator committed.
 """
 
 from __future__ import annotations
@@ -138,7 +139,19 @@ def _cycle_invoices(sessions, billing_id: int) -> list:
         return [(status.value, state.value) for status, state in rows]
 
 
-def test_generator_first_the_request_cancels_the_invoice(sessions, engine_mode):
+def _complete(sessions, service_id: int, request_id: int) -> None:
+    """The completion's invoice step, as the cancellations job does it under the billing lock."""
+    from app.models.billing_jobs import CancellationRequest
+    from app.services.billing.cancellations import _billing_for_service, cancel_unpaid_invoices
+
+    with sessions() as db:
+        _billing_for_service(db, service_id)
+        effective_at = db.get(CancellationRequest, request_id).effective_at
+        cancel_unpaid_invoices(db, service_id, from_period_start=effective_at, cause="cancellation_request")
+        db.commit()
+
+
+def test_generator_first_the_invoice_is_cancelled_at_completion(sessions, engine_mode):
     billing_id, service_id = _seed(sessions, engine_mode)
     locked, release = threading.Event(), threading.Event()
     generated: list = []
@@ -156,6 +169,9 @@ def test_generator_first_the_request_cancels_the_invoice(sessions, engine_mode):
     requester.join(30)
     assert isinstance(generated[0], int), generated
     assert isinstance(requested[0], int), requested
+    [(status, state)] = _cycle_invoices(sessions, billing_id)
+    assert status != "void" and state != "cancelled"
+    _complete(sessions, service_id, requested[0])
     assert _cycle_invoices(sessions, billing_id) == [("void", "cancelled")]
 
 
