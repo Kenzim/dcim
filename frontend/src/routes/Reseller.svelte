@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { checkAuth, isAuthenticated, user } from '../stores/auth.js';
   import { currentRoute, navigate } from '../lib/router.js';
+  import Cancellations from '../components/reseller/Cancellations.svelte';
   import ApiKey from '../components/reseller/ApiKey.svelte';
   import Clients from '../components/reseller/Clients.svelte';
   import Dashboard from '../components/reseller/Dashboard.svelte';
@@ -54,6 +55,8 @@
       <Clients />
     {:else if routeName === 'services'}
       <Services />
+    {:else if routeName === 'cancellations'}
+      <Cancellations />
     {:else if routeName === 'stock'}
       <StockUsage />
     {:else if routeName === 'api'}

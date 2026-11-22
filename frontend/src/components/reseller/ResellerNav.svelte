@@ -14,6 +14,7 @@
     ['/reseller/products', 'Products'],
     ['/reseller/clients', 'Clients'],
     ['/reseller/services', 'Services'],
+    ['/reseller/cancellations', 'Cancellations'],
     ['/reseller/stock', 'Stock'],
     ['/reseller/api', 'API'],
   ];

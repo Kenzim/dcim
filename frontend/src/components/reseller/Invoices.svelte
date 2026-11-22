@@ -12,6 +12,7 @@
   import { billingErrorMessage } from '../../lib/billingClientApi.js';
   import { invoiceStatusLabel, invoiceStatusValue } from '../../lib/billingFormat.js';
   import InvoiceStatusBadge from '../billing/InvoiceStatusBadge.svelte';
+  import InvoiceTaxPanel from '../billing/shared/InvoiceTaxPanel.svelte';
   import ResellerInvoiceCredit from '../billing/reseller/ResellerInvoiceCredit.svelte';
   import { Alert, Spinner } from '../ui/index.js';
 
@@ -163,6 +164,7 @@
             <div><dt>Remaining</dt><dd>{formatMoney(selected.remaining_cents, selected.currency)}</dd></div>
             <div><dt>Created</dt><dd>{new Date(selected.created_at).toLocaleString()}</dd></div>
           </dl>
+          <InvoiceTaxPanel invoice={selected} />
           {#key selected.id}
             <ResellerInvoiceCredit invoice={selected} on:applied={creditApplied} />
           {/key}

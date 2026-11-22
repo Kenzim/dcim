@@ -6,6 +6,8 @@
   } from '../../lib/api.js';
   import { formatMoney } from '../../lib/resellerMoney.js';
   import { Alert, Spinner } from '../ui/index.js';
+  import { newIdempotencyKey, resellerRequestCancellation } from '../../lib/billingClientApi.js';
+  import CancelServiceForm from '../billing/shared/CancelServiceForm.svelte';
 
   let services = [];
   let selected;
@@ -38,6 +40,19 @@
       error = err.message || 'Service details could not be loaded.';
     }
   }
+
+  const requestCancellation = ({ when, reason, invoiceAction }) =>
+    resellerRequestCancellation(
+      { serviceId: selected.id, type: when, reason, invoiceAction },
+      newIdempotencyKey(),
+    );
+
+  async function cancellationRequested() {
+    await load();
+    if (selected) await openService(selected.id);
+  }
+
+  $: canCancel = selected && selected.service_status !== 'terminated' && selected.billing_status !== 'cancelled';
 
   function date(value) {
     return value ? new Date(value).toLocaleString() : '—';
@@ -93,6 +108,20 @@
         {#if selected.current_cycle}
           <p>{selected.current_cycle.state.replaceAll('_', ' ')} · {formatMoney(selected.current_cycle.amount_cents, selected.current_cycle.currency)} due {date(selected.current_cycle.due_at)}</p>
         {:else}<p>No billing cycle recorded yet.</p>{/if}
+        <h3>Cancellation</h3>
+        {#if canCancel}
+          {#key selected.id}
+            <CancelServiceForm
+              askInvoiceAction
+              serviceName={selected.name || `Service ${selected.id}`}
+              submit={requestCancellation}
+              on:requested={cancellationRequested}
+            />
+          {/key}
+          <p class="note">Scheduled cancellations are listed under <a href="/reseller/cancellations">Cancellations</a>, where you can withdraw them.</p>
+        {:else}
+          <p>This service is already cancelled or terminated.</p>
+        {/if}
       </article>
     {/if}
   {/if}
@@ -101,6 +130,6 @@
 <style>
   .heading { display: flex; justify-content: space-between; gap: 18px; align-items: end; margin-bottom: 22px; }.heading h1 { margin: 0 0 6px; font-size: 32px; }.heading p { margin: 0; color: var(--text-secondary); }.filters { display: flex; gap: 8px; }.filters label { color: var(--text-tertiary); font-size: 12px; }.filters select { display: block; margin-top: 4px; padding: 8px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-primary); color: var(--text-primary); }
   .state { min-height: 220px; display: grid; place-items: center; align-content: center; gap: 12px; }.empty { padding: 30px; border: 1px dashed var(--border-color); border-radius: var(--radius-lg); color: var(--text-tertiary); text-align: center; }.table-wrap { overflow-x: auto; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-primary); }table { width: 100%; border-collapse: collapse; }th, td { padding: 12px 13px; border-bottom: 1px solid var(--border-color); text-align: left; white-space: nowrap; }th { color: var(--text-tertiary); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }td { color: var(--text-secondary); font-size: 13px; }td strong { color: var(--text-primary); }td small { display: block; margin-top: 3px; color: var(--text-tertiary); text-transform: capitalize; }.status { color: var(--portal-accent); text-transform: capitalize; font-weight: 750; }td button { padding: 7px 9px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-secondary); color: var(--portal-accent); font-weight: 700; cursor: pointer; }
-  .detail { position: relative; margin-top: 18px; padding: 20px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-primary); }.detail h2 { margin: 0 30px 4px 0; }.detail > p { margin: 0; color: var(--text-secondary); }.close { position: absolute; top: 12px; right: 12px; border: 0; background: none; color: var(--text-tertiary); font-size: 24px; cursor: pointer; }dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }dl div { padding: 10px; border-radius: 8px; background: var(--bg-secondary); }dt { color: var(--text-tertiary); font-size: 11px; }dd { margin: 4px 0 0; text-transform: capitalize; }h3 { font-size: 14px; }
+  .detail { position: relative; margin-top: 18px; padding: 20px; border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--bg-primary); }.detail h2 { margin: 0 30px 4px 0; }.detail > p { margin: 0; color: var(--text-secondary); }.close { position: absolute; top: 12px; right: 12px; border: 0; background: none; color: var(--text-tertiary); font-size: 24px; cursor: pointer; }dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }dl div { padding: 10px; border-radius: 8px; background: var(--bg-secondary); }dt { color: var(--text-tertiary); font-size: 11px; }dd { margin: 4px 0 0; text-transform: capitalize; }h3 { font-size: 14px; }.note { font-size: 13px; color: var(--text-tertiary); }.note a { color: var(--portal-accent); font-weight: 600; }
   @media (max-width: 780px) { .heading { align-items: flex-start; flex-direction: column; }.filters { width: 100%; flex-wrap: wrap; }dl { grid-template-columns: repeat(2, 1fr); } }
 </style>
