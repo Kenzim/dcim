@@ -1,0 +1,30 @@
+{
+  "id": "vies_validator",
+  "name": "VIES VAT number validator",
+  "version": "1.0.0",
+  "description": "Checks EU VAT numbers against the European Commission's VIES service, so Rackflow can apply reverse charge to business customers with a valid number.",
+  "author": "Rackflow",
+  "rackflow_api": ">=1.1,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["tax.validate_id", "http.outbound"],
+  "settings": [
+    {"key": "requester_country", "label": "Your VAT country", "type": "string", "max_length": 2, "pattern": "^([A-Z]{2})?$",
+     "help": "Two letter VIES country code of your own VAT number, for example DE, or EL for Greece. Set it together with your VAT number to receive a consultation number for each check, the evidence a tax authority accepts."},
+    {"key": "requester_vat_number", "label": "Your VAT number", "type": "string", "max_length": 20, "pattern": "^[A-Za-z0-9+*]{0,20}$",
+     "help": "Your own VAT number without the country code. Leave both fields empty to check numbers without a consultation number."},
+    {"key": "endpoint", "label": "VIES endpoint", "type": "url", "default": "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number", "required": true,
+     "help": "The Commission's REST address. Use https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-test-service to try the plugin with the test numbers."}
+  ],
+  "provides": [
+    {
+      "kind": "tax_id_validator",
+      "id": "vies",
+      "label": "EU VIES",
+      "description": "Online check of EU VAT numbers with the European Commission.",
+      "countries": ["AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "ES", "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK"],
+      "id_types": ["eu_vat"],
+      "timeout_seconds": 8,
+      "rate_limit": {"calls": 60, "per_seconds": 60}
+    }
+  ]
+}

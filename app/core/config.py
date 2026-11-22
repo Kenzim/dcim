@@ -134,6 +134,8 @@ class Settings(BaseSettings):
 
     # Plugin system (docs/plugin-system.md). Packages live outside app/.
     plugins_dir: str = "plugins"
+    # Read-only folder of first-party packages; relative paths count from the repository root.
+    bundled_plugins_dir: str = "plugin_packages"
     run_plugin_worker: bool = True
     plugin_worker_interval_seconds: int = 5
     plugin_guest_exec_per_minute: int = 6

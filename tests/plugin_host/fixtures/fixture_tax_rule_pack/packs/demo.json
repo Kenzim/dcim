@@ -1,0 +1,12 @@
+{
+  "pack_id": "demo_pack",
+  "version": "2026.11.1",
+  "jurisdictions": ["XX"],
+  "classes": ["standard"],
+  "legal_notes": {},
+  "rules": [
+    {"key": "xx_standard", "name": "XX VAT 10%", "country": "XX", "class": "standard", "customer_type": "consumer",
+     "rate_percent": "10.0000", "jurisdiction": "XX", "rounding_point": "invoice_rate", "rounding_rule": "round_half_up",
+     "valid_from": "2026-01-01", "valid_to": null, "legal_note_key": null}
+  ]
+}

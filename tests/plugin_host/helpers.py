@@ -30,6 +30,7 @@ def setup_env(mock_redis, monkeypatch, tmp_path) -> Path:
     root = tmp_path / "plugins"
     root.mkdir()
     monkeypatch.setattr(settings, "plugins_dir", str(root))
+    monkeypatch.setattr(settings, "bundled_plugins_dir", str(tmp_path / "bundled"))
     return root
 
 

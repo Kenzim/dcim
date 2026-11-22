@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import importlib.util
 import json
 import logging
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from app.core.config import settings
+from app.plugin_host import kinds
 from app.plugin_host.catalogue import SUPPORTED_API_VERSIONS
 from app.plugin_host.manifest import Manifest, ManifestError, validate_manifest
 
@@ -29,8 +31,39 @@ class PluginLoadError(RuntimeError):
     pass
 
 
+def _install_sdk_modules() -> None:
+    """Make ``rackflow_plugin.kinds`` importable by plugin code (API 1.1)."""
+    if "rackflow_plugin.kinds" in sys.modules:
+        return
+    package = types.ModuleType("rackflow_plugin")
+    package.__path__ = []  # type: ignore[attr-defined]
+    package.kinds = kinds  # type: ignore[attr-defined]
+    sys.modules.setdefault("rackflow_plugin", package)
+    sys.modules["rackflow_plugin.kinds"] = kinds
+
+
+_install_sdk_modules()
+
+
 def plugins_root() -> Path:
     return Path(settings.plugins_dir).expanduser().resolve()
+
+
+def bundled_root() -> Path:
+    """The read-only folder of first-party packages; a relative setting counts from the repository root."""
+    path = Path(settings.bundled_plugins_dir).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[2] / path
+    return path.resolve()
+
+
+def package_roots() -> list[tuple[Path, bool]]:
+    """Every folder plugins are read from, with whether it is the bundled one."""
+    roots = [(plugins_root(), False)]
+    bundled = bundled_root()
+    if bundled != roots[0][0]:
+        roots.append((bundled, True))
+    return roots
 
 
 def package_hash(path: Path) -> str:
@@ -55,6 +88,7 @@ class Package:
     raw: Optional[dict] = None
     errors: list[str] = field(default_factory=list)
     code_hash: Optional[str] = None
+    bundled: bool = False
 
     @property
     def valid(self) -> bool:
@@ -89,6 +123,7 @@ def read_package(path: Path) -> Package:
     entry = path / manifest.entry
     if not entry.resolve().is_relative_to(path.resolve()) or not entry.is_file():
         package.errors.append(f"entry module {manifest.entry} is missing")
+    package.errors.extend(_check_pack_files(path, manifest))
     try:
         package.code_hash = package_hash(path)
     except OSError as exc:
@@ -96,25 +131,91 @@ def read_package(path: Path) -> Package:
     return package
 
 
-def discover(root: Optional[Path] = None) -> list[Package]:
-    root = root or plugins_root()
+def _check_pack_files(path: Path, manifest: Manifest) -> list[str]:
+    """The ``pack.file`` of every ``tax_rule_pack`` provider must exist in the package and be a valid pack."""
+    errors = []
+    for provide in manifest.provides:
+        if provide.pack is None:
+            continue
+        pack_file = path / provide.pack.file
+        if not pack_file.resolve().is_relative_to(path.resolve()) or not pack_file.is_file():
+            errors.append(f"pack file {provide.pack.file} of provider {provide.id} is missing")
+            continue
+        try:
+            data = json.loads(pack_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            errors.append(f"pack file {provide.pack.file} is not valid JSON: {exc}")
+            continue
+        errors.extend(_pack_schema_errors(provide.pack.file, data))
+    return errors
+
+
+def _pack_schema_errors(name: str, data: Any) -> list[str]:
+    """Validate a pack with ``PackSchema`` of the tax pack importer; plain JSON objects pass until it exists."""
+    schema = None
+    for module_name in ("app.services.tax.pack_import", "app.services.tax.packs"):
+        try:
+            schema = getattr(importlib.import_module(module_name), "PackSchema", None)
+        except ImportError:
+            schema = None
+        if schema is not None:
+            break
+    if schema is None:
+        return [] if isinstance(data, dict) else [f"pack file {name} must hold a JSON object"]
+    try:
+        schema.model_validate(data)
+    except Exception as exc:  # noqa: BLE001 - any schema failure is the package's error
+        return [f"pack file {name} does not pass the pack schema: {str(exc)[:300]}"]
+    return []
+
+
+def _scan(root: Path, bundled: bool) -> list[Package]:
     if not root.is_dir():
         return []
     out = []
     for child in sorted(root.iterdir()):
         if child.is_dir() and not child.name.startswith(".") and (child / "plugin.json").exists():
-            out.append(read_package(child))
+            package = read_package(child)
+            package.bundled = bundled
+            out.append(package)
+    return out
+
+
+def _conflict_message(directory: str) -> str:
+    return (
+        f"the plugin {directory!r} exists in both the plugins folder and the bundled plugins folder; "
+        "remove one copy before it can be installed or run"
+    )
+
+
+def discover(root: Optional[Path] = None) -> list[Package]:
+    """Packages of ``root``, or of the plugins folder and then the bundled folder when no root is given."""
+    if root is not None:
+        return _scan(root, False)
+    out: list[Package] = []
+    for folder, bundled in package_roots():
+        out.extend(_scan(folder, bundled))
+    count: dict[str, int] = {}
+    for package in out:
+        count[package.directory] = count.get(package.directory, 0) + 1
+    for package in out:
+        if count[package.directory] > 1:
+            package.errors.append(_conflict_message(package.directory))
     return out
 
 
 def find_package(directory: str, root: Optional[Path] = None) -> Package:
-    root = root or plugins_root()
     if not directory or "/" in directory or "\\" in directory or directory.startswith("."):
         raise PluginLoadError("Unknown plugin directory")
-    path = root / directory
-    if not (path / "plugin.json").is_file():
+    roots = [(root, False)] if root is not None else package_roots()
+    found = [(base / directory, bundled) for base, bundled in roots if (base / directory / "plugin.json").is_file()]
+    if not found:
         raise PluginLoadError("Unknown plugin directory")
-    return read_package(path)
+    package = read_package(found[0][0])
+    package.bundled = found[0][1]
+    if len(found) > 1:
+        package.errors.append(_conflict_message(directory))
+    return package
 
 
 class Registrar:
@@ -128,6 +229,9 @@ class Registrar:
         self.actions: dict[str, Callable] = {}
         self.mcp_tools: dict[str, Callable] = {}
         self.lifecycle_hooks: dict[str, Callable] = {}
+        self.provider_factories: dict[tuple[str, str], Callable] = {}
+        # Filled by import_package: one instance per factory, created once per load.
+        self.providers: dict[tuple[str, str], Any] = {}
 
     def _binder(self, table: dict, name: str, kind: str) -> Callable[[Callable], Callable]:
         if not isinstance(name, str) or not name:
@@ -163,6 +267,23 @@ class Registrar:
             raise PluginLoadError(f"unknown lifecycle step {name!r}")
         return self._binder(self.lifecycle_hooks, name, "lifecycle handler")
 
+    def provider(self, kind: str, provider_id: str) -> Callable[[Callable], Callable]:
+        if kind not in kinds.KINDS:
+            raise PluginLoadError(f"unknown provider kind {kind!r}")
+        if not isinstance(provider_id, str) or not provider_id:
+            raise PluginLoadError("provider needs an id")
+        key = (kind, provider_id)
+
+        def bind(factory: Callable) -> Callable:
+            if key in self.provider_factories:
+                raise PluginLoadError(f"provider {kind}:{provider_id} is registered twice")
+            if not callable(factory):
+                raise PluginLoadError(f"provider {kind}:{provider_id} is not a class or a factory function")
+            self.provider_factories[key] = factory
+            return factory
+
+        return bind
+
 
 class _PublicRegistrar:
     """What register(plugin) receives: only the decorators, never the tables."""
@@ -174,6 +295,7 @@ class _PublicRegistrar:
         self.action = registrar.action
         self.mcp_tool = registrar.mcp_tool
         self.lifecycle = registrar.lifecycle
+        self.provider = registrar.provider
         self.id = registrar.plugin_id
 
 
@@ -203,6 +325,28 @@ def _check_handlers(manifest: Manifest, reg: Registrar) -> list[str]:
             errors.append(f"{kind} {name!r} is declared but has no handler")
         for name in sorted(registered - declared):
             errors.append(f"{kind} {name!r} has a handler but is not declared in plugin.json")
+    declared = {(p.kind, p.id) for p in manifest.provides}
+    registered = set(reg.provider_factories)
+    for kind, provider_id in sorted(declared - registered):
+        errors.append(f"provider {kind}:{provider_id} is declared but has no @plugin.provider")
+    for kind, provider_id in sorted(registered - declared):
+        errors.append(f"provider {kind}:{provider_id} is registered but not declared in provides")
+    return errors
+
+
+def _build_providers(manifest: Manifest, reg: Registrar) -> list[str]:
+    """Create each provider once and check it against the protocol of its kind."""
+    errors = []
+    for (kind, provider_id), factory in sorted(reg.provider_factories.items()):
+        try:
+            obj = factory()
+        except Exception as exc:  # noqa: BLE001 - a constructor failure is a load error
+            errors.append(f"provider {kind}:{provider_id} could not be created: {type(exc).__name__}: {exc}")
+            continue
+        problems = kinds.check_provider(kind, obj)
+        errors.extend(f"provider {kind}:{provider_id}: {problem}" for problem in problems)
+        if not problems:
+            reg.providers[(kind, provider_id)] = obj
     return errors
 
 
@@ -256,6 +400,8 @@ def import_package(package: Package) -> LoadedPlugin:
     except Exception as exc:  # noqa: BLE001
         raise PluginLoadError(f"register(plugin) failed: {type(exc).__name__}: {exc}") from exc
     errors = _check_handlers(manifest, reg)
+    if not errors:
+        errors = _build_providers(manifest, reg)
     if errors:
         raise PluginLoadError("; ".join(errors))
     return LoadedPlugin(manifest=manifest, code_hash=package.code_hash or "", module=module, handlers=reg)
