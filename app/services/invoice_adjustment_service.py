@@ -359,10 +359,15 @@ def _snapshots(db: Session, invoice: Invoice, account_id: Optional[int], now: da
 
 
 def _worth_and_tax_before(db: Session, invoice: Invoice, key: str) -> tuple[int, int]:
-    """The invoice's worth and tax: its own, plus debit notes, less credit notes.
+    """The invoice's tax base: what it is worth and its tax, for the tax of a credit note.
 
-    Only notes issued before the note with idempotency key ``key`` count, so a
-    retry of that note sees the figures its first request saw.
+    The invoice's own total and tax, plus debit notes, less credit notes.
+    Overpayment debit notes do not count: they only move money that was paid
+    beyond the invoice to account credit, and carry no tax, so counting them
+    would dilute the tax of every later credit note. Only notes issued before
+    the note with idempotency key ``key`` count, so a retry of that note sees
+    the figures its first request saw. The caller holds the invoice lock;
+    the read is a locking one so it sees notes committed meanwhile.
     """
     stmt = (
         select(
@@ -370,8 +375,12 @@ def _worth_and_tax_before(db: Session, invoice: Invoice, key: str) -> tuple[int,
             func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
             func.coalesce(func.sum(InvoiceAdjustment.tax_cents), 0),
         )
-        .where(InvoiceAdjustment.invoice_id == invoice.id)
+        .where(
+            InvoiceAdjustment.invoice_id == invoice.id,
+            InvoiceAdjustment.reason_code != AdjustmentReason.OVERPAYMENT,
+        )
         .group_by(InvoiceAdjustment.kind)
+        .with_for_update()
     )
     earlier = db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.idempotency_key == key))
     if earlier is not None:
@@ -384,6 +393,19 @@ def _worth_and_tax_before(db: Session, invoice: Invoice, key: str) -> tuple[int,
     return worth, tax
 
 
+def _tax_of(amount_cents: int, worth: int, tax: int) -> int:
+    """The tax part of ``amount_cents`` credited against a tax base of ``worth`` and ``tax``.
+
+    In proportion, with the amount bounded by the worth and the tax by both,
+    so the net part is never negative. A base worth nothing gives no tax.
+    """
+    if worth <= 0:
+        return 0
+    return refund_tax_proportional(
+        max(0, min(int(amount_cents), worth)), max(0, min(tax, worth)), worth
+    )
+
+
 def _default_amount_lines(
     db: Session, invoice: Invoice, amount_cents: int, description: str, key: str
 ) -> list[NoteLine]:
@@ -391,12 +413,7 @@ def _default_amount_lines(
     # crediting a taxed debit note takes that note's tax too. An amount above
     # the worth is refused by the caller's checks; its tax here is bounded.
     worth, current_tax = _worth_and_tax_before(db, invoice, key)
-    if worth <= 0:
-        tax = 0
-    else:
-        tax = refund_tax_proportional(
-            min(amount_cents, worth), max(0, min(current_tax, worth)), worth
-        )
+    tax = _tax_of(amount_cents, worth, current_tax)
     return [
         NoteLine(
             kind=InvoiceLineKind.ADJUSTMENT,
@@ -538,9 +555,10 @@ def _lock_invoice(db: Session, invoice: Invoice, **locks: bool) -> Invoice:
 
 
 def _balance(db: Session, invoice: Invoice):
+    """The balance of a locked invoice, read with locking reads (``balance(for_update=True)``)."""
     from app.services.invoice_service import InvoiceService
 
-    return InvoiceService.balance(db, invoice)
+    return InvoiceService.balance(db, invoice, for_update=True)
 
 
 def _recompute(db: Session, invoice: Invoice, cause: str) -> None:
@@ -696,6 +714,22 @@ class InvoiceAdjustmentService:
         _fire_debit_note(db, note)
         _recompute(db, invoice, "debit_note")
         return note
+
+    @staticmethod
+    def tax_base(db: Session, invoice: Invoice, *, before_key: str) -> tuple[int, int]:
+        """The invoice's refundable worth and tax, ``(worth_cents, tax_cents)``.
+
+        The one rule for the tax of a credit note or a refund: the invoice plus
+        debit notes, leaving out overpayment debit notes, less credit notes,
+        counting only notes issued before the note with key ``before_key``.
+        The caller holds the invoice lock.
+        """
+        return _worth_and_tax_before(db, invoice, before_key)
+
+    @staticmethod
+    def tax_of(amount_cents: int, worth_cents: int, tax_cents: int) -> int:
+        """The tax part of an amount against a tax base from ``tax_base``."""
+        return _tax_of(amount_cents, worth_cents, tax_cents)
 
     @staticmethod
     def issue_for_refund(

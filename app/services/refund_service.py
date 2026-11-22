@@ -837,7 +837,7 @@ class RefundService:
         if lines:
             tax = sum(int(_line_value(line, "tax_cents") or 0) for line in lines)
         else:
-            tax = RefundService._cumulative_tax(db, refund, invoice)
+            tax = RefundService._refund_tax(db, refund, invoice)
         refund.refund_metadata = {**(refund.refund_metadata or {}), "tax_cents": tax}
         adjustment = None
         if refund.issue_credit_note:
@@ -857,18 +857,26 @@ class RefundService:
         return adjustment
 
     @staticmethod
-    def _cumulative_tax(db: Session, refund: Refund, invoice: Invoice) -> int:
-        """Tax part of this refund, worked out on everything refunded on the invoice so far.
+    def _refund_tax(db: Session, refund: Refund, invoice: Invoice) -> int:
+        """Tax part of this v2 refund, in proportion to what the invoice still has to refund.
 
-        ``tax(previous + this) - tax already refunded``, so rounding never takes
-        the refunded tax past the invoice's tax and no refund's tax is negative.
+        The base is ``InvoiceAdjustmentService.tax_base`` before this refund's
+        credit note: the invoice plus debit notes (not overpayment notes), less
+        earlier credit notes, which include the notes of earlier refunds. An
+        earlier refund that issued no credit note (a dispute, say) is not in
+        that base, so its amount and tax are taken off here; a refund with a
+        note is counted through its note only. The base shrinks by what each
+        refund takes, so refunds that add up to the base take exactly its tax
+        and no refund's tax is negative or above its amount.
         """
-        invoice_tax = int(invoice.tax_cents or 0)
-        invoice_total = int(invoice.amount_cents or 0)
-        if invoice_tax <= 0 or invoice_total <= 0:
-            return 0
+        from app.models.invoice_adjustment import InvoiceAdjustment
+        from app.services.invoice_adjustment_service import InvoiceAdjustmentService
+
+        worth, tax = InvoiceAdjustmentService.tax_base(
+            db, invoice, before_key=f"refund-cn:{refund.id}"
+        )
         previous = db.execute(
-            select(Refund.amount_cents, Refund.refund_metadata)
+            select(Refund.id, Refund.amount_cents, Refund.refund_metadata)
             .where(
                 Refund.invoice_id == invoice.id,
                 Refund.status == RefundStatus.SUCCEEDED,
@@ -876,16 +884,30 @@ class RefundService:
             )
             .with_for_update()
         ).all()
-        previous_cents = sum(int(amount) for amount, _meta in previous)
-        already = sum(
-            int((meta or {}).get("tax_cents"))
-            if (meta or {}).get("tax_cents") is not None
-            else refund_tax_proportional(min(int(amount), invoice_total), invoice_tax, invoice_total)
-            for amount, meta in previous
+        noted = set(
+            db.scalars(
+                select(InvoiceAdjustment.idempotency_key).where(
+                    InvoiceAdjustment.invoice_id == invoice.id,
+                    InvoiceAdjustment.idempotency_key.in_(
+                        [f"refund-cn:{refund_id}" for refund_id, _amount, _meta in previous]
+                    ),
+                )
+            )
         )
-        through = min(previous_cents + int(refund.amount_cents), invoice_total)
-        tax = refund_tax_proportional(through, invoice_tax, invoice_total) - already
-        return max(0, min(tax, int(refund.amount_cents)))
+        invoice_tax = int(invoice.tax_cents or 0)
+        invoice_total = int(invoice.amount_cents or 0)
+        for refund_id, amount, meta in previous:
+            if f"refund-cn:{refund_id}" in noted:
+                continue
+            worth -= int(amount)
+            tax -= (
+                int((meta or {}).get("tax_cents"))
+                if (meta or {}).get("tax_cents") is not None
+                else refund_tax_proportional(
+                    min(int(amount), invoice_total), min(invoice_tax, invoice_total), invoice_total
+                )
+            )
+        return InvoiceAdjustmentService.tax_of(int(refund.amount_cents), worth, tax)
 
     @staticmethod
     def _dispute_policy(db: Session, refund: Refund, invoice: Invoice) -> None:
