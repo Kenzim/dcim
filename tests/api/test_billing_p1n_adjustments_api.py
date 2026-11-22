@@ -133,6 +133,25 @@ def test_admin_issues_a_debit_note(client, db_session, admin_headers):
     assert (response.json()["kind"], response.json()["number_display"], response.json()["total_cents"]) == ("debit", "DN-1", 180)
 
 
+@pytest.mark.parametrize("kind", ["credit-notes", "debit-notes"])
+def test_a_note_waiting_for_an_exchange_rate_answers_409(client, db_session, admin_headers, monkeypatch, kind):
+    from app.services.invoice_adjustment_service import InvoiceAdjustmentService
+    from app.services.tax.exchange_rates import FX_RATE_MISSING_MESSAGE, ExchangeRateMissing
+
+    def _raise(*_args, **_kwargs):
+        raise ExchangeRateMissing("USD", "2026-11")
+
+    monkeypatch.setattr(InvoiceAdjustmentService, "issue_credit_note", staticmethod(_raise))
+    monkeypatch.setattr(InvoiceAdjustmentService, "issue_debit_note", staticmethod(_raise))
+    invoice = _invoice(db_session, BillingAccountDAO.ensure_client_account(db_session, _user(db_session, f"fx-{kind}").id))
+    body = {"reason": "correction", "lines": [{"description": "Extra", "unit_cents": 150}]}
+    if kind == "credit-notes":
+        body = {"amount_cents": 100, "reason": "goodwill"}
+    response = client.post(f"/api/admin/billing/invoices/{invoice.id}/{kind}", headers=admin_headers, json=body)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {"code": "tax_fx_rate_missing", "message": FX_RATE_MISSING_MESSAGE}
+
+
 def test_note_issuing_requires_an_admin_and_is_blocked_during_impersonation(client, db_session, test_admin_user):
     from app.services.user_session_service import mint_user_session
 

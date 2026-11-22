@@ -160,14 +160,30 @@ def _engine_taxed(invoice: Any) -> bool:
 def note_rate(db: Session, invoice: Any, tax_cents: int) -> Optional[NoteRate]:
     """The rate of a note with VAT ``tax_cents`` on ``invoice``, None when it needs no sterling.
 
-    A note uses its invoice's frozen rate.
+    A note uses its invoice's frozen rate. On a UK VAT invoice in another
+    currency that froze none because its own VAT was zero, a taxed note uses
+    the stored rate of the UK month of the invoice's tax point (the rule of
+    publish), share-locked after the invoice as publish does, and raises
+    ``ExchangeRateMissing`` when that is not stored.
     """
     if int(tax_cents or 0) <= 0 or invoice is None or not _engine_taxed(invoice):
         return None
     if invoice.fx_rate is not None:
         rate_id = int(invoice.fx_rate_id) if invoice.fx_rate_id is not None else None
         return NoteRate(Decimal(invoice.fx_rate), str(invoice.fx_period), str(invoice.fx_source), rate_id)
-    return None
+    registration = (
+        db.get(SellerTaxRegistration, int(invoice.seller_registration_id))
+        if invoice.seller_registration_id is not None
+        else None
+    )
+    currency = str(invoice.currency or "").upper()
+    if not needs_conversion(registration, currency, int(tax_cents)):
+        return None
+    period = period_of(invoice.tax_point_at or invoice.issued_at)
+    row = stored_rate(db, currency, period, share_lock=True)
+    if row is None:
+        raise ExchangeRateMissing(currency, period)
+    return NoteRate(Decimal(row.units_per_gbp), period, row.source, int(row.id))
 
 
 def credited_gbp_cents(invoice_tax_cents: int, credited_tax_cents: int, rate: Decimal) -> int:

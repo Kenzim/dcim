@@ -292,6 +292,56 @@ def test_debit_and_credit_notes_add_up_on_their_own_sides(db_session, account, u
     assert sum(n.tax_total_gbp_cents for n in credits) == invoice.tax_total_gbp_cents + 746
 
 
+def zero_rated_invoice(db, account, monkeypatch, moment=NOV_15):
+    """A UK VAT invoice in USD whose only line is zero-rated, so it freezes no sterling."""
+    _series(db, DocumentType.DEBIT_NOTE, "DN")
+    classes = seed_classes(db)
+    add_rule(db, name="UK VAT 0%", rate="0", tax_class="zero", jurisdiction="GB", source="pack",
+             legal_note_key=None)
+    at(monkeypatch, moment)
+    invoice = InvoiceService.create(
+        db, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=1000, currency="USD",
+        lines=[NewLine("Book", 1000, kind=InvoiceLineKind.PRODUCT, tax_cents=0, tax_class_id=classes["zero"])],
+    )
+    assert invoice.tax_cents == 0 and invoice.seller_registration_id is not None
+    assert frozen(invoice) == (None,) * 4
+    return invoice
+
+
+def test_a_taxed_debit_note_on_a_zero_vat_invoice_uses_its_tax_points_month(
+    db_session, account, uk_vat, monkeypatch
+):
+    store(db_session, "2026-11", "1.3396")
+    invoice = zero_rated_invoice(db_session, account, monkeypatch)
+    store(db_session, "2026-12", "1.3158")
+    at(monkeypatch, datetime(2026, 12, 2, 12, tzinfo=timezone.utc))
+    note = debit(db_session, invoice, 500, "fx-zero-dn")
+    assert note.tax_cents == 100
+    assert (note.fx_rate, note.fx_period, note.fx_source, note.tax_total_gbp_cents) == (
+        Decimal("1.3396"), "2026-11", "hmrc_monthly", 75
+    )
+    assert note.fx_rate_id == exchange_rates.stored_rate(db_session, "USD", "2026-11").id
+    assert build_document(db_session, note)["tax_summary"][-1] == (
+        "VAT total in sterling: GBP 0.75 (HMRC monthly exchange rate for 2026-11: USD 1.3396 = GBP 1)"
+    )
+    back = credit(db_session, invoice, int(invoice.amount_cents) + int(note.total_cents), "fx-zero-cn")
+    assert (back.tax_cents, back.fx_period, back.tax_total_gbp_cents) == (100, "2026-11", 75)
+
+
+def test_a_taxed_debit_note_on_a_zero_vat_invoice_without_a_rate_is_refused(
+    db_session, account, uk_vat, monkeypatch
+):
+    from app.models.invoice_adjustment import InvoiceAdjustment
+
+    invoice = zero_rated_invoice(db_session, account, monkeypatch)
+    savepoint = db_session.begin_nested()
+    with pytest.raises(ExchangeRateMissing) as raised:
+        debit(db_session, invoice, 500, "fx-zero-missing")
+    savepoint.rollback()
+    assert (raised.value.currency, raised.value.period) == ("USD", "2026-11")
+    assert db_session.scalar(select(func.count(InvoiceAdjustment.id))) == 0
+
+
 @settings_h(max_examples=300, deadline=None)
 @given(
     invoice_tax=st.integers(min_value=1, max_value=500_000),
