@@ -199,6 +199,10 @@ class InvoiceTransitionError(InvoiceError):
     """An edge that is not in the transition table of the current engine mode."""
 
 
+class TaxQuoteChanged(InvoiceError):
+    """``create`` discarded a prepared ``tax_result`` whose context changed, and the total moved with it."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -573,7 +577,8 @@ class InvoiceService:
             totals = compute_totals(line_rows, prices_include_tax=prices_include_tax)
             untaxed = totals.subtotal_cents - totals.discount_cents
             if int(amount_cents) not in (totals.amount_cents, untaxed):
-                raise InvoiceError(
+                discarded = tax_result is not None and verified_tax is not tax_result
+                raise (TaxQuoteChanged if discarded else InvoiceError)(
                     f"invoice lines add up to {untaxed} before tax and {totals.amount_cents} with it, "
                     f"not {int(amount_cents)}"
                 )

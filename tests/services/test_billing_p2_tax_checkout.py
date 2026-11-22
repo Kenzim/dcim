@@ -265,6 +265,95 @@ def test_v2_needs_invoice_engine_v2(db_session):
     assert CheckoutService._tax_mode(db_session) == "shadow"
 
 
+# --- v2: a coupon on a product outside the standard class ---
+
+
+def _reduced_order(db, *, coupon_cents=100):
+    """A GB buyer, a product in class ``reduced`` (a 5% rule beside the 20% one) and a coupon."""
+    classes = seed_classes(db)
+    add_rule(db, name="UK VAT 5%", rate="5", tax_class="reduced", jurisdiction="GB", source="pack",
+             rounding_point="line")
+    user, account = _buyer(db, "GB")
+    product, plan = _product(db, price_cents=1000)
+    product.product.tax_class_id = classes["reduced"]
+    plan.currency = "GBP"
+    account.currency = "GBP"
+    code = f"P2T{uuid.uuid4().hex[:6]}"
+    db.add(Coupon(code=code, currency="GBP", enabled=True, amount_off_cents=coupon_cents))
+    db.flush()
+    return user, account, product, plan, code
+
+
+def _ten_percent_provider(monkeypatch):
+    from app.plugin_host import providers
+    from app.plugin_host.kinds import TaxProviderPart, TaxProviderResult
+
+    def call_provider(kind, ref, method, request, *args, **kwargs):
+        lines = {}
+        for item in request.lines:
+            net = int(item.net_cents)
+            lines[item.key] = (
+                (TaxProviderPart(name="Acme 10%", rate_percent="10", jurisdiction="GB", base_cents=net,
+                                 tax_cents=net // 10),)
+                if net > 0 else ()
+            )
+        return TaxProviderResult(lines=lines, reference="acme-1")
+
+    monkeypatch.setattr(providers, "call_provider", call_provider)
+
+
+def _invoice_matches_quote(db, order, quote):
+    invoice = db.get(Invoice, order.invoice_id)
+    assert (invoice.tax_cents, invoice.amount_cents) == (quote.tax_cents, quote.total_cents)
+    assert invoice.tax_summary == quote.tax_summary
+    return invoice
+
+
+def test_v2_coupon_on_a_reduced_product_keeps_the_quote_context(db_session, tax_v2, shadow):
+    user, account, product, plan, code = _reduced_order(db_session)
+    quote = _quote(db_session, account, product, plan, coupon_code=code)
+    assert quote.discount_cents == 100 and quote.tax_cents > 0
+    order = _place(db_session, account, user, product, plan, coupon_code=code)
+    _invoice_matches_quote(db_session, order, quote)
+    assert not [r for r in shadow if r["check"] == "t5_context_changed"]
+
+
+def test_v2_coupon_on_a_reduced_product_with_a_provider(db_session, tax_v2, shadow, monkeypatch):
+    _ten_percent_provider(monkeypatch)
+    set_setting(db_session, "billing_tax_provider", "acme_tax:main")
+    user, account, product, plan, code = _reduced_order(db_session)
+    quote = _quote(db_session, account, product, plan, coupon_code=code)
+    assert quote.tax_result.engine == "provider:acme_tax:main" and quote.tax_cents == 100
+    order = _place(db_session, account, user, product, plan, coupon_code=code)
+    invoice = _invoice_matches_quote(db_session, order, quote)
+    assert invoice.tax_engine == "provider:acme_tax:main"
+    assert not [r for r in shadow if r["check"] == "t5_context_changed"]
+
+
+@pytest.mark.parametrize("same_tax", [True, False], ids=["same tax", "other tax"])
+def test_v2_a_changed_context_at_place_order_asks_for_a_new_quote(db_session, tax_v2, monkeypatch, same_tax):
+    from dataclasses import replace
+
+    from app.services.checkout_service import TAX_QUOTE_CHANGED_MESSAGE, CheckoutError
+
+    user, account, product, plan, code = _reduced_order(db_session)
+    real_quote = CheckoutService.quote
+
+    def stale_quote(*args, **kwargs):
+        quote = real_quote(*args, **kwargs)
+        result = replace(quote.tax_result, context_hash="0" * 64)
+        if not same_tax:
+            result = replace(result, lines={k: replace(v, tax_cents=v.tax_cents + 7) for k, v in result.lines.items()})
+            quote = replace(quote, tax_cents=quote.tax_cents + 7, total_cents=quote.total_cents + 7)
+        return replace(quote, tax_result=result)
+
+    monkeypatch.setattr(CheckoutService, "quote", staticmethod(stale_quote))
+    with pytest.raises(CheckoutError) as raised:
+        _place(db_session, account, user, product, plan, coupon_code=code)
+    assert str(raised.value) == TAX_QUOTE_CHANGED_MESSAGE
+    db_session.rollback()
+
+
 # --- the tax_rates mirror (design 3) ---
 
 
