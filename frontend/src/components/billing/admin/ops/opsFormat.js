@@ -36,3 +36,14 @@ export function detailPairs(detail, skip = []) {
     .filter(([key]) => !skip.includes(key))
     .map(([key, value]) => [label(key), detailValue(key, value, currency)]);
 }
+
+/** The lines to show for a failed template call: one per template error, else the message. */
+export function errorLines(err) {
+  if (Array.isArray(err?.errors) && err.errors.length) {
+    return err.errors.map((item) => {
+      const where = [item.field ? label(item.field) : '', item.line ? `line ${item.line}` : ''].filter(Boolean).join(', ');
+      return where ? `${where}: ${item.message}` : item.message;
+    });
+  }
+  return [err?.message || 'The request failed.'];
+}

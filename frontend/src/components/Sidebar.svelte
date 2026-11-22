@@ -95,6 +95,7 @@
   $: isBillingJobsActive = currentPath.startsWith('/admin/billing-jobs');
   $: isBillingNonpaymentActive = currentPath.startsWith('/admin/billing-nonpayment');
   $: isBillingCancellationsActive = currentPath.startsWith('/admin/billing-cancellations');
+  $: isCommerceEmailTemplatesActive = currentPath.startsWith('/admin/commerce/email-templates');
   $: isCommerceTransactionsActive = currentPath.startsWith('/admin/commerce/transactions');
   $: isCommerceGatewayLogsActive = currentPath.startsWith('/admin/commerce/gateway-logs');
   $: isCommerceEmailLogActive = currentPath.startsWith('/admin/commerce/email-log');
@@ -523,6 +524,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
             <span>Cancellations</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/commerce/email-templates" class="nav-link" class:active={isCommerceEmailTemplatesActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
+            <span>Email Templates</span>
           </a>
         </li>
         <li class="nav-item">

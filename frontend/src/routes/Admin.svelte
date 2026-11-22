@@ -62,6 +62,7 @@
   import BillingJobs from '../components/billing/admin/ops/BillingJobs.svelte';
   import NonpaymentPolicies from '../components/billing/admin/ops/NonpaymentPolicies.svelte';
   import CancellationQueue from '../components/billing/admin/ops/CancellationQueue.svelte';
+  import EmailTemplates from '../components/billing/admin/ops/EmailTemplates.svelte';
   import CommerceTransactions from '../components/commerce/CommerceTransactions.svelte';
   import CommerceGatewayLogs from '../components/commerce/CommerceGatewayLogs.svelte';
   import CommerceEmailLog from '../components/commerce/CommerceEmailLog.svelte';
@@ -424,6 +425,8 @@
         <NonpaymentPolicies />
       {:else if routeName === 'billing-cancellations'}
         <CancellationQueue />
+      {:else if routeName === 'commerce/email-templates'}
+        <EmailTemplates />
       {:else if routeName === 'commerce/transactions'}
         <CommerceTransactions />
       {:else if routeName === 'commerce/gateway-logs'}
