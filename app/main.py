@@ -459,6 +459,10 @@ api_router.include_router(billing_refunds_admin_api.router, tags=["billing-refun
 from app.api import billing_engines_admin as billing_engines_admin_api
 api_router.include_router(billing_engines_admin_api.router, tags=["billing-engines-admin"])
 
+# Billing tax: classes, rules, registrations, exemptions, packs, legal notes, preview
+from app.api import billing_tax_admin as billing_tax_admin_api
+api_router.include_router(billing_tax_admin_api.router, tags=["billing-tax-admin"])
+
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api
 api_router.include_router(scripts_admin_api.router, tags=["scripts-admin"])
