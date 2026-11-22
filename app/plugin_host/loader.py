@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.plugin_host import kinds
 from app.plugin_host.catalogue import SUPPORTED_API_VERSIONS
 from app.plugin_host.manifest import Manifest, ManifestError, validate_manifest
+from app.services.tax.packs.schema import PackFormatError, validate_pack
 
 logger = logging.getLogger(__name__)
 
@@ -160,20 +161,12 @@ def _check_pack_files(path: Path, manifest: Manifest) -> list[str]:
 
 
 def _pack_schema_errors(name: str, data: Any) -> list[str]:
-    """Validate a pack with ``PackSchema`` of the tax pack importer; plain JSON objects pass until it exists."""
-    schema = None
-    for module_name in ("app.services.tax.pack_import", "app.services.tax.packs"):
-        try:
-            schema = getattr(importlib.import_module(module_name), "PackSchema", None)
-        except ImportError:
-            schema = None
-        if schema is not None:
-            break
-    if schema is None:
-        return [] if isinstance(data, dict) else [f"pack file {name} must hold a JSON object"]
+    """Validate a pack with the tax pack format (``app.services.tax.packs.schema``)."""
+    if not isinstance(data, dict):
+        return [f"pack file {name} must hold a JSON object"]
     try:
-        schema.model_validate(data)
-    except Exception as exc:  # noqa: BLE001 - any schema failure is the package's error
+        validate_pack(data)
+    except PackFormatError as exc:
         return [f"pack file {name} does not pass the pack schema: {str(exc)[:300]}"]
     return []
 

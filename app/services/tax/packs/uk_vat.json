@@ -1,0 +1,240 @@
+{
+  "pack_id": "uk_vat",
+  "version": "2026.11.1",
+  "jurisdictions": [
+    "GB"
+  ],
+  "classes": [
+    "standard",
+    "reduced",
+    "zero",
+    "exempt",
+    "digital_service"
+  ],
+  "metadata": {
+    "title": "UK VAT",
+    "description": "UK VAT for a seller registered in the UK: the standard, reduced and zero rates, and the zero-tax rows for business customers outside the UK with a valid tax ID. A starting point, not tax advice.",
+    "rates_checked_on": "2026-11-22",
+    "sources": [
+      {
+        "title": "GOV.UK, VAT rates (HM Revenue and Customs)",
+        "url": "https://www.gov.uk/vat-rates"
+      },
+      {
+        "title": "GOV.UK, VAT rates on different goods and services (last updated 10 July 2026)",
+        "url": "https://www.gov.uk/guidance/rates-of-vat-on-different-goods-and-services"
+      }
+    ],
+    "unconfirmed": [
+      "The start dates of the reduced rate (1997-09-01) and of the zero rate (1973-04-01). The rates themselves are confirmed. Start dates before the apply date have no effect, because apply refuses past dates.",
+      "The start date of the reverse charge rows (2021-01-01, the end of the Brexit transition period) is informational for the same reason."
+    ],
+    "assumptions": [
+      "Northern Ireland is part of GB for services, and XI numbers are not used (owner question 11).",
+      "There is no UK domestic reverse charge rule, because it does not cover hosting (owner question 16).",
+      "The wording of the legal notes needs an adviser's confirmation (owner question 10)."
+    ]
+  },
+  "legal_notes": {
+    "gb_outside_scope_b2b": {
+      "en": "Outside the scope of UK VAT: reverse charge. The customer accounts for any VAT due."
+    },
+    "outside_scope": {
+      "en": "Outside the scope of VAT."
+    }
+  },
+  "rules": [
+    {
+      "key": "gb_standard",
+      "name": "UK VAT 20%",
+      "country": "GB",
+      "class": "standard",
+      "customer_type": "any",
+      "rate_percent": "20.0000",
+      "jurisdiction": "GB",
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2011-01-04",
+      "valid_to": null,
+      "legal_note_key": null
+    },
+    {
+      "key": "gb_digital_service",
+      "name": "UK VAT 20%",
+      "country": "GB",
+      "class": "digital_service",
+      "customer_type": "any",
+      "rate_percent": "20.0000",
+      "jurisdiction": "GB",
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2011-01-04",
+      "valid_to": null,
+      "legal_note_key": null
+    },
+    {
+      "key": "gb_reduced",
+      "name": "UK VAT 5%",
+      "country": "GB",
+      "class": "reduced",
+      "customer_type": "any",
+      "rate_percent": "5.0000",
+      "jurisdiction": "GB",
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "1997-09-01",
+      "valid_to": null,
+      "legal_note_key": null
+    },
+    {
+      "key": "gb_zero",
+      "name": "UK VAT 0%",
+      "country": "GB",
+      "class": "zero",
+      "customer_type": "any",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "1973-04-01",
+      "valid_to": null,
+      "legal_note_key": null
+    },
+    {
+      "key": "gb_b2b_eu_reverse_charge_standard",
+      "name": "Outside the scope of UK VAT (reverse charge)",
+      "country": null,
+      "class": "standard",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": "EU",
+      "priority": 10,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "gb_outside_scope_b2b"
+    },
+    {
+      "key": "gb_b2b_outside_scope_standard",
+      "name": "Outside the scope of UK VAT",
+      "country": null,
+      "class": "standard",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": null,
+      "priority": 0,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "outside_scope"
+    },
+    {
+      "key": "gb_b2b_eu_reverse_charge_digital_service",
+      "name": "Outside the scope of UK VAT (reverse charge)",
+      "country": null,
+      "class": "digital_service",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": "EU",
+      "priority": 10,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "gb_outside_scope_b2b"
+    },
+    {
+      "key": "gb_b2b_outside_scope_digital_service",
+      "name": "Outside the scope of UK VAT",
+      "country": null,
+      "class": "digital_service",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": null,
+      "priority": 0,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "outside_scope"
+    },
+    {
+      "key": "gb_b2b_eu_reverse_charge_reduced",
+      "name": "Outside the scope of UK VAT (reverse charge)",
+      "country": null,
+      "class": "reduced",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": "EU",
+      "priority": 10,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "gb_outside_scope_b2b"
+    },
+    {
+      "key": "gb_b2b_outside_scope_reduced",
+      "name": "Outside the scope of UK VAT",
+      "country": null,
+      "class": "reduced",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": null,
+      "priority": 0,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "outside_scope"
+    },
+    {
+      "key": "gb_b2b_eu_reverse_charge_zero",
+      "name": "Outside the scope of UK VAT (reverse charge)",
+      "country": null,
+      "class": "zero",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": "EU",
+      "priority": 10,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "gb_outside_scope_b2b"
+    },
+    {
+      "key": "gb_b2b_outside_scope_zero",
+      "name": "Outside the scope of UK VAT",
+      "country": null,
+      "class": "zero",
+      "customer_type": "business",
+      "rate_percent": "0.0000",
+      "jurisdiction": "GB",
+      "reverse_charge": true,
+      "reverse_charge_zone": null,
+      "priority": 0,
+      "rounding_point": "invoice_rate",
+      "rounding_rule": "round_half_up",
+      "valid_from": "2021-01-01",
+      "valid_to": null,
+      "legal_note_key": "outside_scope"
+    }
+  ]
+}

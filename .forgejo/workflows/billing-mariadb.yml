@@ -11,7 +11,9 @@
 # concurrency), tests/services/test_billing_p1i_settlement_mariadb.py (two
 # payments settling one invoice at once) and
 # tests/services/test_billing_p1c_credit_mariadb.py (credit applied to an
-# invoice under concurrency) against a mariadb:11.8 service container, the
+# invoice under concurrency) and tests/services/test_tax_pack_import_mariadb.py
+# (a tax pack import and a publish locking the same rules wait instead of
+# deadlocking) against a mariadb:11.8 service container, the
 # version production runs. Manual trigger only, so it never blocks other work;
 # the SQLite migration tests in tests/migrations run in the normal test suite.
 name: Billing migrations (MariaDB)
@@ -69,6 +71,8 @@ jobs:
         run: python -m pytest tests/services/test_billing_core_status_mariadb.py -q
       - name: Billing phase 2 chain on MariaDB
         run: python -m pytest tests/migrations/test_billing_p2_mariadb.py -q
+      - name: Tax pack import against a concurrent publish on MariaDB
+        run: python -m pytest tests/services/test_tax_pack_import_mariadb.py -q
       - name: Tax rule superseded during a publish on MariaDB
         run: python -m pytest tests/services/test_billing_p2_tax_publish_mariadb.py -q
       - name: Late fee job under concurrent runs and payments on MariaDB
