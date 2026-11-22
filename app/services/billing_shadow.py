@@ -24,10 +24,8 @@ from app.models.commerce_account import SystemSetting
 
 logger = logging.getLogger(__name__)
 
-# Engines the daily scan, the detectors and the engines page iterate. The tax
-# engine (billing phase 2) joins once its scan and switch criteria exist; until
-# then it has a mode (``ENGINE_SETTING``) but no scan.
-ENGINES = ("invoice", "credit")
+# Engines the daily scan, the detectors and the engines page iterate.
+ENGINES = ("invoice", "credit", "tax")
 SCAN_RESULT_KEY = "billing_shadow_scan"
 SWITCH_RECORD_PREFIX = "billing_engine_switch:"
 ENGINE_SETTING = {
@@ -272,6 +270,8 @@ class BillingShadowService:
                 continue
             if engine == "credit":
                 checked, findings = _credit_scan(db, mode)
+            elif engine == "tax":
+                checked, findings = _tax_scan(db, started)
             else:
                 outcome = _invoice_scan(db, started)
                 if outcome is None:
@@ -343,7 +343,13 @@ CACHE_WITHOUT_ENTRIES = "c2_cache_without_entries"
 # Check keys for differences the two engines are known to produce. They are
 # recorded and listed, but do not count against the switch criterion.
 EXPECTED_PARTIAL_REFUND = "i2_expected_partial_refund"
-EXPECTED_DIFFERENCE_KEYS = frozenset({EXPECTED_PARTIAL_REFUND})
+# Tax checks recorded and listed that do not count against the switch
+# criterion (design 5): rule divergences and uncovered purposes are confirmed
+# by the operator at the switch instead.
+TAX_NON_BLOCKING_KEYS = frozenset(
+    {"t1_rule_divergence", "t2_uncovered", "t3_proforma_rate_changed", "t5_context_changed", "t5_provider_fallback"}
+)
+EXPECTED_DIFFERENCE_KEYS = frozenset({EXPECTED_PARTIAL_REFUND}) | TAX_NON_BLOCKING_KEYS
 _SCAN_BATCH = 1000
 _FINDINGS_RETURNED = 200
 SCAN_FRESH_HOURS = 26
@@ -691,6 +697,52 @@ def _invoice_scan(db: Session, now: datetime) -> Optional[tuple[int, list[dict]]
     return checked, findings
 
 
+def _tax_scan(db: Session, now: datetime) -> tuple[int, list[dict]]:
+    """``t6_scan`` over v2-taxed invoices published in the last 48 hours (design 5).
+
+    For each: every line's tax equals the sum of its rows, the frozen summary
+    equals the rows, and the engine re-run on the stored lines at
+    ``tax_point_at`` (the rules valid then) gives the same tax per line.
+    """
+    from app.models.commerce_invoice_ext import InvoiceLine
+    from app.models.reseller import Invoice
+    from app.services.tax.audit import invoice_tax_findings
+
+    window = now - timedelta(hours=48)
+    findings: list[dict] = []
+    checked = 0
+    after_id = 0
+    while True:
+        invoices = list(
+            db.scalars(
+                select(Invoice)
+                .where(
+                    Invoice.id > after_id,
+                    Invoice.tax_engine.is_not(None),
+                    Invoice.tax_engine != "legacy",
+                    Invoice.tax_point_at >= window,
+                )
+                .order_by(Invoice.id)
+                .limit(_SCAN_BATCH)
+            )
+        )
+        if not invoices:
+            break
+        after_id = invoices[-1].id
+        for invoice in invoices:
+            checked += 1
+            lines = list(
+                db.scalars(
+                    select(InvoiceLine)
+                    .where(InvoiceLine.invoice_id == invoice.id)
+                    .order_by(InvoiceLine.sort_order, InvoiceLine.id)
+                )
+            )
+            for legacy, v2, context in invoice_tax_findings(db, invoice, lines, rerun=True):
+                findings.append(_finding("t6_scan", "invoice", invoice.id, legacy, v2, context))
+    return checked, findings
+
+
 def _partial_refund_difference(db: Session, invoice_id: int) -> Optional[int]:
     """How much partial refunds alone move v2's amount due away from legacy's, or None.
 
@@ -829,7 +881,14 @@ def _item(name: str, ok: bool, **details: Any) -> dict:
 
 
 def evaluate_switch(
-    db: Session, engine: str, now: datetime, *, confirm_overpayments_to_reseller_cache: bool = False
+    db: Session,
+    engine: str,
+    now: datetime,
+    *,
+    confirm_overpayments_to_reseller_cache: bool = False,
+    confirm_mirrored_only: bool = False,
+    confirm_divergence: Optional[list[int]] = None,
+    confirm_uncovered: bool = False,
 ) -> list[dict]:
     """Each item of the switch criterion for moving ``engine`` to v2, with its values. Never writes."""
     from app.services.settings_store import get_setting
@@ -846,6 +905,11 @@ def evaluate_switch(
         differing = reseller_cache_differences(db)
         items.append(_item("reseller_caches_match", not differing,
                            accounts_differing=[account for account, _, _ in differing[:50]]))
+    elif engine == "tax":
+        items.extend(_tax_switch_items(
+            db, now, confirm_mirrored_only=confirm_mirrored_only,
+            confirm_divergence=confirm_divergence or [], confirm_uncovered=confirm_uncovered,
+        ))
     else:
         credit_mode = billing_engine_mode(db, "credit")
         items.append(_item("credit_engine_v2_or_confirmed",
@@ -891,3 +955,71 @@ def evaluate_switch(
     open_counts = open_mismatch_counts(db, engine)
     items.append(_item("no_open_mismatches", not open_counts, open_mismatches=open_counts))
     return items
+
+
+def _tax_switch_items(
+    db: Session, now: datetime, *, confirm_mirrored_only: bool, confirm_divergence: list[int], confirm_uncovered: bool
+) -> list[dict]:
+    """Design 5, switch criterion items 1 to 4 for engine ``tax``."""
+    from app.models.tax import JURISDICTION_ANY, SellerTaxRegistration, TaxRule
+    from app.services.settings_store import get_setting
+
+    items = []
+    invoice_mode = billing_engine_mode(db, "invoice")
+    items.append(_item("invoice_engine_v2", invoice_mode == "v2", invoice_mode=invoice_mode))
+    enabled = bool(get_setting(db, "billing_tax_enabled"))
+    items.append(_item("tax_enabled_or_mirrored_only_confirmed", enabled or confirm_mirrored_only,
+                       tax_enabled=enabled, confirmed=confirm_mirrored_only))
+    current = and_(TaxRule.valid_from <= now, or_(TaxRule.valid_to.is_(None), TaxRule.valid_to > now))
+    jurisdictions = sorted(set(db.scalars(
+        select(TaxRule.jurisdiction).where(TaxRule.enabled.is_(True), TaxRule.jurisdiction != JURISDICTION_ANY,
+                                           or_(TaxRule.valid_to.is_(None), TaxRule.valid_to > now))
+    )))
+    registered = set(db.scalars(
+        select(SellerTaxRegistration.jurisdiction).where(
+            SellerTaxRegistration.enabled.is_(True),
+            SellerTaxRegistration.valid_from <= now,
+            or_(SellerTaxRegistration.valid_to.is_(None), SellerTaxRegistration.valid_to > now),
+        )
+    ))
+    seller = (get_setting(db, "billing_tax_seller_country") or "").strip().upper()
+    unregistered = [j for j in jurisdictions if j not in registered]
+    establishment = bool(seller) and seller in registered
+    items.append(_item(
+        "registrations_for_rules",
+        not unregistered and (not jurisdictions or establishment),
+        jurisdictions=jurisdictions, unregistered=unregistered, seller_country=seller or None,
+        establishment_registration=establishment, rules_in_force=int(db.scalar(
+            select(func.count(TaxRule.id)).where(TaxRule.enabled.is_(True), current)
+        ) or 0),
+    ))
+    open_divergence = sorted(int(i) for i in db.scalars(select(BillingShadowMismatch.id).where(
+        BillingShadowMismatch.engine == "tax", BillingShadowMismatch.check_key == "t1_rule_divergence",
+        BillingShadowMismatch.resolved_at.is_(None),
+    )))
+    unconfirmed = [i for i in open_divergence if i not in set(int(c) for c in confirm_divergence)]
+    uncovered = int(db.scalar(select(func.count(BillingShadowMismatch.id)).where(
+        BillingShadowMismatch.engine == "tax", BillingShadowMismatch.check_key == "t2_uncovered",
+        BillingShadowMismatch.resolved_at.is_(None),
+    )) or 0)
+    items.append(_item(
+        "changes_confirmed",
+        not unconfirmed and (uncovered == 0 or confirm_uncovered),
+        open_divergence=open_divergence[:200], unconfirmed_divergence=unconfirmed[:200],
+        uncovered=uncovered, confirm_uncovered=confirm_uncovered,
+    ))
+    return items
+
+
+def open_v2_taxed_invoices(db: Session) -> int:
+    """Open invoices taxed by the engine, listed when the tax engine is rolled back (design 5)."""
+    from app.models.reseller import Invoice, InvoiceStatus
+
+    return int(db.scalar(
+        select(func.count(Invoice.id)).where(
+            Invoice.tax_engine.is_not(None),
+            Invoice.tax_engine != "legacy",
+            Invoice.status.in_([InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID,
+                                 InvoiceStatus.PENDING_ACTION, InvoiceStatus.COLLECTIONS]),
+        )
+    ) or 0)

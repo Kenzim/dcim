@@ -199,6 +199,10 @@ class InvoiceTransitionError(InvoiceError):
     """An edge that is not in the transition table of the current engine mode."""
 
 
+class TaxQuoteChanged(InvoiceError):
+    """``create`` discarded a prepared ``tax_result`` whose context changed, and the total moved with it."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -462,9 +466,14 @@ class InvoiceService:
         engine would write when they differ from ``lines`` (checkout's tax
         line); in ``shadow`` their total is compared with the legacy total.
         ``tax_result`` (billing phase 2, docs/billing-phase2-design.md 4.7) is
-        accepted and not yet used.
+        the result of ``TaxEngine.prepare`` made before any lock; in tax engine
+        ``v2`` it is used only if its context hash still matches under the lock.
+        In tax ``v2`` the engine sets every line's tax (``NewLine.tax_cents`` is
+        ignored) and ``amount_cents`` may be the total without tax or with it;
+        the stored total is the one with the engine's tax.
         """
-        del tax_result
+        from app.services.tax import invoice_tax
+
         mode = engine_mode(db)
         if mode == "v2" and type(amount_cents) is int and amount_cents == 0:
             if not zero_amounts_supported(db):
@@ -518,8 +527,9 @@ class InvoiceService:
         )
         db.add(invoice)
         db.flush()
+        line_rows = []
         for sort, line in enumerate(lines):
-            db.add(
+            line_rows.append(
                 InvoiceLine(
                     invoice_id=invoice.id,
                     description=line.description[:512],
@@ -539,8 +549,17 @@ class InvoiceService:
                     tax_snapshot=line.tax_snapshot,
                 )
             )
+            db.add(line_rows[-1])
         db.flush()
         db.expire(invoice, ["invoice_lines"])
+        tax_v2 = mode == "v2" and invoice_tax.effective_mode(db, invoice) == "v2"
+        verified_tax = None
+        if tax_v2:
+            created_at = _utcnow()
+            verified_tax = invoice_tax.calculate_verified(
+                db, invoice, line_rows, created_at, tax_result, "create"
+            )
+            invoice_tax.write_rows(db, invoice, line_rows, verified_tax, created_at)
         if mode == "shadow":
             totals = compute_totals(
                 shadow_lines if shadow_lines is not None else lines,
@@ -554,6 +573,16 @@ class InvoiceService:
                     {"amount_cents": totals.amount_cents, "problems": list(totals.problems)},
                     "create",
                 )
+        elif tax_v2:
+            totals = compute_totals(line_rows, prices_include_tax=prices_include_tax)
+            untaxed = totals.subtotal_cents - totals.discount_cents
+            if int(amount_cents) not in (totals.amount_cents, untaxed):
+                discarded = tax_result is not None and verified_tax is not tax_result
+                raise (TaxQuoteChanged if discarded else InvoiceError)(
+                    f"invoice lines add up to {untaxed} before tax and {totals.amount_cents} with it, "
+                    f"not {int(amount_cents)}"
+                )
+            invoice.amount_cents = totals.amount_cents
         elif mode == "v2":
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)
             if totals.amount_cents != int(amount_cents):
@@ -561,7 +590,7 @@ class InvoiceService:
                     f"invoice lines add up to {totals.amount_cents}, not {int(amount_cents)}"
                 )
         if publish:
-            InvoiceService._publish(db, invoice, inserted=True)
+            InvoiceService._publish(db, invoice, inserted=True, verified_tax=verified_tax)
         return invoice
 
     @staticmethod
@@ -606,15 +635,23 @@ class InvoiceService:
         return InvoiceService._publish(db, invoice, inserted=False)
 
     @staticmethod
-    def _publish(db: Session, invoice: Invoice, *, inserted: bool) -> Invoice:
+    def _publish(
+        db: Session, invoice: Invoice, *, inserted: bool, verified_tax: Optional["TaxResult"] = None
+    ) -> Invoice:
         """``publish``; ``inserted`` is set by ``create`` for the row it has just inserted.
 
         No other transaction can see that row, so a legacy or shadow publish
         of it needs no lock and keeps its lock sequence. A v2 publish still
         locks reseller, account and invoice, for the settlement after it.
+
+        In tax engine ``v2`` the tax is recalculated at the tax point (the
+        publish time) with the pure path under the lock and frozen with the
+        invoice; ``verified_tax`` is ``create``'s result of the same
+        transaction, already checked under the same locks (design 4.5).
         """
         from app.services.billing import settlement
         from app.services.billing_locks import BillingLocks
+        from app.services.tax import invoice_tax
 
         v2 = invoice.model_version == 2
         db.flush()
@@ -635,6 +672,20 @@ class InvoiceService:
                 .order_by(InvoiceLine.sort_order, InvoiceLine.id)
             ).scalars()
         )
+        now = _utcnow()
+        tax_mode = invoice_tax.effective_mode(db, invoice)
+        tax_result = None
+        if v2 and tax_mode == "v2" and lines:
+            tax_result = verified_tax or invoice_tax.calculate_verified(
+                db, invoice, lines, now, None, "publish"
+            )
+            invoice_tax.write_rows(db, invoice, lines, tax_result, now)
+            invoice_tax.stamp_published(db, invoice, tax_result, now)
+        else:
+            if v2:
+                invoice_tax.reset_to_legacy(db, invoice, lines)
+            if tax_mode != "legacy":
+                invoice_tax.shadow_publish(db, invoice, lines, now)
         if v2:
             prices_include_tax = bool(invoice.prices_include_tax)
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)
@@ -649,10 +700,13 @@ class InvoiceService:
             invoice.tax_cents = totals.tax_cents
             invoice.prices_include_tax = prices_include_tax
             invoice.amount_cents = totals.amount_cents
-        now = _utcnow()
         invoice.issued_at = now
-        invoice.seller_snapshot = seller_snapshot(now)
-        invoice.buyer_snapshot = buyer_snapshot(db, invoice, now)
+        seller = seller_snapshot(now)
+        buyer = buyer_snapshot(db, invoice, now)
+        if tax_result is not None:
+            invoice_tax.snapshot_extras(db, invoice, seller, buyer)
+        invoice.seller_snapshot = seller
+        invoice.buyer_snapshot = buyer
         auto_apply = v2 and InvoiceService._auto_apply_credit(db, invoice)
         InvoiceService._allocate_publish_number(db, invoice, now, required=v2)
         InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause=CAUSE_PUBLISH)
@@ -753,6 +807,17 @@ class InvoiceService:
             invoice.document_type = InvoiceDocumentType.INVOICE
             invoice.issued_at = at
             db.flush()
+        if invoice.tax_engine is not None:
+            from app.services.tax import invoice_tax
+
+            lines = list(
+                db.execute(
+                    select(InvoiceLine)
+                    .where(InvoiceLine.invoice_id == invoice.id)
+                    .order_by(InvoiceLine.sort_order, InvoiceLine.id)
+                ).scalars()
+            )
+            invoice_tax.proforma_rate_check(db, invoice, lines, at)
 
     @staticmethod
     def delete_draft(db: Session, invoice: Invoice) -> None:
@@ -830,8 +895,6 @@ class InvoiceService:
         period_end: Optional[datetime] = None,
         tax_result: Optional["TaxResult"] = None,
     ) -> Invoice:
-        # ``tax_result`` (billing phase 2) is accepted and not yet used.
-        del tax_result
         line = NewLine(
             description=description[:512],
             unit_cents=int(amount_cents) if type(amount_cents) is int else amount_cents,
@@ -852,6 +915,7 @@ class InvoiceService:
             currency=currency,
             billing_account_id=billing_account_id,
             lines=[line],
+            tax_result=tax_result,
         )
 
     @staticmethod

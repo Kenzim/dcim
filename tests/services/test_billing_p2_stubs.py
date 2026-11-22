@@ -1,4 +1,4 @@
-"""Billing phase 2 interface stubs (docs/billing-phase2-design.md 14.3) import and refuse to run."""
+"""Billing phase 2 interface types and the detectors that ship disabled (docs/billing-phase2-design.md 14.3)."""
 
 from __future__ import annotations
 
@@ -10,44 +10,19 @@ import pytest
 from app.plugin_host import providers
 from app.services.alerting import billing_integrity, catalogue as alert_catalogue
 from app.services.alerting import detectors
-from app.services.billing import cancellations
 from app.services.billing.jobs import base as job_base
+from app.models.billing_jobs import BILLING_JOB_NAMES
 from app.services.billing.jobs import registry as job_registry
-from app.services.billing.jobs import runner
 from app.services.email_templates import render as email_render
-from app.services.invoice_adjustment_service import InvoiceAdjustmentService
 from app.services.invoice_service import InvoiceService
-from app.services.tax import context, engine, mode, result
+from app.services.tax import context, mode, result
 from app.services.tax.packs import registry as pack_registry
 
 NOW = datetime(2026, 11, 22, 12, 0, 0)
 
-STUBS = [
-    lambda: context.TaxContextBuilder.for_checkout(None, None, None, [], NOW, {}),
-    lambda: context.TaxContextBuilder.for_invoice(None, None, [], NOW),
-    lambda: context.TaxContextBuilder.for_adjustment(None, None, []),
-    lambda: engine.TaxEngine.calculate(None, None),
-    lambda: engine.TaxEngine.prepare(None, None),
-    lambda: runner.run_job(lambda: None, "late_fees", dry_run=True, trigger="admin", now=NOW),
-    lambda: job_base.JobRun(1, "late_fees", True, NOW, None).in_window(NOW),
-    lambda: job_base.JobRun(1, "late_fees", True, NOW, None).claim(None, "invoice:1"),
-    lambda: cancellations.CancellationService.request(
-        None, service_id=1, type="immediate", reason=None, actor_user_id=None, source="admin", idempotency_key="k"
-    ),
-    lambda: cancellations.CancellationService.withdraw(None, 1, actor_user_id=None),
-    lambda: cancellations.cancel_unpaid_invoices(None, 1, from_period_start=None, cause="cancellation"),
-    lambda: InvoiceAdjustmentService.tax_base_rows(None, None, before_key="x"),
-]
-
-
-@pytest.mark.parametrize("call", STUBS)
-def test_stubs_raise_not_implemented(call):
-    with pytest.raises(NotImplementedError):
-        call()
-
 
 def test_types_and_registry_exist():
-    assert job_registry.JOBS == {}
+    assert set(job_registry.JOBS) <= set(BILLING_JOB_NAMES)
     assert issubclass(providers.ProviderUnavailable, Exception)
     assert providers.ProviderUnavailable("timeout").reason == "timeout"
     assert providers.ProviderRef("vies_validator", "vies", "tax_id_validator").ref == "vies_validator:vies"

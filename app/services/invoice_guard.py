@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session, object_session
 
 from app.models.commerce_invoice_ext import InvoiceLine
 from app.models.reseller import Invoice, InvoiceStatus
+from app.models.tax import InvoiceLineTax
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,10 @@ FROZEN_COLUMNS = frozenset(
         "buyer_snapshot",
         "model_version",
         "created_at",
+        "tax_engine",
+        "tax_summary",
+        "tax_evidence",
+        "legal_notes",
     }
 )
 # NULL to a value once; a value never changes. ``service_id`` is here because a
@@ -67,6 +72,8 @@ ONCE_SET_COLUMNS = frozenset(
         "proforma_number_period",
         "proforma_number_value",
         "proforma_number_display",
+        "tax_point_at",
+        "seller_registration_id",
     }
 )
 # Mirrors of ON DELETE SET NULL: a change to NULL is allowed. ``service_id`` is
@@ -381,6 +388,30 @@ def _guard_line(action: str):
     return guard
 
 
+def _guard_line_tax(action: str):
+    """``invoice_line_taxes`` rows of a published invoice are frozen (design 1.5)."""
+
+    def guard(_mapper, connection, target: InvoiceLineTax) -> None:
+        parents = [target.invoice_id]
+        if action == "update":
+            history = inspect(target).attrs["invoice_id"].history
+            if history.deleted and history.deleted[0] is not None:
+                parents.insert(0, history.deleted[0])
+        for invoice_id in dict.fromkeys(parents):
+            status = _parent_status(connection, invoice_id)
+            if status in (None, _DRAFT):
+                continue
+            _violation(
+                connection,
+                target,
+                invoice_id,
+                f"invoice line tax {action}",
+                {"column": "invoice_line_taxes", "line_tax_id": target.id, "status": status},
+            )
+
+    return guard
+
+
 def _descends_from(transaction, ancestor) -> bool:
     while transaction is not None:
         if transaction is ancestor:
@@ -430,6 +461,9 @@ _LISTENERS = (
     (InvoiceLine, "before_insert", _guard_line("insert")),
     (InvoiceLine, "before_update", _guard_line("update")),
     (InvoiceLine, "before_delete", _guard_line("delete")),
+    (InvoiceLineTax, "before_insert", _guard_line_tax("insert")),
+    (InvoiceLineTax, "before_update", _guard_line_tax("update")),
+    (InvoiceLineTax, "before_delete", _guard_line_tax("delete")),
 )
 _registered = False
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -267,7 +267,7 @@ class CouponUpdate(RequestModel):
 class TaxRateCreate(RequestModel):
     country: str = Field(min_length=2, max_length=2)
     region: Optional[str] = Field(default=None, max_length=128)
-    rate_bps: StrictInt = Field(gt=0)
+    rate_bps: StrictInt = Field(gt=0, le=10_000)
     name: str = Field(min_length=1, max_length=255)
     enabled: StrictBool = True
 
@@ -275,7 +275,7 @@ class TaxRateCreate(RequestModel):
 class TaxRateUpdate(RequestModel):
     country: Optional[str] = Field(default=None, min_length=2, max_length=2)
     region: Optional[str] = Field(default=None, max_length=128)
-    rate_bps: Optional[Annotated[StrictInt, Field(gt=0)]] = None
+    rate_bps: Optional[Annotated[StrictInt, Field(gt=0, le=10_000)]] = None
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     enabled: Optional[StrictBool] = None
 
@@ -305,6 +305,7 @@ def _serialize_product(row) -> dict:
         "description_html": row.description_html,
         "category_id": row.category_id,
         "product_id": row.product_id,
+        "tax_class_id": getattr(getattr(row, "product", None), "tax_class_id", None),
         "service_type": row.service_type,
         "enabled": row.enabled,
         "visibility": row.visibility.value,
@@ -541,6 +542,44 @@ def update_product(
     return _serialize_product(row)
 
 
+class ProductTaxClassUpdate(RequestModel):
+    tax_class_id: Optional[StrictInt] = Field(default=None, gt=0)
+
+
+@router.put("/products/{product_id}/tax-class", responses=COMMON_ERROR_RESPONSES)
+def update_product_tax_class(product_id: int, body: ProductTaxClassUpdate, auth: AdminDep, db: DbDep):
+    """Set the tax class of the catalogue product a store product sells (NULL is ``standard``).
+
+    Audited ``billing.tax.product_class``; a published invoice keeps its
+    frozen rows, the class applies from the next calculation.
+    """
+    from app.models.product_catalog import Product
+    from app.models.tax import TaxClass
+    from app.services.audit_service import AuditService
+
+    row = FrontendProductDAO.get(db, product_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=_MSG_PRODUCT_NOT_FOUND)
+    product = db.get(Product, row.product_id, with_for_update=True)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Catalogue product not found")
+    if body.tax_class_id is not None and db.get(TaxClass, body.tax_class_id) is None:
+        raise HTTPException(status_code=422, detail="Unknown tax class")
+    before = product.tax_class_id
+    product.tax_class_id = body.tax_class_id
+    AuditService.log(
+        db,
+        actor_user_id=auth["user_id"],
+        action="billing.tax.product_class",
+        resource_type="product",
+        resource_id=str(product.id),
+        metadata={"frontend_product_id": row.id, "from": before, "to": body.tax_class_id},
+    )
+    db.commit()
+    db.refresh(row)
+    return _serialize_product(row)
+
+
 @router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, responses=COMMON_ERROR_RESPONSES)
 def delete_product(product_id: int, db: DbDep):
     row = FrontendProductDAO.get(db, product_id)
@@ -758,8 +797,18 @@ def update_coupon(coupon_id: int, body: CouponUpdate, db: DbDep):
 # --- Tax rates ---
 
 
+def _tax_rates_deprecated(db: Session, response: Response) -> None:
+    """After the tax switch the routes are a façade over the mirrored rules (design 3)."""
+    from app.services.tax.mode import tax_engine_mode
+
+    if tax_engine_mode(db) == "v2":
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = '</api/admin/billing/tax/rules>; rel="successor-version"'
+
+
 @router.get("/tax-rates", responses=COMMON_ERROR_RESPONSES)
 def list_tax_rates(
+    response: Response,
     enabled_only: bool = False,
     country: Optional[str] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
@@ -767,6 +816,7 @@ def list_tax_rates(
     *,
     db: DbDep,
 ):
+    _tax_rates_deprecated(db, response)
     rows = TaxRateDAO.list_admin(
         db, enabled_only=enabled_only, country=country, limit=limit, offset=offset
     )
@@ -774,18 +824,31 @@ def list_tax_rates(
 
 
 @router.post("/tax-rates", status_code=status.HTTP_201_CREATED, responses=COMMON_ERROR_RESPONSES)
-def create_tax_rate(body: TaxRateCreate, db: DbDep):
+def create_tax_rate(body: TaxRateCreate, response: Response, db: DbDep):
+    """Write ``tax_rates`` and its mirrored rule in one transaction (design 3)."""
+    from app.services.tax.mirror import TaxRuleMirror
+
+    _tax_rates_deprecated(db, response)
     data = body.model_dump()
     data["country"] = data["country"].upper()
     row = TaxRateDAO.create(db, **data)
+    TaxRuleMirror.sync(db, row)
     db.commit()
     return _serialize_tax_rate(row)
 
 
 @router.put("/tax-rates/{tax_rate_id}", responses=COMMON_ERROR_RESPONSES)
 def update_tax_rate(
-    tax_rate_id: int, body: TaxRateUpdate, db: DbDep
+    tax_rate_id: int, body: TaxRateUpdate, response: Response, db: DbDep
 ):
+    """Update ``tax_rates``; a used mirrored rule is superseded from now (design 1.2, 3).
+
+    There is no delete route: deleting a ``tax_rates`` row would leave its
+    mirrored rule enabled, so one would have to retire the rule first.
+    """
+    from app.services.tax.mirror import TaxRuleMirror
+
+    _tax_rates_deprecated(db, response)
     row = TaxRateDAO.get(db, tax_rate_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Tax rate not found")
@@ -793,5 +856,6 @@ def update_tax_rate(
     if "country" in data:
         data["country"] = data["country"].upper()
     row = TaxRateDAO.update(db, row, **data)
+    TaxRuleMirror.sync(db, row)
     db.commit()
     return _serialize_tax_rate(row)

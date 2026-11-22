@@ -447,6 +447,10 @@ api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"
 from app.api import billing_adjustments as billing_adjustments_api
 api_router.include_router(billing_adjustments_api.router)
 
+# Cancellation requests and non-payment policies
+from app.api import billing_cancellations as billing_cancellations_api
+api_router.include_router(billing_cancellations_api.router)
+
 # Automation and billing settings store (typed, database-backed, env defaults)
 from app.api import settings_admin as settings_admin_api
 api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
@@ -458,6 +462,12 @@ api_router.include_router(billing_refunds_admin_api.router, tags=["billing-refun
 # Billing engines: modes, shadow mismatches, scans and the v2 switch
 from app.api import billing_engines_admin as billing_engines_admin_api
 api_router.include_router(billing_engines_admin_api.router, tags=["billing-engines-admin"])
+from app.api import billing_jobs_admin as billing_jobs_admin_api
+api_router.include_router(billing_jobs_admin_api.router, tags=["billing-jobs-admin"])
+
+# Billing tax: classes, rules, registrations, exemptions, packs, legal notes, preview
+from app.api import billing_tax_admin as billing_tax_admin_api
+api_router.include_router(billing_tax_admin_api.router, tags=["billing-tax-admin"])
 
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api

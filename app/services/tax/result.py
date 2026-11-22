@@ -1,7 +1,4 @@
-"""The output of the tax engine (docs/billing-phase2-design.md 4.3 item 7).
-
-The fields are the ones the design names; the tax engine worker completes them.
-"""
+"""The output of the tax engine (docs/billing-phase2-design.md 4.3 item 7)."""
 
 from __future__ import annotations
 
@@ -22,6 +19,8 @@ class LineTaxPart:
     tax_cents: int
     reverse_charge: bool = False
     legal_note_key: Optional[str] = None
+    # ``invoice_line_taxes.source``: ``rules``, ``tax_rates`` or ``provider:<plugin_id>:<id>``.
+    source: str = "rules"
 
 
 @dataclass(frozen=True)
@@ -56,3 +55,24 @@ class TaxResult:
     engine: str
     context_hash: str
     scope: str = "in_scope"
+
+    @property
+    def tax_cents(self) -> int:
+        return sum(int(line.tax_cents) for line in self.lines.values())
+
+    def line(self, key: str) -> Optional[LineTax]:
+        return self.lines.get(key)
+
+    def summary_json(self) -> list[dict[str, Any]]:
+        """``invoices.tax_summary``: one entry per name, rate, jurisdiction and reverse charge."""
+        return [
+            {
+                "name": entry.name,
+                "rate_percent": str(entry.rate_percent),
+                "jurisdiction": entry.jurisdiction,
+                "reverse_charge": bool(entry.reverse_charge),
+                "base_cents": int(entry.base_cents),
+                "tax_cents": int(entry.tax_cents),
+            }
+            for entry in self.summary
+        ]

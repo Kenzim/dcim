@@ -517,6 +517,7 @@ def test_outbox_dedupe_disabled_and_retry(db_session):
             smtp_enabled=True,
             smtp_host="smtp.example.com",
             smtp_from="billing@example.com",
+            public_app_url="https://app.example.com",
         ),
         transport=transport,
         clock=clock,

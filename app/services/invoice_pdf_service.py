@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
@@ -124,27 +125,37 @@ def _totals_lines(db: Session, invoice: Invoice) -> list[tuple[str, bool]]:
     return rows
 
 
-def _title(invoice: Invoice) -> str:
+def _title(invoice: Invoice, profile_title: Optional[str] = None) -> str:
     if invoice.model_version != 2:
         return f"Invoice #{invoice.invoice_number}"
     if invoice.number_display:
-        return f"Invoice {invoice.number_display}"
+        return f"{profile_title or 'Invoice'} {invoice.number_display}"
     if invoice.proforma_number_display:
-        return f"Proforma invoice {invoice.proforma_number_display}"
+        return f"{profile_title or 'Proforma invoice'} {invoice.proforma_number_display}"
     return f"Invoice #{invoice.invoice_number}"
 
 
 class InvoicePdfService:
     @staticmethod
     def render_pdf_bytes(db: Session, invoice: Invoice) -> bytes:
-        """Render the invoice; a v2 invoice reads only its snapshots for seller and buyer."""
+        """Render the invoice; a v2 invoice reads only its snapshots for seller and buyer.
+
+        An invoice taxed by the engine also prints its title, the seller's
+        registration number, each line's rate and tax, the summary per rate
+        and the legal notes, all from frozen rows (design 4.9).
+        """
+        from app.services.tax import pdf as tax_pdf
+
         lines = _load_invoice_lines(db, invoice)
         totals = _totals_lines(db, invoice)
+        tax = tax_pdf.for_invoice(db, invoice)
         if invoice.model_version == 2 and invoice.buyer_snapshot:
             profile_lines = _snapshot_buyer_lines(invoice.buyer_snapshot)
         else:
             profile_lines = _invoice_profile_lines(db, invoice)
         company_name, company_lines = _seller_lines(invoice)
+        if tax is not None:
+            company_lines = company_lines + tax.seller_lines
 
         try:
             from reportlab.lib.pagesizes import letter
@@ -167,7 +178,7 @@ class InvoicePdfService:
             y -= 18 if part.startswith("Tax ID: ") else 14
 
         pdf.setFont("Helvetica-Bold", 14)
-        pdf.drawString(inch, y, _title(invoice))
+        pdf.drawString(inch, y, _title(invoice, tax.title if tax is not None else None))
         y -= 0.3 * inch
         pdf.setFont("Helvetica", 10)
         pdf.drawString(inch, y, f"Status: {invoice.status.value}")
@@ -193,7 +204,9 @@ class InvoicePdfService:
         pdf.drawString(inch, y, "Description")
         pdf.drawString(4.5 * inch, y, "Qty")
         pdf.drawString(5.2 * inch, y, "Unit")
-        pdf.drawString(6.2 * inch, y, "Total")
+        if tax is not None:
+            pdf.drawString(5.9 * inch, y, "Tax")
+        pdf.drawString(6.6 * inch if tax is not None else 6.2 * inch, y, "Total")
         y -= 16
         pdf.setFont("Helvetica", 10)
 
@@ -203,9 +216,20 @@ class InvoicePdfService:
                 y = height - inch
             pdf.drawString(inch, y, (line.description or "")[:60])
             pdf.drawRightString(4.9 * inch, y, str(line.quantity))
-            pdf.drawRightString(5.9 * inch, y, f"{line.unit_cents / 100:.2f}")
+            pdf.drawRightString(5.6 * inch if tax is not None else 5.9 * inch, y, f"{line.unit_cents / 100:.2f}")
+            if tax is not None:
+                pdf.drawString(5.7 * inch, y, tax.line_labels.get(line.id, "")[:24])
             pdf.drawRightString(width - inch, y, f"{line.total_cents / 100:.2f}")
             y -= 14
+
+        if tax is not None and tax.summary_lines:
+            y -= 10
+            for text in tax.summary_lines:
+                if y < inch:
+                    pdf.showPage()
+                    y = height - inch
+                pdf.drawRightString(width - inch, y, text[:100])
+                y -= 14
 
         y -= 10
         for text, bold in totals:
@@ -220,6 +244,16 @@ class InvoicePdfService:
         if invoice.description:
             y -= 24
             pdf.drawString(inch, y, invoice.description[:200])
+
+        if tax is not None:
+            pdf.setFont("Helvetica", 9)
+            y -= 10
+            for text in tax.note_lines:
+                y -= 12
+                if y < inch:
+                    pdf.showPage()
+                    y = height - inch
+                pdf.drawString(inch, y, text[:120])
 
         pdf.showPage()
         pdf.save()

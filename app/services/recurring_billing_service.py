@@ -43,6 +43,7 @@ from app.services.notification_service import NotificationEvent, NotificationSer
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
+from app.services.tax.errors import RetryableTaxPublishError
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,65 @@ _UNCHASED_INVOICE_STATUSES = frozenset(
 
 def _utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def cycle_snapshot(billing: ServiceBilling) -> tuple[int, str, bool]:
+    """The amount and currency a new cycle of ``billing`` charges, and whether they are valid."""
+    amount = billing.monthly_price_cents
+    valid_amount = type(amount) is int and amount > 0
+    currency = (billing.currency or "").strip().upper()
+    valid_currency = len(currency) == 3 and currency.isalpha()
+    return (
+        max(0, int(amount or 0)),
+        currency if valid_currency else "USD",
+        valid_amount and valid_currency,
+    )
+
+
+def create_cycle_invoice(
+    db: Session,
+    billing: ServiceBilling,
+    cycle: BillingCycle,
+    *,
+    period_start: Optional[datetime] = None,
+    period_end: Optional[datetime] = None,
+) -> Invoice:
+    """Create the cycle invoice of a new, flushed ``cycle`` and link it.
+
+    The one path both the at-due worker and ``generate_invoices_ahead`` use,
+    so a cycle generated ahead is priced exactly as one created at due.
+    """
+    invoice = InvoiceService.create_cycle(
+        db,
+        reseller_id=billing.reseller_id,
+        service_id=billing.service_id,
+        amount_cents=billing.monthly_price_cents,
+        currency=cycle.currency,
+        description=f"Recurring service charge for {billing.service.name}",
+        due_at=_utc(cycle.due_at),
+        billing_account_id=billing.billing_account_id if is_retail(billing) else None,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    cycle.invoice_id = invoice.id
+    return invoice
+
+
+def lock_cycle_for_due(
+    db: Session, billing_id: int, due_at: datetime
+) -> Optional[BillingCycle]:
+    """Lock the cycle of a billing for one due date; the caller holds the service billing.
+
+    A locking read, so a cycle another transaction (``generate_invoices_ahead``)
+    committed after this transaction's snapshot is seen and reused.
+    """
+    return BillingLocks.billing_cycle(
+        db,
+        select(BillingCycle).where(
+            BillingCycle.service_billing_id == billing_id,
+            BillingCycle.due_at == _utc(due_at),
+        ),
+    )
 
 
 class RecurringBillingService:
@@ -226,20 +286,36 @@ class RecurringBillingService:
             )
             .limit(remaining)
         )
-        billings = list(
-            db.execute(self._locked(due_statement, db)).scalars()
-        )
-        for candidate in billings:
-            # The first commit in the loop releases the batch's locks, so each
-            # row is locked again and re-checked before it is processed.
+        billing_ids = [
+            candidate.id
+            for candidate in db.execute(self._locked(due_statement, db)).scalars()
+        ]
+        for billing_id in billing_ids:
+            # Each billing is processed in a transaction that starts with its
+            # lock, so the transaction's snapshot is taken after the lock and
+            # sees a cycle and invoice generated ahead (design 10.1) and
+            # committed by a job that held the lock before it. Ending the
+            # transaction also releases the batch's locks, so each row is
+            # locked again and re-checked before it is processed.
+            db.commit()
             billing = BillingLocks.service_billing(
-                db, candidate.id, where=due_conditions, skip_locked=True
+                db, billing_id, where=due_conditions, skip_locked=True
             )
             if billing is None:
                 continue
-            outcome = await self._process_billing(
-                db, billing=billing, now=now, owner=owner
-            )
+            try:
+                outcome = await self._process_billing(
+                    db, billing=billing, now=now, owner=owner
+                )
+            except RetryableTaxPublishError as exc:
+                # Nothing of this billing is kept; it is still due on the next pass.
+                db.rollback()
+                logger.warning(
+                    "Recurring billing %s: tax could not be frozen on its invoice (%s); retried next pass",
+                    billing_id,
+                    exc,
+                )
+                continue
             result["processed"] += 1
             if outcome in result:
                 result[outcome] += 1
@@ -519,50 +595,24 @@ class RecurringBillingService:
         now: datetime,
     ) -> BillingCycle:
         due_at = _utc(billing.next_charge_at or now)
-        existing = db.execute(
-            select(BillingCycle).where(
-                BillingCycle.service_billing_id == billing.id,
-                BillingCycle.due_at == due_at,
-            )
-        ).scalar_one_or_none()
+        existing = lock_cycle_for_due(db, billing.id, due_at)
         if existing is not None:
             return existing
 
-        amount = billing.monthly_price_cents
-        valid_amount = type(amount) is int and amount > 0
-        currency = (billing.currency or "").strip().upper()
-        valid_currency = len(currency) == 3 and currency.isalpha()
+        amount, currency, valid = cycle_snapshot(billing)
         cycle = BillingCycle(
             service_billing_id=billing.id,
             due_at=due_at,
-            amount_cents=max(0, int(amount or 0)),
-            currency=currency if valid_currency else "USD",
-            state=(
-                BillingCycleState.DUE
-                if valid_amount and valid_currency
-                else BillingCycleState.MANUAL_REVIEW
-            ),
+            amount_cents=amount,
+            currency=currency,
+            state=BillingCycleState.DUE if valid else BillingCycleState.MANUAL_REVIEW,
         )
         try:
             with db.begin_nested():
                 db.add(cycle)
                 db.flush()
-                if valid_amount and valid_currency:
-                    invoice = InvoiceService.create_cycle(
-                        db,
-                        reseller_id=billing.reseller_id,
-                        service_id=billing.service_id,
-                        amount_cents=amount,
-                        currency=currency,
-                        description=(
-                            f"Recurring service charge for {billing.service.name}"
-                        ),
-                        due_at=due_at,
-                        billing_account_id=(
-                            billing.billing_account_id if is_retail(billing) else None
-                        ),
-                    )
-                    cycle.invoice_id = invoice.id
+                if valid:
+                    create_cycle_invoice(db, billing, cycle)
                 else:
                     cycle.failure_code = "invalid_billing_snapshot"
                     cycle.failure_message = (
@@ -574,12 +624,10 @@ class RecurringBillingService:
                 )
                 db.flush()
         except IntegrityError:
-            return db.execute(
-                select(BillingCycle).where(
-                    BillingCycle.service_billing_id == billing.id,
-                    BillingCycle.due_at == due_at,
-                )
-            ).scalar_one()
+            existing = lock_cycle_for_due(db, billing.id, due_at)
+            if existing is None:
+                raise
+            return existing
         return cycle
 
     async def _attempt_payment(

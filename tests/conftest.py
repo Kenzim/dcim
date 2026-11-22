@@ -355,6 +355,10 @@ def client(db_session, mock_redis, monkeypatch):
     def noop_migrations():
         pass
     monkeypatch.setattr("app.main._run_migrations", noop_migrations)
+    # The keyspace listener holds a real Redis connection and thread that shutdown never stops,
+    # so each test's startup would leave one behind (and reconfigure whatever Redis is running).
+    monkeypatch.setattr("app.main.setup_keyspace_notifications", lambda: None)
+    monkeypatch.setattr("app.main.start_keyspace_notification_listener", lambda: None)
 
     # Make app use our test engine so lifespan (seed_categories, etc.) sees the same DB with tables
     import app.core.database as db_module

@@ -460,6 +460,16 @@ _SPECS = (
         enabled_by_default=False,
     ),
     AlertTypeSpec(
+        "billing_tax_context_changed",
+        "Tax results often discarded at invoice create",
+        "More invoices than the threshold had their prepared tax result discarded in the last 24 hours "
+        "because a rule, exemption or profile changed between preparing and creating them.",
+        _W,
+        "system",
+        (ParamSpec("daily_threshold", "Alert above this many invoices in 24 hours", 10, 1, 10_000),),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
         "billing_job_needs_review",
         "Billing job action needs review",
         "A billing job action failed part way and needs an operator to check it.",

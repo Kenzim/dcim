@@ -1022,34 +1022,268 @@ def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]
 # that owns its data fills it in; the types ship disabled.
 
 
+def _engine_taxed_invoices(params: dict, now: datetime):
+    """v2-taxed invoices published in the detector's window (the last 30 days by default)."""
+    days = int(params.get("lookback_days") or 30)
+    return (
+        Invoice.tax_engine.is_not(None),
+        Invoice.tax_engine != "legacy",
+        Invoice.tax_point_at >= now - timedelta(days=days),
+    )
+
+
 def tax_line_sum(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A v2 tax invoice line whose tax differs from the sum of its tax rows."""
-    return []
+    from app.models.tax import InvoiceLineTax
+
+    rows_tax = (
+        select(InvoiceLineTax.invoice_line_id, func.sum(InvoiceLineTax.tax_cents).label("rows_tax"))
+        .group_by(InvoiceLineTax.invoice_line_id)
+        .subquery()
+    )
+    stmt = (
+        select(InvoiceLine.id.label("line_id"), Invoice.id, Invoice.invoice_number, InvoiceLine.tax_cents,
+               func.coalesce(rows_tax.c.rows_tax, 0).label("rows_tax"))
+        .join(Invoice, Invoice.id == InvoiceLine.invoice_id)
+        .outerjoin(rows_tax, rows_tax.c.invoice_line_id == InvoiceLine.id)
+        .where(*_engine_taxed_invoices(params, now),
+               func.coalesce(InvoiceLine.tax_cents, 0) != func.coalesce(rows_tax.c.rows_tax, 0))
+        .order_by(Invoice.id, InvoiceLine.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    by_invoice: dict[int, dict] = {}
+    for row in rows:
+        entry = by_invoice.setdefault(row.id, {"invoice_id": row.id, "invoice_number": int(row.invoice_number),
+                                               "lines": []})
+        entry["lines"].append({"invoice_line_id": row.line_id, "tax_cents": _money(row.tax_cents),
+                               "rows_tax_cents": _money(row.rows_tax)})
+    out = [
+        Finding(
+            "billing_tax_line_sum", "invoice", str(invoice_id), f"Invoice {d['invoice_number']}",
+            f"Invoice {d['invoice_number']} line tax does not match its tax rows",
+            f"{len(d['lines'])} line(s) carry a tax different from the sum of their tax rows.",
+            details=d,
+        )
+        for invoice_id, d in by_invoice.items()
+    ]
+    if remaining:
+        out.append(_overflow("billing_tax_line_sum", "invoice", "lines", remaining, len(rows)))
+    return out
 
 
 def tax_summary_consistent(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A v2 tax invoice whose ``tax_summary`` differs from its tax rows."""
-    return []
+    from app.services.tax.audit import summary_from_rows, summary_stored
+
+    max_rows = params["max_rows"]
+    out: list[Finding] = []
+    checked = 0
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
+    for invoice in db.scalars(stmt):
+        rows = summary_from_rows(db, invoice.id)
+        stored = summary_stored(invoice)
+        if rows == stored:
+            continue
+        checked += 1
+        if len(out) >= max_rows:
+            continue
+        out.append(Finding(
+            "billing_tax_summary_consistent", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} tax summary does not match its tax rows",
+            "The frozen tax summary printed on the invoice differs from the sum of its tax rows per rate.",
+            details={
+                "invoice_id": invoice.id,
+                "summary": [[*k, *v] for k, v in sorted(stored.items())],
+                "rows": [[*k, *v] for k, v in sorted(rows.items())],
+            },
+        ))
+    if checked > len(out):
+        out.append(_overflow("billing_tax_summary_consistent", "invoice", "invoices", checked - len(out), len(out)))
+    return out
 
 
 def tax_evidence_conflict(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """A published invoice whose location evidence disagrees with the country taxed."""
-    return []
+    """A published invoice whose location evidence disagrees with the country taxed.
+
+    The engine records ``conflict`` when the IP country differs from the
+    billing country; listed only where tax was charged.
+    """
+    max_rows = params["max_rows"]
+    stmt = (
+        select(Invoice)
+        .where(*_engine_taxed_invoices(params, now), Invoice.tax_cents > 0)
+        .order_by(Invoice.id)
+    )
+    found = []
+    for invoice in db.scalars(stmt):
+        evidence = invoice.tax_evidence if isinstance(invoice.tax_evidence, dict) else {}
+        if evidence.get("conflict"):
+            found.append((invoice, evidence))
+    out = [
+        Finding(
+            "billing_tax_evidence_conflict", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} location evidence conflicts",
+            f"Tax was charged for {evidence.get('buyer_country')} but the IP address was in "
+            f"{evidence.get('ip_country')}.",
+            details={"invoice_id": invoice.id, "buyer_country": evidence.get("buyer_country"),
+                     "ip_country": evidence.get("ip_country"), "tax_cents": _money(invoice.tax_cents)},
+        )
+        for invoice, evidence in found[:max_rows]
+    ]
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_evidence_conflict", "invoice", "invoices", len(found) - max_rows, max_rows))
+    return out
 
 
 def tax_not_registered(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """A rule that needs a seller registration was skipped because none is in force."""
-    return []
+    """A rule that needs a seller registration was skipped because none is in force.
+
+    The engine records the evidence note ``not_registered`` for an EU or UK
+    buyer taxed nowhere because the seller holds no registration there (4.3 step 2).
+    """
+    max_rows = params["max_rows"]
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
+    found = []
+    for invoice in db.scalars(stmt):
+        evidence = invoice.tax_evidence if isinstance(invoice.tax_evidence, dict) else {}
+        if "not_registered" in (evidence.get("notes") or []):
+            found.append((invoice, evidence))
+    out = [
+        Finding(
+            "billing_tax_not_registered", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} was not taxed: no registration for {evidence.get('buyer_country')}",
+            "The supply is taxable in the buyer's country but the seller holds no registration in force there, "
+            "so no tax was charged.",
+            details={"invoice_id": invoice.id, "buyer_country": evidence.get("buyer_country")},
+        )
+        for invoice, evidence in found[:max_rows]
+    ]
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_not_registered", "invoice", "invoices", len(found) - max_rows, max_rows))
+    return out
 
 
 def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A billing job action left in ``needs_review``."""
-    return []
+    del now
+    from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus
+
+    stmt = (
+        select(
+            BillingJobAction.id,
+            BillingJobAction.job,
+            BillingJobAction.subject_key,
+            BillingJobAction.run_id,
+            BillingJobAction.claimed_at,
+        )
+        .where(BillingJobAction.status == BillingJobActionStatus.NEEDS_REVIEW)
+        .order_by(BillingJobAction.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_job_needs_review",
+            "system",
+            f"billing_job_action:{row.id}",
+            f"{row.job} {row.subject_key}",
+            f"Billing job {row.job} left {row.subject_key} part way",
+            "The action was claimed and did not finish; check its effect, then mark it done or failed.",
+            details={
+                "action_id": row.id,
+                "job": row.job,
+                "subject_key": row.subject_key,
+                "run_id": row.run_id,
+                "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_job_needs_review", "system", "job actions needing review", remaining, len(out)))
+    return out
 
 
 def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A live billing job whose last scheduled run is older than twice its cadence."""
-    return []
+    del params
+    from app.models.billing_jobs import (
+        BillingJobMode,
+        BillingJobRun,
+        BillingJobRunStatus,
+        BillingJobState,
+        BillingJobTrigger,
+    )
+    from app.services.billing.periodic import CADENCE, CADENCE_PERIOD, DAILY
+
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    out = []
+    for state in db.scalars(
+        select(BillingJobState).where(BillingJobState.mode == BillingJobMode.LIVE).order_by(BillingJobState.job)
+    ):
+        limit = 2 * CADENCE_PERIOD[CADENCE.get(state.job, DAILY)]
+        since = state.live_since
+        if since is None:
+            continue
+        since = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        if now - since <= limit:
+            continue
+        last = db.scalar(
+            select(func.max(BillingJobRun.now_at)).where(
+                BillingJobRun.job == state.job,
+                BillingJobRun.trigger == BillingJobTrigger.SCHEDULE,
+                BillingJobRun.status == BillingJobRunStatus.COMPLETE,
+            )
+        )
+        if last is not None:
+            last = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+            if now - last <= limit:
+                continue
+        out.append(
+            Finding(
+                "billing_job_stale",
+                "system",
+                f"billing_job:{state.job}",
+                f"Billing job {state.job}",
+                f"Billing job {state.job} has not completed a scheduled run in {int(limit.total_seconds() // 3600)} hours",
+                "Last completed scheduled run: " + (last.isoformat() if last else "never") + ".",
+                details={"job": state.job, "last_run_at": last.isoformat() if last else None},
+            )
+        )
+    return out
+
+
+def tax_context_changed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """More than ``daily_threshold`` invoices with ``t5_context_changed`` seen in the last 24 hours (design 5).
+
+    Each invoice has one mismatch row, so the count is of invoices, resolved
+    or not; the finding clears once the rate falls back under the threshold.
+    """
+    from app.models.billing_shadow import BillingShadowMismatch
+    from app.services.tax.shadow import ENGINE, T5_CONTEXT_CHANGED
+
+    count = db.execute(
+        select(func.count(BillingShadowMismatch.id)).where(
+            BillingShadowMismatch.engine == ENGINE,
+            BillingShadowMismatch.check_key == T5_CONTEXT_CHANGED,
+            BillingShadowMismatch.last_seen_at >= now - timedelta(hours=24),
+        )
+    ).scalar_one()
+    threshold = params["daily_threshold"]
+    if count <= threshold:
+        return []
+    return [
+        Finding(
+            "billing_tax_context_changed",
+            "system",
+            "tax",
+            "Tax engine",
+            f"{count} invoices had their prepared tax result discarded in 24 hours",
+            f"{count} invoices (threshold {threshold}) were taxed again at create because a rule, exemption or "
+            "profile changed after their tax was prepared. Check for frequent rule or profile edits, or a "
+            "provider whose results go stale.",
+            details={"invoices": count, "threshold": threshold},
+        )
+    ]
 
 
 def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
@@ -1115,6 +1349,7 @@ BILLING_DETECTORS = {
     "billing_tax_summary_consistent": tax_summary_consistent,
     "billing_tax_evidence_conflict": tax_evidence_conflict,
     "billing_tax_not_registered": tax_not_registered,
+    "billing_tax_context_changed": tax_context_changed,
     "billing_job_needs_review": billing_job_needs_review,
     "billing_job_stale": billing_job_stale,
     "billing_email_template_render_failed": email_template_render_failed,

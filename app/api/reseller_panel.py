@@ -59,6 +59,7 @@ from app.services.credit_ledger_service import (
     unpaid_invoice_statuses,
 )
 from app.services.invoice_service import InvoiceError, InvoiceService
+from app.services.tax.errors import RetryableTaxPublishError
 from app.services.payments.base import (
     GatewayNotConfiguredError,
     PaymentGatewayError,
@@ -960,9 +961,12 @@ def create_topup_invoice(
                 "max_cents": max_cents,
             },
         )
-    invoice = InvoiceService.create_topup(
-        db, reseller_id=reseller.id, amount_cents=body.amount_cents
-    )
+    try:
+        invoice = InvoiceService.create_topup(
+            db, reseller_id=reseller.id, amount_cents=body.amount_cents
+        )
+    except RetryableTaxPublishError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     db.commit()
     db.refresh(invoice)
     return InvoiceService.serialize(db, invoice)

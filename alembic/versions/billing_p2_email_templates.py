@@ -130,6 +130,15 @@ SEED_TEMPLATES = (
         "Pay the invoice in the reseller panel to request automatic recovery.",
         True,
     ),
+    # The retail notice of the non-payment suspension job; it has no sender
+    # before phase 2, so it is seeded disabled.
+    (
+        "service_suspended_nonpayment",
+        "Your Rackflow service is suspended",
+        SERVICE + " was suspended because invoice " + INVOICE + " remains unpaid. "
+        "Sign in to the client area to pay it and restore the service.",
+        False,
+    ),
     (
         "ticket_reply",
         "New reply to your support ticket",

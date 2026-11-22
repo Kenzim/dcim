@@ -76,13 +76,21 @@ def build_document(db: Session, note: InvoiceAdjustment) -> dict[str, Any]:
     invoice_ref = None
     if invoice is not None:
         invoice_ref = invoice.number_display or str(invoice.invoice_number)
+    from app.services.tax import pdf as tax_pdf
+
+    tax = tax_pdf.for_adjustment(db, invoice, note)
+    title = "Credit note" if is_credit else "Debit note"
+    seller = _seller_lines(note.seller_snapshot)
+    if tax is not None:
+        title = tax.title or title
+        seller = seller + tax.seller_lines
     return {
-        "title": "Credit note" if is_credit else "Debit note",
+        "title": title,
         "number": note.number_display,
         "issued_at": note.issued_at,
         "invoice_ref": invoice_ref,
         "currency": note.currency,
-        "seller": _seller_lines(note.seller_snapshot),
+        "seller": seller,
         "buyer": _buyer_lines(note.buyer_snapshot),
         "reason": note.reason_code.value,
         "reason_text": note.reason_text,
@@ -100,6 +108,8 @@ def build_document(db: Session, note: InvoiceAdjustment) -> dict[str, Any]:
         "subtotal_cents": int(note.subtotal_cents),
         "tax_cents": int(note.tax_cents),
         "total_cents": int(note.total_cents),
+        "tax_summary": tax.summary_lines if tax is not None else [],
+        "legal_notes": tax.note_lines if tax is not None else [],
     }
 
 
@@ -170,12 +180,24 @@ class AdjustmentPdfService:
             y -= 14
 
         y -= 10
+        for summary in document["tax_summary"]:
+            pdf.setFont("Helvetica", 10)
+            pdf.drawRightString(width - inch, y, summary[:100])
+            y -= 14
         for label, cents in (("Subtotal", document["subtotal_cents"]), ("Tax", document["tax_cents"])):
             pdf.setFont("Helvetica", 10)
             pdf.drawRightString(width - inch, y, f"{label}: {_money(currency, cents)}")
             y -= 14
         pdf.setFont("Helvetica-Bold", 11)
         pdf.drawRightString(width - inch, y, f"Total: {_money(currency, document['total_cents'])}")
+        y -= 10
+        for note_text in document["legal_notes"]:
+            y -= 12
+            if y < inch:
+                pdf.showPage()
+                y = height - inch
+            pdf.setFont("Helvetica", 9)
+            pdf.drawString(inch, y, note_text[:120])
 
         pdf.showPage()
         pdf.save()
