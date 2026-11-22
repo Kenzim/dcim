@@ -161,7 +161,7 @@ def _seed_quiet_history(db, engine: str, days: int, now: datetime) -> None:
         started = since + timedelta(days=day, minutes=30)
         billing_shadow._append_history(db, engine, {
             "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
-            "subjects_checked": 1, "mismatches_found": 0,
+            "subjects_checked": 1, "mismatches_found": 0, "scheduled": True, "complete": True,
         })
     BillingShadowService.store_scan_result(
         db, engine, started_at=now - timedelta(hours=2), finished_at=now - timedelta(hours=1),

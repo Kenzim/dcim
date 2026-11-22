@@ -186,11 +186,20 @@ def test_reseller_write_locks_reseller_before_account(db_session, recorded, monk
     assert calls[:2] == ["reseller", "billing_account"]
 
 
-def test_new_reseller_account_mirrors_the_reseller_cache(db_session):
+def test_new_reseller_account_without_entries_opens_at_zero(db_session):
     reseller = _reseller(db_session, "fresh")
     reseller.cached_balance_cents = 999
     account = BillingAccountDAO.ensure_reseller_account(db_session, reseller)
-    assert account.credit_balance_cents == 999
+    assert account.credit_balance_cents == 0
+
+
+def test_new_reseller_account_with_entries_opens_at_the_reseller_cache(db_session):
+    set_credit_mode(db_session, "legacy")
+    reseller = _reseller(db_session, "fresh-entries")
+    CreditLedgerService.credit(db_session, reseller.id, 400)
+    assert BillingAccountDAO.get_by_reseller_id(db_session, reseller.id) is None
+    account = BillingAccountDAO.ensure_reseller_account(db_session, reseller)
+    assert account.credit_balance_cents == 400
 
 
 def _open_invoice(db, *, amount: int, reseller=None, account=None) -> Invoice:

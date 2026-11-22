@@ -430,14 +430,9 @@ class PaymentOrchestrator:
     ) -> Optional[InvoiceFundingResult]:
         if invoice.status != InvoiceStatus.PENDING_ACTION:
             return None
-        pending_payment = db.execute(
-            select(Payment)
-            .where(
-                Payment.invoice_id == invoice.id,
-                Payment.status == PaymentStatus.PENDING,
-            )
-            .order_by(Payment.id.desc())
-        ).scalars().first()
+        pending_payment = CreditLedgerService.live_pending_payment(
+            db, CreditLedgerService.lock_invoice_payments(db, invoice.id)
+        )
         if pending_payment is None:
             return None
         return self._result(
@@ -492,12 +487,17 @@ class PaymentOrchestrator:
         amount = min(available, requested_cents)
         if amount <= 0:
             return None
+        payments = CreditLedgerService.lock_invoice_payments(db, invoice.id)
+        # The rule of apply_to_invoice: no credit while a gateway payment is pending.
+        if CreditLedgerService.live_pending_payment(db, payments) is not None:
+            return None
         return CreditLedgerService.allocate_to_locked_invoice(
             db,
             invoice,
             reseller=reseller,
             amount_cents=amount,
             created_by_user_id=reseller.user_id,
+            locked_payments=payments,
         )
 
     def _charge_methods(

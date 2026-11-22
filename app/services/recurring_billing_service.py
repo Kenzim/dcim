@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -42,6 +43,8 @@ from app.services.notification_service import NotificationEvent, NotificationSer
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
+
+logger = logging.getLogger(__name__)
 
 
 _SAFE_CODE_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
@@ -1019,14 +1022,44 @@ class RecurringBillingService:
             cycle.state = BillingCycleState.CANCELLED
             cycle.completed_at = now
             cycle.next_retry_at = None
-            if cycle.invoice is not None and cycle.invoice.status != InvoiceStatus.PAID:
+            if cycle.invoice is not None:
+                RecurringBillingService._void_cancelled_cycle_invoice(db, cycle.invoice)
+
+    @staticmethod
+    def _void_cancelled_cycle_invoice(db: Session, invoice: Invoice) -> None:
+        """Void the invoice of a cancelled cycle where the invoice engine allows it.
+
+        Legacy and shadow void every invoice that is not ``paid``, as they
+        always have. In ``v2`` only ``InvoiceService.void()`` voids (design
+        3.4): an ``open`` or ``overdue`` invoice with nothing paid, pending,
+        noted or being refunded. Any other invoice is left as it is, so money
+        already on it stays visible for a credit note or refund, and the
+        cancellation goes ahead.
+        """
+        from app.services.billing_shadow import billing_engine_mode
+        from app.services.invoice_service import InvoiceTransitionError
+
+        if invoice.status in (InvoiceStatus.PAID, InvoiceStatus.VOID):
+            return
+        if billing_engine_mode(db, "invoice") != "v2":
+            locked = BillingLocks.for_invoice(db, invoice.id) or invoice
+            if locked.status != InvoiceStatus.PAID:
                 InvoiceService.transition(
                     db,
-                    cycle.invoice,
+                    locked,
                     InvoiceStatus.VOID,
                     cause="service_billing_cancelled",
                     reason="Service billing cancelled",
                 )
+            return
+        if invoice.status not in (InvoiceStatus.OPEN, InvoiceStatus.OVERDUE):
+            return
+        try:
+            InvoiceService.void(db, invoice, reason="Service billing cancelled")
+        except InvoiceTransitionError:
+            logger.info(
+                "Cancelled cycle invoice %s kept: it has payments, notes or a refund", invoice.id
+            )
 
     @staticmethod
     def _mark_manual(

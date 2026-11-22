@@ -14,7 +14,7 @@ from app.models.commerce_account import (
     BillingProfile,
     SystemSetting,
 )
-from app.models.reseller import Reseller
+from app.models.reseller import CreditLedgerEntry, Reseller
 from app.models.user import User
 
 
@@ -73,16 +73,25 @@ class BillingAccountDAO:
 
     @staticmethod
     def ensure_reseller_account(db: Session, reseller: Reseller) -> BillingAccount:
+        """The reseller's ``billing_accounts`` row, created if missing (design 6.1).
+
+        A new row opens at 0 when the reseller has no ledger entries, whatever
+        the reseller cache says; with entries it opens at the reseller cache,
+        the balance those entries were written against.
+        """
         existing = BillingAccountDAO.get_by_reseller_id(db, reseller.id)
         if existing is not None:
             return existing
+        has_entries = db.scalar(
+            select(CreditLedgerEntry.id).where(CreditLedgerEntry.reseller_id == reseller.id).limit(1)
+        ) is not None
         account = BillingAccount(
             account_type=BillingAccountType.RESELLER,
             reseller_id=reseller.id,
             user_id=reseller.user_id,
             currency="USD",
             status=BillingAccountStatus.ACTIVE,
-            credit_balance_cents=int(reseller.cached_balance_cents or 0),
+            credit_balance_cents=int(reseller.cached_balance_cents or 0) if has_entries else 0,
         )
         db.add(account)
         db.flush()
