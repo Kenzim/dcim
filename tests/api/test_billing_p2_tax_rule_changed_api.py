@@ -2,19 +2,42 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.core.config import settings
 from app.dao.commerce_dao import BillingAccountDAO
 from app.models.user import User
 from app.services.commerce_lifecycle_service import CommerceLifecycleService
 from app.services.invoice_service import InvoiceService
 from app.services.settings_store import set_setting
+from app.services.tax.errors import RetryableTaxPublishError
 from app.services.tax.invoice_tax import TAX_RULES_CHANGED_DETAIL, TaxRuleChanged
 from tests.api.test_reseller_panel import _login
 from tests.services.test_billing_p1c_ledger import set_credit_mode
 
 
-def _raise(*_args, **_kwargs):
-    raise TaxRuleChanged([1])
+class RateMissing(RetryableTaxPublishError):
+    """A subclass raised by other billing code gets the same handling with its own detail."""
+
+    code = "test_rate_missing"
+    message = "No rate stored; please try again"
+
+
+ERRORS = pytest.mark.parametrize(
+    "error, detail",
+    [
+        (lambda: TaxRuleChanged([1]), TAX_RULES_CHANGED_DETAIL),
+        (RateMissing, {"code": "test_rate_missing", "message": "No rate stored; please try again"}),
+    ],
+    ids=["rule_changed", "subclass"],
+)
+
+
+def _raiser(error):
+    def _raise(*_args, **_kwargs):
+        raise error()
+
+    return _raise
 
 
 def _client_login(client, db, monkeypatch, name):
@@ -32,31 +55,34 @@ def _client_login(client, db, monkeypatch, name):
     assert login.status_code == 200
 
 
-def test_reseller_topup_answers_409(client, db_session, monkeypatch):
+@ERRORS
+def test_reseller_topup_answers_409(client, db_session, monkeypatch, error, detail):
     _reseller, headers = _login(client, db_session, "rule-changed")
-    monkeypatch.setattr(InvoiceService, "create_topup", staticmethod(_raise))
+    monkeypatch.setattr(InvoiceService, "create_topup", staticmethod(_raiser(error)))
     response = client.post("/api/reseller-panel/top-up-invoices", headers=headers, json={"amount_cents": 500})
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == TAX_RULES_CHANGED_DETAIL
+    assert response.json()["detail"] == detail
 
 
-def test_client_credit_topup_answers_409(client, db_session, monkeypatch):
+@ERRORS
+def test_client_credit_topup_answers_409(client, db_session, monkeypatch, error, detail):
     _client_login(client, db_session, monkeypatch, "rule-changed-credit")
     set_credit_mode(db_session, "v2")
     set_setting(db_session, "billing_credit_enabled_retail", True)
     set_setting(db_session, "billing_credit_require_approved_order", False)
     db_session.commit()
-    monkeypatch.setattr(InvoiceService, "create", staticmethod(_raise))
+    monkeypatch.setattr(InvoiceService, "create", staticmethod(_raiser(error)))
     response = client.post("/api/client/commerce/credit/top-up-invoices", json={"amount_cents": 1_000})
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == TAX_RULES_CHANGED_DETAIL
+    assert response.json()["detail"] == detail
 
 
-def test_client_upgrade_answers_409(client, db_session, monkeypatch):
+@ERRORS
+def test_client_upgrade_answers_409(client, db_session, monkeypatch, error, detail):
     _client_login(client, db_session, monkeypatch, "rule-changed-upgrade")
-    monkeypatch.setattr(CommerceLifecycleService, "create_upgrade_quote", staticmethod(_raise))
+    monkeypatch.setattr(CommerceLifecycleService, "create_upgrade_quote", staticmethod(_raiser(error)))
     response = client.post(
         "/api/client/commerce/services/1/upgrade", json={"frontend_product_id": 1, "price_plan_id": 1}
     )
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == TAX_RULES_CHANGED_DETAIL
+    assert response.json()["detail"] == detail

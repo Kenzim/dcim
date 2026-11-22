@@ -43,7 +43,7 @@ from app.services.notification_service import NotificationEvent, NotificationSer
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
-from app.services.tax.invoice_tax import TaxRuleChanged
+from app.services.tax.errors import RetryableTaxPublishError
 
 logger = logging.getLogger(__name__)
 
@@ -307,12 +307,13 @@ class RecurringBillingService:
                 outcome = await self._process_billing(
                     db, billing=billing, now=now, owner=owner
                 )
-            except TaxRuleChanged:
+            except RetryableTaxPublishError as exc:
                 # Nothing of this billing is kept; it is still due on the next pass.
                 db.rollback()
                 logger.warning(
-                    "Recurring billing %s: a tax rule changed while its invoice was issued; retried next pass",
+                    "Recurring billing %s: tax could not be frozen on its invoice (%s); retried next pass",
                     billing_id,
+                    exc,
                 )
                 continue
             result["processed"] += 1

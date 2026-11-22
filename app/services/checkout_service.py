@@ -559,7 +559,7 @@ class CheckoutService:
         v2 = engine_mode(db) == "v2"
         tax_v2 = v2 and CheckoutService._tax_mode(db) == "v2"
         from app.services.invoice_service import TaxQuoteChanged
-        from app.services.tax.invoice_tax import TAX_RULES_CHANGED_MESSAGE, TaxRuleChanged
+        from app.services.tax.errors import RetryableTaxPublishError
 
         try:
             invoice = InvoiceService.create(
@@ -577,8 +577,8 @@ class CheckoutService:
                 prices_include_tax=tax_v2 and CheckoutService._prices_include_tax(db),
                 tax_result=quote.tax_result if tax_v2 else None,
             )
-        except TaxRuleChanged as exc:
-            raise CheckoutError(TAX_RULES_CHANGED_MESSAGE) from exc
+        except RetryableTaxPublishError as exc:
+            raise CheckoutError(exc.message) from exc
         except TaxQuoteChanged as exc:
             raise CheckoutError(TAX_QUOTE_CHANGED_MESSAGE) from exc
         if tax_v2 and quote.tax_result is not None:

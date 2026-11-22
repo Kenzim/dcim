@@ -21,6 +21,7 @@ from app.models.tax import InvoiceLineTax, TaxRule
 from app.services.checkout_service import CheckoutError
 from app.services.invoice_service import InvoiceService, NewLine
 from app.services.tax import invoice_tax
+from app.services.tax.errors import RetryableTaxPublishError
 from app.services.tax.invoice_tax import TAX_RULES_CHANGED_MESSAGE, TaxRuleChanged
 from tests.services.tax_helpers import (
     add_registration,
@@ -49,6 +50,13 @@ def rule(db_session):
     enable_tax(db_session, "GB")
     add_registration(db_session, "GB")
     return add_rule(db_session, name="UK VAT 20%", jurisdiction="GB", source="pack")
+
+
+class RateMissing(RetryableTaxPublishError):
+    """A subclass raised by other billing code gets the same handling with its own message."""
+
+    code = "test_rate_missing"
+    message = "No rate stored; please try again"
 
 
 def _now():
@@ -125,7 +133,14 @@ def test_a_supersede_from_a_later_date_keeps_the_rule(db_session, gb_account, ru
     assert [(r.tax_rule_id, r.tax_cents) for r in _tax_rows(db_session, published.id)] == [(rule.id, 200)]
 
 
-def test_checkout_asks_the_customer_to_try_again(db_session, rule, monkeypatch):
+def test_rule_changed_is_a_retryable_publish_error():
+    error = TaxRuleChanged([3])
+    assert isinstance(error, RetryableTaxPublishError)
+    assert error.detail == {"code": "tax_rules_changed", "message": TAX_RULES_CHANGED_MESSAGE}
+
+
+@pytest.mark.parametrize("subclass", [False, True], ids=["rule_changed", "subclass"])
+def test_checkout_asks_the_customer_to_try_again(db_session, rule, monkeypatch, subclass):
     from tests.services.test_billing_a0_money_path import _account, _product
     from app.dao.commerce_dao import BillingProfileDAO
 
@@ -137,7 +152,13 @@ def test_checkout_asks_the_customer_to_try_again(db_session, rule, monkeypatch):
     product, plan = _product(db_session, price_cents=1000)
     plan.currency = "GBP"
     db_session.flush()
-    supersede_after_calculation(monkeypatch, db_session, rule.id)
+    if subclass:
+        def create(*_args, **_kwargs):
+            raise RateMissing()
+
+        monkeypatch.setattr(InvoiceService, "create", staticmethod(create))
+    else:
+        supersede_after_calculation(monkeypatch, db_session, rule.id)
     from app.services.checkout_service import CheckoutService
 
     with pytest.raises(CheckoutError, match="please try again") as raised:
@@ -145,13 +166,14 @@ def test_checkout_asks_the_customer_to_try_again(db_session, rule, monkeypatch):
             db_session, account=account, user_id=user.id, frontend_product_id=product.id,
             price_plan_id=plan.id, cycle_interval="monthly", checkout_nonce="rule-changed", terms_version="1",
         )
-    assert str(raised.value) == TAX_RULES_CHANGED_MESSAGE
+    assert str(raised.value) == (RateMissing.message if subclass else TAX_RULES_CHANGED_MESSAGE)
     db_session.rollback()
     assert db_session.scalar(select(Order.id).where(Order.checkout_nonce == "rule-changed")) is None
 
 
 @pytest.mark.asyncio
-async def test_recurring_worker_leaves_the_billing_for_its_next_pass(db_session, monkeypatch):
+@pytest.mark.parametrize("error", [lambda: TaxRuleChanged([1]), RateMissing], ids=["rule_changed", "subclass"])
+async def test_recurring_worker_leaves_the_billing_for_its_next_pass(db_session, monkeypatch, error):
     from tests.services.test_recurring_billing_service import (
         FakeGateway,
         FakeLifecycle,
@@ -173,7 +195,7 @@ async def test_recurring_worker_leaves_the_billing_for_its_next_pass(db_session,
     def create_cycle(db, **kwargs):
         if kwargs["service_id"] == first.service_id and not raised:
             raised.append(True)
-            raise TaxRuleChanged([1])
+            raise error()
         return real_create(db, **kwargs)
 
     monkeypatch.setattr(InvoiceService, "create_cycle", staticmethod(create_cycle))

@@ -17,6 +17,7 @@ from app.models.tax import InvoiceLineTax, SellerTaxRegistration, TaxRule
 from app.services.tax import shadow as tax_shadow
 from app.services.tax.context import TaxContextBuilder, line_key
 from app.services.tax.engine import LEGACY_TAXED_PURPOSES, SCOPE_OUT, TaxEngine
+from app.services.tax.errors import RetryableTaxPublishError
 from app.services.tax.result import TaxResult
 
 logger = logging.getLogger(__name__)
@@ -24,21 +25,21 @@ logger = logging.getLogger(__name__)
 ENGINE_LEGACY = "legacy"
 
 TAX_RULES_CHANGED_MESSAGE = "Tax rates changed while this invoice was being issued; please try again"
-# The 409 detail of a route that turns ``TaxRuleChanged`` into a conflict.
-TAX_RULES_CHANGED_DETAIL = {"code": "tax_rules_changed", "message": TAX_RULES_CHANGED_MESSAGE}
 
 
-class TaxRuleChanged(RuntimeError):
-    """A rule the result uses was closed or superseded by the tax point (design 4.9).
+class TaxRuleChanged(RetryableTaxPublishError):
+    """A rule the result uses was closed or superseded by the tax point (design 4.9)."""
 
-    Retryable: the caller rolls back and runs its whole transaction again,
-    which reads the rules afresh. Recalculating in the same transaction would
-    read the same old snapshot on MariaDB (REPEATABLE READ).
-    """
+    code = "tax_rules_changed"
+    message = TAX_RULES_CHANGED_MESSAGE
 
     def __init__(self, rule_ids: Sequence[int]) -> None:
         self.rule_ids = tuple(rule_ids)
         super().__init__(f"tax rules {', '.join(map(str, self.rule_ids))} changed before the tax point")
+
+
+# The 409 detail of a route that turns ``TaxRuleChanged`` into a conflict.
+TAX_RULES_CHANGED_DETAIL = {"code": TaxRuleChanged.code, "message": TaxRuleChanged.message}
 
 
 def _aware(value: datetime) -> datetime:
