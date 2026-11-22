@@ -1,0 +1,272 @@
+"""Job ``nonpayment_suspension`` (B7 retail, design 10.4).
+
+Policy: the billing's product row of ``billing_nonpayment_policies``, else
+``retail_default``; ``suspend_after_days`` NULL means never. Per unpaid cycle
+invoice of a retail billing, ``T = due_at + suspend_after_days``; the job acts
+on the earliest unpaid cycle invoice whose ``T`` is in the window, while the
+invoice still has a balance and the service is active. An invoice whose ``T``
+is before the watermark never triggers; a later one can.
+
+The action has two transactions (design 9.3): claim and mark the billing
+``suspended_nonpayment``, commit; then suspend the service through
+``ServiceLifecycle.suspend`` with no billing lock held, and record the claim
+``done`` (or ``needs_review`` when the suspension fails). Reseller billings are
+never selected: their suspension stays with the recurring pass.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+from typing import Any, Callable, Iterable, Optional
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.billing_jobs import BillingJobActionStatus
+from app.models.reseller import (
+    BillingCycle,
+    Invoice,
+    InvoicePurpose,
+    ServiceBilling,
+    ServiceBillingStatus,
+)
+from app.models.service import Service, ServiceStatus
+from app.services.billing.jobs.base import JobRun, PlannedAction
+from app.services.billing.jobs.nonpayment import (
+    SUSPENSION_JOB,
+    SERVICE_SUSPENDED_NONPAYMENT,
+    finish_action,
+    lease_held,
+    policy_for_billing,
+    send_billing_email,
+    suspension_marks,
+    unpaid_cycle_invoices,
+    utc,
+)
+from app.services.invoice_service import UNPAID_STATUSES, InvoiceService
+
+logger = logging.getLogger(__name__)
+
+JOB = SUSPENSION_JOB
+
+# Billings that are already ended or already suspended are never selected.
+_NOT_SUSPENDABLE = (ServiceBillingStatus.CANCELLED, ServiceBillingStatus.SUSPENDED_NONPAYMENT)
+
+
+def _default_lifecycle():
+    from app.services.service_lifecycle import ServiceLifecycle
+
+    return ServiceLifecycle()
+
+
+class NonpaymentSuspensionJob:
+    name = JOB
+    setting_keys: tuple[str, ...] = ()
+
+    def __init__(self, lifecycle_factory: Optional[Callable[[], Any]] = None) -> None:
+        self.lifecycle_factory = lifecycle_factory or _default_lifecycle
+
+    def candidates(self, db: Session, run: JobRun) -> Iterable[int]:
+        statement = (
+            select(ServiceBilling.id)
+            .join(Service, Service.id == ServiceBilling.service_id)
+            .join(BillingCycle, BillingCycle.service_billing_id == ServiceBilling.id)
+            .join(Invoice, Invoice.id == BillingCycle.invoice_id)
+            .where(
+                ServiceBilling.reseller_id.is_(None),
+                ServiceBilling.status.not_in(list(_NOT_SUSPENDABLE)),
+                Service.status == ServiceStatus.ACTIVE,
+                Invoice.purpose == InvoicePurpose.CYCLE_CHARGE,
+                Invoice.status.in_(list(UNPAID_STATUSES)),
+                Invoice.due_at.is_not(None),
+                Invoice.due_at <= run.now,
+            )
+            .distinct()
+            .order_by(ServiceBilling.id)
+        )
+        return [int(row) for row in db.execute(statement).scalars()]
+
+    @staticmethod
+    def _suspendable(billing: Optional[ServiceBilling], now) -> bool:
+        if billing is None or billing.reseller_id is not None:
+            return False
+        if billing.status in _NOT_SUSPENDABLE:
+            return False
+        if billing.cancel_at is not None and utc(billing.cancel_at) <= now:
+            return False
+        service = billing.service
+        return service is not None and service.status == ServiceStatus.ACTIVE
+
+    def plan(self, db: Session, run: JobRun, subject_id: int) -> Optional[PlannedAction]:
+        billing = db.get(ServiceBilling, int(subject_id))
+        if not self._suspendable(billing, run.now):
+            return None
+        policy = policy_for_billing(db, billing)
+        if policy is None or policy.suspend_after_days is None:
+            return None
+        days = timedelta(days=int(policy.suspend_after_days))
+        for invoice in unpaid_cycle_invoices(db, billing.id):
+            trigger = utc(invoice.due_at) + days
+            if trigger > run.now:
+                return None
+            if not run.in_window(trigger):
+                continue
+            return PlannedAction(
+                f"service:{billing.service_id}:suspend:invoice:{invoice.id}",
+                "suspend",
+                trigger,
+                {
+                    "billing_id": billing.id,
+                    "service_id": billing.service_id,
+                    "invoice_id": invoice.id,
+                    "policy_id": policy.id,
+                    "suspend_after_days": int(policy.suspend_after_days),
+                },
+            )
+        return None
+
+    def execute(self, db: Session, run: JobRun, action: PlannedAction) -> str:
+        from app.services.billing_locks import BillingLocks
+
+        if action.action != "suspend":
+            return "skipped"
+        billing_id = int(action.detail["billing_id"])
+        invoice_id = int(action.detail["invoice_id"])
+        billing = BillingLocks.service_billing(db, billing_id)
+        invoice = BillingLocks.for_invoice(db, invoice_id)
+        if billing is not None and billing.service is not None:
+            db.refresh(billing.service)
+        if not self._suspendable(billing, run.now) or invoice is None:
+            return "skipped"
+        policy = policy_for_billing(db, billing)
+        if policy is None or policy.suspend_after_days is None:
+            return "skipped"
+        if invoice.status not in UNPAID_STATUSES or invoice.due_at is None:
+            return "skipped"
+        trigger = utc(invoice.due_at) + timedelta(days=int(policy.suspend_after_days))
+        if not run.in_window(trigger):
+            return "skipped"
+        if InvoiceService.balance(db, invoice, for_update=True).remaining_cents <= 0:
+            return "skipped"
+        service_id = int(billing.service_id)
+        subject_key = f"service:{service_id}:suspend:invoice:{invoice.id}"
+        if subject_key != action.subject_key:
+            return "skipped"
+        if not lease_held(db, run):
+            return "skipped"
+        if not run.claim(db, subject_key):
+            return "already_done"
+        billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+        billing.next_retry_at = None
+        billing.last_failure_code = "nonpayment"
+        billing.last_failure_message = f"Invoice {invoice.number_display or invoice.invoice_number} is unpaid"
+        detail = {
+            "billing_id": billing_id,
+            "service_id": service_id,
+            "invoice_id": invoice.id,
+            "policy_id": policy.id,
+        }
+        account_id = billing.billing_account_id
+        invoice_number = invoice.number_display or invoice.invoice_number
+        db.commit()
+
+        if not lease_held(db, run):
+            finish_action(
+                db, JOB, subject_key, BillingJobActionStatus.NEEDS_REVIEW, now=run.now,
+                detail={**detail, "error": "the run lost its lease before the suspension"},
+            )
+            db.commit()
+            return "failed"
+        return self._suspend(db, run, subject_key, service_id, account_id, invoice_number, detail)
+
+    def _suspend(
+        self,
+        db: Session,
+        run: JobRun,
+        subject_key: str,
+        service_id: int,
+        account_id: Optional[int],
+        invoice_number: Any,
+        detail: dict[str, Any],
+    ) -> str:
+        from app.services.audit_service import AuditService
+        from app.services.commerce_lifecycle_service import run_lifecycle_sync
+
+        lifecycle = self.lifecycle_factory()
+        service = db.get(Service, service_id)
+        try:
+            if service is None:
+                raise RuntimeError("the service no longer exists")
+            changed = run_lifecycle_sync(
+                lambda: lifecycle.suspend(db, service, reason="nonpayment")
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed suspension goes to staff, never retried
+            db.rollback()
+            logger.warning("Non-payment suspension of service %s failed: %s", service_id, exc)
+            finish_action(
+                db, JOB, subject_key, BillingJobActionStatus.NEEDS_REVIEW, now=run.now,
+                detail={**detail, "error": f"{type(exc).__name__}: {exc}"[:500]},
+            )
+            AuditService.log(
+                db,
+                action="billing.nonpayment_suspend_failed",
+                resource_type="service",
+                resource_id=str(service_id),
+                billing_account_id=account_id,
+                metadata={**detail, "error": str(exc)[:500]},
+            )
+            db.commit()
+            return "failed"
+        finish_action(
+            db, JOB, subject_key, BillingJobActionStatus.DONE, now=run.now,
+            detail={**detail, "suspended": bool(changed), "marks": suspension_marks(db)},
+        )
+        AuditService.log(
+            db,
+            action="billing.nonpayment_suspended",
+            resource_type="service",
+            resource_id=str(service_id),
+            billing_account_id=account_id,
+            metadata={**detail, "suspended": bool(changed)},
+        )
+        if changed:
+            send_billing_email(
+                db,
+                event=SERVICE_SUSPENDED_NONPAYMENT,
+                idempotency_key=subject_key,
+                data={
+                    "service_id": service_id,
+                    "service_name": service.name,
+                    "invoice_id": detail["invoice_id"],
+                    "invoice_number": invoice_number,
+                    "reason": "nonpayment",
+                },
+                billing_account_id=account_id,
+                reseller_id=None,
+                related_type="service",
+                related_id=str(service_id),
+            )
+        db.commit()
+        return "done"
+
+    def live_preconditions(self, db: Session) -> list[str]:
+        """Unmet preconditions for ``live``: a retail policy that suspends, and its email template."""
+        from app.models.billing_jobs import BillingNonpaymentPolicy, NonpaymentPolicyScope
+        from app.services.billing.jobs.nonpayment import template_enabled
+
+        problems = []
+        if not template_enabled(db, SERVICE_SUSPENDED_NONPAYMENT):
+            problems.append(f"the {SERVICE_SUSPENDED_NONPAYMENT} email template is not enabled")
+        count = db.scalar(
+            select(BillingNonpaymentPolicy.id)
+            .where(
+                BillingNonpaymentPolicy.enabled.is_(True),
+                BillingNonpaymentPolicy.suspend_after_days.is_not(None),
+                BillingNonpaymentPolicy.scope != NonpaymentPolicyScope.RESELLER_DEFAULT,
+            )
+            .limit(1)
+        )
+        if count is None:
+            problems.append("no enabled policy sets suspend_after_days")
+        return problems

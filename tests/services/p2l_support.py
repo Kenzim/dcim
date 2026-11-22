@@ -116,6 +116,16 @@ def make_account(db, name: Optional[str] = None):
     return BillingAccountDAO.ensure_client_account(db, user.id)
 
 
+def make_reseller(db):
+    from app.models.reseller import Reseller
+
+    tag = next(_names)
+    reseller = Reseller(user=User(username=f"p2l-rsl-{tag}", email=f"p2l-rsl-{tag}@example.com", is_reseller=True))
+    db.add(reseller)
+    db.commit()
+    return reseller
+
+
 def make_service(db, account, *, status=ServiceStatus.ACTIVE, reseller_id=None) -> Service:
     service = Service(
         name=f"p2l-service-{next(_names)}",

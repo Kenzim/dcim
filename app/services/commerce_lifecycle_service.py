@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
@@ -28,6 +29,24 @@ class CommerceLifecycleError(ValueError):
 
 class ServiceTerminationError(RuntimeError):
     """The service could not be powered off, so it was not marked terminated."""
+
+
+_T = TypeVar("_T")
+
+
+def run_lifecycle_sync(make: Callable[[], Awaitable[_T]]) -> _T:
+    """Run a lifecycle coroutine from synchronous code and return its result.
+
+    Inside a running event loop the coroutine runs on a loop of its own in a
+    helper thread while this thread waits, so the session is still used by one
+    thread at a time.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(make())  # type: ignore[arg-type]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(make())).result()  # type: ignore[arg-type]
 
 
 async def terminate_service(
@@ -100,12 +119,21 @@ class CommerceLifecycleService:
     async def request_cancellation(
         db: Session,
         service_id: int,
-        account: BillingAccount,
+        account: Optional[BillingAccount],
         *,
         when: CancelWhen = "end_of_cycle",
         reason: Optional[str] = None,
         force: bool = False,
+        lifecycle: Optional[Any] = None,
     ) -> dict:
+        """Cancel a service at the end of its period or at once.
+
+        Without ``force`` the service must belong to ``account``; callers that
+        checked ownership themselves (``CancellationService.request``) pass
+        ``force=True`` and may pass no account.
+        """
+        if not force and account is None:
+            raise CommerceLifecycleError("Service does not belong to this account")
         if not force:
             CommerceLifecycleService._get_owned_service(db, service_id, account)
         else:
@@ -140,7 +168,7 @@ class CommerceLifecycleService:
             }
         ):
             try:
-                await terminate_service(db, service, now=now)
+                await terminate_service(db, service, lifecycle=lifecycle, now=now)
             except ServiceTerminationError:
                 termination_pending = True
 
@@ -177,20 +205,22 @@ class CommerceLifecycleService:
     def request_cancellation_sync(
         db: Session,
         service_id: int,
-        account: BillingAccount,
+        account: Optional[BillingAccount],
         *,
         when: CancelWhen = "end_of_cycle",
         reason: Optional[str] = None,
         force: bool = False,
+        lifecycle: Optional[Any] = None,
     ) -> dict:
-        return asyncio.run(
-            CommerceLifecycleService.request_cancellation(
+        return run_lifecycle_sync(
+            lambda: CommerceLifecycleService.request_cancellation(
                 db,
                 service_id,
                 account,
                 when=when,
                 reason=reason,
                 force=force,
+                lifecycle=lifecycle,
             )
         )
 

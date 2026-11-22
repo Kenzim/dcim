@@ -213,9 +213,21 @@ def latest_suspension_claim(db: Session, service_id: int) -> Optional[BillingJob
             BillingJobAction.subject_key.like(f"service:{int(service_id)}:suspend:%"),
             BillingJobAction.status == BillingJobActionStatus.DONE,
         )
-        .order_by(BillingJobAction.updated_at.desc(), BillingJobAction.id.desc())
+        .order_by(BillingJobAction.id.desc())
         .limit(1)
     ).scalar_one_or_none()
+
+
+def suspension_marks(db: Session) -> dict[str, int]:
+    """The highest ids of the rows ``suspension_is_ours`` looks at, recorded with a suspension."""
+    from app.models.refund import Refund
+    from app.models.server_activity import ServerActivity
+
+    return {
+        "activity_id": int(db.scalar(select(func.max(ServerActivity.id))) or 0),
+        "audit_id": int(db.scalar(select(func.max(UserAuditEvent.id))) or 0),
+        "refund_id": int(db.scalar(select(func.max(Refund.id))) or 0),
+    }
 
 
 def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobAction]) -> tuple[bool, str]:
@@ -224,25 +236,26 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
     The claim must have suspended the service itself, and nothing may have
     changed the service's status since: no staff or WHMCS status change in
     the service activity log, no unsuspension by billing after the claim, and
-    no chargeback on an invoice of the service. Times compare against the
-    claim row's own ``updated_at``, which the database clock writes as it
-    writes the other rows' ``created_at``. Returns ``(ours, reason)``.
+    no chargeback on an invoice of the service. "Since" means rows with ids
+    above the marks the claim recorded (``suspension_marks``). Returns
+    ``(ours, reason)``.
     """
     from app.models.refund import Refund, RefundReason
     from app.models.server_activity import ServerActivity, ServerActivityEventType
 
     if claim is None:
         return False, "no_suspension_by_job"
-    if not (claim.detail or {}).get("suspended"):
+    detail = claim.detail or {}
+    if not detail.get("suspended"):
         return False, "suspended_before_job"
-    since = claim.updated_at
+    marks = detail.get("marks") or {}
     staff_change = db.scalar(
         select(
             exists().where(
                 ServerActivity.service_id == int(service_id),
                 ServerActivity.event_type == ServerActivityEventType.SERVICE,
                 ServerActivity.action.in_(_STATUS_ACTIVITY_ACTIONS),
-                ServerActivity.created_at >= since,
+                ServerActivity.id > int(marks.get("activity_id", 0)),
             )
         )
     )
@@ -254,7 +267,7 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
                 UserAuditEvent.action == AUDIT_UNSUSPENDED,
                 UserAuditEvent.resource_type == "service",
                 UserAuditEvent.resource_id == str(int(service_id)),
-                UserAuditEvent.created_at >= since,
+                UserAuditEvent.id > int(marks.get("audit_id", 0)),
             )
         )
     )
@@ -267,7 +280,7 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
                     Refund.invoice_id == Invoice.id,
                     Invoice.service_id == int(service_id),
                     Refund.reason == RefundReason.DISPUTE,
-                    Refund.created_at >= since,
+                    Refund.id > int(marks.get("refund_id", 0)),
                 )
             )
         )
