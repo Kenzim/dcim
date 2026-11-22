@@ -86,3 +86,53 @@ def test_delete_only_a_rate_no_invoice_has_frozen(client, db_session, headers, a
     (audit,) = _audits(db_session, "billing.tax.exchange_rate_deleted")
     assert audit.resource_id == str(eur) and audit.event_metadata["currency"] == "EUR"
     assert exchange_rates.stored_rate(db_session, "USD", "2026-11") is not None
+
+
+def test_a_rate_that_would_fill_pending_documents_needs_confirming(
+    client, db_session, headers, account, uk_vat, monkeypatch
+):
+    """The preview counts what the rate would fill; the store asks for confirm: true when that is not none."""
+    from app.models.billing_series import DocumentType
+    from app.models.reseller import Invoice
+    from app.services.settings_store import set_setting
+    from tests.services.test_billing_p1i_invoice_engine import _series
+    from tests.services.test_billing_p2_proforma_sterling import DEC_2, NOV_30, pay
+    from tests.services.test_billing_p2_sterling_vat import debit
+
+    set_setting(db_session, "billing_proforma_enabled", True)
+    _series(db_session, DocumentType.PROFORMA, "PF")
+    _series(db_session, DocumentType.DEBIT_NOTE, "DN")
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_30)
+    invoice = issue(db_session, account)
+    pay(db_session, invoice, monkeypatch, DEC_2)
+    debit(db_session, invoice, 500, "l6-dn")
+    db_session.commit()
+
+    preview = client.get(f"{BASE}/preview", headers=headers, params={"period": "2026-12", "currency": "usd"})
+    assert preview.status_code == 200
+    assert preview.json() == {
+        "period": "2026-12", "currency": "USD", "stored": False, "pending_invoices": 1, "pending_notes": 1,
+        "previous": {"period": "2026-11", "units_per_gbp": "1.339600"},
+    }
+    body = {"period": "2026-12", "currency": "USD", "units_per_gbp": "1.3158"}
+    unconfirmed = client.post(BASE, headers=headers, json=body)
+    assert unconfirmed.status_code == 409
+    detail = unconfirmed.json()["detail"]
+    assert (detail["code"], detail["pending_invoices"], detail["pending_notes"]) == (
+        "tax_exchange_rate_confirm_required", 1, 1
+    )
+    assert exchange_rates.stored_rate(db_session, "USD", "2026-12") is None
+    created = client.post(BASE, headers=headers, json={**body, "confirm": True})
+    assert created.status_code == 201 and created.json()["filled_invoices"] == 1
+    db_session.expire_all()
+    assert db_session.get(Invoice, invoice.id).tax_total_gbp_cents == 152
+    after = client.get(f"{BASE}/preview", headers=headers, params={"period": "2026-12", "currency": "USD"}).json()
+    assert (after["stored"], after["pending_invoices"], after["pending_notes"]) == (True, 0, 0)
+
+
+def test_a_rate_that_fills_nothing_needs_no_confirming(client, headers):
+    preview = client.get(f"{BASE}/preview", headers=headers, params={"period": "2027-01", "currency": "USD"}).json()
+    assert (preview["pending_invoices"], preview["pending_notes"], preview["previous"]) == (0, 0, None)
+    created = client.post(BASE, headers=headers, json={"period": "2027-01", "currency": "USD", "units_per_gbp": "1.3"})
+    assert created.status_code == 201 and created.json()["filled_invoices"] == 0
