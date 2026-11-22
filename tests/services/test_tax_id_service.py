@@ -42,8 +42,9 @@ def host(monkeypatch):
         assert kind == "tax_id_validator"
         return list(state["refs"])
 
-    def call_provider(kind, ref, method, *args):
+    def call_provider(kind, ref, method, *args, **kwargs):
         state["calls"].append((ref, method, args))
+        state.setdefault("kwargs", []).append((method, kwargs))
         if method == "supports":
             return state["supports"](*args)
         answer = state["answer"]
@@ -116,6 +117,13 @@ def test_valid_horizon_follows_the_setting(db_session, profile, host):
     set_setting(db_session, "billing_tax_id_valid_days", 10)
     row = TaxIdService.check(db_session, profile, now=NOW)
     assert row.expires_at.replace(tzinfo=timezone.utc) == NOW + timedelta(days=10)
+
+
+def test_check_timeout_setting_reaches_the_call(db_session, profile, host):
+    set_setting(db_session, "billing_tax_id_check_timeout_seconds", 4)
+    TaxIdService.check(db_session, profile, now=NOW)
+    assert ("check_online", {"timeout_seconds": 4}) in host["kwargs"]
+    assert all(kw == {} for method, kw in host["kwargs"] if method == "supports")
 
 
 def test_cache_hit_reuses_the_row_and_its_check_time(db_session, profile, host):

@@ -67,6 +67,15 @@ except ImportError:  # pragma: no cover
         requester_tax_id: Optional[str]
 
 
+def _call_check_online(db: Session, ref: str, request: Any) -> Any:
+    """The one call of ``check_online``, with the setting as an upper bound on the timeout.
+
+    The host uses the lower of this and the provider's manifest ``timeout_seconds`` (design 8.6).
+    """
+    timeout = int(get_setting(db, "billing_tax_id_check_timeout_seconds"))
+    return plugin_providers.call_provider(VALIDATOR_KIND, ref, "check_online", request, timeout_seconds=timeout)
+
+
 def _now(now: Optional[datetime]) -> datetime:
     value = now or datetime.now(timezone.utc)
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
@@ -145,12 +154,9 @@ def _expires(db: Session, status: str, checked_at: datetime) -> datetime:
 
 
 def _online(db: Session, ref: str, request: Any) -> dict[str, Any]:
-    """Call ``check_online``; every failure becomes an ``unavailable`` answer.
-
-    The host applies the provider's own ``timeout_seconds`` (design 8.6).
-    """
+    """Call ``check_online``; every failure becomes an ``unavailable`` answer."""
     try:
-        answer = plugin_providers.call_provider(VALIDATOR_KIND, ref, "check_online", request)
+        answer = _call_check_online(db, ref, request)
     except ProviderUnavailable as exc:
         return {"status": TaxIdStatus.UNAVAILABLE.value, "error_code": (exc.reason or "PLUGIN_ERROR").upper()}
     except Exception:  # noqa: BLE001 - call_provider should only raise ProviderUnavailable
