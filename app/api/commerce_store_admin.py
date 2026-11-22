@@ -267,7 +267,7 @@ class CouponUpdate(RequestModel):
 class TaxRateCreate(RequestModel):
     country: str = Field(min_length=2, max_length=2)
     region: Optional[str] = Field(default=None, max_length=128)
-    rate_bps: StrictInt = Field(gt=0)
+    rate_bps: StrictInt = Field(gt=0, le=10_000)
     name: str = Field(min_length=1, max_length=255)
     enabled: StrictBool = True
 
@@ -275,7 +275,7 @@ class TaxRateCreate(RequestModel):
 class TaxRateUpdate(RequestModel):
     country: Optional[str] = Field(default=None, min_length=2, max_length=2)
     region: Optional[str] = Field(default=None, max_length=128)
-    rate_bps: Optional[Annotated[StrictInt, Field(gt=0)]] = None
+    rate_bps: Optional[Annotated[StrictInt, Field(gt=0, le=10_000)]] = None
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     enabled: Optional[StrictBool] = None
 

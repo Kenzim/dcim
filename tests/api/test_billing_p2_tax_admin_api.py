@@ -194,6 +194,21 @@ def test_tax_rates_routes_write_the_mirrored_rule(client, db_session, headers):
     assert client.get(f"{STORE}/tax-rates", headers=headers).headers.get("Deprecation") == "true"
 
 
+def test_tax_rates_routes_refuse_a_rate_above_100_percent(client, db_session, headers):
+    from app.models.commerce_coupon_tax import TaxRate
+
+    resp = client.post(f"{STORE}/tax-rates", headers=headers, json={"name": "X", "country": "FR", "rate_bps": 10_001})
+    assert resp.status_code == 422, resp.text
+    assert db_session.query(TaxRate).filter_by(country="FR").count() == 0
+    resp = client.post(f"{STORE}/tax-rates", headers=headers, json={"name": "Full", "country": "FR", "rate_bps": 10_000})
+    assert resp.status_code == 201, resp.text
+    rate_id = resp.json()["id"]
+    resp = client.put(f"{STORE}/tax-rates/{rate_id}", headers=headers, json={"rate_bps": 10_001})
+    assert resp.status_code == 422, resp.text
+    db_session.expire_all()
+    assert db_session.get(TaxRate, rate_id).rate_bps == 10_000
+
+
 def test_product_tax_class(client, db_session, headers):
     from tests.services.test_billing_a0_money_path import _product
 
