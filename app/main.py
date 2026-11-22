@@ -468,6 +468,8 @@ api_router.include_router(billing_jobs_admin_api.router, tags=["billing-jobs-adm
 # Billing tax: classes, rules, registrations, exemptions, packs, legal notes, preview
 from app.api import billing_tax_admin as billing_tax_admin_api
 api_router.include_router(billing_tax_admin_api.router, tags=["billing-tax-admin"])
+from app.api import billing_tax_exchange_rates_admin as billing_tax_exchange_rates_admin_api
+api_router.include_router(billing_tax_exchange_rates_admin_api.router, tags=["billing-tax-admin"])
 
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api

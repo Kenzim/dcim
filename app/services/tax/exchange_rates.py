@@ -101,15 +101,19 @@ def to_gbp_cents(cents: int, rate: Decimal) -> int:
     return round_half_up(int(cents) * SCALE, micro)
 
 
-def stored_rate(db: Session, currency: str, period: str, source: str = SOURCE_HMRC) -> Optional[TaxExchangeRate]:
-    return db.execute(
-        select(TaxExchangeRate).where(
-            TaxExchangeRate.source == source,
-            TaxExchangeRate.base == BASE,
-            TaxExchangeRate.currency == currency.upper(),
-            TaxExchangeRate.period == period,
-        )
-    ).scalar_one_or_none()
+def stored_rate(
+    db: Session, currency: str, period: str, source: str = SOURCE_HMRC, *, share_lock: bool = False
+) -> Optional[TaxExchangeRate]:
+    """The stored rate; ``share_lock`` holds it until commit so it cannot be deleted meanwhile."""
+    stmt = select(TaxExchangeRate).where(
+        TaxExchangeRate.source == source,
+        TaxExchangeRate.base == BASE,
+        TaxExchangeRate.currency == currency.upper(),
+        TaxExchangeRate.period == period,
+    )
+    if share_lock:
+        stmt = stmt.with_for_update(read=True)
+    return db.execute(stmt).scalar_one_or_none()
 
 
 def has_rate(db: Session, currency: str, period: str, source: str = SOURCE_HMRC) -> bool:
@@ -130,7 +134,8 @@ def convert_at_publish(
     if not needs_conversion(registration, currency, tax_cents):
         return None
     period = period_of(tax_point_at)
-    row = stored_rate(db, currency, period)
+    # Shared, so an administrator cannot delete the rate while this publish freezes it.
+    row = stored_rate(db, currency, period, share_lock=True)
     if row is None:
         raise ExchangeRateMissing(str(currency).upper(), period)
     rate = Decimal(row.units_per_gbp)
