@@ -48,6 +48,7 @@ class Conversion:
     period: str
     source: str
     tax_total_gbp_cents: int
+    rate_id: int
 
 
 def _aware(value: datetime) -> datetime:
@@ -139,7 +140,7 @@ def convert_at_publish(
     if row is None:
         raise ExchangeRateMissing(str(currency).upper(), period)
     rate = Decimal(row.units_per_gbp)
-    return Conversion(rate, period, row.source, to_gbp_cents(int(tax_cents), rate))
+    return Conversion(rate, period, row.source, to_gbp_cents(int(tax_cents), rate), int(row.id))
 
 
 def note_gbp_cents(invoice: Any, tax_cents: int) -> Optional[int]:

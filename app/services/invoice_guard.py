@@ -60,6 +60,7 @@ FROZEN_COLUMNS = frozenset(
         "fx_period",
         "fx_source",
         "tax_total_gbp_cents",
+        "fx_rate_id",
     }
 )
 # NULL to a value once; a value never changes. ``service_id`` is here because a

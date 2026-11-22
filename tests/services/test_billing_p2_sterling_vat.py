@@ -114,6 +114,7 @@ def test_usd_invoice_freezes_the_sterling_vat_and_prints_it(db_session, account,
     invoice = issue(db_session, account)
     assert invoice.tax_cents == 200 and invoice.currency == "USD"
     assert frozen(invoice) == (Decimal("1.3396"), "2026-11", "hmrc_monthly", 149)
+    assert invoice.fx_rate_id == exchange_rates.stored_rate(db_session, "USD", "2026-11").id
     db_session.expire(invoice)
     assert frozen(invoice) == (Decimal("1.339600"), "2026-11", "hmrc_monthly", 149)
     content = tax_pdf.for_invoice(db_session, invoice)
@@ -254,6 +255,7 @@ def test_the_guard_freezes_the_sterling_columns_after_publish(db_session, accoun
             ("fx_source", "admin"),
             ("tax_total_gbp_cents", 150),
             ("fx_rate", None),
+            ("fx_rate_id", None),
         ):
             savepoint = db_session.begin_nested()
             setattr(invoice, column, value)

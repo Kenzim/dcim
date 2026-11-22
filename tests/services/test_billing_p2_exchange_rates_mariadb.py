@@ -117,12 +117,22 @@ def _publish(db, invoice_id: int):
     return invoice
 
 
-def _delete(sessions, rate_id: int, outcome: dict) -> threading.Thread:
+def _delete(sessions, rate_id: int, outcome: dict, *, read_first: bool = False) -> threading.Thread:
+    """The admin delete in a thread; ``read_first`` makes a plain read before it.
+
+    Under REPEATABLE READ that read fixes the transaction's snapshot before
+    the publish commits, so a plain in-use check after it would not see the
+    publish's invoice.
+    """
     from app.api.billing_tax_exchange_rates_admin import delete_rate
+    from app.models.reseller import Invoice
 
     def run():
         with sessions() as db:
             db.execute(sa.text("SET SESSION innodb_lock_wait_timeout = 20"))
+            if read_first:
+                db.execute(sa.select(sa.func.count(Invoice.id))).scalar()
+                outcome["read"] = True
             try:
                 delete_rate(rate_id, {"user_id": None}, db)
                 outcome["result"] = "deleted"
@@ -135,7 +145,8 @@ def _delete(sessions, rate_id: int, outcome: dict) -> threading.Thread:
     return thread
 
 
-def test_a_delete_during_a_publish_waits_and_then_refuses(sessions):
+@pytest.mark.parametrize("read_first", [False, True], ids=["no_earlier_read", "earlier_plain_read"])
+def test_a_delete_during_a_publish_waits_and_then_refuses(sessions, read_first):
     from app.models.tax import TaxExchangeRate
 
     rate_id, (invoice_id,) = _seed(sessions)
@@ -143,8 +154,8 @@ def test_a_delete_during_a_publish_waits_and_then_refuses(sessions):
     outcome: dict = {}
     try:
         invoice = _publish(publisher, invoice_id)
-        assert (invoice.fx_period, invoice.tax_total_gbp_cents) == (_period(), 149)
-        thread = _delete(sessions, rate_id, outcome)
+        assert (invoice.fx_period, invoice.tax_total_gbp_cents, invoice.fx_rate_id) == (_period(), 149, rate_id)
+        thread = _delete(sessions, rate_id, outcome, read_first=read_first)
         time.sleep(1.5)
         assert thread.is_alive(), outcome
         publisher.commit()

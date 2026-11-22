@@ -222,6 +222,7 @@ def stamp_sterling_vat(db: Session, invoice: Any, result: TaxResult, now: dateti
     invoice.fx_period = conversion.period if conversion else None
     invoice.fx_source = conversion.source if conversion else None
     invoice.tax_total_gbp_cents = conversion.tax_total_gbp_cents if conversion else None
+    invoice.fx_rate_id = conversion.rate_id if conversion else None
 
 
 def stamp_published(db: Session, invoice: Any, result: TaxResult, now: datetime) -> None:

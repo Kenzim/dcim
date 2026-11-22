@@ -129,22 +129,32 @@ def create_rate(body: RateCreate, auth: AdminDep, db: DbDep):
     return _payload(row)
 
 
+def _in_use() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"code": "tax_exchange_rate_in_use", "message": "An invoice has frozen this rate"},
+    )
+
+
 @router.delete("/{rate_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_rate(rate_id: int, auth: AdminDep, db: DbDep):
-    # Exclusive: waits for a publish holding the rate (shared) to commit, so its invoice is seen below.
+    """Delete a rate no invoice or note references through ``fx_rate_id``.
+
+    The rate is locked for update first, so a publish holding it (shared)
+    commits before this goes on. The read below may still miss that publish
+    when this transaction's snapshot is older; the foreign keys ``ON DELETE
+    RESTRICT`` then refuse the delete itself, which answers the same 409.
+    """
     row = db.get(TaxExchangeRate, rate_id, with_for_update=True)
     if row is None:
         raise HTTPException(status_code=404, detail="Exchange rate not found")
-    used = db.scalar(
-        select(Invoice.id)
-        .where(Invoice.fx_period == row.period, Invoice.fx_source == row.source, Invoice.currency == row.currency)
-        .limit(1)
-    )
-    if used is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "tax_exchange_rate_in_use", "message": "An invoice has frozen this rate"},
-        )
+    if db.scalar(select(Invoice.id).where(Invoice.fx_rate_id == row.id).limit(1)) is not None:
+        raise _in_use()
     _audit(db, auth, "deleted", row)
     db.delete(row)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise _in_use() from None
     db.commit()

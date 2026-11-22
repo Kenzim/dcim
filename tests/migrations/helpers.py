@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 A0 = "billing_a0_renewals"
 P1_HEAD = "billing_p1_ledger_owner_check"
 # The single alembic head; the phase 2 chain follows the phase 1 head.
-HEAD = "billing_p2_exchange_rates"
+HEAD = "billing_p2_fx_refs"
 CHAIN = [
     "billing_p1_series_shadow",
     "billing_p1_invoice_columns",
@@ -46,6 +46,7 @@ P2_CHAIN = [
     "billing_p2_automation",
     "billing_p2_email_templates",
     "billing_p2_exchange_rates",
+    "billing_p2_fx_refs",
 ]
 P2_NEW_TABLES = {
     "tax_classes",
@@ -71,7 +72,7 @@ P2_NEW_TABLES = {
 P2_COLUMNS = {
     "plugin_installations": {"effective_api"},
     "invoices": {"tax_engine", "tax_point_at", "tax_summary", "tax_evidence", "legal_notes", "seller_registration_id",
-                 "fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents"},
+                 "fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"},
     "orders": {"tax_evidence"},
     "billing_profiles": {"tax_id_type", "tax_id_status", "tax_id_checked_at", "tax_id_check_id", "is_business"},
     "billing_accounts": {"tax_exempt_reason", "billing_late_fee_exempt"},
@@ -84,6 +85,7 @@ P2_INDEXES = {
     "ix_billing_profiles_tax_id_check_id",
     "ix_products_tax_class_id",
     "ix_email_messages_template_id",
+    "ix_invoices_fx_rate_id",
 }
 NEW_TABLES = {
     "document_series",
@@ -280,6 +282,7 @@ SQLITE_OMITTED_FOREIGN_KEYS = {
     ("billing_profiles", "fk_billing_profiles_tax_id_check_id"),
     ("email_messages", "fk_email_messages_template_id"),
     ("invoices", "fk_invoices_seller_registration_id"),
+    ("invoices", "fk_invoices_fx_rate_id"),
     ("products", "fk_products_tax_class_id"),
 }
 
