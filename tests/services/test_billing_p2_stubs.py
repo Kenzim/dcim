@@ -10,7 +10,6 @@ import pytest
 from app.plugin_host import providers
 from app.services.alerting import billing_integrity, catalogue as alert_catalogue
 from app.services.alerting import detectors
-from app.services.billing import cancellations
 from app.services.billing.jobs import base as job_base
 from app.models.billing_jobs import BILLING_JOB_NAMES
 from app.services.billing.jobs import registry as job_registry
@@ -28,11 +27,6 @@ STUBS = [
     lambda: pack_import.PackImporter.preview(None, "uk_vat", "2026.1", NOW),
     lambda: pack_import.PackImporter.apply(None, "uk_vat", "2026.1", NOW, diff_hash="x", actor_user_id=None),
     lambda: legal_notes.render_legal_note(None, "outside_scope", "en"),
-    lambda: cancellations.CancellationService.request(
-        None, service_id=1, type="immediate", reason=None, actor_user_id=None, source="admin", idempotency_key="k"
-    ),
-    lambda: cancellations.CancellationService.withdraw(None, 1, actor_user_id=None),
-    lambda: cancellations.cancel_unpaid_invoices(None, 1, from_period_start=None, cause="cancellation"),
 ]
 
 
