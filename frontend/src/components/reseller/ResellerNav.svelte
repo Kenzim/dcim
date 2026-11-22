@@ -10,6 +10,7 @@
     ['/reseller/top-up', 'Top up'],
     ['/reseller/payment-methods', 'Payments'],
     ['/reseller/invoices', 'Invoices'],
+    ['/reseller/notes', 'Notes'],
     ['/reseller/products', 'Products'],
     ['/reseller/clients', 'Clients'],
     ['/reseller/services', 'Services'],

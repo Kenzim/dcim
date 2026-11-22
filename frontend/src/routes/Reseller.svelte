@@ -7,6 +7,7 @@
   import Dashboard from '../components/reseller/Dashboard.svelte';
   import Invoices from '../components/reseller/Invoices.svelte';
   import PaymentMethods from '../components/reseller/PaymentMethods.svelte';
+  import ResellerNotes from '../components/billing/reseller/ResellerNotes.svelte';
   import Products from '../components/reseller/Products.svelte';
   import ResellerNav from '../components/reseller/ResellerNav.svelte';
   import Services from '../components/reseller/Services.svelte';
@@ -45,6 +46,8 @@
       <PaymentMethods />
     {:else if routeName === 'invoices'}
       <Invoices />
+    {:else if routeName === 'notes'}
+      <ResellerNotes />
     {:else if routeName === 'products'}
       <Products />
     {:else if routeName === 'clients'}

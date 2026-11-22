@@ -18,7 +18,7 @@
   $: onNetworks = path.startsWith('/client/networks');
   $: onStorage = path.startsWith('/client/storage');
   $: onBackupSlots = path.startsWith('/client/backup-slots');
-  $: onBilling = path.startsWith('/client/billing') || path.startsWith('/client/orders');
+  $: onBilling = path.startsWith('/client/billing') || path.startsWith('/client/orders') || path.startsWith('/client/notes');
   $: onCheckout = path.startsWith('/client/checkout');
   $: onSupport = path.startsWith('/client/support');
   $: onAccount = path.startsWith('/client/account');

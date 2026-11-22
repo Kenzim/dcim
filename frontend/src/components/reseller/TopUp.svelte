@@ -14,6 +14,8 @@
     payResellerPanelInvoice,
   } from '../../lib/api.js';
   import { formatMoney, parseUsdToCents } from '../../lib/resellerMoney.js';
+  import { billingErrorMessage } from '../../lib/billingClientApi.js';
+  import { invoiceStatusLabel, invoiceStatusValue } from '../../lib/billingFormat.js';
   import { Alert, Spinner } from '../ui/index.js';
   import StripeCardForm from './StripeCardForm.svelte';
 
@@ -87,7 +89,7 @@
       if (firstEnabled) gateway = firstEnabled;
       selectedMethodId = String(methods.find((method) => method.provider === gateway && method.enabled)?.id || '');
     } catch (err) {
-      error = err.message || 'Top-up invoice could not be created.';
+      error = billingErrorMessage(err, 'Top-up invoice could not be created.');
     } finally {
       working = false;
     }
@@ -118,7 +120,7 @@
           : 'Card authentication completed. Payment confirmation is processing.';
       }
     } catch (err) {
-      error = err.message || 'Invoice payment failed.';
+      error = billingErrorMessage(err, 'Invoice payment failed.');
     } finally {
       clientSecret = null;
       working = false;
@@ -155,7 +157,7 @@
       qrDataUrl = await QRCode.toDataURL(deposit.payment_uri, { width: 220, margin: 1 });
       schedulePoll();
     } catch (err) {
-      error = err.message || 'USDT deposit could not be created.';
+      error = billingErrorMessage(err, 'USDT deposit could not be created.');
     } finally {
       working = false;
     }
@@ -212,7 +214,7 @@
 
       {#if invoice}
         <article class="panel">
-          <div class="invoice-heading"><div><h2>2. Pay invoice #{invoice.invoice_number}</h2><p>{formatMoney(invoice.remaining_cents, invoice.currency)} due</p></div><span class="status">{invoice.status}</span></div>
+          <div class="invoice-heading"><div><h2>2. Pay invoice #{invoice.invoice_number}</h2><p>{formatMoney(invoice.remaining_cents, invoice.currency)} due</p></div><span class="status">{invoiceStatusLabel(invoiceStatusValue(invoice))}</span></div>
           {#if invoice.status === 'paid'}
             <Alert type="success">This top-up invoice is paid.</Alert>
           {:else}
