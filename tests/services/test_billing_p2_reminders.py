@@ -288,6 +288,39 @@ def _kinds(sent, invoice_id):
     return [call["idempotency_key"][len(prefix):] for call in sent if call["idempotency_key"].startswith(prefix)]
 
 
+def test_a_reminder_whose_template_is_disabled_mid_run_is_sent_once_it_is_enabled(
+    factory, sent, events, monkeypatch
+):
+    _configure(factory, v2=True)
+    due = T0 + timedelta(days=2)
+    invoice_id = _retail_invoice(factory, due)
+    _go_live(factory, T0)
+    original = reminders.InvoiceReminders.plan
+
+    def disable_then_plan(self, db, run, subject_id):
+        # After the run's precondition check: the template is switched off mid-run.
+        other = factory()
+        other.query(EmailTemplate).filter_by(event_key="invoice_overdue").update({"enabled": False})
+        other.commit()
+        other.close()
+        return original(self, db, run, subject_id)
+
+    monkeypatch.setattr(reminders.InvoiceReminders, "plan", disable_then_plan)
+    first = _run(factory, due + timedelta(days=1, hours=1))
+    monkeypatch.setattr(reminders.InvoiceReminders, "plan", original)
+    assert first.counts == {"skipped": 1}
+    assert _kinds(sent, invoice_id) == [] and events == []
+    db = factory()
+    assert db.query(BillingJobAction).count() == 0
+    db.query(EmailTemplate).filter_by(event_key="invoice_overdue").update({"enabled": True})
+    db.commit()
+    db.close()
+    second = _run(factory, due + timedelta(days=1, hours=2))
+    assert second.counts == {"done": 1}
+    assert _kinds(sent, invoice_id) == ["overdue_1"]
+    assert [name for name, _ in events] == ["invoice.reminder_sent", "invoice.overdue"]
+
+
 def test_live_needs_both_templates_enabled(factory):
     db = factory()
     db.query(EmailTemplate).filter_by(event_key="invoice_overdue").update({"enabled": False})

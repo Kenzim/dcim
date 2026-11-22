@@ -216,6 +216,7 @@ class InvoiceReminders:
         from app.services.invoice_service import InvoiceService
         from app.plugin_host import events as plugin_events
         from app.services.billing import settlement
+        from app.services.email_templates.render import DEFAULT_LOCALE, select_template
 
         invoice = BillingLocks.for_invoice(db, int(action.detail["invoice_id"]))
         reason = self._open_reason(db, invoice, for_update=True)
@@ -228,10 +229,14 @@ class InvoiceReminders:
         email, user_id = _recipient(db, invoice)
         if email is None:
             return "skipped:no_recipient"
+        event = template_event(kind)
+        template = select_template(db, event, DEFAULT_LOCALE)
+        if template is not None and not template.enabled:
+            # Not claimed, so a later run sends it once the template is enabled.
+            return "skipped:template_disabled"
         if not run.claim(db, subject_key(invoice.id, kind)):
             return "already_done"
         remaining = int(InvoiceService.balance(db, invoice, for_update=True).remaining_cents)
-        event = template_event(kind)
         variables = template_variables(invoice, kind, remaining)
         if _reseller_invoice(invoice):
             EmailMessageService.enqueue_for_reseller(
