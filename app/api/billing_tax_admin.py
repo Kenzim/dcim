@@ -355,6 +355,8 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
     old = db.get(TaxRule, rule_id, with_for_update=True)
     if old is None:
         raise HTTPException(status_code=404, detail="Tax rule not found")
+    if old.legacy_tax_rate_id is not None:
+        raise _conflict("tax_rule_mirrored", "A mirrored rule changes through /tax-rates")
     if old.valid_to is not None and _aware(old.valid_to) <= at:
         raise _conflict("tax_rule_closed", "The rule already ends before valid_from")
     if _aware(old.valid_from) >= at:
@@ -364,10 +366,7 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
     values.update(changes)
     values["valid_to"] = changes.get("valid_to", old.valid_to)
     _check_rule(db, values)
-    legacy_id = old.legacy_tax_rate_id
     old.valid_to = at
-    # The unique legacy_tax_rate_id moves to the new row; the old row lets go of it first.
-    old.legacy_tax_rate_id = None
     db.flush()
     new = TaxRule(
         **values,
@@ -376,7 +375,6 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
         pack_id=old.pack_id,
         pack_version=old.pack_version,
         pack_rule_key=old.pack_rule_key,
-        legacy_tax_rate_id=legacy_id,
         supersedes_id=old.id,
     )
     db.add(new)

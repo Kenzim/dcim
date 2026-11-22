@@ -80,19 +80,23 @@ def test_rule_validation(client, headers):
         assert client.post(f"{BASE}/rules", headers=headers, json=body).status_code == 422
 
 
-def test_superseding_a_mirrored_rule_moves_the_legacy_link(client, db_session, headers):
+def test_superseding_a_mirrored_rule_is_refused(client, db_session, headers):
+    """A mirrored rule changes only through /tax-rates, as an edit of it does."""
     rate = TaxRate(name="UK", country="GB", region=None, rate_bps=2000, enabled=True)
     db_session.add(rate)
     db_session.flush()
     rule = TaxRuleMirror.sync(db_session, rate, now=datetime.now(timezone.utc) - timedelta(days=1))
     db_session.commit()
+    count = db_session.query(TaxRule).count()
     resp = client.post(
         f"{BASE}/rules/{rule.id}/supersede", headers=headers, json={"rate_percent": "17.5", "valid_from": _later()}
     )
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["legacy_tax_rate_id"] == rate.id
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["code"] == "tax_rule_mirrored"
     db_session.expire_all()
-    assert db_session.get(TaxRule, rule.id).legacy_tax_rate_id is None
+    kept = db_session.get(TaxRule, rule.id)
+    assert kept.legacy_tax_rate_id == rate.id and kept.valid_to is None
+    assert db_session.query(TaxRule).count() == count
 
 
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
