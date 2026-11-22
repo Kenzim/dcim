@@ -467,3 +467,58 @@ def test_the_built_in_path_cleans_its_subject_as_well(db_session, monkeypatch):
     )
     assert message.subject == "Hi there"
     _deliver(monkeypatch, message.subject)
+
+
+# ------------------------------------------------------------------ retry
+
+
+def _skipped_message(db_session, enabled=False):
+    row = template(db_session, "ticket_reply", enabled=enabled)
+    message = EmailMessageService.enqueue(
+        db_session, to_address="a@example.com", event="ticket_reply", idempotency_key="retry-1",
+        variables={"ticket_number": "T-1"},
+    )
+    return row, message
+
+
+def test_retry_refuses_a_message_skipped_because_its_template_is_disabled(db_session):
+    from app.services.email_message_service import EmailRetryRefused
+
+    row, message = _skipped_message(db_session)
+    assert message.status == EmailMessageStatus.SKIPPED
+    with pytest.raises(EmailRetryRefused) as info:
+        EmailMessageService.retry(db_session, message.id)
+    assert f"Email template {row.id} (ticket_reply, en) is disabled" in str(info.value)
+    db_session.refresh(message)
+    assert message.status == EmailMessageStatus.SKIPPED
+
+
+def test_retry_requeues_a_skipped_message_once_its_template_is_enabled(db_session):
+    row, message = _skipped_message(db_session)
+    row.enabled = True
+    db_session.commit()
+    assert EmailMessageService.retry(db_session, message.id).status == EmailMessageStatus.QUEUED
+
+
+def test_retry_still_requeues_a_failed_delivery_and_skipped_mail_without_a_template(db_session):
+    row, _skipped = _skipped_message(db_session, enabled=True)
+    failed = EmailMessageService.enqueue(
+        db_session, to_address="a@example.com", event="ticket_reply", idempotency_key="retry-2",
+        variables={"ticket_number": "T-2"},
+    )
+    failed.status, failed.error = EmailMessageStatus.FAILED, "SMTP down"
+    db_session.commit()
+    retried = EmailMessageService.retry(db_session, failed.id)
+    assert (retried.status, retried.error) == (EmailMessageStatus.QUEUED, None)
+    # The template of a failed message may be disabled since: delivery failures retry as before.
+    row.enabled = False
+    failed.status = EmailMessageStatus.FAILED
+    db_session.commit()
+    assert EmailMessageService.retry(db_session, failed.id).status == EmailMessageStatus.QUEUED
+    plain = EmailMessageService.enqueue(
+        db_session, to_address="a@example.com", event="invoice_paid", idempotency_key="retry-3", data={},
+    )
+    plain.status = EmailMessageStatus.SKIPPED
+    db_session.commit()
+    assert EmailMessageService.retry(db_session, plain.id).status == EmailMessageStatus.QUEUED
+    assert EmailMessageService.retry(db_session, 999999) is None

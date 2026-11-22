@@ -329,3 +329,21 @@ def test_preview_is_limited_per_admin_per_minute(client, seeded, headers, mock_r
     assert int(limited.headers["Retry-After"]) > 0
     # Saving, listing and test sending are not affected by the preview counter.
     assert client.get(BASE, headers=headers).status_code == 200
+
+
+def test_retry_route_answers_409_for_mail_skipped_by_a_disabled_template(client, seeded, headers):
+    from app.services.email_message_service import EmailMessageService
+
+    message = EmailMessageService.enqueue(
+        seeded, to_address="a@example.com", event="ticket_reply", idempotency_key="route-retry",
+        variables={"ticket_number": "T-1"},
+    )
+    seeded.commit()
+    assert message.status == EmailMessageStatus.SKIPPED
+    refused = client.post(f"/api/admin/commerce/email-messages/{message.id}/retry", headers=headers)
+    assert refused.status_code == 409
+    assert "ticket_reply" in refused.json()["detail"] and "disabled" in refused.json()["detail"]
+    seeded.execute(EmailTemplate.__table__.update().where(EmailTemplate.event_key == "ticket_reply").values(enabled=True))
+    seeded.commit()
+    again = client.post(f"/api/admin/commerce/email-messages/{message.id}/retry", headers=headers)
+    assert again.status_code == 200 and again.json()["status"] == "queued"

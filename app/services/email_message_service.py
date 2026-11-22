@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.commerce_email import EmailMessage, EmailMessageStatus
+from app.models.commerce_email import EmailMessage, EmailMessageStatus, EmailTemplate
 from app.models.reseller import Reseller
 from app.services.email_templates.catalogue import builtin_email
 from app.services.email_templates.render import clean_subject, render as render_template
@@ -32,6 +32,10 @@ class EmailEvent:
 def render_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
     """Render subject, plain text, and optional HTML for an email event from the built-in texts."""
     return builtin_email(event, data)
+
+
+class EmailRetryRefused(ValueError):
+    """A retry that would send mail for an event whose template is switched off."""
 
 
 class EmailMessageService:
@@ -177,6 +181,13 @@ class EmailMessageService:
             return None
         if row.status not in {EmailMessageStatus.FAILED, EmailMessageStatus.SKIPPED}:
             return row
+        if row.status == EmailMessageStatus.SKIPPED and row.template_id is not None:
+            template = db.get(EmailTemplate, row.template_id)
+            if template is not None and not template.enabled:
+                raise EmailRetryRefused(
+                    f"Email template {template.id} ({template.event_key}, {template.locale}) is disabled, "
+                    "so this message was skipped; enable the template before queueing it again"
+                )
         row.status = EmailMessageStatus.QUEUED
         row.error = None
         db.flush()
