@@ -203,3 +203,29 @@ def test_late_fees_apply_to_cycle_invoices_only(db_session, env):
     assert run_job(db_session, LateFeesJob(), run) == {f"invoice:{cycle.id}:late_fee": "done"}
     assert _remaining(db_session, checkout.id) == 1000
     assert _remaining(db_session, cycle.id) == 1100
+
+
+def test_an_invoice_with_a_chargeback_gets_no_late_fee(db_session, env):
+    from datetime import datetime, timezone
+
+    from app.models.refund import Refund, RefundDestination, RefundReason, RefundStatus
+
+    billing = _billing(db_session, env)
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=30))
+    payment = Payment(
+        invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.SUCCEEDED, amount_cents=400,
+        refunded_cents=0, currency="USD", payment_metadata={},
+    )
+    db_session.add(payment)
+    db_session.flush()
+    db_session.add(Refund(
+        payment_id=payment.id, invoice_id=invoice.id, billing_account_id=invoice.billing_account_id,
+        amount_cents=400, currency="USD", destination=RefundDestination.GATEWAY, gateway="stripe",
+        reason=RefundReason.DISPUTE, status=RefundStatus.PENDING, idempotency_key="dispute-1",
+        requested_at=datetime.now(timezone.utc), refund_metadata={},
+    ))
+    db_session.commit()
+    assert _remaining(db_session, invoice.id) > 0
+    assert run_job(db_session, LateFeesJob(), make_run("late_fees")) == {
+        f"invoice:{invoice.id}:late_fee": "skipped:dispute"
+    }
