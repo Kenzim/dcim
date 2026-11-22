@@ -40,6 +40,17 @@ def _default_session() -> Session:
     return database.SessionLocal()
 
 
+def _holds_sqlite_write_lock(db: Session) -> bool:
+    """Whether ``db`` is on SQLite and has written in its open transaction.
+
+    SQLite has one writer at a time, so a second connection cannot write while
+    this one holds the lock: it waits out the busy timeout and fails.
+    """
+    if db.get_bind().dialect.name != "sqlite" or not db.in_transaction():
+        return False
+    return bool(db.connection().connection.driver_connection.in_transaction)
+
+
 class InvoiceNumbering:
     @staticmethod
     def period(series: DocumentSeries, at: datetime) -> str:
@@ -115,7 +126,9 @@ class InvoiceNumbering:
         the caller passes) and use no counter. Gapless ``own`` series count in
         the caller's transaction, as its last lock. Other ``own`` series count
         on a separate short session committed at once, so a later rollback of
-        the caller leaves a gap but never a duplicate.
+        the caller leaves a gap but never a duplicate. On SQLite a caller that
+        already holds the write lock gets no separate session (it would wait on
+        that lock and fail), so its rollback leaves no gap there.
         """
         period = InvoiceNumbering.period(series, at)
         if series.number_source == "invoice_number":
@@ -124,7 +137,7 @@ class InvoiceNumbering:
             value = int(invoice_number)
             return period, value, InvoiceNumbering.format_number(series, value, at)
 
-        if series.gapless:
+        if series.gapless or _holds_sqlite_write_lock(db):
             value = InvoiceNumbering._increment(db, series.id, period)
         else:
             session = (session_factory or _default_session)()
