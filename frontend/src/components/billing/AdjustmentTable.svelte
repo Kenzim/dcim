@@ -8,6 +8,8 @@
   export let notes = [];
   /** Show which invoice each note belongs to. */
   export let showInvoice = true;
+  /** Drop the effect and issued columns, for narrow panes. */
+  export let compact = false;
   export let busyId = null;
   export let emptyText = 'No credit or debit notes.';
 
@@ -21,7 +23,7 @@
     <table>
       <thead>
         <tr>
-          <th>Number</th><th>Type</th>{#if showInvoice}<th>Invoice</th>{/if}<th>Reason</th><th>Effect</th><th>Issued</th><th class="num">Total</th><th></th>
+          <th>Number</th><th>Type</th>{#if showInvoice}<th>Invoice</th>{/if}<th>Reason</th>{#if !compact}<th>Effect</th><th>Issued</th>{/if}<th class="num">Total</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -31,8 +33,10 @@
             <td><Badge variant={note.kind === 'debit' ? 'warning' : 'info'} caps={false}>{noteKindLabel(note.kind)}</Badge></td>
             {#if showInvoice}<td>#{note.invoice_id}</td>{/if}
             <td>{noteReasonLabel(note.reason ?? note.reason_code)}</td>
-            <td>{noteOutcomeLabel(note.outcome)}</td>
-            <td>{formatDate(note.issued_at)}</td>
+            {#if !compact}
+              <td>{noteOutcomeLabel(note.outcome)}</td>
+              <td>{formatDate(note.issued_at)}</td>
+            {/if}
             <td class="num">{note.kind === 'credit' ? '−' : ''}{formatMoney(note.total_cents, note.currency)}</td>
             <td class="act">
               <Button variant="secondary" size="small" disabled={busyId === note.id} on:click={() => dispatch('download', note)}>

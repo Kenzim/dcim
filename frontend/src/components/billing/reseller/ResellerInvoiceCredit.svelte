@@ -66,7 +66,7 @@
 {#if notes.length}
   <h3>Credit and debit notes</h3>
   {#if notesError}<Alert type="danger">{notesError}</Alert>{/if}
-  <AdjustmentTable {notes} showInvoice={false} {busyId} on:download={downloadNote} />
+  <AdjustmentTable {notes} showInvoice={false} compact {busyId} on:download={downloadNote} />
 {/if}
 
 {#if canApply}

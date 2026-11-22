@@ -69,7 +69,7 @@
 {#if hasNotes}
   <h3>Credit and debit notes</h3>
   {#if notesError}<Alert type="danger">{notesError}</Alert>{/if}
-  <AdjustmentTable {notes} showInvoice={false} {busyId} emptyText="No notes to show for this invoice." on:download={downloadNote} />
+  <AdjustmentTable {notes} showInvoice={false} compact {busyId} emptyText="No notes to show for this invoice." on:download={downloadNote} />
 {/if}
 
 {#if canApply}
