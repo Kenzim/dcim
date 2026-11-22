@@ -1,5 +1,6 @@
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
@@ -59,6 +60,29 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+VERSION_NUM_WIDTH = 255
+
+
+def _create_wide_version_table(connection) -> None:
+    """Create alembic_version with a wide version_num on a fresh MySQL/MariaDB database.
+
+    Alembic's default is VARCHAR(32) and some revision ids are longer, which MySQL
+    rejects in strict mode. An existing alembic_version table is left untouched.
+    """
+    if connection.dialect.name not in ("mysql", "mariadb"):
+        return
+    if sa.inspect(connection).has_table("alembic_version"):
+        return
+    connection.execute(
+        sa.text(
+            "CREATE TABLE alembic_version ("
+            f"version_num VARCHAR({VERSION_NUM_WIDTH}) NOT NULL, "
+            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+        )
+    )
+    connection.commit()
+
+
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
 
@@ -74,12 +98,16 @@ def run_migrations_online() -> None:
     configure_engine(connectable)
 
     with connectable.connect() as connection:
+        _create_wide_version_table(connection)
         context.configure(
             connection=connection, target_metadata=target_metadata
         )
 
         with context.begin_transaction():
             context.run_migrations()
+        # MySQL DDL is not transactional, so nothing above commits the final
+        # alembic_version update; without this the last step's bump is rolled back.
+        connection.commit()
 
 
 if context.is_offline_mode():

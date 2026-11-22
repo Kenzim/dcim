@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.dao.network_port_dao import NetworkPortDAO
 from app.dao.product_catalog_dao import ProductDAO, ProductFamilyDAO, VMTemplateDAO
 from app.dao.server_group_dao import ServerGroupDAO
@@ -177,6 +179,20 @@ def test_create_bare_metal_without_group_is_a_400_with_detail(whmcs):
         "service_config": {},
     })
     assert_error(response, 400)
+
+
+@pytest.mark.parametrize("route_key, extra", [
+    ("create_bare_metal", {"service_type": "bare_metal"}),
+    ("create_vm", {"product_code": "no-such-product"}),
+], ids=["bare_metal", "vm"])
+def test_create_accepts_an_empty_service_config_list_like_an_empty_object(whmcs, route_key, extra):
+    """Older module copies send `"service_config": []` when no options are set."""
+    bodies = [
+        {"name": "service-10", "external_user_id": "7", **extra, "service_config": value} for value in ({}, [])
+    ]
+    responses = [whmcs.call(route_key, body=body) for body in bodies]
+    assert responses[0].status_code == responses[1].status_code == 400
+    assert responses[0].json() == responses[1].json()
 
 
 def test_create_vm_returns_service(whmcs, db_session, monkeypatch):

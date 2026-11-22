@@ -36,6 +36,6 @@ If a change is meant to alter what WHMCS sees:
 
 If the PHP gains a call, add a `Route` and a test that uses its key (`whmcs.call("key", ...)`). `test_every_route_has_a_behaviour_test` fails until a shape test exists.
 
-## Known mismatch (pinned, not fixed)
+## Empty PHP arrays
 
-PHP `json_encode(array())` sends `[]`. The API answers 422 when a route expects an object and receives `[]`. This affects three module calls today: `reset_network` and `randomize_smbios` (sent as `{"params": []}`), VM reinstall with no template and no SSH keys, and Windows password reset without a password. `test_known_mismatch_empty_php_array_bodies_are_rejected_with_422` pins the current 422 answer so a fix on either side shows up as a deliberate change.
+PHP `json_encode(array())` writes `[]`. Current module code sends `{}` for an empty body and casts the `params` and `service_config` fields to objects. Older copies of the module still send `[]`, so the API accepts an empty list in place of an empty object for the strategy action `params`, the `service_config` of both create routes, `template_parameters` of reinstall-os, and the whole body of VM reinstall and Windows password reset (`app/schemas/empty_object.py`). A non-empty list is still refused with 422. The tests `test_run_action_accepts_empty_params_as_object_or_list`, `test_vm_reinstall_accepts_an_empty_list_body_like_an_empty_object`, `test_windows_password_reset_accepts_an_empty_body_as_object_or_list` and `test_create_accepts_an_empty_service_config_list_like_an_empty_object` pin both spellings.

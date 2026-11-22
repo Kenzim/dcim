@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.core.billing_auth import get_billing_integration
+from app.schemas.empty_object import EmptyListBody, EmptyListIsObject
 from app.models.billing_integration import BillingIntegration
 from app.models.server import Server
 from app.models.service import Service, ServiceStatus, ServiceType, ProvisioningSource
@@ -2756,7 +2757,7 @@ async def billing_proxy_fast_path_toggle(
 
 
 class StrategyActionRequest(BaseModel):
-    params: dict = Field(default_factory=dict)
+    params: Annotated[dict, EmptyListIsObject] = Field(default_factory=dict)
 
 
 class BillingReassignVmIpBody(BaseModel):
@@ -2987,7 +2988,7 @@ async def billing_restore_backup(
     return result
 
 
-class BillingVmReinstallBody(BaseModel):
+class BillingVmReinstallBody(EmptyListBody):
     vm_template_id: Optional[int] = None
     ssh_public_keys: Optional[str] = None
 

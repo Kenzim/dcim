@@ -53,6 +53,27 @@ final class RackflowResellerModuleTest extends TestCase
         $this->assertLessThanOrEqual(45, $request['curl_options']['timeout']);
     }
 
+    public function testEmptyServiceConfigAndEmptyBodyAreEncodedAsObjects(): void
+    {
+        $withConfig = rackflow_reseller_buildApiRequest(
+            'https://rackflow.example.test',
+            'rsk_example',
+            'POST',
+            '/api/reseller/vm/services',
+            array('name' => 'service-1', 'service_config' => array(), 'tags' => array('a'))
+        );
+        $this->assertSame('{"name":"service-1","service_config":{},"tags":["a"]}', $withConfig['body']);
+
+        $empty = rackflow_reseller_buildApiRequest(
+            'https://rackflow.example.test',
+            'rsk_example',
+            'POST',
+            '/api/reseller/services/7/portal-sso',
+            array()
+        );
+        $this->assertSame('{}', $empty['body']);
+    }
+
     public function testApiRequestRejectsEveryNonResellerSurface(): void
     {
         $this->expectException(InvalidArgumentException::class);
