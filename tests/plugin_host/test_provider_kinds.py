@@ -452,12 +452,12 @@ def test_billing_may_lower_the_timeout_never_raise_it(plugin_env, db_session):
     setup_plugin(plugin_env, db_session, VALIDATOR, mode="hang")
     started = time.monotonic()
     with pytest.raises(ProviderUnavailable) as err:
-        validator_call(timeout=0.2)
+        validator_call(timeout_seconds=0.2)
     assert err.value.reason == "timeout"
     assert time.monotonic() - started < 0.9
     started = time.monotonic()
     with pytest.raises(ProviderUnavailable):
-        validator_call(timeout=60)  # the provider's own 1 s still applies
+        validator_call(timeout_seconds=60)  # the provider's own 1 s still applies
     assert 0.9 < time.monotonic() - started < 2.5
 
 

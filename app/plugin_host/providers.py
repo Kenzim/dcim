@@ -154,15 +154,15 @@ def _resolve(kind: str, plugin_id: str, provider_id: str, method: str):
     return inst, manifest, provide, fn
 
 
-def call_provider(kind: str, provider_ref: str, method: str, *args: Any, timeout: Optional[float] = None) -> Any:
+def call_provider(kind: str, provider_ref: str, method: str, *args: Any, timeout_seconds: Optional[float] = None) -> Any:
     """Call ``method`` of the provider ``provider_ref`` (``<plugin_id>:<provider_id>``) and return its validated answer.
 
-    ``timeout`` may only lower the provider's own ``timeout_seconds``. Raises only
+    ``timeout_seconds`` may only lower the provider's own ``timeout_seconds``. Raises only
     ``ProviderUnavailable``. Every timeout, exception and invalid answer counts as a failure for the
     plugin's circuit breaker; an answer that passes validation counts as a success.
     """
     try:
-        return _call(kind, provider_ref, method, args, timeout)
+        return _call(kind, provider_ref, method, args, timeout_seconds)
     except ProviderUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - the contract: nothing else leaves this function
@@ -170,7 +170,7 @@ def call_provider(kind: str, provider_ref: str, method: str, *args: Any, timeout
         raise ProviderUnavailable("error") from exc
 
 
-def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout: Optional[float]) -> Any:
+def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_seconds: Optional[float]) -> Any:
     spec = kinds.KINDS.get(kind)
     if spec is None or method not in spec.methods:
         raise ProviderUnavailable("unknown_method")
@@ -187,8 +187,8 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout: Optio
             raise ProviderUnavailable("rate_limited")
 
     seconds = float(provide.timeout_seconds)
-    if timeout is not None:
-        seconds = max(0.1, min(seconds, float(timeout)))
+    if timeout_seconds is not None:
+        seconds = max(0.1, min(seconds, float(timeout_seconds)))
     try:
         # The plugin gets copies, so nothing it does to its arguments reaches billing's objects.
         call_args = copy.deepcopy(args)
