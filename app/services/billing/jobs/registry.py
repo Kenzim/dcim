@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from app.services.billing.jobs.base import BillingJob
 from app.services.billing.jobs.generate_ahead import GenerateInvoicesAhead
+from app.services.billing.jobs.reminders import InvoiceReminders
 
 JOBS: dict[str, BillingJob] = {
     job.name: job
     for job in (
         GenerateInvoicesAhead(),
+        InvoiceReminders(),
     )
 }
