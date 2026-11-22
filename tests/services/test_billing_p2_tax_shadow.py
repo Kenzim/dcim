@@ -64,6 +64,34 @@ def test_consistent_invoice_has_no_findings(db_session, invoice):
     assert billing_shadow._tax_scan(db_session, _now()) == (1, [])
 
 
+def test_a_rescan_of_an_xi_invoice_rebuilds_the_declared_country(db_session, monkeypatch):
+    from app.services.tax.audit import invoice_tax_findings
+    from app.services.tax.context import TaxContextBuilder
+    from app.services.tax.engine import TaxEngine
+
+    stub_legal_notes(monkeypatch)
+    seed_classes(db_session)
+    invoice_v2(db_session)
+    set_engine(db_session, "tax", "v2")
+    enable_tax(db_session, "GB")
+    add_registration(db_session, "GB")
+    add_rule(db_session, name="UK VAT 20%", jurisdiction="GB", source="pack", rounding_point="line")
+    _user, account = retail_account(db_session, country="XI")
+    invoice = InvoiceService.create(
+        db_session, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=1000,
+        currency="GBP", lines=[NewLine("Server", 1000, kind=InvoiceLineKind.PRODUCT)],
+    )
+    assert invoice.tax_cents == 200
+    assert (invoice.tax_evidence["buyer_country"], invoice.tax_evidence["buyer_country_declared"]) == ("GB", "XI")
+    lines = db_session.scalars(select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id)).all()
+    rebuilt = TaxContextBuilder.for_stored(db_session, invoice, lines)
+    assert rebuilt.buyer.country == "XI"
+    again = TaxEngine.calculate(db_session, rebuilt)
+    assert again.context_hash == invoice.tax_evidence["context_hash"]
+    assert again.evidence.values["buyer_country_declared"] == "XI"
+    assert list(invoice_tax_findings(db_session, invoice, lines, rerun=True)) == []
+
+
 def _context_changed(db, subject_id, *, hours_ago=1, check=None):
     from datetime import timedelta
 

@@ -64,6 +64,23 @@ def normalise_rate(rate_percent: object) -> Decimal:
     return (Decimal(rate_ppm(rate_percent)) / RATE_SCALE).quantize(Decimal("0.0001"))
 
 
+# Codes that are another country's for place of supply: the VIES code EL is Greece, and Northern
+# Ireland (XI) is the UK for services (design appendix C).
+COUNTRY_ALIASES = {"EL": "GR", "XI": "GB"}
+
+
+def normalise_country(country: Optional[str], *, mapped: bool = True) -> Optional[str]:
+    """Upper case ISO alpha-2; with ``mapped``, ``COUNTRY_ALIASES`` applied (``EL`` is ``GR``, ``XI`` is ``GB``).
+
+    The engine maps only when ``billing_tax_enabled`` is true; with tax
+    disabled it keeps the literal code, as the ``tax_rates`` lookup does.
+    """
+    value = (country or "").strip().upper()
+    if not value:
+        return None
+    return COUNTRY_ALIASES.get(value, value) if mapped else value
+
+
 def normalise_postcode(postcode: Optional[str]) -> Optional[str]:
     if not postcode:
         return None
@@ -127,8 +144,11 @@ class RuleView:
             return SPEC_COUNTRY, 0
         return SPEC_NONE, 0
 
-    def matches_place(self, country: Optional[str], region: Optional[str], postcode: Optional[str]) -> bool:
-        if self.country and self.country.upper() != (country or "").upper():
+    def matches_place(
+        self, country: Optional[str], region: Optional[str], postcode: Optional[str], *, mapped: bool = False
+    ) -> bool:
+        """``mapped``: the rule's country is mapped as the buyer's was (``normalise_country``), so ``XI`` is ``GB``."""
+        if self.country and normalise_country(self.country, mapped=mapped) != (country or "").upper():
             return False
         if self.mirrored and self.region is not None:
             # tax_rates: a buyer with no region may take a region row.
@@ -272,6 +292,7 @@ def select_rules(
     postcode: Optional[str],
     is_business: bool,
     reverse_charge: Optional[bool] = None,
+    mapped_countries: bool = False,
 ) -> list[RuleView]:
     """The rules that apply to one line, in compound order (design 4.3 step 4).
 
@@ -285,7 +306,8 @@ def select_rules(
     its place among duplicates as in ``tax_rates``. Compound rules of that
     same specificity are all applied after it, in ``compound_order``.
     ``reverse_charge`` limits the candidates to reverse charge rules (True)
-    or ordinary rules (False).
+    or ordinary rules (False). ``mapped_countries``: ``countries`` hold mapped
+    codes (``normalise_country``) and rule countries are mapped the same way.
     """
     matching = [
         rule
@@ -294,7 +316,7 @@ def select_rules(
         and rule.jurisdiction in countries
         and (reverse_charge is None or rule.reverse_charge == reverse_charge)
         and rule.matches_customer(is_business)
-        and rule.matches_place(countries[rule.jurisdiction], region, postcode)
+        and rule.matches_place(countries[rule.jurisdiction], region, postcode, mapped=mapped_countries)
     ]
     if not matching:
         return []

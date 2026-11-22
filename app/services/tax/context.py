@@ -233,7 +233,10 @@ class TaxContextBuilder:
         """The context of a published invoice rebuilt from its frozen evidence, at ``tax_point_at``.
 
         Used to re-run the engine for ``t6_scan``: the buyer facts are those
-        recorded at publish, not the profile as it is now.
+        recorded at publish, not the profile as it is now. The buyer country
+        is the one declared (``buyer_country_declared``, recorded when the
+        engine mapped it, for example ``XI`` to ``GB``), so the rebuilt
+        context is the one published.
         """
         from datetime import timezone
 
@@ -250,7 +253,7 @@ class TaxContextBuilder:
             currency=_currency(invoice.currency),
             prices_include_tax=bool(invoice.prices_include_tax),
             buyer=BuyerTaxFacts(
-                country=stored.get("buyer_country"),
+                country=stored.get("buyer_country_declared") or stored.get("buyer_country"),
                 region=stored.get("buyer_region"),
                 postcode=stored.get("buyer_postcode"),
                 is_business=bool(stored.get("is_business")),

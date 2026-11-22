@@ -423,6 +423,59 @@ def test_reverse_charge_without_a_rule_gets_a_zero_tax_reverse_charge_part(db_se
     assert result.evidence.values["explained_by"] == ["reverse_charge"]
 
 
+# --- Northern Ireland: XI is the UK for services (appendix C, owner question 11) ---
+
+
+def test_xi_consumer_gets_uk_vat(db_session):
+    _uk_seller(db_session)
+    result = _calc(db_session, [line("a", 1000)], facts=buyer("XI"))
+    assert (result.tax_cents, result.legal_note_keys) == (200, ())
+    values = result.evidence.values
+    assert (values["buyer_country"], values["buyer_country_declared"]) == ("GB", "XI")
+    assert values["place_of_supply"] == "seller_country"
+
+
+def test_xi_business_with_an_xi_number_is_a_uk_business(db_session):
+    _uk_seller(db_session)
+    facts = buyer("XI", business=True, tax_id="XI123456789", status="valid", checked_at=NOW - timedelta(days=1))
+    result = _calc(db_session, [line("a", 1000)], facts=facts)
+    assert result.tax_cents == 200 and result.legal_note_keys == ()
+    assert not any(p.reverse_charge for p in result.lines["a"].parts)
+
+
+def test_xi_business_from_an_eu_seller_is_outside_scope_without_eu_reverse_charge(db_session):
+    enable_tax(db_session, "IE")
+    add_registration(db_session, "IE")
+    add_rule(db_session, name="IE VAT 23%", rate="23", country="IE", jurisdiction="IE", source="pack")
+    result = _calc(db_session, [line("a", 1000)], facts=valid_business("XI"))
+    assert result.tax_cents == 0 and result.legal_note_keys == ("outside_scope",)
+    (part,) = result.lines["a"].parts
+    assert part.name == "Outside the scope of VAT" and part.legal_note_key == "outside_scope"
+
+
+def test_xi_billing_country_with_a_gb_ip_is_no_evidence_conflict(db_session):
+    _uk_seller(db_session)
+    result = _calc(db_session, [line("a", 1000)], facts=buyer("XI"), evidence={"ip_country": "GB"})
+    assert "conflict" not in result.evidence.values
+    gb = _calc(db_session, [line("a", 1000)], facts=buyer("GB"), evidence={"ip_country": "XI"})
+    assert "conflict" not in gb.evidence.values and "buyer_country_declared" not in gb.evidence.values
+
+
+def test_a_rule_stored_as_xi_applies_as_gb_when_tax_is_enabled(db_session):
+    add_rule(db_session, name="XI rule", rate="20", country="XI")
+    for country in ("GB", "XI"):
+        assert [p.name for p in _calc(db_session, [line("a", 1000)], facts=buyer(country)).lines["a"].parts] == ["XI rule"]
+
+
+def test_xi_keeps_its_literal_code_when_tax_is_disabled(db_session):
+    set_setting(db_session, "billing_tax_enabled", False)
+    add_rule(db_session, name="GB mirror", rate="20", country="GB", source="tax_rates", rounding_rule="tax_floor")
+    add_rule(db_session, name="XI mirror", rate="15", country="XI", source="tax_rates", rounding_rule="tax_floor")
+    result = _calc(db_session, [line("a", 1000)], facts=buyer("XI"))
+    assert [p.name for p in result.lines["a"].parts] == ["XI mirror"]
+    assert result.evidence.values["buyer_country"] == "XI" and "buyer_country_declared" not in result.evidence.values
+
+
 def test_no_seller_country_only_any_rules_apply(db_session):
     enable_tax(db_session, "")
     add_rule(db_session, name="pack", jurisdiction="GB", source="pack")

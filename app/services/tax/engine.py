@@ -62,12 +62,7 @@ DISCOUNT_KIND = "discount"
 LEGACY_TAXED_PURPOSES = frozenset({"order_charge", "quote"})
 
 
-def normalise_country(country: Optional[str]) -> Optional[str]:
-    """Upper case ISO alpha-2; the VIES code ``EL`` is Greece (``GR``)."""
-    value = (country or "").strip().upper()
-    if not value:
-        return None
-    return "GR" if value == "EL" else value
+normalise_country = rules_repo.normalise_country
 
 
 def _aware(value: Optional[datetime]) -> Optional[datetime]:
@@ -463,7 +458,10 @@ class TaxEngine:
         settings = TaxSettings.read(db)
         at = _aware(context.tax_point_at)
         buyer = context.buyer
-        buyer_country = normalise_country(buyer.country)
+        # Place of supply runs on mapped codes (XI is GB); tax disabled keeps today's literal lookup.
+        mapped = settings.enabled
+        buyer_country = normalise_country(buyer.country, mapped=mapped)
+        declared = normalise_country(buyer.country, mapped=False)
         classes = rules_repo.class_ids(db)
         evidence: dict[str, Any] = {
             "buyer_country": buyer_country,
@@ -479,9 +477,11 @@ class TaxEngine:
             "exemption_ids": list(buyer.exemption_ids),
             "tax_id_checked_at": _aware(buyer.tax_id_checked_at).isoformat() if buyer.tax_id_checked_at else None,
         }
+        if declared != buyer_country:
+            evidence["buyer_country_declared"] = declared
         for key, value in (context.evidence or {}).items():
             evidence.setdefault(str(key), value)
-        ip_country = normalise_country(evidence.get("ip_country"))
+        ip_country = normalise_country(evidence.get("ip_country"), mapped=mapped)
         if ip_country is not None and buyer_country is not None and ip_country != buyer_country:
             evidence["conflict"] = True
         evidence["tax_enabled"] = settings.enabled
@@ -564,6 +564,7 @@ class TaxEngine:
                     postcode=buyer.postcode,
                     is_business=bool(buyer.is_business),
                     reverse_charge=True,
+                    mapped_countries=mapped,
                 )
                 rules = [
                     rule
@@ -585,6 +586,7 @@ class TaxEngine:
                     postcode=buyer.postcode,
                     is_business=bool(buyer.is_business),
                     reverse_charge=False,
+                    mapped_countries=mapped,
                 )
             parts_by_line[line.key] = [_part_of(rule) for rule in rules]
 

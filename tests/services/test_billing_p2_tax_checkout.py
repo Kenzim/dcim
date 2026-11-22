@@ -169,6 +169,17 @@ def test_shadow_ties_on_the_tax_rates_row_after_a_supersede(db_session, shadow, 
     assert not [r for r in shadow if r["engine"] == "tax"]
 
 
+def test_shadow_xi_consumer_with_tax_disabled_equals_legacy(db_session, shadow):
+    _rate(db_session, "GB", None, 2000)
+    _rate(db_session, "XI", None, 1500)
+    user, account = _buyer(db_session, "XI")
+    product, plan = _product(db_session, price_cents=1000)
+    quote = _quote(db_session, account, product, plan)
+    assert quote.tax_cents == quote.tax_result.tax_cents == 150
+    _place(db_session, account, user, product, plan)
+    assert not [r for r in shadow if r["engine"] == "tax"]
+
+
 def test_shadow_records_t1_checkout_when_the_engine_differs(db_session, shadow, monkeypatch):
     _rate(db_session, "GB", None, 2000)
     user, account = _buyer(db_session, "GB")

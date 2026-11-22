@@ -29,7 +29,8 @@ class ProviderResultError(Exception):
         self.reason = reason
 
 
-def _request(db: Session, context: TaxContext) -> Any:
+def _request(db: Session, context: TaxContext, buyer_country: Any) -> Any:
+    """``buyer_country`` is the engine's (``XI`` sent as ``GB`` when tax is enabled); the request has no field for the declared code."""
     from app.plugin_host.kinds import TaxProviderLine, TaxProviderRequest
 
     registrations = rules_repo.registrations_valid_at(db, context.tax_point_at)
@@ -45,7 +46,7 @@ def _request(db: Session, context: TaxContext) -> Any:
             ]
         },
         buyer={
-            "country": buyer.country,
+            "country": buyer_country,
             "region": buyer.region,
             "postcode": buyer.postcode,
             "is_business": bool(buyer.is_business),
@@ -146,7 +147,7 @@ def calculate_with_provider(db: Session, context: TaxContext, base: TaxResult, p
     from app.plugin_host.providers import ProviderUnavailable, call_provider
 
     try:
-        request = _request(db, context)
+        request = _request(db, context, base.evidence.values.get("buyer_country", context.buyer.country))
     except ImportError:
         raise ProviderResultError("kinds_unavailable") from None
     currencies = _manifest_currencies(db, provider_ref)
