@@ -131,8 +131,11 @@ class EmailMessageService:
         data: Optional[dict[str, Any]] = None,
         recipient: Optional[str] = None,
         variables: Optional[dict[str, Any]] = None,
+        billing_account_id: Optional[int] = None,
+        related_type: Optional[str] = None,
+        related_id: Optional[str] = None,
     ) -> EmailMessage:
-        """Queue an email to a reseller; ``variables`` as in ``enqueue``."""
+        """Queue an email to a reseller; the optional arguments as in ``enqueue``."""
         email = (recipient or (reseller.user.email if reseller.user else "")).strip()
         return EmailMessageService.enqueue(
             db,
@@ -142,6 +145,9 @@ class EmailMessageService:
             data=data,
             user_id=reseller.user_id,
             variables=variables,
+            billing_account_id=billing_account_id,
+            related_type=related_type,
+            related_id=related_id,
         )
 
     @staticmethod

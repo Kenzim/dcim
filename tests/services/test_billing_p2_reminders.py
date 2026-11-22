@@ -469,6 +469,7 @@ def test_seeded_templates_render_with_the_variables_passed(factory, monkeypatch)
     assert rows[0].body_text == f"Invoice {number} for USD 15.00 is due on 2027-06-06. Please sign in to pay."
     assert rows[1].body_text == f"Invoice {number} for USD 15.00 is overdue. Please sign in to pay."
     assert rows[0].user_id is not None and rows[0].idempotency_key == f"invoice:{invoice_id}:reminder:upcoming"
+    assert [(row.related_type, row.related_id) for row in rows] == [("invoice", str(invoice_id))] * 2
     db.close()
 
 
@@ -483,6 +484,7 @@ def test_enqueue_for_reseller_passes_variables(factory):
     row = EmailMessageService.enqueue_for_reseller(
         db, reseller=reseller, event="invoice_overdue", idempotency_key="k1",
         variables={"invoice_number": "INV-9", "amount_cents": 250, "currency": "GBP"},
+        related_type="invoice", related_id=str(invoice_id),
     )
     plain = EmailMessageService.enqueue_for_reseller(
         db, reseller=reseller, event="invoice_overdue", idempotency_key="k2", data={"invoice_number": "INV-9"},
@@ -490,6 +492,7 @@ def test_enqueue_for_reseller_passes_variables(factory):
     db.commit()
     assert row.template_id is not None and row.body_text == "Invoice INV-9 for GBP 2.50 is overdue. Please sign in to pay."
     assert row.user_id == reseller.user_id and row.to_address == reseller.user.email
-    assert plain.template_id is None
+    assert (row.related_type, row.related_id, row.billing_account_id) == ("invoice", str(invoice_id), None)
+    assert plain.template_id is None and (plain.related_type, plain.related_id) == (None, None)
     assert db.query(EmailMessage).count() == 2
     db.close()

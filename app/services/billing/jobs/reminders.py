@@ -247,6 +247,9 @@ class InvoiceReminders:
                 data=dict(variables),
                 variables=variables,
                 recipient=email,
+                billing_account_id=invoice.billing_account_id,
+                related_type="invoice",
+                related_id=str(invoice.id),
             )
         else:
             EmailMessageService.enqueue(
