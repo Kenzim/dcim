@@ -488,6 +488,15 @@ _SPECS = (
         enabled_by_default=False,
     ),
     AlertTypeSpec(
+        "billing_tax_fx_rate_missing",
+        "HMRC exchange rate not stored",
+        "UK VAT invoices in the operator currency need HMRC's monthly rate for sterling VAT, and the rate for "
+        "this month (or, from the 25th, next month) is not stored, so those invoices cannot be published. "
+        "Checked only while tax is in shadow or v2 with a GB registration and an operator currency other than GBP.",
+        _W,
+        "system",
+    ),
+    AlertTypeSpec(
         "billing_email_template_render_failed",
         "Email template failed to render",
         "Emails were sent with the built-in text because their stored template failed to render.",

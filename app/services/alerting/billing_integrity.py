@@ -1286,6 +1286,43 @@ def tax_context_changed(db: Session, params: dict, now: datetime) -> list[Findin
     ]
 
 
+def tax_fx_rate_missing(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """The HMRC rate of this month, or from the 25th of next month, is not stored (design 4.10).
+
+    Silent unless tax is in ``shadow`` or ``v2``, a ``GB`` registration is in
+    force and the operator currency is not GBP, so a system without UK tax
+    never sees it.
+    """
+    del params
+    from app.services.billing_shadow import billing_engine_mode
+    from app.services.tax import exchange_rates
+
+    if billing_engine_mode(db, "tax") not in ("shadow", "v2"):
+        return []
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    currency = exchange_rates.rates_needed(db, now)
+    if currency is None:
+        return []
+    current = exchange_rates.period_of(now)
+    out = []
+    for period in exchange_rates.missing_periods(db, now):
+        when = "this month" if period == current else "next month"
+        out.append(
+            Finding(
+                "billing_tax_fx_rate_missing",
+                "system",
+                f"tax_exchange_rate:{period}:{currency}",
+                f"HMRC rate {currency} {period}",
+                f"The HMRC {currency} rate for {period} ({when}) is not stored",
+                f"UK VAT invoices in {currency} with a tax point in {period} cannot be published until it is: "
+                "check the tax_exchange_rates_fetch job and the HMRC exchange rates plugin, or enter HMRC's "
+                "published rate under Billing, Tax, Exchange rates.",
+                details={"currency": currency, "period": period, "source": exchange_rates.SOURCE_HMRC},
+            )
+        )
+    return out
+
+
 def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
     """Email messages queued with the built-in text because their stored template failed to render.
 
@@ -1353,4 +1390,5 @@ BILLING_DETECTORS = {
     "billing_job_needs_review": billing_job_needs_review,
     "billing_job_stale": billing_job_stale,
     "billing_email_template_render_failed": email_template_render_failed,
+    "billing_tax_fx_rate_missing": tax_fx_rate_missing,
 }

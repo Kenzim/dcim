@@ -158,6 +158,31 @@ def gb_registration_active(db: Session, at: datetime) -> bool:
     )
 
 
+NEXT_MONTH_FROM_DAY = 25
+
+
+def rates_needed(db: Session, now: datetime) -> Optional[str]:
+    """The currency that needs sterling rates, or None: a ``GB`` registration in force and an operator currency other than GBP."""
+    from app.services.billing.operator_currency import operator_currency
+
+    currency = operator_currency()
+    if currency == BASE or not gb_registration_active(db, _aware(now)):
+        return None
+    return currency
+
+
+def missing_periods(db: Session, now: datetime, *, include_next: bool = True) -> list[str]:
+    """Months whose rate is needed and not stored: the current UK month, and from the 25th the next."""
+    currency = rates_needed(db, now)
+    if currency is None:
+        return []
+    current = period_of(now)
+    periods = [current]
+    if include_next and _aware(now).astimezone(UK).day >= NEXT_MONTH_FROM_DAY:
+        periods.append(next_period(current))
+    return [period for period in periods if not has_rate(db, currency, period)]
+
+
 @dataclass(frozen=True)
 class StoreOutcome:
     inserted: tuple[str, ...]

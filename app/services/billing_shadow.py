@@ -1008,6 +1008,14 @@ def _tax_switch_items(
         open_divergence=open_divergence[:200], unconfirmed_divergence=unconfirmed[:200],
         uncovered=uncovered, confirm_uncovered=confirm_uncovered,
     ))
+    from app.services.tax import exchange_rates
+
+    currency = exchange_rates.rates_needed(db, now)
+    missing = exchange_rates.missing_periods(db, now, include_next=False)
+    items.append(_item(
+        "exchange_rate_stored", not missing,
+        currency=currency, missing_periods=missing, source=exchange_rates.SOURCE_HMRC,
+    ))
     return items
 
 
