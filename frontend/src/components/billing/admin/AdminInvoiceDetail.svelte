@@ -15,6 +15,7 @@
   } from '../../../lib/billingAdminApi.js';
   import NoteModal from './NoteModal.svelte';
   import RefundModal from './RefundModal.svelte';
+  import InvoiceTaxPanel from './tax/InvoiceTaxPanel.svelte';
   import './billingAdmin.css';
 
   export let invoiceId;
@@ -256,6 +257,11 @@
     {/if}
     {#if voidBlock && ['open', 'overdue', 'pending_action'].includes(status)}<p class="ba-hint">Void is unavailable: {voidBlock}</p>{/if}
   </div>
+
+  <InvoiceTaxPanel {invoice} />
+  {#if invoice.billing_account_id}
+    <p class="ba-hint" style="margin: -6px 0 18px"><a href="/admin/billing/tax?account={invoice.billing_account_id}">Tax settings of account #{invoice.billing_account_id}</a></p>
+  {/if}
 
   <div class="ba-panel">
     <h3>Payments</h3>
