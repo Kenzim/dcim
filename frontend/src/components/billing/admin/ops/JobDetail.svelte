@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { Alert, Button, Spinner, Tabs } from '../../../ui/index.js';
   import { getJobForecast, getJobRun, listJobRuns } from '../../../../lib/billingOpsAdminApi.js';
+  import NeedsReview from './NeedsReview.svelte';
   import { detailPairs, label, when } from './opsFormat.js';
   import '../billingAdmin.css';
   import './opsAdmin.css';
@@ -9,6 +10,8 @@
   export let job;
   /** Bumped by the parent after it starts a run, so the run list reloads. */
   export let refreshKey = 0;
+  /** How many of this job's actions need review; shown on the tab. */
+  export let needsReview = 0;
 
   const dispatch = createEventDispatcher();
 
@@ -130,14 +133,18 @@
   </div>
   <div style="margin-top:12px">
     <Tabs
-      tabs={[{ id: 'runs', label: 'Runs' }, { id: 'forecast', label: 'Forecast' }]}
+      tabs={[{ id: 'runs', label: 'Runs' }, { id: 'forecast', label: 'Forecast' }, { id: 'review', label: needsReview > 0 ? `Needs review (${needsReview})` : 'Needs review' }]}
       active={tab}
       on:change={onTab}
     />
   </div>
   {#if error}<Alert type="danger">{error}</Alert>{/if}
 
-  {#if tab === 'runs'}
+  {#if tab === 'review'}
+    <div style="margin-top:14px">
+      <NeedsReview {job} {refreshKey} on:resolved={() => dispatch('resolved')} />
+    </div>
+  {:else if tab === 'runs'}
     {#if openRun}
       <div class="ba-inline" style="margin:14px 0 8px">
         <Button variant="secondary" size="small" on:click={() => (openRun = null)}>Back to runs</Button>

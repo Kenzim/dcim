@@ -489,6 +489,18 @@ def completed_scheduled_dry_runs(db: Session, name: str, since: Optional[datetim
     return int(db.scalar(query) or 0)
 
 
+def dry_run_progress(db: Session, state: BillingJobState) -> tuple[int, int]:
+    """``(completed, needed)`` scheduled dry runs for going live (design 9.2).
+
+    Runs count since ``dry_run_since``; a job that is not in ``dry_run`` has
+    none.
+    """
+    needed = int(_setting(db, "billing_job_min_dry_runs"))
+    if state.mode != BillingJobMode.DRY_RUN:
+        return 0, needed
+    return completed_scheduled_dry_runs(db, state.job, state.dry_run_since), needed
+
+
 def change_mode(
     db: Session, name: str, to: str, *, now: datetime, actor_user_id: Optional[int]
 ) -> tuple[str, BillingJobState]:
@@ -510,8 +522,7 @@ def change_mode(
     if target == BillingJobMode.LIVE:
         if previous != BillingJobMode.DRY_RUN:
             raise JobModeError("a job goes live only from dry_run")
-        needed = int(_setting(db, "billing_job_min_dry_runs"))
-        done = completed_scheduled_dry_runs(db, name, state.dry_run_since)
+        done, needed = dry_run_progress(db, state)
         if done < needed:
             raise JobModeError(f"{done} completed scheduled dry runs since dry_run began; {needed} needed")
         unmet = live_preconditions(db, job)

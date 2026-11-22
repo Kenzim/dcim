@@ -73,6 +73,8 @@ def _seller_lines(snapshot: Optional[dict]) -> list[str]:
     number = snapshot.get("registration_tax_number")
     if not number or number == snapshot.get("company_tax_id"):
         return []
+    if snapshot.get("registration_jurisdiction") == "EU_OSS":
+        return [f"One Stop Shop VAT identification number: {number}"]
     return [f"VAT/Tax registration: {number}"]
 
 

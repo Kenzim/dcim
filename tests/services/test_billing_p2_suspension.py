@@ -267,6 +267,24 @@ def test_failed_suspension_needs_review_and_is_not_retried(db_session, env):
     assert lifecycle.calls == [("suspend", billing.service_id)]
 
 
+@pytest.mark.parametrize("to", ["done", "failed"])
+def test_a_resolved_suspension_is_never_retried_and_unsuspends_nothing_by_itself(db_session, env, to):
+    from app.services.billing.jobs.actions import resolve_action
+
+    _, billing, lifecycle, job = env
+    lifecycle.fail = True
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    assert run_job(db_session, job, make_run(JOB)) == {_key(billing, invoice): "failed"}
+    claim = db_session.query(BillingJobAction).one()
+    resolve_action(db_session, claim.id, to=to, note="checked", actor_user_id=None, now=NOW)
+    db_session.commit()
+    lifecycle.fail = False
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(hours=1))) == {}
+    assert lifecycle.calls == [("suspend", billing.service_id)], "only the first, failed attempt"
+    assert _service(db_session, billing).status == ServiceStatus.ACTIVE
+    assert db_session.query(BillingJobAction).one().status.value == to
+
+
 def test_paid_between_plan_and_execute_skips(db_session, env):
     _, billing, lifecycle, job = env
     invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))

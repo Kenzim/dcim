@@ -12,7 +12,14 @@ from app.models.commerce_coupon_tax import TaxRate
 from app.models.tax import TaxExemption, TaxRule
 from app.services.tax.mirror import TaxRuleMirror
 from tests.api.test_billing_p1c_engines_api import _admin
-from tests.services.tax_helpers import add_rule, retail_account, seed_classes, set_engine
+from tests.services.tax_helpers import (
+    TAX_ALERT_KEYS,
+    add_rule,
+    enable_tax_alerts,
+    retail_account,
+    seed_classes,
+    set_engine,
+)
 
 BASE = "/api/admin/billing/tax"
 
@@ -195,6 +202,30 @@ def test_rule_country_xi_is_refused_with_a_pointer_to_gb(client, headers):
     assert client.get(f"{BASE}/rules/{future.json()['id']}", headers=headers).json()["country"] == "GB"
 
 
+@pytest.mark.parametrize(("code", "country", "error"), [("IM", "GB", "country_im"), ("MC", "FR", "country_mc")])
+def test_rule_country_im_and_mc_are_refused_with_a_pointer(client, headers, code, country, error):
+    """The Isle of Man is taxed by GB rules and Monaco by FR rules; a rule for either would never match."""
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+    resp = client.post(f"{BASE}/rules", headers=headers, json={**body, "country": code.lower()})
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == error and country in detail["message"]
+
+
+@pytest.mark.parametrize(("code", "right"), [("EL", "GR"), ("XI", "GB"), ("IM", "GB"), ("MC", "FR"), ("UK", "GB")])
+def test_registration_jurisdiction_codes_that_never_match_are_refused(client, headers, code, right):
+    body = {"jurisdiction": code.lower(), "scheme": "domestic", "tax_number": "X1", "country": right}
+    resp = client.post(f"{BASE}/registrations", headers=headers, json=body)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "invalid_registration_jurisdiction" and right in detail["message"]
+    created = client.post(f"{BASE}/registrations", headers=headers, json={**body, "jurisdiction": right})
+    assert created.status_code == 201, created.text
+    resp = client.put(f"{BASE}/registrations/{created.json()['id']}", headers=headers, json={"jurisdiction": code})
+    assert resp.status_code == 422 and resp.json()["detail"]["code"] == "invalid_registration_jurisdiction"
+
+
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
     classes = {c["code"]: c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json()}
     assert client.delete(f"{BASE}/classes/{classes['standard']}", headers=headers).status_code == 409
@@ -340,7 +371,14 @@ def test_tax_switch_refused_then_accepted_and_rollback_lists_open_invoices(clien
 
     _seed_quiet_history(db_session, "tax", 14, datetime.now(timezone.utc))
     set_engine(db_session, "invoice", "v2")
+    enable_tax_alerts(db_session)
     db_session.commit()
+    unsigned = client.post(f"{engines}/tax/switch", headers=headers, json={"to": "v2", "confirm_mirrored_only": True})
+    assert unsigned.status_code == 409 and unsigned.json()["detail"]["failing"] == ["adviser_signoff"]
+    signed = client.put(
+        "/api/admin/settings/billing_tax_adviser_signoff", headers=headers, json={"value": "Adviser ref 12, 2026-12-01"}
+    )
+    assert signed.status_code == 200, signed.text
     accepted = client.post(
         f"{engines}/tax/switch", headers=headers, json={"to": "v2", "confirm_mirrored_only": True}
     )
@@ -350,3 +388,94 @@ def test_tax_switch_refused_then_accepted_and_rollback_lists_open_invoices(clien
     db_session.expire_all()
     events = db_session.scalars(select(Event).where(Event.action == "billing.engine.switch")).all()
     assert [e.resource_id for e in events][-2:] == ["tax", "tax"]
+
+
+# --- the tax_alerts_enabled switch item (design 5, item 7) ---
+
+ENGINES = "/api/admin/billing/engines"
+ALERT_TYPES = "/api/admin/alerts/types"
+SWITCH_V2 = {"to": "v2", "confirm_mirrored_only": True}
+
+
+def _ready_for_v2(db_session):
+    """Every switch item passes except possibly the alerts: quiet period, invoice engine, sign-off."""
+    from app.services.settings_store import set_setting
+    from tests.api.test_billing_p1c_engines_api import _seed_quiet_history
+
+    _seed_quiet_history(db_session, "tax", 14, datetime.now(timezone.utc))
+    set_engine(db_session, "invoice", "v2")
+    set_setting(db_session, "billing_tax_adviser_signoff", "Adviser ref 12, 2026-12-01")
+    db_session.commit()
+
+
+def _alert_enabled(client, headers, key):
+    items = client.get(ALERT_TYPES, headers=headers).json()["items"]
+    return next(i["enabled"] for i in items if i["type"] == key)
+
+
+def _tax_mode(client, headers):
+    engines = client.get(ENGINES, headers=headers).json()["engines"]
+    return next(e["mode"] for e in engines if e["engine"] == "tax")
+
+
+def _switch_events(db):
+    db.expire_all()
+    return db.scalars(select(UserAuditEvent).where(UserAuditEvent.action == "billing.engine.switch")).all()
+
+
+def test_tax_switch_refused_while_every_tax_alert_is_off_by_default(client, db_session, headers):
+    _ready_for_v2(db_session)
+    refused = client.post(f"{ENGINES}/tax/switch", headers=headers, json=SWITCH_V2)
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert detail["failing"] == ["tax_alerts_enabled"]
+    item = next(i for i in detail["criteria"] if i["item"] == "tax_alerts_enabled")
+    assert set(item["disabled"]) == set(TAX_ALERT_KEYS) - {
+        "billing_tax_fx_rate_missing", "billing_tax_home_registration_missing"
+    }
+
+
+@pytest.mark.parametrize("key", TAX_ALERT_KEYS)
+def test_tax_switch_refused_for_each_tax_alert_that_is_off_then_accepted(client, db_session, headers, key):
+    from app.services.alerting.catalogue import update_type_setting
+
+    _ready_for_v2(db_session)
+    enable_tax_alerts(db_session)
+    update_type_setting(db_session, key, enabled=False)
+    db_session.commit()
+    refused = client.post(f"{ENGINES}/tax/switch", headers=headers, json=SWITCH_V2)
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert detail["failing"] == ["tax_alerts_enabled"]
+    item = next(i for i in detail["criteria"] if i["item"] == "tax_alerts_enabled")
+    assert item["disabled"] == [key]
+    assert _tax_mode(client, headers) == "shadow"
+
+    # The alerting admin route is the way to switch it on; then the switch goes through.
+    assert client.put(f"{ALERT_TYPES}/{key}", headers=headers, json={"enabled": True}).status_code == 200
+    accepted = client.post(f"{ENGINES}/tax/switch", headers=headers, json=SWITCH_V2)
+    assert accepted.status_code == 200, accepted.text
+    recorded = {i["item"]: i for i in _switch_events(db_session)[-1].event_metadata["criteria"]}
+    assert recorded["tax_alerts_enabled"]["ok"] is True
+
+
+def test_a_tax_alert_can_still_be_switched_off_after_the_v2_switch(client, db_session, headers):
+    _ready_for_v2(db_session)
+    enable_tax_alerts(db_session)
+    db_session.commit()
+    assert client.post(f"{ENGINES}/tax/switch", headers=headers, json=SWITCH_V2).status_code == 200
+    for key in TAX_ALERT_KEYS:
+        resp = client.put(f"{ALERT_TYPES}/{key}", headers=headers, json={"enabled": False})
+        assert resp.status_code == 200, resp.text
+        assert _alert_enabled(client, headers, key) is False
+    assert _tax_mode(client, headers) == "v2"
+
+
+@pytest.mark.parametrize("start, target", [("v2", "shadow"), ("v2", "legacy"), ("shadow", "legacy"), ("legacy", "shadow")])
+def test_other_tax_switches_ignore_the_alerts(client, db_session, headers, start, target):
+    set_engine(db_session, "tax", start)
+    db_session.commit()
+    assert not _alert_enabled(client, headers, "billing_tax_line_sum")
+    resp = client.post(f"{ENGINES}/tax/switch", headers=headers, json={"to": target})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mode"] == target

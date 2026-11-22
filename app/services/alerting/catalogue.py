@@ -444,7 +444,8 @@ _SPECS = (
     AlertTypeSpec(
         "billing_tax_evidence_conflict",
         "Invoice tax location evidence conflicts",
-        "The location evidence recorded on an invoice disagrees with the country whose tax was charged.",
+        "The location evidence recorded on an invoice disagrees with the country whose tax was charged, or "
+        "the buyer's VAT number is from another country than its billing country.",
         _W,
         "invoice",
         (_BILLING_MAX_ROWS,),
@@ -454,6 +455,24 @@ _SPECS = (
         "billing_tax_not_registered",
         "Tax rule skipped: no seller registration",
         "A tax rule applied to a sale but was skipped because the seller has no registration in force there.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_buyer_country_missing",
+        "Invoice taxed without the buyer's country",
+        "A buyer with no billing country was taxed as a consumer in the seller's country.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_no_rule_for_class",
+        "Invoice line untaxed: no rule for its class",
+        "A line's tax class has no rule in the jurisdiction the sale was taxed in, so it was charged no tax.",
         _W,
         "invoice",
         (_BILLING_MAX_ROWS,),
@@ -479,6 +498,16 @@ _SPECS = (
         enabled_by_default=False,
     ),
     AlertTypeSpec(
+        "billing_nonpayment_termination_unsettled",
+        "Termination settled but service still suspended",
+        "A non-payment termination was settled by an admin as done or failed, yet the service is still "
+        "suspended for non-payment with an unpaid invoice, and no job will act on it again.",
+        _W,
+        "service",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
         "billing_job_stale",
         "Billing job overdue",
         "A live billing job has not run on schedule for more than twice its cadence.",
@@ -493,6 +522,15 @@ _SPECS = (
         "UK VAT invoices in the operator currency need HMRC's monthly rate for sterling VAT, and the rate for "
         "this month (or, from the 25th, next month) is not stored, so those invoices cannot be published. "
         "Checked only while tax is in shadow or v2 with a GB registration and an operator currency other than GBP.",
+        _W,
+        "system",
+    ),
+    AlertTypeSpec(
+        "billing_tax_home_registration_missing",
+        "No tax registration in the seller's country",
+        "The seller holds no enabled domestic registration in force in its establishment country, so sales "
+        "there are charged no tax. An OSS registration alone does not count. Checked only while tax is in "
+        "shadow or v2 with tax enabled and a seller country set.",
         _W,
         "system",
     ),

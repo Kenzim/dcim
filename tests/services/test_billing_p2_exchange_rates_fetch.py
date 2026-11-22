@@ -208,6 +208,31 @@ def test_a_hand_entered_rate_that_differs_is_a_conflict_and_kept(factory, source
     assert _run(factory, T0 + timedelta(days=1)).counts == {} and len(source.calls) == 3
 
 
+def test_a_resolved_conflict_changes_no_rate_and_is_not_fetched_again(factory, source):
+    from app.services.billing.jobs.actions import resolve_action
+
+    _hand_enter(factory, "2026-09", "1.3500")
+    source.months = {"2026-09": {"USD": "1.3456"}, "2026-11": {"USD": "1.3396"}, "2026-12": {"USD": "1.3158"}}
+    _go_live(factory, T0 - timedelta(hours=1))
+    assert _run(factory).counts == {"done": 3}
+    db = factory()
+    action = db.scalars(
+        sa.select(BillingJobAction).where(BillingJobAction.subject_key == "compare:2026-09:USD")
+    ).one()
+    resolve_action(db, action.id, to="failed", note="stored rate is right", actor_user_id=None, now=T0)
+    db.commit()
+    db.close()
+    calls = len(source.calls)
+    assert _run(factory, T0 + timedelta(days=1)).counts == {} and len(source.calls) == calls
+    assert _rates(factory)[("2026-09", "USD")] == Decimal("1.3500")
+    db = factory()
+    assert db.scalars(sa.select(BillingJobAction).where(BillingJobAction.job == NAME)).all()[0].status in (
+        "failed", "done", "needs_review"
+    )
+    assert db.get(BillingJobAction, action.id).status == "failed"
+    db.close()
+
+
 def test_a_hand_entered_rate_not_published_yet_is_compared_later(factory, source):
     _hand_enter(factory, "2026-11", "1.3396")
     _hand_enter(factory, "2026-12", "1.3158")

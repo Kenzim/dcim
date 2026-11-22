@@ -191,8 +191,16 @@ def save_template(
     actor_user_id: Optional[int],
 ) -> EmailTemplate:
     validate(row.event_key, subject=subject, body_text=body_text, body_html=body_html)
+    flag_changed = enabled is not None and bool(row.enabled) != enabled
     if enabled is not None:
         row.enabled = enabled
+    if (subject, body_text, body_html or None) == (row.subject, row.body_text, row.body_html or None):
+        # Only the enabled flag can differ: no new version, no version row.
+        if flag_changed:
+            row.updated_by_user_id = actor_user_id
+            row.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        return row
     _append_version(db, row, subject=subject, body_text=body_text, body_html=body_html, actor_user_id=actor_user_id)
     return row
 

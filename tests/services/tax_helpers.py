@@ -150,6 +150,28 @@ def enable_tax(db, seller_country: str = "GB") -> None:
     db.flush()
 
 
+TAX_ALERT_KEYS = (
+    "billing_tax_line_sum",
+    "billing_tax_summary_consistent",
+    "billing_tax_evidence_conflict",
+    "billing_tax_not_registered",
+    "billing_tax_context_changed",
+    "billing_tax_buyer_country_missing",
+    "billing_tax_no_rule_for_class",
+    "billing_tax_fx_rate_missing",
+    "billing_tax_home_registration_missing",
+)
+
+
+def enable_tax_alerts(db) -> None:
+    """Switch on every invoice tax alert, as the ``tax_alerts_enabled`` switch item needs."""
+    from app.services.alerting.catalogue import update_type_setting
+
+    for key in TAX_ALERT_KEYS:
+        update_type_setting(db, key, enabled=True)
+    db.flush()
+
+
 def set_engine(db, engine: str, mode: str) -> None:
     """Put ``engine`` (invoice, credit or tax) into ``mode`` with the switch record ``v2`` needs."""
     from app.services.billing_shadow import ENGINE_SETTING
