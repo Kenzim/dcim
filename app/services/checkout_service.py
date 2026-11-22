@@ -664,7 +664,7 @@ class CheckoutService:
             to_address=recipient,
             event=EmailEvent.ORDER_CONFIRMATION,
             idempotency_key=f"order:{order.id}:confirmation",
-            data={
+            variables={
                 "order_number": order.order_number,
                 "order_id": order.id,
                 "amount_cents": quote.total_cents,
@@ -682,7 +682,7 @@ class CheckoutService:
             to_address=recipient,
             event=EmailEvent.INVOICE_CREATED,
             idempotency_key=f"invoice:{invoice.id}:created",
-            data={
+            variables={
                 "invoice_number": invoice.invoice_number,
                 "invoice_id": invoice.id,
                 "amount_cents": quote.total_cents,
