@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from tests.plugin_host.helpers import base_manifest, install, write_plugin
@@ -18,7 +19,7 @@ from tests.plugin_host.test_provider_kinds import (  # noqa: F401 - shared helpe
 
 import pytest
 
-from app.plugin_host import kinds
+from app.plugin_host import health, kinds, providers
 from app.plugin_host.providers import ProviderUnavailable, call_provider
 
 SAME_ID_CODE = """
@@ -228,6 +229,66 @@ def test_a_keyboard_interrupt_from_an_exception_message_does_not_escape(plugin_e
         pytest.fail("a KeyboardInterrupt raised by the plugin's exception reached the caller")
     assert err.value.reason == "error"
     assert failures(db_session, VALIDATOR) == 1
+
+
+def wait_idle(plugin_id, seconds=10.0):
+    deadline = time.monotonic() + seconds
+    while getattr(providers, "_running", {}).get(plugin_id) and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def release(monkeypatch, tmp_path):
+    """A file whose creation lets every call of the validator's ``block`` mode return."""
+    flag = tmp_path / "release"
+    monkeypatch.setenv("RF_TEST_RELEASE", str(flag))
+    yield flag
+    flag.touch()
+    wait_idle(VALIDATOR)
+
+
+def test_a_hung_provider_neither_delays_nor_blames_other_plugins(plugin_env, db_session, release, monkeypatch):
+    sessions = []
+    real_session = providers.new_session
+
+    def tracked_session():
+        session = real_session()
+        real_close = session.close
+
+        def close():
+            session.info["closed"] = True
+            real_close()
+
+        session.close = close
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(providers, "new_session", tracked_session)
+    monkeypatch.setattr(health, "FAILURES_TO_OPEN", 50)  # so the circuit does not stop the hung calls first
+    setup_plugin(plugin_env, db_session, VALIDATOR, mode="block")
+    setup_plugin(plugin_env, db_session, TAX)
+    reasons = []
+    for _ in range(8):
+        with pytest.raises(ProviderUnavailable) as err:
+            validator_call(timeout_seconds=0.1)
+        reasons.append(err.value.reason)
+    other = []
+    for _ in range(5):
+        try:
+            other.append(tax_call(timeout_seconds=0.5).reference)
+        except ProviderUnavailable as exc:
+            other.append(exc.reason)
+    assert other == ["TX-1"] * 5, "another plugin's calls are neither delayed nor failed"
+    assert failures(db_session, TAX) == 0
+    assert reasons == ["timeout", "timeout"] + ["busy"] * 6
+    assert failures(db_session, VALIDATOR) == 2, "busy is not a failure of the plugin"
+    assert providers._running[VALIDATOR] == 2 and providers._abandoned[VALIDATOR] == 2
+
+    release.touch()
+    wait_idle(VALIDATOR)
+    assert VALIDATOR not in providers._running and VALIDATOR not in providers._abandoned
+    assert sessions and all(s.info.get("closed") for s in sessions), "every session, abandoned calls' too, is closed"
+    assert validator_call("supports", "DE", "eu_vat") is True, "the slots are free again"
 
 
 def test_two_kinds_with_the_same_provider_id_have_separate_rate_limits(plugin_env, db_session):

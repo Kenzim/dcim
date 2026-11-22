@@ -1,5 +1,6 @@
 """A tax_id_validator for the host tests. The `mode` setting decides what check_online does."""
 
+import os
 import time
 from datetime import datetime, timezone
 
@@ -45,6 +46,11 @@ def register(plugin):
                 raise Unprintable(KeyboardInterrupt)
             if mode == "hang":
                 time.sleep(3)
+            if mode == "block":  # until the file named by RF_TEST_RELEASE exists, for at most 30 s
+                release = os.environ.get("RF_TEST_RELEASE", "")
+                deadline = time.monotonic() + 30
+                while not os.path.exists(release) and time.monotonic() < deadline:
+                    time.sleep(0.02)
             if mode == "bad_status":
                 return TaxIdCheckResult(status="maybe", checked_at=_now())
             if mode == "no_error_code":
