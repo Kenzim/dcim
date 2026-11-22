@@ -303,9 +303,22 @@ def test_a_held_lease_refuses_the_run(factory, job):
     assert _live(factory, job, T0 + timedelta(hours=1)).status == "locked"
 
 
+def _lease_seconds(factory):
+    from app.services.settings_store import get_setting
+
+    db = factory()
+    try:
+        return int(get_setting(db, "billing_job_lease_seconds"))
+    finally:
+        db.close()
+
+
 def test_a_run_that_loses_its_lease_stops(factory, job, monkeypatch):
     _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
     job.subjects = {i: T0 + timedelta(minutes=i) for i in range(1, 4)}
+    clock = [0.0]
+    monkeypatch.setattr(runner, "_clock", lambda: clock[0], raising=False)
+    lease = _lease_seconds(factory)
 
     def steal_then_list(db, run):
         other = factory()
@@ -314,13 +327,66 @@ def test_a_run_that_loses_its_lease_stops(factory, job, monkeypatch):
         )
         other.commit()
         other.close()
+        clock[0] += lease / 2
         return sorted(job.subjects)
 
     monkeypatch.setattr(job, "candidates", steal_then_list)
-    monkeypatch.setattr(runner, "RENEW_EVERY", 1)
     result = _live(factory, job, T0 + timedelta(hours=1))
     assert result.status == "aborted" and result.error == "lease lost"
+    assert job.executed == []
+
+
+def test_a_slow_run_stops_once_a_second_owner_takes_its_expired_lease(factory, job, monkeypatch):
+    """Items that each outlast the lease: the overlap ends with the first run stopping."""
+    _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
+    job.subjects = {i: T0 + timedelta(minutes=i) for i in range(1, 5)}
+    clock = [0.0]
+    monkeypatch.setattr(runner, "_clock", lambda: clock[0], raising=False)
+    lease = _lease_seconds(factory)
+    now = T0 + timedelta(hours=1)
+    second = []
+    plan = job.plan
+
+    def slow(db, run, subject_id):
+        clock[0] += lease + 10
+        if subject_id == 1:
+            other = factory()
+            second.append(periodic.acquire_lease(other, "billing_job:generate_invoices_ahead", owner="second",
+                                                 seconds=lease, now=now + timedelta(seconds=clock[0])))
+            other.close()
+        return plan(db, run, subject_id)
+
+    monkeypatch.setattr(job, "plan", slow)
+    result = _live(factory, job, now)
+    assert second == [True]
+    assert result.status == "aborted" and result.error == "lease lost"
     assert job.executed == [1]
+
+
+def test_a_slow_run_renews_by_time_so_no_second_owner_gets_in(factory, job, monkeypatch):
+    _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
+    job.subjects = {i: T0 + timedelta(minutes=i) for i in range(1, 5)}
+    clock = [0.0]
+    monkeypatch.setattr(runner, "_clock", lambda: clock[0], raising=False)
+    lease = _lease_seconds(factory)
+    now = T0 + timedelta(hours=1)
+    second = []
+    plan = job.plan
+
+    def slow(db, run, subject_id):
+        clock[0] += lease * 0.6
+        if subject_id == 2:
+            # Past the expiry of the lease as first taken.
+            other = factory()
+            second.append(periodic.acquire_lease(other, "billing_job:generate_invoices_ahead", owner="second",
+                                                 seconds=lease, now=now + timedelta(seconds=clock[0])))
+            other.close()
+        return plan(db, run, subject_id)
+
+    monkeypatch.setattr(job, "plan", slow)
+    result = _live(factory, job, now)
+    assert second == [False]
+    assert result.status == "complete" and job.executed == [1, 2, 3, 4]
 
 
 def test_stuck_claims_become_needs_review(factory, job):

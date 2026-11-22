@@ -42,8 +42,9 @@ from app.services.billing.jobs.base import BillingJob, JobRun, JobRunResult, Pla
 
 logger = logging.getLogger(__name__)
 
-# Items between two lease renewals (9.3).
-RENEW_EVERY = 100
+# The run renews its lease before an item once half the lease is spent (9.3);
+# a seconds clock, replaced in tests.
+_clock = time.monotonic
 _ERROR_LIMIT = 1000
 
 
@@ -298,16 +299,17 @@ def run_job(
     trigger_kind = BillingJobTrigger(trigger)
     owner = owner or make_owner()
     lease = lease_name(name)
-    started = time.monotonic()
+    started = _clock()
 
     def lease_now() -> datetime:
-        return now + timedelta(seconds=time.monotonic() - started)
+        return now + timedelta(seconds=_clock() - started)
 
     sdb = db_factory()
     wdb: Optional[Session] = None
     try:
         lease_seconds = int(_setting(sdb, "billing_job_lease_seconds"))
         sdb.rollback()
+        renewed_at = _clock()
         if not periodic.acquire_lease(sdb, lease, owner=owner, seconds=lease_seconds, now=lease_now()):
             return JobRunResult(None, name, "locked")
         try:
@@ -363,14 +365,16 @@ def run_job(
                 subjects: Iterable[int] = list(job.candidates(wdb, handle))
                 if not dry_run:
                     wdb.rollback()
-                for index, subject_id in enumerate(subjects, start=1):
+                for subject_id in subjects:
+                    if _clock() - renewed_at >= lease_seconds / 2:
+                        if not periodic.renew_lease(
+                            sdb, lease, owner=owner, seconds=lease_seconds, now=lease_now()
+                        ):
+                            status = BillingJobRunStatus.ABORTED
+                            error = "lease lost"
+                            break
+                        renewed_at = _clock()
                     _process(wdb, run, int(subject_id))
-                    if index % RENEW_EVERY == 0 and not periodic.renew_lease(
-                        sdb, lease, owner=owner, seconds=lease_seconds, now=lease_now()
-                    ):
-                        status = BillingJobRunStatus.ABORTED
-                        error = "lease lost"
-                        break
             except Exception as exc:  # noqa: BLE001 - recorded on the run
                 logger.exception("Billing job %s failed", name)
                 status = BillingJobRunStatus.FAILED
