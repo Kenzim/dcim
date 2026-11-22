@@ -10,7 +10,6 @@ checkout one of ``ensure_checkout_allowed`` under the ``block_checkout`` policy.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -25,6 +24,7 @@ from app.models.tax import (
     TaxRegistrationScheme,
 )
 from app.plugin_host import providers as plugin_providers
+from app.plugin_host.kinds import TaxIdCheckRequest
 from app.plugin_host.providers import ProviderUnavailable
 from app.services.settings_store import get_setting
 from app.services.tax import id_formats
@@ -46,25 +46,28 @@ UNVERIFIED_MESSAGE = "We could not verify your VAT number; VAT has been charged.
 _ONLINE_STATUSES = {TaxIdStatus.VALID.value, TaxIdStatus.INVALID.value, TaxIdStatus.UNAVAILABLE.value}
 
 
+# ``ProviderUnavailable.reason`` of the host (design 8.6) to the stored ``error_code``.
+ERROR_CODES = {
+    "timeout": "TIMEOUT",
+    "rate_limited": "RATE_LIMITED",
+    "circuit_open": "CIRCUIT_OPEN",
+    "invalid_answer": "INVALID_ANSWER",
+}
+DEFAULT_ERROR_CODE = "PLUGIN_ERROR"
+
+# Reasons that say the validator is configured and enabled but failing now: it stays a
+# candidate, so the check is ``unavailable`` rather than ``unchecked``.
+_TRANSIENT = {"timeout", "rate_limited", "circuit_open", "invalid_answer", "error"}
+
+
 class TaxIdUnverifiable(Exception):
     """Checkout refused under ``block_checkout``: answer 409 ``tax_id_unverifiable``."""
 
     code = "tax_id_unverifiable"
 
 
-# Local copy of the plugin API 1.1 request type (design 8.5), used only while
-# ``app.plugin_host.kinds`` does not exist; it is the only place to switch.
-try:
-    from app.plugin_host.kinds import TaxIdCheckRequest
-except ImportError:  # pragma: no cover
-
-    @dataclass(frozen=True)
-    class TaxIdCheckRequest:  # type: ignore[no-redef]
-        country: str
-        tax_id: str
-        id_type: str
-        requester_country: Optional[str]
-        requester_tax_id: Optional[str]
+def error_code_for(reason: Optional[str]) -> str:
+    return ERROR_CODES.get(reason or "", DEFAULT_ERROR_CODE)
 
 
 def _call_check_online(db: Session, ref: str, request: Any) -> Any:
@@ -100,27 +103,26 @@ def configured_validators(db: Session) -> list[str]:
 
 
 def _supporting_validators(db: Session, country: str, id_type: str) -> list[str]:
-    """Configured validators, in the setting's order, that are enabled and support the number."""
-    configured = configured_validators(db)
-    if not configured:
-        return []
-    try:
-        enabled = {ref.ref for ref in plugin_providers.providers_of(VALIDATOR_KIND)}
-    except Exception:  # noqa: BLE001 - the plugin host never breaks a tax-ID check
-        logger.exception("Listing tax-ID validators failed")
-        return []
-    out = []
-    for ref in configured:
-        if ref not in enabled:
-            continue
+    """Configured validators, in the setting's order, that support the number.
+
+    A validator whose ``supports`` call fails for a transient reason (open circuit,
+    timeout, rate limit, error) is kept after those that answered, so its failure is
+    recorded as ``unavailable``. One that is disabled, not installed or unknown is left out.
+    ``providers_of`` is not used to filter, because it omits providers with an open circuit.
+    """
+    answered: list[str] = []
+    failing: list[str] = []
+    for ref in configured_validators(db):
         try:
             if plugin_providers.call_provider(VALIDATOR_KIND, ref, "supports", country, id_type) is True:
-                out.append(ref)
-        except ProviderUnavailable:
-            continue
-        except Exception:  # noqa: BLE001
+                answered.append(ref)
+        except ProviderUnavailable as exc:
+            if exc.reason in _TRANSIENT:
+                failing.append(ref)
+        except Exception:  # noqa: BLE001 - call_provider should only raise ProviderUnavailable
             logger.exception("Tax-ID validator %s failed in supports()", ref)
-    return out
+            failing.append(ref)
+    return answered + failing
 
 
 def _requester(db: Session, at: datetime) -> tuple[Optional[str], Optional[str]]:
@@ -158,10 +160,10 @@ def _online(db: Session, ref: str, request: Any) -> dict[str, Any]:
     try:
         answer = _call_check_online(db, ref, request)
     except ProviderUnavailable as exc:
-        return {"status": TaxIdStatus.UNAVAILABLE.value, "error_code": (exc.reason or "PLUGIN_ERROR").upper()}
+        return {"status": TaxIdStatus.UNAVAILABLE.value, "error_code": error_code_for(exc.reason)}
     except Exception:  # noqa: BLE001 - call_provider should only raise ProviderUnavailable
         logger.exception("Tax-ID validator %s raised", ref)
-        return {"status": TaxIdStatus.UNAVAILABLE.value, "error_code": "PLUGIN_ERROR"}
+        return {"status": TaxIdStatus.UNAVAILABLE.value, "error_code": DEFAULT_ERROR_CODE}
     status = getattr(answer, "status", None)
     if status not in _ONLINE_STATUSES:
         logger.warning("Tax-ID validator %s answered an unknown status %r", ref, status)

@@ -45,6 +45,8 @@ def host(monkeypatch):
     def call_provider(kind, ref, method, *args, **kwargs):
         state["calls"].append((ref, method, args))
         state.setdefault("kwargs", []).append((method, kwargs))
+        if ref not in {r.ref for r in state["refs"]}:
+            raise ProviderUnavailable("disabled")
         if method == "supports":
             return state["supports"](*args)
         answer = state["answer"]
@@ -161,12 +163,51 @@ def test_format_invalid_stops_before_any_validator(db_session, profile, host):
     assert host["calls"] == []
 
 
-@pytest.mark.parametrize("reason", ["timeout", "circuit_open", "rate_limited", "plugin_error"])
-def test_provider_failure_is_unavailable_with_a_code(db_session, profile, host, reason):
+# Every reason of the host (the real-path cases are in tests/plugin_host/test_tax_id_service_host.py).
+@pytest.mark.parametrize(
+    "reason, code",
+    [
+        ("timeout", "TIMEOUT"),
+        ("rate_limited", "RATE_LIMITED"),
+        ("circuit_open", "CIRCUIT_OPEN"),
+        ("invalid_answer", "INVALID_ANSWER"),
+        ("error", "PLUGIN_ERROR"),
+        ("disabled", "PLUGIN_ERROR"),
+        ("not_installed", "PLUGIN_ERROR"),
+        ("not_loaded", "PLUGIN_ERROR"),
+        ("not_permitted", "PLUGIN_ERROR"),
+        ("unknown_provider", "PLUGIN_ERROR"),
+        ("unknown_method", "PLUGIN_ERROR"),
+        ("bad_arguments", "PLUGIN_ERROR"),
+        (None, "PLUGIN_ERROR"),
+    ],
+)
+def test_provider_failure_is_unavailable_with_a_code(db_session, profile, host, reason, code):
     host["answer"] = ProviderUnavailable(reason)
     row = TaxIdService.check(db_session, profile, now=NOW)
-    assert (row.status, row.error_code) == ("unavailable", reason.upper())
+    assert (row.status, row.error_code) == ("unavailable", code)
     assert profile.tax_id_status == "unavailable"
+
+
+@pytest.mark.parametrize("reason", ["circuit_open", "timeout", "rate_limited", "error", "invalid_answer"])
+def test_a_transient_supports_failure_keeps_the_validator(db_session, profile, host, reason):
+    def failing(country, id_type):
+        raise ProviderUnavailable(reason)
+
+    host["supports"] = failing
+    host["answer"] = ProviderUnavailable(reason)
+    row = TaxIdService.check(db_session, profile, now=NOW)
+    assert row.status == "unavailable" and row.validator == "vies:vies"
+
+
+@pytest.mark.parametrize("reason", ["disabled", "not_installed", "not_loaded", "not_permitted", "unknown_provider"])
+def test_a_lasting_supports_failure_leaves_the_number_unchecked(db_session, profile, host, reason):
+    def failing(country, id_type):
+        raise ProviderUnavailable(reason)
+
+    host["supports"] = failing
+    assert TaxIdService.check(db_session, profile, now=NOW) is None
+    assert profile.tax_id_status == "unchecked"
 
 
 def test_unexpected_exception_and_bad_answers_are_unavailable(db_session, profile, host):
