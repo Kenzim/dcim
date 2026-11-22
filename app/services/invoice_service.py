@@ -470,6 +470,8 @@ class InvoiceService:
             raise InvoiceError("currency must be a three-letter code")
         if reseller_id is None and billing_account_id is None:
             raise InvoiceError("reseller_id or billing_account_id is required")
+        if mode == "v2":
+            InvoiceService._lock_owner(db, reseller_id=reseller_id, billing_account_id=billing_account_id)
         if lines is None:
             lines = [
                 NewLine(
@@ -555,6 +557,29 @@ class InvoiceService:
         return invoice
 
     @staticmethod
+    def _lock_owner(
+        db: Session, *, reseller_id: Optional[int], billing_account_id: Optional[int]
+    ) -> None:
+        """Lock the new invoice's reseller and billing account before any number row.
+
+        The account is the one ``BillingLocks.for_invoice`` will lock for the
+        invoice: its own, else the reseller's. In engine ``v2`` publish settles
+        in the same transaction, and settlement locks both.
+        """
+        from app.models.commerce_account import BillingAccount
+        from app.services.billing_locks import BillingLocks
+
+        if reseller_id is not None:
+            BillingLocks.reseller(db, int(reseller_id))
+        account_id = billing_account_id
+        if account_id is None and reseller_id is not None:
+            account_id = db.scalar(
+                select(BillingAccount.id).where(BillingAccount.reseller_id == reseller_id)
+            )
+        if account_id is not None:
+            BillingLocks.billing_account(db, int(account_id))
+
+    @staticmethod
     def publish(db: Session, invoice: Invoice) -> Invoice:
         """``draft`` to ``open``: totals, snapshots, number, ``invoice.created`` (design 3.3).
 
@@ -597,11 +622,13 @@ class InvoiceService:
         invoice.seller_snapshot = seller_snapshot(now)
         invoice.buyer_snapshot = buyer_snapshot(db, invoice, now)
         auto_apply = v2 and InvoiceService._auto_apply_credit(db, invoice)
-        if auto_apply:
-            # The account comes before the number counter in the lock order.
+        if v2:
+            # The recompute below settles and may credit an overpayment, and
+            # auto-apply writes the ledger: reseller, account and invoice come
+            # before the number counter in the lock order.
             from app.services.billing_locks import BillingLocks
 
-            BillingLocks.for_invoice(db, invoice.id, billing_account=True)
+            BillingLocks.for_invoice(db, invoice.id, reseller=True, billing_account=True)
         InvoiceService._allocate_publish_number(db, invoice, now, required=v2)
         InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause=CAUSE_PUBLISH)
         settlement.fire(db, settlement.INVOICE_CREATED, settlement.InvoiceCreated(invoice=invoice))
@@ -819,7 +846,7 @@ class InvoiceService:
         return InvoiceService._legacy_allocated_cents(db, invoice_id)
 
     @staticmethod
-    def balance(db: Session, invoice: Invoice) -> InvoiceBalance:
+    def balance(db: Session, invoice: Invoice, *, for_update: bool = False) -> InvoiceBalance:
         """The invoice's balance from two aggregate queries. Never writes.
 
         A payment marked ``refunded`` whose ``refunded_cents`` is still 0 was
@@ -827,6 +854,13 @@ class InvoiceService:
         refunded in full, the fact ``billing_backfill`` records for older rows.
         A partially refunded payment never counts more than its amount as
         refunded. An invoice that is not flushed yet has no payments or notes.
+
+        ``for_update`` makes both queries locking reads of the invoice's
+        payments and notes, for a caller that holds the invoice lock and
+        decides money from the result: under REPEATABLE READ (MySQL, MariaDB)
+        a plain read sees the transaction's first snapshot, which may predate
+        a payment committed while it waited for the lock. Payments and notes
+        come after the invoice in the lock order.
         """
         total = int(invoice.amount_cents or 0)
         if invoice.id is None:
@@ -839,7 +873,7 @@ class InvoiceService:
             (Payment.refunded_cents > Payment.amount_cents, Payment.amount_cents),
             else_=Payment.refunded_cents,
         )
-        payments = db.execute(
+        payments_query = (
             select(
                 Payment.status,
                 func.coalesce(func.sum(Payment.amount_cents), 0),
@@ -847,7 +881,20 @@ class InvoiceService:
             )
             .where(Payment.invoice_id == invoice.id)
             .group_by(Payment.status)
-        ).all()
+        )
+        notes_query = (
+            select(
+                InvoiceAdjustment.kind,
+                func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
+            )
+            .where(InvoiceAdjustment.invoice_id == invoice.id)
+            .group_by(InvoiceAdjustment.kind)
+        )
+        if for_update:
+            db.flush()
+            payments_query = payments_query.with_for_update()
+            notes_query = notes_query.with_for_update()
+        payments = db.execute(payments_query).all()
         paid_gross = refunded = pending = 0
         for status, amount, refunded_sum in payments:
             if status in _PAID_PAYMENT_STATUSES:
@@ -855,16 +902,7 @@ class InvoiceService:
                 refunded += int(refunded_sum)
             elif status == PaymentStatus.PENDING:
                 pending += int(amount)
-        notes = dict(
-            db.execute(
-                select(
-                    InvoiceAdjustment.kind,
-                    func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
-                )
-                .where(InvoiceAdjustment.invoice_id == invoice.id)
-                .group_by(InvoiceAdjustment.kind)
-            ).all()
-        )
+        notes = dict(db.execute(notes_query).all())
         debit = int(notes.get(AdjustmentKind.DEBIT, 0))
         credit = int(notes.get(AdjustmentKind.CREDIT, 0))
         worth = total + debit - credit

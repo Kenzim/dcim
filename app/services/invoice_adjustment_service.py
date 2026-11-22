@@ -359,10 +359,14 @@ def _snapshots(db: Session, invoice: Invoice, account_id: Optional[int], now: da
 
 
 def _worth_and_tax_before(db: Session, invoice: Invoice, key: str) -> tuple[int, int]:
-    """The invoice's worth and tax: its own, plus debit notes, less credit notes.
+    """The tax base of the invoice: its worth and tax, plus debit notes, less credit notes.
 
-    Only notes issued before the note with idempotency key ``key`` count, so a
-    retry of that note sees the figures its first request saw.
+    Overpayment debit notes do not count: they only move money that was paid
+    beyond the invoice to account credit, and carry no tax, so counting them
+    would dilute the tax of every later credit note. Only notes issued before
+    the note with idempotency key ``key`` count, so a retry of that note sees
+    the figures its first request saw. The caller holds the invoice lock;
+    the read is a locking one so it sees notes committed meanwhile.
     """
     stmt = (
         select(
@@ -370,8 +374,12 @@ def _worth_and_tax_before(db: Session, invoice: Invoice, key: str) -> tuple[int,
             func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
             func.coalesce(func.sum(InvoiceAdjustment.tax_cents), 0),
         )
-        .where(InvoiceAdjustment.invoice_id == invoice.id)
+        .where(
+            InvoiceAdjustment.invoice_id == invoice.id,
+            InvoiceAdjustment.reason_code != AdjustmentReason.OVERPAYMENT,
+        )
         .group_by(InvoiceAdjustment.kind)
+        .with_for_update()
     )
     earlier = db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.idempotency_key == key))
     if earlier is not None:
@@ -538,9 +546,10 @@ def _lock_invoice(db: Session, invoice: Invoice, **locks: bool) -> Invoice:
 
 
 def _balance(db: Session, invoice: Invoice):
+    """The balance of a locked invoice, read with locking reads (``balance(for_update=True)``)."""
     from app.services.invoice_service import InvoiceService
 
-    return InvoiceService.balance(db, invoice)
+    return InvoiceService.balance(db, invoice, for_update=True)
 
 
 def _recompute(db: Session, invoice: Invoice, cause: str) -> None:

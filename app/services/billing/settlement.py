@@ -37,7 +37,13 @@ from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.reseller import Invoice, InvoiceStatus, Payment
+from app.models.reseller import (
+    Invoice,
+    InvoiceDocumentType,
+    InvoicePurpose,
+    InvoiceStatus,
+    Payment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +314,9 @@ def settle_invoice(
     mode = engine_mode(db)
     if mode == "v2":
         return _settle_v2(db, invoice_id, payment=payment, source=source, cause=cause)
-    invoice = _settle_legacy(db, invoice_id, payment=payment, source=source)
+    invoice = _settle_legacy(
+        db, invoice_id, payment=payment, source=source, cause=cause, shadow=mode == "shadow"
+    )
     if invoice is None:
         raise InvoiceError("Invoice not found")
     if mode == "shadow":
@@ -322,6 +330,8 @@ def _settle_legacy(
     *,
     payment: Optional[Payment],
     source: Optional[str],
+    cause: Optional[str] = None,
+    shadow: bool = False,
 ) -> Optional[Invoice]:
     from app.services.billing.order_refunds import record_refund_review
     from app.services.invoice_service import CAUSE_SETTLEMENT, InvoiceError, InvoiceService
@@ -347,6 +357,9 @@ def _settle_legacy(
 
     if allocated > invoice.amount_cents:
         if not _is_retail(invoice):
+            if shadow:
+                # Design 4.3: the case is recorded on its own session before the raise.
+                _record_legacy_overpayment_raise(db, invoice, allocated, cause=cause)
             raise InvoiceError("Invoice payment allocations exceed its total")
         if payment is not None:
             record_refund_review(
@@ -415,6 +428,39 @@ def _compare_decision(db: Session, invoice: Invoice, *, cause: Optional[str]) ->
         )
 
 
+def _record_legacy_overpayment_raise(
+    db: Session, invoice: Invoice, allocated: int, *, cause: Optional[str]
+) -> None:
+    """Shadow check ``i1_decision`` for an overpaid reseller invoice, which legacy refuses.
+
+    v2 would turn the excess into a debit note and account credit (4.3), so
+    the two decisions always differ here.
+    """
+    from app.services.billing_shadow import BillingShadowService
+    from app.services.invoice_service import InvoiceService
+
+    try:
+        balance = InvoiceService.balance(db, invoice)
+        legacy = {
+            "decision": "raise",
+            "allocated_cents": int(allocated),
+            "amount_cents": int(invoice.amount_cents),
+        }
+        v2 = {
+            "decision": "overpayment_debit_note",
+            "overpaid_cents": max(0, -balance.due_cents),
+            "status": InvoiceStatus.PAID.value,
+            "balance": balance.as_dict(),
+        }
+    except Exception:  # noqa: BLE001 - a shadow comparison never changes the legacy outcome
+        logger.exception("Shadow overpayment check failed for invoice %s", invoice.id)
+        return
+    BillingShadowService.record(
+        "invoice", "i1_decision", "invoice", int(invoice.id), legacy, v2,
+        context=cause or "settlement",
+    )
+
+
 def _settle_v2(
     db: Session,
     invoice_id: int,
@@ -439,7 +485,9 @@ def _settle_v2(
         raise InvoiceError("Invoice not found")
     if invoice.status == InvoiceStatus.DRAFT:
         return invoice
-    balance = InvoiceService.balance(db, invoice)
+    # A locking read: under REPEATABLE READ a plain read could miss a payment
+    # committed while this transaction waited for the invoice lock.
+    balance = InvoiceService.balance(db, invoice, for_update=True)
     if invoice.status in TERMINAL_V2:
         if payment is not None and _payment_counts(payment):
             record_refund_review(
@@ -451,23 +499,35 @@ def _settle_v2(
             )
         db.flush()
         return invoice
+    became_paid = False
     if balance.due_cents < 0:
-        _credit_overpayment(db, invoice, -balance.due_cents, payment)
-        balance = InvoiceService.balance(db, invoice)
-        if balance.due_cents < 0:
-            raise InvoiceError(
-                f"invoice {invoice.id} is still overpaid after the overpayment debit note"
-            )
+        if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
+            # The whole payment is account credit already, so the excess is
+            # credited directly and the invoice stays overpaid on record.
+            _credit_topup_overpayment(db, invoice, -balance.due_cents, payment)
+        else:
+            if invoice.document_type == InvoiceDocumentType.PROFORMA:
+                # A proforma takes no notes (5.4): it is paid and converted
+                # first, and the debit note goes on the invoice it becomes.
+                became_paid = invoice.status != InvoiceStatus.PAID
+                _mark_paid(db, invoice)
+            _credit_overpayment(db, invoice, -balance.due_cents, payment)
+            balance = InvoiceService.balance(db, invoice, for_update=True)
+            if balance.due_cents < 0:
+                raise InvoiceError(
+                    f"invoice {invoice.id} is still overpaid after the overpayment debit note"
+                )
     target = InvoiceService.target_status(
         db, invoice, balance, cause=cause or CAUSE_SETTLEMENT
     )
-    if target == invoice.status:
-        db.flush()
-        return invoice
-    if target == InvoiceStatus.PAID:
-        _mark_paid(db, invoice)
+    if target == InvoiceStatus.PAID and (became_paid or invoice.status != InvoiceStatus.PAID):
+        if not became_paid:
+            _mark_paid(db, invoice)
         db.flush()
         fire_invoice_paid(db, InvoicePaid(invoice=invoice, payment=payment, source=source))
+        return invoice
+    if target == invoice.status:
+        db.flush()
         return invoice
     InvoiceService.transition(
         db,
@@ -489,20 +549,11 @@ def _payment_counts(payment: Payment) -> bool:
     )
 
 
-def _credit_overpayment(
-    db: Session, invoice: Invoice, excess_cents: int, payment: Optional[Payment]
-) -> None:
-    """Design 4.3: a debit note for the excess and the same amount as account credit.
-
-    ``issue_overpayment`` writes both (the note and its ledger entry) under the
-    idempotency key ``overpayment:<invoice_id>:<payment_id>``. With no payment
-    named, the latest successful payment on the invoice is the one that
-    caused the overpayment.
-    """
+def _overpaying_payment(db: Session, invoice: Invoice, payment: Optional[Payment]) -> Payment:
+    """The payment that caused an overpayment: the one named, else the latest successful one."""
     from sqlalchemy import select
 
     from app.models.reseller import PaymentStatus
-    from app.services.invoice_adjustment_service import InvoiceAdjustmentService
     from app.services.invoice_service import InvoiceError
 
     if payment is None:
@@ -519,7 +570,74 @@ def _credit_overpayment(
         ).scalar_one_or_none()
     if payment is None:
         raise InvoiceError(f"invoice {invoice.id} is overpaid without a payment")
+    return payment
+
+
+def _credit_overpayment(
+    db: Session, invoice: Invoice, excess_cents: int, payment: Optional[Payment]
+) -> None:
+    """Design 4.3: a debit note for the excess and the same amount as account credit.
+
+    ``issue_overpayment`` writes both (the note and its ledger entry) under the
+    idempotency key ``overpayment:<invoice_id>:<payment_id>``.
+    """
+    from app.services.invoice_adjustment_service import InvoiceAdjustmentService
+
+    payment = _overpaying_payment(db, invoice, payment)
     InvoiceAdjustmentService.issue_overpayment(db, invoice, int(excess_cents), payment)
+
+
+TOPUP_OVERPAYMENT_REFERENCE = "topup_overpayment"
+
+
+def _credit_topup_overpayment(
+    db: Session, invoice: Invoice, excess_cents: int, payment: Optional[Payment]
+) -> None:
+    """Credit the part of a top-up's excess not credited yet to its account, with no note.
+
+    A top-up takes no debit note (its payments are credit already), so its
+    ``due`` stays negative and every settlement sees the whole excess again.
+    Only what earlier settlements have not credited is credited, under the
+    key ``overpayment-credit:topup:<invoice_id>:<payment_id>``. The caller
+    holds the account lock.
+    """
+    from sqlalchemy import func, select
+
+    from app.models.reseller import CreditLedgerEntry
+    from app.services.billing.settlement_subscribers import account_id_for
+    from app.services.credit_ledger_service import CreditLedgerService
+    from app.services.invoice_service import InvoiceError
+
+    credited = db.scalar(
+        select(func.coalesce(func.sum(CreditLedgerEntry.amount_cents), 0))
+        .where(
+            CreditLedgerEntry.invoice_id == invoice.id,
+            CreditLedgerEntry.reference_type == TOPUP_OVERPAYMENT_REFERENCE,
+        )
+        .with_for_update()
+    )
+    uncredited = int(excess_cents) - int(credited or 0)
+    if uncredited <= 0:
+        return
+    payment = _overpaying_payment(db, invoice, payment)
+    account_id = account_id_for(
+        db, billing_account_id=invoice.billing_account_id, reseller_id=invoice.reseller_id
+    )
+    if account_id is None:
+        raise InvoiceError(f"top-up invoice {invoice.id} has no billing account to credit")
+    CreditLedgerService.credit_account(
+        db,
+        account_id,
+        uncredited,
+        description=(
+            f"Overpayment on top-up invoice {invoice.number_display or invoice.invoice_number}"
+        ),
+        invoice_id=invoice.id,
+        payment_id=payment.id,
+        reference_type=TOPUP_OVERPAYMENT_REFERENCE,
+        reference_id=str(payment.id),
+        idempotency_key=f"overpayment-credit:topup:{invoice.id}:{payment.id}",
+    )
 
 
 _DEFERRED_FULFILMENT_KEY = "billing.deferred_order_fulfilment"
