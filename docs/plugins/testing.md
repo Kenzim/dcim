@@ -12,7 +12,7 @@ pip install -r requirements.txt
 PYTHONPATH=. pytest path/to/your_plugin/tests
 ```
 
-A plugin that lives in the Rackflow repository, under `examples/plugins`, needs no `PYTHONPATH`. The [template](../../examples/plugins/plugin_template/README.md) has the files below ready to copy.
+A plugin that lives in the Rackflow repository, under `examples/plugins`, needs no `PYTHONPATH`: `pytest.ini` lists `examples` in `testpaths` and puts the repository root on the path, so a bare `pytest` also runs every example's tests. The [template](../../examples/plugins/plugin_template/README.md) has the files below ready to copy.
 
 In `tests/conftest.py` of your plugin folder:
 
@@ -71,11 +71,11 @@ def test_new_service_gets_a_welcome_note(rackflow):
 | `plugin.logs(level=None)`, `plugin.log_messages(level=None)` | What the plugin wrote with `ctx.log`, plus the host's own failure lines. |
 | `plugin.activate(service, on=True)` | The admin switching the plugin on or off for one service. Needed for plugins with `enablement` `opt_in`. |
 | `plugin.status`, `plugin.installation` | The installation row: status, version, health counters, `last_error`. |
-| `plugin.enable()`, `plugin.disable()`, `plugin.upgrade(folder=None)`, `plugin.uninstall(keep_data=False)` | The lifecycle, through the real code. `upgrade` copies a newer folder over the installed files first. |
+| `plugin.enable()`, `plugin.disable()`, `plugin.upgrade(source=None, accept_permissions=None)`, `plugin.uninstall(keep_data=False)` | The lifecycle, through the real code. `upgrade` copies a newer folder over the installed files first. |
 
 ### People and services
 
-- `rackflow.make_user(name=None, admin=False, plugin_notices=True)`: a user. A client has opted in to plugin notices by default, as `ctx.notify.client` needs.
+- `rackflow.make_user(username=None, admin=False, plugin_notices=True)`: a user. A client has opted in to plugin notices by default, as `ctx.notify.client` needs.
 - `rackflow.make_service(owner=None, type="vm", status="active", name=None, product_code=None, os_code=None)`: inserts a service the way Rackflow does, so plugins subscribed to `service.created` receive a real event.
 - `rackflow.set_status(service, "suspended")`: changes status; the host's listener queues `service.suspended`, `service.unsuspended`, `service.activated` or `service.terminated`.
 - `rackflow.client_notices(user)`: the notices queued for a client by `ctx.notify.client`.
