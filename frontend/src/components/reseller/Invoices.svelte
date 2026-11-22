@@ -108,18 +108,23 @@
         error = 'Card authentication is required, but Stripe is not available.';
         return;
       }
-      const stripe = await loadStripe(config.stripe.publishable_key);
-      const result = await stripe?.confirmCardPayment(clientSecret);
-      if (!result || result.error) {
-        error = result?.error?.message || 'Card authentication failed.';
-        return;
+      try {
+        const stripe = await loadStripe(config.stripe.publishable_key);
+        const result = await stripe?.confirmCardPayment(clientSecret);
+        if (!result || result.error) {
+          error = result?.error?.message || 'Card authentication failed.';
+          return;
+        }
+        selected = await getResellerPanelInvoice(selected.id);
+        success = 'Card authentication completed. Payment confirmation may take a moment.';
+      } catch (authErr) {
+        error = billingErrorMessage(authErr, 'Card authentication failed.', { currency: selected?.currency });
+        success = '';
       }
-      selected = await getResellerPanelInvoice(selected.id);
-      success = 'Card authentication completed. Payment confirmation may take a moment.';
     } finally {
       clientSecret = null;
       working = false;
-      invoices = await listResellerPanelInvoices(statusFilter ? { status: statusFilter } : {});
+      invoices = await listResellerPanelInvoices(statusFilter ? { status: statusFilter } : {}).catch(() => invoices);
     }
   }
 </script>
