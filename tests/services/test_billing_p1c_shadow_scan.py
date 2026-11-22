@@ -405,10 +405,21 @@ def test_admin_scans_do_not_push_scheduled_scans_out_of_the_history(db_session):
     for index in range(5):
         billing_shadow._append_history(db_session, "credit", {"started_at": f"admin{index}", "scheduled": False})
     history = BillingShadowService.scan_history(db_session, "credit")
+    assert [entry["started_at"] for entry in history] == [str(index) for index in range(HISTORY_LIMIT)]
+    billing_shadow._append_history(db_session, "credit", {"started_at": "late", "scheduled": True})
+    history = BillingShadowService.scan_history(db_session, "credit")
+    assert history[0]["started_at"] == "1" and history[-1]["started_at"] == "late"
+
+
+def test_admin_scans_replace_older_admin_scans_in_a_full_history(db_session):
+    for index in range(HISTORY_LIMIT - 1):
+        billing_shadow._append_history(db_session, "credit", {"started_at": str(index), "scheduled": True})
+    for index in range(3):
+        billing_shadow._append_history(db_session, "credit", {"started_at": f"admin{index}", "scheduled": False})
+    history = BillingShadowService.scan_history(db_session, "credit")
     assert len(history) == HISTORY_LIMIT
-    # Each admin scan is kept until the next one replaces it; no scheduled scan goes.
     assert sum(1 for entry in history if entry["scheduled"]) == HISTORY_LIMIT - 1
-    assert history[0]["started_at"] == "1" and history[-1]["started_at"] == "admin4"
+    assert history[-1]["started_at"] == "admin2"
 
 
 def test_scan_records_scheduled_and_complete(db_session):

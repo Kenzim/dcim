@@ -358,8 +358,9 @@ def _parse_time(value: Any) -> Optional[datetime]:
 def _append_history(db: Session, engine: str, entry: dict) -> None:
     """Append one scan result to the engine's history, keeping ``HISTORY_LIMIT`` entries.
 
-    When the history is full the oldest on-demand entry goes first, so admin
-    scans never push out the scheduled scans the switch criterion counts.
+    When the history is full the oldest on-demand entry goes first, which can
+    be the new entry itself (``last_scan`` still holds it), so admin scans
+    never push out the scheduled scans the switch criterion counts.
     """
     row = db.get(SystemSetting, SCAN_RESULT_KEY, with_for_update=True)
     value = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
@@ -367,7 +368,7 @@ def _append_history(db: Session, engine: str, entry: dict) -> None:
     entries = list(history.get(engine) or []) + [entry]
     while len(entries) > HISTORY_LIMIT:
         on_demand = next(
-            (index for index, old in enumerate(entries[:-1]) if old.get("scheduled") is not True), None
+            (index for index, old in enumerate(entries) if old.get("scheduled") is not True), None
         )
         entries.pop(on_demand if on_demand is not None else 0)
     history[engine] = entries
