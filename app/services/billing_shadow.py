@@ -975,10 +975,36 @@ ADVISER_SIGNOFF_COVERS = (
 )
 
 
+# The alert types the ``tax_alerts_enabled`` switch item needs on: every ``billing_tax_`` detector.
+# Their conditions only arise once tax is ``v2``, where an alert that is off tells nobody. The
+# two system detectors that are on by default are listed too, so a later change of default
+# cannot leave a gap.
+INVOICE_TAX_ALERTS = (
+    "billing_tax_line_sum",
+    "billing_tax_summary_consistent",
+    "billing_tax_evidence_conflict",
+    "billing_tax_not_registered",
+    "billing_tax_context_changed",
+    "billing_tax_buyer_country_missing",
+    "billing_tax_no_rule_for_class",
+    "billing_tax_fx_rate_missing",
+    "billing_tax_home_registration_missing",
+)
+
+
+def _tax_alerts_item(db: Session) -> dict:
+    """``tax_alerts_enabled``: every alert of ``INVOICE_TAX_ALERTS`` is enabled (alerting's effective setting)."""
+    from app.services.alerting.catalogue import effective_settings
+
+    effective = effective_settings(db)
+    disabled = [key for key in INVOICE_TAX_ALERTS if not effective[key].enabled]
+    return _item("tax_alerts_enabled", not disabled, disabled=disabled, required=list(INVOICE_TAX_ALERTS))
+
+
 def _tax_switch_items(
     db: Session, now: datetime, *, confirm_mirrored_only: bool, confirm_divergence: list[int], confirm_uncovered: bool
 ) -> list[dict]:
-    """Design 5, switch criterion items 1 to 4 for engine ``tax``."""
+    """Design 5, the tax-specific switch criterion items for engine ``tax``."""
     from app.models.tax import JURISDICTION_ANY, SellerTaxRegistration, TaxRule
     from app.services.settings_store import get_setting
 
@@ -1030,6 +1056,7 @@ def _tax_switch_items(
     signoff = str(get_setting(db, "billing_tax_adviser_signoff") or "").strip()
     items.append(_item("adviser_signoff", bool(signoff), signoff=signoff or None,
                        setting="billing_tax_adviser_signoff", covers=list(ADVISER_SIGNOFF_COVERS)))
+    items.append(_tax_alerts_item(db))
     from app.services.tax import exchange_rates
 
     currency = exchange_rates.rates_needed(db, now)

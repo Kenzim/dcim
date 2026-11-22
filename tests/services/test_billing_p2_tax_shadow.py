@@ -341,3 +341,28 @@ def test_open_v2_taxed_invoices_counted_for_rollback(db_session, invoice):
 
     assert invoice.status == InvoiceStatus.OPEN
     assert billing_shadow.open_v2_taxed_invoices(db_session) == 1
+
+
+def test_tax_alerts_item_lists_the_disabled_alerts_and_passes_when_all_are_on(db_session):
+    from tests.services.tax_helpers import TAX_ALERT_KEYS, enable_tax_alerts
+
+    seed_classes(db_session)
+    item = _items(db_session)["tax_alerts_enabled"]
+    assert not item["ok"]
+    assert item["disabled"] == [
+        key for key in TAX_ALERT_KEYS if key not in ("billing_tax_fx_rate_missing", "billing_tax_home_registration_missing")
+    ]
+    assert item["required"] == list(TAX_ALERT_KEYS)
+    enable_tax_alerts(db_session)
+    item = _items(db_session)["tax_alerts_enabled"]
+    assert item["ok"] and item["disabled"] == []
+
+
+def test_the_tax_alert_list_is_every_billing_tax_detector():
+    from app.services.alerting.billing_integrity import BILLING_DETECTORS
+    from app.services.alerting.catalogue import CATALOGUE
+    from tests.services.tax_helpers import TAX_ALERT_KEYS
+
+    assert set(billing_shadow.INVOICE_TAX_ALERTS) == set(TAX_ALERT_KEYS)
+    assert set(billing_shadow.INVOICE_TAX_ALERTS) == {k for k in CATALOGUE if k.startswith("billing_tax_")}
+    assert set(billing_shadow.INVOICE_TAX_ALERTS) <= set(BILLING_DETECTORS)
