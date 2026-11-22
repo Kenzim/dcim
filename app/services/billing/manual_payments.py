@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING, Optional
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.reseller import Invoice, InvoiceStatus, Payment, PaymentStatus
+from app.models.reseller import (
+    Invoice,
+    InvoiceDocumentType,
+    InvoiceStatus,
+    Payment,
+    PaymentStatus,
+)
 
 if TYPE_CHECKING:
     from app.services.payments.registry import PaymentGatewayRegistry
@@ -24,6 +30,14 @@ class ManualPaymentNotAllowed(ManualPaymentError):
     """A partial amount or a write-off asked for before the invoice engine is ``v2``."""
 
 
+class ManualPaymentConflict(ManualPaymentError):
+    """The request is valid but the invoice's state refuses it (a proforma, a pending payment)."""
+
+
+class ManualPaymentInvalid(ManualPaymentError):
+    """The write-off note refused the request itself (for example a reason that is too long)."""
+
+
 def _outstanding(db: Session, invoice: Invoice, mode: str) -> int:
     """Today's ``amount - allocated`` in legacy and shadow, ``balance().remaining`` in v2.
 
@@ -33,7 +47,7 @@ def _outstanding(db: Session, invoice: Invoice, mode: str) -> int:
     from app.services.invoice_service import InvoiceService
 
     if mode == "v2":
-        return InvoiceService.balance(db, invoice).remaining_cents
+        return InvoiceService.balance(db, invoice, for_update=True).remaining_cents
     legacy = int(invoice.amount_cents) - InvoiceService._legacy_allocated_cents(db, invoice.id)
     if mode == "shadow":
         remaining = InvoiceService.balance(db, invoice).remaining_cents
@@ -112,6 +126,11 @@ def record_manual_payment(
         )
     paid_cents = outstanding if amount_cents is None else amount_cents
     write_off_cents = outstanding - paid_cents if write_off_rest else 0
+    if write_off_cents > 0 and invoice.document_type == InvoiceDocumentType.PROFORMA:
+        # Checked before any gateway call: a proforma takes no credit note (design 5.4).
+        raise ManualPaymentConflict(
+            "A proforma cannot be written off: record the full amount, or void the proforma"
+        )
     payment: Optional[Payment] = None
     if outstanding > 0:
         card_attempts = cancel_open_card_payments(db, invoice.id, registry=registry)
@@ -129,18 +148,27 @@ def record_manual_payment(
             # The note comes first: it recomputes the invoice itself, and the
             # payment below must be the one that settles it.
             from app.models.invoice_adjustment import AdjustmentOutcome, AdjustmentReason
-            from app.services.invoice_adjustment_service import InvoiceAdjustmentService
-
-            InvoiceAdjustmentService.issue_credit_note(
-                db,
-                invoice,
-                amount_cents=write_off_cents,
-                reason=AdjustmentReason.WRITE_OFF,
-                outcome=AdjustmentOutcome.REDUCED_BALANCE,
-                actor_user_id=actor_user_id,
-                idempotency_key=f"write-off:{external_ref}",
-                reason_text=reason,
+            from app.services.invoice_adjustment_service import (
+                AdjustmentConflictError,
+                InvoiceAdjustmentError,
+                InvoiceAdjustmentService,
             )
+
+            try:
+                InvoiceAdjustmentService.issue_credit_note(
+                    db,
+                    invoice,
+                    amount_cents=write_off_cents,
+                    reason=AdjustmentReason.WRITE_OFF,
+                    outcome=AdjustmentOutcome.REDUCED_BALANCE,
+                    actor_user_id=actor_user_id,
+                    idempotency_key=f"write-off:{external_ref}",
+                    reason_text=reason,
+                )
+            except AdjustmentConflictError as exc:
+                raise ManualPaymentConflict(f"The rest cannot be written off: {exc}") from exc
+            except InvoiceAdjustmentError as exc:
+                raise ManualPaymentInvalid(f"The rest cannot be written off: {exc}") from exc
         payment = Payment(
             invoice_id=invoice.id,
             gateway=MANUAL_GATEWAY,
