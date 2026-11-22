@@ -14,6 +14,7 @@
     listCatalogProducts,
   } from '../../lib/api.js';
   import CycleEditor from '../billing/admin/CycleEditor.svelte';
+  import ProductTaxClass from '../billing/admin/tax/ProductTaxClass.svelte';
 
   let products = [];
   let categories = [];
@@ -219,6 +220,10 @@
             <div><dt>Visibility</dt><dd>{detail.visibility}</dd></div>
             <div><dt>Status</dt><dd>{detail.enabled ? 'Enabled' : 'Disabled'}</dd></div>
           </dl>
+
+          {#key detail.id}
+            <ProductTaxClass storeProductId={detail.id} taxClassId={detail.tax_class_id} onChanged={() => selectProduct(selectedId)} />
+          {/key}
 
           <h3>Price plans</h3>
           {#each detail.price_plans || [] as plan (plan.id)}
