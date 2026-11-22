@@ -227,10 +227,21 @@ def test_amount_above_refundable_refused(db_session, monkeypatch):
 
 
 @pytest.fixture
-def v2(monkeypatch):
+def v2(monkeypatch, db_session):
+    from app.models.commerce_account import SystemSetting
+    from app.services.settings_store import set_setting
+
     calls = SimpleNamespace(recompute=[], credit=[], debit=[], apply=[], notes=[])
-    monkeypatch.setattr(refund_module, "invoice_engine_mode", lambda db: "v2")
-    monkeypatch.setattr(InvoiceService, "recompute", staticmethod(lambda db, invoice, *, cause: calls.recompute.append((invoice.id, cause)) or invoice))
+    set_setting(db_session, "billing_invoice_engine", "v2")
+    db_session.add(SystemSetting(key="billing_engine_switch:invoice", value={"mode": "v2"}))
+    db_session.commit()
+    real_recompute = InvoiceService.recompute
+
+    def recompute(db, invoice, *, cause):
+        calls.recompute.append((invoice.id, cause))
+        return real_recompute(db, invoice, cause=cause)
+
+    monkeypatch.setattr(InvoiceService, "recompute", staticmethod(recompute))
     monkeypatch.setattr(
         CreditLedgerService,
         "credit_account",

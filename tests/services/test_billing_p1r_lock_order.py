@@ -97,6 +97,24 @@ def test_dispute_reversal_locks_billing_account(db_session, lock_calls, transact
     _check(transactions())
 
 
+def test_usdt_settlement_locks_billing_account_before_invoice(db_session, lock_calls, transactions):  # noqa: F811
+    from app.services.payments.usdt_watcher import UsdtWatcher
+    from tests.services.test_usdt_watcher import FakeRpc, _config, _deposit, _log
+
+    reseller, invoice, _deposit_row, payment, _cursor = _deposit(db_session)
+    BillingAccountDAO.ensure_reseller_account(db_session, reseller)
+    db_session.commit()
+    lock_calls.clear()
+    UsdtWatcher(FakeRpc([_log(1_000_000, tx_digit="a", log_index=0)]), _config()).run_once(db_session)
+    db_session.commit()
+    _check(transactions())
+    first = [call for call in lock_calls if call[0] in ("reseller", "billing_account", "invoice", "payment")][:4]
+    assert [kind for kind, _ in first] == ["reseller", "billing_account", "invoice", "payment"]
+    assert first[2] == ("invoice", invoice.id)
+    db_session.refresh(payment)
+    assert payment.status.value == "succeeded"
+
+
 def test_v2_topup_hold_locks_billing_account(db_session, lock_calls, transactions, v2):  # noqa: F811
     account = _retail_account(db_session, "lk-topup")
     _invoice, payment = _paid(db_session, account=account, purpose=InvoicePurpose.CREDIT_TOPUP)
