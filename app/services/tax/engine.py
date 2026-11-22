@@ -214,6 +214,27 @@ def _tax_id_freshness(db: Session, context: TaxContext, settings: TaxSettings) -
     return True, None, checked_at.isoformat()
 
 
+REASON_TAX_ID_COUNTRY_MISMATCH = "tax_id_country_mismatch"
+
+
+def _tax_id_country(db: Session, buyer: Any, buyer_country: str) -> Optional[str]:
+    """The country of the buyer's tax ID, mapped as the buyer's country is (``XI`` and ``IM`` are ``GB``).
+
+    The country of the check that validated it when there is one, else the
+    number's own prefix read against the buyer's country.
+    """
+    from app.services.tax import id_formats
+
+    country = None
+    if buyer.tax_id_check_id is not None:
+        check = db.get(TaxIdCheck, int(buyer.tax_id_check_id))
+        country = check.country if check is not None else None
+    if not country:
+        number = id_formats.normalise(buyer.tax_id or "", buyer_country)
+        country = number.country if number is not None else None
+    return normalise_country(country, mapped=True)
+
+
 def _domestic(registrations: Sequence[rules_repo.RegistrationView], country: Optional[str]):
     for registration in registrations:
         if registration.scheme == TaxRegistrationScheme.DOMESTIC.value and registration.jurisdiction == country:
@@ -515,6 +536,14 @@ class TaxEngine:
                 evidence["tax_id_checked_at"] = checked_at
                 if reason:
                     reasons.append(reason)
+                # A business abroad only on a number of the buyer's own country; otherwise a consumer there.
+                if business_valid and buyer_country is not None and buyer_country != settings.seller_country:
+                    number_country = _tax_id_country(db, buyer, buyer_country)
+                    if number_country is not None and number_country != buyer_country:
+                        business_valid = False
+                        reasons.append(REASON_TAX_ID_COUNTRY_MISMATCH)
+                        evidence["tax_id_country"] = number_country
+                        evidence["tax_id_country_mismatch"] = True
             place = _place(settings, buyer_country, business_valid, registrations)
             jurisdictions = sorted(set(place.countries) | set(place.rc_countries))
             candidates = rules_repo.rules_valid_at(

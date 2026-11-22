@@ -163,6 +163,21 @@ def test_evidence_and_not_registered_detectors(db_session, invoice):
     assert [f.resource_id for f in bi.tax_not_registered(db_session, PARAMS, _now())] == [str(invoice.id)]
 
 
+def test_a_tax_id_country_mismatch_raises_the_evidence_conflict_alert(db_session, invoice):
+    evidence = dict(invoice.tax_evidence)
+    db_session.execute(
+        Invoice.__table__.update().where(Invoice.id == invoice.id).values(
+            tax_cents=0,
+            tax_evidence={**evidence, "reasons": ["tax_id_country_mismatch"], "tax_id_country": "DE",
+                          "tax_id_country_mismatch": True},
+        )
+    )
+    db_session.expire_all()
+    (finding,) = bi.tax_evidence_conflict(db_session, PARAMS, _now())
+    assert finding.resource_id == str(invoice.id)
+    assert finding.details["tax_id_country"] == "DE" and "DE" in finding.message
+
+
 def test_tax_is_iterated_and_its_non_blocking_checks_do_not_block(db_session):
     assert "tax" in billing_shadow.ENGINES
     assert {"t1_rule_divergence", "t2_uncovered", "t5_context_changed"} <= billing_shadow.EXPECTED_DIFFERENCE_KEYS

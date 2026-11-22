@@ -1105,33 +1105,44 @@ def tax_evidence_conflict(db: Session, params: dict, now: datetime) -> list[Find
     """A published invoice whose location evidence disagrees with the country taxed.
 
     The engine records ``conflict`` when the IP country differs from the
-    billing country; listed only where tax was charged.
+    billing country, listed only where tax was charged; and
+    ``tax_id_country_mismatch`` when the buyer's VAT number is of another
+    country than its billing country (the buyer was taxed as a consumer),
+    listed whatever the tax.
     """
     max_rows = params["max_rows"]
-    stmt = (
-        select(Invoice)
-        .where(*_engine_taxed_invoices(params, now), Invoice.tax_cents > 0)
-        .order_by(Invoice.id)
-    )
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
     found = []
     for invoice in db.scalars(stmt):
         evidence = invoice.tax_evidence if isinstance(invoice.tax_evidence, dict) else {}
-        if evidence.get("conflict"):
+        if evidence.get("tax_id_country_mismatch") or (evidence.get("conflict") and int(invoice.tax_cents or 0) > 0):
             found.append((invoice, evidence))
-    out = [
-        Finding(
-            "billing_tax_evidence_conflict", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
-            f"Invoice {invoice.invoice_number} location evidence conflicts",
-            f"Tax was charged for {evidence.get('buyer_country')} but the IP address was in "
-            f"{evidence.get('ip_country')}.",
-            details={"invoice_id": invoice.id, "buyer_country": evidence.get("buyer_country"),
-                     "ip_country": evidence.get("ip_country"), "tax_cents": _money(invoice.tax_cents)},
-        )
-        for invoice, evidence in found[:max_rows]
-    ]
+    out = [_evidence_conflict_finding(invoice, evidence) for invoice, evidence in found[:max_rows]]
     if len(found) > max_rows:
         out.append(_overflow("billing_tax_evidence_conflict", "invoice", "invoices", len(found) - max_rows, max_rows))
     return out
+
+
+def _evidence_conflict_finding(invoice: Invoice, evidence: dict) -> Finding:
+    problems = []
+    if evidence.get("conflict") and int(invoice.tax_cents or 0) > 0:
+        problems.append(
+            f"Tax was charged for {evidence.get('buyer_country')} but the IP address was in "
+            f"{evidence.get('ip_country')}."
+        )
+    if evidence.get("tax_id_country_mismatch"):
+        problems.append(
+            f"The buyer's VAT number is from {evidence.get('tax_id_country')} but its billing country is "
+            f"{evidence.get('buyer_country')}, so it was taxed as a consumer in {evidence.get('buyer_country')}."
+        )
+    return Finding(
+        "billing_tax_evidence_conflict", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+        f"Invoice {invoice.invoice_number} location evidence conflicts",
+        " ".join(problems),
+        details={"invoice_id": invoice.id, "buyer_country": evidence.get("buyer_country"),
+                 "ip_country": evidence.get("ip_country"), "tax_id_country": evidence.get("tax_id_country"),
+                 "tax_cents": _money(invoice.tax_cents)},
+    )
 
 
 def tax_not_registered(db: Session, params: dict, now: datetime) -> list[Finding]:

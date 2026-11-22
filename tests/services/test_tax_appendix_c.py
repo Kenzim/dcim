@@ -147,6 +147,15 @@ REVIEW = [
          tax_id="GB123456789", declared="IM"),
     Case("de-to-mc-consumer-oss", "DE", ("DE", "OSS_DE"), "MC", False, "unchecked", FR20, "20.0000",
          registration="OSS_DE", declared="MC"),
+    # A business abroad only when its VAT number's country is the buyer's country; else a consumer there.
+    Case("de-to-fr-business-de-number", "DE", ("DE", "OSS_DE"), "FR", True, "valid", FR20, "20.0000",
+         registration="OSS_DE", tax_id="DE123456789", reasons=frozenset({"tax_id_country_mismatch"})),
+    Case("uk-to-de-business-de-number", "GB", ("GB", "OSS_IE"), "DE", True, "valid", NONE, reverse_charge=True,
+         notes=frozenset({"gb_outside_scope_b2b"}), registration="GB", tax_id="DE123456789"),
+    Case("de-to-it-business-gb-number", "DE", ("DE", "OSS_DE"), "IT", True, "valid", IT22, "22.0000",
+         registration="OSS_DE", tax_id="GB123456789", reasons=frozenset({"tax_id_country_mismatch"})),
+    Case("de-to-uk-business-de-number", "DE", ("DE",), "GB", True, "valid", NONE, not_registered=True,
+         registration="DE", tax_id="DE123456789", reasons=frozenset({"tax_id_country_mismatch"})),
 ]
 
 _REGISTRATIONS = {
@@ -187,7 +196,7 @@ def _setup(db, case: Case) -> tuple[TaxContext, dict[str, int]]:
         checked = STALE if status == "stale" else FRESH
         stored = "valid" if status == "stale" else status
         check = TaxIdCheck(
-            country=case.country, normalised_id="123456789", id_type="eu_vat", validator="vies:vies",
+            country=(case.tax_id or case.country)[:2], normalised_id="123456789", id_type="eu_vat", validator="vies:vies",
             status=stored, checked_at=checked, expires_at=checked + timedelta(days=30),
         )
         db.add(check)

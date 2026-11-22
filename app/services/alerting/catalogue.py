@@ -444,7 +444,8 @@ _SPECS = (
     AlertTypeSpec(
         "billing_tax_evidence_conflict",
         "Invoice tax location evidence conflicts",
-        "The location evidence recorded on an invoice disagrees with the country whose tax was charged.",
+        "The location evidence recorded on an invoice disagrees with the country whose tax was charged, or "
+        "the buyer's VAT number is from another country than its billing country.",
         _W,
         "invoice",
         (_BILLING_MAX_ROWS,),
