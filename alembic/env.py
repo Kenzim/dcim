@@ -6,7 +6,7 @@ from sqlalchemy import pool
 from alembic import context
 
 # Import your models and Base
-from app.core.database import Base
+from app.core.database import Base, configure_engine
 from app.core.config import settings
 import app.models  # This ensures all models are imported
 # Explicitly import junction table to ensure it's registered
@@ -71,6 +71,7 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    configure_engine(connectable)
 
     with connectable.connect() as connection:
         context.configure(

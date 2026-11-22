@@ -7,11 +7,10 @@ that holds rows in ``users`` or ``invoices`` unless
 ``RACKFLOW_TEST_MARIADB_ALLOW_DROP=1``.
 
 Each case runs at the server's default isolation level and at READ COMMITTED.
-Every session turns ``innodb_snapshot_isolation`` off (ignored on servers
-without it, before MariaDB 11.6), matching what the application's connect hook
-will do; remove ``_snapshot_off`` once that hook is in ``app/core/database.py``.
-An allocation here commits an invoice carrying its number in the same
-transaction, as a publish does, so ``set_counter_at_least`` sees what was issued.
+The engine is built through ``configure_engine()`` as the application's is, so
+every session runs with ``innodb_snapshot_isolation`` off. An allocation here
+commits an invoice carrying its number in the same transaction, as a publish
+does, so ``set_counter_at_least`` sees what was issued.
 """
 
 from __future__ import annotations
@@ -41,30 +40,15 @@ def _drop_all(engine) -> None:
         conn.execute(sa.text("SET foreign_key_checks = 1"))
 
 
-UNKNOWN_SYSTEM_VARIABLE = 1193
-
-
-def _snapshot_off(dbapi_connection, _record) -> None:
-    import pymysql
-
-    with dbapi_connection.cursor() as cursor:
-        try:
-            cursor.execute("SET SESSION innodb_snapshot_isolation = OFF")
-        except pymysql.err.MySQLError as exc:
-            if exc.args[0] != UNKNOWN_SYSTEM_VARIABLE:
-                raise
-
-
 @pytest.fixture(params=["default_isolation", "read_committed"])
 def engine(request):
     import app.models  # noqa: F401
-    from app.core.database import Base
+    from app.core.database import Base, configure_engine
 
     options = {"pool_pre_ping": True, "pool_size": 25, "max_overflow": 0}
     if request.param == "read_committed":
         options["isolation_level"] = "READ COMMITTED"
-    built = sa.create_engine(URL, **options)
-    sa.event.listen(built, "connect", _snapshot_off)
+    built = configure_engine(sa.create_engine(URL, **options))
 
     with built.begin() as conn:
         if os.environ.get("RACKFLOW_TEST_MARIADB_ALLOW_DROP") != "1":
