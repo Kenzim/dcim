@@ -451,6 +451,10 @@ api_router.include_router(billing_adjustments_api.router)
 from app.api import settings_admin as settings_admin_api
 api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
 
+# Billing engines: modes, shadow mismatches, scans and the v2 switch
+from app.api import billing_engines_admin as billing_engines_admin_api
+api_router.include_router(billing_engines_admin_api.router, tags=["billing-engines-admin"])
+
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api
 api_router.include_router(scripts_admin_api.router, tags=["scripts-admin"])

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.commerce_auth import (
@@ -29,11 +30,20 @@ from app.dao.storefront_dao import FrontendProductDAO
 from app.models.commerce_account import BillingAccount
 from app.models.commerce_audit import UserAuditEvent
 from app.models.commerce_order import Order, OrderStatus
-from app.models.reseller import Invoice, InvoiceStatus
+from app.models.reseller import CreditLedgerEntry, Invoice, InvoicePurpose, InvoiceStatus
 from app.models.storefront import FrontendProductVisibility
 from app.models.support_ticket import TicketPriority, TicketStatus
 from app.services.billing.cycles import cycle_length_fields, sellable_cycles
 from app.services.billing_account_service import BillingAccountService
+from app.services.billing_locks import BillingLocks
+from app.services.billing.settlement import commit_and_fulfil
+from app.services.credit_ledger_service import (
+    CreditLedgerError,
+    CreditLedgerService,
+    InsufficientCreditError,
+    statuses_for_status_filter,
+    unpaid_invoice_statuses,
+)
 from app.services.checkout_service import CheckoutError, CheckoutService
 from app.services.commerce_lifecycle_service import (
     CommerceLifecycleError,
@@ -43,6 +53,7 @@ from app.services.discord_link_service import DiscordLinkError, DiscordLinkServi
 from app.services.email_message_service import EmailMessageService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceService
+from app.services.settings_store import get_setting
 from app.services.payments.retail_card import (
     RetailCardPaymentError,
     start_card_payment,
@@ -407,7 +418,7 @@ def list_invoices(
         .order_by(Invoice.created_at.desc(), Invoice.id.desc())
     )
     if status_filter is not None:
-        stmt = stmt.where(Invoice.status == status_filter)
+        stmt = stmt.where(Invoice.status.in_(statuses_for_status_filter(status_filter)))
     rows = list(db.execute(stmt.offset(offset).limit(limit)).scalars())
     return [_serialize_invoice(db, row) for row in rows]
 
@@ -483,6 +494,187 @@ def pay_invoice(
         }
     db.commit()
     return started.as_response()
+
+
+# --- Account credit (A3; live once the credit engine is v2) ---
+
+
+class CreditTopupBody(RequestModel):
+    amount_cents: StrictInt = Field(gt=0)
+
+
+class ApplyCreditBody(RequestModel):
+    amount_cents: Optional[StrictInt] = Field(default=None, gt=0)
+
+
+def _require_retail_credit(db: Session) -> None:
+    if not CreditLedgerService.retail_credit_available(db):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "credit_unavailable",
+                "message": "Account credit is not available yet",
+            },
+        )
+
+
+def _ledger_entry_payload(entry: CreditLedgerEntry) -> dict:
+    return {
+        "id": entry.id,
+        "entry_type": entry.entry_type.value,
+        "amount_cents": entry.amount_cents,
+        "balance_after_cents": entry.balance_after_cents,
+        "description": entry.description,
+        "invoice_id": entry.invoice_id,
+        "created_at": entry.created_at,
+    }
+
+
+@router.get("/credit", responses=COMMON_ERROR_RESPONSES)
+def get_credit(
+    account: AccountDep,
+    db: DbDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+):
+    entries = list(
+        db.execute(
+            select(CreditLedgerEntry)
+            .where(CreditLedgerEntry.billing_account_id == account.id)
+            .order_by(CreditLedgerEntry.id.desc())
+            .limit(limit)
+        ).scalars()
+    )
+    return {
+        "enabled": CreditLedgerService.retail_credit_available(db),
+        "balance_cents": CreditLedgerService.balance_cents(db, account),
+        "available_cents": CreditLedgerService.available_cents(db, account),
+        "currency": account.currency,
+        "topup_min_cents": get_setting(db, "billing_credit_topup_min_cents"),
+        "topup_max_cents": get_setting(db, "billing_credit_topup_max_cents"),
+        "entries": [_ledger_entry_payload(entry) for entry in entries],
+    }
+
+
+@router.post(
+    "/credit/top-up-invoices",
+    status_code=status.HTTP_201_CREATED,
+    responses=COMMON_ERROR_RESPONSES,
+)
+def create_credit_topup_invoice(
+    body: CreditTopupBody,
+    auth: ClientSessionDep,
+    account: AccountDep,
+    db: DbDep,
+):
+    _block_impersonation_money_actions(auth)
+    _require_retail_credit(db)
+    min_cents = int(get_setting(db, "billing_credit_topup_min_cents"))
+    max_cents = int(get_setting(db, "billing_credit_topup_max_cents"))
+    if not (min_cents <= body.amount_cents <= max_cents):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "invalid_topup_amount",
+                "min_cents": min_cents,
+                "max_cents": max_cents,
+            },
+        )
+    locked = BillingLocks.billing_account(db, account.id)
+    if get_setting(db, "billing_credit_require_approved_order"):
+        fulfilled = db.scalar(
+            select(Order.id)
+            .where(Order.billing_account_id == locked.id, Order.status == OrderStatus.ACTIVE)
+            .limit(1)
+        )
+        if fulfilled is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "credit_requires_fulfilled_order",
+                    "message": "Account credit is available after your first order is fulfilled",
+                },
+            )
+    max_balance = int(get_setting(db, "billing_credit_max_balance_cents"))
+    if max_balance > 0:
+        pending_topups = int(
+            db.scalar(
+                select(func.coalesce(func.sum(Invoice.amount_cents), 0)).where(
+                    Invoice.billing_account_id == locked.id,
+                    Invoice.purpose == InvoicePurpose.CREDIT_TOPUP,
+                    Invoice.status.in_(unpaid_invoice_statuses()),
+                )
+            )
+            or 0
+        )
+        projected = CreditLedgerService.balance_cents(db, locked) + pending_topups + body.amount_cents
+        if projected > max_balance:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "credit_balance_limit",
+                    "max_balance_cents": max_balance,
+                    "projected_balance_cents": projected,
+                },
+            )
+    invoice = InvoiceService.create(
+        db,
+        billing_account_id=locked.id,
+        purpose=InvoicePurpose.CREDIT_TOPUP,
+        amount_cents=body.amount_cents,
+        description="Account credit top-up",
+        due_at=datetime.now(timezone.utc),
+        currency=locked.currency,
+    )
+    db.commit()
+    db.refresh(invoice)
+    return _serialize_invoice(db, invoice)
+
+
+@router.post("/invoices/{invoice_id}/apply-credit", responses=COMMON_ERROR_RESPONSES)
+def apply_credit_to_invoice(
+    invoice_id: int,
+    auth: ClientSessionDep,
+    account: AccountDep,
+    db: DbDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=128)],
+    body: Optional[ApplyCreditBody] = None,
+):
+    _block_impersonation_money_actions(auth)
+    _require_retail_credit(db)
+    invoice = db.get(Invoice, invoice_id)
+    if invoice is None or invoice.billing_account_id != account.id:
+        raise HTTPException(status_code=404, detail=_MSG_INVOICE_NOT_FOUND)
+    if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
+        raise HTTPException(status_code=400, detail="Credit cannot pay a credit top-up invoice")
+    try:
+        payment = CreditLedgerService.apply_to_invoice(
+            db,
+            invoice,
+            amount_cents=body.amount_cents if body is not None else None,
+            actor_user_id=int(auth["user_id"]),
+            idempotency_key=f"client-apply-credit:{account.id}:{idempotency_key}",
+        )
+    except InsufficientCreditError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "insufficient_credit",
+                "available_cents": exc.available_cents,
+                "requested_cents": exc.requested_cents,
+            },
+        ) from exc
+    except CreditLedgerError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    commit_and_fulfil(db)
+    db.refresh(invoice)
+    return {
+        "applied_cents": payment.amount_cents if payment is not None else 0,
+        "payment_id": payment.id if payment is not None else None,
+        "balance_cents": CreditLedgerService.balance_cents(db, account),
+        "invoice": _serialize_invoice(db, invoice),
+    }
 
 
 # --- Payment methods (stub) ---

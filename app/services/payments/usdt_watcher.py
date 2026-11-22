@@ -499,7 +499,7 @@ class UsdtWatcher:
         expected = int(deposit.expected_token_units)
         received = int(deposit.received_token_units)
         # Billing lock order: reseller, invoice, then payment (``billing_locks``).
-        BillingLocks.for_invoice(db, int(deposit.invoice_id), reseller=True)
+        BillingLocks.for_invoice(db, int(deposit.invoice_id), reseller=True, billing_account=True)
         locked = BillingLocks.payments(
             db,
             select(Payment).where(
