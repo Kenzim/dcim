@@ -141,9 +141,18 @@ def _check_pack_files(path: Path, manifest: Manifest) -> list[str]:
         if not pack_file.resolve().is_relative_to(path.resolve()) or not pack_file.is_file():
             errors.append(f"pack file {provide.pack.file} of provider {provide.id} is missing")
             continue
+        too_large = f"pack file {provide.pack.file} is larger than 1 MB"
         try:
-            data = json.loads(pack_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+            if pack_file.stat().st_size > kinds.MAX_PACK_BYTES:
+                errors.append(too_large)
+                continue
+            with pack_file.open("rb") as handle:
+                content = handle.read(kinds.MAX_PACK_BYTES + 1)  # the file may have grown since stat
+            if len(content) > kinds.MAX_PACK_BYTES:
+                errors.append(too_large)
+                continue
+            data = json.loads(content.decode("utf-8"))
+        except (OSError, ValueError, RecursionError) as exc:
             errors.append(f"pack file {provide.pack.file} is not valid JSON: {exc}")
             continue
         errors.extend(_pack_schema_errors(provide.pack.file, data))

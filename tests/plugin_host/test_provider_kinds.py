@@ -833,6 +833,22 @@ def test_the_same_plugin_in_both_roots_is_an_error_and_neither_loads(plugin_env,
     assert "exists in both" in db_session.get(PluginInstallation, VALIDATOR).disabled_reason
 
 
+def test_a_pack_file_over_1_mb_is_refused_before_it_is_read(plugin_env, monkeypatch):
+    path = put_fixture(plugin_env, PACK)
+    pack = path / "packs" / "demo.json"
+    data = json.loads(pack.read_text())
+    data["padding"] = "x" * kinds.MAX_PACK_BYTES
+    pack.write_text(json.dumps(data))
+    read_text = Path.read_text
+
+    def no_big_reads(self, *args, **kwargs):
+        assert self != pack, "the oversized pack was read whole"
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", no_big_reads)
+    assert any("packs/demo.json is larger than 1 MB" in e for e in find_package(PACK).errors)
+
+
 def test_installing_a_plugin_present_in_both_roots_is_refused(plugin_env, bundled, db_session):
     put_fixture(bundled, VALIDATOR)
     put_fixture(plugin_env, VALIDATOR)
