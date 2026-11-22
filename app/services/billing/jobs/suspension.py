@@ -236,12 +236,10 @@ class NonpaymentSuspensionJob:
                 db,
                 event=SERVICE_SUSPENDED_NONPAYMENT,
                 idempotency_key=subject_key,
-                data={
-                    "service_id": service_id,
+                variables={
                     "service_name": service.name,
                     "invoice_id": detail["invoice_id"],
                     "invoice_number": invoice_number,
-                    "reason": "nonpayment",
                 },
                 billing_account_id=account_id,
                 reseller_id=None,

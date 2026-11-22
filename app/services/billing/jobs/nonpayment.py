@@ -299,7 +299,7 @@ def send_billing_email(
     *,
     event: str,
     idempotency_key: str,
-    data: dict[str, Any],
+    variables: dict[str, Any],
     billing_account_id: Optional[int],
     reseller_id: Optional[int],
     related_type: Optional[str] = None,
@@ -307,8 +307,10 @@ def send_billing_email(
 ) -> bool:
     """Queue a billing email to the account owner (retail) or the reseller.
 
-    Returns False when nothing is queued: no recipient, or an event of
-    ``TEMPLATE_GATED_EVENTS`` without an enabled template. Never raises; a
+    ``variables`` are the event's catalogue variables; the text comes from
+    its email template. Returns False when nothing is queued: no recipient,
+    or an event of ``TEMPLATE_GATED_EVENTS`` without an enabled template (a
+    missing row would otherwise send the built-in text). Never raises; a
     failed enqueue is logged and leaves the action it reports on in place.
     """
     from app.models.commerce_account import BillingAccount
@@ -324,7 +326,7 @@ def send_billing_email(
                 if reseller is None or reseller.user is None or not reseller.user.email:
                     return False
                 EmailMessageService.enqueue_for_reseller(
-                    db, reseller=reseller, event=event, idempotency_key=idempotency_key, data=data
+                    db, reseller=reseller, event=event, idempotency_key=idempotency_key, variables=variables
                 )
                 return True
             account = db.get(BillingAccount, billing_account_id) if billing_account_id is not None else None
@@ -336,7 +338,7 @@ def send_billing_email(
                 to_address=user.email,
                 event=event,
                 idempotency_key=idempotency_key,
-                data=data,
+                variables=variables,
                 billing_account_id=account.id,
                 user_id=user.id,
                 related_type=related_type,

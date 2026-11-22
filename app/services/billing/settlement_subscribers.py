@@ -104,7 +104,7 @@ def email_invoice_paid(db: Session, event: InvoicePaid) -> None:
         to_address=user.email,
         event=EmailEvent.INVOICE_PAID,
         idempotency_key=f"invoice:{invoice.id}:paid",
-        data={
+        variables={
             "invoice_number": invoice.invoice_number,
             "invoice_id": invoice.id,
             "amount_cents": int(invoice.amount_cents),

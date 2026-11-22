@@ -265,12 +265,11 @@ class LateFeesJob:
             db,
             event=LATE_FEE_ADDED,
             idempotency_key=f"invoice:{invoice.id}:late_fee",
-            data={
+            variables={
                 "invoice_id": invoice.id,
                 "invoice_number": invoice.number_display or invoice.invoice_number,
-                "amount_cents": fee,
+                "fee_cents": fee,
                 "currency": invoice.currency,
-                "debit_note_number": note.number_display,
             },
             billing_account_id=invoice.billing_account_id,
             reseller_id=invoice.reseller_id,

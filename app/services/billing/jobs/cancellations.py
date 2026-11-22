@@ -128,7 +128,7 @@ class CancellationsJob:
             db,
             event=CANCELLATION_COMPLETED,
             idempotency_key=f"cancellation:{request.id}:completed",
-            data={"service_id": request.service_id, "service_name": service.name if service else None},
+            variables={"service_name": service.name if service else None},
             billing_account_id=request.billing_account_id,
             reseller_id=request.reseller_id,
             related_type="service",

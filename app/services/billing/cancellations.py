@@ -319,12 +319,7 @@ def _announce_request(db: Session, request: CancellationRequest, service: Servic
         db,
         event=CANCELLATION_REQUESTED,
         idempotency_key=f"cancellation:{request.id}:requested",
-        data={
-            "service_id": service.id,
-            "service_name": service.name,
-            "type": _value(request.type),
-            "effective_at": effective,
-        },
+        variables={"service_name": service.name, "effective_date": effective[:10] if effective else None},
         billing_account_id=request.billing_account_id,
         reseller_id=request.reseller_id,
         related_type="service",
