@@ -166,6 +166,22 @@ def test_recheck_age_follows_the_validity_and_freshness_settings(
     db.close()
 
 
+def test_shortening_validity_while_live_rechecks_profiles_already_due(factory, checks):
+    profile_id = _profile(factory, status="valid", checked_at=T0 - timedelta(days=15))
+    _go_live(factory, T0 - timedelta(hours=1))
+    assert runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0).counts == {}
+    db = factory()
+    set_setting(db, "billing_tax_id_valid_days", 10)  # age 5 days: the profile is now 10 days past it
+    db.commit()
+    db.close()
+    # The setting change moves the watermark, but a re-check is due now, not at a past moment.
+    result = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0 + timedelta(hours=1))
+    assert result.counts == {"done": 1} and checks == [profile_id]
+    db = factory()
+    assert db.get(BillingJobState, NAME).config_since.replace(tzinfo=timezone.utc) == T0 + timedelta(hours=1)
+    db.close()
+
+
 def test_both_settings_are_in_the_config_hash():
     from app.services.billing.jobs.registry import JOBS
 
