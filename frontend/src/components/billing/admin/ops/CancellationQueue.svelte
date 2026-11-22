@@ -18,6 +18,7 @@
   const limit = 50;
 
   let rows = [];
+  let total = null;
   let loading = true;
   let error = '';
   let success = '';
@@ -40,7 +41,9 @@
   async function load() {
     loading = true;
     try {
-      rows = await listCancellationRequests({ ...filters, limit, offset });
+      const page = await listCancellationRequests({ ...filters, limit, offset });
+      rows = page.items;
+      total = page.total;
       error = '';
     } catch (err) {
       error = err.message;
@@ -214,8 +217,11 @@
     {/if}
     <div class="ba-inline" style="margin-top:12px">
       <Button variant="secondary" size="small" disabled={offset === 0 || loading} on:click={() => { offset = Math.max(0, offset - limit); load(); }}>Previous</Button>
-      <span class="ba-muted">Showing {rows.length ? offset + 1 : 0} to {offset + rows.length}</span>
-      <Button variant="secondary" size="small" disabled={rows.length < limit || loading} on:click={() => { offset += limit; load(); }}>Next</Button>
+      <span class="ba-muted">
+        Showing {rows.length ? offset + 1 : 0} to {offset + rows.length}{total !== null ? ` of ${total}` : ''}
+        {#if total !== null && total > limit} (page {Math.floor(offset / limit) + 1} of {Math.ceil(total / limit)}){/if}
+      </span>
+      <Button variant="secondary" size="small" disabled={(total !== null ? offset + rows.length >= total : rows.length < limit) || loading} on:click={() => { offset += limit; load(); }}>Next</Button>
     </div>
   </div>
 </div>
