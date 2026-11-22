@@ -1062,6 +1062,17 @@ class InvoiceService:
                 f"invoice {invoice.id} cannot move from {current.value} to {to.value} "
                 f"(engine {mode})"
             )
+        if (
+            mode == "v2"
+            and current == S.PAID
+            and to == S.VOID
+            and InvoiceService.balance(db, invoice, for_update=True).paid_net_cents > 0
+        ):
+            # Only the status rule's "credited" move (paid net 0) voids a paid
+            # invoice; money kept on it is refunded first.
+            raise InvoiceTransitionError(
+                f"invoice {invoice.id} has money paid; refund it before voiding"
+            )
         now = _utcnow()
         invoice.status = to
         invoice.status_changed_at = now

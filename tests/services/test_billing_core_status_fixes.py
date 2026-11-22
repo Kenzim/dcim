@@ -374,3 +374,86 @@ def test_b4_legacy_cancelled_cycle_invoice_is_still_voided(db_session, mode, loc
     db_session.refresh(invoice)
     assert invoice.status == S.VOID
     assert "invoice" in [kind for kind, _ in calls]
+
+
+# ------------------------------------------------------------------ B5
+
+
+def _credit_paid_deploy(db, suffix):
+    from app.services.reseller_billing_service import PreparedDeployCharge, ResellerBillingService
+
+    reseller = _reseller(db, balance=5000, preference="payment_first")
+    invoice = InvoiceService.create_deploy(
+        db, reseller_id=reseller.id, amount_cents=1000, description=f"Deploy {suffix}"
+    )
+    result = _orchestrator(FakeGateway({})).fund_invoice(db, reseller, invoice)
+    assert result
+    InvoiceService.mark_paid_if_fully_allocated(db, invoice.id)
+    db.refresh(invoice)
+    assert invoice.status == S.PAID
+    charge = PreparedDeployCharge(
+        product=None, price=None, invoice=invoice,
+        ledger_entries=tuple(ResellerBillingService._invoice_debits(db, invoice.id)),
+        idempotency=None,
+    )
+    db.commit()
+    return reseller, invoice, charge
+
+
+def test_b5_v2_failed_deploy_refunds_the_paid_invoice_to_credit(db_session, lock_calls):
+    from app.models.invoice_adjustment import InvoiceAdjustment
+    from app.services.credit_ledger_service import CreditLedgerService
+    from app.services.reseller_billing_service import ResellerBillingService
+
+    from app.models.billing_series import DocumentType
+    from tests.services.test_billing_p1i_invoice_engine import _series
+
+    _v2(db_session)
+    _series(db_session, DocumentType.CREDIT_NOTE, "CN")
+    reseller, invoice, charge = _credit_paid_deploy(db_session, "v2")
+    before = CreditLedgerService.balance_cents(db_session, reseller)
+
+    ResellerBillingService.compensate_failed_deploy(
+        db_session, reseller=reseller, charge=charge, error=RuntimeError("boom")
+    )
+
+    db_session.expire_all()
+    invoice = db_session.get(Invoice, invoice.id)
+    balance = InvoiceService.balance(db_session, invoice)
+    assert invoice.status == S.REFUNDED
+    assert balance.paid_net_cents == 0
+    assert db_session.scalar(
+        select(InvoiceAdjustment.id).where(InvoiceAdjustment.invoice_id == invoice.id)
+    ) is not None
+    assert CreditLedgerService.balance_cents(db_session, reseller) == before + 1000
+    assert lock_calls[0][0] in ("reseller", "service_billing")
+    _assert_lock_order(lock_calls)
+
+
+def test_b5_v2_transition_refuses_paid_to_void_with_money_paid(db_session):
+    from app.services.invoice_service import InvoiceTransitionError
+
+    _v2(db_session)
+    _reseller_, invoice, _charge = _credit_paid_deploy(db_session, "guard")
+
+    with pytest.raises(InvoiceTransitionError, match="money paid"):
+        InvoiceService.transition(db_session, invoice, S.VOID, cause="deploy_failed_credit_returned")
+    assert invoice.status == S.PAID
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_b5_legacy_failed_deploy_still_reverses_credit_and_voids(db_session, mode):
+    from app.services.credit_ledger_service import CreditLedgerService
+    from app.services.reseller_billing_service import ResellerBillingService
+
+    set_setting(db_session, "billing_invoice_engine", mode)
+    reseller, invoice, charge = _credit_paid_deploy(db_session, mode)
+    before = CreditLedgerService.balance_cents(db_session, reseller)
+
+    ResellerBillingService.compensate_failed_deploy(
+        db_session, reseller=reseller, charge=charge, error=RuntimeError("boom")
+    )
+
+    db_session.expire_all()
+    assert db_session.get(Invoice, invoice.id).status == S.VOID
+    assert CreditLedgerService.balance_cents(db_session, reseller) == before + 1000
