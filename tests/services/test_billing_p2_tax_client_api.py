@@ -49,10 +49,13 @@ def test_profile_tax_fields_and_reset_on_tax_id_change(client, db_session, monke
     assert db_session.query(BillingProfile).filter_by(billing_account_id=account.id).one().tax_id_status == "unchecked"
 
 
-def test_profile_check_stub_leaves_unchecked(client, db_session):
+def test_profile_tax_id_is_format_checked_and_unchecked_without_a_validator(client, db_session):
     user, _account_row = _account(db_session, "p2tprof2")
     _client_login(client, user)
     resp = client.put("/api/client/commerce/profile", json={"country": "DE", "tax_id": "DE1"})
+    assert resp.status_code == 200 and resp.json()["tax_id_status"] == "format_invalid"
+    # A well-formed number with no validator installed is not checked.
+    resp = client.put("/api/client/commerce/profile", json={"country": "DE", "tax_id": "DE123456789"})
     assert resp.status_code == 200 and resp.json()["tax_id_status"] == "unchecked"
     assert client.get("/api/client/commerce/profile").json()["tax_id_checked_at"] is None
 
