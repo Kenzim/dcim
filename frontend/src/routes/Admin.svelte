@@ -64,6 +64,7 @@
   import CommerceEmailLog from '../components/commerce/CommerceEmailLog.svelte';
   import CommerceAudit from '../components/commerce/CommerceAudit.svelte';
   import SupportTickets from '../components/commerce/SupportTickets.svelte';
+  import BillingTax from '../components/billing/admin/BillingTax.svelte';
 
   let authChecked = false;
   
@@ -423,6 +424,8 @@
         <CommerceEmailLog />
       {:else if routeName === 'commerce/audit'}
         <CommerceAudit />
+      {:else if routeName === 'billing/tax'}
+        <BillingTax />
       {:else if routeName === 'settings/automation'}
         <AutomationSettings />
       {:else if routeName === 'support/tickets'}

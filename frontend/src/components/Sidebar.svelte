@@ -61,7 +61,8 @@
   $: isBillingIntegrationsActive = currentPath.startsWith('/admin/billing-integrations');
   $: isAlertsActive = currentPath.startsWith('/admin/alerts');
   $: isMcpKeysActive = currentPath.startsWith('/admin/mcp-keys');
-  $: isBillingActive = currentPath === '/admin/billing' || currentPath.startsWith('/admin/billing/');
+  $: isBillingActive = currentPath === '/admin/billing' || (currentPath.startsWith('/admin/billing/') && !currentPath.startsWith('/admin/billing/tax'));
+  $: isBillingTaxActive = currentPath.startsWith('/admin/billing/tax');
   $: isResellersActive = currentPath.startsWith('/admin/resellers');
   $: isResellerGroupsActive = currentPath.startsWith('/admin/reseller-groups');
   $: isServicesActive = currentPath.startsWith('/admin/services');
@@ -496,6 +497,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
             </svg>
             <span>Account Credit</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/billing/tax" class="nav-link" class:active={isBillingTaxActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z" />
+            </svg>
+            <span>Tax</span>
           </a>
         </li>
         <li class="nav-item">
