@@ -129,6 +129,19 @@ def stamp_published(db: Session, invoice: Any, result: TaxResult, now: datetime)
     invoice.seller_registration_id = result.registration_id
 
 
+def _invoice_profile(db: Session, registration: Optional[SellerTaxRegistration]):
+    """The registration's invoice profile, else the enabled profile named ``default``."""
+    from app.models.tax import InvoiceProfile
+
+    if registration is not None and registration.invoice_profile_id is not None:
+        row = db.get(InvoiceProfile, int(registration.invoice_profile_id))
+        if row is not None and row.enabled:
+            return row
+    return db.execute(
+        select(InvoiceProfile).where(InvoiceProfile.name == "default", InvoiceProfile.enabled.is_(True))
+    ).scalar_one_or_none()
+
+
 def snapshot_extras(db: Session, invoice: Any, seller: dict, buyer: dict) -> None:
     """Registration number on the seller block, tax ID facts on the buyer block (v2 only)."""
     from app.services.tax.context import invoice_account
@@ -140,6 +153,11 @@ def snapshot_extras(db: Session, invoice: Any, seller: dict, buyer: dict) -> Non
     )
     seller["registration_tax_number"] = registration.tax_number if registration is not None else None
     seller["registration_jurisdiction"] = registration.jurisdiction if registration is not None else None
+    profile_row = _invoice_profile(db, registration)
+    seller["document_title"] = profile_row.document_title if profile_row is not None else "Invoice"
+    seller["proforma_title"] = profile_row.proforma_title if profile_row is not None else None
+    seller["credit_note_title"] = profile_row.credit_note_title if profile_row is not None else None
+    seller["footer_text"] = profile_row.footer_text if profile_row is not None else None
     _account, profile = invoice_account(db, invoice)
     buyer["buyer_tax_id"] = getattr(profile, "tax_id", None)
     buyer["buyer_tax_id_status"] = getattr(profile, "tax_id_status", None)
