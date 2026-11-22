@@ -12,7 +12,7 @@ import json
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
@@ -105,6 +105,34 @@ class TaxProvider(Protocol):
     def calculate(self, request: TaxProviderRequest) -> TaxProviderResult: ...
 
 
+# ------------------------------------------------------------------ currency rates
+
+
+@dataclass(frozen=True)
+class CurrencyRatesRequest:
+    base: str  # ISO 4217 alpha-3 of the base currency, "GBP"
+    period: str  # "YYYY-MM"
+
+
+@dataclass(frozen=True)
+class CurrencyRate:
+    currency: str  # ISO 4217 alpha-3, upper case
+    units_per_base: str  # ASCII decimal above zero, at most six decimals, e.g. "1.3396"
+
+
+@dataclass(frozen=True)
+class CurrencyRatesResult:
+    source: str  # for example "hmrc_monthly"
+    period_start: date  # first day of the requested month
+    period_end: date  # last day of the requested month
+    rates: tuple[CurrencyRate, ...]  # empty when the month is not published yet
+
+
+@runtime_checkable
+class CurrencyRates(Protocol):
+    def rates(self, request: CurrencyRatesRequest) -> CurrencyRatesResult: ...
+
+
 # ------------------------------------------------------------------ the kind table
 
 
@@ -141,6 +169,13 @@ KINDS: dict[str, KindSpec] = {
         {"supports": 1, "calculate": 1},
         frozenset({"calculate"}),
     ),
+    "currency_rates": KindSpec(
+        "currency_rates",
+        "currency.rates",
+        CurrencyRates,
+        {"rates": 1},
+        frozenset({"rates"}),
+    ),
 }
 
 DATA_TYPES: tuple[type, ...] = (
@@ -150,6 +185,9 @@ DATA_TYPES: tuple[type, ...] = (
     TaxProviderRequest,
     TaxProviderPart,
     TaxProviderResult,
+    CurrencyRatesRequest,
+    CurrencyRate,
+    CurrencyRatesResult,
 )
 
 
@@ -357,10 +395,68 @@ def _tax_result(value: Any, request: Any) -> TaxProviderResult:
     return TaxProviderResult(lines=lines, reference=_text(value.reference, "reference", 128, optional=True))
 
 
+MAX_RATES = 400
+_SOURCE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}\Z")
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}\Z")
+_UNITS_RE = re.compile(r"^[0-9]{1,12}(\.[0-9]{1,6})?\Z")
+_PERIOD_RE = re.compile(r"^([0-9]{4})-(0[1-9]|1[0-2])\Z")
+
+
+def _month_bounds(period: Any) -> tuple[date, date]:
+    match = _PERIOD_RE.match(period) if type(period) is str else None
+    if match is None:
+        raise InvalidAnswer("the request has no YYYY-MM period")
+    year, month = int(match.group(1)), int(match.group(2))
+    following = date(year + month // 12, month % 12 + 1, 1)
+    return date(year, month, 1), following - timedelta(days=1)
+
+
+def _rates_result(value: Any, request: Any) -> CurrencyRatesResult:
+    if type(value) is not CurrencyRatesResult:
+        raise InvalidAnswer("rates must return a CurrencyRatesResult")
+    source = _text(value.source, "source", 32, required=True)
+    if not _SOURCE_RE.match(source or ""):
+        raise InvalidAnswer("source must match ^[a-z][a-z0-9_]{0,31}$")
+    start, end = _month_bounds(getattr(request, "period", None))
+    for label, given, wanted in (("period_start", value.period_start, start), ("period_end", value.period_end, end)):
+        if type(given) is not date:
+            raise InvalidAnswer(f"{label} must be a date")
+        if given != wanted:
+            raise InvalidAnswer(f"{label} must be {wanted.isoformat()} for the period asked for")
+    answered = value.rates
+    if type(answered) not in (tuple, list) or len(answered) > MAX_RATES:
+        raise InvalidAnswer(f"rates must be a tuple of at most {MAX_RATES} CurrencyRate")
+    base = getattr(request, "base", None)
+    seen: set[str] = set()
+    rates = []
+    for entry in list(answered):
+        if type(entry) is not CurrencyRate:
+            raise InvalidAnswer("rates holds something that is not a CurrencyRate")
+        currency, units = entry.currency, entry.units_per_base
+        if type(currency) is not str or not _CURRENCY_RE.match(currency):
+            raise InvalidAnswer("a currency must be an upper case ISO alpha-3 code")
+        if currency == base:
+            raise InvalidAnswer(f"{currency} is the base currency")
+        if currency in seen:
+            raise InvalidAnswer(f"{currency} is listed twice")
+        if type(units) is not str or not _UNITS_RE.match(units) or Decimal(units) <= 0:
+            raise InvalidAnswer(f"the rate of {currency} must be a decimal above zero with at most six decimals")
+        seen.add(currency)
+        rates.append(CurrencyRate(currency=currency, units_per_base=units))
+    return CurrencyRatesResult(
+        source=source,  # type: ignore[arg-type]
+        period_start=date(start.year, start.month, start.day),
+        period_end=date(end.year, end.month, end.day),
+        rates=tuple(rates),
+    )
+
+
 def validate_answer(kind: str, method: str, args: tuple, value: Any) -> Any:
     """Check and normalise what a provider method returned; raises ``InvalidAnswer``."""
     if method in ("supports", "check_format"):
         return _bool(value, f"{method} answer")
+    if kind == "currency_rates":
+        return _rates_result(value, args[0] if args else None)
     if kind == "tax_id_validator":
         return _tax_id_result(value)
     if kind == "tax_rule_pack":

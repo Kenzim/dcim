@@ -346,7 +346,7 @@ class PackRef(_Strict):
 
 
 class ProvideSpec(_Strict):
-    kind: Literal["tax_id_validator", "tax_rule_pack", "tax_provider"]
+    kind: Literal["tax_id_validator", "tax_rule_pack", "tax_provider", "currency_rates"]
     id: str
     label: str = Field(min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)

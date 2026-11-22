@@ -54,6 +54,12 @@ PERMISSION_LIST = (
         "Receive basket lines, amounts and the buyer's address and tax ID, and decide the tax on invoices.",
         "high",
     ),
+    Permission(
+        "currency.rates",
+        "Offer exchange rates",
+        "Offer published exchange rates that billing stores and uses to show tax in another currency.",
+        "medium",
+    ),
 )
 PERMISSIONS = {p.key: p for p in PERMISSION_LIST}
 

@@ -584,6 +584,7 @@
   },
   "permissions": [
     "billing.read",
+    "currency.rates",
     "events.veto",
     "guest.exec",
     "http.outbound",
@@ -618,6 +619,15 @@
   "provider_kinds": {
     "context": "current_context",
     "kinds": {
+      "currency_rates": {
+        "metered": [
+          "rates"
+        ],
+        "methods": {
+          "rates": 1
+        },
+        "permission": "currency.rates"
+      },
       "tax_id_validator": {
         "metered": [
           "check_online"
@@ -653,6 +663,52 @@
     },
     "module": "rackflow_plugin.kinds",
     "types": {
+      "CurrencyRate": [
+        {
+          "name": "currency",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "units_per_base",
+          "required": true,
+          "type": "str"
+        }
+      ],
+      "CurrencyRatesRequest": [
+        {
+          "name": "base",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "period",
+          "required": true,
+          "type": "str"
+        }
+      ],
+      "CurrencyRatesResult": [
+        {
+          "name": "source",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "name": "period_start",
+          "required": true,
+          "type": "date"
+        },
+        {
+          "name": "period_end",
+          "required": true,
+          "type": "date"
+        },
+        {
+          "name": "rates",
+          "required": true,
+          "type": "tuple[CurrencyRate, ...]"
+        }
+      ],
       "TaxIdCheckRequest": [
         {
           "name": "country",
