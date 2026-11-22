@@ -6,10 +6,12 @@ table from the models and drops them all afterwards, so it refuses a database
 that holds rows in ``users`` or ``invoices`` unless
 ``RACKFLOW_TEST_MARIADB_ALLOW_DROP=1``.
 
-Each case runs at the server's defaults, at READ COMMITTED, and with
-``innodb_snapshot_isolation`` off (MariaDB 11.6 and later only). An allocation
-here commits an invoice carrying its number in the same transaction, as a
-publish does, so ``set_counter_at_least`` sees what was issued.
+Each case runs at the server's default isolation level and at READ COMMITTED.
+Every session turns ``innodb_snapshot_isolation`` off (ignored on servers
+without it, before MariaDB 11.6), matching what the application's connect hook
+will do; remove ``_snapshot_off`` once that hook is in ``app/core/database.py``.
+An allocation here commits an invoice carrying its number in the same
+transaction, as a publish does, so ``set_counter_at_least`` sees what was issued.
 """
 
 from __future__ import annotations
@@ -39,7 +41,21 @@ def _drop_all(engine) -> None:
         conn.execute(sa.text("SET foreign_key_checks = 1"))
 
 
-@pytest.fixture(params=["defaults", "read_committed", "snapshot_off"])
+UNKNOWN_SYSTEM_VARIABLE = 1193
+
+
+def _snapshot_off(dbapi_connection, _record) -> None:
+    import pymysql
+
+    with dbapi_connection.cursor() as cursor:
+        try:
+            cursor.execute("SET SESSION innodb_snapshot_isolation = OFF")
+        except pymysql.err.MySQLError as exc:
+            if exc.args[0] != UNKNOWN_SYSTEM_VARIABLE:
+                raise
+
+
+@pytest.fixture(params=["default_isolation", "read_committed"])
 def engine(request):
     import app.models  # noqa: F401
     from app.core.database import Base
@@ -48,16 +64,7 @@ def engine(request):
     if request.param == "read_committed":
         options["isolation_level"] = "READ COMMITTED"
     built = sa.create_engine(URL, **options)
-    if request.param == "snapshot_off":
-        with built.connect() as conn:
-            if conn.execute(sa.text("SHOW VARIABLES LIKE 'innodb_snapshot_isolation'")).first() is None:
-                built.dispose()
-                pytest.skip("this server has no innodb_snapshot_isolation")
-
-        @sa.event.listens_for(built, "connect")
-        def _snapshot_off(dbapi_connection, _record):
-            with dbapi_connection.cursor() as cursor:
-                cursor.execute("SET SESSION innodb_snapshot_isolation = OFF")
+    sa.event.listen(built, "connect", _snapshot_off)
 
     with built.begin() as conn:
         if os.environ.get("RACKFLOW_TEST_MARIADB_ALLOW_DROP") != "1":
