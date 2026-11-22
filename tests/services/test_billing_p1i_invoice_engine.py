@@ -658,21 +658,17 @@ def test_v2_overpayment_goes_to_a_debit_note(db_session, account, monkeypatch, e
     assert InvoiceService.balance(db_session, invoice).due_cents == 0
 
 
-def test_v2_overpayment_through_the_real_debit_note_service(db_session, account, monkeypatch, events):
-    """P1-N's issue_overpayment for real; only the ledger credit (P1-C) is faked."""
-    from types import SimpleNamespace
+def test_v2_overpayment_through_the_real_debit_note_service(db_session, account, events):
+    """P1-N's issue_overpayment and P1-C's credit ledger, both for real."""
+    from app.models.reseller import CreditLedgerEntry
 
-    from app.services.credit_ledger_service import CreditLedgerService
+    def credits():
+        return db_session.execute(
+            select(CreditLedgerEntry).where(CreditLedgerEntry.billing_account_id == account.id)
+        ).scalars().all()
 
     _v2(db_session)
     _series(db_session, DocumentType.DEBIT_NOTE, "DN")
-    credits = []
-
-    def fake_credit(db, account_id, amount_cents, **kwargs):
-        credits.append((account_id, amount_cents, kwargs["idempotency_key"]))
-        return SimpleNamespace(id=None)
-
-    monkeypatch.setattr(CreditLedgerService, "credit_account", staticmethod(fake_credit))
     invoice = _create(db_session, account)
     _pay(db_session, invoice, 600)
     second = _pay(db_session, invoice, 600)
@@ -684,14 +680,20 @@ def test_v2_overpayment_through_the_real_debit_note_service(db_session, account,
         AdjustmentKind.DEBIT, 200, f"overpayment:{invoice.id}:{second.id}"
     )
     assert note.number_display == "DN-1"
-    assert credits == [(account.id, 200, f"overpayment-credit:{note.id}")]
+    [entry] = credits()
+    assert (entry.amount_cents, entry.idempotency_key) == (200, f"overpayment-credit:{note.id}")
+    assert note.ledger_entry_id == entry.id
+    db_session.refresh(account)
+    assert account.credit_balance_cents == 200
     assert invoice.status == S.PAID
     balance = InvoiceService.balance(db_session, invoice)
     assert (balance.worth_cents, balance.due_cents) == (1200, 0)
     assert [name for name, _ in events].count(settlement.INVOICE_PAID) == 1
     # A second settlement finds nothing left to convert.
     InvoiceService.recompute(db_session, invoice, cause="payment", payment=second)
-    assert len(credits) == 1
+    assert [row.id for row in credits()] == [entry.id]
+    db_session.refresh(account)
+    assert account.credit_balance_cents == 200
 
 
 def test_v2_money_on_a_terminal_invoice_goes_to_refund_review(db_session, account, monkeypatch):

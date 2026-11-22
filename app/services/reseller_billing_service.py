@@ -792,9 +792,7 @@ class ResellerBillingService:
                 metadata={"reason": str(error)[:500]},
                 created_by_user_id=reseller.user_id,
             )
-        from app.services.payments.orchestrator import transition_invoice_status
-
-        transition_invoice_status(
+        InvoiceService.transition(
             db,
             charge.invoice,
             InvoiceStatus.VOID,

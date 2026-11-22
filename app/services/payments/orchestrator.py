@@ -47,34 +47,6 @@ SUCCESS_ALLOWED_FROM = frozenset(
 )
 
 
-def transition_invoice_status(
-    db: Session,
-    invoice: Invoice,
-    to: InvoiceStatus,
-    *,
-    cause: str,
-    actor_user_id: Optional[int] = None,
-    reason: Optional[str] = None,
-) -> Invoice:
-    """Write an invoice status through ``InvoiceService.transition``.
-
-    Temporary: while ``transition`` is still the unimplemented stub, the status
-    is assigned directly as before. Remove the fallback once it is implemented.
-    """
-    try:
-        return InvoiceService.transition(
-            db, invoice, to, cause=cause, actor_user_id=actor_user_id, reason=reason
-        )
-    except NotImplementedError:
-        logger.debug(
-            "InvoiceService.transition is not implemented; writing invoice %s status %s directly",
-            invoice.id,
-            to.value,
-        )
-        invoice.status = to
-        return invoice
-
-
 @dataclass(frozen=True)
 class InvoiceFundingResult:
     funded: bool
@@ -610,7 +582,7 @@ class PaymentOrchestrator:
             self.finalize_success(db, payment)
             return self._result(db, invoice, payment_id=payment.id)
         if status == PaymentStatus.PENDING:
-            transition_invoice_status(
+            InvoiceService.transition(
                 db, invoice, InvoiceStatus.PENDING_ACTION, cause="payment_requires_action"
             )
             db.flush()

@@ -40,10 +40,7 @@ from app.services.billing.renewals import (
 from app.services.invoice_service import InvoiceService
 from app.services.notification_service import NotificationEvent, NotificationService
 from app.services.credit_ledger_service import CreditLedgerService
-from app.services.payments.orchestrator import (
-    PaymentOrchestrator,
-    transition_invoice_status,
-)
+from app.services.payments.orchestrator import PaymentOrchestrator
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
 
 
@@ -694,7 +691,7 @@ class RecurringBillingService:
             else BillingCycleState.GRACE
         )
         if cycle.invoice.status != InvoiceStatus.PENDING_ACTION:
-            transition_invoice_status(
+            InvoiceService.transition(
                 db, cycle.invoice, InvoiceStatus.OVERDUE, cause="renewal_past_due"
             )
         billing.status = (
@@ -1023,7 +1020,7 @@ class RecurringBillingService:
             cycle.completed_at = now
             cycle.next_retry_at = None
             if cycle.invoice is not None and cycle.invoice.status != InvoiceStatus.PAID:
-                transition_invoice_status(
+                InvoiceService.transition(
                     db,
                     cycle.invoice,
                     InvoiceStatus.VOID,
