@@ -5,7 +5,10 @@ off) and ``overdue_1`` to ``overdue_3`` at ``due_at + billing_reminder_overdue_d
 The overdue sequence is anchored: an invoice is in it only when its
 ``overdue_1`` trigger is at or after the watermark, and a later notice needs
 the earlier one done. One notice per invoice per run, the earliest pending.
-Reminders never change an invoice's status.
+Reminders never change an invoice's status. The first overdue notice fires
+``invoice.overdue`` in its claim's transaction unless the invoice is already
+``overdue`` (the v2 move to ``overdue`` fired it then), so the event comes
+once per invoice under every engine.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ TRACKS_SETTING = f"billing_job_tracks_{NAME}"
 REMINDED_STATUSES = (InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID)
 TEMPLATE_EVENTS = ("invoice_reminder", "invoice_overdue")
 UPCOMING = "upcoming"
+FIRST_OVERDUE = "overdue_1"
 
 
 def _setting(db: Session, key: str):
@@ -211,7 +215,7 @@ class InvoiceReminders:
         from app.services.email_message_service import EmailMessageService
         from app.services.invoice_service import InvoiceService
         from app.plugin_host import events as plugin_events
-        from app.services.billing_shadow import billing_engine_mode
+        from app.services.billing import settlement
 
         invoice = BillingLocks.for_invoice(db, int(action.detail["invoice_id"]))
         reason = self._open_reason(db, invoice, for_update=True)
@@ -227,7 +231,6 @@ class InvoiceReminders:
         if not run.claim(db, subject_key(invoice.id, kind)):
             return "already_done"
         remaining = int(InvoiceService.balance(db, invoice, for_update=True).remaining_cents)
-        due = _utc(invoice.due_at)
         event = template_event(kind)
         variables = template_variables(invoice, kind, remaining)
         if _reseller_invoice(invoice):
@@ -263,19 +266,10 @@ class InvoiceReminders:
                 "kind": kind,
             },
         )
-        if kind == "overdue_1" and billing_engine_mode(db, "invoice") != "v2":
-            # Under v2 ``transition`` to ``overdue`` already emits this event.
-            plugin_events.emit(
+        if kind == FIRST_OVERDUE and invoice.status != InvoiceStatus.OVERDUE:
+            settlement.fire(
                 db,
-                "invoice.overdue",
-                {
-                    "invoice_id": invoice.id,
-                    "billing_account_id": invoice.billing_account_id,
-                    "due_cents": remaining,
-                    "currency": invoice.currency,
-                    "reseller_id": invoice.reseller_id,
-                    "invoice_number": invoice.invoice_number,
-                    "due_at": due.isoformat(),
-                },
+                settlement.INVOICE_OVERDUE,
+                settlement.InvoiceOverdue(invoice=invoice, due_cents=remaining),
             )
         return "done"

@@ -85,6 +85,98 @@ def _run(factory, now):
     return runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=now)
 
 
+@pytest.fixture
+def events(monkeypatch):
+    from app.plugin_host import events as plugin_events
+
+    seen: list[tuple[str, dict]] = []
+    monkeypatch.setattr(plugin_events, "emit", lambda db, name, payload, *a, **k: seen.append((name, payload)))
+    return seen
+
+
+def _overdue_events(events, invoice_id):
+    return [payload for name, payload in events if name == "invoice.overdue" and payload["invoice_id"] == invoice_id]
+
+
+def _retail_invoice(factory, due, *, amount=2000, status=InvoiceStatus.OPEN):
+    from app.models.commerce_account import BillingAccount, BillingAccountType
+    from app.models.user import User
+
+    db = factory()
+    number = next(_numbers)
+    user = User(username=f"retail-{number}", email=f"retail-{number}@example.com")
+    db.add(user)
+    db.flush()
+    account = BillingAccount(account_type=BillingAccountType.CLIENT, user_id=user.id)
+    db.add(account)
+    db.flush()
+    invoice = Invoice(invoice_number=number, billing_account_id=account.id, purpose=InvoicePurpose.ADJUSTMENT,
+                      status=status, amount_cents=amount, currency="USD", due_at=due)
+    db.add(invoice)
+    db.commit()
+    invoice_id = invoice.id
+    db.close()
+    return invoice_id
+
+
+def _configure(factory, *, v2):
+    from app.services.settings_store import set_setting
+    from tests.services.test_billing_p1i_invoice_engine import _v2
+
+    db = factory()
+    set_setting(db, reminders.TRACKS_SETTING, "both")
+    if v2:
+        _v2(db)
+    db.commit()
+    db.close()
+
+
+def _engine(factory):
+    from app.services.billing_shadow import billing_engine_mode
+
+    db = factory()
+    try:
+        return billing_engine_mode(db, "invoice")
+    finally:
+        db.close()
+
+
+def test_v2_retail_first_overdue_notice_fires_invoice_overdue_once(factory, sent, events):
+    _configure(factory, v2=True)
+    assert _engine(factory) == "v2"
+    invoice_id = _retail_invoice(factory, T0 + timedelta(days=5))
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["upcoming", "overdue_1", "overdue_2", "overdue_3"]
+    [event] = _overdue_events(events, invoice_id)
+    assert event["due_cents"] == 2000 and event["billing_account_id"] is not None
+    db = factory()
+    assert db.get(Invoice, invoice_id).status == InvoiceStatus.OPEN
+    db.close()
+
+
+def test_v2_invoice_already_overdue_gets_no_second_invoice_overdue(factory, sent, events):
+    _configure(factory, v2=True)
+    invoice_id = _invoice(factory, T0 + timedelta(days=2), status=InvoiceStatus.OVERDUE)
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["overdue_1", "overdue_2", "overdue_3"]
+    assert _overdue_events(events, invoice_id) == []
+
+
+def test_legacy_first_overdue_notice_fires_invoice_overdue_once(factory, sent, events):
+    _configure(factory, v2=False)
+    assert _engine(factory) != "v2"
+    invoice_id = _retail_invoice(factory, T0 + timedelta(days=2))
+    _go_live(factory, T0)
+    for day in range(0, 30):
+        _run(factory, T0 + timedelta(days=day, hours=1))
+    assert _kinds(sent, invoice_id) == ["overdue_1", "overdue_2", "overdue_3"]
+    assert len(_overdue_events(events, invoice_id)) == 1
+
+
 def _kinds(sent, invoice_id):
     prefix = f"invoice:{invoice_id}:reminder:"
     return [call["idempotency_key"][len(prefix):] for call in sent if call["idempotency_key"].startswith(prefix)]
