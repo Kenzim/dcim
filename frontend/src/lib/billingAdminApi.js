@@ -183,8 +183,8 @@ export const dispatchRefund = (id) =>
   request(`/admin/billing/refunds/${id}/dispatch`, { method: 'POST', errorMessage: 'Failed to send the refund' });
 export const resolveRefund = (id, body) =>
   request(`/admin/billing/refunds/${id}/resolve`, { method: 'POST', body, errorMessage: 'Failed to resolve the refund' });
-export const listRefundReviews = (filters = {}) =>
-  request(`/admin/billing/refund-reviews${query(filters)}`, { errorMessage: 'Failed to load the refund review queue' });
+export const listRefundReviews = (openOnly = true, limit = 200) =>
+  request(`/admin/billing/refund-reviews${query({ open: openOnly, limit })}`, { errorMessage: 'Failed to load the refund review queue' });
 export const resolveRefundReview = (body, key) =>
   request('/admin/billing/refund-reviews/resolve', {
     method: 'POST',
