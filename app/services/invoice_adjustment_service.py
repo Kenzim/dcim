@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional, Sequence
@@ -48,6 +49,7 @@ from app.models.reseller import (
 from app.services.billing.rounding import refund_tax_proportional
 
 MAX_NOTE_LINES = 100
+logger = logging.getLogger(__name__)
 MAX_KEY_LENGTH = 255
 _REQUEST_HASH = "request_hash"
 
@@ -422,14 +424,186 @@ def _tax_of(amount_cents: int, worth: int, tax: int) -> int:
     )
 
 
+@dataclass(frozen=True)
+class RowShare:
+    """The part of a credit that falls on one ``RowBase``: gross and its tax."""
+
+    row: RowBase
+    gross_cents: int
+    tax_cents: int
+
+
+def _group_key(name: Any, rate: Any, jurisdiction: Any, reverse_charge: Any) -> tuple:
+    return (name, Decimal(str(rate)).quantize(Decimal("0.0001")), jurisdiction, bool(reverse_charge))
+
+
+def _has_tax_rows(db: Session, invoice: Invoice) -> bool:
+    from app.models.tax import InvoiceLineTax
+
+    return db.scalar(
+        select(InvoiceLineTax.id).where(InvoiceLineTax.invoice_id == invoice.id).limit(1)
+    ) is not None
+
+
+def _tax_base_rows(db: Session, invoice: Invoice, key: str) -> list[RowBase]:
+    from app.models.tax import InvoiceAdjustmentLineTax, InvoiceLineTax
+
+    worth, tax = _worth_and_tax_before(db, invoice, key)
+    groups: dict[tuple, list[int]] = {}
+    for row in db.execute(
+        select(InvoiceLineTax)
+        .where(InvoiceLineTax.invoice_id == invoice.id)
+        .order_by(InvoiceLineTax.id)
+        .with_for_update()
+    ).scalars():
+        entry = groups.setdefault(_group_key(row.name, row.rate_percent, row.jurisdiction, row.reverse_charge), [0, 0])
+        entry[0] += int(row.base_cents) + int(row.tax_cents)
+        entry[1] += int(row.tax_cents)
+    stmt = (
+        select(InvoiceAdjustment.kind, InvoiceAdjustmentLineTax)
+        .join(InvoiceAdjustment, InvoiceAdjustment.id == InvoiceAdjustmentLineTax.invoice_adjustment_id)
+        .where(
+            InvoiceAdjustment.invoice_id == invoice.id,
+            InvoiceAdjustment.reason_code != AdjustmentReason.OVERPAYMENT,
+        )
+        .order_by(InvoiceAdjustmentLineTax.id)
+        .with_for_update()
+    )
+    earlier = db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.idempotency_key == key))
+    if earlier is not None:
+        stmt = stmt.where(InvoiceAdjustment.id < earlier)
+    for kind, row in db.execute(stmt).all():
+        sign = 1 if _value(kind) == AdjustmentKind.DEBIT.value else -1
+        entry = groups.setdefault(_group_key(row.name, row.rate_percent, row.jurisdiction, row.reverse_charge), [0, 0])
+        entry[0] += sign * (int(row.base_cents) + int(row.tax_cents))
+        entry[1] += sign * int(row.tax_cents)
+    rows = [
+        RowBase(name=k[0], rate_percent=k[1], jurisdiction=k[2], reverse_charge=k[3], worth_cents=v[0], tax_cents=v[1])
+        for k, v in groups.items()
+    ]
+    rows.append(
+        RowBase(
+            name=None, rate_percent=None, jurisdiction=None, reverse_charge=False,
+            worth_cents=worth - sum(r.worth_cents for r in rows), tax_cents=tax - sum(r.tax_cents for r in rows),
+        )
+    )
+    return rows
+
+
+def _split_by_rows(rows: Sequence[RowBase], amount_cents: int) -> list[RowShare]:
+    from app.services.billing.rounding import tax_split_largest_remainder
+
+    amount = max(0, int(amount_cents))
+    weights = [max(0, int(r.worth_cents)) for r in rows]
+    total = sum(weights)
+    if total <= 0:
+        return [RowShare(row=rows[-1], gross_cents=amount, tax_cents=0)] if rows else []
+    bounded = min(amount, total)
+    shares = tax_split_largest_remainder(bounded, weights)
+    shares[-1] += amount - bounded
+    return [
+        RowShare(row=row, gross_cents=share, tax_cents=_tax_of(share, int(row.worth_cents), int(row.tax_cents)))
+        for row, share in zip(rows, shares)
+    ]
+
+
+def rows_less(rows: Sequence[RowBase], shares: Sequence[RowShare]) -> list[RowBase]:
+    """``rows`` after taking ``shares`` off them (an earlier refund with no credit note)."""
+    taken = {_group_key(s.row.name, s.row.rate_percent or 0, s.row.jurisdiction, s.row.reverse_charge): s for s in shares}
+    out = []
+    for row in rows:
+        share = taken.get(_group_key(row.name, row.rate_percent or 0, row.jurisdiction, row.reverse_charge))
+        if share is None:
+            out.append(row)
+            continue
+        out.append(
+            RowBase(
+                name=row.name, rate_percent=row.rate_percent, jurisdiction=row.jurisdiction,
+                reverse_charge=row.reverse_charge, worth_cents=row.worth_cents - share.gross_cents,
+                tax_cents=row.tax_cents - share.tax_cents,
+            )
+        )
+    return out
+
+
+def shares_json(shares: Sequence[RowShare]) -> list[list]:
+    """Shares as JSON for ``refunds.refund_metadata``: ``[name, rate, jurisdiction, rc, gross, tax]``."""
+    return [
+        [s.row.name, None if s.row.rate_percent is None else str(s.row.rate_percent), s.row.jurisdiction,
+         bool(s.row.reverse_charge), int(s.gross_cents), int(s.tax_cents)]
+        for s in shares
+    ]
+
+
+def shares_from_json(data: Sequence[Sequence]) -> list[RowShare]:
+    return [
+        RowShare(
+            row=RowBase(
+                name=item[0], rate_percent=None if item[1] is None else Decimal(item[1]), jurisdiction=item[2],
+                reverse_charge=bool(item[3]), worth_cents=0, tax_cents=0,
+            ),
+            gross_cents=int(item[4]),
+            tax_cents=int(item[5]),
+        )
+        for item in data
+    ]
+
+
+def _write_amount_rows(db: Session, note: InvoiceAdjustment, shares: Sequence[RowShare]) -> None:
+    """The tax rows of a one-line note split by ``split_by_rows`` (taxed groups only)."""
+    from app.models.tax import InvoiceAdjustmentLineTax
+
+    line = db.execute(
+        select(InvoiceAdjustmentLine)
+        .where(InvoiceAdjustmentLine.adjustment_id == note.id)
+        .order_by(InvoiceAdjustmentLine.sort_order, InvoiceAdjustmentLine.id)
+    ).scalars().first()
+    position = 0
+    for share in shares:
+        if share.row.name is None or share.gross_cents <= 0:
+            continue
+        db.add(
+            InvoiceAdjustmentLineTax(
+                invoice_adjustment_id=note.id,
+                invoice_adjustment_line_id=line.id,
+                position=position,
+                name=share.row.name,
+                rate_percent=share.row.rate_percent,
+                jurisdiction=share.row.jurisdiction,
+                base_cents=share.gross_cents - share.tax_cents,
+                tax_cents=share.tax_cents,
+                reverse_charge=bool(share.row.reverse_charge),
+                source="credit_note",
+            )
+        )
+        position += 1
+    db.flush()
+
+
 def _default_amount_lines(
     db: Session, invoice: Invoice, amount_cents: int, description: str, key: str
 ) -> list[NoteLine]:
-    # The tax in proportion to the invoice's current worth and tax, so a note
-    # crediting a taxed debit note takes that note's tax too. An amount above
-    # the worth is refused by the caller's checks; its tax here is bounded.
-    worth, current_tax = _worth_and_tax_before(db, invoice, key)
-    tax = _tax_of(amount_cents, worth, current_tax)
+    return _amount_lines_and_shares(db, invoice, amount_cents, description, key)[0]
+
+
+def _amount_lines_and_shares(
+    db: Session, invoice: Invoice, amount_cents: int, description: str, key: str
+) -> tuple[list[NoteLine], Optional[list[RowShare]]]:
+    """The one line of a note by amount and, for an invoice with tax rows, its per-row split.
+
+    An invoice taxed per row (tax engine v2) splits the amount over
+    ``tax_base_rows`` (design 4.8); any other keeps phase 1's single base.
+    """
+    shares = None
+    if _has_tax_rows(db, invoice):
+        shares = _split_by_rows(_tax_base_rows(db, invoice, key), amount_cents)
+        tax = sum(share.tax_cents for share in shares)
+    else:
+        # The tax in proportion to the invoice's current worth and tax, so a note
+        # crediting a taxed debit note takes that note's tax too. An amount above
+        # the worth is refused by the caller's checks; its tax here is bounded.
+        worth, current_tax = _worth_and_tax_before(db, invoice, key)
+        tax = _tax_of(amount_cents, worth, current_tax)
     return [
         NoteLine(
             kind=InvoiceLineKind.ADJUSTMENT,
@@ -438,7 +612,309 @@ def _default_amount_lines(
             unit_cents=amount_cents - tax,
             tax_cents=tax,
         )
+    ], shares
+
+
+@dataclass(frozen=True)
+class LineRowCredit:
+    """One tax row of an invoice line reversed by a credit note line."""
+
+    source_line_tax_id: int
+    name: str
+    rate_percent: Decimal
+    jurisdiction: str
+    reverse_charge: bool
+    legal_note_key: Optional[str]
+    base_cents: int
+    tax_cents: int
+
+
+def _line_rows_left(db: Session, invoice_line_id: int, key: str) -> list[tuple[Any, int, int]]:
+    """``(row, base_left, tax_left)`` for each tax row of an invoice line, after earlier credit notes."""
+    from app.models.tax import InvoiceAdjustmentLineTax, InvoiceLineTax
+
+    rows = db.execute(
+        select(InvoiceLineTax)
+        .where(InvoiceLineTax.invoice_line_id == invoice_line_id)
+        .order_by(InvoiceLineTax.position, InvoiceLineTax.id)
+        .with_for_update()
+    ).scalars().all()
+    if not rows:
+        return []
+    stmt = (
+        select(
+            InvoiceAdjustmentLineTax.source_line_tax_id,
+            func.coalesce(func.sum(InvoiceAdjustmentLineTax.base_cents), 0),
+            func.coalesce(func.sum(InvoiceAdjustmentLineTax.tax_cents), 0),
+        )
+        .join(InvoiceAdjustment, InvoiceAdjustment.id == InvoiceAdjustmentLineTax.invoice_adjustment_id)
+        .where(
+            InvoiceAdjustmentLineTax.source_line_tax_id.in_([r.id for r in rows]),
+            InvoiceAdjustment.kind == AdjustmentKind.CREDIT,
+        )
+        .group_by(InvoiceAdjustmentLineTax.source_line_tax_id)
+    )
+    earlier = db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.idempotency_key == key))
+    if earlier is not None:
+        stmt = stmt.where(InvoiceAdjustment.id < earlier)
+    credited = {int(i): (int(b), int(t)) for i, b, t in db.execute(stmt).all()}
+    return [
+        (row, int(row.base_cents) - credited.get(row.id, (0, 0))[0], int(row.tax_cents) - credited.get(row.id, (0, 0))[1])
+        for row in rows
     ]
+
+
+def _credit_line_rows(
+    db: Session, invoice: Invoice, lines: Sequence[NoteLine], key: str
+) -> tuple[list[NoteLine], dict[int, list[LineRowCredit]]]:
+    """Design 4.8 by lines: each credited line reverses each of its invoice line's tax rows.
+
+    A row's share is in proportion to the part of the line's remaining net
+    being credited, so crediting what is left takes exactly what is left of
+    every row. The line's tax becomes the sum of its rows; a caller's
+    ``tax_cents`` is ignored for a line with tax rows.
+
+    Credits by amount and refund notes take from a rate group as a whole, not
+    from its lines, so each row is also bounded by what is left of its group
+    in ``tax_base_rows`` (see ``_bound_by_group``).
+    """
+    out: list[NoteLine] = []
+    credits: dict[int, list[LineRowCredit]] = {}
+    groups = {
+        _group_key(r.name, r.rate_percent, r.jurisdiction, r.reverse_charge): r
+        for r in _tax_base_rows(db, invoice, key)
+        if r.name is not None
+    }
+    taken: dict[tuple, list[int]] = {}
+    for index, line in enumerate(lines):
+        left = _line_rows_left(db, line.invoice_line_id, key) if line.invoice_line_id else []
+        if not left:
+            out.append(line)
+            continue
+        invoice_line = db.get(InvoiceLine, line.invoice_line_id)
+        line_net = int(invoice_line.total_cents)
+        if invoice.prices_include_tax:
+            line_net -= int(invoice_line.tax_cents or 0)
+        net_left = line_net - _credited_net(db, line.invoice_line_id, key)
+        net = line.total_cents
+        row_credits = []
+        for row, base_left, tax_left in left:
+            tax = refund_tax_proportional(max(0, min(net, net_left)), max(0, tax_left), net_left) if net_left > 0 else 0
+            base = refund_tax_proportional(max(0, min(net, net_left)), max(0, base_left), net_left) if net_left > 0 else 0
+            group_key = _group_key(row.name, row.rate_percent, row.jurisdiction, row.reverse_charge)
+            tax = _bound_by_group(
+                groups[group_key], taken.setdefault(group_key, [0, 0]), base, tax, f"line {index + 1}"
+            )
+            row_credits.append(
+                LineRowCredit(
+                    source_line_tax_id=int(row.id), name=row.name, rate_percent=row.rate_percent,
+                    jurisdiction=row.jurisdiction, reverse_charge=bool(row.reverse_charge),
+                    legal_note_key=row.legal_note_key, base_cents=base, tax_cents=tax,
+                )
+            )
+        credits[index] = row_credits
+        out.append(replace(line, tax_cents=sum(c.tax_cents for c in row_credits)))
+    return out, credits
+
+
+def _bound_by_group(group: RowBase, taken: list[int], base: int, tax: int, label: str) -> int:
+    """The tax of one row of a credit by lines, bounded by what is left of its rate group.
+
+    ``taken`` is the ``[base, tax]`` this note has already taken from the
+    group and is updated. A note may not credit more net than the group has
+    left; one that credits all of it takes exactly the group's remaining tax,
+    so the note that completes a rate leaves no cent behind or over.
+    """
+    net_left = int(group.worth_cents) - int(group.tax_cents)
+    tax_left = int(group.tax_cents) - taken[1]
+    taken[0] += base
+    if taken[0] > net_left:
+        raise AdjustmentConflictError(
+            f"{label} credits more than is left at {group.name} ({max(0, net_left)} cents net)"
+        )
+    tax = tax_left if taken[0] == net_left else min(tax, tax_left)
+    tax = max(0, tax)
+    taken[1] += tax
+    return tax
+
+
+def _credited_net(db: Session, invoice_line_id: int, key: str) -> int:
+    stmt = (
+        select(func.coalesce(func.sum(InvoiceAdjustmentLine.total_cents), 0))
+        .join(InvoiceAdjustment, InvoiceAdjustment.id == InvoiceAdjustmentLine.adjustment_id)
+        .where(
+            InvoiceAdjustmentLine.invoice_line_id == invoice_line_id,
+            InvoiceAdjustment.kind == AdjustmentKind.CREDIT,
+        )
+    )
+    earlier = db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.idempotency_key == key))
+    if earlier is not None:
+        stmt = stmt.where(InvoiceAdjustment.id < earlier)
+    return int(db.scalar(stmt) or 0)
+
+
+def _write_line_rows(db: Session, note: InvoiceAdjustment, credits: dict[int, list[LineRowCredit]]) -> None:
+    from app.models.tax import InvoiceAdjustmentLineTax
+
+    note_lines = db.execute(
+        select(InvoiceAdjustmentLine)
+        .where(InvoiceAdjustmentLine.adjustment_id == note.id)
+        .order_by(InvoiceAdjustmentLine.sort_order, InvoiceAdjustmentLine.id)
+    ).scalars().all()
+    for index, row_credits in credits.items():
+        for position, credit in enumerate(row_credits):
+            db.add(
+                InvoiceAdjustmentLineTax(
+                    invoice_adjustment_id=note.id,
+                    invoice_adjustment_line_id=note_lines[index].id,
+                    source_line_tax_id=credit.source_line_tax_id,
+                    position=position,
+                    name=credit.name,
+                    rate_percent=credit.rate_percent,
+                    jurisdiction=credit.jurisdiction,
+                    base_cents=credit.base_cents,
+                    tax_cents=credit.tax_cents,
+                    reverse_charge=credit.reverse_charge,
+                    legal_note_key=credit.legal_note_key,
+                    source="credit_note",
+                )
+            )
+    db.flush()
+
+
+def _debit_tax(
+    db: Session, invoice: Invoice, lines: Sequence[NoteLine], reason: AdjustmentReason
+) -> tuple[list[NoteLine], Optional[Any]]:
+    """A debit note on an invoice taxed per row is taxed by the engine as a new supply (design 4.8).
+
+    Purpose ``adjustment`` at the note's tax point; a late fee is outside the
+    scope of tax. Returns the lines with their tax and the engine's result.
+    """
+    if not _has_tax_rows(db, invoice):
+        return list(lines), None
+    from app.services.tax.context import TaxContextBuilder
+    from app.services.tax.engine import TaxEngine
+
+    if reason == AdjustmentReason.LATE_FEE:
+        return [replace(line, tax_cents=0) for line in lines], None
+    result = TaxEngine.calculate(db, TaxContextBuilder.for_adjustment(db, invoice, lines))
+    out = []
+    for index, line in enumerate(lines):
+        line_tax = result.line(f"line:{index}")
+        out.append(replace(line, tax_cents=line_tax.tax_cents if line_tax is not None else 0))
+    return out, result
+
+
+def _retried_debit_note(
+    db: Session,
+    invoice: Invoice,
+    key: str,
+    reason: AdjustmentReason,
+    outcome: AdjustmentOutcome,
+    reason_text: Optional[str],
+    lines: Sequence[NoteLine],
+) -> Optional[InvoiceAdjustment]:
+    """The note already issued under ``key`` on an invoice taxed per row, before any tax is computed.
+
+    The engine taxed that note at its issue time; the rules may have changed
+    since, so a retry is matched against the tax the note was issued with.
+    Raises when the key was used for other parameters. Any other invoice
+    takes the caller's tax, so its retry is matched after ``_debit_tax``.
+    """
+    if not _has_tax_rows(db, invoice):
+        return None
+    existing = db.execute(
+        select(InvoiceAdjustment).where(InvoiceAdjustment.idempotency_key == key)
+    ).scalar_one_or_none()
+    if existing is None:
+        return None
+    issued = db.execute(
+        select(InvoiceAdjustmentLine.tax_cents)
+        .where(InvoiceAdjustmentLine.adjustment_id == existing.id)
+        .order_by(InvoiceAdjustmentLine.sort_order, InvoiceAdjustmentLine.id)
+    ).scalars().all()
+    if len(issued) == len(lines):
+        lines = [replace(line, tax_cents=int(tax)) for line, tax in zip(lines, issued)]
+    fingerprint = _fingerprint(AdjustmentKind.DEBIT, invoice.id, reason, outcome, reason_text, lines)
+    return _existing_note(db, key, fingerprint, invoice.id)
+
+
+def _write_debit_rows(db: Session, note: InvoiceAdjustment, result: Any) -> None:
+    from app.models.tax import InvoiceAdjustmentLineTax
+
+    note_lines = db.execute(
+        select(InvoiceAdjustmentLine)
+        .where(InvoiceAdjustmentLine.adjustment_id == note.id)
+        .order_by(InvoiceAdjustmentLine.sort_order, InvoiceAdjustmentLine.id)
+    ).scalars().all()
+    for index, note_line in enumerate(note_lines):
+        line_tax = result.line(f"line:{index}")
+        for position, part in enumerate(line_tax.parts if line_tax is not None else ()):
+            db.add(
+                InvoiceAdjustmentLineTax(
+                    invoice_adjustment_id=note.id,
+                    invoice_adjustment_line_id=note_line.id,
+                    tax_rule_id=part.rule_id,
+                    position=position,
+                    name=part.name[:255],
+                    rate_percent=part.rate_percent,
+                    jurisdiction=part.jurisdiction[:16],
+                    base_cents=int(part.base_cents),
+                    tax_cents=int(part.tax_cents),
+                    reverse_charge=bool(part.reverse_charge),
+                    legal_note_key=part.legal_note_key,
+                    source=part.source[:128],
+                )
+            )
+    db.flush()
+
+
+def _shadow_note_tax(db: Session, invoice: Invoice, note: InvoiceAdjustment, lines: Sequence[NoteLine]) -> None:
+    """``t4_note_tax`` in tax shadow: the note's phase 1 tax against the per-row reversal (design 5).
+
+    The rows are the engine's for the invoice's lines at its issue time; a
+    credited line's per-row tax is in proportion to the credited net.
+    """
+    from app.services.tax import shadow as tax_shadow
+    from app.services.tax.context import TaxContextBuilder
+    from app.services.tax.engine import SCOPE_OUT, TaxEngine
+
+    credited = [line for line in lines if line.invoice_line_id is not None]
+    if not credited:
+        return
+    try:
+        invoice_lines = db.execute(
+            select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id).order_by(InvoiceLine.sort_order, InvoiceLine.id)
+        ).scalars().all()
+        at = invoice.issued_at or invoice.created_at or _now()
+        result = TaxEngine.calculate(db, TaxContextBuilder.for_invoice(db, invoice, invoice_lines, at))
+        if result.scope == SCOPE_OUT:
+            return
+        by_id = {}
+        for index, invoice_line in enumerate(invoice_lines):
+            sort = invoice_line.sort_order if invoice_line.sort_order is not None else index
+            by_id[invoice_line.id] = (invoice_line, result.line(f"line:{int(sort)}"))
+        rows_tax = 0
+        for line in credited:
+            invoice_line, line_tax = by_id.get(line.invoice_line_id, (None, None))
+            if invoice_line is None or line_tax is None or int(invoice_line.total_cents) <= 0:
+                continue
+            for part in line_tax.parts:
+                rows_tax += refund_tax_proportional(
+                    min(line.total_cents, int(invoice_line.total_cents)), int(part.tax_cents), int(invoice_line.total_cents)
+                )
+        phase1 = sum(line.tax_cents for line in credited)
+    except Exception:  # noqa: BLE001 - a shadow check never fails a note
+        logger.exception("tax shadow: could not check credit note %s", note.id)
+        return
+    if rows_tax != phase1:
+        tax_shadow.record_note_tax(int(note.id), {"tax_cents": phase1}, {"tax_cents": rows_tax})
+
+
+def _tax_shadow_on(db: Session) -> bool:
+    from app.services.tax.mode import tax_engine_mode
+
+    return tax_engine_mode(db) == "shadow"
 
 
 def _existing_note(
@@ -633,8 +1109,10 @@ class InvoiceAdjustmentService:
         # account are locked before the invoice, as settlement locks them.
         invoice = _lock_invoice(db, invoice, reseller=True, billing_account=True)
 
+        shares = None
+        row_credits: dict[int, list[LineRowCredit]] = {}
         if amount_cents is not None:
-            note_lines = _default_amount_lines(
+            note_lines, shares = _amount_lines_and_shares(
                 db,
                 invoice,
                 amount_cents,
@@ -643,6 +1121,8 @@ class InvoiceAdjustmentService:
             )
         else:
             note_lines = _normalise_lines(db, invoice, lines)
+            if _has_tax_rows(db, invoice):
+                note_lines, row_credits = _credit_line_rows(db, invoice, note_lines, key)
         fingerprint = _fingerprint(
             AdjustmentKind.CREDIT, invoice.id, reason, outcome, reason_text, note_lines
         )
@@ -679,6 +1159,12 @@ class InvoiceAdjustmentService:
             key=key,
             fingerprint=fingerprint,
         )
+        if shares is not None:
+            _write_amount_rows(db, note, shares)
+        elif row_credits:
+            _write_line_rows(db, note, row_credits)
+        elif lines is not None and _tax_shadow_on(db):
+            _shadow_note_tax(db, invoice, note, note_lines)
         _fire_credit_note(db, note)
         _recompute(db, invoice, "credit_note")
         return note
@@ -705,6 +1191,10 @@ class InvoiceAdjustmentService:
 
         note_lines = _normalise_lines(db, invoice, lines)
         outcome = AdjustmentOutcome.INCREASED_BALANCE
+        retried = _retried_debit_note(db, invoice, key, reason, outcome, reason_text, note_lines)
+        if retried is not None:
+            return retried
+        note_lines, debit_tax = _debit_tax(db, invoice, note_lines, reason)
         fingerprint = _fingerprint(
             AdjustmentKind.DEBIT, invoice.id, reason, outcome, reason_text, note_lines
         )
@@ -727,6 +1217,8 @@ class InvoiceAdjustmentService:
             key=key,
             fingerprint=fingerprint,
         )
+        if debit_tax is not None:
+            _write_debit_rows(db, note, debit_tax)
         _fire_debit_note(db, note)
         _recompute(db, invoice, "debit_note")
         return note
@@ -747,9 +1239,26 @@ class InvoiceAdjustmentService:
         """The per-row form of ``tax_base`` for a v2 tax invoice (billing phase 2, design 4.8).
 
         One entry per ``(name, rate_percent, jurisdiction, reverse_charge)`` group
-        of the invoice's and its debit notes' tax rows, plus one untaxed entry.
+        of the invoice's and its debit notes' tax rows, less earlier credit
+        notes' rows, plus one untaxed entry (last) that takes the rest of
+        ``tax_base``, so the entries always add up to ``tax_base``. The caller
+        holds the invoice lock.
         """
-        raise NotImplementedError("tax_base_rows is built by the tax engine worker")
+        return _tax_base_rows(db, invoice, before_key)
+
+    @staticmethod
+    def split_by_rows(rows: Sequence["RowBase"], amount_cents: int) -> list["RowShare"]:
+        """Split a gross amount over ``rows`` (design 4.8): the one rule for a credit by amount and a v2 refund.
+
+        The amount is spread by the largest remainder rule weighted by each
+        row's remaining worth; each share's tax is ``tax_of`` against its row.
+        Amounts that add up to the whole base take exactly each row's tax.
+        """
+        return _split_by_rows(rows, amount_cents)
+
+    @staticmethod
+    def has_tax_rows(db: Session, invoice: Invoice) -> bool:
+        return _has_tax_rows(db, invoice)
 
     @staticmethod
     def tax_of(amount_cents: int, worth_cents: int, tax_cents: int) -> int:
@@ -758,14 +1267,21 @@ class InvoiceAdjustmentService:
 
     @staticmethod
     def issue_for_refund(
-        db: Session, refund: Refund, *, lines: Optional[Sequence[Any]] = None
+        db: Session,
+        refund: Refund,
+        *,
+        lines: Optional[Sequence[Any]] = None,
+        tax_rows: Optional[Sequence["RowShare"]] = None,
     ) -> InvoiceAdjustment:
         """The credit note paired with a refund (``outcome = refunded``, or ``credited_to_balance``).
 
         Its total equals the refund amount. Without ``lines`` there is one
         line "Refund of payment <id>" whose tax part is split from the amount
-        in proportion to the invoice's tax. The caller (the refund completion
-        step) sets ``refunds.adjustment_id`` and recomputes the invoice.
+        in proportion to the invoice's tax. ``tax_rows`` is the refund's
+        per-row split from ``split_by_rows`` (an invoice with tax rows); the
+        note's tax rows are written from it, so they agree with the refund's
+        tax. The caller (the refund completion step) sets
+        ``refunds.adjustment_id`` and recomputes the invoice.
         """
         if not getattr(refund, "issue_credit_note", True):
             raise AdjustmentConflictError("this refund does not issue a credit note")
@@ -784,11 +1300,15 @@ class InvoiceAdjustmentService:
         reason_text = _check_text(refund.reason_text)
         amount = _integer(int(refund.amount_cents), "refund amount", minimum=1)
         if lines is None:
-            note_lines = _default_amount_lines(
+            note_lines, shares = _amount_lines_and_shares(
                 db, invoice, amount, f"Refund of payment {refund.payment_id}", key
             )
+            if tax_rows is None:
+                tax_rows = shares
         else:
             note_lines = _normalise_lines(db, invoice, lines)
+        if tax_rows is not None and sum(s.tax_cents for s in tax_rows) != sum(n.tax_cents for n in note_lines):
+            raise InvoiceAdjustmentError("the refund's tax rows do not add up to its tax")
         fingerprint = _fingerprint(
             AdjustmentKind.CREDIT, invoice.id, reason, outcome, reason_text, note_lines
         )
@@ -815,6 +1335,8 @@ class InvoiceAdjustmentService:
             key=key,
             fingerprint=fingerprint,
         )
+        if tax_rows:
+            _write_amount_rows(db, note, tax_rows)
         _fire_credit_note(db, note, refund)
         return note
 

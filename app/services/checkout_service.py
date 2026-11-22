@@ -32,6 +32,7 @@ from app.models.storefront import (
     ProductOption,
     ProductOptionValue,
 )
+from app.services.billing import email_events
 from app.services.billing.coupons import (
     FIRST_INVOICE_ONLY_NOTE,
     CouponRuleError,
@@ -61,6 +62,9 @@ class CheckoutError(ValueError):
     pass
 
 
+TAX_QUOTE_CHANGED_MESSAGE = "The tax on this order changed since it was quoted; please review the new quote and try again"
+
+
 @dataclass(frozen=True)
 class QuoteLine:
     description: str
@@ -84,6 +88,18 @@ class QuoteResult:
     coupon_code: Optional[str] = None
     lines: list[QuoteLine] = field(default_factory=list)
     coupon_first_invoice_only: bool = False
+    # Tax engine fields (docs/billing-phase2-design.md 6.2); empty unless tax engine v2 decides.
+    tax_lines: list[dict] = field(default_factory=list)
+    tax_summary: list[dict] = field(default_factory=list)
+    legal_notes: list[str] = field(default_factory=list)
+    reverse_charge: bool = False
+    # The engine's result: in v2 the one the invoice uses, in shadow the one compared.
+    tax_result: Optional[Any] = field(default=None, repr=False, compare=False)
+    tax_evidence: dict = field(default_factory=dict, repr=False, compare=False)
+
+
+# QuoteResult fields that are not part of the quote API response.
+QUOTE_INTERNAL_FIELDS = frozenset({"tax_result", "tax_evidence"})
 
 
 class CheckoutService:
@@ -203,16 +219,18 @@ class CheckoutService:
         return 0
 
     @staticmethod
-    def _tax_cents(
-        db: Session,
-        account: BillingAccount,
-        taxable_cents: int,
-    ) -> int:
-        if taxable_cents <= 0 or account.tax_exempt:
-            return 0
+    def _tax_rate(db: Session, account: BillingAccount) -> Optional[TaxRate]:
+        """The ``tax_rates`` row for the account's profile, or None.
+
+        The candidates are today's: the country's enabled rows, limited to the
+        national rows and the profile's region when the profile has one. Of
+        several, a profile with a region takes its regional row and one
+        without takes a national row; ties go to the lowest id. A region of
+        ``''`` is a literal region, as in the query this replaces.
+        """
         profile = BillingProfileDAO.get_by_account(db, account.id)
         if profile is None or not profile.country:
-            return 0
+            return None
         stmt = select(TaxRate).where(
             TaxRate.country == profile.country.upper(),
             TaxRate.enabled.is_(True),
@@ -220,13 +238,114 @@ class CheckoutService:
         if profile.region:
             stmt = stmt.where(
                 (TaxRate.region.is_(None)) | (TaxRate.region == profile.region)
-            )
-        rate = db.execute(
-            stmt.order_by(TaxRate.region.is_(None), TaxRate.region.desc())
-        ).scalar_one_or_none()
+            ).order_by(TaxRate.region.is_(None), TaxRate.id)
+        else:
+            stmt = stmt.order_by(TaxRate.region.is_(None).desc(), TaxRate.id)
+        return db.execute(stmt.limit(1)).scalars().first()
+
+    @staticmethod
+    def _tax_cents(
+        db: Session,
+        account: BillingAccount,
+        taxable_cents: int,
+    ) -> int:
+        if taxable_cents <= 0 or account.tax_exempt:
+            return 0
+        rate = CheckoutService._tax_rate(db, account)
         if rate is None:
             return 0
         return (taxable_cents * int(rate.rate_bps)) // 10_000
+
+    @staticmethod
+    def _ensure_tax_checkout_allowed(db: Session, account: BillingAccount) -> None:
+        """Design 7.4's "block checkout" tax ID policy; owned by the packs and tax ID worker.
+
+        A no-op until ``app.services.tax.validators.ensure_checkout_allowed``
+        exists; then this is the one line that calls it.
+        """
+        return None
+
+    @staticmethod
+    def _tax_mode(db: Session) -> str:
+        """The checkout's tax mode: ``v2`` needs the invoice engine in ``v2`` too."""
+        from app.services.tax.mode import tax_engine_mode
+
+        mode = tax_engine_mode(db)
+        if mode == "v2" and engine_mode(db) != "v2":
+            return "shadow"
+        return mode
+
+    @staticmethod
+    def _priced_lines(lines: list[QuoteLine]) -> list[tuple[QuoteLine, InvoiceLineKind]]:
+        """The quote lines a v2 invoice writes, in order, with their line kinds."""
+        kinds = {
+            "setup": InvoiceLineKind.SETUP,
+            "product": InvoiceLineKind.PRODUCT,
+            "option": InvoiceLineKind.OPTION,
+            "discount": InvoiceLineKind.DISCOUNT,
+        }
+        priced = []
+        for line in lines:
+            if line.kind == "tax" or line.total_cents == 0:
+                continue
+            kind = kinds.get(line.kind, InvoiceLineKind.OTHER)
+            if line.total_cents < 0:
+                kind = InvoiceLineKind.DISCOUNT
+            priced.append((line, kind))
+        return priced
+
+    @staticmethod
+    def _product_tax_class_id(product: FrontendProduct) -> Optional[int]:
+        catalog = getattr(product, "product", None)
+        return getattr(catalog, "tax_class_id", None) if catalog is not None else None
+
+    @staticmethod
+    def _tax_result(
+        db: Session,
+        account: BillingAccount,
+        lines: list[QuoteLine],
+        *,
+        tax_class_id: Optional[int],
+        evidence: dict,
+        prices_include_tax: bool,
+        prepare: bool,
+    ):
+        """The engine's tax for the quote lines, keyed as the invoice will key them.
+
+        One function for the quote and the checkout invoice, so they agree
+        (design 4.5). ``prepare`` may call a provider (never under a lock);
+        otherwise only the built-in rules are used.
+        """
+        from app.services.tax.context import TaxContextBuilder, TaxLineInput, class_code_of
+        from app.services.tax.engine import TaxEngine
+
+        code = class_code_of(db, tax_class_id)
+        inputs = [
+            TaxLineInput(
+                key=f"line:{index}",
+                net_cents=int(line.total_cents),
+                tax_class_code=code,
+                kind=kind.value,
+            )
+            for index, (line, kind) in enumerate(CheckoutService._priced_lines(lines))
+        ]
+        profile = BillingProfileDAO.get_by_account(db, account.id)
+        context = TaxContextBuilder.for_checkout(
+            db, account, profile, inputs, datetime.now(timezone.utc), evidence,
+            prices_include_tax=prices_include_tax,
+        )
+        return TaxEngine.prepare(db, context) if prepare else TaxEngine.calculate(db, context)
+
+    @staticmethod
+    def _tax_evidence(db: Session, account: BillingAccount, client_ip: Optional[str], ip_country: Optional[str]) -> dict:
+        """Location evidence recorded on the order (design 7.6)."""
+        profile = BillingProfileDAO.get_by_account(db, account.id)
+        country = (getattr(profile, "country", None) or "").strip().upper() or None
+        return {
+            "billing_country": country,
+            "ip_address": client_ip,
+            "ip_country": (ip_country or "").strip().upper() or None,
+        }
 
     @staticmethod
     def quote(
@@ -237,7 +356,15 @@ class CheckoutService:
         cycle_interval: Optional[str],
         options: Optional[dict[str, Any]] = None,
         coupon_code: Optional[str] = None,
+        *,
+        evidence: Optional[dict] = None,
     ) -> QuoteResult:
+        """Price an order. ``evidence`` is the checkout's location evidence (design 7.6).
+
+        Tax engine ``legacy`` and ``shadow``: ``_tax_cents`` decides (in
+        ``shadow`` the engine's result rides along for ``t1_checkout``); ``v2``:
+        the engine decides and the quote carries its parts (design 4.7).
+        """
         product = CheckoutService._load_product_bundle(db, frontend_product_id)
         plan = next((p for p in product.price_plans if p.id == price_plan_id), None)
         if plan is None or not plan.enabled:
@@ -257,8 +384,6 @@ class CheckoutService:
         )
         discount = CheckoutService._coupon_discount(coupon, subtotal)
         taxable = max(0, subtotal - discount)
-        tax = CheckoutService._tax_cents(db, account, taxable)
-        total = taxable + tax
 
         title = f"{product.name} — {plan.name}"
         lines: list[QuoteLine] = []
@@ -305,10 +430,32 @@ class CheckoutService:
                     kind="discount",
                 )
             )
+        tax_mode = CheckoutService._tax_mode(db)
+        evidence = dict(evidence or {})
+        tax_result = None
+        tax_fields: dict[str, Any] = {}
+        prices_include_tax = False
+        if tax_mode == "v2":
+            from app.services.settings_store import get_setting
+
+            prices_include_tax = bool(get_setting(db, "billing_tax_prices_include_tax"))
+            tax_result = CheckoutService._tax_result(
+                db, account, lines, tax_class_id=CheckoutService._product_tax_class_id(product),
+                evidence=evidence, prices_include_tax=prices_include_tax, prepare=True,
+            )
+            tax = tax_result.tax_cents
+            tax_fields = CheckoutService._quote_tax_fields(tax_result)
+        else:
+            tax = CheckoutService._tax_cents(db, account, taxable) if tax_mode == "legacy" else None
+            if tax is None:
+                tax, tax_result = CheckoutService._shadow_tax(
+                    db, account, taxable, lines, product, evidence
+                )
+        total = taxable + (0 if prices_include_tax else tax)
         if tax:
             lines.append(
                 QuoteLine(
-                    description="Tax",
+                    description="Tax" if not prices_include_tax else "Tax included",
                     quantity=1,
                     unit_cents=tax,
                     total_cents=tax,
@@ -328,7 +475,64 @@ class CheckoutService:
             coupon_code=coupon.code if coupon else None,
             lines=lines,
             coupon_first_invoice_only=first_only,
+            tax_result=tax_result,
+            tax_evidence=evidence,
+            **tax_fields,
         )
+
+    @staticmethod
+    def _shadow_tax(
+        db: Session,
+        account: BillingAccount,
+        taxable: int,
+        lines: list[QuoteLine],
+        product: FrontendProduct,
+        evidence: dict,
+    ):
+        """``(_tax_cents, the engine's result beside it)`` for tax engine ``shadow``.
+
+        The engine never fails a checkout in shadow: an error is logged and
+        the result is None. When ``_tax_cents`` raises, ``t1_checkout`` records
+        that as its own outcome before the error propagates.
+        """
+        engine_result = None
+        try:
+            engine_result = CheckoutService._tax_result(
+                db, account, lines, tax_class_id=CheckoutService._product_tax_class_id(product),
+                evidence=evidence, prices_include_tax=False, prepare=False,
+            )
+        except Exception:  # noqa: BLE001 - a shadow calculation never fails a checkout
+            logger.exception("tax shadow: engine failed for billing account %s", account.id)
+        try:
+            tax = CheckoutService._tax_cents(db, account, taxable)
+        except Exception as exc:
+            from app.services.tax.shadow import record_legacy_raised
+
+            record_legacy_raised("billing_account", int(account.id), type(exc).__name__, engine_result)
+            raise
+        return tax, engine_result
+
+    @staticmethod
+    def _quote_tax_fields(result) -> dict[str, Any]:
+        tax_lines = [
+            {
+                "line": key,
+                "name": part.name,
+                "rate_percent": str(part.rate_percent),
+                "jurisdiction": part.jurisdiction,
+                "base_cents": int(part.base_cents),
+                "tax_cents": int(part.tax_cents),
+                "reverse_charge": bool(part.reverse_charge),
+            }
+            for key, line in result.lines.items()
+            for part in line.parts
+        ]
+        return {
+            "tax_lines": tax_lines,
+            "tax_summary": result.summary_json(),
+            "legal_notes": list(result.legal_note_keys),
+            "reverse_charge": any(item["reverse_charge"] for item in tax_lines),
+        }
 
     @staticmethod
     def _create_commerce_invoice(
@@ -338,6 +542,7 @@ class CheckoutService:
         order: Order,
         quote: QuoteResult,
         order_item_id: int,
+        tax_class_id: Optional[int] = None,
     ) -> Invoice:
         if quote.total_cents <= 0:
             raise CheckoutError("Cannot create invoice for zero total")
@@ -350,24 +555,52 @@ class CheckoutService:
             else None
         )
         legacy_lines = CheckoutService._legacy_invoice_lines(quote, order_item_id)
-        v2_lines = CheckoutService._v2_invoice_lines(quote, order_item_id)
+        v2_lines = CheckoutService._v2_invoice_lines(quote, order_item_id, tax_class_id=tax_class_id)
         v2 = engine_mode(db) == "v2"
-        invoice = InvoiceService.create(
-            db,
-            reseller_id=reseller_id,
-            billing_account_id=account.id,
-            order_id=order.id,
-            purpose=InvoicePurpose.ORDER_CHARGE,
-            amount_cents=int(quote.total_cents),
-            currency=quote.currency,
-            description=f"Order #{order.order_number}",
-            due_at=datetime.now(timezone.utc),
-            lines=v2_lines if v2 else legacy_lines,
-            shadow_lines=v2_lines,
-        )
+        tax_v2 = v2 and CheckoutService._tax_mode(db) == "v2"
+        from app.services.invoice_service import TaxQuoteChanged
+        from app.services.tax.errors import RetryableTaxPublishError
+
+        try:
+            invoice = InvoiceService.create(
+                db,
+                reseller_id=reseller_id,
+                billing_account_id=account.id,
+                order_id=order.id,
+                purpose=InvoicePurpose.ORDER_CHARGE,
+                amount_cents=int(quote.total_cents),
+                currency=quote.currency,
+                description=f"Order #{order.order_number}",
+                due_at=datetime.now(timezone.utc),
+                lines=v2_lines if v2 else legacy_lines,
+                shadow_lines=v2_lines,
+                prices_include_tax=tax_v2 and CheckoutService._prices_include_tax(db),
+                tax_result=quote.tax_result if tax_v2 else None,
+            )
+        except RetryableTaxPublishError as exc:
+            raise CheckoutError(exc.message) from exc
+        except TaxQuoteChanged as exc:
+            raise CheckoutError(TAX_QUOTE_CHANGED_MESSAGE) from exc
+        if tax_v2 and quote.tax_result is not None:
+            # The prepared result was used only if its context still matched (design 4.7).
+            if (invoice.tax_evidence or {}).get("context_hash") != quote.tax_result.context_hash:
+                raise CheckoutError(TAX_QUOTE_CHANGED_MESSAGE)
+        if not tax_v2 and quote.tax_result is not None:
+            from app.services.tax.shadow import compare_checkout
+
+            compare_checkout(
+                int(quote.tax_cents), quote.tax_result, subject_type="invoice", subject_id=int(invoice.id),
+                context="checkout",
+            )
         order.invoice_id = invoice.id
         db.flush()
         return invoice
+
+    @staticmethod
+    def _prices_include_tax(db: Session) -> bool:
+        from app.services.settings_store import get_setting
+
+        return bool(get_setting(db, "billing_tax_prices_include_tax"))
 
     @staticmethod
     def _legacy_invoice_lines(quote: QuoteResult, order_item_id: int) -> list[NewLine]:
@@ -387,29 +620,22 @@ class CheckoutService:
         ]
 
     @staticmethod
-    def _v2_invoice_lines(quote: QuoteResult, order_item_id: int) -> list[NewLine]:
+    def _v2_invoice_lines(
+        quote: QuoteResult, order_item_id: int, *, tax_class_id: Optional[int] = None
+    ) -> list[NewLine]:
         """Design 1.3.1: every line has a kind and the tax sits on the taxed lines.
 
         The quote's tax is spread over the charged lines in proportion to their
         totals by the largest remainder rule; a negative option total is
-        written as a discount line, since only discounts may be negative.
+        written as a discount line, since only discounts may be negative. In
+        tax engine ``v2`` the engine replaces that spread with its own rows.
+        Every line carries the product's tax class, the discount included: a
+        discount reduces that product's taxable amount, and the quote's tax
+        context gives it the same class.
         """
         from app.services.billing.rounding import tax_split_largest_remainder
 
-        kinds = {
-            "setup": InvoiceLineKind.SETUP,
-            "product": InvoiceLineKind.PRODUCT,
-            "option": InvoiceLineKind.OPTION,
-            "discount": InvoiceLineKind.DISCOUNT,
-        }
-        priced = []
-        for line in quote.lines:
-            if line.kind == "tax" or line.total_cents == 0:
-                continue
-            kind = kinds.get(line.kind, InvoiceLineKind.OTHER)
-            if line.total_cents < 0:
-                kind = InvoiceLineKind.DISCOUNT
-            priced.append((line, kind))
+        priced = CheckoutService._priced_lines(quote.lines)
         charged = [
             index
             for index, (_line, kind) in enumerate(priced)
@@ -427,6 +653,7 @@ class CheckoutService:
                 kind=kind,
                 tax_cents=tax_of.get(index, 0),
                 taxable=kind != InvoiceLineKind.DISCOUNT,
+                tax_class_id=tax_class_id,
                 order_item_id=(
                     order_item_id if line.kind in {"setup", "product", "option"} else None
                 ),
@@ -455,7 +682,7 @@ class CheckoutService:
             to_address=recipient,
             event=EmailEvent.ORDER_CONFIRMATION,
             idempotency_key=f"order:{order.id}:confirmation",
-            data={
+            variables={
                 "order_number": order.order_number,
                 "order_id": order.id,
                 "amount_cents": quote.total_cents,
@@ -473,7 +700,7 @@ class CheckoutService:
             to_address=recipient,
             event=EmailEvent.INVOICE_CREATED,
             idempotency_key=f"invoice:{invoice.id}:created",
-            data={
+            variables={
                 "invoice_number": invoice.invoice_number,
                 "invoice_id": invoice.id,
                 "amount_cents": quote.total_cents,
@@ -499,6 +726,7 @@ class CheckoutService:
         checkout_nonce: str,
         terms_version: Optional[str] = None,
         client_ip: Optional[str] = None,
+        ip_country: Optional[str] = None,
     ) -> Order:
         if not checkout_nonce.strip():
             raise CheckoutError("Checkout nonce is required")
@@ -513,6 +741,12 @@ class CheckoutService:
         if plan is None:
             raise CheckoutError("Price plan is unavailable")
         normalized_options, _ = CheckoutService._normalize_options(product, options)
+        tax_mode = CheckoutService._tax_mode(db)
+        if tax_mode == "v2":
+            CheckoutService._ensure_tax_checkout_allowed(db, account)
+        evidence = (
+            CheckoutService._tax_evidence(db, account, client_ip, ip_country) if tax_mode != "legacy" else {}
+        )
         quote = CheckoutService.quote(
             db,
             account,
@@ -521,6 +755,7 @@ class CheckoutService:
             cycle_interval,
             options,
             coupon_code,
+            evidence=evidence,
         )
 
         status = (
@@ -545,6 +780,8 @@ class CheckoutService:
             checkout_nonce=checkout_nonce.strip(),
             client_ip=client_ip,
         )
+        if tax_mode != "legacy":
+            order.tax_evidence = evidence
         item = OrderItemDAO.create(
             db,
             order_id=order.id,
@@ -575,6 +812,7 @@ class CheckoutService:
                 order=order,
                 quote=quote,
                 order_item_id=item.id,
+                tax_class_id=CheckoutService._product_tax_class_id(product),
             )
 
         db.flush()
@@ -703,6 +941,7 @@ class CheckoutService:
                     product_id=catalog_product,
                 )
             item.fulfill_status = OrderItemFulfillStatus.FULFILLED
+            email_events.send_service_provisioned(db, service)
             return None
         except Exception as exc:
             item.fulfill_status = OrderItemFulfillStatus.FAILED

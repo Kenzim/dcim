@@ -143,8 +143,8 @@ def test_tax_engine_mode_honours_the_switch_record(db_session, caplog):
     db_session.flush()
     assert billing_engine_mode(db_session, "tax") == "v2"
     db_session.rollback()
-    # The scan and detectors do not iterate the tax engine until it has a scan.
-    assert "tax" not in ENGINES
+    # The tax engine has its scan (t6_scan), so the scan and detectors iterate it.
+    assert "tax" in ENGINES
 
 
 def test_generic_settings_endpoint_refuses_the_tax_engine(client, db_session, test_admin_user):
