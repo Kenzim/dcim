@@ -1,0 +1,17 @@
+{
+  "id": "fixture_tax_rule_pack",
+  "name": "Fixture tax rule pack",
+  "version": "1.0.0",
+  "description": "Test plugin: a tax_rule_pack that serves the JSON file in packs/.",
+  "rackflow_api": ">=1.1,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["tax.rule_pack"],
+  "provides": [
+    {
+      "kind": "tax_rule_pack",
+      "id": "demo_pack",
+      "label": "Demo pack",
+      "pack": {"file": "packs/demo.json"}
+    }
+  ]
+}

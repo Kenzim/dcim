@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.plugin_host import PluginInstallation, PluginStatus
 from app.plugin_host.catalogue import EVENTS
 from app.plugin_host.common import new_session, write_log
-from app.plugin_host.loader import LoadedPlugin, PluginLoadError, _purge_modules, import_package, plugins_root, read_package
+from app.plugin_host.loader import LoadedPlugin, PluginLoadError, _purge_modules, find_package, import_package
 from app.plugin_host.manifest import Manifest, validate_manifest
 
 logger = logging.getLogger(__name__)
@@ -121,8 +121,11 @@ def load_installed(inst: PluginInstallation, *, require_enabled: bool = True) ->
         cached = _loaded.get(inst.id)
     if cached is not None and cached.code_hash == inst.code_hash and cached.manifest.version == inst.version:
         return cached
-    package = read_package(plugins_root() / inst.directory)
-    if package.manifest is None or package.code_hash != inst.code_hash or package.manifest.version != inst.version:
+    try:
+        package = find_package(inst.directory)
+    except PluginLoadError:
+        package = None
+    if package is None or package.manifest is None or package.code_hash != inst.code_hash or package.manifest.version != inst.version:
         reason = "The files on disk differ from the approved version; review and upgrade to run them."
         if require_enabled:
             _set_status(inst.id, PluginStatus.FILES_CHANGED, reason)

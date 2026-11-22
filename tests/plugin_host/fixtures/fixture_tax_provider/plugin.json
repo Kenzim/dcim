@@ -1,0 +1,21 @@
+{
+  "id": "fixture_tax_provider",
+  "name": "Fixture tax provider",
+  "version": "1.0.0",
+  "description": "Test plugin: a tax_provider that charges 10 per cent, or misbehaves as the `mode` setting says.",
+  "rackflow_api": ">=1.1,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["tax.calculate"],
+  "settings": [
+    {"key": "mode", "type": "string", "label": "Behaviour", "default": "ok"}
+  ],
+  "provides": [
+    {
+      "kind": "tax_provider",
+      "id": "flat",
+      "label": "Flat 10 per cent",
+      "currencies": ["EUR", "GBP"],
+      "timeout_seconds": 1
+    }
+  ]
+}

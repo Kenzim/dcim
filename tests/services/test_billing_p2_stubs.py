@@ -29,8 +29,6 @@ STUBS = [
     lambda: context.TaxContextBuilder.for_adjustment(None, None, []),
     lambda: engine.TaxEngine.calculate(None, None),
     lambda: engine.TaxEngine.prepare(None, None),
-    lambda: providers.call_provider("tax_id_validator", "vies_validator:vies", "validate"),
-    lambda: providers.providers_of("tax_id_validator"),
     lambda: runner.run_job(lambda: None, "late_fees", dry_run=True, trigger="admin", now=NOW),
     lambda: job_base.JobRun(1, "late_fees", True, NOW, None).in_window(NOW),
     lambda: job_base.JobRun(1, "late_fees", True, NOW, None).claim(None, "invoice:1"),
