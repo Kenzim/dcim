@@ -475,6 +475,10 @@ api_router.include_router(asset_api.router)
 from app.api import permission_sets_admin as permission_sets_admin_api
 api_router.include_router(permission_sets_admin_api.router, tags=["admin-permission-sets"])
 
+# Editable email templates (billing phase 2, F4)
+from app.api import email_templates_admin as email_templates_admin_api
+api_router.include_router(email_templates_admin_api.router, tags=["email-templates-admin"])
+
 # VM guest VNC console: public launch-ticket redeem + WebSocket bridge to Proxmox
 from app.api import vm_vnc as vm_vnc_api
 api_router.include_router(vm_vnc_api.router, tags=["vm-vnc"])

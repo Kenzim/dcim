@@ -25,6 +25,7 @@ from sqlalchemy import MetaData, Table, and_, case, func, inspect, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from app.models.commerce_email import EmailMessage
 from app.models.commerce_invoice_ext import InvoiceLine
 from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment, InvoiceAdjustmentLine
 from app.models.reseller import (
@@ -43,6 +44,7 @@ OVERFLOW_ID = "overflow"
 _REFUNDS_TABLE = "refunds"
 _PENDING = "pending"
 _REVIEW = "review"
+EMAIL_RENDER_FAILED_LOOKBACK_DAYS = 7
 
 
 def _limited(db: Session, stmt: Select, max_rows: int) -> tuple[list[Any], int]:
@@ -1172,8 +1174,46 @@ def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]
 
 
 def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Email messages sent with the built-in text because their template failed to render."""
-    return []
+    """Email messages queued with the built-in text because their stored template failed to render.
+
+    One finding per template (and event) with such messages in the last
+    ``EMAIL_RENDER_FAILED_LOOKBACK_DAYS`` days; the finding clears once the
+    template is fixed and the last fallback message ages out of that window.
+    """
+    last = func.max(EmailMessage.id)
+    stmt = (
+        select(EmailMessage.template_id, EmailMessage.event, func.count(EmailMessage.id).label("messages"),
+               last.label("last_message_id"))
+        .where(
+            EmailMessage.render_fallback.is_(True),
+            EmailMessage.created_at >= now - timedelta(days=EMAIL_RENDER_FAILED_LOOKBACK_DAYS),
+        )
+        .group_by(EmailMessage.template_id, EmailMessage.event)
+        .order_by(last.desc())
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_email_template_render_failed",
+            "email_template",
+            str(row.template_id) if row.template_id is not None else f"event:{row.event}",
+            f"Email template {row.template_id}" if row.template_id is not None else f"Event {row.event}",
+            f"The {row.event} email template failed to render",
+            f"{row.messages} message(s) in the last {EMAIL_RENDER_FAILED_LOOKBACK_DAYS} days were sent with the "
+            "built-in text because the stored template failed to render. The audit log has the error.",
+            details={
+                "template_id": row.template_id,
+                "event": row.event,
+                "messages": int(row.messages),
+                "last_message_id": int(row.last_message_id),
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_email_template_render_failed", "email_template",
+                             "templates with render failures", remaining, len(rows)))
+    return out
 
 
 BILLING_DETECTORS = {

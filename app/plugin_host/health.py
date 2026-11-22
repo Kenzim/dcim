@@ -71,14 +71,26 @@ def record_success(plugin_id: str) -> None:
         db.close()
 
 
-def record_failure(plugin_id: str, message: str, *, service_id: Optional[int] = None, detail: Optional[str] = None) -> None:
-    """Count one failure, log it, open the circuit or disable the plugin when the thresholds are reached."""
+def record_failure(
+    plugin_id: str,
+    message: str,
+    *,
+    service_id: Optional[int] = None,
+    detail: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> None:
+    """Count one failure, log it, open the circuit or disable the plugin when the thresholds are reached.
+
+    ``provider`` (``<kind>:<provider_id>``) names the provider whose call failed; when that failure
+    opens the circuit, the audit entry ``plugin.provider_failed`` records it.
+    """
     from app.plugin_host import runtime
 
     now = utcnow()
     write_log(plugin_id, "error", message, service_id=service_id, context={"traceback": detail} if detail else None)
     db = new_session()
     disabled = False
+    opened_for: Optional[int] = None
     try:
         db.execute(
             update(PluginInstallation)
@@ -105,6 +117,7 @@ def record_failure(plugin_id: str, message: str, *, service_id: Optional[int] = 
             seconds = min(OPEN_MAX_SECONDS, OPEN_BASE_SECONDS * 2 ** min(inst.circuit_opens or 0, 10))
             inst.circuit_open_until = now + timedelta(seconds=seconds)
             inst.circuit_opens = (inst.circuit_opens or 0) + 1
+            opened_for = seconds
         db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -115,6 +128,9 @@ def record_failure(plugin_id: str, message: str, *, service_id: Optional[int] = 
         runtime.invalidate()
         audit("plugin.auto_disabled", plugin_id=plugin_id, resource_type="plugin", resource_id=plugin_id,
               metadata={"error": message[:500]})
+    if provider and opened_for is not None:
+        audit("plugin.provider_failed", plugin_id=plugin_id, resource_type="plugin", resource_id=plugin_id,
+              metadata={"provider": provider, "failures": failures, "open_seconds": opened_for, "error": message[:500]})
 
 
 def reset(db, inst: PluginInstallation) -> None:
