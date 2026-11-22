@@ -9,6 +9,7 @@ from typing import Optional, Union
 from app.plugin_host.catalogue import API_VERSION
 from app.plugin_host.loader import PluginLoadError, _purge_modules, import_package, read_package
 from app.plugin_host.manifest import Manifest, range_allows
+from app.plugin_host.testkit.deprecations import used_deprecations
 
 
 @dataclass
@@ -59,6 +60,7 @@ def check_package(path: Union[str, Path]) -> PackageReport:
     report = PackageReport(path=path, errors=list(package.errors), manifest=package.manifest)
     if package.manifest is not None:
         report.warnings = _warnings(package.manifest)
+        report.warnings += [d.message() for d in used_deprecations(package.raw or {}, path)]
     if package.valid:
         try:
             import_package(package)
