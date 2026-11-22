@@ -215,7 +215,7 @@
         {diff.entries.filter((e) => e.action === 'kept_edited').length} legal notes kept because you edited them.
         <span class="ba-mono">diff {diff.diff_hash.slice(0, 12)}</span>
       </p>
-      <label class="ba-inline" style="font-weight:500"><input type="checkbox" bind:checked={showUnchanged} /> Show unchanged entries</label>
+      <label class="ba-inline" style="gap:8px;font-weight:500"><input type="checkbox" bind:checked={showUnchanged} /> Show unchanged entries</label>
       {#if entries.length === 0}
         <p class="ba-empty">Nothing to show.</p>
       {:else}

@@ -129,7 +129,7 @@
   {#if !compact}
     <div class="ba-toolbar">
       <label>Billing account<input bind:value={filterAccount} inputmode="numeric" placeholder="All accounts" style="width:140px" on:change={load} /></label>
-      <label class="ba-inline" style="font-weight:500"><input type="checkbox" bind:checked={activeOnly} on:change={load} /> Not revoked</label>
+      <label class="ba-inline" style="gap:8px;font-weight:500"><input type="checkbox" bind:checked={activeOnly} on:change={load} /> Not revoked</label>
     </div>
   {/if}
   {#if loading}

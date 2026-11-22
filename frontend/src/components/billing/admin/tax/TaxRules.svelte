@@ -268,7 +268,7 @@
         {#each packs as p}<option value={p}>{p}</option>{/each}
       </select>
     </label>
-    <label class="ba-inline" style="font-weight:500"><input type="checkbox" bind:checked={filters.currentOnly} on:change={load} /> In effect now</label>
+    <label class="ba-inline" style="gap:8px;font-weight:500"><input type="checkbox" bind:checked={filters.currentOnly} on:change={load} /> In effect now</label>
   </div>
   {#if rules.length >= 500}<p class="ba-hint">Only the first 500 rules are listed; narrow the filters.</p>{/if}
   {#if loading}
