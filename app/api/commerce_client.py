@@ -47,7 +47,12 @@ from app.services.credit_ledger_service import (
     statuses_for_status_filter,
     unpaid_invoice_statuses,
 )
-from app.services.checkout_service import QUOTE_INTERNAL_FIELDS, CheckoutError, CheckoutService
+from app.services.checkout_service import (
+    QUOTE_INTERNAL_FIELDS,
+    CheckoutError,
+    CheckoutService,
+    CheckoutTaxError,
+)
 from app.services.commerce_lifecycle_service import (
     CommerceLifecycleError,
     CommerceLifecycleService,
@@ -345,6 +350,8 @@ def quote_checkout(
             if CheckoutService._tax_mode(db) == "v2"
             else None,
         )
+    except CheckoutTaxError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     except CheckoutError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     payload = {
@@ -387,6 +394,8 @@ def checkout(
             client_ip=_client_ip(request),
             ip_country=_ip_country(db, request),
         )
+    except CheckoutTaxError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     except CheckoutError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()

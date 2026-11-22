@@ -62,7 +62,24 @@ class CheckoutError(ValueError):
     pass
 
 
+class CheckoutTaxError(CheckoutError):
+    """A tax refusal the client tells apart by ``code``; the API answers 409 with ``detail``.
+
+    Every other ``CheckoutError`` stays a plain message answered 400.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+    @property
+    def detail(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
+
+
 TAX_QUOTE_CHANGED_MESSAGE = "The tax on this order changed since it was quoted; please review the new quote and try again"
+TAX_QUOTE_CHANGED_CODE = "tax_quote_changed"
 
 
 @dataclass(frozen=True)
@@ -92,7 +109,11 @@ class QuoteResult:
     tax_lines: list[dict] = field(default_factory=list)
     tax_summary: list[dict] = field(default_factory=list)
     legal_notes: list[str] = field(default_factory=list)
+    # The notes as ``{key, text}``, rendered like the invoice's (design 4.9); ``legal_notes`` stays the keys.
+    legal_note_texts: list[dict] = field(default_factory=list)
     reverse_charge: bool = False
+    # Under ``charge_tax`` when the buyer's VAT number could not be checked (design 7.4).
+    tax_id_message: Optional[str] = None
     # The engine's result: in v2 the one the invoice uses, in shadow the one compared.
     tax_result: Optional[Any] = field(default=None, repr=False, compare=False)
     tax_evidence: dict = field(default_factory=dict, repr=False, compare=False)
@@ -258,12 +279,19 @@ class CheckoutService:
 
     @staticmethod
     def _ensure_tax_checkout_allowed(db: Session, account: BillingAccount) -> None:
-        """Design 7.4's "block checkout" tax ID policy; owned by the packs and tax ID worker.
+        """Design 7.4's ``block_checkout`` policy: refuse a business buyer whose EU VAT number is ``unavailable``.
 
-        A no-op until ``app.services.tax.validators.ensure_checkout_allowed``
-        exists; then this is the one line that calls it.
+        Called by ``quote``, which ``place_order`` calls too; renewals and invoices never reach it.
         """
-        return None
+        from app.services.tax.validators import TaxIdService, TaxIdUnverifiable
+
+        profile = BillingProfileDAO.get_by_account(db, account.id)
+        if profile is None:
+            return
+        try:
+            TaxIdService.ensure_checkout_allowed(db, profile)
+        except TaxIdUnverifiable as exc:
+            raise CheckoutTaxError(exc.code, str(exc)) from exc
 
     @staticmethod
     def _tax_mode(db: Session) -> str:
@@ -371,6 +399,9 @@ class CheckoutService:
             raise CheckoutError("Price plan is unavailable")
         if plan.currency.upper() != account.currency.upper():
             raise CheckoutError("Price plan currency does not match account currency")
+        tax_mode = CheckoutService._tax_mode(db)
+        if tax_mode == "v2":
+            CheckoutService._ensure_tax_checkout_allowed(db, account)
 
         _, option_delta = CheckoutService._normalize_options(
             product, options
@@ -430,7 +461,6 @@ class CheckoutService:
                     kind="discount",
                 )
             )
-        tax_mode = CheckoutService._tax_mode(db)
         evidence = dict(evidence or {})
         tax_result = None
         tax_fields: dict[str, Any] = {}
@@ -444,7 +474,12 @@ class CheckoutService:
                 evidence=evidence, prices_include_tax=prices_include_tax, prepare=True,
             )
             tax = tax_result.tax_cents
-            tax_fields = CheckoutService._quote_tax_fields(tax_result)
+            tax_fields = CheckoutService._quote_tax_fields(db, tax_result)
+            from app.services.tax.validators import TaxIdService
+
+            tax_fields["tax_id_message"] = TaxIdService.client_message(
+                db, BillingProfileDAO.get_by_account(db, account.id)
+            )
         else:
             tax = CheckoutService._tax_cents(db, account, taxable) if tax_mode == "legacy" else None
             if tax is None:
@@ -513,7 +548,9 @@ class CheckoutService:
         return tax, engine_result
 
     @staticmethod
-    def _quote_tax_fields(result) -> dict[str, Any]:
+    def _quote_tax_fields(db: Session, result) -> dict[str, Any]:
+        from app.services.tax.invoice_tax import legal_notes_json
+
         tax_lines = [
             {
                 "line": key,
@@ -531,6 +568,7 @@ class CheckoutService:
             "tax_lines": tax_lines,
             "tax_summary": result.summary_json(),
             "legal_notes": list(result.legal_note_keys),
+            "legal_note_texts": legal_notes_json(db, result, None),
             "reverse_charge": any(item["reverse_charge"] for item in tax_lines),
         }
 
@@ -578,13 +616,13 @@ class CheckoutService:
                 tax_result=quote.tax_result if tax_v2 else None,
             )
         except RetryableTaxPublishError as exc:
-            raise CheckoutError(exc.message) from exc
+            raise CheckoutTaxError(exc.code, exc.message) from exc
         except TaxQuoteChanged as exc:
-            raise CheckoutError(TAX_QUOTE_CHANGED_MESSAGE) from exc
+            raise CheckoutTaxError(TAX_QUOTE_CHANGED_CODE, TAX_QUOTE_CHANGED_MESSAGE) from exc
         if tax_v2 and quote.tax_result is not None:
             # The prepared result was used only if its context still matched (design 4.7).
             if (invoice.tax_evidence or {}).get("context_hash") != quote.tax_result.context_hash:
-                raise CheckoutError(TAX_QUOTE_CHANGED_MESSAGE)
+                raise CheckoutTaxError(TAX_QUOTE_CHANGED_CODE, TAX_QUOTE_CHANGED_MESSAGE)
         if not tax_v2 and quote.tax_result is not None:
             from app.services.tax.shadow import compare_checkout
 
@@ -742,8 +780,6 @@ class CheckoutService:
             raise CheckoutError("Price plan is unavailable")
         normalized_options, _ = CheckoutService._normalize_options(product, options)
         tax_mode = CheckoutService._tax_mode(db)
-        if tax_mode == "v2":
-            CheckoutService._ensure_tax_checkout_allowed(db, account)
         evidence = (
             CheckoutService._tax_evidence(db, account, client_ip, ip_country) if tax_mode != "legacy" else {}
         )
