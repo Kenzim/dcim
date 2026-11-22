@@ -81,6 +81,26 @@ def _trace(exc: BaseException) -> str:
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=8))[-4000:]
 
 
+def _safe_trace(exc: BaseException) -> Optional[str]:
+    try:
+        return _trace(exc)
+    except Exception:  # noqa: BLE001 - a plugin exception that cannot be formatted has no traceback text
+        return None
+
+
+def _text_of(exc: BaseException) -> str:
+    """The message of a plugin's exception; never raises, whatever its __str__ does."""
+    try:
+        text = str(exc)
+    except Exception:  # noqa: BLE001
+        return "<the message could not be shown>"
+    return text if type(text) is str else "<the message could not be shown>"
+
+
+def _describe(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {_text_of(exc)}"
+
+
 async def _await(awaitable: Any, timeout: float) -> Any:
     return await asyncio.wait_for(awaitable, timeout)
 
@@ -218,11 +238,12 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
             ctx._close()
         raise _fail(plugin_id, provider, "timeout", f"{label} timed out after {seconds:g}s") from None
     except kinds.InvalidAnswer as exc:
-        raise _fail(plugin_id, provider, "invalid_answer", f"{label} gave an invalid answer: {exc}"[:500]) from None
-    except Exception as exc:  # noqa: BLE001 - every plugin failure stops here
         raise _fail(
-            plugin_id, provider, "error", f"{label} failed: {type(exc).__name__}: {exc}"[:500], _trace(exc)
+            plugin_id, provider, "invalid_answer", f"{label} gave an invalid answer: {_text_of(exc)}"[:500]
         ) from None
+    except Exception as exc:  # noqa: BLE001 - every plugin failure stops here
+        # The message is built so that it cannot fail, so the failure is always recorded.
+        raise _fail(plugin_id, provider, "error", f"{label} failed: {_describe(exc)}"[:500], _safe_trace(exc)) from None
     if method in spec.metered:
         # Only the methods that do real work prove the plugin healthy; a cheap supports() answer
         # before every failing check_online must not keep resetting the circuit.

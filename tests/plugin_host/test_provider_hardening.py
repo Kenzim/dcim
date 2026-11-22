@@ -210,6 +210,15 @@ def test_the_answer_is_checked_against_billings_own_request(plugin_env, db_sessi
     assert failures(db_session, TAX) == 1
 
 
+def test_an_exception_that_cannot_be_shown_still_counts(plugin_env, db_session):
+    setup_plugin(plugin_env, db_session, VALIDATOR, mode="unprintable_value_error")
+    for _ in range(3):
+        with pytest.raises(ProviderUnavailable) as err:
+            validator_call()
+        assert err.value.reason == "error"
+    assert failures(db_session, VALIDATOR) == 3
+
+
 def test_two_kinds_with_the_same_provider_id_have_separate_rate_limits(plugin_env, db_session):
     limit = {"calls": 1, "per_seconds": 3600}
     manifest = base_manifest(

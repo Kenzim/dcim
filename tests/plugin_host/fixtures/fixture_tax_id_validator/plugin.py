@@ -6,6 +6,19 @@ from datetime import datetime, timezone
 from rackflow_plugin.kinds import TaxIdCheckResult, current_context
 
 
+class Unprintable(Exception):
+    """An exception that raises ``error`` when anything tries to show it."""
+
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def __str__(self):
+        raise self.error("no message for you")
+
+    __repr__ = __str__
+
+
 def _now():
     return datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -26,6 +39,10 @@ def register(plugin):
                 raise RuntimeError("the registry exploded")
             if mode == "sysexit":
                 raise SystemExit(3)
+            if mode == "unprintable_value_error":
+                raise Unprintable(ValueError)
+            if mode == "unprintable_interrupt":
+                raise Unprintable(KeyboardInterrupt)
             if mode == "hang":
                 time.sleep(3)
             if mode == "bad_status":
