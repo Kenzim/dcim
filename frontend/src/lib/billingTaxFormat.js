@@ -73,30 +73,55 @@ export function hasTaxDetail(source) {
   );
 }
 
-const NOTE_TEXTS = {
-  eu_reverse_charge: 'Reverse charge: VAT to be accounted for by the customer.',
-  gb_outside_scope_b2b: 'Outside the scope of UK VAT: reverse charge. The customer accounts for any VAT due.',
-  outside_scope: 'Outside the scope of VAT.',
-  exempt_customer: 'No VAT is charged because this account is exempt.',
-};
-
 /**
- * A legal note as `{ key, text }`. A quote lists note keys only, so a known key gets its
- * standard wording; an invoice lists `{ key, text }` and keeps its own stored text.
+ * A legal note as `{ key, text }`. Invoices list `{ key, text }` and a quote lists the same in
+ * `legal_note_texts`, both rendered by the server from the stored (and possibly edited) text,
+ * so the text is shown as given. A bare key (a quote from an older server) is shown as words.
  */
 export function legalNoteView(note) {
   if (note && typeof note === 'object') {
     const key = String(note.key ?? '');
-    return { key, text: note.text || NOTE_TEXTS[key] || humanise(key) };
+    return { key, text: note.text || humanise(key) };
   }
   const key = String(note ?? '');
-  return { key, text: NOTE_TEXTS[key] || humanise(key) };
+  return { key, text: humanise(key) };
+}
+
+/** The notes of a quote or invoice: the rendered texts when it has them, else its note keys. */
+export function legalNotesOf(source) {
+  if (Array.isArray(source?.legal_note_texts) && source.legal_note_texts.length > 0) return source.legal_note_texts;
+  return Array.isArray(source?.legal_notes) ? source.legal_notes : [];
 }
 
 /** The label of one tax summary entry, for example "VAT 20%" or "VAT 0% (reverse charge)". */
 export function taxEntryLabel(entry) {
   const rate = formatRate(entry.rate_percent);
   return `${entry.name} ${rate}${entry.reverse_charge ? ' (reverse charge)' : ''}`;
+}
+
+// --- Tax refusals at checkout ---
+
+// Codes the quote and checkout routes answer with (409, `detail: { code, message }`).
+// `requote`: the tax or the price may have moved, so a new quote is needed;
+// `retry`: nothing was placed and the same order can be sent again;
+// `later`: it cannot succeed yet, so show the message and stop.
+const TAX_REFUSAL_ACTIONS = {
+  tax_quote_changed: 'requote',
+  tax_rules_changed: 'requote',
+  tax_publish_retry: 'retry',
+  tax_fx_rate_missing: 'later',
+  tax_id_unverifiable: 'later',
+};
+
+/** The code of a failed commerce request (`detail` is `{ code, message }` for a tax refusal), or ''. */
+export function refusalCode(err) {
+  const detail = err?.detail;
+  return detail && typeof detail === 'object' && typeof detail.code === 'string' ? detail.code : '';
+}
+
+/** What a client can do about a failed quote or order: `requote`, `retry`, `later` or `none`. */
+export function taxRefusalAction(err) {
+  return TAX_REFUSAL_ACTIONS[refusalCode(err)] || 'none';
 }
 
 // --- Sterling VAT on an invoice in another currency ---

@@ -9,7 +9,7 @@
     clientCommerceQuote,
   } from '../../lib/api.js';
   import { formatMoney } from '../../lib/resellerMoney.js';
-  import { hasTaxDetail } from '../../lib/billingTaxFormat.js';
+  import { hasTaxDetail, taxRefusalAction } from '../../lib/billingTaxFormat.js';
   import TaxBreakdown from '../billing/shared/TaxBreakdown.svelte';
 
   export let impersonating = false;
@@ -25,8 +25,8 @@
   let couponCode = '';
   let termsAccepted = false;
   let confirmOpen = false;
-  /** True when the last order attempt failed in a way a fresh quote can fix. */
-  let requote = false;
+  /** What the last failed order attempt allows: `requote`, `retry`, `later` or `none` (by error code). */
+  let refusal = 'none';
   let config = {
     price_plan_id: '',
     cycle_interval: '',
@@ -75,16 +75,11 @@
   $: selectedPlan = product?.price_plans?.find((p) => String(p.id) === config.price_plan_id);
   $: taxDetail = hasTaxDetail(quote);
 
-  /** A 409, or a refusal that says the tax moved or to try again, is cured by quoting again. */
-  function isRequoteError(err) {
-    return err?.status === 409 || /try again|quoted|changed|exchange rate/i.test(err?.message || '');
-  }
-
   async function runQuote() {
     if (!product) return;
     working = true;
     error = '';
-    requote = false;
+    refusal = 'none';
     try {
       quote = await clientCommerceQuote({
         frontend_product_id: product.id,
@@ -117,6 +112,7 @@
     if (!product || !quote) return;
     working = true;
     error = '';
+    refusal = 'none';
     try {
       const order = await clientCommerceCheckout({
         frontend_product_id: product.id,
@@ -132,7 +128,7 @@
       navigate(order.invoice_id ? `/client/billing/${order.invoice_id}` : '/client/billing');
     } catch (err) {
       error = err.message || 'Checkout failed';
-      requote = isRequoteError(err);
+      refusal = taxRefusalAction(err);
       confirmOpen = false;
     } finally {
       working = false;
@@ -152,11 +148,18 @@
   </div>
 
   {#if error}<Alert type="danger">{error}</Alert>{/if}
-  {#if requote && step === 'checkout'}
+  {#if step === 'checkout' && refusal === 'requote'}
     <div class="requote">
       <p>Your order was not placed. Get a new quote to see the current price, then place the order again.</p>
       <Button variant="secondary" on:click={runQuote} disabled={working}>{working ? 'Getting a new quote…' : 'Get a new quote'}</Button>
     </div>
+  {:else if step === 'checkout' && refusal === 'retry'}
+    <div class="requote">
+      <p>Your order was not placed and you have not been charged. You can try again now.</p>
+      <Button variant="secondary" on:click={placeOrder} disabled={working}>{working ? 'Trying again…' : 'Try again'}</Button>
+    </div>
+  {:else if step === 'checkout' && refusal === 'later'}
+    <div class="requote"><p>Your order was not placed and you have not been charged. Please try again later.</p></div>
   {/if}
   {#if success}<Alert type="success">{success}</Alert>{/if}
 
@@ -240,6 +243,7 @@
       {#if taxDetail}
         <TaxBreakdown source={quote} currency={quote.currency} />
       {/if}
+      {#if quote.tax_id_message}<Alert type="warning">{quote.tax_id_message}</Alert>{/if}
       <label class="check"><input type="checkbox" bind:checked={termsAccepted} /> I agree to the terms of service</label>
       <Button on:click={openConfirm} disabled={working || impersonating}>Place order</Button>
       {#if impersonating}<p class="hint">Checkout disabled during impersonation.</p>{/if}
