@@ -7,7 +7,7 @@ so a publish never locks a rule row (design 1.2 and 15.5).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping, Optional, Sequence
@@ -98,10 +98,17 @@ class RuleView:
     rounding_rule: str
     source: str
     version: str
+    # The first row of the rule's supersede chain; set for mirrored rules that superseded another.
+    origin_id: Optional[int] = None
 
     @property
     def mirrored(self) -> bool:
         return self.source == TaxRuleSource.TAX_RATES.value
+
+    @property
+    def tie_id(self) -> int:
+        """The id that breaks a tie: a superseded rule keeps the place of the row it replaced."""
+        return self.origin_id if self.origin_id is not None else self.id
 
     def specificity(self, buyer_region: Optional[str] = None) -> tuple[int, int]:
         """``(level, rank)``; the highest wins.
@@ -224,7 +231,36 @@ def rules_valid_at(
         except (TaxRateError, ValueError):
             # A rate the API would refuse (written around it) never applies.
             continue
+    if any(view.mirrored for view in views):
+        origins = _mirror_origins(db)
+        views = [replace(view, origin_id=origins.get(view.id)) if view.mirrored else view for view in views]
     return views
+
+
+def _mirror_origins(db: Session) -> dict[int, int]:
+    """Mirrored rule id to the first row of its supersede chain, for rules that superseded another.
+
+    ``tax_rates`` breaks ties on its own id, which a supersede keeps; the
+    first mirrored row of a ``tax_rates`` row was made when that row was, so
+    chains order as their ``tax_rates`` rows do.
+    """
+    parents = {
+        int(id_): int(parent)
+        for id_, parent in db.execute(
+            select(TaxRule.id, TaxRule.supersedes_id).where(
+                TaxRule.source == TaxRuleSource.TAX_RATES.value,
+                TaxRule.supersedes_id.is_not(None),
+            )
+        ).all()
+    }
+    origins: dict[int, int] = {}
+    for start in parents:
+        current, seen = start, {start}
+        while current in parents and parents[current] not in seen:
+            current = parents[current]
+            seen.add(current)
+        origins[start] = current
+    return origins
 
 
 def select_rules(
@@ -244,7 +280,9 @@ def select_rules(
     Most specific wins (postcode, region, country, none), then the highest
     priority, then a rule of a registration's jurisdiction before an ``ANY``
     rule, then the lowest id. Mirrored rules carry no priority of their own
-    (``tax_rates`` has none), so they tie on id alone. Compound rules of that
+    (``tax_rates`` has none), so they tie on id alone: the id of the first
+    row of their supersede chain, so that editing a ``tax_rates`` row keeps
+    its place among duplicates as in ``tax_rates``. Compound rules of that
     same specificity are all applied after it, in ``compound_order``.
     ``reverse_charge`` limits the candidates to reverse charge rules (True)
     or ordinary rules (False).
@@ -264,7 +302,7 @@ def select_rules(
     level = [rule for rule in matching if rule.specificity(region) == best]
     plain = sorted(
         (r for r in level if not r.compound),
-        key=lambda r: (0 if r.mirrored else -r.priority, r.jurisdiction == JURISDICTION_ANY, r.id),
+        key=lambda r: (0 if r.mirrored else -r.priority, r.jurisdiction == JURISDICTION_ANY, r.tie_id),
     )
     compound = [r for r in level if r.compound]
     chosen = plain[:1] + compound

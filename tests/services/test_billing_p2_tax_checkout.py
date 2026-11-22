@@ -141,6 +141,34 @@ def test_shadow_engine_matches_tax_cents_on_mirrored_rules(db_session, shadow, l
     assert not [r for r in shadow if r["engine"] == "tax"]
 
 
+@pytest.mark.parametrize(
+    "rows,profile",
+    [
+        ([("DE", None, 1900), ("DE", None, 700)], ("DE", None)),
+        # tax_rates is unique on (country, region), so only national rows (NULL region) repeat.
+        ([("US", None, 500), ("US", None, 600), ("US", "CA", 725)], ("US", "TX")),
+    ],
+    ids=["duplicate national rows", "profile region over duplicate national rows"],
+)
+def test_shadow_ties_on_the_tax_rates_row_after_a_supersede(db_session, shadow, rows, profile):
+    first, *_rest = [_rate(db_session, country, region, bps) for country, region, bps in rows]
+    old_rule = TaxRuleMirror.current(db_session, first.id)
+    first.name = "renamed"
+    new_rule = TaxRuleMirror.sync(db_session, first)
+    assert new_rule.supersedes_id == old_rule.id
+    user, account = _buyer(db_session, *profile)
+    product, plan = _product(db_session, price_cents=10_000)
+    quote = _quote(db_session, account, product, plan)
+    assert CheckoutService._tax_rate(db_session, account).id == first.id
+    expected = 10_000 * first.rate_bps // 10_000
+    assert quote.tax_cents == expected
+    assert quote.tax_result.tax_cents == expected
+    (part,) = quote.tax_result.line("line:0").parts
+    assert part.rule_id == new_rule.id
+    _place(db_session, account, user, product, plan)
+    assert not [r for r in shadow if r["engine"] == "tax"]
+
+
 def test_shadow_records_t1_checkout_when_the_engine_differs(db_session, shadow, monkeypatch):
     _rate(db_session, "GB", None, 2000)
     user, account = _buyer(db_session, "GB")
