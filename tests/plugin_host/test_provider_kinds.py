@@ -833,6 +833,17 @@ def test_the_same_plugin_in_both_roots_is_an_error_and_neither_loads(plugin_env,
     assert "exists in both" in db_session.get(PluginInstallation, VALIDATOR).disabled_reason
 
 
+def test_the_same_plugin_id_under_another_folder_name_is_a_conflict(plugin_env, bundled):
+    put_fixture(bundled, VALIDATOR)
+    shutil.copytree(bundled / VALIDATOR, plugin_env / "renamed_copy")
+    packages = {(p.directory, p.bundled): p for p in discover()}
+    assert set(packages) == {(VALIDATOR, True), ("renamed_copy", False)}
+    for package in packages.values():
+        assert "exists in both the plugins folder and the bundled plugins folder" in " ".join(package.errors)
+    assert not find_package(VALIDATOR).valid
+    assert any("exists in both" in e for e in find_package(VALIDATOR).errors)
+
+
 def test_a_pack_file_over_1_mb_is_refused_before_it_is_read(plugin_env, monkeypatch):
     path = put_fixture(plugin_env, PACK)
     pack = path / "packs" / "demo.json"
