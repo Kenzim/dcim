@@ -14,6 +14,12 @@ A proforma paid in a month whose rate is missing leaves its sterling VAT
 pending; a rate stored meanwhile waits for the payment (the payment's share
 lock on the missing row) and then fills the invoice, and a payment during a
 store waits for it and takes the new rate.
+
+A credit note counts the earlier notes' VAT with a locking read, so a note
+committed after its transaction's snapshot still counts, and the notes'
+sterling adds up to the invoice's. The invoice guard reads the stored row
+with a locking read before it allows a sterling fill, so a session copy
+loaded before another transaction filled the row cannot fill it again.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 import sqlalchemy as sa
@@ -333,3 +340,87 @@ def test_a_payment_during_a_store_waits_for_it_and_takes_the_rate(sessions):
         storer.close()
     with sessions() as db:
         assert exchange_rates.stored_rate(db, "USD", "2031-03").id == rate_id
+
+
+def _credit(db, invoice_id: int, amount: int, key: str):
+    from app.models.invoice_adjustment import AdjustmentOutcome, AdjustmentReason
+    from app.models.reseller import Invoice
+    from app.services.invoice_adjustment_service import InvoiceAdjustmentService
+
+    return InvoiceAdjustmentService.issue_credit_note(
+        db, db.get(Invoice, invoice_id), amount_cents=amount, reason=AdjustmentReason.GOODWILL,
+        outcome=AdjustmentOutcome.REDUCED_BALANCE, actor_user_id=None, idempotency_key=key,
+    )
+
+
+def test_a_credit_note_counts_a_note_committed_after_its_snapshot(sessions):
+    """A reads first, B credits half and commits, then A credits the rest.
+
+    USD 1.00 of VAT alone is GBP 0.75 (0.7465), so two halves each counted
+    from nothing would make GBP 1.50 against the invoice's 1.49.
+    """
+    from app.models.billing_series import DocumentType
+    from app.models.invoice_adjustment import InvoiceAdjustment
+    from app.models.reseller import Invoice
+    from tests.services.test_billing_p1i_invoice_engine import _series
+
+    invoice_id = _published(sessions)
+    with sessions() as db:
+        _series(db, DocumentType.CREDIT_NOTE, "CN")
+        db.commit()
+        invoice = db.get(Invoice, invoice_id)
+        total, sterling = int(invoice.amount_cents), invoice.tax_total_gbp_cents
+    assert (invoice.tax_cents, sterling) == (200, 149)
+    late, early = sessions(), sessions()
+    try:
+        assert late.execute(sa.select(sa.func.count(InvoiceAdjustment.id))).scalar() == 0
+        first = _credit(early, invoice_id, total // 2, "fx-race-early")
+        early.commit()
+        second = _credit(late, invoice_id, total - total // 2, "fx-race-late")
+        late.commit()
+    finally:
+        early.close()
+        late.close()
+    assert (first.tax_cents, second.tax_cents) == (100, 100)
+    assert (first.tax_total_gbp_cents, second.tax_total_gbp_cents) == (75, 74)
+    assert first.tax_total_gbp_cents + second.tax_total_gbp_cents == sterling
+
+
+def test_the_guard_refuses_a_second_fill_from_a_copy_loaded_before_the_first(sessions):
+    """A loads the pending invoice, B fills it and commits, then A's own fill is refused."""
+    from app.models.reseller import Invoice
+    from app.services import invoice_guard
+    from app.services.invoice_guard import FrozenInvoiceError
+    from app.services.tax import exchange_rates
+
+    invoice_id = _published(sessions)
+    with sessions() as db:
+        _convert(db, invoice_id, LATER)
+        db.commit()
+    stale, storer = sessions(), sessions()
+    previous = invoice_guard.set_mode_override("enforce")
+    try:
+        invoice = stale.get(Invoice, invoice_id)
+        assert (invoice.fx_period, invoice.fx_rate) == ("2031-03", None)
+        assert exchange_rates.store_month(storer, "2031-03", [("USD", "1.3158")]).filled == (invoice_id,)
+        storer.commit()
+        filled_id = exchange_rates.stored_rate(storer, "USD", "2031-03").id
+        other = exchange_rates.store_month(stale, "2031-04", [("USD", "1.5")])
+        other_id = exchange_rates.stored_rate(stale, "USD", "2031-04").id
+        assert other.filled == ()
+        invoice.fx_rate = Decimal("1.5")
+        invoice.fx_source = "admin"
+        invoice.tax_total_gbp_cents = 133
+        invoice.fx_rate_id = other_id
+        with pytest.raises(FrozenInvoiceError):
+            stale.flush()
+        stale.rollback()
+    finally:
+        invoice_guard.set_mode_override(previous)
+        stale.close()
+        storer.close()
+    with sessions() as db:
+        invoice = db.get(Invoice, invoice_id)
+        assert (invoice.fx_rate, invoice.fx_source, invoice.tax_total_gbp_cents, invoice.fx_rate_id) == (
+            Decimal("1.3158"), "hmrc_monthly", 152, filled_id
+        )

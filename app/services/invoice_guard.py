@@ -327,22 +327,35 @@ def _record(records: list[dict]) -> None:
         )
 
 
-def _sterling_fill(state, committed: _Committed) -> bool:
+def _sterling_fill(state, connection, committed: _Committed) -> bool:
     """A pending sterling VAT filled in once (design 4.10, ``sterling_conversion``).
 
     The row is pending (``fx_period`` set and kept, ``fx_rate`` NULL), and
     each of the four other sterling columns goes from NULL to a value in the
     same flush. The values judged are those the session loaded (the fill
     loads the row with a locking read), not a plain read of the stored row,
-    which under REPEATABLE READ may show an older snapshot.
+    which under REPEATABLE READ may show an older snapshot. A session copy
+    loaded before another transaction filled the row also shows NULL, so the
+    stored row is then read with a locking read, which sees the latest
+    committed row: its four columns must still be NULL and its ``fx_period``
+    the same.
     """
-    if state.obj().fx_period is None or _old_value(state, "fx_period", committed)[0]:
+    period = state.obj().fx_period
+    if period is None or _old_value(state, "fx_period", committed)[0]:
         return False
     for name in STERLING_FILL_COLUMNS:
         changed, old, new = _old_value(state, name, committed)
         if not changed or old is not None or new is None:
             return False
-    return True
+    table = Invoice.__table__
+    stored = connection.execute(
+        select(table.c.fx_period, *(table.c[name] for name in sorted(STERLING_FILL_COLUMNS)))
+        .where(table.c.id == state.obj().id)
+        .with_for_update()
+    ).first()
+    if stored is None or not _same(stored[0], period):
+        return False
+    return all(value is None for value in stored[1:])
 
 
 def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
@@ -352,7 +365,7 @@ def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
     if old_status == _DRAFT:
         return
     allowance = _allowance.get()
-    fill = _sterling_fill(state, committed)
+    fill = _sterling_fill(state, connection, committed)
     for name in sorted(GUARDED_COLUMNS):
         changed, old, new = _old_value(state, name, committed)
         if not changed or _allowed(name, old, new, allowance, target.id):

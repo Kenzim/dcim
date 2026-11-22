@@ -947,29 +947,39 @@ def _check_text(reason_text: Optional[str]) -> Optional[str]:
     return reason_text.strip() or None
 
 
-def _sterling(db: Session, invoice: Invoice, kind: AdjustmentKind, tax_cents: int) -> dict:
+def _sterling(db: Session, invoice: Invoice, kind: AdjustmentKind, tax_cents: int, key: str) -> dict:
     """The frozen sterling fields of a new note (design 4.10), empty when it needs none.
 
     The note's figure is cumulative over the invoice's earlier notes of its
     kind, in id order, so the credit notes that credit all the VAT add up to
     the invoice's sterling VAT (and the debit notes' sterling VAT) exactly.
     Runs with the invoice locked, so no other note of the invoice is issued
-    meanwhile.
+    meanwhile; the earlier notes are read with a locking read, which sees
+    notes committed after this transaction's snapshot (under REPEATABLE READ
+    a plain read would not). Only notes before the note with idempotency key
+    ``key`` count, should one already be stored.
     """
     from app.services.tax import exchange_rates
 
     rate = exchange_rates.note_rate(db, invoice, tax_cents)
     if rate is None:
         return {}
-    before = db.scalar(
-        select(func.coalesce(func.sum(InvoiceAdjustment.tax_cents), 0)).where(
-            InvoiceAdjustment.invoice_id == invoice.id, InvoiceAdjustment.kind == kind
-        )
-    )
+    notes = db.execute(
+        select(InvoiceAdjustment.kind, InvoiceAdjustment.idempotency_key, InvoiceAdjustment.tax_cents)
+        .where(InvoiceAdjustment.invoice_id == invoice.id)
+        .order_by(InvoiceAdjustment.id)
+        .with_for_update()
+    ).all()
+    before = 0
+    for note_kind, note_key, note_tax in notes:
+        if note_key == key:
+            break
+        if _value(note_kind) == _value(kind):
+            before += int(note_tax or 0)
     gbp = exchange_rates.note_gbp_cents(
         credit=kind == AdjustmentKind.CREDIT,
         invoice_tax_cents=int(invoice.tax_cents or 0),
-        before_cents=int(before or 0),
+        before_cents=before,
         tax_cents=int(tax_cents),
         rate=rate.rate,
     )
@@ -1006,7 +1016,7 @@ def _insert_note(
     tax = sum(line.tax_cents for line in lines)
     if subtotal + tax <= 0:
         raise InvoiceAdjustmentError("a note must total more than zero")
-    sterling = _sterling(db, invoice, kind, tax)
+    sterling = _sterling(db, invoice, kind, tax, key)
     seller, buyer = _snapshots(db, invoice, account_id, now)
     document_type = DocumentType.CREDIT_NOTE if kind == AdjustmentKind.CREDIT else DocumentType.DEBIT_NOTE
     series = InvoiceNumbering.default_series(db, document_type)
