@@ -32,6 +32,7 @@ from app.models.storefront import (
     ProductOption,
     ProductOptionValue,
 )
+from app.services.billing import email_events
 from app.services.billing.coupons import (
     FIRST_INVOICE_ONLY_NOTE,
     CouponRuleError,
@@ -922,26 +923,13 @@ class CheckoutService:
                     product_id=catalog_product,
                 )
             item.fulfill_status = OrderItemFulfillStatus.FULFILLED
-            CheckoutService._send_service_provisioned(db, service)
+            email_events.send_service_provisioned(db, service)
             return None
         except Exception as exc:
             item.fulfill_status = OrderItemFulfillStatus.FAILED
             item.error_message = str(exc)[:2000]
             logger.exception("Provision failed for order item %s", item.id)
             return f"Item {item.id}: {exc}"
-
-    @staticmethod
-    def _send_service_provisioned(db: Session, service: Any) -> None:
-        """The service provisioned email; a failure to queue it never fails fulfilment."""
-        from app.services.billing import email_events
-
-        try:
-            with db.begin_nested():
-                email_events.send_service_provisioned(db, service)
-        except NotImplementedError:
-            logger.debug("The service provisioned email is not available yet")
-        except Exception:  # noqa: BLE001 - the email is best effort
-            logger.warning("Could not queue the service provisioned email for service %s", service.id, exc_info=True)
 
     @staticmethod
     def mark_paid_and_fulfill(db: Session, order: Order) -> Order:

@@ -287,21 +287,6 @@ def test_mirror_keeps_an_empty_region_literal(db_session):
     assert rule.region == "" and rule.priority == 0
 
 
-def test_send_service_provisioned_failure_never_fails_fulfilment(db_session, monkeypatch):
-    from app.services.billing import email_events
-
-    calls = []
-
-    def failing(db, service):
-        calls.append(service)
-        raise RuntimeError("smtp down")
-
-    monkeypatch.setattr(email_events, "send_service_provisioned", failing)
-    service = type("S", (), {"id": 1})()
-    CheckoutService._send_service_provisioned(db_session, service)
-    assert calls == [service]
-
-
 def test_prices_include_tax_setting_is_read(db_session):
     set_setting(db_session, "billing_tax_prices_include_tax", True)
     assert CheckoutService._prices_include_tax(db_session) is True
