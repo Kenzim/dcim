@@ -16,7 +16,7 @@ from app.models.billing_series import DocumentType
 from app.models.commerce_invoice_ext import InvoiceLineKind
 from app.models.invoice_adjustment import AdjustmentOutcome, AdjustmentReason
 from app.models.reseller import Invoice, InvoicePurpose
-from app.models.tax import InvoiceLineTax
+from app.models.tax import InvoiceLineTax, SellerTaxRegistration
 from app.services import invoice_guard
 from app.services.adjustment_pdf_service import build_document
 from app.services.billing.operator_currency import operator_currency
@@ -340,6 +340,58 @@ def test_a_taxed_debit_note_on_a_zero_vat_invoice_without_a_rate_is_refused(
     savepoint.rollback()
     assert (raised.value.currency, raised.value.period) == ("USD", "2026-11")
     assert db_session.scalar(select(func.count(InvoiceAdjustment.id))) == 0
+
+
+def test_a_lower_case_currency_finds_the_stored_rate(db_session, account, uk_vat, monkeypatch):
+    store(db_session, "2026-11", "1.3396")
+    row = exchange_rates.stored_rate(db_session, "usd", "2026-11")
+    assert row is not None and row.currency == "USD"
+    assert exchange_rates.has_rate(db_session, "usd", "2026-11")
+    registration = db_session.scalars(select(SellerTaxRegistration)).one()
+    conversion = exchange_rates.convert_at_publish(db_session, registration, "usd", 200, NOV_15)
+    assert (conversion.rate, conversion.period, conversion.tax_total_gbp_cents, conversion.rate_id) == (
+        Decimal("1.3396"), "2026-11", 149, row.id
+    )
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_legacy_and_shadow_tax_never_stamp_sterling(db_session, account, uk_vat, monkeypatch, mode):
+    store(db_session, "2026-11", "1.3396")
+    set_engine(db_session, "tax", mode)
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account)
+    assert frozen(invoice) == (None,) * 4 and invoice.fx_rate_id is None
+    assert invoice.tax_engine in (None, "legacy")
+    content = tax_pdf.for_invoice(db_session, invoice)
+    assert content is None or not any("sterling" in line for line in content.summary_lines)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_legacy_and_shadow_tax_publish_without_a_rate(db_session, account, uk_vat, monkeypatch, mode):
+    set_engine(db_session, "tax", mode)
+    at(monkeypatch, NOV_15)
+    invoice = issue(db_session, account)
+    assert frozen(invoice) == (None,) * 4
+
+
+def test_an_invoice_with_a_discount_converts_its_vat_after_the_discount(db_session, account, uk_vat, monkeypatch):
+    store(db_session, "2026-11", "1.3396")
+    at(monkeypatch, NOV_15)
+    invoice = InvoiceService.create(
+        db_session, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=800, currency="USD",
+        lines=[
+            NewLine("Server", 1000, kind=InvoiceLineKind.PRODUCT, tax_cents=0),
+            NewLine("Coupon", -200, kind=InvoiceLineKind.DISCOUNT),
+        ],
+    )
+    assert (invoice.discount_cents, invoice.tax_cents) == (200, 160)
+    # USD 1.60 at 1.3396 is GBP 1.19 (119.44), not the GBP 1.49 of the undiscounted VAT.
+    assert frozen(invoice) == (Decimal("1.3396"), "2026-11", "hmrc_monthly", 119)
+    assert tax_pdf.for_invoice(db_session, invoice).summary_lines[-1] == (
+        "VAT total in sterling: GBP 1.19 (HMRC monthly exchange rate for 2026-11: USD 1.3396 = GBP 1)"
+    )
+    note = credit(db_session, invoice, 960, "fx-discount-cn")
+    assert (note.tax_cents, note.tax_total_gbp_cents) == (160, 119)
 
 
 @settings_h(max_examples=300, deadline=None)
