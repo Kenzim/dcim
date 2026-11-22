@@ -15,6 +15,7 @@ PATH = "/api/v2/exchange_rates/files/monthly_xml_{year}-{month}.xml"
 _PERIOD_RE = re.compile(r"^([0-9]{4})-(0[1-9]|1[0-2])$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _RATE_RE = re.compile(r"^[0-9]{1,12}(\.[0-9]{1,6})?$")
+_LONG_RATE_RE = re.compile(r"^[0-9]{1,12}\.[0-9]{7,}$")
 # The DOCTYPE check refuses entity declarations, so nothing in the file is expanded.
 _DOCTYPE_RE = re.compile(r"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
 
@@ -64,6 +65,10 @@ def parse(text, start, end, log=None):
         code = (entry.findtext("currencyCode") or "").strip().upper()
         rate = (entry.findtext("rateNew") or "").strip()
         if not _CURRENCY_RE.match(code) or code == BASE or not _RATE_RE.match(rate) or float(rate) <= 0:
+            if log is not None and _CURRENCY_RE.match(code) and _LONG_RATE_RE.match(rate):
+                log.warning(
+                    f"HMRC lists {code} for {start:%Y-%m} at {rate}, more than six decimals; it is left out"
+                )
             continue
         if code in found and found[code] != rate:
             conflicting.add(code)
