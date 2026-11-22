@@ -1177,6 +1177,7 @@ class CreditLedgerService:
         actor_user_id: Optional[int] = None,
         idempotency_key: str,
         allow_negative_balance: bool = False,
+        refuse_if_payment_pending: Optional[bool] = None,
     ) -> Optional[Payment]:
         """Pay (part of) an invoice from account credit as a ``credit`` payment (design 6.7).
 
@@ -1190,7 +1191,10 @@ class CreditLedgerService:
         ``allow_negative_balance``, or None when there is nothing to apply; a
         repeated key with other parameters raises. Retail invoices need the
         credit engine in ``v2``. An invoice with a payment still pending at a
-        gateway raises ``InvoicePaymentPendingError``.
+        gateway raises ``InvoicePaymentPendingError`` when
+        ``refuse_if_payment_pending`` is true, which it is by default except
+        with ``allow_negative_balance``: the dispute policy records money the
+        gateway has already taken back and must not wait on another payment.
 
         Everything that decides money after the locks is a locking read, so a
         payment or entry committed while this call waited for the invoice lock
@@ -1250,7 +1254,11 @@ class CreditLedgerService:
             owner = db.get(BillingAccount, locked.billing_account_id)
         if locked.status not in unpaid_invoice_statuses():
             raise CreditLedgerError("Invoice cannot take credit in its current state")
-        pending = CreditLedgerService.live_pending_payment(db, payments)
+        pending = (
+            CreditLedgerService.live_pending_payment(db, payments)
+            if (not allow_negative_balance if refuse_if_payment_pending is None else refuse_if_payment_pending)
+            else None
+        )
         if pending is not None:
             raise InvoicePaymentPendingError(invoice_id=locked.id, payment_id=pending.id)
 

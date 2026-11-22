@@ -344,3 +344,81 @@ def test_partial_refund_plus_one_cent_blocks_the_switch(db_session, monkeypatch)
     assert [(f["check_key"], f["subject_id"]) for f in summary["findings"]] == [("i2_scan", invoice.id)]
     assert summary["expected_differences"] == []
     assert {"no_open_mismatches", "daily_scans", "quiet_period"} <= set(failing)
+
+
+def test_on_demand_scans_do_not_satisfy_the_daily_scan_criterion(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "ondemand", 500)
+    billing_shadow.set_shadow_since(db_session, "credit", at=NOW - timedelta(days=15), by="test")
+    for minute in range(14):
+        started = NOW - timedelta(hours=1) + timedelta(minutes=minute * 4)
+        billing_shadow._append_history(db_session, "credit", {
+            "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
+            "subjects_checked": 1, "mismatches_found": 0, "expected_differences_found": 0,
+            "scheduled": False, "complete": True,
+        })
+    db_session.commit()
+    assert "daily_scans" in _failing(db_session)
+
+
+def test_a_missing_day_of_scheduled_scans_fails_the_daily_scan_criterion(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "gap", 500)
+    since = NOW - timedelta(days=15, hours=1)
+    billing_shadow.set_shadow_since(db_session, "credit", at=since, by="test")
+    for day in range(15):
+        if day == 6:
+            continue
+        started = since + timedelta(days=day, hours=2)
+        billing_shadow._append_history(db_session, "credit", {
+            "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
+            "subjects_checked": 1, "mismatches_found": 0, "scheduled": True, "complete": True,
+        })
+    db_session.commit()
+    items = {item["item"]: item for item in billing_shadow.evaluate_switch(db_session, "credit", NOW)}
+    assert not items["daily_scans"]["ok"]
+    assert items["daily_scans"]["days_missing"] == [(since + timedelta(days=6, hours=2)).date().isoformat()]
+
+
+def test_scheduled_scans_with_mismatches_or_old_entries_do_not_count(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "dirty", 500)
+    since = NOW - timedelta(days=15, hours=1)
+    billing_shadow.set_shadow_since(db_session, "credit", at=since, by="test")
+    for day in range(15):
+        started = since + timedelta(days=day, hours=2)
+        entry = {
+            "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
+            "subjects_checked": 1, "mismatches_found": 0, "scheduled": True, "complete": True,
+        }
+        if day == 3:
+            entry["mismatches_found"] = 2
+        if day == 5:
+            # Written before entries recorded whether the daily job ran them.
+            del entry["scheduled"], entry["complete"]
+        billing_shadow._append_history(db_session, "credit", entry)
+    db_session.commit()
+    items = {item["item"]: item for item in billing_shadow.evaluate_switch(db_session, "credit", NOW)}
+    assert not items["daily_scans"]["ok"]
+    assert len(items["daily_scans"]["days_missing"]) == 2
+
+
+def test_admin_scans_do_not_push_scheduled_scans_out_of_the_history(db_session):
+    for index in range(HISTORY_LIMIT):
+        billing_shadow._append_history(db_session, "credit", {"started_at": str(index), "scheduled": True})
+    for index in range(5):
+        billing_shadow._append_history(db_session, "credit", {"started_at": f"admin{index}", "scheduled": False})
+    history = BillingShadowService.scan_history(db_session, "credit")
+    assert len(history) == HISTORY_LIMIT
+    # Each admin scan is kept until the next one replaces it; no scheduled scan goes.
+    assert sum(1 for entry in history if entry["scheduled"]) == HISTORY_LIMIT - 1
+    assert history[0]["started_at"] == "1" and history[-1]["started_at"] == "admin4"
+
+
+def test_scan_records_scheduled_and_complete(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "flags", 500)
+    _scan(db_session)
+    _scan(db_session, scheduled=True)
+    history = BillingShadowService.scan_history(db_session, "credit")
+    assert [(entry["scheduled"], entry["complete"]) for entry in history[-2:]] == [(False, True), (True, True)]

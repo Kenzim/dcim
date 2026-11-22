@@ -291,3 +291,48 @@ def test_rollback_from_v2_to_legacy_is_audited_and_follows_the_rules(client, db_
     assert refused.status_code == 409 and refused.json()["detail"]["code"] == "rollback_refused"
     monkeypatch.setattr(billing_engines_admin, "_invoice_rollback_blocker", lambda db: None)
     assert client.post(f"{BASE}/invoice/switch", headers=headers, json={"to": "legacy"}).status_code == 200
+
+
+def test_reseller_panel_apply_credit_refuses_a_pending_payment_with_409(client, db_session):
+    from app.models.reseller import Payment, PaymentStatus
+
+    user = User(username="panel-pending", email="panel-pending@example.com", is_reseller=True)
+    user.set_password("panel-password")
+    reseller = Reseller(user=user)
+    db_session.add(reseller)
+    db_session.commit()
+    CreditLedgerService.credit(db_session, reseller.id, 2_000)
+    invoice = InvoiceService.create(db_session, reseller_id=reseller.id, purpose=InvoicePurpose.CYCLE_CHARGE,
+                                    amount_cents=1_000)
+    invoice.status = InvoiceStatus.PENDING_ACTION
+    card = Payment(invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.PENDING,
+                   amount_cents=1_000, currency="USD", external_ref="pi_panel_pending")
+    db_session.add(card)
+    db_session.commit()
+    token = client.post("/api/users/login", json={"username": "panel-pending", "password": "panel-password"}).json()["token"]
+    response = client.post(f"/api/reseller-panel/invoices/{invoice.id}/apply-credit",
+                           headers={"Authorization": f"Bearer {token}", "Idempotency-Key": "panel-pending-1"})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "invoice_payment_pending", "invoice_id": invoice.id, "payment_id": card.id,
+    }
+
+
+def test_admin_apply_credit_refuses_a_pending_payment_with_409(client, db_session, test_admin_user):
+    from app.models.reseller import Payment, PaymentStatus
+
+    reseller = Reseller(user=User(username="admin-pending", email="admin-pending@example.com", is_reseller=True))
+    db_session.add(reseller)
+    db_session.commit()
+    CreditLedgerService.credit(db_session, reseller.id, 2_000)
+    invoice = InvoiceService.create(db_session, reseller_id=reseller.id, purpose=InvoicePurpose.CYCLE_CHARGE,
+                                    amount_cents=1_000)
+    invoice.status = InvoiceStatus.OPEN
+    card = Payment(invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.PENDING,
+                   amount_cents=1_000, currency="USD", external_ref="pi_admin_pending")
+    db_session.add(card)
+    db_session.commit()
+    response = client.post(f"/api/admin/resellers/invoices/{invoice.id}/apply-credit", headers=_admin(client),
+                           json={"idempotency_key": "admin-pending-1"})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "invoice_payment_pending"
