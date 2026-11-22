@@ -336,3 +336,33 @@ def test_admin_apply_credit_refuses_a_pending_payment_with_409(client, db_sessio
                            json={"idempotency_key": "admin-pending-1"})
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "invoice_payment_pending"
+
+
+def test_reseller_apply_credit_is_blocked_during_impersonation_like_pay(client, db_session):
+    from app.services.user_session_service import mint_user_session
+
+    user = User(username="panel-imp-credit", email="panel-imp-credit@example.com", is_reseller=True)
+    user.set_password("panel-password")
+    reseller = Reseller(user=user)
+    admin = User(username="panel-imp-credit-admin", email="panel-imp-credit-admin@example.com", is_admin=True)
+    db_session.add_all([reseller, admin])
+    db_session.commit()
+    CreditLedgerService.credit(db_session, reseller.id, 2_000)
+    invoice = InvoiceService.create(db_session, reseller_id=reseller.id, purpose=InvoicePurpose.CYCLE_CHARGE,
+                                    amount_cents=1_000)
+    invoice.status = InvoiceStatus.OPEN
+    db_session.commit()
+    token = mint_user_session(reseller.user, extra_fields={"impersonated_by": admin.id})
+    impersonated = {"Authorization": f"Bearer {token}", "Idempotency-Key": "imp-credit-1"}
+
+    pay = client.post(f"/api/reseller-panel/invoices/{invoice.id}/pay", headers=impersonated, json={})
+    apply = client.post(f"/api/reseller-panel/invoices/{invoice.id}/apply-credit", headers=impersonated)
+    assert apply.status_code == pay.status_code == 403
+    assert apply.json() == pay.json() == {"detail": "Money actions are blocked during impersonation"}
+    db_session.expire_all()
+    assert CreditLedgerService.balance_cents(db_session, db_session.get(Reseller, reseller.id)) == 2_000
+
+    own_token = client.post("/api/users/login", json={"username": "panel-imp-credit", "password": "panel-password"}).json()["token"]
+    own = client.post(f"/api/reseller-panel/invoices/{invoice.id}/apply-credit",
+                      headers={"Authorization": f"Bearer {own_token}", "Idempotency-Key": "imp-credit-2"})
+    assert own.status_code == 200, own.text
