@@ -1,9 +1,11 @@
 # Optional: billing phase 1 migrations on MariaDB 11.8.
 #
 # Runs tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
-# billing_p1_* chain), the snapshot isolation connect hook test and
+# billing_p1_* chain), the snapshot isolation connect hook test,
 # tests/services/test_billing_p1i_numbering_mariadb.py (series counters under
-# concurrency) against a mariadb:11.8 service container, the version production
+# concurrency) and tests/services/test_billing_p1c_credit_mariadb.py (credit
+# applied to an invoice under concurrency) against a mariadb:11.8 service
+# container, the version production
 # runs. Manual trigger
 # only, so it never blocks other work; the SQLite migration tests in
 # tests/migrations run in the normal test suite.
@@ -52,3 +54,5 @@ jobs:
         run: python -m pytest tests/migrations/test_billing_p1_mariadb.py tests/core/test_database_snapshot_isolation.py -q
       - name: Series counters under concurrency on MariaDB
         run: python -m pytest tests/services/test_billing_p1i_numbering_mariadb.py -q
+      - name: Credit applied to invoices under concurrency on MariaDB
+        run: python -m pytest tests/services/test_billing_p1c_credit_mariadb.py -q
