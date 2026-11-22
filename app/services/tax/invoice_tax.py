@@ -158,6 +158,37 @@ def write_rows(db: Session, invoice: Any, lines: Sequence[Any], result: TaxResul
     db.flush()
 
 
+def reset_to_legacy(db: Session, invoice: Any, lines: Sequence[Any]) -> None:
+    """Make a draft written by tax ``v2`` a plain legacy draft (design 5); for a publish in another mode.
+
+    Only a draft with ``invoice_line_taxes`` rows changes: the rows go, prices
+    exclude tax, and the lines get the tax legacy gives the invoice's purpose:
+    ``CheckoutService._tax_cents`` on the untaxed total for a purpose legacy
+    taxes, spread over the charged lines by the largest remainder as checkout
+    spreads it, else none.
+    """
+    removed = db.execute(delete(InvoiceLineTax).where(InvoiceLineTax.invoice_id == invoice.id)).rowcount
+    if not removed:
+        return
+    from app.services.billing.rounding import tax_split_largest_remainder
+    from app.services.checkout_service import CheckoutService
+    from app.services.tax.context import invoice_account
+
+    invoice.prices_include_tax = False
+    charged = [line for line in lines if str(getattr(line.kind, "value", line.kind)) != "discount"]
+    tax = 0
+    if _purpose(invoice) in LEGACY_TAXED_PURPOSES:
+        account, _profile = invoice_account(db, invoice)
+        if account is not None:
+            tax = CheckoutService._tax_cents(db, account, sum(int(line.total_cents) for line in lines))
+    shares = tax_split_largest_remainder(tax, [int(line.total_cents) for line in charged]) if charged else []
+    for line in lines:
+        line.tax_cents = 0
+    for line, share in zip(charged, shares):
+        line.tax_cents = int(share)
+    db.flush()
+
+
 def legal_notes_json(db: Session, result: TaxResult, locale: Optional[str]) -> list[dict]:
     from app.services.tax.legal_notes import render_legal_note
 

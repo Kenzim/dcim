@@ -676,8 +676,11 @@ class InvoiceService:
             )
             invoice_tax.write_rows(db, invoice, lines, tax_result, now)
             invoice_tax.stamp_published(db, invoice, tax_result, now)
-        elif tax_mode != "legacy":
-            invoice_tax.shadow_publish(db, invoice, lines, now)
+        else:
+            if v2:
+                invoice_tax.reset_to_legacy(db, invoice, lines)
+            if tax_mode != "legacy":
+                invoice_tax.shadow_publish(db, invoice, lines, now)
         if v2:
             prices_include_tax = bool(invoice.prices_include_tax)
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)
