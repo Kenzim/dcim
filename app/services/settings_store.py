@@ -586,7 +586,7 @@ _DEFINITIONS = (
     SettingDef(
         "billing_tax_id_valid_days",
         "int",
-        "Days a valid tax-ID check counts as fresh evidence for zero-rating.",
+        "Days a valid tax-ID check result is cached before the validator is asked again.",
         "billing_tax",
         min_value=1,
         max_value=365,
@@ -595,7 +595,7 @@ _DEFINITIONS = (
     SettingDef(
         "billing_tax_id_max_age_days",
         "int",
-        "Days a stored tax-ID check result is reused before the validator is asked again.",
+        "Days a valid tax-ID check counts as fresh evidence for reverse charge, counted back from the tax point.",
         "billing_tax",
         min_value=1,
         max_value=365,

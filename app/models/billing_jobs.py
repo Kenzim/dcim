@@ -65,6 +65,8 @@ class BillingJobRunStatus(str, enum.Enum):
     COMPLETE = "complete"
     FAILED = "failed"
     ABORTED = "aborted"
+    # A live run that found the job's live preconditions unmet and acted on nothing.
+    SKIPPED = "skipped"
 
 
 class BillingJobItemOutcome(str, enum.Enum):
