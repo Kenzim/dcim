@@ -57,6 +57,7 @@ from app.services.email_message_service import EmailMessageService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceService
 from app.services.settings_store import get_setting
+from app.services.tax.invoice_tax import TAX_RULES_CHANGED_DETAIL, TaxRuleChanged
 from app.services.payments.retail_card import (
     RetailCardPaymentError,
     start_card_payment,
@@ -642,15 +643,18 @@ def create_credit_topup_invoice(
                     "projected_balance_cents": projected,
                 },
             )
-    invoice = InvoiceService.create(
-        db,
-        billing_account_id=locked.id,
-        purpose=InvoicePurpose.CREDIT_TOPUP,
-        amount_cents=body.amount_cents,
-        description="Account credit top-up",
-        due_at=datetime.now(timezone.utc),
-        currency=locked.currency,
-    )
+    try:
+        invoice = InvoiceService.create(
+            db,
+            billing_account_id=locked.id,
+            purpose=InvoicePurpose.CREDIT_TOPUP,
+            amount_cents=body.amount_cents,
+            description="Account credit top-up",
+            due_at=datetime.now(timezone.utc),
+            currency=locked.currency,
+        )
+    except TaxRuleChanged as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=TAX_RULES_CHANGED_DETAIL) from exc
     db.commit()
     db.refresh(invoice)
     return _serialize_invoice(db, invoice)
@@ -791,6 +795,8 @@ def upgrade_service(
         )
     except CommerceLifecycleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TaxRuleChanged as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=TAX_RULES_CHANGED_DETAIL) from exc
     db.commit()
     return result
 

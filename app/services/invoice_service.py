@@ -551,10 +551,11 @@ class InvoiceService:
         tax_v2 = mode == "v2" and invoice_tax.effective_mode(db, invoice) == "v2"
         verified_tax = None
         if tax_v2:
+            created_at = _utcnow()
             verified_tax = invoice_tax.calculate_verified(
-                db, invoice, line_rows, _utcnow(), tax_result, "create"
+                db, invoice, line_rows, created_at, tax_result, "create"
             )
-            invoice_tax.write_rows(db, invoice, line_rows, verified_tax)
+            invoice_tax.write_rows(db, invoice, line_rows, verified_tax, created_at)
         if mode == "shadow":
             totals = compute_totals(
                 shadow_lines if shadow_lines is not None else lines,
@@ -673,7 +674,7 @@ class InvoiceService:
             tax_result = verified_tax or invoice_tax.calculate_verified(
                 db, invoice, lines, now, None, "publish"
             )
-            invoice_tax.write_rows(db, invoice, lines, tax_result)
+            invoice_tax.write_rows(db, invoice, lines, tax_result, now)
             invoice_tax.stamp_published(db, invoice, tax_result, now)
         elif tax_mode != "legacy":
             invoice_tax.shadow_publish(db, invoice, lines, now)

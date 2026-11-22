@@ -555,21 +555,26 @@ class CheckoutService:
         v2_lines = CheckoutService._v2_invoice_lines(quote, order_item_id, tax_class_id=tax_class_id)
         v2 = engine_mode(db) == "v2"
         tax_v2 = v2 and CheckoutService._tax_mode(db) == "v2"
-        invoice = InvoiceService.create(
-            db,
-            reseller_id=reseller_id,
-            billing_account_id=account.id,
-            order_id=order.id,
-            purpose=InvoicePurpose.ORDER_CHARGE,
-            amount_cents=int(quote.total_cents),
-            currency=quote.currency,
-            description=f"Order #{order.order_number}",
-            due_at=datetime.now(timezone.utc),
-            lines=v2_lines if v2 else legacy_lines,
-            shadow_lines=v2_lines,
-            prices_include_tax=tax_v2 and CheckoutService._prices_include_tax(db),
-            tax_result=quote.tax_result if tax_v2 else None,
-        )
+        from app.services.tax.invoice_tax import TAX_RULES_CHANGED_MESSAGE, TaxRuleChanged
+
+        try:
+            invoice = InvoiceService.create(
+                db,
+                reseller_id=reseller_id,
+                billing_account_id=account.id,
+                order_id=order.id,
+                purpose=InvoicePurpose.ORDER_CHARGE,
+                amount_cents=int(quote.total_cents),
+                currency=quote.currency,
+                description=f"Order #{order.order_number}",
+                due_at=datetime.now(timezone.utc),
+                lines=v2_lines if v2 else legacy_lines,
+                shadow_lines=v2_lines,
+                prices_include_tax=tax_v2 and CheckoutService._prices_include_tax(db),
+                tax_result=quote.tax_result if tax_v2 else None,
+            )
+        except TaxRuleChanged as exc:
+            raise CheckoutError(TAX_RULES_CHANGED_MESSAGE) from exc
         if not tax_v2 and quote.tax_result is not None:
             from app.services.tax.shadow import compare_checkout
 
