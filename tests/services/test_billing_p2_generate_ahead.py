@@ -209,6 +209,82 @@ def test_dry_run_plans_without_writing(factory):
     assert [entry["subject_key"] for entry in forecast] == [f"billing:{billing_id}:cycle:{due.isoformat()}"]
 
 
+def _retail_seed(factory, due):
+    from tests.services.test_billing_a0_renewals import _retail_billing
+
+    db = factory()
+    set_setting(db, "billing_retail_renewals_enabled", True)
+    set_setting(db, "billing_job_tracks_generate_invoices_ahead", "both")
+    db.commit()
+    billing, account = _retail_billing(db, due, interval="monthly")
+    ids = billing.id, billing.service_id, account.id
+    db.close()
+    return ids
+
+
+def _retail_worker(now):
+    from tests.services.test_billing_a0_renewals import Clock, _worker
+
+    return _worker(Clock(now), retail=True)
+
+
+@pytest.mark.asyncio
+async def test_retail_generated_ahead_is_emailed_and_waits_for_payment_at_due(factory):
+    from app.models.commerce_email import EmailMessage
+
+    due = T0 + timedelta(days=10)
+    billing_id, service_id, account_id = _retail_seed(factory, due)
+    _go_live(factory, T0)
+    result = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=due - timedelta(days=6))
+    assert result.counts == {"done": 1}
+    [(_, state, invoice_id)] = _cycles(factory, billing_id)
+    db = factory()
+    invoice = db.get(Invoice, invoice_id)
+    assert invoice.billing_account_id == account_id and invoice.reseller_id is None
+    assert invoice.status == InvoiceStatus.OPEN
+    [email] = db.query(EmailMessage).filter_by(event="invoice_created").all()
+    assert email.idempotency_key == f"invoice:{invoice_id}:created"
+    db.close()
+    db = factory()
+    await _retail_worker(due + timedelta(minutes=1)).process_batch(db, owner="w")
+    db.close()
+    # At due the same cycle and invoice wait to be paid; nothing new is issued.
+    [(_, state, again)] = _cycles(factory, billing_id)
+    assert again == invoice_id and state != BillingCycleState.PAID.value
+    db = factory()
+    assert db.query(Invoice).filter_by(service_id=service_id).count() == 1
+    assert db.get(Invoice, invoice_id).status in (InvoiceStatus.OPEN, InvoiceStatus.OVERDUE)
+    assert db.query(EmailMessage).filter_by(event="invoice_created").count() == 1
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_voided_ahead_invoice_is_not_regenerated_and_goes_to_review_at_due(factory):
+    from app.services.invoice_service import InvoiceService
+
+    due = T0 + timedelta(days=10)
+    billing_id, service_id, _ = _retail_seed(factory, due)
+    _go_live(factory, T0)
+    runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=due - timedelta(days=6))
+    [(_, _, invoice_id)] = _cycles(factory, billing_id)
+    db = factory()
+    InvoiceService.transition(db, db.get(Invoice, invoice_id), InvoiceStatus.VOID, cause="admin", reason="test")
+    db.commit()
+    db.close()
+    again = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=due - timedelta(days=5))
+    assert again.counts == {}
+    db = factory()
+    outcome = await _retail_worker(due + timedelta(minutes=1)).process_batch(db, owner="w")
+    db.close()
+    assert outcome["manual_review"] == 1
+    [(_, state, same)] = _cycles(factory, billing_id)
+    assert same == invoice_id and state == BillingCycleState.MANUAL_REVIEW.value
+    db = factory()
+    assert db.query(Invoice).filter_by(service_id=service_id).count() == 1
+    assert db.get(ServiceBilling, billing_id).next_charge_at.replace(tzinfo=timezone.utc) == due
+    db.close()
+
+
 @pytest.mark.asyncio
 async def test_at_due_reuses_a_cycle_committed_after_its_snapshot(factory):
     """The worker's cycle lookup is a locking read, so it sees a cycle committed by another session."""

@@ -177,6 +177,73 @@ def test_legacy_first_overdue_notice_fires_invoice_overdue_once(factory, sent, e
     assert len(_overdue_events(events, invoice_id)) == 1
 
 
+def test_retail_invoice_reminders_go_to_the_account_user(factory, sent):
+    _configure(factory, v2=False)
+    invoice_id = _retail_invoice(factory, T0 + timedelta(days=5))
+    _go_live(factory, T0)
+    _run(factory, T0 + timedelta(days=2, hours=1))
+    [call] = sent
+    db = factory()
+    invoice = db.get(Invoice, invoice_id)
+    assert call["billing_account_id"] == invoice.billing_account_id
+    assert call["to_address"].startswith("retail-") and call["related_id"] == str(invoice_id)
+    assert call["event"] == "invoice_reminder"
+    db.close()
+
+
+def test_dry_run_writes_only_job_tables(factory):
+    job_tables = {"billing_job_states", "billing_job_runs", "billing_job_run_items", "billing_job_actions",
+                  "recurring_billing_leases"}
+
+    def counts():
+        db = factory()
+        try:
+            names = sa.inspect(db.get_bind()).get_table_names()
+            return {n: db.execute(sa.text(f'SELECT COUNT(*) FROM "{n}"')).scalar() for n in names
+                    if n not in job_tables}
+        finally:
+            db.close()
+
+    _invoice(factory, T0 + timedelta(days=5))
+    db = factory()
+    runner.change_mode(db, NAME, "dry_run", now=T0, actor_user_id=None)
+    db.commit()
+    db.close()
+    before = counts()
+    result = runner.run_job(factory, NAME, dry_run=True, trigger="schedule", now=T0 + timedelta(days=2, hours=1))
+    assert result.counts == {"planned": 1}
+    assert counts() == before
+    db = factory()
+    assert db.query(BillingJobAction).count() == 0
+    db.close()
+
+
+def test_invoice_paid_between_plan_and_execute_gets_no_reminder(factory, sent, monkeypatch):
+    from app.models.billing_jobs import BillingJobRunItem
+
+    invoice_id = _invoice(factory, T0 + timedelta(days=5))
+    _go_live(factory, T0)
+    plan = reminders.InvoiceReminders.plan
+
+    def plan_then_pay(self, db, run, subject_id):
+        action = plan(self, db, run, subject_id)
+        other = factory()
+        other.add(Payment(invoice_id=invoice_id, gateway="manual", status=PaymentStatus.SUCCEEDED,
+                          amount_cents=2000, currency="USD", payment_metadata={}))
+        other.commit()
+        other.close()
+        return action
+
+    monkeypatch.setattr(reminders.InvoiceReminders, "plan", plan_then_pay)
+    result = _run(factory, T0 + timedelta(days=2, hours=1))
+    assert result.counts == {"skipped": 1} and sent == []
+    db = factory()
+    item = db.query(BillingJobRunItem).filter_by(run_id=result.run_id).one()
+    assert item.detail["skip_reason"] == "no_balance"
+    assert db.query(BillingJobAction).count() == 0
+    db.close()
+
+
 def _kinds(sent, invoice_id):
     prefix = f"invoice:{invoice_id}:reminder:"
     return [call["idempotency_key"][len(prefix):] for call in sent if call["idempotency_key"].startswith(prefix)]

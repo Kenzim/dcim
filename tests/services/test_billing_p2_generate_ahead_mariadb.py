@@ -156,6 +156,18 @@ async def test_job_runs_while_the_worker_holds_the_billing(factory, monkeypatch)
         return original(db, **kwargs)
 
     monkeypatch.setattr(InvoiceService, "create_cycle", staticmethod(create_while_job_waits))
+    from app.services.recurring_billing_service import RecurringBillingService
+
+    initial = RecurringBillingService._initial_cycle_outcome
+
+    async def after_cycle_commit(self, db, **kwargs):
+        # The worker committed the cycle and has not yet charged or moved
+        # next_charge_at: the job takes the billing now, so its due date still
+        # matches and it reaches the locking cycle lookup.
+        thread.join(30)
+        return await initial(self, db, **kwargs)
+
+    monkeypatch.setattr(RecurringBillingService, "_initial_cycle_outcome", after_cycle_commit)
     gateway = FakeGateway(["success"])
     worker = _worker(gateway, due + timedelta(minutes=1))
     with factory() as db:
@@ -163,4 +175,9 @@ async def test_job_runs_while_the_worker_holds_the_billing(factory, monkeypatch)
     thread.join(30)
     assert result["paid"] == 1
     assert job_results[0].counts == {"skipped": 1}
+    from app.models.billing_jobs import BillingJobRunItem
+
+    with factory() as db:
+        item = db.query(BillingJobRunItem).filter_by(run_id=job_results[0].run_id).one()
+        assert item.detail["skip_reason"] == "cycle_exists"
     _assert_one_of_each(factory, billing_id, service_id, gateway)
