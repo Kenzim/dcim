@@ -32,6 +32,10 @@ class PackNotFound(LookupError):
     """No pack with that id and version."""
 
 
+class PackVersionNotFound(PackNotFound):
+    """The pack exists but does not offer that version."""
+
+
 class PackUnavailable(RuntimeError):
     """A plugin pack could not be loaded (provider failure or invalid data)."""
 
@@ -135,13 +139,13 @@ class PackRegistry:
         if pack_id in BUILTIN_PACKS:
             data = _builtin(pack_id)
             if data.version != version:
-                raise PackNotFound(f"pack {pack_id} has version {data.version}, not {version}")
+                raise PackVersionNotFound(f"pack {pack_id} has version {data.version}, not {version}")
             return data
         if pack_id not in _plugin_refs():
             raise PackNotFound(f"no pack {pack_id}")
         try:
             if version not in _plugin_versions(pack_id):
-                raise PackNotFound(f"pack {pack_id} has no version {version}")
+                raise PackVersionNotFound(f"pack {pack_id} has no version {version}")
             raw = plugin_providers.call_provider(PACK_KIND, pack_id, "load", version)
         except ProviderUnavailable as exc:
             raise PackUnavailable(exc.reason) from exc

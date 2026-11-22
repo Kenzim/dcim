@@ -22,7 +22,13 @@ from sqlalchemy.orm import Session
 
 from app.models.tax import TaxClass, TaxClassCode, TaxLegalNote, TaxRule, TaxRuleSource
 from app.services.audit_service import AuditService
-from app.services.tax.packs.registry import PackData, PackNotFound, PackRegistry, PackUnavailable
+from app.services.tax.packs.registry import (
+    PackData,
+    PackNotFound,
+    PackRegistry,
+    PackUnavailable,
+    PackVersionNotFound,
+)
 
 AUDIT_ACTION = "billing.tax.pack_applied"
 
@@ -141,6 +147,8 @@ def _pack_values(rule: dict[str, Any], effective_from: datetime) -> dict[str, An
 def _load(db: Session, pack_id: str, version: str) -> PackData:
     try:
         return PackRegistry.load(db, pack_id, version)
+    except PackVersionNotFound as exc:
+        raise PackImportError("pack_version_not_found", str(exc)) from exc
     except PackNotFound as exc:
         raise PackImportError("pack_not_found", str(exc)) from exc
     except PackUnavailable as exc:
