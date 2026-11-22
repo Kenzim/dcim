@@ -247,6 +247,20 @@ def test_non_gapless_counts_on_its_own_session_and_survives_rollback(file_db):
     assert check.get(InvoiceSequence, series_counter_name(series.id, "")).next_value == 3
 
 
+def test_non_gapless_after_a_write_of_the_caller_does_not_lock_on_sqlite(tmp_path):
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'p1-lock.db'}", connect_args={"timeout": 0.2})
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autoflush=False)
+    db = factory()
+    series = _series(db)
+    db.commit()
+    _invoice(db)
+    assert InvoiceNumbering.allocate(db, series, at=NOW, session_factory=factory) == ("", 1, "CN-1")
+    db.commit()
+    assert InvoiceNumbering.allocate(db, series, at=NOW, session_factory=factory) == ("", 2, "CN-2")
+    engine.dispose()
+
+
 def test_gapless_counts_in_the_callers_transaction(file_db):
     db = file_db()
     series = _series(db, code="DN", document_type=DocumentType.DEBIT_NOTE, gapless=True, reset_period="yearly")
