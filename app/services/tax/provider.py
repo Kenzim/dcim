@@ -1,8 +1,10 @@
 """The ``tax_provider`` route into billing (docs/billing-phase2-design.md 8.5 to 8.7).
 
-Only ``TaxEngine.prepare`` calls this, never under a billing lock. Every
-failure, including an answer that fails validation, becomes
-``ProviderResultError`` and the caller falls back to the built-in rules.
+Only ``TaxEngine.prepare`` calls this, never under a billing lock. A provider
+is asked only for a currency its manifest lists (``currencies``, empty for
+any) and only when its ``supports`` answers True. Every failure, including a
+refusal and an answer that fails validation, becomes ``ProviderResultError``
+and the caller falls back to the built-in rules.
 """
 
 from __future__ import annotations
@@ -70,11 +72,21 @@ def _rate(value: Any) -> Decimal:
         raise ProviderResultError("invalid_rate") from None
 
 
+def _check_bases(context: TaxContext, line: Any, parts: list) -> None:
+    """Each part's base is the line's net: the amount sent (exclusive) or the gross less the line's tax (inclusive)."""
+    net = int(line.net_cents)
+    if context.prices_include_tax:
+        net -= sum(int(part.tax_cents) for _position, part, _rate, _rc in parts)
+    if any(int(part.base_cents) != net for _position, part, _rate, _rc in parts):
+        raise ProviderResultError("base_does_not_match_line")
+
+
 def validate_parts(context: TaxContext, answer: Any) -> dict[str, tuple[LineTaxPart, ...]]:
     """Design 8.5: every line key present, no negative amount, rates that reproduce the tax.
 
-    A part's tax must be within one minor unit of ``base * rate`` and a
-    reverse charge part must carry no tax.
+    A part's tax must be within one minor unit of ``base * rate``, a reverse
+    charge part must carry no tax, and every part's base must be the line's
+    net (``_check_bases``), so the parts tax the amount billed.
     """
     lines = getattr(answer, "lines", None)
     if not isinstance(lines, dict):
@@ -96,6 +108,7 @@ def validate_parts(context: TaxContext, answer: Any) -> dict[str, tuple[LineTaxP
             if abs(expected - tax) > 1:
                 raise ProviderResultError("rate_does_not_reproduce_tax")
             parts.append((position, part, rate, reverse_charge))
+        _check_bases(context, line, parts)
         out[line.key] = tuple(
             LineTaxPart(
                 rule_id=None,
@@ -112,6 +125,23 @@ def validate_parts(context: TaxContext, answer: Any) -> dict[str, tuple[LineTaxP
     return out
 
 
+def _manifest_currencies(db: Session, provider_ref: str) -> tuple[str, ...]:
+    """The ``currencies`` of the provider's manifest entry; empty (any) when it cannot be read.
+
+    A provider that cannot be read is refused by ``call_provider`` with its own reason.
+    """
+    from app.models.plugin_host import PluginInstallation
+    from app.plugin_host import runtime
+
+    plugin_id, _separator, provider_id = (provider_ref or "").partition(":")
+    try:
+        inst = db.get(PluginInstallation, plugin_id)
+        provide = runtime.manifest_of(inst).provider(PROVIDER_KIND, provider_id) if inst is not None else None
+    except Exception:  # noqa: BLE001 - a manifest that no longer validates is call_provider's to report
+        return ()
+    return tuple(str(c).upper() for c in (getattr(provide, "currencies", None) or ()))
+
+
 def calculate_with_provider(db: Session, context: TaxContext, base: TaxResult, provider_ref: str) -> TaxResult:
     from app.plugin_host.providers import ProviderUnavailable, call_provider
 
@@ -119,7 +149,12 @@ def calculate_with_provider(db: Session, context: TaxContext, base: TaxResult, p
         request = _request(db, context)
     except ImportError:
         raise ProviderResultError("kinds_unavailable") from None
+    currencies = _manifest_currencies(db, provider_ref)
+    if currencies and str(context.currency).upper() not in currencies:
+        raise ProviderResultError("currency_not_supported")
     try:
+        if call_provider(PROVIDER_KIND, provider_ref, "supports", request) is not True:
+            raise ProviderResultError("not_supported")
         answer = call_provider(PROVIDER_KIND, provider_ref, "calculate", request)
     except ProviderUnavailable as exc:
         raise ProviderResultError(exc.reason or "unavailable") from None
