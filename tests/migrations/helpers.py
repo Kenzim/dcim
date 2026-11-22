@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Optional
 
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from alembic.runtime.environment import EnvironmentContext
 from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -112,23 +112,21 @@ def current(engine: sa.Engine) -> Optional[str]:
 
 
 def migrate(engine: sa.Engine, target: str) -> None:
-    """Upgrade or downgrade ``engine`` to ``target`` through the real revision files."""
-    directory = script()
+    """Upgrade or downgrade ``engine`` to ``target`` through the real revision files.
+
+    Runs ``alembic/env.py`` itself on a connection of ``engine``, so the tests
+    use the transaction configuration of a real ``alembic upgrade``.
+    """
     start = current(engine)
     revisions = [A0, *CHAIN, *P2_CHAIN]
-    upward = start is None or revisions.index(target) >= revisions.index(start)
-
-    def steps(rev, _context):
+    upward = start is None or start not in revisions or revisions.index(target) >= revisions.index(start)
+    config = alembic_config()
+    with engine.connect() as conn:
+        config.attributes["connection"] = conn
         if upward:
-            return directory._upgrade_revs(target, rev)
-        return directory._downgrade_revs(target, rev)
-
-    with EnvironmentContext(alembic_config(), directory, fn=steps, destination_rev=target) as env:
-        with engine.connect() as conn:
-            env.configure(connection=conn, transaction_per_migration=True)
-            with env.begin_transaction():
-                env.run_migrations()
-            conn.commit()
+            command.upgrade(config, target)
+        else:
+            command.downgrade(config, target)
 
 
 def build_a0_database(engine: sa.Engine) -> None:
@@ -236,6 +234,83 @@ def execute(engine: sa.Engine, sql: str, **params):
 def scalar(engine: sa.Engine, sql: str, **params):
     with engine.connect() as conn:
         return conn.execute(sa.text(sql), params).scalar()
+
+
+P2_TABLES = P2_NEW_TABLES | set(P2_COLUMNS)
+
+
+def _p2_object(obj, name, type_, _reflected, _compare_to) -> bool:
+    """Compare the tables phase 2 creates whole, and only the phase 2 columns of the tables it alters."""
+    if type_ == "table":
+        return name in P2_TABLES
+    table = getattr(obj, "table", None)
+    if table is None or table.name not in P2_TABLES:
+        return False
+    if table.name in P2_NEW_TABLES:
+        return True
+    added = P2_COLUMNS[table.name]
+    if type_ == "column":
+        return name in added
+    columns = {column.name for column in getattr(obj, "columns", ())}
+    if type_ == "foreign_key_constraint":
+        columns = {element.parent.name for element in obj.elements}
+    return bool(columns & added)
+
+
+def raw_p2_schema_diffs(engine: sa.Engine) -> list:
+    """``compare_metadata`` of the migrated phase 2 schema against the models."""
+    import app.models  # noqa: F401
+    import app.models.plugin  # noqa: F401  (server_plugins, which env.py's plugin_categories refers to)
+    from alembic.autogenerate import compare_metadata
+    from app.core.database import Base
+
+    with engine.connect() as conn:
+        context = MigrationContext.configure(
+            conn,
+            opts={"compare_type": True, "compare_server_default": True, "include_object": _p2_object},
+        )
+        return compare_metadata(context, Base.metadata)
+
+
+# Foreign keys the phase 2 revisions deliberately leave off the tables they alter on SQLite.
+SQLITE_OMITTED_FOREIGN_KEYS = {
+    ("billing_profiles", "fk_billing_profiles_tax_id_check_id"),
+    ("email_messages", "fk_email_messages_template_id"),
+    ("invoices", "fk_invoices_seller_registration_id"),
+    ("products", "fk_products_tax_class_id"),
+}
+
+
+def _is_reflection_noise(dialect: str, diff) -> bool:
+    if isinstance(diff, list) and len(diff) == 1:
+        diff = diff[0]
+    kind = diff[0]
+    if kind == "modify_default":
+        # MariaDB reflects server_default=func.now() as current_timestamp().
+        reflected, model = diff[5], diff[6]
+        reflected_text = str(getattr(getattr(reflected, "arg", None), "text", "")).lower()
+        return (
+            dialect in ("mysql", "mariadb")
+            and reflected_text in ("current_timestamp()", "current_timestamp")
+            and isinstance(getattr(model, "arg", None), sa.sql.functions.now)
+        )
+    if kind == "add_fk" and dialect == "sqlite":
+        constraint = diff[1]
+        return (constraint.table.name, constraint.name) in SQLITE_OMITTED_FOREIGN_KEYS
+    return False
+
+
+def p2_schema_diffs(engine: sa.Engine) -> list[str]:
+    """Differences between the migrated phase 2 schema and the models, minus known reflection noise.
+
+    Types, nullability, server defaults, indexes, unique keys and foreign keys
+    are compared on the tables phase 2 creates and on the columns it adds.
+    """
+    return [
+        repr(diff)
+        for diff in raw_p2_schema_diffs(engine)
+        if not _is_reflection_noise(engine.dialect.name, diff)
+    ]
 
 
 def load_revision(revision_id: str):

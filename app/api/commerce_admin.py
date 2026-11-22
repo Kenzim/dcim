@@ -42,7 +42,7 @@ from app.services.billing.settlement import commit_and_fulfil
 from app.services.billing_shadow import is_reserved_key as is_reserved_billing_key
 from app.services.billing.order_refunds import cancel_order as cancel_commerce_order
 from app.services.commerce_webhook_service import CommerceWebhookService
-from app.services.email_message_service import EmailMessageService
+from app.services.email_message_service import EmailMessageService, EmailRetryRefused
 from app.services.gdpr_service import GdprService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceError, InvoiceService
@@ -643,7 +643,10 @@ def list_email_messages(
 
 @router.post("/email-messages/{message_id}/retry", responses=COMMON_ERROR_RESPONSES)
 def retry_email_message(message_id: int, db: DbDep):
-    row = EmailMessageService.retry(db, message_id)
+    try:
+        row = EmailMessageService.retry(db, message_id)
+    except EmailRetryRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if row is None:
         raise HTTPException(status_code=404, detail="Email message not found")
     db.commit()

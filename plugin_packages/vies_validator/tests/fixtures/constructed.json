@@ -1,0 +1,106 @@
+{
+  "_source": "Written by hand from the Commission's published contract (swagger_publicVAT.yaml, CheckVatResponse and CommonResponse). The test service never issues consultation numbers and always answers 200, so these shapes were not recorded.",
+  "cases": {
+    "valid_with_consultation_number": {
+      "status": 200,
+      "body": {
+        "countryCode": "FR",
+        "vatNumber": "12345678901",
+        "requestDate": "2026-11-22T13:02:11.481Z",
+        "valid": true,
+        "requestIdentifier": "WAPIAAAAZyQrXyZ1",
+        "name": "SOCIETE EXEMPLE SAS",
+        "address": "1 RUE DE L'EXEMPLE\n75001 PARIS",
+        "traderName": "---",
+        "traderStreet": "---",
+        "traderPostalCode": "---",
+        "traderCity": "---",
+        "traderCompanyType": "---",
+        "traderNameMatch": "NOT_PROCESSED",
+        "traderStreetMatch": "NOT_PROCESSED",
+        "traderPostalCodeMatch": "NOT_PROCESSED",
+        "traderCityMatch": "NOT_PROCESSED",
+        "traderCompanyTypeMatch": "NOT_PROCESSED"
+      }
+    },
+    "valid_without_registered_details": {
+      "status": 200,
+      "body": {
+        "countryCode": "DE",
+        "vatNumber": "123456789",
+        "requestDate": "2026-11-22T13:02:11.481Z",
+        "valid": true,
+        "requestIdentifier": "",
+        "name": "---",
+        "address": "---"
+      }
+    },
+    "invalid": {
+      "status": 200,
+      "body": {
+        "countryCode": "DE",
+        "vatNumber": "123456789",
+        "requestDate": "2026-11-22T13:02:11.481Z",
+        "valid": false,
+        "requestIdentifier": "",
+        "name": "---",
+        "address": "---"
+      }
+    },
+    "bad_request_with_error_wrapper": {
+      "status": 400,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "INVALID_INPUT",
+            "message": "Invalid input"
+          }
+        ]
+      }
+    },
+    "server_error_with_error_wrapper": {
+      "status": 500,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "MS_UNAVAILABLE"
+          }
+        ]
+      }
+    },
+    "unknown_error_code": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "SOMETHING_NEW"
+          }
+        ]
+      }
+    },
+    "valid_flag_missing": {
+      "status": 200,
+      "body": {
+        "countryCode": "DE",
+        "vatNumber": "123456789"
+      }
+    },
+    "valid_flag_is_text": {
+      "status": 200,
+      "body": {
+        "valid": "true"
+      }
+    },
+    "html_gateway_error": {
+      "status": 502,
+      "text": "<html><body>502 Bad Gateway</body></html>"
+    },
+    "empty_body": {
+      "status": 200,
+      "text": ""
+    }
+  }
+}

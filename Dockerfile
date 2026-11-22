@@ -61,6 +61,7 @@ COPY --from=ipxe /build/boot_media/rackflow-vmedia.iso /build/boot_media/rackflo
 
 # Application code and migrations (change frequently)
 COPY app/ ./app/
+COPY plugin_packages/ ./plugin_packages/
 COPY scripts/ ./scripts/
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
