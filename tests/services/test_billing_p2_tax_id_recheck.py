@@ -137,3 +137,33 @@ def test_no_check_made_is_nothing_to_do(factory, monkeypatch):
     assert db.get(BillingProfile, profile_id).tax_id_status == "unchecked"
     db.close()
     assert runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0 + timedelta(hours=1)).counts == {}
+
+
+@pytest.mark.parametrize(
+    ("valid_days", "age_days"),
+    [(30, 25), (10, 5), (6, 1), (5, 1), (1, 1)],
+)
+def test_recheck_age_follows_the_validity_setting(factory, checks, valid_days, age_days):
+    from app.services.billing.jobs import tax_id_recheck
+
+    db = factory()
+    set_setting(db, "billing_tax_id_valid_days", valid_days)
+    db.commit()
+    assert tax_id_recheck.recheck_age_days(db) == age_days
+    db.close()
+    due = _profile(factory, status="valid", checked_at=T0 - timedelta(days=age_days, minutes=1))
+    fresh = _profile(factory, status="valid", checked_at=T0 - timedelta(days=age_days) + timedelta(minutes=1))
+    result = runner.run_job(factory, NAME, dry_run=True, trigger="admin", now=T0)
+    assert result.counts == {"planned": 1}
+    from app.models.billing_jobs import BillingJobRunItem
+
+    db = factory()
+    [item] = db.query(BillingJobRunItem).filter_by(run_id=result.run_id).all()
+    assert item.detail["profile_id"] == due and fresh != due
+    db.close()
+
+
+def test_unavailable_retry_is_fifteen_minutes():
+    from app.services.billing.jobs import tax_id_recheck
+
+    assert tax_id_recheck.UNAVAILABLE_RETRY == timedelta(minutes=15)

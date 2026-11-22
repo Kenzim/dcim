@@ -1,8 +1,9 @@
 """``tax_id_recheck`` (docs/billing-phase2-design.md 7.4 and 10.7).
 
 Re-checks the EU VAT number of profiles whose ``valid`` result is older than
-``VALID_RECHECK_DAYS`` and of every ``unavailable`` profile (at most every
-``UNAVAILABLE_RETRY`` per profile) through ``TaxIdService.check(force=True)``,
+``recheck_age_days`` (``RECHECK_BEFORE_EXPIRY_DAYS`` before the result stops
+counting under ``billing_tax_id_valid_days``, never under one day) and of
+every ``unavailable`` profile (at most every ``UNAVAILABLE_RETRY`` per profile) through ``TaxIdService.check(force=True)``,
 at most ``billing_tax_id_recheck_batch`` profiles per run. It writes only
 checks and profile status, never invoices.
 
@@ -26,7 +27,8 @@ from app.services.billing.jobs.base import JobRun, PlannedAction, _utc
 
 NAME = "tax_id_recheck"
 ACTION = "recheck_tax_id"
-VALID_RECHECK_DAYS = 25
+RECHECK_BEFORE_EXPIRY_DAYS = 5
+MIN_RECHECK_AGE_DAYS = 1
 UNAVAILABLE_RETRY = timedelta(minutes=15)
 
 
@@ -40,8 +42,14 @@ def subject_key(profile: BillingProfile) -> str:
     return f"profile:{profile.id}:check:{profile.tax_id_check_id or 'none'}"
 
 
-def _due_clause(run: JobRun):
+def recheck_age_days(db: Session) -> int:
+    valid_days = int(_setting(db, "billing_tax_id_valid_days"))
+    return max(MIN_RECHECK_AGE_DAYS, valid_days - RECHECK_BEFORE_EXPIRY_DAYS)
+
+
+def _due_clause(db: Session, run: JobRun):
     now = _utc(run.now)
+    age = timedelta(days=recheck_age_days(db))
     return and_(
         BillingProfile.tax_id_type == TaxIdType.EU_VAT.value,
         BillingProfile.tax_id.is_not(None),
@@ -49,7 +57,7 @@ def _due_clause(run: JobRun):
         or_(
             and_(
                 BillingProfile.tax_id_status == TaxIdStatus.VALID.value,
-                BillingProfile.tax_id_checked_at < now - timedelta(days=VALID_RECHECK_DAYS),
+                BillingProfile.tax_id_checked_at < now - age,
             ),
             and_(
                 BillingProfile.tax_id_status == TaxIdStatus.UNAVAILABLE.value,
@@ -64,21 +72,21 @@ def _due_clause(run: JobRun):
 
 def _is_due(db: Session, run: JobRun, profile_id: int) -> bool:
     return (
-        db.scalar(select(BillingProfile.id).where(BillingProfile.id == profile_id, _due_clause(run)))
+        db.scalar(select(BillingProfile.id).where(BillingProfile.id == profile_id, _due_clause(db, run)))
         is not None
     )
 
 
 class TaxIdRecheck:
     name = NAME
-    setting_keys = ("billing_tax_id_recheck_batch",)
+    setting_keys = ("billing_tax_id_recheck_batch", "billing_tax_id_valid_days")
 
     def candidates(self, db: Session, run: JobRun) -> Iterable[int]:
         batch = int(_setting(db, "billing_tax_id_recheck_batch"))
         return list(
             db.scalars(
                 select(BillingProfile.id)
-                .where(_due_clause(run))
+                .where(_due_clause(db, run))
                 .order_by(BillingProfile.tax_id_checked_at, BillingProfile.id)
                 .limit(batch)
             )
