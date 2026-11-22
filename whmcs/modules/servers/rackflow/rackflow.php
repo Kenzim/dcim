@@ -800,6 +800,23 @@ function rackflow_TestConnection(array $params)
 }
 
 /**
+ * JSON-encode a request body. Every RackFlow request body is a JSON object, so
+ * an empty PHP array is written as "{}" instead of the list "[]" (which the API
+ * rejects with 422). Non-empty lists nested inside the body are left alone.
+ *
+ * @param mixed $data Request data
+ *
+ * @return string|false JSON text
+ */
+function rackflow_jsonBody($data)
+{
+    if (is_array($data) && count($data) === 0) {
+        $data = new stdClass();
+    }
+    return json_encode($data);
+}
+
+/**
  * Make API call to RackFlow backend.
  *
  * @param string $apiUrl Base API URL
@@ -837,7 +854,7 @@ function rackflow_apiCall($apiUrl, $apiKey, $method, $endpoint, $data = null, $t
     if ($method !== 'GET') {
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
         if ($data !== null && in_array($method, array('POST', 'PUT', 'PATCH'))) {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+            curl_setopt($ch, CURLOPT_POSTFIELDS, rackflow_jsonBody($data));
         }
     }
     
@@ -1048,7 +1065,7 @@ function rackflow_CreateAccount(array $params)
                 'external_email' => $externalEmail,
                 'product_code' => $productCode,
                 'description' => isset($params['productname']) ? $params['productname'] : null,
-                'service_config' => $vmServiceConfig,
+                'service_config' => (object)$vmServiceConfig,
             );
             if ($vmTemplateId !== null && $vmTemplateId > 0) {
                 $serviceData['vm_template_id'] = $vmTemplateId;
@@ -1084,7 +1101,7 @@ function rackflow_CreateAccount(array $params)
                 'product_code' => $productCode,
                 'service_type' => $serviceType,
                 'description' => isset($params['productname']) ? $params['productname'] : null,
-                'service_config' => $serviceConfig,
+                'service_config' => (object)$serviceConfig,
             );
         }
 
@@ -3565,7 +3582,7 @@ function rackflow_runStrategyAction(array $params, $actionName, array $actionPar
         $apiConfig['key'],
         'POST',
         '/api/billing/services/' . (int)$rackflowServiceId . '/actions/' . rawurlencode($actionName) . $qs,
-        array('params' => $actionParams),
+        array('params' => (object)$actionParams),
         $timeout
     );
     if (!$result['success']) {
