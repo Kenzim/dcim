@@ -41,6 +41,16 @@ PHASE1_TYPES = (
     "billing_refund_mismatch",
     "billing_adjustment_bounds",
 )
+# Billing phase 2 types (docs/billing-phase2-design.md 15.4): stubs, shipped disabled.
+PHASE2_TYPES = (
+    "billing_tax_line_sum",
+    "billing_tax_summary_consistent",
+    "billing_tax_evidence_conflict",
+    "billing_tax_not_registered",
+    "billing_job_needs_review",
+    "billing_job_stale",
+    "billing_email_template_render_failed",
+)
 _numbers = iter(range(9000, 100000))
 
 
@@ -137,7 +147,9 @@ def test_changing_only_a_parameter_keeps_the_default_state(db_session):
 
 def test_pre_existing_types_stay_enabled_by_default(db_session):
     settings = effective_settings(db_session)
-    assert all(s.enabled for key, s in settings.items() if key not in BILLING_TYPES + PHASE1_TYPES)
+    assert all(
+        s.enabled for key, s in settings.items() if key not in BILLING_TYPES + PHASE1_TYPES + PHASE2_TYPES
+    )
 
 
 def test_phase1_types_ship_disabled_and_find_nothing_yet(db_session):

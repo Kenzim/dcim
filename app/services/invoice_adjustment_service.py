@@ -20,6 +20,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import func, select
@@ -85,6 +86,21 @@ class AdjustmentConflictError(InvoiceAdjustmentError):
 
 class AdjustmentIdempotencyError(AdjustmentConflictError):
     """The idempotency key was already used for a different note."""
+
+
+@dataclass(frozen=True)
+class RowBase:
+    """One tax group of an invoice, as left after earlier credit notes (billing phase 2, 4.8).
+
+    ``name`` is None for the untaxed entry (lines with no tax row).
+    """
+
+    name: Optional[str]
+    rate_percent: Optional[Decimal]
+    jurisdiction: Optional[str]
+    reverse_charge: bool
+    worth_cents: int
+    tax_cents: int
 
 
 @dataclass(frozen=True)
@@ -725,6 +741,15 @@ class InvoiceAdjustmentService:
         The caller holds the invoice lock.
         """
         return _worth_and_tax_before(db, invoice, before_key)
+
+    @staticmethod
+    def tax_base_rows(db: Session, invoice: Invoice, *, before_key: str) -> list["RowBase"]:
+        """The per-row form of ``tax_base`` for a v2 tax invoice (billing phase 2, design 4.8).
+
+        One entry per ``(name, rate_percent, jurisdiction, reverse_charge)`` group
+        of the invoice's and its debit notes' tax rows, plus one untaxed entry.
+        """
+        raise NotImplementedError("tax_base_rows is built by the tax engine worker")
 
     @staticmethod
     def tax_of(amount_cents: int, worth_cents: int, tax_cents: int) -> int:
