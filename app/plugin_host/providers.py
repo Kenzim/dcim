@@ -20,9 +20,13 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
+
 from app.models.plugin_host import PluginInstallation, PluginStatus
-from app.plugin_host import health, kinds, runtime
-from app.plugin_host.common import new_session, rate_hit
+from app.plugin_host import common, health, kinds, runtime
+from app.plugin_host.common import new_session
 from app.plugin_host.manifest import Manifest
 from app.plugin_host.sdk import PluginContext
 
@@ -35,6 +39,10 @@ logger = logging.getLogger(__name__)
 SLOTS_PER_PLUGIN = 2
 # How long a caller waits for its new thread to start before it gives up with ``busy``.
 START_SECONDS = 2.0
+
+# The rate limit asks Redis with these socket timeouts and no retries, so a Redis that does not
+# answer costs a call at most about twice this before the per-process count takes over.
+REDIS_TIMEOUT_SECONDS = 0.25
 
 _slots_lock = threading.Lock()
 _running: dict[str, int] = {}  # by plugin id: calls whose code has not returned yet
@@ -267,6 +275,59 @@ def _work(call: _Call) -> None:
         call.done.set()
 
 
+_rate_redis_lock = threading.Lock()
+_rate_redis: Optional[tuple[Any, Any]] = None  # the shared client, and the client made from it here
+
+
+def _rate_client() -> Any:
+    """A client for the shared Redis with short timeouts; the shared client itself is left as it is.
+
+    Anything other than a ``redis.Redis`` (a stand-in in tests) is used as it is.
+    """
+    global _rate_redis
+    from app.core import redis as redis_module
+
+    shared = redis_module.redis_client
+    if not isinstance(shared, redis.Redis):
+        return shared
+    with _rate_redis_lock:
+        if _rate_redis is None or _rate_redis[0] is not shared:
+            pool = shared.connection_pool
+            options = dict(pool.connection_kwargs)
+            options.update(
+                socket_timeout=REDIS_TIMEOUT_SECONDS,
+                socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
+                retry_on_timeout=False,
+                retry=Retry(NoBackoff(), 0),
+            )
+            client = redis.Redis(
+                connection_pool=redis.ConnectionPool(connection_class=pool.connection_class, **options),
+                retry=Retry(NoBackoff(), 0),
+            )
+            _rate_redis = (shared, client)
+        return _rate_redis[1]
+
+
+def _rate_hit(key: str, limit: int, window_seconds: int) -> bool:
+    """Count one call; False when the window's limit is used. Redis first, the per-process count when it fails or is slow."""
+    bucket = int(time.time() // window_seconds)
+    redis_key = f"rf:plugin:rl:{key}:{bucket}"
+    try:
+        client = _rate_client()
+        count = int(client.incr(redis_key))
+        if count == 1:
+            client.expire(redis_key, window_seconds + 5)
+        return count <= limit
+    except Exception:  # noqa: BLE001 - Redis down or too slow: count in this process
+        now = time.time()
+        count, started = common._local_counters.get(key, (0, now))
+        if now - started >= window_seconds:
+            count, started = 0, now
+        count += 1
+        common._local_counters[key] = (count, started)
+        return count <= limit
+
+
 def _fail(plugin_id: str, provider: str, reason: str, message: str, detail: Optional[str] = None) -> ProviderUnavailable:
     health.record_failure(plugin_id, message, detail=detail, provider=provider)
     return ProviderUnavailable(reason)
@@ -325,14 +386,16 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
         raise ProviderUnavailable("unknown_provider")
     inst, manifest, provide = _resolve(kind, plugin_id, provider_id)
 
-    if method in spec.metered and provide.rate_limit is not None:
-        limit = provide.rate_limit
-        if not rate_hit(f"provider:{plugin_id}:{kind}:{provider_id}", limit.calls, limit.per_seconds):
-            raise ProviderUnavailable("rate_limited")
-
     seconds = float(provide.timeout_seconds)
     if timeout_seconds is not None:
         seconds = max(0.1, min(seconds, float(timeout_seconds)))
+    if method in spec.metered and provide.rate_limit is not None:
+        limit = provide.rate_limit
+        asked = time.monotonic()
+        if not _rate_hit(f"provider:{plugin_id}:{kind}:{provider_id}", limit.calls, limit.per_seconds):
+            raise ProviderUnavailable("rate_limited")
+        # The time Redis took is part of the caller's limit.
+        seconds = max(0.1, seconds - (time.monotonic() - asked))
     try:
         # The plugin gets copies, so nothing it does to its arguments reaches billing's objects.
         call_args = copy.deepcopy(args)

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -316,6 +317,45 @@ def test_loading_the_plugin_counts_within_the_call_time_limit(plugin_env, db_ses
     assert err.value.reason == "timeout"
     assert time.monotonic() - started < 2.0
     assert failures(db_session, "demo_plugin") == 1
+
+
+def test_a_redis_that_does_not_answer_cannot_hold_the_caller(plugin_env, db_session, monkeypatch):
+    import socket
+
+    import redis
+
+    import app.core.redis as redis_module
+    from app.plugin_host import common
+
+    setup_plugin(plugin_env, db_session, VALIDATOR, rate_limit={"calls": 2, "per_seconds": 3600})
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(16)  # connections are accepted by the kernel and never answered
+    shared = redis.Redis(host="127.0.0.1", port=silent.getsockname()[1], decode_responses=True)
+    monkeypatch.setattr(redis_module, "redis_client", shared)
+    common._local_counters.clear()
+    outcome = []
+
+    def calls():
+        for _ in range(3):
+            try:
+                outcome.append(validator_call().status)
+            except ProviderUnavailable as exc:
+                outcome.append(exc.reason)
+
+    caller = threading.Thread(target=calls, daemon=True)
+    started = time.monotonic()
+    caller.start()
+    caller.join(5)
+    try:
+        assert not caller.is_alive(), "the caller was still blocked on Redis after 5 s"
+        assert outcome == ["valid", "valid", "rate_limited"]
+        assert time.monotonic() - started < 3 * (2 * providers.REDIS_TIMEOUT_SECONDS + 0.5)
+        assert common._local_counters, "a silent Redis falls back to the per-process count"
+        assert redis_module.redis_client is shared and shared.connection_pool.connection_kwargs.get("socket_timeout") is None
+    finally:
+        silent.close()
+        caller.join(10)
 
 
 def test_two_kinds_with_the_same_provider_id_have_separate_rate_limits(plugin_env, db_session):
