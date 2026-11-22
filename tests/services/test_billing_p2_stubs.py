@@ -18,7 +18,7 @@ from app.services.email_message_service import EmailMessageService
 from app.services.email_templates import render as email_render
 from app.services.invoice_adjustment_service import InvoiceAdjustmentService
 from app.services.invoice_service import InvoiceService
-from app.services.tax import context, engine, legal_notes, mode, pack_import, result, validators
+from app.services.tax import context, engine, mode, result
 from app.services.tax.packs import registry as pack_registry
 
 NOW = datetime(2026, 11, 22, 12, 0, 0)
@@ -29,12 +29,6 @@ STUBS = [
     lambda: context.TaxContextBuilder.for_adjustment(None, None, []),
     lambda: engine.TaxEngine.calculate(None, None),
     lambda: engine.TaxEngine.prepare(None, None),
-    lambda: validators.TaxIdService.check(None, None, force=True),
-    lambda: pack_registry.PackRegistry.list(None),
-    lambda: pack_registry.PackRegistry.load(None, "uk_vat", "2026.1"),
-    lambda: pack_import.PackImporter.preview(None, "uk_vat", "2026.1", NOW),
-    lambda: pack_import.PackImporter.apply(None, "uk_vat", "2026.1", NOW, diff_hash="x", actor_user_id=None),
-    lambda: legal_notes.render_legal_note(None, "outside_scope", "en"),
     lambda: providers.call_provider("tax_id_validator", "vies_validator:vies", "validate"),
     lambda: providers.providers_of("tax_id_validator"),
     lambda: runner.run_job(lambda: None, "late_fees", dry_run=True, trigger="admin", now=NOW),
