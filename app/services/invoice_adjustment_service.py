@@ -673,9 +673,19 @@ def _credit_line_rows(
     being credited, so crediting what is left takes exactly what is left of
     every row. The line's tax becomes the sum of its rows; a caller's
     ``tax_cents`` is ignored for a line with tax rows.
+
+    Credits by amount and refund notes take from a rate group as a whole, not
+    from its lines, so each row is also bounded by what is left of its group
+    in ``tax_base_rows`` (see ``_bound_by_group``).
     """
     out: list[NoteLine] = []
     credits: dict[int, list[LineRowCredit]] = {}
+    groups = {
+        _group_key(r.name, r.rate_percent, r.jurisdiction, r.reverse_charge): r
+        for r in _tax_base_rows(db, invoice, key)
+        if r.name is not None
+    }
+    taken: dict[tuple, list[int]] = {}
     for index, line in enumerate(lines):
         left = _line_rows_left(db, line.invoice_line_id, key) if line.invoice_line_id else []
         if not left:
@@ -691,6 +701,10 @@ def _credit_line_rows(
         for row, base_left, tax_left in left:
             tax = refund_tax_proportional(max(0, min(net, net_left)), max(0, tax_left), net_left) if net_left > 0 else 0
             base = refund_tax_proportional(max(0, min(net, net_left)), max(0, base_left), net_left) if net_left > 0 else 0
+            group_key = _group_key(row.name, row.rate_percent, row.jurisdiction, row.reverse_charge)
+            tax = _bound_by_group(
+                groups[group_key], taken.setdefault(group_key, [0, 0]), base, tax, f"line {index + 1}"
+            )
             row_credits.append(
                 LineRowCredit(
                     source_line_tax_id=int(row.id), name=row.name, rate_percent=row.rate_percent,
@@ -701,6 +715,27 @@ def _credit_line_rows(
         credits[index] = row_credits
         out.append(replace(line, tax_cents=sum(c.tax_cents for c in row_credits)))
     return out, credits
+
+
+def _bound_by_group(group: RowBase, taken: list[int], base: int, tax: int, label: str) -> int:
+    """The tax of one row of a credit by lines, bounded by what is left of its rate group.
+
+    ``taken`` is the ``[base, tax]`` this note has already taken from the
+    group and is updated. A note may not credit more net than the group has
+    left; one that credits all of it takes exactly the group's remaining tax,
+    so the note that completes a rate leaves no cent behind or over.
+    """
+    net_left = int(group.worth_cents) - int(group.tax_cents)
+    tax_left = int(group.tax_cents) - taken[1]
+    taken[0] += base
+    if taken[0] > net_left:
+        raise AdjustmentConflictError(
+            f"{label} credits more than is left at {group.name} ({max(0, net_left)} cents net)"
+        )
+    tax = tax_left if taken[0] == net_left else min(tax, tax_left)
+    tax = max(0, tax)
+    taken[1] += tax
+    return tax
 
 
 def _credited_net(db: Session, invoice_line_id: int, key: str) -> int:
@@ -768,6 +803,40 @@ def _debit_tax(
         line_tax = result.line(f"line:{index}")
         out.append(replace(line, tax_cents=line_tax.tax_cents if line_tax is not None else 0))
     return out, result
+
+
+def _retried_debit_note(
+    db: Session,
+    invoice: Invoice,
+    key: str,
+    reason: AdjustmentReason,
+    outcome: AdjustmentOutcome,
+    reason_text: Optional[str],
+    lines: Sequence[NoteLine],
+) -> Optional[InvoiceAdjustment]:
+    """The note already issued under ``key`` on an invoice taxed per row, before any tax is computed.
+
+    The engine taxed that note at its issue time; the rules may have changed
+    since, so a retry is matched against the tax the note was issued with.
+    Raises when the key was used for other parameters. Any other invoice
+    takes the caller's tax, so its retry is matched after ``_debit_tax``.
+    """
+    if not _has_tax_rows(db, invoice):
+        return None
+    existing = db.execute(
+        select(InvoiceAdjustment).where(InvoiceAdjustment.idempotency_key == key)
+    ).scalar_one_or_none()
+    if existing is None:
+        return None
+    issued = db.execute(
+        select(InvoiceAdjustmentLine.tax_cents)
+        .where(InvoiceAdjustmentLine.adjustment_id == existing.id)
+        .order_by(InvoiceAdjustmentLine.sort_order, InvoiceAdjustmentLine.id)
+    ).scalars().all()
+    if len(issued) == len(lines):
+        lines = [replace(line, tax_cents=int(tax)) for line, tax in zip(lines, issued)]
+    fingerprint = _fingerprint(AdjustmentKind.DEBIT, invoice.id, reason, outcome, reason_text, lines)
+    return _existing_note(db, key, fingerprint, invoice.id)
 
 
 def _write_debit_rows(db: Session, note: InvoiceAdjustment, result: Any) -> None:
@@ -1121,8 +1190,11 @@ class InvoiceAdjustmentService:
         invoice = _lock_invoice(db, invoice, reseller=True, billing_account=True)
 
         note_lines = _normalise_lines(db, invoice, lines)
-        note_lines, debit_tax = _debit_tax(db, invoice, note_lines, reason)
         outcome = AdjustmentOutcome.INCREASED_BALANCE
+        retried = _retried_debit_note(db, invoice, key, reason, outcome, reason_text, note_lines)
+        if retried is not None:
+            return retried
+        note_lines, debit_tax = _debit_tax(db, invoice, note_lines, reason)
         fingerprint = _fingerprint(
             AdjustmentKind.DEBIT, invoice.id, reason, outcome, reason_text, note_lines
         )

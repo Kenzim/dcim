@@ -80,19 +80,119 @@ def test_rule_validation(client, headers):
         assert client.post(f"{BASE}/rules", headers=headers, json=body).status_code == 422
 
 
-def test_superseding_a_mirrored_rule_moves_the_legacy_link(client, db_session, headers):
+def test_superseding_a_mirrored_rule_is_refused(client, db_session, headers):
+    """A mirrored rule changes only through /tax-rates, as an edit of it does."""
     rate = TaxRate(name="UK", country="GB", region=None, rate_bps=2000, enabled=True)
     db_session.add(rate)
     db_session.flush()
     rule = TaxRuleMirror.sync(db_session, rate, now=datetime.now(timezone.utc) - timedelta(days=1))
     db_session.commit()
+    count = db_session.query(TaxRule).count()
     resp = client.post(
         f"{BASE}/rules/{rule.id}/supersede", headers=headers, json={"rate_percent": "17.5", "valid_from": _later()}
     )
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["legacy_tax_rate_id"] == rate.id
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["code"] == "tax_rule_mirrored"
     db_session.expire_all()
-    assert db_session.get(TaxRule, rule.id).legacy_tax_rate_id is None
+    kept = db_session.get(TaxRule, rule.id)
+    assert kept.legacy_tax_rate_id == rate.id and kept.valid_to is None
+    assert db_session.query(TaxRule).count() == count
+
+
+RULE_NOT_NULL = (
+    "name", "tax_class_id", "customer_type", "rate_percent", "priority", "compound", "compound_order",
+    "jurisdiction", "reverse_charge", "rounding_point", "rounding_rule", "enabled",
+)
+REGISTRATION_NOT_NULL = ("jurisdiction", "scheme", "tax_number", "country", "valid_from", "enabled")
+
+
+def _standard(client, headers):
+    return next(c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json() if c["code"] == "standard")
+
+
+@pytest.mark.parametrize("field", RULE_NOT_NULL)
+def test_explicit_null_for_a_not_null_rule_field_is_refused(client, headers, field):
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+    created = client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_from": _later(days=1)}).json()
+    current = client.post(f"{BASE}/rules", headers=headers, json=body).json()
+    assert client.post(f"{BASE}/rules", headers=headers, json={**body, field: None}).status_code == 422
+    resp = client.put(f"{BASE}/rules/{created['id']}", headers=headers, json={field: None})
+    assert resp.status_code == 422, resp.text
+    resp = client.post(
+        f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={field: None, "valid_from": _later(hours=1)}
+    )
+    assert resp.status_code == 422, resp.text
+    assert client.get(f"{BASE}/rules/{created['id']}", headers=headers).json()[field] is not None
+
+
+@pytest.mark.parametrize("field", REGISTRATION_NOT_NULL)
+def test_explicit_null_for_a_not_null_registration_field_is_refused(client, headers, field):
+    body = {"jurisdiction": "GB", "scheme": "domestic", "tax_number": "GB1", "country": "GB"}
+    created = client.post(f"{BASE}/registrations", headers=headers, json=body)
+    assert created.status_code == 201, created.text
+    resp = client.post(f"{BASE}/registrations", headers=headers, json={**body, field: None})
+    assert resp.status_code == 422, resp.text
+    resp = client.put(f"{BASE}/registrations/{created.json()['id']}", headers=headers, json={field: None})
+    assert resp.status_code == 422, resp.text
+
+
+def test_explicit_null_class_name_is_refused(client, headers):
+    created = client.post(f"{BASE}/classes", headers=headers, json={"code": "books", "name": "Books"}).json()
+    resp = client.put(f"{BASE}/classes/{created['id']}", headers=headers, json={"name": None})
+    assert resp.status_code == 422, resp.text
+    resp = client.put(f"{BASE}/classes/{created['id']}", headers=headers, json={"description": None})
+    assert resp.status_code == 200, resp.text
+
+
+def test_rule_valid_to_must_be_after_valid_from(client, headers):
+    """A rule holds on the half-open ``[valid_from, valid_to)``, so an equal ``valid_to`` is empty too."""
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+    start = _later(days=1)
+
+    def refused(resp):
+        return resp.status_code == 422 and resp.json()["detail"]["code"] == "valid_to_not_after_valid_from"
+
+    assert refused(client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_from": start, "valid_to": start}))
+    assert refused(client.post(
+        f"{BASE}/rules", headers=headers, json={**body, "valid_from": start, "valid_to": _later(hours=1)}
+    ))
+    assert refused(client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_to": _later(hours=-1)}))
+    future = client.post(f"{BASE}/rules", headers=headers, json={**body, "valid_from": start, "valid_to": _later(days=2)})
+    assert future.status_code == 201, future.text
+    assert refused(client.put(f"{BASE}/rules/{future.json()['id']}", headers=headers, json={"valid_to": _later(hours=1)}))
+    assert client.put(
+        f"{BASE}/rules/{future.json()['id']}", headers=headers, json={"valid_to": _later(days=3)}
+    ).status_code == 200
+    current = client.post(f"{BASE}/rules", headers=headers, json=body).json()
+    at = _later(hours=2)
+    for valid_to in (at, _later(hours=1)):
+        assert refused(client.post(
+            f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={"valid_from": at, "valid_to": valid_to}
+        ))
+    assert client.post(
+        f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={"valid_from": at, "valid_to": _later(hours=3)}
+    ).status_code == 201
+
+
+def test_rule_country_xi_is_refused_with_a_pointer_to_gb(client, headers):
+    """Northern Ireland is taxed by the GB rules; an XI rule would never match a buyer."""
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+
+    def refused(resp):
+        detail = resp.json()["detail"] if resp.status_code == 422 else {}
+        return detail.get("code") == "country_xi" and "GB" in detail.get("message", "")
+
+    assert refused(client.post(f"{BASE}/rules", headers=headers, json={**body, "country": "xi"}))
+    future = client.post(f"{BASE}/rules", headers=headers, json={**body, "country": "GB", "valid_from": _later(days=1)})
+    assert refused(client.put(f"{BASE}/rules/{future.json()['id']}", headers=headers, json={"country": "XI"}))
+    current = client.post(f"{BASE}/rules", headers=headers, json={**body, "country": "GB"}).json()
+    assert refused(client.post(
+        f"{BASE}/rules/{current['id']}/supersede", headers=headers, json={"country": "XI", "valid_from": _later(hours=1)}
+    ))
+    assert client.get(f"{BASE}/rules/{future.json()['id']}", headers=headers).json()["country"] == "GB"
 
 
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):

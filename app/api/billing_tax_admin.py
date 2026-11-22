@@ -12,10 +12,10 @@ import re
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, ClassVar, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -103,6 +103,17 @@ def _json(value: Any) -> Any:
 
 class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # Fields that may be left out but not sent as null: their columns are NOT NULL.
+    not_null: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_nulls(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            nulls = sorted(name for name in cls.not_null if name in data and data[name] is None)
+            if nulls:
+                raise ValueError(f"{', '.join(nulls)} may not be null")
+        return data
 
 
 # --- classes ---
@@ -115,6 +126,8 @@ class ClassCreate(RequestModel):
 
 
 class ClassUpdate(RequestModel):
+    not_null: ClassVar[frozenset[str]] = frozenset({"name"})
+
     name: Optional[str] = Field(default=None, min_length=1, max_length=128)
     description: Optional[str] = Field(default=None, max_length=512)
 
@@ -182,6 +195,11 @@ RULE_FIELDS = (
 
 
 class RuleFields(RequestModel):
+    not_null: ClassVar[frozenset[str]] = frozenset({
+        "name", "tax_class_id", "customer_type", "rate_percent", "priority", "compound", "compound_order",
+        "jurisdiction", "reverse_charge", "rounding_point", "rounding_rule", "enabled",
+    })
+
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     country: Optional[str] = Field(default=None, min_length=2, max_length=2)
     region: Optional[str] = Field(default=None, max_length=128)
@@ -263,7 +281,15 @@ def _rule_payload(row: TaxRule) -> dict:
     return payload
 
 
-def _check_rule(db: Session, values: dict) -> None:
+def _check_rule(db: Session, values: dict, valid_from: datetime) -> None:
+    """Checks shared by create, update and supersede; ``valid_from`` is the start of the row written."""
+    valid_to = values.get("valid_to")
+    # A rule holds on [valid_from, valid_to): an end at or before the start leaves it empty.
+    if valid_to is not None and _aware(valid_to) <= _aware(valid_from):
+        raise _unprocessable("valid_to_not_after_valid_from", "valid_to must be after valid_from")
+    # Buyers in Northern Ireland are matched as GB, so a rule for XI would never apply.
+    if values.get("country") == "XI":
+        raise _unprocessable("country_xi", "Northern Ireland (XI) is taxed by GB rules; use country GB")
     if values.get("tax_class_id") is not None and db.get(TaxClass, values["tax_class_id"]) is None:
         raise _unprocessable("unknown_tax_class", "Unknown tax class")
     jurisdiction = values.get("jurisdiction") or JURISDICTION_ANY
@@ -306,13 +332,10 @@ def create_rule(body: RuleCreate, auth: AdminDep, db: DbDep):
     now = _now()
     values = body.model_dump(exclude={"valid_from"})
     values = {k: v for k, v in values.items() if v is not None}
-    _check_rule(db, values)
+    valid_from = _not_in_past(body.valid_from, now) if body.valid_from is not None else now
+    _check_rule(db, values, valid_from)
     values.setdefault("jurisdiction", JURISDICTION_ANY)
-    row = TaxRule(
-        **values,
-        valid_from=_not_in_past(body.valid_from, now) if body.valid_from is not None else now,
-        source=TaxRuleSource.ADMIN.value,
-    )
+    row = TaxRule(**values, valid_from=valid_from, source=TaxRuleSource.ADMIN.value)
     db.add(row)
     db.flush()
     _audit(db, auth, "rule.created", "tax_rule", row.id, _json(body.model_dump(exclude_unset=True)))
@@ -339,7 +362,7 @@ def update_rule(rule_id: int, body: RuleFields, auth: AdminDep, db: DbDep):
     if row.legacy_tax_rate_id is not None:
         raise _conflict("tax_rule_mirrored", "A mirrored rule changes through /tax-rates")
     data = body.model_dump(exclude_unset=True)
-    _check_rule(db, {**{name: getattr(row, name) for name in RULE_FIELDS}, **data})
+    _check_rule(db, {**{name: getattr(row, name) for name in RULE_FIELDS}, **data}, row.valid_from)
     for name, value in data.items():
         setattr(row, name, value)
     _audit(db, auth, "rule.updated", "tax_rule", row.id, _json(data))
@@ -355,6 +378,8 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
     old = db.get(TaxRule, rule_id, with_for_update=True)
     if old is None:
         raise HTTPException(status_code=404, detail="Tax rule not found")
+    if old.legacy_tax_rate_id is not None:
+        raise _conflict("tax_rule_mirrored", "A mirrored rule changes through /tax-rates")
     if old.valid_to is not None and _aware(old.valid_to) <= at:
         raise _conflict("tax_rule_closed", "The rule already ends before valid_from")
     if _aware(old.valid_from) >= at:
@@ -363,11 +388,8 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
     values = {name: getattr(old, name) for name in RULE_FIELDS}
     values.update(changes)
     values["valid_to"] = changes.get("valid_to", old.valid_to)
-    _check_rule(db, values)
-    legacy_id = old.legacy_tax_rate_id
+    _check_rule(db, values, at)
     old.valid_to = at
-    # The unique legacy_tax_rate_id moves to the new row; the old row lets go of it first.
-    old.legacy_tax_rate_id = None
     db.flush()
     new = TaxRule(
         **values,
@@ -376,7 +398,6 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
         pack_id=old.pack_id,
         pack_version=old.pack_version,
         pack_rule_key=old.pack_rule_key,
-        legacy_tax_rate_id=legacy_id,
         supersedes_id=old.id,
     )
     db.add(new)
@@ -393,6 +414,10 @@ def supersede_rule(rule_id: int, body: RuleSupersede, auth: AdminDep, db: DbDep)
 
 
 class RegistrationFields(RequestModel):
+    not_null: ClassVar[frozenset[str]] = frozenset(
+        {"jurisdiction", "scheme", "tax_number", "country", "valid_from", "enabled"}
+    )
+
     jurisdiction: Optional[str] = Field(default=None, min_length=2, max_length=16)
     scheme: Optional[TaxRegistrationScheme] = None
     tax_number: Optional[str] = Field(default=None, min_length=1, max_length=64)
