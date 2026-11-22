@@ -853,14 +853,20 @@ class InvoiceService:
     # --- Balance ---
 
     @staticmethod
-    def _legacy_allocated_cents(db: Session, invoice_id: int) -> int:
-        value = db.scalar(
-            select(func.coalesce(func.sum(Payment.amount_cents), 0)).where(
-                Payment.invoice_id == invoice_id,
-                Payment.status == PaymentStatus.SUCCEEDED,
-            )
+    def _legacy_allocated_cents(db: Session, invoice_id: int, *, for_update: bool = False) -> int:
+        """The sum of the invoice's succeeded payments.
+
+        ``for_update`` makes it a locking read, for a caller holding the invoice
+        lock that decides from it (see ``balance``).
+        """
+        query = select(func.coalesce(func.sum(Payment.amount_cents), 0)).where(
+            Payment.invoice_id == invoice_id,
+            Payment.status == PaymentStatus.SUCCEEDED,
         )
-        return int(value or 0)
+        if for_update:
+            db.flush()
+            query = query.with_for_update()
+        return int(db.scalar(query) or 0)
 
     @staticmethod
     def allocated_cents(db: Session, invoice_id: int) -> int:

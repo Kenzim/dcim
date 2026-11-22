@@ -11,7 +11,8 @@ The engine is built through ``configure_engine()`` as the application's is
 isolation level (REPEATABLE READ) and at READ COMMITTED. The second session
 reads before the first commits, so under REPEATABLE READ its snapshot
 predates the first payment: settlement must read the payments with a locking
-read once it holds the invoice lock, or it misses the overpayment.
+read once it holds the invoice lock, or it misses the overpayment (v2) or
+leaves a fully paid invoice open (legacy and shadow).
 """
 
 from __future__ import annotations
@@ -159,3 +160,42 @@ def test_two_payments_settling_at_once_credit_the_overpayment(sessions):
         assert [c.amount_cents for c in credits] == [200]
         assert db.get(BillingAccount, account_id).credit_balance_cents == 200
         assert (balance.paid_net_cents, balance.worth_cents, balance.due_cents) == (1200, 1200, 0)
+
+
+def _setup_legacy(sessions, mode: str) -> int:
+    """An open invoice of 1,000 under the ``legacy`` or ``shadow`` invoice engine."""
+    from app.models.commerce_account import BillingAccount
+    from app.models.reseller import InvoicePurpose
+    from app.models.user import User
+    from app.services.invoice_service import InvoiceService
+    from app.services.settings_store import set_setting
+
+    with sessions() as db:
+        set_setting(db, "billing_invoice_engine", mode)
+        user = User(username=f"p1i-race-{mode}", email=f"p1i-race-{mode}@example.com", is_admin=False)
+        user.set_password("p1i-race-password")
+        db.add(user)
+        db.flush()
+        account = BillingAccount(account_type="client", user_id=user.id, status="active", currency="USD")
+        db.add(account)
+        db.commit()
+        invoice = InvoiceService.create(db, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE,
+                                        amount_cents=1000, description="Upgrade")
+        db.commit()
+        return int(invoice.id)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow"])
+def test_two_payments_settling_at_once_pay_a_legacy_invoice(sessions, mode):
+    """Legacy rule, unchanged: succeeded payments covering the total make the invoice paid."""
+    from app.models.reseller import Invoice, InvoiceStatus
+
+    invoice_id = _setup_legacy(sessions, mode)
+    first, second = _together(
+        lambda: _pay(sessions, invoice_id, 500, delay=0.0, hold=1.0),
+        lambda: _pay(sessions, invoice_id, 500, delay=0.3, hold=0.0),
+    )
+    assert not isinstance(first, Exception), first
+    assert not isinstance(second, Exception), second
+    with sessions() as db:
+        assert db.get(Invoice, invoice_id).status == InvoiceStatus.PAID

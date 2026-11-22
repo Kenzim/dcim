@@ -48,9 +48,11 @@ def _outstanding(db: Session, invoice: Invoice, mode: str) -> int:
 
     if mode == "v2":
         return InvoiceService.balance(db, invoice, for_update=True).remaining_cents
-    legacy = int(invoice.amount_cents) - InvoiceService._legacy_allocated_cents(db, invoice.id)
+    legacy = int(invoice.amount_cents) - InvoiceService._legacy_allocated_cents(
+        db, invoice.id, for_update=True
+    )
     if mode == "shadow":
-        remaining = InvoiceService.balance(db, invoice).remaining_cents
+        remaining = InvoiceService.balance(db, invoice, for_update=True).remaining_cents
         if remaining != max(0, legacy):
             BillingShadowService.record(
                 "invoice",

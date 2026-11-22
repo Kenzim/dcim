@@ -339,7 +339,9 @@ def _settle_legacy(
     invoice = InvoiceService.get_for_update(db, invoice_id)
     if invoice is None:
         return None
-    allocated = InvoiceService._legacy_allocated_cents(db, invoice.id)
+    # A locking read: under REPEATABLE READ a plain read could miss a payment
+    # committed while this transaction waited for the invoice lock.
+    allocated = InvoiceService._legacy_allocated_cents(db, invoice.id, for_update=True)
 
     if invoice.status == InvoiceStatus.VOID and (
         invoice.order_id is not None or _is_retail(invoice)
@@ -400,12 +402,12 @@ def _compare_decision(db: Session, invoice: Invoice, *, cause: Optional[str]) ->
     from app.services.invoice_service import InvoiceService
 
     try:
-        allocated = InvoiceService._legacy_allocated_cents(db, invoice.id)
+        allocated = InvoiceService._legacy_allocated_cents(db, invoice.id, for_update=True)
         legacy = {
             "remaining_cents": max(0, int(invoice.amount_cents) - allocated),
             "paid": invoice.status == InvoiceStatus.PAID,
         }
-        balance = InvoiceService.balance(db, invoice)
+        balance = InvoiceService.balance(db, invoice, for_update=True)
         v2_status = InvoiceService.target_status(
             db, invoice, balance, cause=cause or "settlement"
         )
@@ -440,7 +442,7 @@ def _record_legacy_overpayment_raise(
     from app.services.invoice_service import InvoiceService
 
     try:
-        balance = InvoiceService.balance(db, invoice)
+        balance = InvoiceService.balance(db, invoice, for_update=True)
         legacy = {
             "decision": "raise",
             "allocated_cents": int(allocated),
