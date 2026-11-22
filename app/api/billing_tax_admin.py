@@ -38,7 +38,7 @@ from app.models.tax import (
 )
 from app.services.audit_service import AuditService
 from app.services.billing.rounding import TAX_ROUNDING_RULES
-from app.services.tax.rules_repo import TaxRateError, normalise_rate
+from app.services.tax.rules_repo import MAPPED_RULE_COUNTRIES, TaxRateError, normalise_rate
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -283,9 +283,15 @@ def _check_rule(db: Session, values: dict, valid_from: datetime) -> None:
     # A rule holds on [valid_from, valid_to): an end at or before the start leaves it empty.
     if valid_to is not None and _aware(valid_to) <= _aware(valid_from):
         raise _unprocessable("valid_to_not_after_valid_from", "valid_to must be after valid_from")
-    # Buyers in Northern Ireland are matched as GB, so a rule for XI would never apply.
-    if values.get("country") == "XI":
-        raise _unprocessable("country_xi", "Northern Ireland (XI) is taxed by GB rules; use country GB")
+    # Buyers in Northern Ireland and the Isle of Man are matched as GB, in Monaco as FR, so a rule
+    # for XI, IM or MC would never apply.
+    country = values.get("country")
+    if country in MAPPED_RULE_COUNTRIES:
+        names = {"XI": "Northern Ireland", "IM": "The Isle of Man", "MC": "Monaco"}
+        target = MAPPED_RULE_COUNTRIES[country]
+        raise _unprocessable(
+            f"country_{country.lower()}", f"{names[country]} ({country}) is taxed by {target} rules; use country {target}"
+        )
     if values.get("tax_class_id") is not None and db.get(TaxClass, values["tax_class_id"]) is None:
         raise _unprocessable("unknown_tax_class", "Unknown tax class")
     jurisdiction = values.get("jurisdiction") or JURISDICTION_ANY

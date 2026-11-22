@@ -30,6 +30,13 @@ _COUNTRY = re.compile(r"[A-Z]{2}")
 _LOCALE = re.compile(r"[a-z]{2}(-[A-Z]{2})?")
 _RATE = re.compile(r"\d{1,3}(\.\d{1,4})?")
 
+# Rule countries the engine maps to another code, so a rule for them would never match.
+_MAPPED_COUNTRIES = {
+    "XI": "XI is not used: Northern Ireland is GB",
+    "IM": "IM is not used: the Isle of Man is GB",
+    "MC": "MC is not used: Monaco is FR",
+}
+
 
 class PackFormatError(ValueError):
     """The pack does not follow the format of design 7.2."""
@@ -91,8 +98,8 @@ class PackRule(BaseModel):
     def _country(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and not _COUNTRY.fullmatch(value):
             raise ValueError("must be an ISO 3166-1 alpha-2 code in upper case")
-        if value == "XI":
-            raise ValueError("XI is not used: Northern Ireland is GB")
+        if value in _MAPPED_COUNTRIES:
+            raise ValueError(_MAPPED_COUNTRIES[value])
         return value
 
     @field_validator("tax_class")

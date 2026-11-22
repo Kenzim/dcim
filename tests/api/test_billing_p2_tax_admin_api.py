@@ -195,6 +195,17 @@ def test_rule_country_xi_is_refused_with_a_pointer_to_gb(client, headers):
     assert client.get(f"{BASE}/rules/{future.json()['id']}", headers=headers).json()["country"] == "GB"
 
 
+@pytest.mark.parametrize(("code", "country", "error"), [("IM", "GB", "country_im"), ("MC", "FR", "country_mc")])
+def test_rule_country_im_and_mc_are_refused_with_a_pointer(client, headers, code, country, error):
+    """The Isle of Man is taxed by GB rules and Monaco by FR rules; a rule for either would never match."""
+    standard = _standard(client, headers)
+    body = {"name": "VAT", "tax_class_id": standard, "rate_percent": "20"}
+    resp = client.post(f"{BASE}/rules", headers=headers, json={**body, "country": code.lower()})
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == error and country in detail["message"]
+
+
 def test_system_class_cannot_be_deleted_and_used_class_neither(client, db_session, headers):
     classes = {c["code"]: c["id"] for c in client.get(f"{BASE}/classes", headers=headers).json()}
     assert client.delete(f"{BASE}/classes/{classes['standard']}", headers=headers).status_code == 409

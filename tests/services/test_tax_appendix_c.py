@@ -65,6 +65,11 @@ class Case:
     registration: Optional[str] = None
     not_registered: bool = False
     region: Optional[str] = None
+    tax_id: Optional[str] = None  # the buyer's number when it is not "<country>123456789"
+    line1_class: str = "standard"
+    reasons: frozenset = field(default_factory=frozenset)  # evidence reasons that must be recorded
+    evidence_notes: frozenset = field(default_factory=frozenset)  # evidence notes besides not_registered
+    declared: Optional[str] = None  # buyer_country_declared when the engine maps the country
 
 
 C = [
@@ -130,6 +135,20 @@ C = [
     Case("de-to-row-consumer", "DE", ("DE", "OSS_DE"), "US", False, "unchecked", NONE, notes=frozenset({"outside_scope"}), registration="DE"),
 ]
 
+# Cases added after the legal review of billing phase 2 (Isle of Man, Monaco, tax ID country,
+# missing buyer country, a class with no rule). Run with the appendix C cases.
+IT22 = _taxed(2200, 440)  # 439.78
+
+REVIEW = [
+    # The Isle of Man is in the UK VAT area; Monaco is France for EU VAT.
+    Case("uk-to-im-consumer", "GB", ("GB",), "IM", False, "unchecked", GB20, "20.0000", registration="GB",
+         declared="IM"),
+    Case("uk-to-im-business-gb-number", "GB", ("GB",), "IM", True, "valid", GB20, "20.0000", registration="GB",
+         tax_id="GB123456789", declared="IM"),
+    Case("de-to-mc-consumer-oss", "DE", ("DE", "OSS_DE"), "MC", False, "unchecked", FR20, "20.0000",
+         registration="OSS_DE", declared="MC"),
+]
+
 _REGISTRATIONS = {
     "GB": ("GB", "domestic", "GB123456789", "GB"),
     "DE": ("DE", "domestic", "DE123456789", "DE"),
@@ -180,8 +199,8 @@ def _setup(db, case: Case) -> tuple[TaxContext, dict[str, int]]:
         region=case.region,
         postcode=None,
         is_business=case.business,
-        tax_id=f"{case.country}123456789" if case.business else None,
-        tax_id_type="eu_vat" if case.business and case.country not in ("GB", "US") else None,
+        tax_id=(case.tax_id or f"{case.country}123456789") if case.business else None,
+        tax_id_type="eu_vat" if case.business and (case.tax_id or case.country or "")[:2] not in ("GB", "US", "IM") else None,
         tax_id_status=status,
         tax_id_check_id=check_id,
         exempt_all=False,
@@ -192,7 +211,9 @@ def _setup(db, case: Case) -> tuple[TaxContext, dict[str, int]]:
         currency="GBP" if case.seller == "GB" else "EUR",
         prices_include_tax=False,
         buyer=buyer,
-        lines=LINES,
+        lines=LINES if case.line1_class == "standard" else (
+            LINES[0], TaxLineInput(key="line:1", net_cents=1_999, tax_class_code=case.line1_class, kind="product"),
+        ),
         purpose="order_charge",
         owner="retail",
         evidence={},
@@ -200,7 +221,7 @@ def _setup(db, case: Case) -> tuple[TaxContext, dict[str, int]]:
     return context, regs
 
 
-@pytest.mark.parametrize("case", C, ids=[c.id for c in C])
+@pytest.mark.parametrize("case", C + REVIEW, ids=[c.id for c in C + REVIEW])
 def test_appendix_c(db_session, case):
     context, regs = _setup(db_session, case)
     result = TaxEngine.calculate(db_session, context)
@@ -217,8 +238,14 @@ def test_appendix_c(db_session, case):
             assert not any(part.reverse_charge for part in line.parts), key
     assert set(result.legal_note_keys) == set(case.notes)
     assert result.registration_id == (regs[case.registration] if case.registration else None)
-    evidence = json.dumps(dict(result.evidence.values), default=str)
+    values = dict(result.evidence.values)
+    evidence = json.dumps(values, default=str)
     assert ("not_registered" in evidence) == case.not_registered
+    assert set(values.get("notes") or []) - {"not_registered"} == set(case.evidence_notes)
+    reasons = set(values.get("reasons") or [])
+    assert set(case.reasons) <= reasons
+    assert ("tax_id_country_mismatch" in reasons) == ("tax_id_country_mismatch" in case.reasons)
+    assert values.get("buyer_country_declared") == case.declared
 
 
 def test_the_table_covers_every_row_of_appendix_c():

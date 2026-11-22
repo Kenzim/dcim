@@ -193,6 +193,8 @@ def _mutated(mutate):
         lambda d: d["rules"][0].update(rate_percent="-1"),
         lambda d: d["rules"][0].update(country="gb"),
         lambda d: d["rules"][0].update(country="XI"),
+        lambda d: d["rules"][0].update(country="IM"),
+        lambda d: d["rules"][0].update(country="MC"),
         lambda d: d["rules"][0].update(rounding_rule="round_nearest"),
         lambda d: d["rules"][0].update(rounding_point="invoice"),
         lambda d: d["rules"][0].update(jurisdiction="US"),
