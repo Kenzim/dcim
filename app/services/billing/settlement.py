@@ -283,23 +283,53 @@ def settle_invoice(
     *,
     payment: Optional[Payment] = None,
     source: Optional[str] = None,
+    cause: Optional[str] = None,
 ) -> Invoice:
-    """Lock the invoice, compare succeeded payments with its total, and settle it.
+    """Lock the invoice, derive its status from what was paid, and settle it.
 
-    An invoice whose succeeded payments cover its total becomes PAID and fires
-    the invoice paid event exactly once (on the transition). A PAID invoice
-    whose allocations dropped below the total reopens, as before. Money that
-    arrives for a voided order invoice, or more money than a retail invoice
-    is worth, is kept on record and flagged for refund review instead of
-    changing the invoice.
+    This is the only code that moves an invoice to ``paid``, and it fires the
+    invoice paid event exactly once, on that move. ``cause`` names the money
+    event for the audit row (``settlement`` when not given).
+
+    Engines ``legacy`` and ``shadow``: succeeded payments are compared with
+    the total. Covered means ``paid``; a ``paid`` invoice whose allocations
+    dropped below the total reopens. Money that arrives for a voided order
+    invoice, or more money than a retail invoice is worth, is kept on record
+    and flagged for refund review instead of changing the invoice. In
+    ``shadow`` the v2 decision is computed beside it and any difference is
+    recorded as check ``i1_decision``.
+
+    Engine ``v2``: the status follows ``balance()`` and the status rule
+    (design 3.2). An overpayment becomes a debit note and account credit
+    first (4.3); money arriving on a terminal invoice goes to refund review.
     """
+    from app.services.invoice_service import InvoiceError, engine_mode
+
+    mode = engine_mode(db)
+    if mode == "v2":
+        return _settle_v2(db, invoice_id, payment=payment, source=source, cause=cause)
+    invoice = _settle_legacy(db, invoice_id, payment=payment, source=source)
+    if invoice is None:
+        raise InvoiceError("Invoice not found")
+    if mode == "shadow":
+        _compare_decision(db, invoice, cause=cause)
+    return invoice
+
+
+def _settle_legacy(
+    db: Session,
+    invoice_id: int,
+    *,
+    payment: Optional[Payment],
+    source: Optional[str],
+) -> Optional[Invoice]:
     from app.services.billing.order_refunds import record_refund_review
-    from app.services.invoice_service import InvoiceError, InvoiceService
+    from app.services.invoice_service import CAUSE_SETTLEMENT, InvoiceError, InvoiceService
 
     invoice = InvoiceService.get_for_update(db, invoice_id)
     if invoice is None:
-        raise InvoiceError("Invoice not found")
-    allocated = InvoiceService.allocated_cents(db, invoice.id)
+        return None
+    allocated = InvoiceService._legacy_allocated_cents(db, invoice.id)
 
     if invoice.status == InvoiceStatus.VOID and (
         invoice.order_id is not None or _is_retail(invoice)
@@ -330,17 +360,166 @@ def settle_invoice(
     became_paid = False
     if allocated >= invoice.amount_cents:
         became_paid = invoice.status != InvoiceStatus.PAID
-        invoice.status = InvoiceStatus.PAID
-        invoice.paid_at = invoice.paid_at or datetime.now(timezone.utc)
+        if became_paid:
+            _mark_paid(db, invoice)
     elif invoice.status == InvoiceStatus.PAID:
-        invoice.status = InvoiceStatus.OPEN
-        invoice.paid_at = None
+        InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause=CAUSE_SETTLEMENT)
     db.flush()
     if became_paid:
         fire_invoice_paid(
             db, InvoicePaid(invoice=invoice, payment=payment, source=source)
         )
     return invoice
+
+
+def _mark_paid(db: Session, invoice: Invoice) -> None:
+    """The move to ``paid``, with the proforma conversion of design 5.4."""
+    from app.services.invoice_service import CAUSE_SETTLEMENT, InvoiceService
+
+    now = datetime.now(timezone.utc)
+    InvoiceService.transition(db, invoice, InvoiceStatus.PAID, cause=CAUSE_SETTLEMENT)
+    InvoiceService.convert_proforma(db, invoice, invoice.paid_at or now)
+
+
+def _compare_decision(db: Session, invoice: Invoice, *, cause: Optional[str]) -> None:
+    """Shadow check ``i1_decision``: the legacy answer against ``balance()`` and the v2 rule."""
+    from app.services.billing_shadow import BillingShadowService
+    from app.services.invoice_service import InvoiceService
+
+    try:
+        allocated = InvoiceService._legacy_allocated_cents(db, invoice.id)
+        legacy = {
+            "remaining_cents": max(0, int(invoice.amount_cents) - allocated),
+            "paid": invoice.status == InvoiceStatus.PAID,
+        }
+        balance = InvoiceService.balance(db, invoice)
+        v2_status = InvoiceService.target_status(
+            db, invoice, balance, cause=cause or "settlement"
+        )
+        v2 = {
+            "remaining_cents": balance.remaining_cents,
+            "paid": v2_status == InvoiceStatus.PAID,
+        }
+    except Exception:  # noqa: BLE001 - a shadow comparison never breaks settlement
+        logger.exception("Shadow decision check failed for invoice %s", invoice.id)
+        return
+    if legacy != v2:
+        BillingShadowService.record(
+            "invoice",
+            "i1_decision",
+            "invoice",
+            int(invoice.id),
+            legacy,
+            {**v2, "status": v2_status.value, "balance": balance.as_dict()},
+            context=cause or "settlement",
+        )
+
+
+def _settle_v2(
+    db: Session,
+    invoice_id: int,
+    *,
+    payment: Optional[Payment],
+    source: Optional[str],
+    cause: Optional[str],
+) -> Invoice:
+    from app.services.billing.order_refunds import record_refund_review
+    from app.services.billing_locks import BillingLocks
+    from app.services.invoice_service import (
+        CAUSE_SETTLEMENT,
+        TERMINAL_V2,
+        InvoiceError,
+        InvoiceService,
+    )
+
+    # Reseller and account come before the invoice in the lock order, for an
+    # overpayment credit (the same locks ``issue_overpayment`` takes).
+    invoice = BillingLocks.for_invoice(db, invoice_id, reseller=True, billing_account=True)
+    if invoice is None:
+        raise InvoiceError("Invoice not found")
+    if invoice.status == InvoiceStatus.DRAFT:
+        return invoice
+    balance = InvoiceService.balance(db, invoice)
+    if invoice.status in TERMINAL_V2:
+        if payment is not None and _payment_counts(payment):
+            record_refund_review(
+                db,
+                invoice=invoice,
+                amount_cents=int(payment.amount_cents),
+                reason=f"payment_on_{invoice.status.value}_invoice",
+                payment=payment,
+            )
+        db.flush()
+        return invoice
+    if balance.due_cents < 0:
+        _credit_overpayment(db, invoice, -balance.due_cents, payment)
+        balance = InvoiceService.balance(db, invoice)
+        if balance.due_cents < 0:
+            raise InvoiceError(
+                f"invoice {invoice.id} is still overpaid after the overpayment debit note"
+            )
+    target = InvoiceService.target_status(
+        db, invoice, balance, cause=cause or CAUSE_SETTLEMENT
+    )
+    if target == invoice.status:
+        db.flush()
+        return invoice
+    if target == InvoiceStatus.PAID:
+        _mark_paid(db, invoice)
+        db.flush()
+        fire_invoice_paid(db, InvoicePaid(invoice=invoice, payment=payment, source=source))
+        return invoice
+    InvoiceService.transition(
+        db,
+        invoice,
+        target,
+        cause=cause or CAUSE_SETTLEMENT,
+        reason="credited" if target == InvoiceStatus.VOID else None,
+    )
+    db.flush()
+    return invoice
+
+
+def _payment_counts(payment: Payment) -> bool:
+    from app.models.reseller import PaymentStatus
+
+    return payment.status in (
+        PaymentStatus.SUCCEEDED,
+        PaymentStatus.PARTIALLY_REFUNDED,
+    )
+
+
+def _credit_overpayment(
+    db: Session, invoice: Invoice, excess_cents: int, payment: Optional[Payment]
+) -> None:
+    """Design 4.3: a debit note for the excess and the same amount as account credit.
+
+    ``issue_overpayment`` writes both (the note and its ledger entry) under the
+    idempotency key ``overpayment:<invoice_id>:<payment_id>``. With no payment
+    named, the latest successful payment on the invoice is the one that
+    caused the overpayment.
+    """
+    from sqlalchemy import select
+
+    from app.models.reseller import PaymentStatus
+    from app.services.invoice_adjustment_service import InvoiceAdjustmentService
+    from app.services.invoice_service import InvoiceError
+
+    if payment is None:
+        payment = db.execute(
+            select(Payment)
+            .where(
+                Payment.invoice_id == invoice.id,
+                Payment.status.in_(
+                    (PaymentStatus.SUCCEEDED, PaymentStatus.PARTIALLY_REFUNDED)
+                ),
+            )
+            .order_by(Payment.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+    if payment is None:
+        raise InvoiceError(f"invoice {invoice.id} is overpaid without a payment")
+    InvoiceAdjustmentService.issue_overpayment(db, invoice, int(excess_cents), payment)
 
 
 _DEFERRED_FULFILMENT_KEY = "billing.deferred_order_fulfilment"

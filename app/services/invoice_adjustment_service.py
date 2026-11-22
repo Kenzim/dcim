@@ -44,6 +44,7 @@ from app.models.reseller import (
     InvoiceStatus,
     Payment,
 )
+from app.services.billing.rounding import refund_tax_proportional
 
 MAX_NOTE_LINES = 100
 MAX_KEY_LENGTH = 255
@@ -117,25 +118,6 @@ def _value(item: Any) -> Any:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _round_half_even_div(numerator: int, denominator: int) -> int:
-    quotient, remainder = divmod(numerator, denominator)
-    twice = remainder * 2
-    if twice > denominator or (twice == denominator and quotient % 2 == 1):
-        quotient += 1
-    return quotient
-
-
-def refund_tax_proportional(amount_cents: int, invoice_tax_cents: int, invoice_total_cents: int) -> int:
-    """Tax part of ``amount_cents`` in proportion to the invoice's tax (appendix B), half to even.
-
-    Zero when the invoice total is zero; never more than the amount.
-    """
-    if invoice_total_cents <= 0 or invoice_tax_cents <= 0 or amount_cents <= 0:
-        return 0
-    tax = _round_half_even_div(amount_cents * invoice_tax_cents, invoice_total_cents)
-    return min(tax, amount_cents)
 
 
 def _field(item: Any, name: str, default: Any = None) -> Any:
@@ -376,10 +358,45 @@ def _snapshots(db: Session, invoice: Invoice, account_id: Optional[int], now: da
     return seller, buyer
 
 
-def _default_amount_lines(invoice: Invoice, amount_cents: int, description: str) -> list[NoteLine]:
-    tax = refund_tax_proportional(
-        amount_cents, int(invoice.tax_cents or 0), int(invoice.amount_cents)
+def _worth_and_tax_before(db: Session, invoice: Invoice, key: str) -> tuple[int, int]:
+    """The invoice's worth and tax: its own, plus debit notes, less credit notes.
+
+    Only notes issued before the note with idempotency key ``key`` count, so a
+    retry of that note sees the figures its first request saw.
+    """
+    stmt = (
+        select(
+            InvoiceAdjustment.kind,
+            func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
+            func.coalesce(func.sum(InvoiceAdjustment.tax_cents), 0),
+        )
+        .where(InvoiceAdjustment.invoice_id == invoice.id)
+        .group_by(InvoiceAdjustment.kind)
     )
+    earlier = db.scalar(select(InvoiceAdjustment.id).where(InvoiceAdjustment.idempotency_key == key))
+    if earlier is not None:
+        stmt = stmt.where(InvoiceAdjustment.id < earlier)
+    worth, tax = int(invoice.amount_cents), int(invoice.tax_cents or 0)
+    for kind, total_sum, tax_sum in db.execute(stmt).all():
+        sign = 1 if _value(kind) == AdjustmentKind.DEBIT.value else -1
+        worth += sign * int(total_sum)
+        tax += sign * int(tax_sum)
+    return worth, tax
+
+
+def _default_amount_lines(
+    db: Session, invoice: Invoice, amount_cents: int, description: str, key: str
+) -> list[NoteLine]:
+    # The tax in proportion to the invoice's current worth and tax, so a note
+    # crediting a taxed debit note takes that note's tax too. An amount above
+    # the worth is refused by the caller's checks; its tax here is bounded.
+    worth, current_tax = _worth_and_tax_before(db, invoice, key)
+    if worth <= 0:
+        tax = 0
+    else:
+        tax = refund_tax_proportional(
+            min(amount_cents, worth), max(0, min(current_tax, worth)), worth
+        )
     return [
         NoteLine(
             kind=InvoiceLineKind.ADJUSTMENT,
@@ -578,11 +595,17 @@ class InvoiceAdjustmentService:
         if amount_cents is not None:
             _integer(amount_cents, "amount_cents", minimum=1)
         _require_engine_v2(db)
-        invoice = _lock_invoice(db, invoice)
+        # The recompute at the end may credit an overpayment: reseller and
+        # account are locked before the invoice, as settlement locks them.
+        invoice = _lock_invoice(db, invoice, reseller=True, billing_account=True)
 
         if amount_cents is not None:
             note_lines = _default_amount_lines(
-                invoice, amount_cents, reason_text or f"Credit note for invoice {_display(invoice)}"
+                db,
+                invoice,
+                amount_cents,
+                reason_text or f"Credit note for invoice {_display(invoice)}",
+                key,
             )
         else:
             note_lines = _normalise_lines(db, invoice, lines)
@@ -644,7 +667,7 @@ class InvoiceAdjustmentService:
         if reason not in DEBIT_REASONS:
             raise InvoiceAdjustmentError(f"reason {reason.value} is not allowed on a debit note")
         _require_engine_v2(db)
-        invoice = _lock_invoice(db, invoice)
+        invoice = _lock_invoice(db, invoice, reseller=True, billing_account=True)
 
         note_lines = _normalise_lines(db, invoice, lines)
         outcome = AdjustmentOutcome.INCREASED_BALANCE
@@ -702,7 +725,9 @@ class InvoiceAdjustmentService:
         reason_text = _check_text(refund.reason_text)
         amount = _integer(int(refund.amount_cents), "refund amount", minimum=1)
         if lines is None:
-            note_lines = _default_amount_lines(invoice, amount, f"Refund of payment {refund.payment_id}")
+            note_lines = _default_amount_lines(
+                db, invoice, amount, f"Refund of payment {refund.payment_id}", key
+            )
         else:
             note_lines = _normalise_lines(db, invoice, lines)
         fingerprint = _fingerprint(

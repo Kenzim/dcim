@@ -247,7 +247,6 @@ class CommerceLifecycleService:
                 f"to {product.name} (pending admin approval)"
             ),
         )
-        invoice.status = InvoiceStatus.OPEN
 
         return {
             "service_id": service.id,

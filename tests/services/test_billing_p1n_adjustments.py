@@ -37,8 +37,8 @@ from app.services.invoice_adjustment_service import (
     AdjustmentIdempotencyError,
     InvoiceAdjustmentError,
     InvoiceAdjustmentService,
-    refund_tax_proportional,
 )
+from app.services.billing.rounding import refund_tax_proportional
 from app.services.invoice_service import InvoiceService
 from app.services.settings_store import set_setting
 from tests.conftest import TestingSessionLocal
@@ -64,7 +64,7 @@ def rec(db_session, monkeypatch):
     monkeypatch.setattr(database, "SessionLocal", TestingSessionLocal)
     recorder = Recorder()
 
-    def fake_recompute(db, invoice, *, cause):
+    def fake_recompute(db, invoice, *, cause, payment=None):
         recorder.recomputes.append((invoice.id, cause))
         return invoice
 
@@ -150,8 +150,8 @@ def debit(db, invoice, key, lines=None, **values):
     [
         (1100, 100, 1100, 100),
         (550, 100, 1100, 50),
-        (5, 1, 2, 2),  # 2.5 ties to the even quotient
-        (3, 1, 2, 2),  # 1.5 ties to the even quotient
+        (5, 5, 10, 2),  # 2.5 ties to the even quotient
+        (3, 3, 6, 2),  # 1.5 ties to the even quotient
         (1, 1, 3, 0),
         (10, 5, 0, 0),
         (10, 0, 100, 0),

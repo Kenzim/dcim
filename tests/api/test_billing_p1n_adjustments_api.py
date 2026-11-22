@@ -26,9 +26,6 @@ _numbers = iter(range(91000, 99000))
 @pytest.fixture(autouse=True)
 def _setup(db_session, monkeypatch):
     monkeypatch.setattr(settings, "commerce_retail_enabled", True)
-    monkeypatch.setattr(
-        InvoiceService, "recompute", staticmethod(lambda db, invoice, *, cause: invoice)
-    )
     set_setting(db_session, "billing_invoice_engine", "v2")
     db_session.add(SystemSetting(key="billing_engine_switch:invoice", value={"mode": "v2"}))
     for code, document_type in (("CN", DocumentType.CREDIT_NOTE), ("DN", DocumentType.DEBIT_NOTE)):

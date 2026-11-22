@@ -32,6 +32,7 @@ from app.services.commerce_lifecycle_service import (
 from app.services import settings_store
 from app.services.billing.manual_payments import (
     ManualPaymentError,
+    ManualPaymentNotAllowed,
     record_manual_payment,
 )
 from app.services.billing.order_refunds import OrderCancelError
@@ -42,7 +43,7 @@ from app.services.commerce_webhook_service import CommerceWebhookService
 from app.services.email_message_service import EmailMessageService
 from app.services.gdpr_service import GdprService
 from app.services.invoice_pdf_service import InvoicePdfService
-from app.services.invoice_service import InvoiceService
+from app.services.invoice_service import InvoiceError, InvoiceService
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 
 DbDep = Annotated[Session, Depends(get_db)]
@@ -62,6 +63,17 @@ class RequestModel(BaseModel):
 
 class MarkPaidBody(RequestModel):
     reason: str = Field(min_length=1, max_length=2000)
+    # Invoice engine v2 only: less than the amount due, optionally writing off the rest.
+    amount_cents: Optional[StrictInt] = Field(default=None, gt=0)
+    write_off_rest: bool = False
+
+
+class VoidInvoiceBody(RequestModel):
+    reason: Optional[str] = Field(default=None, max_length=255)
+
+
+class InvoiceDueDateBody(RequestModel):
+    due_at: Optional[datetime] = None
 
 
 class SettingUpdateBody(RequestModel):
@@ -455,7 +467,11 @@ def mark_invoice_paid(
             invoice.id,
             reason=body.reason,
             actor_user_id=auth.get("user_id"),
+            amount_cents=body.amount_cents,
+            write_off_rest=body.write_off_rest,
         )
+    except ManualPaymentNotAllowed as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ManualPaymentError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     AuditService.log(
@@ -470,6 +486,8 @@ def mark_invoice_paid(
         metadata={
             "reason": body.reason,
             "payment_id": payment.id if payment is not None else None,
+            "amount_cents": payment.amount_cents if payment is not None else None,
+            "write_off_rest": body.write_off_rest,
         },
     )
     commit_and_fulfil(db)
@@ -483,11 +501,21 @@ def void_invoice(
     request: Request,
     auth: AdminDep,
     db: DbDep,
+    body: Optional[VoidInvoiceBody] = None,
 ):
     invoice = _get_invoice_or_404(db, invoice_id)
     if invoice.status == InvoiceStatus.PAID:
         raise HTTPException(status_code=400, detail="Cannot void a paid invoice")
-    invoice.status = InvoiceStatus.VOID
+    try:
+        invoice = InvoiceService.void(
+            db,
+            invoice,
+            reason=(body.reason if body and body.reason else "admin_void"),
+            actor_user_id=auth.get("user_id"),
+        )
+    except InvoiceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     AuditService.log(
         db,
         actor_user_id=auth.get("user_id"),
@@ -499,6 +527,26 @@ def void_invoice(
         user_agent=request.headers.get("user-agent"),
     )
     db.commit()
+    return _serialize_invoice(db, invoice)
+
+
+@router.patch("/invoices/{invoice_id}/due-date", responses=COMMON_ERROR_RESPONSES)
+def change_invoice_due_date(
+    invoice_id: int,
+    body: InvoiceDueDateBody,
+    auth: AdminDep,
+    db: DbDep,
+):
+    invoice = _get_invoice_or_404(db, invoice_id)
+    try:
+        invoice = InvoiceService.change_due_date(
+            db, invoice, body.due_at, actor_user_id=auth.get("user_id")
+        )
+    except InvoiceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(invoice)
     return _serialize_invoice(db, invoice)
 
 
