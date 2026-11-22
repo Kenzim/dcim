@@ -9,6 +9,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from app.services.billing.rounding import (
+    PPM,
     TAX_ROUNDING_RULES,
     late_fee_percentage,
     round_down,
@@ -18,6 +19,7 @@ from app.services.billing.rounding import (
     tax_floor,
     tax_inclusive,
     tax_invoice_rate,
+    tax_split_largest_remainder,
 )
 
 money = st.integers(min_value=0, max_value=10**11)
@@ -109,14 +111,79 @@ def test_rule_names_and_refusals():
         tax_inclusive(1.0, 200_000, "round_half_up")
 
 
-@given(money, rate_ppm, rule_names)
-def test_inclusive_net_plus_tax_equals_gross(gross, rate, rule):
-    tax = tax_inclusive(gross, rate, rule)
-    net = gross - tax
-    assert 0 <= tax <= gross
-    assert net + tax == gross
-    # The net is the rule's rounding of the exact net, so within one unit of it.
-    assert abs(Fraction(net) - Fraction(gross * 1_000_000, 1_000_000 + rate)) <= 1
+# One property per rule, always through the rule's name in TAX_ROUNDING_RULES.
+FLOOR_RULE_NAMES = ("tax_floor", "round_down")
+HALF_RULE_NAMES = ("round_half_up", "round_half_even")
+numerators = st.integers(min_value=0, max_value=10**15)
+denominators = st.integers(min_value=1, max_value=10**9)
+
+
+@st.composite
+def ties(draw):
+    """``(numerator, denominator, quotient)`` with ``numerator / denominator == quotient + 1/2``."""
+    half = draw(st.integers(min_value=1, max_value=10**9))
+    quotient = draw(st.integers(min_value=0, max_value=10**6))
+    return 2 * half * quotient + half, 2 * half, quotient
+
+
+def test_every_rule_name_has_a_property():
+    assert set(TAX_ROUNDING_RULES) == {*FLOOR_RULE_NAMES, *HALF_RULE_NAMES}
+
+
+@given(st.sampled_from(FLOOR_RULE_NAMES), numerators, denominators)
+def test_floor_rules_floor(rule, numerator, denominator):
+    result = rounding_rule(rule)(numerator, denominator)
+    exact = Fraction(numerator, denominator)
+    assert result <= exact < result + 1
+
+
+@given(st.sampled_from(FLOOR_RULE_NAMES), money, rate_ppm)
+def test_floor_rules_floor_the_tax_in_both_modes(rule, amount, rate):
+    exclusive = tax_exclusive(amount, rate, rule)
+    assert exclusive <= Fraction(amount * rate, PPM) < exclusive + 1
+    inclusive = tax_inclusive(amount, rate, rule)
+    assert inclusive <= Fraction(amount * rate, PPM + rate) < inclusive + 1
+
+
+@given(st.sampled_from(HALF_RULE_NAMES), numerators, denominators)
+def test_half_rules_are_within_a_half(rule, numerator, denominator):
+    result = rounding_rule(rule)(numerator, denominator)
+    assert abs(result - Fraction(numerator, denominator)) <= Fraction(1, 2)
+
+
+@given(ties(), st.booleans())
+def test_round_half_up_ties_away_from_zero(tie, negative):
+    numerator, denominator, quotient = tie
+    sign = -1 if negative else 1
+    assert rounding_rule("round_half_up")(sign * numerator, denominator) == sign * (quotient + 1)
+
+
+@given(ties())
+def test_round_half_even_ties_to_even(tie):
+    numerator, denominator, quotient = tie
+    result = rounding_rule("round_half_even")(numerator, denominator)
+    assert result in (quotient, quotient + 1)
+    assert result % 2 == 0
+
+
+@given(st.sampled_from(HALF_RULE_NAMES), money, rate_ppm)
+def test_half_rules_in_both_modes(rule, amount, rate):
+    exclusive = tax_exclusive(amount, rate, rule)
+    assert abs(exclusive - Fraction(amount * rate, PPM)) <= Fraction(1, 2)
+    # Inclusive: the rule rounds the net, so the net is within a half of the exact net.
+    tax = tax_inclusive(amount, rate, rule)
+    assert 0 <= tax <= amount
+    assert abs((amount - tax) - Fraction(amount * PPM, PPM + rate)) <= Fraction(1, 2)
+
+
+@given(st.integers(min_value=0, max_value=10**9), st.lists(money, min_size=1, max_size=12))
+def test_spreading_sums_exactly_and_each_share_is_within_one(total_tax, weights):
+    if sum(weights) == 0:
+        weights = [*weights[:-1], 1]
+    shares = tax_split_largest_remainder(total_tax, weights)
+    assert sum(shares) == total_tax
+    for share, weight in zip(shares, weights):
+        assert abs(share - Fraction(total_tax * weight, sum(weights))) < 1
 
 
 @given(money, rate_ppm, rule_names)
@@ -145,6 +212,8 @@ def test_invoice_rate_spreading_sums_exactly(bases, rate, rule, inclusive):
     assert sum(shares) == single
     assert all(share >= 0 for share in shares)
     assert all(share == 0 for share, base in zip(shares, bases) if base == 0)
+    for share, base in zip(shares, bases):
+        assert abs(share - Fraction(single * base, sum(bases) or 1)) < 1
 
 
 @given(st.lists(money, min_size=1, max_size=12), rate_bps)
