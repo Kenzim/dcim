@@ -206,14 +206,21 @@ def test_a_run_that_loses_its_lease_stops(factory, job, monkeypatch):
 
     _go_live(factory, T0)
     job.subjects = {i: T0 + timedelta(minutes=i) for i in range(1, 4)}
+    clock = [0.0]
+    monkeypatch.setattr(runner, "_clock", lambda: clock[0])
+    with factory() as db:
+        from app.services.settings_store import get_setting
+
+        lease = int(get_setting(db, "billing_job_lease_seconds"))
 
     def steal(db, run, action):
         with factory() as other:
             other.query(RecurringBillingLease).filter_by(name=f"billing_job:{NAME}").update({"owner": "thief"})
             other.commit()
+        # Half the lease is spent, so the run renews before its next item.
+        clock[0] += lease / 2
 
     job.on_execute = steal
-    monkeypatch.setattr(runner, "RENEW_EVERY", 1)
     result = runner.run_job(factory, NAME, dry_run=False, trigger="admin", now=T0 + timedelta(hours=1))
     assert (result.status, result.error) == ("aborted", "lease lost")
     assert _effects(factory) == ["fx-1"]
