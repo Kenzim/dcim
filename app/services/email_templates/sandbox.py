@@ -124,6 +124,10 @@ def _check_deadline() -> None:
         raise EmailTemplateError("The template took too long to render", kind="limit")
 
 
+def _too_large() -> EmailTemplateError:
+    return EmailTemplateError("A value in the template grew too large", kind="limit")
+
+
 def _take_iterations(count: int) -> None:
     remaining = _ITERATIONS.get()
     if remaining is None:
@@ -161,21 +165,26 @@ def iterate_guard(value: Any) -> Any:
 
 @pass_eval_context
 def concat_guard(eval_ctx: Any, operands: Any) -> Any:
-    """``~``: the built-in join, after a deadline check."""
+    """``~``: the built-in join, refused up front when its result would be too large."""
     _check_deadline()
+    if sum(len(soft_str(operand)) for operand in operands) > MAX_VALUE_CHARS:
+        raise _too_large()
     return (markup_join if eval_ctx.autoescape else str_join)(operands)
 
 
 def add_guard(operands: Any) -> Any:
-    """``+``, after a deadline check."""
+    """``+``, refused up front when joining two strings or lists would be too large."""
     _check_deadline()
     left, right = operands
+    if isinstance(left, (str, list, tuple)) and isinstance(right, (str, list, tuple)):
+        if len(left) + len(right) > MAX_VALUE_CHARS:
+            raise _too_large()
     return left + right
 
 
 def _check_value(value: Any) -> Any:
     if isinstance(value, str) and len(value) > MAX_VALUE_CHARS:
-        raise EmailTemplateError("A value in the template grew too large", kind="limit")
+        raise _too_large()
     return value
 
 
@@ -219,7 +228,7 @@ def replace_filter(eval_ctx: Any, value: Any, old: Any, new: Any, count: Optiona
     if count is not None:
         occurrences = min(occurrences, max(int(count), 0))
     if len(text) + occurrences * max(len(replacement) - len(needle), 0) > MAX_VALUE_CHARS:
-        raise EmailTemplateError("A value in the template grew too large", kind="limit")
+        raise _too_large()
     return FILTERS["replace"](eval_ctx, value, old, new, count)
 
 

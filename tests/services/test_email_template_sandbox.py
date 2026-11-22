@@ -363,3 +363,26 @@ def test_concatenation_and_addition_keep_their_results():
     assert text("{{ 'a' ~ 1 ~ name }}|{{ 1 + 2 }}|{{ items + ['d'] }}|{{ 'a' + 'b' }}") == "a1Alex|3|['a', 'b', 'c', 'd']|ab"
     assert html("{{ '<' ~ name }}") == "&lt;Alex"
     assert html("{{ url ~ '<b>' }}").endswith("&lt;b&gt;")
+
+
+def test_concatenation_cannot_build_values_past_the_value_limit():
+    """The review repro: 250 concatenations of a ~240 KB value built a 61 MB string."""
+    big = "(v|list)|join(v[:60])"
+    source = "{{ ((" + big + ") ~ " + " ~ ".join(["(" + big + ")"] * 250) + ")|length }}"
+    error = refused(source, "limit", {"v": LONG})
+    assert "too large" in error.message
+
+
+def test_a_chain_of_additions_is_bounded_too():
+    data = {"a": "x" * 200_000, "l": ["y"] * 90}
+    refused("{{ (a + a)|length }}", "limit", data)
+    refused("{{ (a ~ a)|length }}", "limit", data)
+    refused("{{ (a ~ 'b' ~ a)|length }}", "limit", data)
+    assert text("{{ (a + 'b')|length }}|{{ (l + l)|length }}|{{ (a ~ l|length)|length }}", data) == "200001|180|200002"
+
+
+def test_values_just_under_the_limit_still_concatenate():
+    half = "z" * (sandbox.MAX_VALUE_CHARS // 2)
+    assert text("{{ (a ~ a)|length }}", {"a": half}) == str(len(half) * 2)
+    assert html("{{ (a ~ a)|length }}", {"a": half}) == str(len(half) * 2)
+    refused("{{ (a ~ a ~ 'xy')|length }}", "limit", {"a": half}, as_html=True)
