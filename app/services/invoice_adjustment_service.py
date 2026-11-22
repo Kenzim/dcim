@@ -957,13 +957,17 @@ def _sterling(db: Session, invoice: Invoice, kind: AdjustmentKind, tax_cents: in
     meanwhile; the earlier notes are read with a locking read, which sees
     notes committed after this transaction's snapshot (under REPEATABLE READ
     a plain read would not). Only notes before the note with idempotency key
-    ``key`` count, should one already be stored.
+    ``key`` count, should one already be stored. On an invoice whose sterling
+    VAT is pending the note's is pending too (``fx_period`` only), and
+    ``sterling_conversion.fill_pending`` fills it after the invoice.
     """
     from app.services.tax import exchange_rates
 
     rate = exchange_rates.note_rate(db, invoice, tax_cents)
     if rate is None:
         return {}
+    if rate.pending:
+        return {"fx_period": rate.period}
     notes = db.execute(
         select(InvoiceAdjustment.kind, InvoiceAdjustment.idempotency_key, InvoiceAdjustment.tax_cents)
         .where(InvoiceAdjustment.invoice_id == invoice.id)

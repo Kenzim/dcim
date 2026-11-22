@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { Alert, Button, Modal, Spinner } from '../../../ui/index.js';
-  import { createExchangeRate, deleteExchangeRate, listExchangeRates } from '../../../../lib/billingTaxAdminApi.js';
+  import { createExchangeRate, deleteExchangeRate, listExchangeRates, previewExchangeRate } from '../../../../lib/billingTaxAdminApi.js';
   import { when } from './taxUi.js';
 
   let rates = [];
@@ -15,6 +15,9 @@
   let form = { period: '', currency: '', units_per_gbp: '' };
   let formError = '';
   let confirmAdd = false;
+  let preview = null;
+  let fillConfirmed = false;
+  let checking = false;
   let deleting = null;
   let deleteError = '';
 
@@ -45,6 +48,8 @@
   function openAdd() {
     adding = true;
     confirmAdd = false;
+    preview = null;
+    fillConfirmed = false;
     form = { period: '', currency: '', units_per_gbp: '' };
     formError = '';
   }
@@ -59,9 +64,24 @@
     return '';
   }
 
-  function review() {
+  $: pendingCount = preview ? preview.pending_invoices + preview.pending_notes : 0;
+  $: change = preview && preview.previous
+    ? (Number(form.units_per_gbp) - Number(preview.previous.units_per_gbp)) / Number(preview.previous.units_per_gbp)
+    : null;
+
+  async function review() {
     formError = checkForm();
-    if (!formError) confirmAdd = true;
+    if (formError) return;
+    checking = true;
+    try {
+      preview = await previewExchangeRate(form.period.trim(), form.currency.trim().toUpperCase());
+      fillConfirmed = false;
+      confirmAdd = true;
+    } catch (err) {
+      formError = err.message;
+    } finally {
+      checking = false;
+    }
   }
 
   async function save() {
@@ -71,8 +91,10 @@
         period: form.period.trim(),
         currency: form.currency.trim().toUpperCase(),
         units_per_gbp: form.units_per_gbp.trim(),
+        confirm: pendingCount > 0 && fillConfirmed,
       });
-      success = `Stored ${row.currency} ${row.units_per_gbp} per £1 for ${row.period}. Invoices waiting for this month's rate are filled in.`;
+      success = `Stored ${row.currency} ${row.units_per_gbp} per £1 for ${row.period}.`
+        + (row.filled_invoices ? ` ${row.filled_invoices} invoices waiting for this month's rate, and their notes, are filled in.` : '');
       adding = false;
       await load();
     } catch (err) {
@@ -162,16 +184,29 @@
       <p>
         Store <strong>{form.currency.trim().toUpperCase()} {form.units_per_gbp.trim()}</strong> per £1 for <strong>{form.period.trim()}</strong>?
       </p>
-      <p class="ba-muted">Invoices of that month waiting for a rate are filled in at once and cannot be changed afterwards. The entry is audited with your name, and the daily job compares it with HMRC's file once.</p>
+      {#if change !== null}
+        <p class={Math.abs(change) > 0.05 ? 'ba-error' : 'ba-muted'}>
+          {preview.previous.period} was {preview.previous.units_per_gbp} per £1: this is {(change * 100).toFixed(1)}% {change >= 0 ? 'higher' : 'lower'}.{#if Math.abs(change) > 0.05} Check the figure against HMRC's file.{/if}
+        </p>
+      {/if}
+      {#if pendingCount > 0}
+        <Alert type="warning">
+          Storing this rate fills the sterling VAT of <strong>{preview.pending_invoices}</strong> invoices and <strong>{preview.pending_notes}</strong> notes of that month at once. Their figures cannot be changed afterwards, and the rate can then no longer be deleted.
+        </Alert>
+        <label class="ba-inline"><input type="checkbox" bind:checked={fillConfirmed} /> I have checked the rate against HMRC's file</label>
+      {:else}
+        <p class="ba-muted">No invoice or note is waiting for this rate.</p>
+      {/if}
+      <p class="ba-muted">The entry is audited with your name, and the daily job compares it with HMRC's file once.</p>
       {#if formError}<div class="ba-error">{formError}</div>{/if}
     {/if}
     <svelte:fragment slot="footer">
       {#if confirmAdd}
         <Button variant="secondary" on:click={() => (confirmAdd = false)}>Back</Button>
-        <Button on:click={save} disabled={working}>Store the rate</Button>
+        <Button on:click={save} disabled={working || (pendingCount > 0 && !fillConfirmed)}>Store the rate</Button>
       {:else}
         <Button variant="secondary" on:click={() => (adding = false)}>Cancel</Button>
-        <Button on:click={review}>Review</Button>
+        <Button on:click={review} disabled={checking}>Review</Button>
       {/if}
     </svelte:fragment>
   </Modal>

@@ -126,6 +126,10 @@ export const previewTax = (body) =>
 
 export const listExchangeRates = (filters = {}) =>
   request(`${TAX}/exchange-rates${query(filters)}`, { errorMessage: 'Failed to load exchange rates' });
+export const previewExchangeRate = (period, currency) =>
+  request(`${TAX}/exchange-rates/preview${query({ period, currency })}`, {
+    errorMessage: 'Failed to check what the exchange rate would fill',
+  });
 export const createExchangeRate = (body) =>
   request(`${TAX}/exchange-rates`, { method: 'POST', body, errorMessage: 'Failed to store the exchange rate' });
 export const deleteExchangeRate = (id) =>

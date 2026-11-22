@@ -6,7 +6,10 @@ like a fetched rate, since it is the same published figure, and the audit
 entry records who entered it. It is marked ``hand_entered``, and the fetch
 job compares it with HMRC's file once. A stored rate is never changed. A
 rate no published invoice or note has frozen may be deleted, to correct a
-typing mistake.
+typing mistake. Storing a rate fills at once every invoice and note whose
+sterling VAT waits for it, after which the rate can no longer be deleted, so
+``GET /preview`` says how many it would fill and the POST asks for
+``confirm: true`` when that is more than none.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from app.models.invoice_adjustment import InvoiceAdjustment
 from app.models.reseller import Invoice
 from app.models.tax import TaxExchangeRate
 from app.services.audit_service import AuditService
-from app.services.tax import exchange_rates
+from app.services.tax import exchange_rates, sterling_conversion
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -76,6 +79,7 @@ class RateCreate(BaseModel):
     period: str = Field(pattern=PERIOD_PATTERN)
     currency: str = Field(pattern=CURRENCY_PATTERN)
     units_per_gbp: StrictStr = Field(max_length=24)
+    confirm: bool = False
 
     @field_validator("currency")
     @classmethod
@@ -117,12 +121,59 @@ def list_rates(
     return {"items": [_payload(row) for row in db.scalars(stmt)]}
 
 
+def _preview(db: Session, period: str, currency: str) -> dict:
+    invoices, notes = sterling_conversion.pending_documents(db, period, currency)
+    previous_period = _previous_period(period)
+    previous = exchange_rates.stored_rate(db, currency, previous_period)
+    return {
+        "period": period,
+        "currency": currency,
+        "stored": exchange_rates.has_rate(db, currency, period),
+        "pending_invoices": invoices,
+        "pending_notes": notes,
+        "previous": (
+            {"period": previous.period, "units_per_gbp": format(previous.units_per_gbp, "f")}
+            if previous is not None
+            else None
+        ),
+    }
+
+
+def _previous_period(period: str) -> str:
+    year, month = exchange_rates.parse_period(period)
+    return f"{year - (month == 1):04d}-{(month - 2) % 12 + 1:02d}"
+
+
+@router.get("/preview")
+def preview_rate(
+    db: DbDep,
+    period: str = Query(pattern=PERIOD_PATTERN),
+    currency: str = Query(pattern=CURRENCY_PATTERN),
+):
+    """What storing a rate for ``period`` and ``currency`` would fill: pending invoices and notes, and last month's rate."""
+    return _preview(db, period, currency.upper())
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_rate(body: RateCreate, auth: AdminDep, db: DbDep):
     if exchange_rates.has_rate(db, body.currency, body.period):
         raise _exists(body)
+    invoices, notes = sterling_conversion.pending_documents(db, body.period, body.currency)
+    if invoices + notes > 0 and not body.confirm:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "tax_exchange_rate_confirm_required",
+                "message": (
+                    f"Storing this rate fills the sterling VAT of {invoices} invoices and {notes} notes at once, "
+                    "and the rate can then no longer be deleted; send confirm: true to store it"
+                ),
+                "pending_invoices": invoices,
+                "pending_notes": notes,
+            },
+        )
     try:
-        exchange_rates.store_month(
+        outcome = exchange_rates.store_month(
             db, body.period, [(body.currency, body.units_per_gbp)], fetched_at=datetime.now(timezone.utc),
             hand_entered=True,
         )
@@ -132,7 +183,7 @@ def create_rate(body: RateCreate, auth: AdminDep, db: DbDep):
     row = exchange_rates.stored_rate(db, body.currency, body.period)
     _audit(db, auth, "created", row)
     db.commit()
-    return _payload(row)
+    return {**_payload(row), "filled_invoices": len(outcome.filled)}
 
 
 def _in_use() -> HTTPException:
