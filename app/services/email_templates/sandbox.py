@@ -20,8 +20,13 @@ treated as untrusted code. Several layers keep it harmless:
   ``date``), each wrapped so no result exceeds ``MAX_VALUE_CHARS`` and the
   render deadline is checked.
 * Limits: source at most 64 KB, at most ``MAX_NODES`` syntax nodes, output at
-  most 256 KB, a wall-clock deadline, and data limited by
-  ``sanitise_variables`` (plain values only, bounded size).
+  most 256 KB, at most ``MAX_LOOP_ITERATIONS`` loop iterations in a render, a
+  wall-clock deadline, and data limited by ``sanitise_variables`` (plain
+  values only, bounded size).
+* After the syntax check the parsed tree is rewritten: every ``for`` iterable
+  passes through an iteration guard, and every ``~`` and ``+`` through a
+  guard of its own. The guards count iterations and check the deadline, so a
+  loop whose body prints nothing and calls no filter is still bounded.
 """
 
 from __future__ import annotations
@@ -36,15 +41,18 @@ from typing import Any, Callable, Optional
 from jinja2 import StrictUndefined, TemplateAssertionError, TemplateSyntaxError, nodes
 from jinja2.exceptions import SecurityError, TemplateError, UndefinedError
 from jinja2.filters import FILTERS, pass_eval_context
-from jinja2.runtime import LoopContext
+from jinja2.runtime import LoopContext, markup_join, str_join
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from jinja2.tests import TESTS
+from jinja2.visitor import NodeTransformer
+from markupsafe import soft_str
 
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_OUTPUT_CHARS = 256 * 1024
 MAX_VALUE_CHARS = 256 * 1024
 MAX_NODES = 2000
 MAX_RENDER_SECONDS = 2.0
+MAX_LOOP_ITERATIONS = 1000
 MAX_VARIABLE_STRING = 4096
 MAX_VARIABLE_ITEMS = 100
 MAX_VARIABLE_DEPTH = 3
@@ -102,12 +110,67 @@ class EmailTemplateError(Exception):
 
 
 _DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar("email_template_deadline", default=None)
+_ITERATIONS: contextvars.ContextVar[Optional[list[int]]] = contextvars.ContextVar(
+    "email_template_iterations", default=None
+)
+GUARD_ITERATE = "_guard_iterate"
+GUARD_CONCAT = "_guard_concat"
+GUARD_ADD = "_guard_add"
 
 
 def _check_deadline() -> None:
     deadline = _DEADLINE.get()
     if deadline is not None and time.monotonic() > deadline:
         raise EmailTemplateError("The template took too long to render", kind="limit")
+
+
+def _take_iterations(count: int) -> None:
+    remaining = _ITERATIONS.get()
+    if remaining is None:
+        raise RuntimeError("Loop guards only run while a template renders")
+    remaining[0] -= count
+    if remaining[0] < 0:
+        raise EmailTemplateError(f"The template loops more than {MAX_LOOP_ITERATIONS} times", kind="limit")
+
+
+def _counted(value: Any, per_item: bool) -> Any:
+    for item in value:
+        if per_item:
+            _take_iterations(1)
+        _check_deadline()
+        yield item
+
+
+def iterate_guard(value: Any) -> Any:
+    """The iterable of a ``for`` loop, counted against the render's iteration budget.
+
+    Sized iterables are charged up front, so an oversized loop is refused
+    before its first pass; the deadline is checked on every iteration.
+    """
+    _check_deadline()
+    try:
+        size: Optional[int] = len(value)
+    except TypeError:
+        size = None
+    if size is not None:
+        _take_iterations(size)
+    elif _ITERATIONS.get() is None:
+        raise RuntimeError("Loop guards only run while a template renders")
+    return _counted(value, size is None)
+
+
+@pass_eval_context
+def concat_guard(eval_ctx: Any, operands: Any) -> Any:
+    """``~``: the built-in join, after a deadline check."""
+    _check_deadline()
+    return (markup_join if eval_ctx.autoescape else str_join)(operands)
+
+
+def add_guard(operands: Any) -> Any:
+    """``+``, after a deadline check."""
+    _check_deadline()
+    left, right = operands
+    return left + right
 
 
 def _check_value(value: Any) -> Any:
@@ -198,6 +261,9 @@ def _environment(*, autoescape: bool) -> _MailEnvironment:
     environment.filters["money"] = _guard(money_filter)
     environment.filters["date"] = _guard(date_filter)
     environment.filters["replace"] = _guard(replace_filter)
+    environment.filters[GUARD_ITERATE] = iterate_guard
+    environment.filters[GUARD_CONCAT] = concat_guard
+    environment.filters[GUARD_ADD] = add_guard
     environment.tests = {name: TESTS[name] for name in ALLOWED_TESTS}
     return environment
 
@@ -282,6 +348,10 @@ def _validate_tree(tree: nodes.Template) -> None:
         if isinstance(node, nodes.Getitem) and isinstance(node.arg, nodes.Const):
             if isinstance(node.arg.value, str) and node.arg.value.startswith("_"):
                 raise _forbid(node, f"The key {node.arg.value!r}")
+        if isinstance(node, nodes.Filter) and node.name not in ALLOWED_FILTERS:
+            raise _forbid(node, f"The filter {node.name!r}")
+        if isinstance(node, nodes.Test) and node.name not in ALLOWED_TESTS:
+            raise _forbid(node, f"The test {node.name!r}")
         if isinstance(node, (nodes.Filter, nodes.Test)) and (node.dyn_args or node.dyn_kwargs):
             raise _forbid(node, "Argument unpacking")
         if isinstance(node, nodes.For):
@@ -292,6 +362,29 @@ def _validate_tree(tree: nodes.Template) -> None:
             loops += 1
         for child in node.iter_child_nodes():
             stack.append((child, loops))
+
+
+def _guarded(inner: nodes.Expr, name: str, like: nodes.Node) -> nodes.Filter:
+    guard = nodes.Filter(inner, name, [], [], None, None)
+    guard.set_lineno(like.lineno or 1, override=True)
+    return guard
+
+
+class _Guards(NodeTransformer):
+    """Routes loops, ``~`` and ``+`` through the guard filters of the environment."""
+
+    def visit_For(self, node: nodes.For) -> nodes.For:
+        self.generic_visit(node)
+        node.iter = _guarded(node.iter, GUARD_ITERATE, node)
+        return node
+
+    def visit_Concat(self, node: nodes.Concat) -> nodes.Filter:
+        self.generic_visit(node)
+        return _guarded(nodes.Tuple(node.nodes, "load"), GUARD_CONCAT, node)
+
+    def visit_Add(self, node: nodes.Add) -> nodes.Filter:
+        self.generic_visit(node)
+        return _guarded(nodes.Tuple([node.left, node.right], "load"), GUARD_ADD, node)
 
 
 def _line_of(exc: BaseException) -> Optional[int]:
@@ -307,6 +400,8 @@ def _line_of(exc: BaseException) -> Optional[int]:
 def translate_error(exc: BaseException) -> EmailTemplateError:
     """The ``EmailTemplateError`` for any error raised while compiling or rendering a template."""
     if isinstance(exc, EmailTemplateError):
+        if exc.line is None:
+            exc.line = _line_of(exc)
         return exc
     if isinstance(exc, TemplateSyntaxError):
         return EmailTemplateError(exc.message or "Syntax error", line=exc.lineno, kind="syntax")
@@ -333,6 +428,8 @@ def compile_source(source: str, *, html: bool = False) -> Any:
     try:
         tree = environment.parse(source)
         _validate_tree(tree)
+        tree = _Guards().visit(tree)
+        tree.set_environment(environment)
         return environment.from_string(tree)
     except Exception as exc:  # noqa: BLE001 - every failure becomes an EmailTemplateError
         raise translate_error(exc) from exc
@@ -342,6 +439,7 @@ def render_source(source: str, variables: Mapping[str, Any], *, html: bool = Fal
     """Render template text with plain data; raises ``EmailTemplateError``."""
     template = compile_source(source, html=html)
     token = _DEADLINE.set(time.monotonic() + MAX_RENDER_SECONDS)
+    iterations = _ITERATIONS.set([MAX_LOOP_ITERATIONS])
     pieces: list[str] = []
     total = 0
     try:
@@ -354,6 +452,7 @@ def render_source(source: str, variables: Mapping[str, Any], *, html: bool = Fal
     except Exception as exc:  # noqa: BLE001
         raise translate_error(exc) from exc
     finally:
+        _ITERATIONS.reset(iterations)
         _DEADLINE.reset(token)
     return "".join(pieces)
 

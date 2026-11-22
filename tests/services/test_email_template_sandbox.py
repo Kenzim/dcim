@@ -300,3 +300,66 @@ def test_attr_and_xmlattr_are_not_filters_of_the_sandbox():
         assert name not in sandbox.ALLOWED_FILTERS
         assert name not in sandbox.TEXT_ENVIRONMENT.filters
         assert name not in sandbox.HTML_ENVIRONMENT.filters
+
+
+LONG = "v" * 4000
+
+
+def test_a_silent_loop_over_a_huge_iterable_is_refused_quickly():
+    """The review repro: ~244,000 iterations of a 200-term comparison, printing nothing and calling no filter."""
+    source = "{%- for c in (v|list|join(v[:60])) -%}{%- if (" + " ~ ".join(["v"] * 200) + ") == c -%}{%- endif -%}{%- endfor -%}"
+    started = time.monotonic()
+    error = refused(source, "limit", {"v": LONG})
+    assert "loops more than" in error.message
+    assert error.line == 1
+    assert time.monotonic() - started < sandbox.MAX_RENDER_SECONDS + 0.5
+
+
+def test_the_iteration_budget_is_shared_by_every_loop_of_a_render():
+    data = {"s": "x" * 600}
+    one = "{% for c in s %}{% endfor %}"
+    assert text(one, data) == ""
+    refused(one + one, "limit", data)
+    half = {"s": "x" * 400}
+    assert text(one + one, half) == ""
+    assert text(one, data) == ""  # a new render starts with a new budget
+
+
+def test_iterations_are_counted_for_every_kind_of_iterable():
+    refused("{% for c in s %}{% endfor %}", "limit", {"s": "x" * 1001})
+    refused("{% for k in d %}{% endfor %}", "limit", {"d": {str(i): i for i in range(1001)}})
+    refused("{% for c in s|reverse %}{% endfor %}", "limit", {"s": ["x"] * 1001})
+    refused("{% for c in s if c %}x{% else %}y{% endfor %}", "limit", {"s": ["x"] * 1001})
+    refused("{% for c in '" + "a" * 2000 + "' %}{% endfor %}", "limit")
+    assert text("{% for c in s %}{{ loop.index }}{% endfor %}", {"s": "x" * 1000}).endswith("1000")
+
+
+def test_loops_still_work_inside_the_budget():
+    assert text("{% for a in items if a != 'b' %}{{ a }}{% else %}none{% endfor %}") == "ac"
+    assert text("{% for a in items|reverse %}{{ a }}{{ loop.revindex }}{% endfor %}") == "c3b2a1"
+    assert text("{% for a in [] %}x{% else %}empty{% endfor %}") == "empty"
+
+
+def test_the_deadline_is_checked_on_loop_iterations_and_in_operators(monkeypatch):
+    monkeypatch.setattr(sandbox, "MAX_RENDER_SECONDS", -1.0)
+    for source in (
+        "{% for a in items %}{% endfor %}",
+        "{% if (name ~ name) == name %}{% endif %}",
+        "{% if (amount_cents + 1) == 3 %}{% endif %}",
+        "{% if name ~ name %}{% endif %}",
+    ):
+        error = refused(source, "limit")
+        assert "too long" in error.message, source
+
+
+def test_the_guard_filters_are_not_available_to_templates():
+    for name in (sandbox.GUARD_ITERATE, sandbox.GUARD_CONCAT, sandbox.GUARD_ADD):
+        refused("{{ name|%s }}" % name, "security")
+        assert name not in sandbox.ALLOWED_FILTERS
+    refused("{{ name is nosuchtest }}", "security")
+
+
+def test_concatenation_and_addition_keep_their_results():
+    assert text("{{ 'a' ~ 1 ~ name }}|{{ 1 + 2 }}|{{ items + ['d'] }}|{{ 'a' + 'b' }}") == "a1Alex|3|['a', 'b', 'c', 'd']|ab"
+    assert html("{{ '<' ~ name }}") == "&lt;Alex"
+    assert html("{{ url ~ '<b>' }}").endswith("&lt;b&gt;")
