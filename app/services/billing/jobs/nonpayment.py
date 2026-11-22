@@ -355,6 +355,43 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
     return True, "ours"
 
 
+def suspension_claim_is_current(
+    db: Session, service_id: int, claim: BillingJobAction, *, paid_invoice_id: int
+) -> bool:
+    """Whether ``claim`` records the service's current non-payment episode.
+
+    True when the claim's invoice is ``paid_invoice_id`` or still has a
+    balance, and no billing lift (``AUDIT_UNSUSPENDED``) was recorded for the
+    service after the claim's marks. A claim of an episode billing already
+    ended says nothing about a later suspension.
+    """
+    detail = claim.detail or {}
+    invoice_id = detail.get("invoice_id")
+    if invoice_id is None:
+        return False
+    if int(invoice_id) != int(paid_invoice_id):
+        invoice = db.get(Invoice, int(invoice_id))
+        if (
+            invoice is None
+            or invoice.status not in UNPAID_STATUSES
+            or InvoiceService.balance(db, invoice).remaining_cents <= 0
+        ):
+            return False
+    resolution = detail.get("resolution") or {}
+    marks = (resolution.get("marks") if "marks" in resolution else detail.get("marks")) or {}
+    lifted = db.scalar(
+        select(
+            exists().where(
+                UserAuditEvent.action == AUDIT_UNSUSPENDED,
+                UserAuditEvent.resource_type == "service",
+                UserAuditEvent.resource_id == str(int(service_id)),
+                UserAuditEvent.id > int(marks.get("audit_id", 0)),
+            )
+        )
+    )
+    return not lifted
+
+
 # ---------------------------------------------------------------- email
 
 
