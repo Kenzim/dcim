@@ -144,6 +144,25 @@ def _split_outcome(raw: str) -> tuple[str, Optional[str]]:
     return outcome, reason or None
 
 
+def _state_signature(mode, live_since, dry_run_since) -> tuple:
+    return (
+        BillingJobMode(mode),
+        _utc(live_since) if live_since is not None else None,
+        _utc(dry_run_since) if dry_run_since is not None else None,
+    )
+
+
+def _state_changed(sdb: Session, name: str, started_as: tuple) -> bool:
+    """The job's mode, ``live_since`` or ``dry_run_since`` differ from the run's start."""
+    sdb.rollback()  # a fresh snapshot
+    row = sdb.execute(
+        select(BillingJobState.mode, BillingJobState.live_since, BillingJobState.dry_run_since).where(
+            BillingJobState.job == name
+        )
+    ).one_or_none()
+    return row is None or _state_signature(*row) != started_as
+
+
 class _Run:
     """The state of one run in progress."""
 
@@ -290,9 +309,12 @@ def run_job(
 
     A live run needs the job in ``live``; a scheduled run needs the mode that
     matches ``dry_run`` and a due slot (re-checked under the lease); an admin
-    dry run works from any mode. Returns status ``complete``, ``failed``,
-    ``aborted`` (lease lost), or, with no run row, ``off``, ``not_live``,
-    ``not_due`` or ``locked``.
+    dry run works from any mode. Before each item the run renews its lease
+    once half of it is spent and re-reads the job's state; it stops as
+    ``aborted`` when the lease is lost or the mode, ``live_since`` or
+    ``dry_run_since`` changed. Returns status ``complete``, ``failed``,
+    ``aborted``, or, with no run row, ``off``, ``not_live``, ``not_due`` or
+    ``locked``.
     """
     job = get_job(name)
     now = _utc(now)
@@ -331,6 +353,7 @@ def run_job(
             records_hash = not dry_run or (
                 trigger_kind == BillingJobTrigger.SCHEDULE and state.mode == BillingJobMode.DRY_RUN
             )
+            started_as = _state_signature(state.mode, state.live_since, state.dry_run_since)
             if records_hash and state.config_hash != current_hash:
                 state.config_hash = current_hash
                 state.config_since = now
@@ -374,6 +397,12 @@ def run_job(
                             error = "lease lost"
                             break
                         renewed_at = _clock()
+                    # Switching the job off (or re-arming it) stops a run in
+                    # progress before its next item (design 9.2).
+                    if _state_changed(sdb, name, started_as):
+                        status = BillingJobRunStatus.ABORTED
+                        error = "mode changed"
+                        break
                     _process(wdb, run, int(subject_id))
             except Exception as exc:  # noqa: BLE001 - recorded on the run
                 logger.exception("Billing job %s failed", name)

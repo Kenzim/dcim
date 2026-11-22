@@ -389,6 +389,32 @@ def test_a_slow_run_renews_by_time_so_no_second_owner_gets_in(factory, job, monk
     assert result.status == "complete" and job.executed == [1, 2, 3, 4]
 
 
+@pytest.mark.parametrize("change", ["off", "off_then_dry_run", "live_since_moved"])
+def test_a_run_stops_when_the_job_is_switched_off_or_re_armed(factory, job, monkeypatch, change):
+    _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
+    job.subjects = {i: T0 + timedelta(minutes=i) for i in range(1, 4)}
+    now = T0 + timedelta(hours=1)
+    plan = job.plan
+
+    def switch_during_first(db, run, subject_id):
+        if subject_id == 1:
+            if change == "live_since_moved":
+                other = factory()
+                other.get(BillingJobState, job.name).live_since = T0 + timedelta(minutes=30)
+                other.commit()
+                other.close()
+            else:
+                _mode(factory, "off", now)
+                if change == "off_then_dry_run":
+                    _mode(factory, "dry_run", now)
+        return plan(db, run, subject_id)
+
+    monkeypatch.setattr(job, "plan", switch_during_first)
+    result = _live(factory, job, now)
+    assert result.status == "aborted" and result.error == "mode changed"
+    assert job.executed == [1] and _effects(factory) == ["fx-1"]
+
+
 def test_stuck_claims_become_needs_review(factory, job):
     _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
     db = factory()
