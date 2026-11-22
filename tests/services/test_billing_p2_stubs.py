@@ -24,11 +24,6 @@ from app.services.tax.packs import registry as pack_registry
 NOW = datetime(2026, 11, 22, 12, 0, 0)
 
 STUBS = [
-    lambda: context.TaxContextBuilder.for_checkout(None, None, None, [], NOW, {}),
-    lambda: context.TaxContextBuilder.for_invoice(None, None, [], NOW),
-    lambda: context.TaxContextBuilder.for_adjustment(None, None, []),
-    lambda: engine.TaxEngine.calculate(None, None),
-    lambda: engine.TaxEngine.prepare(None, None),
     lambda: validators.TaxIdService.check(None, None, force=True),
     lambda: pack_registry.PackRegistry.list(None),
     lambda: pack_registry.PackRegistry.load(None, "uk_vat", "2026.1"),
