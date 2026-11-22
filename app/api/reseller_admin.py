@@ -69,6 +69,7 @@ from app.services.credit_ledger_service import (
     CreditLedgerError,
     CreditLedgerService,
     InsufficientCreditError,
+    InvoicePaymentPendingError,
 )
 from app.services.billing.settlement import commit_and_fulfil
 from app.services.invoice_service import InvoiceService
@@ -2047,6 +2048,16 @@ def apply_reseller_credit_to_invoice(
                 "code": "insufficient_credit",
                 "available_cents": exc.available_cents,
                 "requested_cents": exc.requested_cents,
+            },
+        ) from exc
+    except InvoicePaymentPendingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "invoice_payment_pending",
+                "invoice_id": exc.invoice_id,
+                "payment_id": exc.payment_id,
             },
         ) from exc
     except CreditLedgerError as exc:

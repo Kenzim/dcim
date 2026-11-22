@@ -54,6 +54,7 @@ from app.services.credit_ledger_service import (
     CreditLedgerError,
     CreditLedgerService,
     InsufficientCreditError,
+    InvoicePaymentPendingError,
     statuses_for_status_filter,
     unpaid_invoice_statuses,
 )
@@ -805,8 +806,15 @@ def apply_credit_to_invoice(
     reseller: ResellerDep,
     db: DbDep,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=128)],
+    request: Request,
     body: Optional[ApplyCreditBody] = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
+    if _impersonated_by_from_token(_token_from_request(request, credentials)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Money actions are blocked during impersonation",
+        )
     invoice = _invoice_or_404(db, reseller, invoice_id)
     if invoice.purpose == InvoicePurpose.CREDIT_TOPUP:
         raise HTTPException(status_code=400, detail="Credit cannot pay a credit top-up invoice")
@@ -826,6 +834,16 @@ def apply_credit_to_invoice(
                 "code": "insufficient_credit",
                 "available_cents": exc.available_cents,
                 "requested_cents": exc.requested_cents,
+            },
+        ) from exc
+    except InvoicePaymentPendingError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "invoice_payment_pending",
+                "invoice_id": exc.invoice_id,
+                "payment_id": exc.payment_id,
             },
         ) from exc
     except CreditLedgerError as exc:

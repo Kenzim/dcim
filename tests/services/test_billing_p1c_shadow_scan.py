@@ -161,7 +161,7 @@ def _seed_quiet_history(db, engine: str, days: int, now: datetime) -> None:
         started = since + timedelta(days=day, minutes=30)
         billing_shadow._append_history(db, engine, {
             "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
-            "subjects_checked": 1, "mismatches_found": 0,
+            "subjects_checked": 1, "mismatches_found": 0, "scheduled": True, "complete": True,
         })
     BillingShadowService.store_scan_result(
         db, engine, started_at=now - timedelta(hours=2), finished_at=now - timedelta(hours=1),
@@ -344,3 +344,124 @@ def test_partial_refund_plus_one_cent_blocks_the_switch(db_session, monkeypatch)
     assert [(f["check_key"], f["subject_id"]) for f in summary["findings"]] == [("i2_scan", invoice.id)]
     assert summary["expected_differences"] == []
     assert {"no_open_mismatches", "daily_scans", "quiet_period"} <= set(failing)
+
+
+def test_on_demand_scans_do_not_satisfy_the_daily_scan_criterion(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "ondemand", 500)
+    billing_shadow.set_shadow_since(db_session, "credit", at=NOW - timedelta(days=15), by="test")
+    db_session.commit()
+    for _ in range(14):
+        _scan(db_session)
+    assert len(BillingShadowService.scan_history(db_session, "credit")) == 14
+    assert "daily_scans" in _failing(db_session)
+
+
+def test_a_missing_day_of_scheduled_scans_fails_the_daily_scan_criterion(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "gap", 500)
+    since = NOW - timedelta(days=15, hours=1)
+    billing_shadow.set_shadow_since(db_session, "credit", at=since, by="test")
+    for day in range(15):
+        if day == 6:
+            continue
+        started = since + timedelta(days=day, hours=2)
+        billing_shadow._append_history(db_session, "credit", {
+            "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
+            "subjects_checked": 1, "mismatches_found": 0, "scheduled": True, "complete": True,
+        })
+    db_session.commit()
+    items = {item["item"]: item for item in billing_shadow.evaluate_switch(db_session, "credit", NOW)}
+    assert not items["daily_scans"]["ok"]
+    assert items["daily_scans"]["days_missing"] == [(since + timedelta(days=6, hours=2)).date().isoformat()]
+
+
+def test_scheduled_scans_with_mismatches_or_old_entries_do_not_count(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "dirty", 500)
+    since = NOW - timedelta(days=15, hours=1)
+    billing_shadow.set_shadow_since(db_session, "credit", at=since, by="test")
+    for day in range(15):
+        started = since + timedelta(days=day, hours=2)
+        entry = {
+            "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
+            "subjects_checked": 1, "mismatches_found": 0, "scheduled": True, "complete": True,
+        }
+        if day == 3:
+            entry["mismatches_found"] = 2
+        if day == 5:
+            # Written before entries recorded whether the daily job ran them.
+            del entry["scheduled"], entry["complete"]
+        billing_shadow._append_history(db_session, "credit", entry)
+    db_session.commit()
+    items = {item["item"]: item for item in billing_shadow.evaluate_switch(db_session, "credit", NOW)}
+    assert not items["daily_scans"]["ok"]
+    assert len(items["daily_scans"]["days_missing"]) == 2
+
+
+def test_admin_scans_do_not_push_scheduled_scans_out_of_the_history(db_session):
+    for index in range(HISTORY_LIMIT):
+        billing_shadow._append_history(db_session, "credit", {"started_at": str(index), "scheduled": True})
+    for index in range(5):
+        billing_shadow._append_history(db_session, "credit", {"started_at": f"admin{index}", "scheduled": False})
+    history = BillingShadowService.scan_history(db_session, "credit")
+    assert [entry["started_at"] for entry in history] == [str(index) for index in range(HISTORY_LIMIT)]
+    billing_shadow._append_history(db_session, "credit", {"started_at": "late", "scheduled": True})
+    history = BillingShadowService.scan_history(db_session, "credit")
+    assert history[0]["started_at"] == "1" and history[-1]["started_at"] == "late"
+
+
+def test_admin_scans_replace_older_admin_scans_in_a_full_history(db_session):
+    for index in range(HISTORY_LIMIT - 1):
+        billing_shadow._append_history(db_session, "credit", {"started_at": str(index), "scheduled": True})
+    for index in range(3):
+        billing_shadow._append_history(db_session, "credit", {"started_at": f"admin{index}", "scheduled": False})
+    history = BillingShadowService.scan_history(db_session, "credit")
+    assert len(history) == HISTORY_LIMIT
+    assert sum(1 for entry in history if entry["scheduled"]) == HISTORY_LIMIT - 1
+    assert history[-1]["started_at"] == "admin2"
+
+
+def test_scan_records_scheduled_and_complete(db_session):
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "flags", 500)
+    _scan(db_session)
+    _scan(db_session, scheduled=True)
+    history = BillingShadowService.scan_history(db_session, "credit")
+    assert [(entry["scheduled"], entry["complete"]) for entry in history[-2:]] == [(False, True), (True, True)]
+
+
+def test_a_balance_without_ledger_entries_is_a_blocking_cache_without_entries_finding(db_session):
+    from app.models.commerce_account import BillingAccount, BillingAccountStatus, BillingAccountType
+
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "explained", 300)
+    legacy_only = _reseller(db_session, "legacy-only")
+    legacy_only.cached_balance_cents = 500  # set by an old direct write, no entry
+    db_session.commit()
+    new_account = BillingAccountDAO.ensure_reseller_account(db_session, legacy_only)
+    assert new_account.credit_balance_cents == 0
+    mirrored = _reseller(db_session, "mirrored")
+    mirrored.cached_balance_cents = 200
+    db_session.commit()
+    # As the A3 backfill leaves it: account cache copied, still no entry.
+    BillingAccountDAO.ensure_reseller_account(db_session, mirrored).credit_balance_cents = 200
+    retail = BillingAccount(account_type=BillingAccountType.CLIENT, user=User(username="retail-s", email="retail-s@example.com"),
+                            currency="USD", status=BillingAccountStatus.ACTIVE, credit_balance_cents=75)
+    db_session.add(retail)
+    db_session.commit()
+
+    findings = _scan(db_session)["engines"]["credit"]["findings"]
+    unexplained = sorted(
+        (f["subject_type"], f["subject_id"], f["legacy_value"], f["v2_value"])
+        for f in findings if f["check_key"] == "c2_cache_without_entries"
+    )
+    assert unexplained == sorted([
+        ("reseller", legacy_only.id, 500, 0), ("reseller", mirrored.id, 200, 200), ("billing_account", retail.id, 0, 75),
+    ])
+    assert all("cache_without_entries" in f["context"] for f in findings if f["check_key"] == "c2_cache_without_entries")
+    # Reported once per reseller: no separate mirror finding for the same account.
+    assert ("c2_mirror", new_account.id) not in {(f["check_key"], f["subject_id"]) for f in findings}
+    items = {item["item"]: item for item in billing_shadow.evaluate_switch(db_session, "credit", NOW)}
+    assert not all(item["ok"] for item in items.values())
+    assert "c2_cache_without_entries" in {row.check_key for row in _open_rows(db_session)}

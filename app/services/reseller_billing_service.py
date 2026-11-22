@@ -777,6 +777,13 @@ class ResellerBillingService:
         charge: PreparedDeployCharge,
         error: Exception,
     ) -> None:
+        from app.services.billing_locks import BillingLocks
+
+        # Reseller, account, then invoice (LOCK_ORDER), before the reversals
+        # lock the first two and the void needs the third.
+        BillingLocks.for_invoice(
+            db, charge.invoice.id, reseller=True, billing_account=True
+        )
         for ledger_entry in charge.ledger_entries:
             CreditLedgerService.reverse(
                 db,

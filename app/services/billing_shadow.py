@@ -306,6 +306,8 @@ class BillingShadowService:
                     "subjects_checked": checked,
                     "mismatches_found": len(blocking),
                     "expected_differences_found": len(expected),
+                    "scheduled": bool(scheduled),
+                    "complete": True,
                 },
             )
             if scheduled and mode == "shadow":
@@ -314,6 +316,13 @@ class BillingShadowService:
 
     @staticmethod
     def scan_history(db: Session, engine: str) -> list[dict]:
+        """The engine's stored scan results, oldest first.
+
+        Each entry records ``scheduled`` (the daily job's run) and ``complete``
+        (the scan checked every subject). Entries written before those fields
+        existed count as neither: the scan then stored admin and scheduled runs
+        alike.
+        """
         row = db.get(SystemSetting, SCAN_RESULT_KEY)
         if row is None or not isinstance(row.value, dict):
             return []
@@ -322,6 +331,8 @@ class BillingShadowService:
 
 HISTORY_LIMIT = 90
 
+# A blocking credit finding: a balance with no ledger entries behind it.
+CACHE_WITHOUT_ENTRIES = "c2_cache_without_entries"
 # Check keys for differences the two engines are known to produce. They are
 # recorded and listed, but do not count against the switch criterion.
 EXPECTED_PARTIAL_REFUND = "i2_expected_partial_refund"
@@ -347,10 +358,22 @@ def _parse_time(value: Any) -> Optional[datetime]:
 
 
 def _append_history(db: Session, engine: str, entry: dict) -> None:
+    """Append one scan result to the engine's history, keeping ``HISTORY_LIMIT`` entries.
+
+    When the history is full the oldest on-demand entry goes first, which can
+    be the new entry itself (``last_scan`` still holds it), so admin scans
+    never push out the scheduled scans the switch criterion counts.
+    """
     row = db.get(SystemSetting, SCAN_RESULT_KEY, with_for_update=True)
     value = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
     history = dict(value.get("history") or {})
-    history[engine] = (list(history.get(engine) or []) + [entry])[-HISTORY_LIMIT:]
+    entries = list(history.get(engine) or []) + [entry]
+    while len(entries) > HISTORY_LIMIT:
+        on_demand = next(
+            (index for index, old in enumerate(entries) if old.get("scheduled") is not True), None
+        )
+        entries.pop(on_demand if on_demand is not None else 0)
+    history[engine] = entries
     value["history"] = history
     if row is None:
         db.add(SystemSetting(key=SCAN_RESULT_KEY, value=value))
@@ -401,6 +424,61 @@ def reseller_cache_differences(db: Session) -> list[tuple[int, int, int]]:
         .order_by(BillingAccount.id)
     ).all()
     return [(int(a), int(r or 0), int(c or 0)) for a, r, c in rows]
+
+
+def caches_without_entries(db: Session) -> list[tuple[str, int, int, int]]:
+    """Balances no ledger entry explains: (subject type, subject id, legacy value, v2 value).
+
+    A reseller with no entries (by ``reseller_id`` or through its account)
+    and a non-zero reseller or account cache is reported as subject
+    ``reseller`` with the reseller cache and the account cache (0 without an
+    account). A retail account with no entries and a non-zero cache is
+    reported as subject ``billing_account`` with 0 and its cache. Every ledger
+    write moves a cache and the entry sum by the same amount, so no ledger
+    write can make such a balance agree with its entries.
+    """
+    from app.models.commerce_account import BillingAccount, BillingAccountType
+    from app.models.reseller import CreditLedgerEntry, Reseller
+
+    account = BillingAccount.__table__.alias("reseller_account")
+    reseller_entries = select(CreditLedgerEntry.id).where(
+        or_(
+            CreditLedgerEntry.reseller_id == Reseller.id,
+            and_(account.c.id.is_not(None), CreditLedgerEntry.billing_account_id == account.c.id),
+        )
+    )
+    resellers = db.execute(
+        select(Reseller.id, Reseller.cached_balance_cents, account.c.credit_balance_cents)
+        .outerjoin(
+            account,
+            and_(
+                account.c.reseller_id == Reseller.id,
+                account.c.account_type == BillingAccountType.RESELLER,
+            ),
+        )
+        .where(
+            or_(
+                func.coalesce(Reseller.cached_balance_cents, 0) != 0,
+                func.coalesce(account.c.credit_balance_cents, 0) != 0,
+            ),
+            ~reseller_entries.exists(),
+        )
+        .order_by(Reseller.id)
+    ).all()
+    retail = db.execute(
+        select(BillingAccount.id, BillingAccount.credit_balance_cents)
+        .where(
+            BillingAccount.account_type == BillingAccountType.CLIENT,
+            func.coalesce(BillingAccount.credit_balance_cents, 0) != 0,
+            ~select(CreditLedgerEntry.id)
+            .where(CreditLedgerEntry.billing_account_id == BillingAccount.id)
+            .exists(),
+        )
+        .order_by(BillingAccount.id)
+    ).all()
+    return [("reseller", int(rid), int(r or 0), int(a or 0)) for rid, r, a in resellers] + [
+        ("billing_account", int(aid), 0, int(c or 0)) for aid, c in retail
+    ]
 
 
 def resellers_without_account(db: Session) -> list[int]:
@@ -537,7 +615,17 @@ def _credit_scan(db: Session, mode: str) -> tuple[int, list[dict]]:
                 entry_id, expected, actual = breaks[account_id]
                 findings.append(_finding("c2_chain_continuity", "billing_account", account_id,
                                          expected, actual, f"ledger_entry:{entry_id}"))
+    unexplained = caches_without_entries(db)
+    unexplained_resellers = {sid for kind, sid, _, _ in unexplained if kind == "reseller"}
+    for subject_type, subject_id, legacy_value, v2_value in unexplained:
+        findings.append(_finding(CACHE_WITHOUT_ENTRIES, subject_type, subject_id, legacy_value, v2_value,
+                                 "cache_without_entries: non-zero balance with no ledger entries"))
+    from app.models.commerce_account import BillingAccount
+
     for account_id, reseller_cache, account_cache in reseller_cache_differences(db):
+        # A reseller with no entries is reported once, above, with both caches.
+        if db.scalar(select(BillingAccount.reseller_id).where(BillingAccount.id == account_id)) in unexplained_resellers:
+            continue
         findings.append(_finding("c2_mirror", "billing_account", account_id,
                                  reseller_cache, account_cache, "reseller cache vs account cache"))
     for reseller_id, count in unlinked_entry_counts(db).items():
@@ -687,6 +775,48 @@ def open_mismatch_counts(db: Session, engine: str, *, expected: bool = False) ->
     return {key: int(count) for key, count in rows}
 
 
+def _daily_scan_coverage(history: list[dict], quiet_start: Optional[datetime], now: datetime) -> dict:
+    """Which UTC days of the quiet period have a complete, clean, scheduled scan (design 6.5 item 4).
+
+    A scan counts when it is scheduled, complete, found no blocking mismatch
+    and started at or after ``quiet_start``. ``days_missing`` lists every whole
+    UTC day strictly between the day of ``quiet_start`` and today that has no
+    such scan; the partial first day and today may be covered but need not be.
+    Only the last ``HISTORY_LIMIT`` days are checked, the most the capped
+    history can hold at one scheduled scan a day.
+    """
+    counted = []
+    for entry in history:
+        started = _parse_time(entry.get("started_at"))
+        finished = _parse_time(entry.get("finished_at"))
+        if quiet_start is None or started is None or finished is None or started < quiet_start:
+            continue
+        if entry.get("scheduled") is not True or entry.get("complete") is not True:
+            continue
+        if int(entry.get("mismatches_found", 1)) != 0:
+            continue
+        counted.append((started, finished))
+    days = sorted({started.astimezone(timezone.utc).date() for started, _ in counted})
+    missing = []
+    if quiet_start is not None:
+        today = now.astimezone(timezone.utc).date()
+        day = max(
+            quiet_start.astimezone(timezone.utc).date() + timedelta(days=1),
+            today - timedelta(days=HISTORY_LIMIT - 1),
+        )
+        covered = set(days)
+        while day < today:
+            if day not in covered:
+                missing.append(day.isoformat())
+            day += timedelta(days=1)
+    return {
+        "scans": len(counted),
+        "days_covered": [day.isoformat() for day in days],
+        "days_missing": missing,
+        "latest_scheduled_finished_at": max((finished for _, finished in counted), default=None),
+    }
+
+
 def _item(name: str, ok: bool, **details: Any) -> dict:
     return {"item": name, "ok": bool(ok), **_jsonable(details)}
 
@@ -734,22 +864,22 @@ def evaluate_switch(
         since is not None and quiet_days is not None and quiet_days >= min_days,
         shadow_since=since, last_mismatch_seen_at=last_seen, quiet_days=quiet_days, required_days=min_days,
     ))
-    history = BillingShadowService.scan_history(db, engine)
-    in_period = [
-        entry for entry in history
-        if quiet_start is not None
-        and (_parse_time(entry.get("started_at")) or now) >= quiet_start
-        and _parse_time(entry.get("finished_at")) is not None
-    ]
+    coverage = _daily_scan_coverage(BillingShadowService.scan_history(db, engine), quiet_start, now)
     latest = BillingShadowService.last_scan(db, engine)
-    latest_finished = _parse_time(latest.get("finished_at")) if latest else None
+    latest_finished = coverage["latest_scheduled_finished_at"]
     fresh = latest_finished is not None and now - latest_finished < timedelta(hours=SCAN_FRESH_HOURS)
     latest_clean = latest is not None and int(latest.get("mismatches_found", 1)) == 0
     items.append(_item(
         "daily_scans",
-        len(in_period) >= min_days and fresh and latest_clean,
-        scans_in_quiet_period=len(in_period), required_scans=min_days,
-        latest_finished_at=latest_finished, latest_mismatches=latest.get("mismatches_found") if latest else None,
+        quiet_start is not None
+        and len(coverage["days_covered"]) >= min_days
+        and not coverage["days_missing"]
+        and fresh
+        and latest_clean,
+        scans_in_quiet_period=coverage["scans"], days_covered=len(coverage["days_covered"]),
+        required_days=min_days, days_missing=coverage["days_missing"][:50],
+        latest_scheduled_finished_at=latest_finished,
+        latest_mismatches=latest.get("mismatches_found") if latest else None,
     ))
     open_counts = open_mismatch_counts(db, engine)
     items.append(_item("no_open_mismatches", not open_counts, open_mismatches=open_counts))

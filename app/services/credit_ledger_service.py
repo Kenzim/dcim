@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Union
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.dao.reseller_dao import ResellerDAO
@@ -44,6 +45,10 @@ from app.models.reseller import (
 logger = logging.getLogger(__name__)
 
 CREDIT_PAYMENT_GATEWAY = "credit"
+
+# Entry metadata key holding the parameters of the request that wrote a keyed
+# entry, so a repeat of the key with different parameters can be refused.
+IDEMPOTENCY_REQUEST_KEY = "idempotency_request"
 
 # Temporary fallback for ``InvoiceService.UNPAID_STATUSES`` (design 4.2) until
 # the invoice engine worker adds it. ``partially_paid`` and ``collections`` are
@@ -127,6 +132,22 @@ class LedgerEntryAlreadyReversedError(CreditLedgerError):
     pass
 
 
+class InvoicePaymentPendingError(CreditLedgerError):
+    """Credit is refused while a payment of the invoice is pending (a card awaiting 3-D Secure)."""
+
+    def __init__(self, *, invoice_id: int, payment_id: int) -> None:
+        self.invoice_id = invoice_id
+        self.payment_id = payment_id
+        super().__init__(
+            f"Invoice {invoice_id} has payment {payment_id} pending; "
+            "credit can be applied once it completes or fails"
+        )
+
+
+class _IdempotencyKeyTaken(CreditLedgerError):
+    """The debit of a credit allocation found its key on an entry of another payment."""
+
+
 @dataclass(frozen=True)
 class _LedgerEntryContext:
     description: Optional[str] = None
@@ -139,6 +160,25 @@ class _LedgerEntryContext:
     idempotency_key: Optional[str] = None
     metadata: Optional[Mapping[str, Any]] = None
     created_by_user_id: Optional[int] = None
+
+
+def _request_record(metadata: Mapping[str, Any], allow_negative_balance: bool) -> dict:
+    return {
+        **dict(metadata.get(IDEMPOTENCY_REQUEST_KEY) or {}),
+        "allow_negative_balance": bool(allow_negative_balance),
+    }
+
+
+def _same_request(entry: CreditLedgerEntry, expected: Mapping[str, Any]) -> bool:
+    """Whether the request recorded on a keyed entry agrees with ``expected``.
+
+    A parameter the entry did not record (entries written before the record,
+    or by legacy mode) cannot be compared and is taken as agreeing.
+    """
+    recorded = (entry.ledger_metadata or {}).get(IDEMPOTENCY_REQUEST_KEY)
+    if not isinstance(recorded, dict):
+        return True
+    return all(recorded[name] == value for name, value in expected.items() if name in recorded)
 
 
 def credit_engine_mode(db: Session) -> str:
@@ -204,7 +244,19 @@ class CreditLedgerService:
         context: _LedgerEntryContext,
         allow_negative_balance: bool = False,
     ) -> CreditLedgerEntry:
-        """The legacy write: reseller cache only, entry not linked to an account."""
+        """The legacy write: reseller cache only, entry not linked to an account.
+
+        A repeated ``idempotency_key`` is handled as in ``_append``.
+        """
+        replay = dict(
+            account=None,
+            reseller=reseller,
+            entry_type=entry_type,
+            signed_amount_cents=signed_amount_cents,
+            context=context,
+            allow_negative_balance=allow_negative_balance,
+        )
+        metadata = dict(context.metadata or {})
         if context.idempotency_key is not None:
             existing = db.execute(
                 select(CreditLedgerEntry).where(
@@ -213,17 +265,8 @@ class CreditLedgerService:
                 )
             ).scalar_one_or_none()
             if existing is not None:
-                if (
-                    existing.reseller_id != reseller.id
-                    or existing.entry_type != entry_type
-                    or existing.amount_cents != signed_amount_cents
-                    or existing.reversal_of_id != context.reversal_of_id
-                ):
-                    raise CreditLedgerError(
-                        "idempotency_key is already used by a different "
-                        "ledger operation"
-                    )
-                return existing
+                return CreditLedgerService._replay_entry(existing, **replay)
+            metadata[IDEMPOTENCY_REQUEST_KEY] = _request_record(metadata, allow_negative_balance)
 
         new_balance = reseller.cached_balance_cents + signed_amount_cents
         if new_balance < 0 and not allow_negative_balance:
@@ -233,16 +276,21 @@ class CreditLedgerService:
                 requested_cents=-signed_amount_cents,
             )
 
-        reseller.cached_balance_cents = new_balance
-        entry = CreditLedgerEntry(
-            reseller=reseller,
-            entry_type=entry_type,
-            amount_cents=signed_amount_cents,
-            balance_after_cents=new_balance,
-            **CreditLedgerService._entry_fields(context),
-        )
-        db.add(entry)
-        db.flush()
+        try:
+            with db.begin_nested():
+                reseller.cached_balance_cents = new_balance
+                entry = CreditLedgerEntry(
+                    reseller=reseller,
+                    entry_type=entry_type,
+                    amount_cents=signed_amount_cents,
+                    balance_after_cents=new_balance,
+                    **{**CreditLedgerService._entry_fields(context), "ledger_metadata": metadata},
+                )
+                db.add(entry)
+                db.flush()
+        except IntegrityError:
+            existing = CreditLedgerService._replay_after_conflict(db, context, reseller=reseller)
+            return CreditLedgerService._replay_entry(existing, **replay)
         return entry
 
     @staticmethod
@@ -275,8 +323,22 @@ class CreditLedgerService:
         """Write one entry to ``account``'s chain in mode ``shadow`` or ``v2`` (design 6.2).
 
         The caller holds the reseller lock (reseller accounts) and then the
-        account lock.
+        account lock. A repeated ``idempotency_key`` returns the earlier entry
+        if its owner, type, amount, reversal target and
+        ``allow_negative_balance`` match, and raises otherwise. The key is
+        looked up with a plain read; when that read predates the commit of
+        the same key by another transaction, the insert fails on the unique
+        key and the committed entry is replayed instead.
         """
+        replay = dict(
+            account=account,
+            reseller=reseller,
+            entry_type=entry_type,
+            signed_amount_cents=signed_amount_cents,
+            context=context,
+            allow_negative_balance=allow_negative_balance,
+        )
+        metadata = dict(context.metadata or {})
         if context.idempotency_key is not None:
             existing = db.execute(
                 select(CreditLedgerEntry).where(
@@ -284,25 +346,144 @@ class CreditLedgerService:
                 )
             ).scalar_one_or_none()
             if existing is not None:
-                reseller_id = reseller.id if reseller is not None else None
-                same_owner = existing.reseller_id == reseller_id and (
-                    existing.billing_account_id == account.id
-                    # An entry written before the account link (legacy mode or
-                    # an older process) by the same reseller.
-                    or (existing.billing_account_id is None and reseller_id is not None)
-                )
-                if (
-                    not same_owner
-                    or existing.entry_type != entry_type
-                    or existing.amount_cents != signed_amount_cents
-                    or existing.reversal_of_id != context.reversal_of_id
-                ):
-                    raise CreditLedgerError(
-                        "idempotency_key is already used by a different "
-                        "ledger operation"
-                    )
-                return existing
+                return CreditLedgerService._replay_entry(existing, **replay)
+            metadata[IDEMPOTENCY_REQUEST_KEY] = _request_record(metadata, allow_negative_balance)
 
+        try:
+            with db.begin_nested():
+                entry, authoritative, mirror_after = CreditLedgerService._insert_entry(
+                    db,
+                    mode=mode,
+                    account=account,
+                    reseller=reseller,
+                    entry_type=entry_type,
+                    signed_amount_cents=signed_amount_cents,
+                    context=context,
+                    metadata=metadata,
+                    allow_negative_balance=allow_negative_balance,
+                )
+        except IntegrityError:
+            existing = CreditLedgerService._replay_after_conflict(
+                db, context, account=account, reseller=reseller
+            )
+            return CreditLedgerService._replay_entry(existing, **replay)
+
+        if mirror_after is not None and mirror_after != authoritative:
+            from app.services.billing_shadow import BillingShadowService
+
+            # The mirror keeps its own computed value so the drift stays visible.
+            BillingShadowService.record(
+                "credit",
+                "c1_cache_pair",
+                "billing_account",
+                account.id,
+                reseller.cached_balance_cents,
+                account.credit_balance_cents,
+                f"ledger_entry:{entry.id}",
+            )
+        if signed_amount_cents > 0:
+            from app.services.billing import settlement
+
+            settlement.fire(
+                db,
+                settlement.CREDIT_ADDED,
+                settlement.CreditAdded(
+                    entry=entry,
+                    balance_cents=authoritative,
+                    currency=account.currency,
+                ),
+            )
+        return entry
+
+    @staticmethod
+    def _locked_entry_for_key(db: Session, idempotency_key: str) -> Optional[CreditLedgerEntry]:
+        """The committed entry with ``idempotency_key``, read with a lock so the read is current.
+
+        Only called once the key is known to exist, so the lock is a record
+        lock and takes no gap lock on the key index.
+        """
+        return db.execute(
+            select(CreditLedgerEntry)
+            .where(CreditLedgerEntry.idempotency_key == idempotency_key)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def _replay_after_conflict(
+        db: Session,
+        context: _LedgerEntryContext,
+        *,
+        reseller: Optional[Reseller],
+        account: Optional[BillingAccount] = None,
+    ) -> CreditLedgerEntry:
+        """After a failed keyed insert: the committed entry holding the key.
+
+        Must be called inside the ``except IntegrityError`` block; re-raises
+        it when the failure was not the idempotency key. The savepoint
+        rollback expired the owner rows, so they are read again under the
+        locks the caller still holds.
+        """
+        from app.services.billing_locks import BillingLocks
+
+        existing = None
+        if context.idempotency_key is not None:
+            existing = CreditLedgerService._locked_entry_for_key(db, context.idempotency_key)
+        if existing is None:
+            raise
+        if reseller is not None:
+            BillingLocks.reseller(db, reseller.id)
+        if account is not None:
+            BillingLocks.billing_account(db, account.id)
+        return existing
+
+    @staticmethod
+    def _replay_entry(
+        existing: CreditLedgerEntry,
+        *,
+        account: Optional[BillingAccount],
+        reseller: Optional[Reseller],
+        entry_type: CreditLedgerEntryType,
+        signed_amount_cents: int,
+        context: _LedgerEntryContext,
+        allow_negative_balance: bool,
+    ) -> CreditLedgerEntry:
+        reseller_id = reseller.id if reseller is not None else None
+        same_owner = existing.reseller_id == reseller_id and (
+            # The legacy write knows only the reseller.
+            account is None
+            or existing.billing_account_id == account.id
+            # An entry written before the account link (legacy mode or
+            # an older process) by the same reseller.
+            or (existing.billing_account_id is None and reseller_id is not None)
+        )
+        if (
+            not same_owner
+            or existing.entry_type != entry_type
+            or existing.amount_cents != signed_amount_cents
+            or existing.reversal_of_id != context.reversal_of_id
+            or not _same_request(existing, {"allow_negative_balance": bool(allow_negative_balance)})
+        ):
+            raise CreditLedgerError(
+                "idempotency_key is already used by a different "
+                "ledger operation"
+            )
+        return existing
+
+    @staticmethod
+    def _insert_entry(
+        db: Session,
+        *,
+        mode: str,
+        account: BillingAccount,
+        reseller: Optional[Reseller],
+        entry_type: CreditLedgerEntryType,
+        signed_amount_cents: int,
+        context: _LedgerEntryContext,
+        metadata: dict,
+        allow_negative_balance: bool,
+    ) -> tuple[CreditLedgerEntry, int, Optional[int]]:
+        """Move both caches and insert the entry; returns it, the authoritative and the mirror balance."""
         account_before = int(account.credit_balance_cents or 0)
         account_after = account_before + signed_amount_cents
         mirror_after: Optional[int] = None
@@ -332,37 +513,11 @@ class CreditLedgerService:
             entry_type=entry_type,
             amount_cents=signed_amount_cents,
             balance_after_cents=authoritative,
-            **CreditLedgerService._entry_fields(context),
+            **{**CreditLedgerService._entry_fields(context), "ledger_metadata": metadata},
         )
         db.add(entry)
         db.flush()
-
-        if mirror_after is not None and mirror_after != authoritative:
-            from app.services.billing_shadow import BillingShadowService
-
-            # The mirror keeps its own computed value so the drift stays visible.
-            BillingShadowService.record(
-                "credit",
-                "c1_cache_pair",
-                "billing_account",
-                account.id,
-                reseller.cached_balance_cents,
-                account.credit_balance_cents,
-                f"ledger_entry:{entry.id}",
-            )
-        if signed_amount_cents > 0:
-            from app.services.billing import settlement
-
-            settlement.fire(
-                db,
-                settlement.CREDIT_ADDED,
-                settlement.CreditAdded(
-                    entry=entry,
-                    balance_cents=authoritative,
-                    currency=account.currency,
-                ),
-            )
-        return entry
+        return entry, authoritative, mirror_after
 
     @staticmethod
     def _write_reseller(
@@ -785,15 +940,105 @@ class CreditLedgerService:
         )
 
     @staticmethod
+    def lock_invoice_payments(db: Session, invoice_id: int) -> list[Payment]:
+        """The invoice's payments by a locking read, so they are the latest committed rows.
+
+        Under REPEATABLE READ (MySQL, MariaDB) a plain read sees the
+        transaction's first snapshot, which may predate a payment committed
+        while this transaction waited for the invoice lock. Payments come
+        after the invoice in the lock order.
+        """
+        db.flush()
+        return list(
+            db.execute(
+                select(Payment)
+                .where(Payment.invoice_id == invoice_id)
+                .order_by(Payment.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).scalars()
+        )
+
+    @staticmethod
+    def live_pending_payment(
+        db: Session, payments: list[Payment]
+    ) -> Optional[Payment]:
+        """The newest of ``payments`` still pending money from a gateway, if any.
+
+        A card payment awaiting 3-D Secure or a USDT deposit still open will
+        settle the invoice when it completes, so no other funding may pay the
+        invoice meanwhile. A USDT payment whose deposit has expired never
+        settles automatically (a late transfer goes to manual review), so it
+        does not count.
+        """
+        from app.models.usdt import UsdtDeposit, UsdtDepositStatus
+
+        for payment in sorted(payments, key=lambda row: row.id, reverse=True):
+            if payment.status != PaymentStatus.PENDING:
+                continue
+            deposit_id = (payment.payment_metadata or {}).get("usdt_deposit_id")
+            if payment.gateway == "usdt" and deposit_id is not None:
+                deposit_status = db.scalar(
+                    select(UsdtDeposit.status).where(UsdtDeposit.id == int(deposit_id))
+                )
+                if deposit_status == UsdtDepositStatus.EXPIRED:
+                    continue
+            return payment
+        return None
+
+    @staticmethod
     def _remaining_cents(db: Session, invoice: Invoice) -> int:
+        """What credit may still pay, by the invoice engine's locking reads.
+
+        ``InvoiceService.balance(for_update=True)`` in v2 and the locking
+        legacy sum otherwise, so a payment or note committed while the caller
+        waited for the invoice lock is counted.
+        """
         from app.services.billing_shadow import billing_engine_mode
         from app.services.invoice_service import InvoiceService
 
         if billing_engine_mode(db, "invoice") == "v2":
-            return int(InvoiceService.balance(db, invoice).remaining_cents)
-        return max(
-            0, int(invoice.amount_cents) - InvoiceService.allocated_cents(db, invoice.id)
-        )
+            return int(InvoiceService.balance(db, invoice, for_update=True).remaining_cents)
+        allocated = InvoiceService._legacy_allocated_cents(db, invoice.id, for_update=True)
+        return max(0, int(invoice.amount_cents or 0) - allocated)
+
+    @staticmethod
+    def _replay_allocation(
+        db: Session,
+        payment_id: int,
+        *,
+        invoice_id: int,
+        amount_cents: Optional[int],
+        allow_negative_balance: bool,
+    ) -> Payment:
+        """The payment an earlier ``apply_to_invoice`` with the same key wrote.
+
+        Raises when it paid another invoice or the request differs. A payment
+        written before requests were recorded is compared on the amount only.
+        """
+        payment = db.execute(
+            select(Payment)
+            .where(Payment.id == payment_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if payment is None or payment.invoice_id != invoice_id:
+            raise CreditLedgerError(
+                "idempotency_key is already used by a different ledger operation"
+            )
+        recorded = (payment.payment_metadata or {}).get(IDEMPOTENCY_REQUEST_KEY)
+        if isinstance(recorded, dict):
+            same = recorded.get("amount_cents") == amount_cents and bool(
+                recorded.get("allow_negative_balance")
+            ) == bool(allow_negative_balance)
+        else:
+            same = amount_cents is None or int(payment.amount_cents) == amount_cents
+        if not same:
+            raise CreditLedgerError(
+                "idempotency_key was already used with a different amount_cents "
+                "or allow_negative_balance"
+            )
+        return payment
 
     @staticmethod
     def allocate_to_locked_invoice(
@@ -806,6 +1051,8 @@ class CreditLedgerService:
         idempotency_key: Optional[str] = None,
         fire_event: bool = True,
         allow_negative_balance: bool = False,
+        request: Optional[Mapping[str, Any]] = None,
+        locked_payments: Optional[list[Payment]] = None,
     ) -> Optional[Payment]:
         """Pay ``amount_cents`` of a locked invoice from its owner's credit.
 
@@ -814,20 +1061,28 @@ class CreditLedgerService:
         a succeeded ``credit`` payment and the matching debit, then settles the
         invoice. Without ``idempotency_key`` the debit's key is
         ``invoice-credit:<invoice>:<payment>``, the reseller funding path's key.
+        ``request`` is stored on the payment for comparing a repeated key.
+        ``locked_payments`` is the caller's locking read of the invoice's
+        payments, counted for the payment's reference instead of a plain read.
+        Raises ``CreditLedgerError`` when ``idempotency_key`` already belongs
+        to another entry.
         """
         from app.services.invoice_service import InvoiceService
 
         if amount_cents <= 0:
             return None
-        ordinal = int(
-            db.scalar(
-                select(func.count(Payment.id)).where(
-                    Payment.invoice_id == invoice.id,
-                    Payment.gateway == CREDIT_PAYMENT_GATEWAY,
+        if locked_payments is not None:
+            ordinal = sum(1 for row in locked_payments if row.gateway == CREDIT_PAYMENT_GATEWAY)
+        else:
+            ordinal = int(
+                db.scalar(
+                    select(func.count(Payment.id)).where(
+                        Payment.invoice_id == invoice.id,
+                        Payment.gateway == CREDIT_PAYMENT_GATEWAY,
+                    )
                 )
+                or 0
             )
-            or 0
-        )
         source = "reseller_credit" if reseller is not None else "account_credit"
         payment = Payment(
             invoice_id=invoice.id,
@@ -867,9 +1122,15 @@ class CreditLedgerService:
                 allow_negative_balance=allow_negative_balance,
                 **keywords,
             )
-        metadata = {"source": source, "ledger_entry_id": ledger.id}
+        if ledger.payment_id != payment.id:
+            raise _IdempotencyKeyTaken(
+                "idempotency_key is already used by a different ledger operation"
+            )
+        metadata: dict[str, Any] = {"source": source, "ledger_entry_id": ledger.id}
         if idempotency_key is not None:
             metadata["idempotency_key"] = idempotency_key
+        if request is not None:
+            metadata[IDEMPOTENCY_REQUEST_KEY] = dict(request)
         payment.payment_metadata = metadata
         InvoiceService.mark_paid_if_fully_allocated(db, invoice.id)
         if fire_event and credit_engine_mode(db) != "legacy":
@@ -896,6 +1157,7 @@ class CreditLedgerService:
         actor_user_id: Optional[int] = None,
         idempotency_key: str,
         allow_negative_balance: bool = False,
+        refuse_if_payment_pending: Optional[bool] = None,
     ) -> Optional[Payment]:
         """Pay (part of) an invoice from account credit as a ``credit`` payment (design 6.7).
 
@@ -905,8 +1167,19 @@ class CreditLedgerService:
         credit is no cap: the default is the remaining amount and the balance
         may go below zero by the shortfall. Locks reseller, account and invoice
         in order. Returns the payment, the earlier payment for a repeated
-        ``idempotency_key``, or None when there is nothing to apply. Retail
-        invoices need the credit engine in ``v2``.
+        ``idempotency_key`` with the same ``amount_cents`` and
+        ``allow_negative_balance``, or None when there is nothing to apply; a
+        repeated key with other parameters raises. Retail invoices need the
+        credit engine in ``v2``. An invoice with a payment still pending at a
+        gateway raises ``InvoicePaymentPendingError`` when
+        ``refuse_if_payment_pending`` is true, which it is by default except
+        with ``allow_negative_balance``: the dispute policy records money the
+        gateway has already taken back and must not wait on another payment.
+
+        Everything that decides money after the locks is a locking read, so a
+        payment or entry committed while this call waited for the invoice lock
+        is seen; a concurrent call with the same key that commits between the
+        lookup and the insert is replayed from the unique key.
         """
         from app.services.billing_locks import BillingLocks
 
@@ -919,17 +1192,33 @@ class CreditLedgerService:
         )
         if locked is None:
             raise CreditLedgerError(f"Invoice {invoice.id} was not found")
+        request = {
+            "amount_cents": amount_cents,
+            "allow_negative_balance": bool(allow_negative_balance),
+        }
+
+        def replay(payment_id: Optional[int]) -> Payment:
+            if payment_id is None:
+                raise CreditLedgerError(
+                    "idempotency_key is already used by a different ledger operation"
+                )
+            return CreditLedgerService._replay_allocation(
+                db, int(payment_id), invoice_id=locked.id, **request
+            )
+
         existing = db.execute(
             select(CreditLedgerEntry).where(
                 CreditLedgerEntry.idempotency_key == idempotency_key
             )
         ).scalar_one_or_none()
         if existing is not None:
-            if existing.invoice_id != locked.id or existing.payment_id is None:
-                raise CreditLedgerError(
-                    "idempotency_key is already used by a different ledger operation"
-                )
-            return db.get(Payment, existing.payment_id)
+            if existing.invoice_id != locked.id:
+                replay(None)
+            return replay(existing.payment_id)
+        payments = CreditLedgerService.lock_invoice_payments(db, locked.id)
+        for row in payments:
+            if (row.payment_metadata or {}).get("idempotency_key") == idempotency_key:
+                return replay(row.id)
 
         reseller: Optional[Reseller] = None
         if locked.reseller_id is not None:
@@ -945,6 +1234,13 @@ class CreditLedgerService:
             owner = db.get(BillingAccount, locked.billing_account_id)
         if locked.status not in unpaid_invoice_statuses():
             raise CreditLedgerError("Invoice cannot take credit in its current state")
+        pending = (
+            CreditLedgerService.live_pending_payment(db, payments)
+            if (not allow_negative_balance if refuse_if_payment_pending is None else refuse_if_payment_pending)
+            else None
+        )
+        if pending is not None:
+            raise InvoicePaymentPendingError(invoice_id=locked.id, payment_id=pending.id)
 
         available = CreditLedgerService.available_cents(db, owner)
         remaining = CreditLedgerService._remaining_cents(db, locked)
@@ -963,15 +1259,28 @@ class CreditLedgerService:
                     requested_cents=amount_cents,
                 )
             amount = amount_cents
-        return CreditLedgerService.allocate_to_locked_invoice(
-            db,
-            locked,
-            reseller=reseller,
-            amount_cents=amount,
-            created_by_user_id=actor_user_id,
-            idempotency_key=idempotency_key,
-            allow_negative_balance=allow_negative_balance,
-        )
+        try:
+            with db.begin_nested():
+                return CreditLedgerService.allocate_to_locked_invoice(
+                    db,
+                    locked,
+                    reseller=reseller,
+                    amount_cents=amount,
+                    created_by_user_id=actor_user_id,
+                    idempotency_key=idempotency_key,
+                    allow_negative_balance=allow_negative_balance,
+                    request=request,
+                    locked_payments=payments,
+                )
+        except (IntegrityError, _IdempotencyKeyTaken):
+            entry = CreditLedgerService._locked_entry_for_key(db, idempotency_key)
+            if entry is None:
+                raise
+            # The savepoint rollback expired the locked rows; lock them again.
+            BillingLocks.for_invoice(db, locked.id, reseller=True, billing_account=True)
+            if entry.invoice_id != locked.id:
+                replay(None)
+            return replay(entry.payment_id)
 
     @staticmethod
     def remove_from_invoice(

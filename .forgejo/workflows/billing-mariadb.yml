@@ -1,11 +1,15 @@
 # Optional: billing phase 1 migrations on MariaDB 11.8.
 #
 # Runs tests/core/test_alembic_fresh_mariadb.py (the whole Alembic chain,
-# phase 1 included, from an empty database), tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
-# billing_p1_* chain), the snapshot isolation connect hook test and
+# phase 1 included, from an empty database),
+# tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
+# billing_p1_* chain), the snapshot isolation connect hook test,
 # tests/services/test_billing_p1i_numbering_mariadb.py (series counters under
-# concurrency) and tests/services/test_billing_p1i_settlement_mariadb.py (two
-# payments settling one invoice at once) against a mariadb:11.8 service container, the version production
+# concurrency), tests/services/test_billing_p1i_settlement_mariadb.py (two
+# payments settling one invoice at once) and
+# tests/services/test_billing_p1c_credit_mariadb.py (credit applied to an
+# invoice under concurrency) against a mariadb:11.8 service container, the
+# version production
 # runs. Manual trigger
 # only, so it never blocks other work; the SQLite migration tests in
 # tests/migrations run in the normal test suite.
@@ -58,3 +62,5 @@ jobs:
         run: python -m pytest tests/services/test_billing_p1i_numbering_mariadb.py -q
       - name: Concurrent payments settling one invoice on MariaDB
         run: python -m pytest tests/services/test_billing_p1i_settlement_mariadb.py -q
+      - name: Credit applied to invoices under concurrency on MariaDB
+        run: python -m pytest tests/services/test_billing_p1c_credit_mariadb.py -q
