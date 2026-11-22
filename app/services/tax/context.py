@@ -81,6 +81,13 @@ def _product_class_id(db: Session, line: Any) -> Optional[int]:
     return int(product.tax_class_id) if product is not None and product.tax_class_id is not None else None
 
 
+def class_code_of(db: Session, tax_class_id: Optional[int]) -> str:
+    """The code of a tax class id; ``standard`` for None or an unknown id."""
+    if tax_class_id is None:
+        return "standard"
+    return _class_codes(db).get(int(tax_class_id), "standard")
+
+
 def line_class_code(db: Session, line: Any, codes: Mapping[int, str]) -> str:
     """``tax_class_code`` of a line: its own class, else its product's, else ``standard``."""
     code = getattr(line, "tax_class_code", None)

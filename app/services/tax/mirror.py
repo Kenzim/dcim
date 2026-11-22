@@ -43,10 +43,11 @@ def _standard_class_id(db: Session) -> int:
 
 
 def mirrored_values(tax_rate: TaxRate) -> dict[str, Any]:
+    """The mirrored rule's fields; a region of ``''`` stays a literal region, as in ``tax_rates``."""
     return {
         "name": tax_rate.name,
         "country": (tax_rate.country or "").upper() or None,
-        "region": tax_rate.region or None,
+        "region": tax_rate.region,
         "rate_percent": rate_percent_of(tax_rate.rate_bps),
         "priority": 10 if tax_rate.region else 0,
         "enabled": bool(tax_rate.enabled),

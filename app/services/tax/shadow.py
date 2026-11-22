@@ -62,6 +62,12 @@ def compare_checkout(legacy_tax_cents: int, result: TaxResult, *, subject_type: 
     return key
 
 
+def record_legacy_raised(subject_type: str, subject_id: int, error: str, result: Optional[TaxResult]) -> None:
+    """``t1_checkout`` when ``_tax_cents`` raised: its own outcome, not a plain mismatch."""
+    v2 = result_values(result) if result is not None else {"tax_cents": None}
+    _record(T1_CHECKOUT, subject_type, subject_id, {"raised": error}, v2, "legacy_raised")
+
+
 def record_uncovered(invoice_id: int, purpose: str, result: TaxResult) -> None:
     """``t2_uncovered``: a publish legacy never taxed that the engine would tax."""
     if result.tax_cents == 0 and not any(line.parts for line in result.lines.values()):

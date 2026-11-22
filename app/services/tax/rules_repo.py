@@ -103,23 +103,32 @@ class RuleView:
     def mirrored(self) -> bool:
         return self.source == TaxRuleSource.TAX_RATES.value
 
-    def specificity(self) -> int:
+    def specificity(self, buyer_region: Optional[str] = None) -> tuple[int, int]:
+        """``(level, rank)``; the highest wins.
+
+        A rule mirrored from ``tax_rates`` keeps that table's lookup: a region
+        row (``''`` included, as a literal region) is regional, and a buyer
+        with no region prefers the national row over any region row.
+        """
         if self.postcode_pattern:
-            return SPEC_POSTCODE
+            return SPEC_POSTCODE, 0
+        if self.mirrored and self.region is not None:
+            return (SPEC_REGION, 0) if (buyer_region or "") else (SPEC_COUNTRY, -1)
         if self.region:
-            return SPEC_REGION
+            return SPEC_REGION, 0
         if self.country:
-            return SPEC_COUNTRY
-        return SPEC_NONE
+            return SPEC_COUNTRY, 0
+        return SPEC_NONE, 0
 
     def matches_place(self, country: Optional[str], region: Optional[str], postcode: Optional[str]) -> bool:
         if self.country and self.country.upper() != (country or "").upper():
             return False
-        if self.region and not _same_text(self.region, region):
-            # A rule mirrored from ``tax_rates`` keeps that table's matching: a
-            # buyer with no region matches a region row (checkout_service._tax_cents).
-            if not (self.mirrored and not (region or "").strip()):
+        if self.mirrored and self.region is not None:
+            # tax_rates: a buyer with no region may take a region row.
+            if (region or "") and not _same_text(self.region, region):
                 return False
+        elif self.region and not _same_text(self.region, region):
+            return False
         if self.postcode_pattern:
             normalised = normalise_postcode(postcode)
             if normalised is None:
@@ -147,11 +156,12 @@ def _version(row: object) -> str:
 
 
 def _view(rule: TaxRule) -> RuleView:
+    mirrored = _value(rule.source) == TaxRuleSource.TAX_RATES.value
     return RuleView(
         id=int(rule.id),
         name=rule.name,
         country=(rule.country or None) and rule.country.upper(),
-        region=rule.region or None,
+        region=rule.region if mirrored else (rule.region or None),
         postcode_pattern=rule.postcode_pattern or None,
         tax_class_id=int(rule.tax_class_id),
         customer_type=_value(rule.customer_type),
@@ -233,9 +243,11 @@ def select_rules(
     rules are matched against; rules of any other jurisdiction are left out.
     Most specific wins (postcode, region, country, none), then the highest
     priority, then a rule of a registration's jurisdiction before an ``ANY``
-    rule, then the lowest id. Compound rules of that same specificity are all
-    applied after it, in ``compound_order``. ``reverse_charge`` limits the
-    candidates to reverse charge rules (True) or ordinary rules (False).
+    rule, then the lowest id. Mirrored rules carry no priority of their own
+    (``tax_rates`` has none), so they tie on id alone. Compound rules of that
+    same specificity are all applied after it, in ``compound_order``.
+    ``reverse_charge`` limits the candidates to reverse charge rules (True)
+    or ordinary rules (False).
     """
     matching = [
         rule
@@ -248,11 +260,11 @@ def select_rules(
     ]
     if not matching:
         return []
-    best = max(rule.specificity() for rule in matching)
-    level = [rule for rule in matching if rule.specificity() == best]
+    best = max(rule.specificity(region) for rule in matching)
+    level = [rule for rule in matching if rule.specificity(region) == best]
     plain = sorted(
         (r for r in level if not r.compound),
-        key=lambda r: (-r.priority, r.jurisdiction == JURISDICTION_ANY, r.id),
+        key=lambda r: (0 if r.mirrored else -r.priority, r.jurisdiction == JURISDICTION_ANY, r.id),
     )
     compound = [r for r in level if r.compound]
     chosen = plain[:1] + compound
