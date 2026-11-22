@@ -320,8 +320,9 @@ def _inclusive_multi(parts: list[_Part], gross: int) -> None:
     """A gross line with several taxes: the net from the combined rate, each tax on it.
 
     Plain taxes share the net as base; compound taxes add the earlier taxes.
-    The net is rounded with the first rule; the last taxed part takes the unit
-    left over so that net plus taxes equals the gross exactly.
+    The total tax is rounded with the first rule (so ``tax_floor`` floors the
+    tax, not the net); the last taxed part takes the unit left over so that
+    net plus taxes equals the gross exactly.
     """
     plain_ppm = sum(p.rate_ppm for p in parts if not p.compound and not p.reverse_charge)
     numerator = PPM + plain_ppm
@@ -330,7 +331,7 @@ def _inclusive_multi(parts: list[_Part], gross: int) -> None:
         if part.compound and not part.reverse_charge:
             numerator *= PPM + part.rate_ppm
             denominator *= PPM
-    net = rounding_rule(parts[0].rounding_rule)(gross * denominator, numerator)
+    net = gross - rounding_rule(parts[0].rounding_rule)(gross * (numerator - denominator), numerator)
     for index, part in enumerate(parts):
         base = net + (sum(p.tax for p in parts[:index]) if part.compound else 0)
         part.base = base

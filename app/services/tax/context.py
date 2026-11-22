@@ -232,7 +232,10 @@ class TaxContextBuilder:
     def for_adjustment(
         db: Session, invoice: Any, adjustment_lines: Sequence[Any], *, now: Optional[datetime] = None
     ) -> TaxContext:
-        """A debit note taxed as a new supply at its own tax point (design 4.8), purpose ``adjustment``."""
+        """A debit note taxed as a new supply at its own tax point (design 4.8), purpose ``adjustment``.
+
+        Note line amounts are always net of tax, so the context is tax exclusive.
+        """
         from datetime import timezone
 
         at = now or datetime.now(timezone.utc)
@@ -240,7 +243,7 @@ class TaxContextBuilder:
         return TaxContext(
             tax_point_at=at,
             currency=_currency(invoice.currency),
-            prices_include_tax=bool(invoice.prices_include_tax),
+            prices_include_tax=False,
             buyer=buyer_facts(db, account, profile, at),
             lines=line_inputs(db, adjustment_lines, purpose="adjustment"),
             purpose="adjustment",
