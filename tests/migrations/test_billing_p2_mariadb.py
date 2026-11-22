@@ -145,7 +145,18 @@ def test_p2_chain_up_down_up_on_mariadb(mariadb):
     helpers.migrate(engine, helpers.HEAD)
     _assert_head(engine, models_shape)
 
-    # The seed downgrade refuses while a product uses a system class.
+    # MariaDB enforces the policy scope check.
+    for scope, product_id in (("product", 0), ("retail_default", 90)):
+        with pytest.raises(sa.exc.DBAPIError, match="ck_billing_nonpayment_policies_scope_product"):
+            helpers.execute(
+                engine,
+                "INSERT INTO billing_nonpayment_policies (scope, product_id) VALUES (:s, :p)",
+                s=scope, p=product_id,
+            )
+    helpers.execute(engine, "INSERT INTO billing_nonpayment_policies (scope, product_id) VALUES ('product', 90)")
+
+    # The seed downgrade refuses while a product uses a system class; the
+    # revisions above it have been downgraded and committed by then.
     standard = helpers.scalar(engine, "SELECT id FROM tax_classes WHERE code = 'standard'")
     helpers.execute(
         engine,
@@ -155,6 +166,7 @@ def test_p2_chain_up_down_up_on_mariadb(mariadb):
     )
     with pytest.raises(RuntimeError, match="products with a system tax class"):
         helpers.migrate(engine, helpers.P1_HEAD)
+    assert helpers.current(engine) == "billing_p2_tax_seed"
     helpers.execute(engine, "UPDATE products SET tax_class_id = NULL")
 
     helpers.migrate(engine, helpers.P1_HEAD)
