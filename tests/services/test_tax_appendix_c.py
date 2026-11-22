@@ -2,8 +2,10 @@
 
 Each case applies the built-in packs, sets the seller's establishment country
 and registrations, and checks the tax per line, the reverse charge flag, the
-legal notes and the registration the engine chose. While the engine is the
-phase 2 stub the cases are expected failures; any other failure is real.
+legal notes and the registration the engine chose. A case with no tax still
+names the establishment registration: the invoice is issued under it and
+prints its number (design 4.3 step 2.2; for the no-tax cases of step 2.3 this
+is the engine's choice, pending the design saying so).
 """
 
 from __future__ import annotations
@@ -74,7 +76,7 @@ C = [
         "uk-to-eu-business-valid", "GB", ("GB", "OSS_IE"), "DE", True, "valid", NONE, reverse_charge=True,
         notes=frozenset({"gb_outside_scope_b2b"}), registration="GB",
     ),
-    Case("uk-to-eu-business-unchecked-no-oss", "GB", ("GB",), "DE", True, "unchecked", NONE, not_registered=True),
+    Case("uk-to-eu-business-unchecked-no-oss", "GB", ("GB",), "DE", True, "unchecked", NONE, not_registered=True, registration="GB"),
     Case(
         "uk-to-eu-business-invalid-oss", "GB", ("GB", "OSS_IE"), "DE", True, "invalid", DE19, "19.0000",
         registration="OSS_IE",
@@ -91,9 +93,9 @@ C = [
         "uk-to-eu-consumer-domestic-beats-oss", "GB", ("GB", "IE", "OSS_IE"), "IE", False, "unchecked", IE23,
         "23.0000", registration="IE",
     ),
-    Case("uk-to-eu-consumer-no-oss", "GB", ("GB",), "FR", False, "unchecked", NONE, not_registered=True),
-    Case("uk-to-row-consumer", "GB", ("GB",), "US", False, "unchecked", NONE, notes=frozenset({"outside_scope"})),
-    Case("uk-to-row-business", "GB", ("GB",), "US", True, "valid", NONE, notes=frozenset({"outside_scope"})),
+    Case("uk-to-eu-consumer-no-oss", "GB", ("GB",), "FR", False, "unchecked", NONE, not_registered=True, registration="GB"),
+    Case("uk-to-row-consumer", "GB", ("GB",), "US", False, "unchecked", NONE, notes=frozenset({"outside_scope"}), registration="GB"),
+    Case("uk-to-row-business", "GB", ("GB",), "US", True, "valid", NONE, notes=frozenset({"outside_scope"}), registration="GB"),
     # Seller established in an EU member state.
     Case("de-consumer", "DE", ("DE",), "DE", False, "unchecked", DE19, "19.0000", registration="DE"),
     Case("de-business-valid", "DE", ("DE", "OSS_DE"), "DE", True, "valid", DE19, "19.0000", registration="DE"),
@@ -121,11 +123,11 @@ C = [
         "de-to-fr-consumer-under-threshold", "DE", ("DE",), "FR", False, "unchecked", DE19, "19.0000",
         registration="DE",
     ),
-    Case("de-to-uk-business-valid", "DE", ("DE",), "GB", True, "valid", NONE, notes=frozenset({"outside_scope"})),
+    Case("de-to-uk-business-valid", "DE", ("DE",), "GB", True, "valid", NONE, notes=frozenset({"outside_scope"}), registration="DE"),
     Case("de-to-uk-consumer-gb-reg", "DE", ("DE", "GB"), "GB", False, "unchecked", GB20, "20.0000", registration="GB"),
-    Case("de-to-uk-consumer-no-gb-reg", "DE", ("DE",), "GB", False, "unchecked", NONE, not_registered=True),
-    Case("de-to-uk-business-unchecked", "DE", ("DE",), "GB", True, "unchecked", NONE, not_registered=True),
-    Case("de-to-row-consumer", "DE", ("DE", "OSS_DE"), "US", False, "unchecked", NONE, notes=frozenset({"outside_scope"})),
+    Case("de-to-uk-consumer-no-gb-reg", "DE", ("DE",), "GB", False, "unchecked", NONE, not_registered=True, registration="DE"),
+    Case("de-to-uk-business-unchecked", "DE", ("DE",), "GB", True, "unchecked", NONE, not_registered=True, registration="DE"),
+    Case("de-to-row-consumer", "DE", ("DE", "OSS_DE"), "US", False, "unchecked", NONE, notes=frozenset({"outside_scope"}), registration="DE"),
 ]
 
 _REGISTRATIONS = {
@@ -201,10 +203,7 @@ def _setup(db, case: Case) -> tuple[TaxContext, dict[str, int]]:
 @pytest.mark.parametrize("case", C, ids=[c.id for c in C])
 def test_appendix_c(db_session, case):
     context, regs = _setup(db_session, case)
-    try:
-        result = TaxEngine.calculate(db_session, context)
-    except NotImplementedError:
-        pytest.xfail("TaxEngine.calculate is still the phase 2 stub")
+    result = TaxEngine.calculate(db_session, context)
 
     for key, expected in case.tax.items():
         line = result.lines[key]
