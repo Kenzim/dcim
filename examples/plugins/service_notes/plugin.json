@@ -1,0 +1,54 @@
+{
+  "id": "service_notes",
+  "name": "Service notes",
+  "version": "1.0.0",
+  "description": "A label and a note on every service, editable by the client and by staff, with a daily review that flags notes nobody has looked at for a while.",
+  "author": "Rackflow",
+  "licence": "MIT",
+  "rackflow_api": ">=1.0,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["service.read", "ui.client", "notify.client", "mcp.staff"],
+  "services": {"types": ["vm", "bare_metal"], "enablement": "all"},
+  "settings": [
+    {"key": "review_after_days", "label": "Flag a note for review after (days)", "type": "integer",
+     "default": 90, "min": 1, "max": 3650, "required": true},
+    {"key": "notify_owner", "label": "Tell the client when their note needs review", "type": "boolean", "default": true}
+  ],
+  "schedules": [{"id": "review", "every": "1d", "scope": "service", "jitter": "1h"}],
+  "actions": [
+    {"id": "save_note", "label": "Save", "audience": ["admin", "client"], "style": "primary",
+     "params": [
+       {"key": "label", "label": "Label", "type": "string", "max_length": 60, "default_state": "label"},
+       {"key": "note", "label": "Note", "type": "text", "max_length": 500, "default_state": "note"}
+     ]},
+    {"id": "clear_note", "label": "Clear note", "audience": ["admin", "client"], "style": "danger",
+     "confirm": "Remove the label and the note from this service?",
+     "when": {"state": "note", "truthy": true}},
+    {"id": "mark_reviewed", "label": "Mark as reviewed", "audience": ["admin"], "style": "secondary",
+     "when": {"state": "review_status", "eq": "stale"}}
+  ],
+  "ui": {"panels": [{
+    "id": "notes",
+    "title": "Notes",
+    "placement": "service",
+    "audience": ["admin", "client"],
+    "elements": [
+      {"type": "badge", "label": "Review", "state": "review_status",
+       "map": {"current": {"text": "Up to date", "tone": "success"}, "stale": {"text": "Needs review", "tone": "warning"}},
+       "default": {"text": "No note yet", "tone": "neutral"}},
+      {"type": "field", "label": "Label", "state": "label", "empty": "None"},
+      {"type": "field", "label": "Note", "state": "note", "empty": "None"},
+      {"type": "field", "label": "Last changed", "state": "updated_at", "format": "datetime", "empty": "Never"},
+      {"type": "field", "label": "Changed by", "state": "updated_by", "audience": ["admin"], "empty": "Unknown"},
+      {"type": "text", "tone": "warning", "text": "This note has not been looked at for a while. Please check it is still right.",
+       "when": {"state": "review_status", "eq": "stale"}},
+      {"type": "action", "action": "save_note"},
+      {"type": "action", "action": "clear_note"},
+      {"type": "action", "action": "mark_reviewed"}
+    ]
+  }]},
+  "mcp_tools": [
+    {"id": "get_note", "description": "The label and note of one service.", "audience": "staff", "scope": "read",
+     "params": [{"key": "service_id", "label": "Service", "type": "integer", "required": true}]}
+  ]
+}
