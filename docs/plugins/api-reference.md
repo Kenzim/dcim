@@ -224,6 +224,7 @@ Service types: `vm`, `bare_metal`, `http_proxy`, `nfs_storage`, `backup_slot`. V
 | `actions` | list of [ActionSpec](#actionspec) | empty | max length 50 |  |
 | `ui` | [UiSpec](#uispec) | empty |  |  |
 | `mcp_tools` | list of [McpToolSpec](#mcptoolspec) | empty | max length 20 |  |
+| `provides` | list of [ProvideSpec](#providespec) | empty | max length 10 | Typed providers the plugin offers (API 1.1 and later). Each needs the permission of its kind and an `@plugin.provider(kind, id)` in `register`. |
 | `tables` | any | none |  | Reserved. Refused in API 1.0. |
 
 ### ServicesSpec
@@ -360,6 +361,34 @@ Service types: `vm`, `bare_metal`, `http_proxy`, `nfs_storage`, `backup_slot`. V
 | `params` | list of [ParamField](#paramfield) | empty | max length 20 |  |
 | `timeout` | integer | `15` | at least 1, at most 30 |  |
 
+### ProvideSpec
+
+| Field | Type | Default | Limits | Notes |
+|---|---|---|---|---|
+| `kind` | `"tax_id_validator"` or `"tax_rule_pack"` or `"tax_provider"` | required |  | `tax_id_validator`, `tax_rule_pack` or `tax_provider`. |
+| `id` | string | required |  | Unique with the kind inside the plugin. Billing refers to the provider as `<plugin id>:<provider id>`. |
+| `label` | string | required | min length 1, max length 80 | Shown to admins where they choose a provider. |
+| `description` | string | `""` | max length 500 |  |
+| `countries` | list of string | empty | max length 300 | Upper case ISO alpha-2 codes the provider covers (`EL` for Greece at VIES). Empty means any. |
+| `id_types` | list of string | empty | max length 50 | Tax ID types the provider checks, such as `eu_vat`. Required for `tax_id_validator`, refused elsewhere. |
+| `currencies` | list of string | empty | max length 200 | Upper case ISO alpha-3 codes. Only for `tax_provider`; empty means any. |
+| `timeout_seconds` | integer | `8` | at least 1, at most 30 | Wall-clock limit of one call. Billing may lower it for a call, never raise it. |
+| `rate_limit` | [RateLimitSpec](#ratelimitspec) | none |  | Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate` and `load`, not `supports` or `check_format`. |
+| `pack` | [PackRef](#packref) | none |  | Only for `tax_rule_pack`: the JSON file of the pack inside the package. It must exist and pass the pack schema at install. |
+
+### RateLimitSpec
+
+| Field | Type | Default | Limits | Notes |
+|---|---|---|---|---|
+| `calls` | integer | required | at least 1, at most 10000 | Calls allowed in one window. |
+| `per_seconds` | integer | required | at least 1, at most 86400 | Length of the window in seconds. |
+
+### PackRef
+
+| Field | Type | Default | Limits | Notes |
+|---|---|---|---|---|
+| `file` | string | required | min length 1, max length 255 | Relative path of a `.json` file inside the package. |
+
 ## SDK context
 
 Every handler receives `ctx`. A call that needs a permission raises `PermissionDenied` when the plugin was not granted it. Calls on a service raise `NotActive` when the plugin is not active for that service.
@@ -375,7 +404,7 @@ Every handler receives `ctx`. A call that needs a permission raises `PermissionD
 | `await ctx.http.get(url: str, *, headers=None, timeout: float = 10) -> dict` | method | `http.outbound` | GET from a public address. Returns status and text. |
 | `await ctx.http.post(url: str, *, json=None, body=None, headers=None, timeout: float = 10) -> dict` | method | `http.outbound` | POST to a public address. Returns status and text. |
 | `ctx.in_window(setting_key: str, at: Optional[datetime] = None) -> bool` | method |  | Whether a time falls inside a window setting. The time defaults to now. |
-| `ctx.kind` | attribute |  | What is running: event, before, schedule, action, mcp_tool or lifecycle. |
+| `ctx.kind` | attribute |  | What is running: event, before, schedule, action, mcp_tool, lifecycle or provider. |
 | `ctx.log.debug(message, service_id=None, **fields)` | method |  | Write a debug line to the plugin log. |
 | `ctx.log.error(message, service_id=None, **fields)` | method |  | Write an error to the plugin log. |
 | `ctx.log.info(message, service_id=None, **fields)` | method |  | Write an info line to the plugin log. |
@@ -401,6 +430,79 @@ Every handler receives `ctx`. A call that needs a permission raises `PermissionD
 
 `state.*` is the interface of `ctx.store` (plugin-wide) and of `ctx.state(service_id)` (one service).
 
+## Provider kinds
+
+From API 1.1 a plugin can also offer typed providers that Rackflow calls directly. Declare each in the manifest under `provides` and bind it in `register` with `@plugin.provider(kind, id)`. The decorated class (or a factory function) is instantiated once per load with no arguments. The types below are importable from `rackflow_plugin.kinds`; they are frozen dataclasses, amounts are integer minor units and tax rates are strings with at most four decimals.
+
+A provider method receives only its arguments. To read settings, write the plugin log or make outbound HTTP calls, a provider calls `rackflow_plugin.kinds.current_context()` while a method runs; it returns the usual `ctx` (with `ctx.kind == "provider"`). A method may be a plain function or a coroutine.
+
+| Kind | Permission | Methods | What it is for |
+|---|---|---|---|
+| `tax_id_validator` | `tax.validate_id` | `supports`, `check_format`, `check_online` | Checks a customer's tax or VAT number. Billing asks `supports`, then `check_format`, then `check_online`. |
+| `tax_provider` | `tax.calculate` | `supports`, `calculate` | Calculates the tax of a basket. Billing falls back to its own rules when the provider fails. |
+| `tax_rule_pack` | `tax.rule_pack` | `pack_id`, `versions`, `load` | Offers a set of tax rules as data. An administrator reviews and applies it; nothing is applied automatically. |
+
+### tax_id_validator
+
+| Method | Arguments | Notes |
+|---|---|---|
+| `supports` | `(country: str, id_type: str) -> bool` | Whether the validator handles this country and ID type. Local and fast. |
+| `check_format` | `(country: str, tax_id: str) -> bool` | Whether the number is well formed for the country. Local, no network. |
+| `check_online` | `(request: TaxIdCheckRequest) -> TaxIdCheckResult` | Ask the registry. Return a `TaxIdCheckResult`; `unavailable` needs an `error_code`. |
+
+### tax_provider
+
+| Method | Arguments | Notes |
+|---|---|---|
+| `supports` | `(request: TaxProviderRequest) -> bool` | Whether the provider can handle this request (country, currency, lines). |
+| `calculate` | `(request: TaxProviderRequest) -> TaxProviderResult` | Return a `TaxProviderResult` with every requested line key. |
+
+### tax_rule_pack
+
+| Method | Arguments | Notes |
+|---|---|---|
+| `pack_id` | `() -> str` | The pack's id, matching `^[a-z][a-z0-9_]{0,63}$`. |
+| `versions` | `() -> list[str]` | Available versions, newest last. |
+| `load` | `(version: str) -> dict` | The pack JSON of one version. At most 1 MB. |
+
+### Types
+
+| Type | Field | Type of field | Required |
+|---|---|---|---|
+| `TaxIdCheckRequest` | `country` | `str` | yes |
+| `TaxIdCheckRequest` | `tax_id` | `str` | yes |
+| `TaxIdCheckRequest` | `id_type` | `str` | yes |
+| `TaxIdCheckRequest` | `requester_country` | `str or None` | no |
+| `TaxIdCheckRequest` | `requester_tax_id` | `str or None` | no |
+| `TaxIdCheckResult` | `status` | `"valid" or "invalid" or "unavailable"` | yes |
+| `TaxIdCheckResult` | `checked_at` | `datetime` | yes |
+| `TaxIdCheckResult` | `request_ref` | `str or None` | no |
+| `TaxIdCheckResult` | `registered_name` | `str or None` | no |
+| `TaxIdCheckResult` | `registered_address` | `str or None` | no |
+| `TaxIdCheckResult` | `error_code` | `str or None` | no |
+| `TaxProviderLine` | `key` | `str` | yes |
+| `TaxProviderLine` | `net_cents` | `int` | yes |
+| `TaxProviderLine` | `tax_class` | `str` | yes |
+| `TaxProviderLine` | `kind` | `str` | yes |
+| `TaxProviderLine` | `product_code` | `str or None` | no |
+| `TaxProviderRequest` | `tax_point_at` | `datetime` | yes |
+| `TaxProviderRequest` | `currency` | `str` | yes |
+| `TaxProviderRequest` | `prices_include_tax` | `bool` | yes |
+| `TaxProviderRequest` | `seller` | `dict` | yes |
+| `TaxProviderRequest` | `buyer` | `dict` | yes |
+| `TaxProviderRequest` | `lines` | `tuple[TaxProviderLine, ...]` | yes |
+| `TaxProviderPart` | `name` | `str` | yes |
+| `TaxProviderPart` | `rate_percent` | `str` | yes |
+| `TaxProviderPart` | `jurisdiction` | `str` | yes |
+| `TaxProviderPart` | `base_cents` | `int` | yes |
+| `TaxProviderPart` | `tax_cents` | `int` | yes |
+| `TaxProviderPart` | `reverse_charge` | `bool` | no |
+| `TaxProviderPart` | `legal_note` | `str or None` | no |
+| `TaxProviderResult` | `lines` | `dict[str, tuple[TaxProviderPart, ...]]` | yes |
+| `TaxProviderResult` | `reference` | `str or None` | no |
+
+Billing checks every answer. A wrong type, an unknown status, a missing, extra or unreadable field, an `unavailable` answer without an `error_code`, or (for a tax provider) a missing or unknown line key, a negative amount, a rate that does not give the tax within one minor unit, or tax on a reverse charge part counts as a failure of the plugin, the same as a timeout or an exception.
+
 ## Handlers
 
 `register(plugin)` binds handlers with these decorators. Every name must be declared in the manifest, and every declared name must be bound.
@@ -412,6 +514,7 @@ Every handler receives `ctx`. A call that needs a permission raises `PermissionD
 | `@plugin.schedule(id)` | `schedules` | `ctx, service` (a service dict, or `None` for a global schedule) |
 | `@plugin.action(id)` | `actions` | `ctx, request`; return `{"message": "..."}` |
 | `@plugin.mcp_tool(id)` | `mcp_tools` | `ctx, params` |
+| `@plugin.provider(kind, id)` | `provides` | a class or factory with the methods of its kind; see Provider kinds |
 | `@plugin.lifecycle(step)` | none | `ctx, info`; steps: `install`, `enable`, `disable`, `upgrade`, `uninstall` |
 
 Handlers may be plain functions or coroutines.
@@ -452,6 +555,9 @@ Nothing is deprecated in this API version.
 | Action calls per minute | 10 per plugin, action, service and caller |
 | MCP tool calls per minute | 30 per plugin, tool and caller |
 | Guest commands per minute | 6 per plugin and service, 60 per plugin |
+| Providers per plugin | 10 |
+| Provider call time limit | 8 s by default, at most 30 s (`timeout_seconds`) |
+| Provider rate limit | set per provider in `rate_limit`, from 1 call per 86,400 s to 10,000 calls per second |
 | Failures that open the circuit | 5 in a row |
 | Failures that disable the plugin | 25 in a row |
 | Circuit open time | 60 s, doubling to 1800 s |

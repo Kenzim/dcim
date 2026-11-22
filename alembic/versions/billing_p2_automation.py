@@ -9,7 +9,10 @@ behaviour) and ``cancellation_requests`` (design 1.10). New tables only.
 
 ``billing_nonpayment_policies.product_id`` is 0 on the two default rows so the
 unique key ``(scope, product_id)`` holds on MariaDB, whose unique indexes do
-not treat NULLs as equal; for that reason it has no foreign key.
+not treat NULLs as equal; for that reason it has no foreign key (a foreign key
+would refuse the 0). The check constraint
+``ck_billing_nonpayment_policies_scope_product`` allows ``product_id > 0`` only
+for scope ``product`` and requires 0 for every other scope.
 
 Revision ID: billing_p2_automation
 Revises: billing_p2_tax_seed
@@ -151,6 +154,10 @@ def upgrade() -> None:
         sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
         *_timestamps(),
         sa.UniqueConstraint("scope", "product_id", name="uq_billing_nonpayment_policies_scope_product"),
+        sa.CheckConstraint(
+            "(scope = 'product' AND product_id > 0) OR (scope <> 'product' AND product_id = 0)",
+            name="ck_billing_nonpayment_policies_scope_product",
+        ),
     )
 
     op.create_table(

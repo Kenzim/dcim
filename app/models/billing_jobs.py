@@ -11,6 +11,7 @@ import enum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -64,6 +65,8 @@ class BillingJobRunStatus(str, enum.Enum):
     COMPLETE = "complete"
     FAILED = "failed"
     ABORTED = "aborted"
+    # A live run that found the job's live preconditions unmet and acted on nothing.
+    SKIPPED = "skipped"
 
 
 class BillingJobItemOutcome(str, enum.Enum):
@@ -85,6 +88,11 @@ class NonpaymentPolicyScope(str, enum.Enum):
     RETAIL_DEFAULT = "retail_default"
     RESELLER_DEFAULT = "reseller_default"
     PRODUCT = "product"
+
+
+NONPAYMENT_POLICY_SCOPE_CHECK = (
+    "(scope = 'product' AND product_id > 0) OR (scope <> 'product' AND product_id = 0)"
+)
 
 
 class UnpaidInvoiceAction(str, enum.Enum):
@@ -237,12 +245,15 @@ class BillingNonpaymentPolicy(Base):
 
     ``product_id`` is 0 for the two default rows, so the unique key works on
     MariaDB (whose unique indexes do not treat NULLs as equal); it therefore
-    carries no foreign key, as ``email_templates.product_scope``.
+    carries no foreign key, as ``email_templates.product_scope``. The check
+    constraint ties the two together: a ``product`` row names a product, any
+    other scope has ``product_id`` 0.
     """
 
     __tablename__ = "billing_nonpayment_policies"
     __table_args__ = (
         UniqueConstraint("scope", "product_id", name="uq_billing_nonpayment_policies_scope_product"),
+        CheckConstraint(NONPAYMENT_POLICY_SCOPE_CHECK, name="ck_billing_nonpayment_policies_scope_product"),
     )
 
     id = Column(Integer, primary_key=True)

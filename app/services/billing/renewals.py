@@ -100,7 +100,7 @@ def email_cycle_invoice(db: Session, billing: ServiceBilling, invoice: Invoice) 
         to_address=user.email,
         event=EmailEvent.INVOICE_CREATED,
         idempotency_key=f"invoice:{invoice.id}:created",
-        data={
+        variables={
             "invoice_number": invoice.invoice_number,
             "invoice_id": invoice.id,
             "amount_cents": int(invoice.amount_cents),

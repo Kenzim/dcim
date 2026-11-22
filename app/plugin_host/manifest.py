@@ -8,10 +8,13 @@ from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.plugin_host.catalogue import EVENTS, PERMISSIONS, SUPPORTED_API_VERSIONS
+from app.plugin_host.kinds import KINDS
 
 PLUGIN_ID_RE = re.compile(r"^[a-z][a-z0-9_]{2,47}$")
 ITEM_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 SETTING_KEY_RE = ITEM_ID_RE
+COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
+CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 STATE_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 DURATION_RE = re.compile(r"^(\d+)([smhd])$")
@@ -325,6 +328,78 @@ class McpToolSpec(_Strict):
         return any(p.key == "service_id" for p in self.params)
 
 
+class RateLimitSpec(_Strict):
+    calls: int = Field(ge=1, le=10000)
+    per_seconds: int = Field(ge=1, le=86400)
+
+
+class PackRef(_Strict):
+    file: str = Field(min_length=1, max_length=255)
+
+    @field_validator("file")
+    @classmethod
+    def _file(cls, value: str) -> str:
+        parts = value.split("/")
+        if not value.endswith(".json") or "\\" in value or value.startswith("/") or ".." in parts or any(not p for p in parts):
+            raise ValueError("pack file must be a relative .json path inside the package")
+        return value
+
+
+class ProvideSpec(_Strict):
+    kind: Literal["tax_id_validator", "tax_rule_pack", "tax_provider"]
+    id: str
+    label: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+    countries: list[str] = Field(default_factory=list, max_length=300)
+    id_types: list[str] = Field(default_factory=list, max_length=50)
+    currencies: list[str] = Field(default_factory=list, max_length=200)
+    timeout_seconds: int = Field(default=8, ge=1, le=30)
+    rate_limit: Optional[RateLimitSpec] = None
+    pack: Optional[PackRef] = None
+
+    @field_validator("id")
+    @classmethod
+    def _id(cls, value: str) -> str:
+        if not ITEM_ID_RE.match(value):
+            raise ValueError("provider id must match ^[a-z][a-z0-9_]{0,63}$")
+        return value
+
+    @field_validator("countries")
+    @classmethod
+    def _countries(cls, value: list[str]) -> list[str]:
+        if any(not COUNTRY_RE.match(c) for c in value):
+            raise ValueError("countries must be upper case ISO alpha-2 codes")
+        return value
+
+    @field_validator("currencies")
+    @classmethod
+    def _currencies(cls, value: list[str]) -> list[str]:
+        if any(not CURRENCY_RE.match(c) for c in value):
+            raise ValueError("currencies must be upper case ISO alpha-3 codes")
+        return value
+
+    @field_validator("id_types")
+    @classmethod
+    def _id_types(cls, value: list[str]) -> list[str]:
+        if any(not ITEM_ID_RE.match(t) for t in value):
+            raise ValueError("id types must match ^[a-z][a-z0-9_]{0,63}$")
+        return value
+
+    @model_validator(mode="after")
+    def _by_kind(self):
+        if self.kind == "tax_id_validator" and not self.id_types:
+            raise ValueError(f"{self.kind} provider {self.id} needs id_types")
+        if self.kind != "tax_id_validator" and self.id_types:
+            raise ValueError(f"id_types belong to tax_id_validator providers, not {self.kind} {self.id}")
+        if self.kind != "tax_provider" and self.currencies:
+            raise ValueError(f"currencies belong to tax_provider providers, not {self.kind} {self.id}")
+        if self.kind == "tax_rule_pack" and self.pack is None:
+            raise ValueError(f"tax_rule_pack provider {self.id} needs pack.file")
+        if self.kind != "tax_rule_pack" and self.pack is not None:
+            raise ValueError(f"pack belongs to tax_rule_pack providers, not {self.kind} {self.id}")
+        return self
+
+
 class ServicesSpec(_Strict):
     types: list[Literal["vm", "bare_metal", "http_proxy", "nfs_storage", "backup_slot"]] = Field(min_length=1)
     enablement: Literal["all", "opt_in", "addon"] = "opt_in"
@@ -349,6 +424,7 @@ class Manifest(_Strict):
     actions: list[ActionSpec] = Field(default_factory=list, max_length=50)
     ui: UiSpec = Field(default_factory=UiSpec)
     mcp_tools: list[McpToolSpec] = Field(default_factory=list, max_length=20)
+    provides: list[ProvideSpec] = Field(default_factory=list, max_length=10)
     tables: Optional[Any] = None
 
     @field_validator("id")
@@ -421,6 +497,16 @@ class Manifest(_Strict):
             if len(set(items)) != len(items):
                 errors.append(f"{label} ids must be unique")
 
+        if self.provides:
+            api = effective_api(self.rackflow_api)
+            if api is not None and _version_tuple(api) < (1, 1, 0):
+                errors.append("provides needs plugin API 1.1; this manifest allows only 1.0")
+        provided = [(p.kind, p.id) for p in self.provides]
+        if len(set(provided)) != len(provided):
+            errors.append("provider kind and id pairs must be unique")
+        for provide in self.provides:
+            need(KINDS[provide.kind].permission, f"{provide.kind} provider {provide.id}")
+
         service_features = (
             any(s.scope == "service" for s in self.schedules) or bool(self.actions) or bool(self.ui.panels)
         )
@@ -460,6 +546,9 @@ class Manifest(_Strict):
 
     def schedule(self, schedule_id: str) -> Optional[ScheduleSpec]:
         return next((s for s in self.schedules if s.id == schedule_id), None)
+
+    def provider(self, kind: str, provider_id: str) -> Optional[ProvideSpec]:
+        return next((p for p in self.provides if p.kind == kind and p.id == provider_id), None)
 
     def compatible(self) -> bool:
         return self.effective_api() is not None

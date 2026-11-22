@@ -8,10 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.commerce_email import EmailMessage, EmailMessageStatus
+from app.models.commerce_email import EmailMessage, EmailMessageStatus, EmailTemplate
 from app.models.reseller import Reseller
-from app.services.email_layout import render_email_html
-from app.services.notification_service import NotificationEvent, render_notification
+from app.services.email_templates.catalogue import builtin_email
+from app.services.email_templates.render import clean_subject, render as render_template
 
 
 class EmailEvent:
@@ -29,130 +29,13 @@ class EmailEvent:
     TICKET_REPLY = "ticket_reply"
 
 
-_SUBJECTS = {
-    EmailEvent.WELCOME: "Welcome to Rackflow",
-    EmailEvent.VERIFY_EMAIL: "Verify your Rackflow email address",
-    EmailEvent.PASSWORD_RESET: "Reset your Rackflow password",
-    EmailEvent.USER_INVITE: "You have been invited to Rackflow",
-    EmailEvent.ORDER_CONFIRMATION: "Your Rackflow order confirmation",
-    EmailEvent.INVOICE_CREATED: "New Rackflow invoice",
-    EmailEvent.INVOICE_PAID: "Rackflow invoice paid",
-    EmailEvent.INVOICE_OVERDUE: "Rackflow invoice overdue",
-    EmailEvent.PAYMENT_FAILED: "Rackflow payment failed",
-    EmailEvent.SERVICE_PROVISIONED: "Your Rackflow service is ready",
-    EmailEvent.SERVICE_SUSPENDED: "Your Rackflow service was suspended",
-    EmailEvent.TICKET_REPLY: "New reply to your support ticket",
-}
-
-
-def _money(data: dict) -> str:
-    cents = int(data.get("amount_cents") or 0)
-    currency = str(data.get("currency") or "USD").upper()
-    return f"{currency} {cents / 100:.2f}"
-
-
 def render_email(event: str, data: dict) -> tuple[str, str, Optional[str]]:
-    """Render subject, plain text, and optional HTML for an email event."""
-    if event in {
-        NotificationEvent.CYCLE_CHARGE_FAILED,
-        NotificationEvent.PAYMENT_ACTION_REQUIRED,
-        NotificationEvent.GRACE_WARNING,
-        NotificationEvent.SERVICE_SUSPENDED,
-        NotificationEvent.PAYMENT_RECOVERED,
-        NotificationEvent.TOPUP_RECEIVED,
-        NotificationEvent.USDT_PENDING,
-        NotificationEvent.USDT_DETECTED,
-    }:
-        subject, body = render_notification(event, data)
-        html = render_email_html(heading=subject, paragraphs=body.split("\n\n"))
-        return subject, body, html
+    """Render subject, plain text, and optional HTML for an email event from the built-in texts."""
+    return builtin_email(event, data)
 
-    subject = _SUBJECTS.get(event, "Rackflow notification")
-    order = str(data.get("order_number") or data.get("order_id") or "")
-    invoice = str(data.get("invoice_number") or data.get("invoice_id") or "")
-    service = str(data.get("service_name") or "your service")
-    ticket = str(data.get("ticket_number") or data.get("ticket_id") or "")
-    amount = _money(data)
-    verify_url = str(data.get("verify_url") or "")
-    reset_url = str(data.get("reset_url") or "")
-    invite_url = str(data.get("invite_url") or "")
 
-    bodies = {
-        EmailEvent.WELCOME: (
-            f"Welcome to Rackflow, {data.get('username', 'there')}! "
-            "Your account is ready."
-        ),
-        EmailEvent.VERIFY_EMAIL: (
-            "Please verify your email address to activate your account."
-            + (f" Open this link: {verify_url}" if verify_url else "")
-        ),
-        EmailEvent.PASSWORD_RESET: (
-            "We received a request to reset your password."
-            + (f" Use this link: {reset_url}" if reset_url else "")
-        ),
-        EmailEvent.USER_INVITE: (
-            "You have been invited to join Rackflow. Accept the invitation to choose your username and password."
-            + (f" Open this link: {invite_url}" if invite_url else "")
-            + " The link expires in 7 days."
-        ),
-        EmailEvent.ORDER_CONFIRMATION: (
-            f"Thank you for your order {order}. We received your request and "
-            "will notify you when provisioning completes."
-        ),
-        EmailEvent.INVOICE_CREATED: (
-            f"Invoice {invoice} for {amount} is now available in your account."
-        ),
-        EmailEvent.INVOICE_PAID: (
-            f"Payment of {amount} for invoice {invoice} was received. Thank you."
-        ),
-        EmailEvent.INVOICE_OVERDUE: (
-            f"Invoice {invoice} for {amount} is overdue. Please sign in to pay."
-        ),
-        EmailEvent.PAYMENT_FAILED: (
-            f"A payment attempt for invoice {invoice} ({amount}) failed. "
-            "Please update your payment method or try again."
-        ),
-        EmailEvent.SERVICE_PROVISIONED: (
-            f"{service} has been provisioned and is ready to use."
-        ),
-        EmailEvent.SERVICE_SUSPENDED: (
-            f"{service} was suspended. Sign in to review billing details."
-        ),
-        EmailEvent.TICKET_REPLY: (
-            f"There is a new reply on support ticket {ticket}."
-        ),
-    }
-    body = bodies.get(event, "There is an update to your Rackflow account.")
-
-    if event == EmailEvent.PASSWORD_RESET:
-        html = render_email_html(
-            heading="Reset your password",
-            paragraphs=["We received a request to reset your password. Choose a new one with the button below."],
-            action_url=reset_url or None,
-            action_label="Reset password",
-            footnote="If you didn't ask for this, you can ignore this email; your password won't change.",
-        )
-    elif event == EmailEvent.USER_INVITE:
-        html = render_email_html(
-            heading="You have been invited to Rackflow",
-            paragraphs=[
-                "An account has been created for you. Accept the invitation to choose your username and password.",
-                "The link expires in 7 days.",
-            ],
-            action_url=invite_url or None,
-            action_label="Accept invitation",
-            footnote="If you weren't expecting this invitation, you can ignore this email.",
-        )
-    elif event == EmailEvent.VERIFY_EMAIL:
-        html = render_email_html(
-            heading="Verify your email address",
-            paragraphs=["Please verify your email address to activate your account."],
-            action_url=verify_url or None,
-            action_label="Verify email",
-        )
-    else:
-        html = render_email_html(heading=subject, paragraphs=[body])
-    return subject, body, html
+class EmailRetryRefused(ValueError):
+    """A retry that would send mail for an event whose template is switched off."""
 
 
 class EmailMessageService:
@@ -169,11 +52,17 @@ class EmailMessageService:
         related_type: Optional[str] = None,
         related_id: Optional[str] = None,
         variables: Optional[dict[str, Any]] = None,
+        locale: str = "en",
+        product_id: Optional[int] = None,
     ) -> EmailMessage:
-        # ``variables`` renders through the email templates (billing phase 2,
-        # docs/billing-phase2-design.md 12.1); that path is not built yet.
-        if variables is not None:
-            raise NotImplementedError("rendering email through templates is built by the email templates worker")
+        """Queue an email, rendered now and stored with its text.
+
+        With ``variables`` the text comes from the event's email template
+        (``app.services.email_templates.render``): a template that fails falls
+        back to the built-in text (``render_fallback``), and a disabled
+        template stores the message as ``skipped``. With ``data`` only, the
+        built-in text is used.
+        """
         email = to_address.strip()
         if not email or "@" not in email:
             raise ValueError("Email recipient is unavailable")
@@ -186,17 +75,36 @@ class EmailMessageService:
         if existing is not None:
             return existing
 
-        subject, body_text, body_html = render_email(event, dict(data or {}))
+        status = EmailMessageStatus.QUEUED
+        template_id = template_version = None
+        render_fallback = False
+        error = None
+        if variables is not None:
+            rendered = render_template(
+                db, event, locale=locale, variables=variables, product_id=product_id
+            )
+            subject, body_text, body_html = rendered.subject, rendered.text, rendered.html
+            template_id, template_version = rendered.template_id, rendered.template_version
+            render_fallback = rendered.fallback
+            if rendered.skipped:
+                status = EmailMessageStatus.SKIPPED
+                error = "Skipped: the email template for this event is disabled"
+        else:
+            subject, body_text, body_html = render_email(event, dict(data or {}))
         row = EmailMessage(
             billing_account_id=billing_account_id,
             user_id=user_id,
             to_address=email[:320],
-            subject=subject[:998],
+            subject=clean_subject(subject, 998),
             body_text=body_text,
             body_html=body_html,
             template_key=event[:128],
             event=event[:64],
-            status=EmailMessageStatus.QUEUED,
+            status=status,
+            error=error,
+            template_id=template_id,
+            template_version=template_version,
+            render_fallback=render_fallback,
             related_type=related_type[:64] if related_type else None,
             related_id=str(related_id)[:255] if related_id is not None else None,
             idempotency_key=idempotency_key[:255],
@@ -222,7 +130,12 @@ class EmailMessageService:
         idempotency_key: str,
         data: Optional[dict[str, Any]] = None,
         recipient: Optional[str] = None,
+        variables: Optional[dict[str, Any]] = None,
+        billing_account_id: Optional[int] = None,
+        related_type: Optional[str] = None,
+        related_id: Optional[str] = None,
     ) -> EmailMessage:
+        """Queue an email to a reseller; the optional arguments as in ``enqueue``."""
         email = (recipient or (reseller.user.email if reseller.user else "")).strip()
         return EmailMessageService.enqueue(
             db,
@@ -231,6 +144,10 @@ class EmailMessageService:
             idempotency_key=idempotency_key,
             data=data,
             user_id=reseller.user_id,
+            variables=variables,
+            billing_account_id=billing_account_id,
+            related_type=related_type,
+            related_id=related_id,
         )
 
     @staticmethod
@@ -273,6 +190,13 @@ class EmailMessageService:
             return None
         if row.status not in {EmailMessageStatus.FAILED, EmailMessageStatus.SKIPPED}:
             return row
+        if row.status == EmailMessageStatus.SKIPPED and row.template_id is not None:
+            template = db.get(EmailTemplate, row.template_id)
+            if template is not None and not template.enabled:
+                raise EmailRetryRefused(
+                    f"Email template {template.id} ({template.event_key}, {template.locale}) is disabled, "
+                    "so this message was skipped; enable the template before queueing it again"
+                )
         row.status = EmailMessageStatus.QUEUED
         row.error = None
         db.flush()

@@ -10,11 +10,9 @@ import pytest
 from app.plugin_host import providers
 from app.services.alerting import billing_integrity, catalogue as alert_catalogue
 from app.services.alerting import detectors
-from app.services.billing import email_events
 from app.services.billing.jobs import base as job_base
+from app.models.billing_jobs import BILLING_JOB_NAMES
 from app.services.billing.jobs import registry as job_registry
-from app.services.billing.jobs import runner
-from app.services.email_message_service import EmailMessageService
 from app.services.email_templates import render as email_render
 from app.services.invoice_adjustment_service import InvoiceAdjustmentService
 from app.services.invoice_service import InvoiceService
@@ -35,18 +33,7 @@ STUBS = [
     lambda: pack_import.PackImporter.preview(None, "uk_vat", "2026.1", NOW),
     lambda: pack_import.PackImporter.apply(None, "uk_vat", "2026.1", NOW, diff_hash="x", actor_user_id=None),
     lambda: legal_notes.render_legal_note(None, "outside_scope", "en"),
-    lambda: providers.call_provider("tax_id_validator", "vies_validator:vies", "validate"),
-    lambda: providers.providers_of("tax_id_validator"),
-    lambda: runner.run_job(lambda: None, "late_fees", dry_run=True, trigger="admin", now=NOW),
-    lambda: job_base.JobRun(1, "late_fees", True, NOW, None).in_window(NOW),
-    lambda: job_base.JobRun(1, "late_fees", True, NOW, None).claim(None, "invoice:1"),
-    lambda: email_events.send_service_provisioned(None, None),
-    lambda: email_events.send_welcome(None, None),
-    lambda: email_render.render(None, "welcome", locale="en", variables={}),
     lambda: InvoiceAdjustmentService.tax_base_rows(None, None, before_key="x"),
-    lambda: EmailMessageService.enqueue(
-        None, event="welcome", to_address="a@example.com", idempotency_key="k", variables={}
-    ),
 ]
 
 
@@ -57,7 +44,7 @@ def test_stubs_raise_not_implemented(call):
 
 
 def test_types_and_registry_exist():
-    assert job_registry.JOBS == {}
+    assert set(job_registry.JOBS) <= set(BILLING_JOB_NAMES)
     assert issubclass(providers.ProviderUnavailable, Exception)
     assert providers.ProviderUnavailable("timeout").reason == "timeout"
     assert providers.ProviderRef("vies_validator", "vies", "tax_id_validator").ref == "vies_validator:vies"

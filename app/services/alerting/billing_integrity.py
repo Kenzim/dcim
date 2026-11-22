@@ -25,6 +25,7 @@ from sqlalchemy import MetaData, Table, and_, case, func, inspect, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from app.models.commerce_email import EmailMessage
 from app.models.commerce_invoice_ext import InvoiceLine
 from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment, InvoiceAdjustmentLine
 from app.models.reseller import (
@@ -43,6 +44,7 @@ OVERFLOW_ID = "overflow"
 _REFUNDS_TABLE = "refunds"
 _PENDING = "pending"
 _REVIEW = "review"
+EMAIL_RENDER_FAILED_LOOKBACK_DAYS = 7
 
 
 def _limited(db: Session, stmt: Select, max_rows: int) -> tuple[list[Any], int]:
@@ -1042,17 +1044,134 @@ def tax_not_registered(db: Session, params: dict, now: datetime) -> list[Finding
 
 def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A billing job action left in ``needs_review``."""
-    return []
+    del now
+    from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus
+
+    stmt = (
+        select(
+            BillingJobAction.id,
+            BillingJobAction.job,
+            BillingJobAction.subject_key,
+            BillingJobAction.run_id,
+            BillingJobAction.claimed_at,
+        )
+        .where(BillingJobAction.status == BillingJobActionStatus.NEEDS_REVIEW)
+        .order_by(BillingJobAction.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_job_needs_review",
+            "system",
+            f"billing_job_action:{row.id}",
+            f"{row.job} {row.subject_key}",
+            f"Billing job {row.job} left {row.subject_key} part way",
+            "The action was claimed and did not finish; check its effect, then mark it done or failed.",
+            details={
+                "action_id": row.id,
+                "job": row.job,
+                "subject_key": row.subject_key,
+                "run_id": row.run_id,
+                "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_job_needs_review", "system", "job actions needing review", remaining, len(out)))
+    return out
 
 
 def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A live billing job whose last scheduled run is older than twice its cadence."""
-    return []
+    del params
+    from app.models.billing_jobs import (
+        BillingJobMode,
+        BillingJobRun,
+        BillingJobRunStatus,
+        BillingJobState,
+        BillingJobTrigger,
+    )
+    from app.services.billing.periodic import CADENCE, CADENCE_PERIOD, DAILY
+
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    out = []
+    for state in db.scalars(
+        select(BillingJobState).where(BillingJobState.mode == BillingJobMode.LIVE).order_by(BillingJobState.job)
+    ):
+        limit = 2 * CADENCE_PERIOD[CADENCE.get(state.job, DAILY)]
+        since = state.live_since
+        if since is None:
+            continue
+        since = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        if now - since <= limit:
+            continue
+        last = db.scalar(
+            select(func.max(BillingJobRun.now_at)).where(
+                BillingJobRun.job == state.job,
+                BillingJobRun.trigger == BillingJobTrigger.SCHEDULE,
+                BillingJobRun.status == BillingJobRunStatus.COMPLETE,
+            )
+        )
+        if last is not None:
+            last = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+            if now - last <= limit:
+                continue
+        out.append(
+            Finding(
+                "billing_job_stale",
+                "system",
+                f"billing_job:{state.job}",
+                f"Billing job {state.job}",
+                f"Billing job {state.job} has not completed a scheduled run in {int(limit.total_seconds() // 3600)} hours",
+                "Last completed scheduled run: " + (last.isoformat() if last else "never") + ".",
+                details={"job": state.job, "last_run_at": last.isoformat() if last else None},
+            )
+        )
+    return out
 
 
 def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """Email messages sent with the built-in text because their template failed to render."""
-    return []
+    """Email messages queued with the built-in text because their stored template failed to render.
+
+    One finding per template (and event) with such messages in the last
+    ``EMAIL_RENDER_FAILED_LOOKBACK_DAYS`` days; the finding clears once the
+    template is fixed and the last fallback message ages out of that window.
+    """
+    last = func.max(EmailMessage.id)
+    stmt = (
+        select(EmailMessage.template_id, EmailMessage.event, func.count(EmailMessage.id).label("messages"),
+               last.label("last_message_id"))
+        .where(
+            EmailMessage.render_fallback.is_(True),
+            EmailMessage.created_at >= now - timedelta(days=EMAIL_RENDER_FAILED_LOOKBACK_DAYS),
+        )
+        .group_by(EmailMessage.template_id, EmailMessage.event)
+        .order_by(last.desc())
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_email_template_render_failed",
+            "email_template",
+            str(row.template_id) if row.template_id is not None else f"event:{row.event}",
+            f"Email template {row.template_id}" if row.template_id is not None else f"Event {row.event}",
+            f"The {row.event} email template failed to render",
+            f"{row.messages} message(s) in the last {EMAIL_RENDER_FAILED_LOOKBACK_DAYS} days were sent with the "
+            "built-in text because the stored template failed to render. The audit log has the error.",
+            details={
+                "template_id": row.template_id,
+                "event": row.event,
+                "messages": int(row.messages),
+                "last_message_id": int(row.last_message_id),
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_email_template_render_failed", "email_template",
+                             "templates with render failures", remaining, len(rows)))
+    return out
 
 
 BILLING_DETECTORS = {

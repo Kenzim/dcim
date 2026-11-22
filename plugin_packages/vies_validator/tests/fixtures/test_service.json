@@ -1,0 +1,161 @@
+{
+  "_source": "Recorded on 2026-11-22 from POST https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-test-service with countryCode DE and the vatNumber that is the key. The Commission's test service answers every case with HTTP 200.",
+  "cases": {
+    "100": {
+      "status": 200,
+      "body": {
+        "countryCode": "DE",
+        "vatNumber": "100",
+        "requestDate": "2026-11-22T12:47:28.849Z",
+        "valid": true,
+        "requestIdentifier": "",
+        "name": "John Doe",
+        "address": "123 Main St, Anytown, UK"
+      }
+    },
+    "200": {
+      "status": 200,
+      "body": {
+        "countryCode": "DE",
+        "vatNumber": "200",
+        "requestDate": "2026-11-22T12:47:28.940Z",
+        "valid": false,
+        "requestIdentifier": "",
+        "name": "---",
+        "address": "---"
+      }
+    },
+    "201": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "INVALID_INPUT"
+          }
+        ]
+      }
+    },
+    "202": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "INVALID_REQUESTER_INFO"
+          }
+        ]
+      }
+    },
+    "300": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "SERVICE_UNAVAILABLE"
+          }
+        ]
+      }
+    },
+    "301": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "MS_UNAVAILABLE"
+          }
+        ]
+      }
+    },
+    "302": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "TIMEOUT"
+          }
+        ]
+      }
+    },
+    "400": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "VAT_BLOCKED"
+          }
+        ]
+      }
+    },
+    "401": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "IP_BLOCKED"
+          }
+        ]
+      }
+    },
+    "500": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "GLOBAL_MAX_CONCURRENT_REQ"
+          }
+        ]
+      }
+    },
+    "501": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "GLOBAL_MAX_CONCURRENT_REQ_TIME"
+          }
+        ]
+      }
+    },
+    "600": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "MS_MAX_CONCURRENT_REQ"
+          }
+        ]
+      }
+    },
+    "601": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "MS_MAX_CONCURRENT_REQ_TIME"
+          }
+        ]
+      }
+    },
+    "999": {
+      "status": 200,
+      "body": {
+        "actionSucceed": false,
+        "errorWrappers": [
+          {
+            "error": "SERVICE_UNAVAILABLE"
+          }
+        ]
+      }
+    }
+  }
+}
