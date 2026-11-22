@@ -130,7 +130,9 @@ class EmailMessageService:
         idempotency_key: str,
         data: Optional[dict[str, Any]] = None,
         recipient: Optional[str] = None,
+        variables: Optional[dict[str, Any]] = None,
     ) -> EmailMessage:
+        """Queue an email to a reseller; ``variables`` as in ``enqueue``."""
         email = (recipient or (reseller.user.email if reseller.user else "")).strip()
         return EmailMessageService.enqueue(
             db,
@@ -139,6 +141,7 @@ class EmailMessageService:
             idempotency_key=idempotency_key,
             data=data,
             user_id=reseller.user_id,
+            variables=variables,
         )
 
     @staticmethod

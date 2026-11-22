@@ -86,7 +86,8 @@ def _run(factory, now):
 
 
 def _kinds(sent, invoice_id):
-    return [call["variables"]["kind"] for call in sent if call["variables"]["invoice_id"] == invoice_id]
+    prefix = f"invoice:{invoice_id}:reminder:"
+    return [call["idempotency_key"][len(prefix):] for call in sent if call["idempotency_key"].startswith(prefix)]
 
 
 def test_live_needs_both_templates_enabled(factory):
@@ -111,7 +112,8 @@ def test_full_sequence_after_going_live_once_each(factory, sent):
     db.close()
     assert keys == [f"invoice:{invoice_id}:reminder:{k}" for k in ("overdue_1", "overdue_2", "overdue_3", "upcoming")]
     assert sent[0]["idempotency_key"] == f"invoice:{invoice_id}:reminder:upcoming"
-    assert sent[1]["variables"]["days_overdue"] == 1
+    assert sent[1]["event"] == "invoice_overdue" and "due_date" not in sent[1]["variables"]
+    assert sent[0]["event"] == "invoice_reminder" and sent[0]["variables"]["due_date"] == "2027-06-06"
 
 
 def test_sequence_is_anchored_at_the_first_overdue_notice(factory, sent):
@@ -181,4 +183,82 @@ def test_failed_enqueue_rolls_back_the_claim(factory, monkeypatch):
     assert result.counts == {"failed": 1}
     db = factory()
     assert db.query(BillingJobAction).filter(BillingJobAction.subject_key.like(f"invoice:{invoice_id}:%")).count() == 0
+    db.close()
+
+
+def _seed_real_templates(factory):
+    from tests.services.test_email_templates import seed
+
+    db = factory()
+    db.query(EmailTemplate).delete()
+    db.commit()
+    seed(db, only=set(reminders.TEMPLATE_EVENTS))
+    # Seeded disabled (nothing new is sent at deploy); the admin enables them to go live.
+    db.query(EmailTemplate).update({"enabled": True})
+    db.commit()
+    db.close()
+
+
+def test_seeded_templates_render_with_the_variables_passed(factory, monkeypatch):
+    from app.models.commerce_email import EmailMessage
+    from app.services.email_templates import catalogue
+
+    _seed_real_templates(factory)
+    invoice_id = _invoice(factory, T0 + timedelta(days=5), amount=2000)
+    db = factory()
+    db.add(Payment(invoice_id=invoice_id, gateway="manual", status=PaymentStatus.SUCCEEDED, amount_cents=500,
+                   currency="USD", payment_metadata={}))
+    db.commit()
+    number = db.get(Invoice, invoice_id).invoice_number
+    db.close()
+    calls = []
+    original = EmailMessageService.enqueue_for_reseller
+
+    def spy(db, **kwargs):
+        calls.append(kwargs)
+        return original(db, **kwargs)
+
+    monkeypatch.setattr(EmailMessageService, "enqueue_for_reseller", staticmethod(spy))
+    _go_live(factory, T0)
+    _run(factory, T0 + timedelta(days=2, hours=1))
+    _run(factory, T0 + timedelta(days=6, hours=1))
+    assert [call["event"] for call in calls] == ["invoice_reminder", "invoice_overdue"]
+    for call in calls:
+        allowed = {variable.name for variable in catalogue.EVENTS[call["event"]].variables}
+        assert set(call["variables"]) <= allowed
+        required = {variable.name for variable in catalogue.EVENTS[call["event"]].variables if variable.required}
+        assert required <= set(call["variables"])
+    db = factory()
+    rows = db.query(EmailMessage).order_by(EmailMessage.id).all()
+    assert [(row.event, row.status.value, row.render_fallback) for row in rows] == [
+        ("invoice_reminder", "queued", False),
+        ("invoice_overdue", "queued", False),
+    ]
+    assert all(row.template_id is not None for row in rows)
+    assert rows[0].body_text == f"Invoice {number} for USD 15.00 is due on 2027-06-06. Please sign in to pay."
+    assert rows[1].body_text == f"Invoice {number} for USD 15.00 is overdue. Please sign in to pay."
+    assert rows[0].user_id is not None and rows[0].idempotency_key == f"invoice:{invoice_id}:reminder:upcoming"
+    db.close()
+
+
+def test_enqueue_for_reseller_passes_variables(factory):
+    from app.models.commerce_email import EmailMessage
+    from app.models.reseller import Reseller
+
+    _seed_real_templates(factory)
+    invoice_id = _invoice(factory, T0)
+    db = factory()
+    reseller = db.get(Reseller, db.get(Invoice, invoice_id).reseller_id)
+    row = EmailMessageService.enqueue_for_reseller(
+        db, reseller=reseller, event="invoice_overdue", idempotency_key="k1",
+        variables={"invoice_number": "INV-9", "amount_cents": 250, "currency": "GBP"},
+    )
+    plain = EmailMessageService.enqueue_for_reseller(
+        db, reseller=reseller, event="invoice_overdue", idempotency_key="k2", data={"invoice_number": "INV-9"},
+    )
+    db.commit()
+    assert row.template_id is not None and row.body_text == "Invoice INV-9 for GBP 2.50 is overdue. Please sign in to pay."
+    assert row.user_id == reseller.user_id and row.to_address == reseller.user.email
+    assert plain.template_id is None
+    assert db.query(EmailMessage).count() == 2
     db.close()

@@ -16,7 +16,7 @@ from typing import Iterable, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus
+from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus, Reseller
 from app.services.billing.jobs.base import JobRun, PlannedAction, _utc
 
 NAME = "invoice_reminders"
@@ -87,13 +87,35 @@ def next_reminder(
     return None
 
 
+def template_event(kind: str) -> str:
+    return TEMPLATE_EVENTS[0] if kind == UPCOMING else TEMPLATE_EVENTS[1]
+
+
+def template_variables(invoice: Invoice, kind: str, remaining_cents: int) -> dict:
+    """The variables of the event's template (``email_templates.catalogue``).
+
+    ``amount_cents`` is the balance still to pay, the amount the notice asks for.
+    """
+    variables = {
+        "invoice_number": str(invoice.invoice_number) if invoice.invoice_number is not None else None,
+        "invoice_id": invoice.id,
+        "amount_cents": int(remaining_cents),
+        "currency": invoice.currency,
+    }
+    if kind == UPCOMING:
+        variables["due_date"] = _utc(invoice.due_at).date().isoformat()
+    return variables
+
+
+def _reseller_invoice(invoice: Invoice) -> bool:
+    return invoice.reseller_id is not None and invoice.billing_account_id is None
+
+
 def _recipient(db: Session, invoice: Invoice) -> tuple[Optional[str], Optional[int]]:
     from app.models.commerce_account import BillingAccount
     from app.models.user import User
 
-    if invoice.reseller_id is not None and invoice.billing_account_id is None:
-        from app.models.reseller import Reseller
-
+    if _reseller_invoice(invoice):
         reseller = db.get(Reseller, invoice.reseller_id)
         user = reseller.user if reseller is not None else None
     else:
@@ -186,7 +208,7 @@ class InvoiceReminders:
 
     def execute(self, db: Session, run: JobRun, action: PlannedAction) -> str:
         from app.services.billing_locks import BillingLocks
-        from app.services.email_message_service import EmailEvent, EmailMessageService
+        from app.services.email_message_service import EmailMessageService
         from app.services.invoice_service import InvoiceService
         from app.plugin_host import events as plugin_events
         from app.services.billing_shadow import billing_engine_mode
@@ -206,28 +228,31 @@ class InvoiceReminders:
             return "already_done"
         remaining = int(InvoiceService.balance(db, invoice, for_update=True).remaining_cents)
         due = _utc(invoice.due_at)
-        variables = {
-            "invoice_id": invoice.id,
-            "invoice_number": invoice.invoice_number,
-            "kind": kind,
-            "amount_cents": int(invoice.amount_cents),
-            "remaining_cents": remaining,
-            "currency": invoice.currency,
-            "due_at": due.isoformat(),
-            "days_overdue": max(0, (_utc(run.now) - due).days),
-        }
-        EmailMessageService.enqueue(
-            db,
-            to_address=email,
-            event=EmailEvent.INVOICE_OVERDUE if kind != UPCOMING else TEMPLATE_EVENTS[0],
-            idempotency_key=subject_key(invoice.id, kind),
-            data=dict(variables),
-            variables=variables,
-            billing_account_id=invoice.billing_account_id,
-            user_id=user_id,
-            related_type="invoice",
-            related_id=str(invoice.id),
-        )
+        event = template_event(kind)
+        variables = template_variables(invoice, kind, remaining)
+        if _reseller_invoice(invoice):
+            EmailMessageService.enqueue_for_reseller(
+                db,
+                reseller=db.get(Reseller, invoice.reseller_id),
+                event=event,
+                idempotency_key=subject_key(invoice.id, kind),
+                data=dict(variables),
+                variables=variables,
+                recipient=email,
+            )
+        else:
+            EmailMessageService.enqueue(
+                db,
+                to_address=email,
+                event=event,
+                idempotency_key=subject_key(invoice.id, kind),
+                data=dict(variables),
+                variables=variables,
+                billing_account_id=invoice.billing_account_id,
+                user_id=user_id,
+                related_type="invoice",
+                related_id=str(invoice.id),
+            )
         plugin_events.emit(
             db,
             "invoice.reminder_sent",
