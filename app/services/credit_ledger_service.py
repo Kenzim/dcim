@@ -987,40 +987,20 @@ class CreditLedgerService:
         return None
 
     @staticmethod
-    def _remaining_cents(db: Session, invoice: Invoice, payments: list[Payment]) -> int:
-        """What credit may still pay, from locked rows (see ``lock_invoice_payments``).
+    def _remaining_cents(db: Session, invoice: Invoice) -> int:
+        """What credit may still pay, by the invoice engine's locking reads.
 
-        The arithmetic is ``InvoiceService.balance`` (v2) and
-        ``allocated_cents`` (legacy, shadow) over ``payments`` and, in v2, a
-        locking read of the invoice's notes.
+        ``InvoiceService.balance(for_update=True)`` in v2 and the locking
+        legacy sum otherwise, so a payment or note committed while the caller
+        waited for the invoice lock is counted.
         """
-        from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment
         from app.services.billing_shadow import billing_engine_mode
-        from app.services.invoice_service import _PAID_PAYMENT_STATUSES
+        from app.services.invoice_service import InvoiceService
 
-        total = int(invoice.amount_cents or 0)
-        if billing_engine_mode(db, "invoice") != "v2":
-            succeeded = sum(
-                int(row.amount_cents) for row in payments if row.status == PaymentStatus.SUCCEEDED
-            )
-            return max(0, total - succeeded)
-        paid_net = 0
-        for row in payments:
-            if row.status not in _PAID_PAYMENT_STATUSES:
-                continue
-            amount = int(row.amount_cents)
-            refunded = int(row.refunded_cents or 0)
-            if row.status == PaymentStatus.REFUNDED and refunded == 0:
-                refunded = amount
-            paid_net += amount - min(refunded, amount)
-        notes = db.execute(
-            select(InvoiceAdjustment.kind, InvoiceAdjustment.total_cents)
-            .where(InvoiceAdjustment.invoice_id == invoice.id)
-            .with_for_update()
-        ).all()
-        debit = sum(int(cents) for kind, cents in notes if kind == AdjustmentKind.DEBIT)
-        credit = sum(int(cents) for kind, cents in notes if kind == AdjustmentKind.CREDIT)
-        return max(0, total + debit - credit - paid_net)
+        if billing_engine_mode(db, "invoice") == "v2":
+            return int(InvoiceService.balance(db, invoice, for_update=True).remaining_cents)
+        allocated = InvoiceService._legacy_allocated_cents(db, invoice.id, for_update=True)
+        return max(0, int(invoice.amount_cents or 0) - allocated)
 
     @staticmethod
     def _replay_allocation(
@@ -1263,7 +1243,7 @@ class CreditLedgerService:
             raise InvoicePaymentPendingError(invoice_id=locked.id, payment_id=pending.id)
 
         available = CreditLedgerService.available_cents(db, owner)
-        remaining = CreditLedgerService._remaining_cents(db, locked, payments)
+        remaining = CreditLedgerService._remaining_cents(db, locked)
         if amount_cents is None:
             amount = remaining if allow_negative_balance else min(available, remaining)
         else:
