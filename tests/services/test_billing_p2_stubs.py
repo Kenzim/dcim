@@ -35,8 +35,6 @@ STUBS = [
     lambda: pack_import.PackImporter.preview(None, "uk_vat", "2026.1", NOW),
     lambda: pack_import.PackImporter.apply(None, "uk_vat", "2026.1", NOW, diff_hash="x", actor_user_id=None),
     lambda: legal_notes.render_legal_note(None, "outside_scope", "en"),
-    lambda: providers.call_provider("tax_id_validator", "vies_validator:vies", "validate"),
-    lambda: providers.providers_of("tax_id_validator"),
     lambda: runner.run_job(lambda: None, "late_fees", dry_run=True, trigger="admin", now=NOW),
     lambda: job_base.JobRun(1, "late_fees", True, NOW, None).in_window(NOW),
     lambda: job_base.JobRun(1, "late_fees", True, NOW, None).claim(None, "invoice:1"),
