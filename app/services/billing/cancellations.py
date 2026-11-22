@@ -70,6 +70,44 @@ def open_request(db: Session, service_id: int) -> Optional[CancellationRequest]:
 
 class CancellationService:
     @staticmethod
+    def check_owner(db: Session, service_id: int, *, account_user_id: Optional[int] = None, reseller_id: Optional[int] = None) -> Service:
+        """The service, if it belongs to the client user (retail) or the reseller; else 404."""
+        service = db.get(Service, service_id)
+        if service is None:
+            raise CancellationError("Service not found", status_code=404)
+        billing_reseller = db.scalar(
+            select(ServiceBilling.reseller_id).where(ServiceBilling.service_id == service_id)
+        )
+        if account_user_id is not None and billing_reseller is None and service.owner_user_id == account_user_id:
+            return service
+        if reseller_id is not None and billing_reseller is not None and int(billing_reseller) == int(reseller_id):
+            return service
+        raise CancellationError("Service not found", status_code=404)
+
+    @staticmethod
+    def summary(db: Session, request: CancellationRequest) -> dict[str, Any]:
+        """The response of the cancel routes: the request and the service's billing state."""
+        billing = db.execute(
+            select(ServiceBilling).where(ServiceBilling.service_id == request.service_id)
+        ).scalar_one_or_none()
+        service = db.get(Service, request.service_id)
+        immediate = request.type == CancellationType.IMMEDIATE
+        return {
+            "service_id": request.service_id,
+            "when": "immediate" if immediate else "end_of_cycle",
+            "billing_status": _value(billing.status) if billing is not None else None,
+            "service_status": _value(service.status) if service is not None else None,
+            "termination_pending": immediate and request.status != CancellationStatus.COMPLETED,
+            "cancel_at": (
+                _utc(billing.cancel_at).isoformat()
+                if billing is not None and billing.cancel_at is not None
+                else None
+            ),
+            "request": serialise_request(request),
+            "request_id": request.id,
+        }
+
+    @staticmethod
     def request(
         db: Session,
         *,
@@ -221,6 +259,28 @@ class CancellationService:
         )
         db.flush()
         return request
+
+
+def serialise_request(request: CancellationRequest) -> dict[str, Any]:
+    def stamp(value: Optional[datetime]) -> Optional[str]:
+        return _utc(value).isoformat() if value is not None else None
+
+    return {
+        "id": request.id,
+        "service_id": request.service_id,
+        "service_billing_id": request.service_billing_id,
+        "billing_account_id": request.billing_account_id,
+        "reseller_id": request.reseller_id,
+        "type": _value(request.type),
+        "reason": request.reason,
+        "requested_by_user_id": request.requested_by_user_id,
+        "source": _value(request.source),
+        "status": _value(request.status),
+        "effective_at": stamp(request.effective_at),
+        "completed_at": stamp(request.completed_at),
+        "invoice_action": _value(request.invoice_action),
+        "created_at": stamp(request.created_at),
+    }
 
 
 def _announce_request(db: Session, request: CancellationRequest, service: Service) -> None:

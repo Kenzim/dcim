@@ -447,6 +447,10 @@ api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"
 from app.api import billing_adjustments as billing_adjustments_api
 api_router.include_router(billing_adjustments_api.router)
 
+# Cancellation requests and non-payment policies
+from app.api import billing_cancellations as billing_cancellations_api
+api_router.include_router(billing_cancellations_api.router)
+
 # Automation and billing settings store (typed, database-backed, env defaults)
 from app.api import settings_admin as settings_admin_api
 api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
