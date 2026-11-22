@@ -36,9 +36,13 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
 
 
 def _standard_class_id(db: Session) -> int:
+    """The ``standard`` class (seeded by ``billing_p2_tax_seed``); created as the seed would if missing."""
     class_id = db.scalar(select(TaxClass.id).where(TaxClass.code == TaxClassCode.STANDARD.value))
     if class_id is None:
-        raise RuntimeError("the standard tax class is missing (revision billing_p2_tax_seed)")
+        row = TaxClass(code=TaxClassCode.STANDARD.value, name="Standard rate", system=True)
+        db.add(row)
+        db.flush()
+        class_id = row.id
     return int(class_id)
 
 
