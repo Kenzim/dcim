@@ -362,3 +362,17 @@ def test_a_taxed_note_on_a_zero_vat_converted_proforma_uses_the_payments_month(
     assert note_frozen(note) == (
         DEC_RATE, "2026-12", "hmrc_monthly", 76, exchange_rates.stored_rate(db_session, "USD", "2026-12").id
     )
+
+
+# --- A pending invoice's PDF prints its sterling line as to follow, as a pending note's does ---
+
+
+def test_a_pending_invoice_prints_its_sterling_line_as_to_follow(db_session, proforma, monkeypatch):
+    from app.services.tax import pdf as tax_pdf
+
+    pay_card(db_session, proforma, monkeypatch)
+    assert tax_pdf.for_invoice(db_session, proforma).summary_lines[-1] == PENDING_LINE
+    exchange_rates.store_month(db_session, "2026-12", [("USD", str(DEC_RATE))], fetched_at=DEC_2)
+    db_session.refresh(proforma)
+    filled = tax_pdf.for_invoice(db_session, proforma).summary_lines[-1]
+    assert filled == tax_pdf.sterling_line(proforma, 152) and "to follow" not in filled

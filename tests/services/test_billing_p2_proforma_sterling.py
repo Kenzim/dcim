@@ -115,7 +115,9 @@ def test_a_missing_rate_never_refuses_the_payment_and_is_filled_once(db_session,
     assert frozen(proforma) == (None, "2026-12", None, None) and proforma.fx_rate_id is None
     assert sterling_conversion.is_pending(proforma)
     assert proforma.tax_cents == 200
-    assert sterling_line(db_session, proforma) is None
+    assert sterling_line(db_session, proforma) == (
+        "VAT total in sterling: to follow (HMRC monthly exchange rate for 2026-12 not yet stored)"
+    )
     (finding,) = _fx_findings(db_session, DEC_2)
     assert finding.details["pending_invoices"] == 1
 

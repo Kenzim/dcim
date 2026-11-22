@@ -68,6 +68,15 @@ def sterling_line(invoice: Any, gbp_cents: Optional[int]) -> Optional[str]:
     )
 
 
+def _sterling_or_pending(document: Any) -> Optional[str]:
+    """``sterling_line`` of an invoice or note, or the line as to follow while its month's rate is not stored."""
+    sterling = sterling_line(document, document.tax_total_gbp_cents)
+    if sterling is None and document.fx_period is not None and document.fx_rate is None:
+        source = SOURCE_LABELS["hmrc_monthly"]
+        sterling = f"VAT total in sterling: to follow ({source} for {document.fx_period} not yet stored)"
+    return sterling
+
+
 def _seller_lines(snapshot: Optional[dict]) -> list[str]:
     snapshot = snapshot or {}
     number = snapshot.get("registration_tax_number")
@@ -98,7 +107,7 @@ def for_invoice(db: Session, invoice: Any) -> Optional[TaxPdf]:
     if snapshot.get("footer_text"):
         notes.append(str(snapshot["footer_text"]))
     summary_lines = _summary_lines(invoice.currency, invoice.tax_summary or [])
-    sterling = sterling_line(invoice, invoice.tax_total_gbp_cents)
+    sterling = _sterling_or_pending(invoice)
     if sterling:
         summary_lines.append(sterling)
     return TaxPdf(
@@ -142,10 +151,7 @@ def for_adjustment(db: Session, invoice: Any, note: Any) -> Optional[TaxPdf]:
     notes.append(_reference_note(db, invoice, kind, reference))
     title = snapshot.get("credit_note_title") if kind == "credit" else None
     summary_lines = _summary_lines(note.currency, summary)
-    sterling = sterling_line(note, note.tax_total_gbp_cents)
-    if sterling is None and note.fx_period is not None and note.fx_rate is None:
-        source = SOURCE_LABELS["hmrc_monthly"]
-        sterling = f"VAT total in sterling: to follow ({source} for {note.fx_period} not yet stored)"
+    sterling = _sterling_or_pending(note)
     if sterling:
         summary_lines.append(sterling)
     return TaxPdf(
