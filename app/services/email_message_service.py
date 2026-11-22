@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.commerce_email import EmailMessage, EmailMessageStatus
 from app.models.reseller import Reseller
 from app.services.email_templates.catalogue import builtin_email
-from app.services.email_templates.render import render as render_template
+from app.services.email_templates.render import clean_subject, render as render_template
 
 
 class EmailEvent:
@@ -91,7 +91,7 @@ class EmailMessageService:
             billing_account_id=billing_account_id,
             user_id=user_id,
             to_address=email[:320],
-            subject=subject[:998],
+            subject=clean_subject(subject, 998),
             body_text=body_text,
             body_html=body_html,
             template_key=event[:128],

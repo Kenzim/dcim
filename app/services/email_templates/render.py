@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOCALE = "en"
 MAX_SUBJECT_CHARS = 255
 RENDER_FAILED_ACTION = "billing.email_template_render_failed"
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]+")
+# Control characters and every character str.splitlines() treats as a line break
+# (the C0 and C1 controls, U+2028 and U+2029); a header value may contain none of them.
+_CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 
 
 @dataclass(frozen=True)
@@ -42,9 +44,9 @@ class RenderedEmail:
     skipped: bool = False
 
 
-def clean_subject(subject: str) -> str:
-    """One line, no control characters (a subject must never carry a header break)."""
-    return _CONTROL_CHARACTERS.sub(" ", subject).strip()[:MAX_SUBJECT_CHARS]
+def clean_subject(subject: str, limit: int = MAX_SUBJECT_CHARS) -> str:
+    """One line, no control or line-break characters (a subject must never carry a header break)."""
+    return _CONTROL_CHARACTERS.sub(" ", subject).strip()[:limit]
 
 
 def select_template(

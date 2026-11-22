@@ -390,3 +390,80 @@ def test_send_welcome_picks_the_product_of_the_first_order(db_session):
     message = email_events.send_welcome(db_session, user)
     assert message.template_id == variant.id
     assert message.body_text == "proxy buyer"
+
+
+# ------------------------------------------------------------------ subject line breaks
+
+
+def _line_break_characters():
+    return [chr(code) for code in range(0x110000) if len(("a" + chr(code) + "b").splitlines()) > 1]
+
+
+class _FakeSMTP:
+    sent: list = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def ehlo(self):
+        pass
+
+    def send_message(self, message):
+        _FakeSMTP.sent.append(message)
+
+
+def _deliver(monkeypatch, subject, body="Body"):
+    from types import SimpleNamespace
+
+    from app.services import email_sender
+
+    _FakeSMTP.sent.clear()
+    monkeypatch.setattr(email_sender.smtplib, "SMTP", _FakeSMTP)
+    config = SimpleNamespace(
+        smtp_from="Rackflow <noreply@example.com>", smtp_host="localhost", smtp_port=25,
+        smtp_timeout_seconds=5, smtp_starttls=False, smtp_username=None, smtp_password=None,
+    )
+    email_sender.deliver(config, to_address="a@example.com", subject=subject, body_text=body, body_html=None)
+    return _FakeSMTP.sent[-1]
+
+
+def test_every_line_break_character_is_covered():
+    breaks = _line_break_characters()
+    assert {"\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"} <= set(breaks)
+    from app.services.email_templates.render import clean_subject
+
+    for char in breaks + [chr(code) for code in range(0x7F, 0xA0)] + [chr(code) for code in range(0x20)]:
+        cleaned = clean_subject(f"a{char}b")
+        assert cleaned == "a b", repr(char)
+
+
+def test_a_line_break_in_customer_data_cannot_stop_the_mail(db_session, monkeypatch):
+    """A service name with U+2028 used to make every delivery attempt raise, so the mail ended FAILED."""
+    template(db_session, "service_provisioned", subject="{{ service_name }} is ready", body_text="{{ service_name }}")
+    characters = _line_break_characters() + [chr(code) for code in range(0x7F, 0xA0)]
+    for number, char in enumerate(characters):
+        message = EmailMessageService.enqueue(
+            db_session, to_address="a@example.com", event="service_provisioned", idempotency_key=f"lb{number}",
+            variables={"service_name": f"vm{char}Bcc: x@example.com"},
+        )
+        assert message.render_fallback is False
+        sent = _deliver(monkeypatch, message.subject, message.body_text)
+        assert sent["Subject"] == "vm Bcc: x@example.com is ready", repr(char)
+        assert sent["Bcc"] is None
+
+
+def test_the_built_in_path_cleans_its_subject_as_well(db_session, monkeypatch):
+    from app.services import email_message_service
+
+    monkeypatch.setattr(email_message_service, "render_email", lambda event, data: (f"Hi\u2028there\x85", "Body", None))
+    message = EmailMessageService.enqueue(
+        db_session, to_address="a@example.com", event="invoice_paid", idempotency_key="builtin-lb", data={},
+    )
+    assert message.subject == "Hi there"
+    _deliver(monkeypatch, message.subject)
