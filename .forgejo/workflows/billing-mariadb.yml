@@ -15,11 +15,12 @@
 # (a tax pack import and a publish locking the same rules wait instead of
 # deadlocking) and tests/services/test_billing_p2_exchange_rates_mariadb.py (an
 # exchange rate deleted or stored twice during a publish, stored during a
-# proforma payment whose month's rate is missing, a credit note's sterling
-# after another note committed, and the guard refusing a second sterling
-# fill), tests/services/test_billing_p2_suspension_mariadb.py (a payment
-# landing before, during and after the suspension job's locked re-check)
-# against a mariadb:11.8
+# proforma payment whose month's rate is missing (also between the payment's
+# rate read and its write), a credit note's sterling after another note
+# committed, and the guard refusing a second sterling fill),
+# tests/services/test_billing_p2_suspension_mariadb.py (a payment landing
+# before, during and after the suspension job's locked re-check) against a
+# mariadb:11.8
 # service container, the
 # version production runs. Manual trigger only, so it never blocks other work;
 # the SQLite migration tests in tests/migrations run in the normal test suite.

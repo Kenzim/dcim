@@ -14,7 +14,6 @@ from app.services.invoice_guard import FrozenInvoiceError
 from app.services.invoice_service import InvoiceService
 from app.services.settings_store import set_setting
 from app.services.tax import exchange_rates, sterling_conversion
-from app.services.tax.exchange_rates import ExchangeRateMissing
 from app.services.tax import pdf as tax_pdf
 from tests.services.test_billing_p1i_invoice_engine import _series
 from tests.services.test_billing_p2_sterling_vat import (  # noqa: F401 - fixtures
@@ -116,15 +115,15 @@ def test_a_missing_rate_never_refuses_the_payment_and_is_filled_once(db_session,
     assert frozen(proforma) == (None, "2026-12", None, None) and proforma.fx_rate_id is None
     assert sterling_conversion.is_pending(proforma)
     assert proforma.tax_cents == 200
-    assert sterling_line(db_session, proforma) is None
+    assert sterling_line(db_session, proforma) == (
+        "VAT total in sterling: to follow (HMRC monthly exchange rate for 2026-12 not yet stored)"
+    )
     (finding,) = _fx_findings(db_session, DEC_2)
     assert finding.details["pending_invoices"] == 1
 
-    savepoint = db_session.begin_nested()
-    with pytest.raises(ExchangeRateMissing) as raised:
-        debit(db_session, proforma, 500, "pf-dn-pending")
-    savepoint.rollback()
-    assert (raised.value.currency, raised.value.period) == ("USD", "2026-12")
+    pending_note = debit(db_session, proforma, 500, "pf-dn-pending")
+    assert pending_note.tax_cents == 100
+    assert (pending_note.fx_rate, pending_note.fx_period, pending_note.tax_total_gbp_cents) == (None, "2026-12", None)
 
     invoice_guard.set_mode_override("enforce")
     try:
@@ -135,15 +134,18 @@ def test_a_missing_rate_never_refuses_the_payment_and_is_filled_once(db_session,
         assert frozen(proforma) == (Decimal("1.3158"), "2026-12", "hmrc_monthly", 152)
         assert proforma.fx_rate_id == december.id
         assert sterling_line(db_session, proforma) == DEC_LINE
-        (filled,) = audits(db_session, "billing.tax.sterling_filled")
+        filled, filled_note = audits(db_session, "billing.tax.sterling_filled")
         assert filled.resource_id == str(proforma.id)
         assert (filled.event_metadata["rate_id"], filled.event_metadata["tax_total_gbp_cents"]) == (december.id, 152)
+        db_session.refresh(pending_note)
+        assert (filled_note.resource_type, filled_note.resource_id) == ("invoice_adjustment", str(pending_note.id))
+        assert (pending_note.fx_rate_id, pending_note.tax_total_gbp_cents) == (december.id, 76)
         assert _fx_findings(db_session, DEC_2) == []
 
         # Storing again or sweeping again changes nothing.
         assert exchange_rates.store_month(db_session, "2026-12", [("USD", "1.3158")]).filled == ()
         assert sterling_conversion.sweep(db_session, "2026-12", "USD") == []
-        assert len(audits(db_session, "billing.tax.sterling_filled")) == 1
+        assert len(audits(db_session, "billing.tax.sterling_filled")) == 2
 
         # Filled once; after that the sterling columns are frozen.
         for column, value in (
@@ -161,6 +163,7 @@ def test_a_missing_rate_never_refuses_the_payment_and_is_filled_once(db_session,
     finally:
         invoice_guard.set_mode_override(None)
 
+    # 200 cents of debit VAT is GBP 1.52 (152.0), so the second note gets 76 too.
     note = debit(db_session, proforma, 500, "pf-dn-filled")
     assert (note.fx_rate, note.fx_period, note.tax_total_gbp_cents) == (Decimal("1.3158"), "2026-12", 76)
 
@@ -198,6 +201,8 @@ def test_the_fetch_jobs_sweep_fills_one_the_store_missed(db_session, proforma, m
     db_session.flush()
     assert sterling_conversion.is_pending(proforma)
     assert sterling_conversion.pending_months(db_session) == [("2026-12", "USD", 1)]
+    (finding,) = _fx_findings(db_session, DEC_2)
+    assert finding.details["rate_stored"] is True and "daily sweep" in finding.title
     assert sterling_conversion.sweep(db_session, "2026-12", "USD") == [proforma.id]
     assert frozen(proforma) == (Decimal("1.3158"), "2026-12", "hmrc_monthly", 152)
     assert sterling_conversion.pending_months(db_session) == []

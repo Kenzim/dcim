@@ -786,21 +786,28 @@ class InvoiceService:
         ``proforma_conversion`` allowance; the proforma number and the
         snapshots stay, and so do the VAT and the tax rows. The sterling VAT
         follows the VAT invoice's tax point, ``at`` (design 4.10,
-        ``sterling_conversion.restamp_at_conversion``).
+        ``sterling_conversion.plan_restamp``); it is written in the same flush
+        as the document type, the only flush the guard lets it change in.
         """
         from app.models.billing_series import DocumentType
         from app.services.invoice_numbering import InvoiceNumbering
+        from app.services.tax import sterling_conversion
 
         if invoice.document_type != InvoiceDocumentType.PROFORMA:
             return
         series = InvoiceNumbering.default_series(db, DocumentType.INVOICE)
         with invoice_guard.allow(
             invoice_guard.PROFORMA_CONVERSION,
-            {"document_type", "issued_at", "series_id", "number_period", "number_value", "number_display"},
+            {"document_type", "issued_at", "series_id", "number_period", "number_value", "number_display"}
+            | set(sterling_conversion.STERLING_COLUMNS),
             invoice.id,
         ):
             period, value, display = InvoiceNumbering.allocate(
                 db, series, at=at, invoice_number=invoice.invoice_number
+            )
+            # After the counter, as at publish: the rate's share lock comes last.
+            restamp = (
+                sterling_conversion.plan_restamp(db, invoice, at) if invoice.tax_engine is not None else None
             )
             invoice.series_id = series.id
             invoice.number_period = period
@@ -808,12 +815,14 @@ class InvoiceService:
             invoice.number_display = display
             invoice.document_type = InvoiceDocumentType.INVOICE
             invoice.issued_at = at
+            if restamp is not None:
+                sterling_conversion.apply_restamp(invoice, restamp)
             db.flush()
+        if restamp is not None:
+            sterling_conversion.audit_restamp(db, invoice, restamp)
         if invoice.tax_engine is not None:
             from app.services.tax import invoice_tax
-            from app.services.tax.sterling_conversion import restamp_at_conversion
 
-            restamp_at_conversion(db, invoice, at)
             lines = list(
                 db.execute(
                     select(InvoiceLine)

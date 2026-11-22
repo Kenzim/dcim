@@ -93,6 +93,9 @@ NOTE_FROZEN_COLUMNS = frozenset(
 )
 # Written once when a pending sterling VAT is filled (``_sterling_fill``).
 STERLING_FILL_COLUMNS = frozenset({"fx_rate", "fx_source", "tax_total_gbp_cents", "fx_rate_id"})
+# Re-stamped by the proforma conversion, only in the flush that makes the
+# stored proforma its VAT invoice (``_allowed``).
+STERLING_COLUMNS = STERLING_FILL_COLUMNS | {"fx_period"}
 
 MODES = ("log", "enforce")
 PROFORMA_CONVERSION = "proforma_conversion"
@@ -250,10 +253,13 @@ def _allowed(
     new: Any,
     allowance: Optional[tuple[str, frozenset, int]],
     invoice_id: Optional[int],
+    converting: bool = False,
 ) -> bool:
     if allowance is not None and name in allowance[1] and invoice_id == allowance[2]:
         if name == "document_type":
             return _plain(old) == "proforma" and _plain(new) == "invoice"
+        if name in STERLING_COLUMNS:
+            return converting
         return True
     if name in ONCE_SET_COLUMNS and old is None:
         return True
@@ -338,24 +344,33 @@ def _sterling_fill(state, connection, committed: _Committed) -> bool:
     loaded before another transaction filled the row also shows NULL, so the
     stored row is then read with a locking read, which sees the latest
     committed row: its four columns must still be NULL and its ``fx_period``
-    the same.
+    the same. The values must be those the fill writes: ``fx_rate_id`` the
+    stored sterling rate of ``fx_period`` and the invoice's currency, with
+    ``fx_rate`` its value and ``fx_source`` its source, and
+    ``tax_total_gbp_cents`` the stored VAT converted at it.
     """
-    period = state.obj().fx_period
-    if period is None or _old_value(state, "fx_period", committed)[0]:
+    from decimal import Decimal
+
+    from app.services.tax.exchange_rates import to_gbp_cents
+
+    if not _filled_once(state, committed):
         return False
-    for name in STERLING_FILL_COLUMNS:
-        changed, old, new = _old_value(state, name, committed)
-        if not changed or old is not None or new is None:
-            return False
+    invoice = state.obj()
+    period = invoice.fx_period
     table = Invoice.__table__
     stored = connection.execute(
-        select(table.c.fx_period, *(table.c[name] for name in sorted(STERLING_FILL_COLUMNS)))
-        .where(table.c.id == state.obj().id)
+        select(table.c.fx_period, table.c.tax_cents, *(table.c[name] for name in sorted(STERLING_FILL_COLUMNS)))
+        .where(table.c.id == invoice.id)
         .with_for_update()
     ).first()
-    if stored is None or not _same(stored[0], period):
+    if stored is None or not _same(stored[0], period) or any(value is not None for value in stored[2:]):
         return False
-    return all(value is None for value in stored[1:])
+    if not _rate_row_matches(
+        connection, invoice.fx_rate_id, period=period, currency=invoice.currency, rate=invoice.fx_rate,
+        source=invoice.fx_source,
+    ):
+        return False
+    return invoice.tax_total_gbp_cents == to_gbp_cents(int(stored[1] or 0), Decimal(invoice.fx_rate))
 
 
 def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
@@ -366,9 +381,11 @@ def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
         return
     allowance = _allowance.get()
     fill = _sterling_fill(state, connection, committed)
+    type_changed, old_type, new_type = _old_value(state, "document_type", committed)
+    converting = type_changed and _plain(old_type) == "proforma" and _plain(new_type) == "invoice"
     for name in sorted(GUARDED_COLUMNS):
         changed, old, new = _old_value(state, name, committed)
-        if not changed or _allowed(name, old, new, allowance, target.id):
+        if not changed or _allowed(name, old, new, allowance, target.id, converting):
             continue
         if fill and name in STERLING_FILL_COLUMNS:
             continue
@@ -381,14 +398,103 @@ def _guard_invoice_update(_mapper, connection, target: Invoice) -> None:
         )
 
 
+def _rate_row_matches(connection, rate_id: Any, *, period: Any, currency: Any, rate: Any, source: Any) -> bool:
+    """The stored rate ``rate_id`` is the sterling rate of ``period`` and ``currency`` with this value and source."""
+    from decimal import Decimal
+
+    from app.models.tax import TaxExchangeRate
+
+    table = TaxExchangeRate.__table__
+    row = connection.execute(
+        select(table.c.period, table.c.currency, table.c.base, table.c.units_per_gbp, table.c.source).where(
+            table.c.id == rate_id
+        )
+    ).first()
+    if row is None or rate is None:
+        return False
+    return (
+        row.period == period
+        and row.currency == str(currency or "").upper()
+        and row.base == "GBP"
+        and Decimal(row.units_per_gbp) == Decimal(rate)
+        and row.source == source
+    )
+
+
+def _filled_once(state, committed: _Committed) -> bool:
+    """The loaded row is pending (``fx_period`` set and kept) and each of the four other columns goes from NULL to a value."""
+    if state.obj().fx_period is None or _old_value(state, "fx_period", committed)[0]:
+        return False
+    for name in STERLING_FILL_COLUMNS:
+        changed, old, new = _old_value(state, name, committed)
+        if not changed or old is not None or new is None:
+            return False
+    return True
+
+
+def _note_sterling_fill(state, connection, committed: _Committed) -> bool:
+    """A note's pending sterling VAT filled once, after its invoice, with the fill's own figure (design 4.10).
+
+    As for an invoice (``_sterling_fill``), the stored note row is read with
+    a locking read and must still be pending for the same month. Its invoice,
+    as this connection sees it, must be filled from the same rate row, which
+    must be the sterling rate of the month and the note's currency with the
+    value and source written; and ``tax_total_gbp_cents`` must be the
+    cumulative figure of the invoice's notes
+    (``exchange_rates.cumulative_note_gbp_cents``).
+    """
+    from decimal import Decimal
+
+    from app.services.tax.exchange_rates import cumulative_note_gbp_cents
+
+    if not _filled_once(state, committed):
+        return False
+    note = state.obj()
+    notes, invoices = InvoiceAdjustment.__table__, Invoice.__table__
+    stored = connection.execute(
+        select(notes.c.fx_period, notes.c.invoice_id, *(notes.c[name] for name in sorted(STERLING_FILL_COLUMNS)))
+        .where(notes.c.id == note.id)
+        .with_for_update()
+    ).first()
+    if stored is None or not _same(stored[0], note.fx_period) or any(value is not None for value in stored[2:]):
+        return False
+    invoice = connection.execute(
+        select(invoices.c.tax_cents, invoices.c.fx_period, invoices.c.fx_rate_id).where(
+            invoices.c.id == stored.invoice_id
+        )
+    ).first()
+    if invoice is None or invoice.fx_rate_id != note.fx_rate_id or not _same(invoice.fx_period, note.fx_period):
+        return False
+    if not _rate_row_matches(
+        connection, note.fx_rate_id, period=note.fx_period, currency=note.currency, rate=note.fx_rate,
+        source=note.fx_source,
+    ):
+        return False
+    siblings = connection.execute(
+        select(notes.c.id, notes.c.kind, notes.c.tax_cents).where(
+            notes.c.invoice_id == stored.invoice_id, notes.c.id <= note.id
+        )
+    ).all()
+    expected = cumulative_note_gbp_cents(
+        siblings, int(note.id), invoice_tax_cents=int(invoice.tax_cents or 0), rate=Decimal(note.fx_rate)
+    )
+    return expected is not None and expected == note.tax_total_gbp_cents
+
+
 def _guard_note_update(_mapper, connection, target: InvoiceAdjustment) -> None:
-    """A note's sterling VAT is frozen from insert (notes are never drafts)."""
+    """A note's sterling VAT is frozen from insert (notes are never drafts), except a pending one filled once."""
     state = inspect(target)
     committed = _Committed(connection, target.id, InvoiceAdjustment.__table__)
+    fill: Optional[bool] = None
     for name in sorted(NOTE_FROZEN_COLUMNS):
         changed, old, new = _old_value(state, name, committed)
         if not changed:
             continue
+        if name in STERLING_FILL_COLUMNS:
+            if fill is None:
+                fill = _note_sterling_fill(state, connection, committed)
+            if fill:
+                continue
         _violation(
             connection,
             target,
