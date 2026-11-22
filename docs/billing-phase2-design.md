@@ -760,6 +760,10 @@ Mode lives in `billing_job_states.mode`, never in the settings store, and change
 
 Other routes (`app/api/billing_jobs_admin.py`, new): `GET /api/admin/billing/jobs` (state, last run, next run, counts); `POST /api/admin/billing/jobs/{job}/run` (runs now in the job's current mode, or `{"dry_run": true}` from any mode; admin runs are marked `trigger = admin`); `GET /api/admin/billing/jobs/{job}/runs`; `GET /api/admin/billing/jobs/runs/{run_id}` with items, filterable by outcome; `GET /api/admin/billing/jobs/{job}/forecast?days=7` (triggers in the next days, read only).
 
+`GET /api/admin/billing/jobs` also gives each job `completed_scheduled_dry_runs` (completed scheduled dry runs since `dry_run_since`; 0 unless the job is in `dry_run`) and `min_dry_runs` (`billing_job_min_dry_runs`), the numbers the live rule above checks, so a screen can show "N of M needed" before the mode route refuses.
+
+**Settling a `needs_review` action.** `GET /api/admin/billing/jobs/actions?status=needs_review&job=&limit=&offset=` lists claim rows (id, job, subject key, action, run id, claimed and finished time, detail, status; with `total`), oldest first. `POST /api/admin/billing/jobs/actions/{id}/resolve` with `{"to": "done" | "failed", "note": str, "confirm": true}` (admin only; the note is required; 409 unless the action is `needs_review`; the row is locked) records the admin's conclusion and audits `billing.job.action_resolved` (from, to, note, job, subject key). It writes the row's status, `finished_at` (the time of the decision) and a `resolution` entry in its detail, and nothing else: it never performs or retries the action's effect, and changes no service, invoice, suspension or job state. The row stays, so its unique `(job, subject_key)` key keeps every job from claiming the subject again. The service's own status, never the claim's, decides what billing does next, with one exception: termination reads its notice claim (10.5), so a notice settled `done` counts as sent at the time of the decision (the notice period runs from then), and one settled `failed` stops termination for that invoice. A service still suspended for non-payment after its termination was settled leaves the alert `billing_nonpayment_termination_unsettled` (15.4), whatever the job modes.
+
 ### 9.3 Running and claiming on several processes
 
 The jobs run in the recurring billing worker process (`app/workers/recurring_billing.py`) through the periodic job list of `app/services/billing/periodic.py`, in a thread (`asyncio.to_thread`), each job on its own cadence. Several worker processes may run; three layers keep a job from acting twice:
@@ -1020,7 +1024,7 @@ Each revision: up, down, up on SQLite and on MariaDB 11.8 (`RACKFLOW_TEST_MARIAD
 
 ### 15.4 E2 integrity detectors
 
-`tax_line_sum` (line tax equals its rows), `tax_summary_consistent` (summary equals rows), `tax_evidence_conflict`, `tax_not_registered` (4.3 step 2), `billing_job_needs_review`, `billing_job_stale` (a live job whose last scheduled run is older than twice its cadence), `email_template_render_failed`.
+`tax_line_sum` (line tax equals its rows), `tax_summary_consistent` (summary equals rows), `tax_evidence_conflict`, `tax_not_registered` (4.3 step 2), `billing_job_needs_review`, `billing_job_stale` (a live job whose last scheduled run is older than twice its cadence), `billing_nonpayment_termination_unsettled` (a service still suspended for non-payment with an unpaid cycle invoice although its termination claim is settled `done` or `failed`; no job-mode or tax-mode condition, the state is the condition), `email_template_render_failed`.
 
 ### 15.5 MariaDB concurrency tests (each added to `.forgejo/workflows/billing-mariadb.yml`)
 

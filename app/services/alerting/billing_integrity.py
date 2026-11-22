@@ -1202,6 +1202,80 @@ def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[F
     return out
 
 
+def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A settled termination claim whose service is still suspended for non-payment with a balance due.
+
+    The termination job leaves a failed power-off in ``needs_review``; once an
+    admin settles it as ``done`` or ``failed`` no job acts on it again, so the
+    service stays as it is. The service's own status decides here, not the
+    claim's.
+    """
+    del now
+    import re
+
+    from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus
+    from app.models.reseller import ServiceBilling, ServiceBillingStatus
+    from app.models.service import Service, ServiceStatus
+    from app.services.billing.jobs.nonpayment import unpaid_cycle_invoices
+    from app.services.billing.jobs.termination import JOB
+
+    claims: dict[int, BillingJobAction] = {}
+    pattern = re.compile(r"^service:(\d+):terminate$")
+    rows = db.scalars(
+        select(BillingJobAction)
+        .where(
+            BillingJobAction.job == JOB,
+            BillingJobAction.status.in_([BillingJobActionStatus.DONE, BillingJobActionStatus.FAILED]),
+            BillingJobAction.subject_key.like("service:%:terminate"),
+        )
+        .order_by(BillingJobAction.id)
+    )
+    for row in rows:
+        match = pattern.match(row.subject_key)
+        if match:
+            claims[int(match.group(1))] = row
+    found: list[tuple[BillingJobAction, ServiceBilling]] = []
+    ids = sorted(claims)
+    for start in range(0, len(ids), 500):
+        stuck = db.execute(
+            select(ServiceBilling)
+            .join(Service, Service.id == ServiceBilling.service_id)
+            .where(
+                ServiceBilling.service_id.in_(ids[start : start + 500]),
+                Service.status == ServiceStatus.SUSPENDED,
+                ServiceBilling.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT,
+            )
+        ).scalars()
+        for billing in stuck:
+            if unpaid_cycle_invoices(db, billing.id):
+                found.append((claims[int(billing.service_id)], billing))
+    found.sort(key=lambda pair: pair[0].id)
+    shown = found[: params["max_rows"]]
+    out = [
+        Finding(
+            "billing_nonpayment_termination_unsettled",
+            "service",
+            str(billing.service_id),
+            f"Service {billing.service_id}",
+            f"Service {billing.service_id} is still suspended for non-payment after its termination was settled",
+            f"An admin settled the termination as {getattr(claim.status, 'value', claim.status)} without the "
+            "service being terminated, and an invoice is still unpaid. Nothing will terminate it "
+            "automatically; terminate or unsuspend it by hand.",
+            details={
+                "service_id": int(billing.service_id),
+                "billing_id": billing.id,
+                "action_id": claim.id,
+                "claim_status": getattr(claim.status, "value", claim.status),
+            },
+        )
+        for claim, billing in shown
+    ]
+    if len(found) > len(shown):
+        out.append(_overflow("billing_nonpayment_termination_unsettled", "service",
+                             "services still suspended", len(found) - len(shown), len(shown)))
+    return out
+
+
 def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A live billing job whose last scheduled run is older than twice its cadence."""
     del params
@@ -1419,6 +1493,7 @@ BILLING_DETECTORS = {
     "billing_tax_context_changed": tax_context_changed,
     "billing_job_needs_review": billing_job_needs_review,
     "billing_job_stale": billing_job_stale,
+    "billing_nonpayment_termination_unsettled": nonpayment_termination_unsettled,
     "billing_email_template_render_failed": email_template_render_failed,
     "billing_tax_fx_rate_missing": tax_fx_rate_missing,
 }

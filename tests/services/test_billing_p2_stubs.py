@@ -50,6 +50,7 @@ PHASE2_DETECTORS = (
     "billing_tax_not_registered",
     "billing_job_needs_review",
     "billing_job_stale",
+    "billing_nonpayment_termination_unsettled",
     "billing_email_template_render_failed",
 )
 
