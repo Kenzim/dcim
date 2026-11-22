@@ -194,9 +194,7 @@
   function voidBlockReason(inv, st, bal) {
     if (!inv) return '';
     if (!['open', 'overdue', 'pending_action'].includes(st)) return `An invoice that is ${label(st)} cannot be voided.`;
-    if (bal.paid_net_cents > 0) return 'Money has been paid on this invoice.';
-    if (bal.pending_cents > 0) return 'A payment is pending.';
-    if ((inv.adjustments || []).length) return 'A credit or debit note exists.';
+    if (bal.paid_net_cents > 0) return 'Money has been paid on this invoice; refund it first.';
     return '';
   }
 </script>

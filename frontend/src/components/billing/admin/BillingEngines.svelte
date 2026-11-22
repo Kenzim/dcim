@@ -327,11 +327,11 @@
       </Alert>
     {/if}
     {#if switchNeedsConfirm}
-      <label class="ba-form ba-check"><input type="checkbox" bind:checked={confirmOverpay} />
-        I confirm that overpayments on reseller invoices will keep going to the reseller credit cache, because the credit engine is not v2 yet.
+      <label class="ba-inline" style="align-items:flex-start"><input type="checkbox" bind:checked={confirmOverpay} style="margin-top:4px" />
+        <span>I confirm that overpayments on reseller invoices will keep going to the reseller credit cache, because the credit engine is not v2 yet.</span>
       </label>
     {/if}
-    <label class="ba-form">Type <strong>{switching.to}</strong> to confirm
+    <label class="ba-form" style="margin-top:10px"><span>Type <strong>{switching.to}</strong> to confirm</span>
       <input bind:value={typed} autocomplete="off" />
     </label>
     {#if switchError}

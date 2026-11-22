@@ -67,7 +67,8 @@ async function request(path, { method = 'GET', body, headers, raw = false, error
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    const error = new Error(describeDetail(payload.detail, response.status, errorMessage));
+    const fallback = response.status >= 500 ? `${errorMessage || 'The request failed'} (server error ${response.status})` : errorMessage;
+    const error = new Error(describeDetail(payload.detail, response.status, fallback));
     error.status = response.status;
     error.detail = payload.detail;
     error.code = payload.detail && typeof payload.detail === 'object' ? payload.detail.code : undefined;
