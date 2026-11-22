@@ -232,6 +232,33 @@ def test_v2_publish_of_a_saved_draft_locks_the_account_before_the_number(
     _assert_lock_order(number_lock_calls)
 
 
+# ------------------------------------------------------------------ manager finding: auto-apply gate
+
+
+@pytest.mark.parametrize("retail_enabled", [False, True])
+def test_auto_apply_at_publish_needs_retail_credit_enabled(db_session, account, retail_enabled):
+    from app.models.commerce_account import SystemSetting
+    from app.services.credit_ledger_service import CreditLedgerService
+
+    _v2(db_session)
+    set_setting(db_session, "billing_credit_engine", "v2")
+    db_session.add(SystemSetting(key="billing_engine_switch:credit", value={"mode": "v2"}))
+    set_setting(db_session, "billing_credit_auto_apply_retail", True)
+    set_setting(db_session, "billing_credit_enabled_retail", retail_enabled)
+    db_session.flush()
+    CreditLedgerService.credit_account(
+        db_session, account.id, 300, description="Goodwill", idempotency_key="p1i-fix-goodwill"
+    )
+    invoice = _create(db_session, account)
+    db_session.refresh(account)
+    remaining = InvoiceService.balance(db_session, invoice).remaining_cents
+    if retail_enabled:
+        assert (remaining, account.credit_balance_cents) == (invoice.amount_cents - 300, 0)
+    else:
+        assert (remaining, account.credit_balance_cents) == (invoice.amount_cents, 300)
+        assert invoice.status == S.OPEN
+
+
 # ------------------------------------------------------------------ finding 4: refund tax after an overpayment
 
 

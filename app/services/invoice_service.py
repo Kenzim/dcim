@@ -644,8 +644,13 @@ class InvoiceService:
 
     @staticmethod
     def _auto_apply_credit(db: Session, invoice: Invoice) -> bool:
-        """Retail auto-apply of account credit after publish (design 6.7); needs credit engine v2."""
-        from app.services.billing_shadow import billing_engine_mode
+        """Retail auto-apply of account credit after publish (design 6.7).
+
+        Needs retail credit to be live (``retail_credit_available``: credit
+        engine v2 and ``billing_credit_enabled_retail``) as well as the
+        auto-apply setting.
+        """
+        from app.services.credit_ledger_service import CreditLedgerService
         from app.services.settings_store import get_setting
 
         if invoice.reseller_id is not None or invoice.billing_account_id is None:
@@ -654,7 +659,7 @@ class InvoiceService:
             return False
         if not get_setting(db, "billing_credit_auto_apply_retail"):
             return False
-        return billing_engine_mode(db, "credit") == "v2"
+        return CreditLedgerService.retail_credit_available(db)
 
     @staticmethod
     def _allocate_publish_number(
@@ -1101,16 +1106,20 @@ class InvoiceService:
                 raise InvoiceTransitionError(
                     f"a {locked.status.value} invoice cannot be voided; issue a credit note"
                 )
-            balance = InvoiceService.balance(db, locked)
+            # Locking reads, so payments, notes and refunds committed while
+            # this transaction waited for the invoice lock are seen.
+            balance = InvoiceService.balance(db, locked, for_update=True)
             if balance.paid_net_cents or balance.pending_cents:
                 raise InvoiceTransitionError("an invoice with payments cannot be voided")
             if balance.debit_cents or balance.credit_cents:
                 raise InvoiceTransitionError("an invoice with credit or debit notes cannot be voided")
             refunding = db.scalar(
-                select(func.count(Refund.id)).where(
+                select(func.count(Refund.id))
+                .where(
                     Refund.invoice_id == locked.id,
                     Refund.status.in_([RefundStatus.PENDING, RefundStatus.REVIEW]),
                 )
+                .with_for_update()
             )
             if refunding:
                 raise InvoiceTransitionError("an invoice with a refund in progress cannot be voided")
