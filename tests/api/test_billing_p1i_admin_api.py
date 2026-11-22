@@ -275,6 +275,69 @@ def test_v2_mark_paid_partial_and_write_off(client, db_session, admin, account):
     assert (balance.credit_cents, balance.paid_net_cents, balance.due_cents) == (100, 900, 0)
 
 
+def test_v2_mark_paid_write_off_on_a_proforma_is_a_conflict(client, db_session, admin, account):
+    _v2(db_session)
+    _seed_invoice_series(db_session)
+    db_session.add(DocumentSeries(code="PF", document_type=DocumentType.PROFORMA, name="PF",
+                                  format="{SERIES}-{NUMBER}", number_source="own", gapless=True,
+                                  reset_period="never", default_for="proforma"))
+    set_setting(db_session, "billing_proforma_enabled", True)
+    db_session.commit()
+    proforma = _invoice(db_session, account)
+    response = client.post(f"/api/admin/commerce/invoices/{proforma.id}/mark-paid", headers=admin,
+                           json={"reason": "settled", "amount_cents": 900, "write_off_rest": True})
+    assert response.status_code == 409, response.text
+    assert "proforma" in response.json()["detail"]
+    db_session.expire_all()
+    assert db_session.get(Invoice, proforma.id).status == InvoiceStatus.OPEN
+    assert db_session.scalars(select(Payment).where(Payment.invoice_id == proforma.id)).all() == []
+
+
+def test_v2_mark_paid_write_off_with_a_pending_card_payment_is_a_conflict(
+    client, db_session, admin, account, monkeypatch
+):
+    from app.services.payments import retail_card
+
+    monkeypatch.setattr(retail_card.payment_gateway_registry, "maybe_get", lambda name: None)
+    _v2(db_session)
+    _seed_invoice_series(db_session)
+    invoice = _invoice(db_session, account)
+    db_session.add(Payment(invoice_id=invoice.id, gateway="stripe", status="pending", amount_cents=1000,
+                           currency="USD", external_ref="pi_pending", payment_metadata={}))
+    db_session.commit()
+    response = client.post(f"/api/admin/commerce/invoices/{invoice.id}/mark-paid", headers=admin,
+                           json={"reason": "settled", "amount_cents": 900, "write_off_rest": True})
+    assert response.status_code == 409, response.text
+    assert "pending" in response.json()["detail"]
+    db_session.expire_all()
+    assert [p.gateway for p in db_session.scalars(select(Payment).where(Payment.invoice_id == invoice.id))] == [
+        "stripe"
+    ]
+
+
+def test_void_endpoint_checks_paid_on_the_locked_row(client, db_session, admin, account, monkeypatch):
+    """A payment that settles the invoice while the void waits for the lock is seen."""
+    from sqlalchemy import update
+
+    from app.services.billing_locks import BillingLocks
+
+    invoice = _invoice(db_session, account)
+    real_invoice_row = BillingLocks.invoice_row
+    settled = []
+
+    def invoice_row(db, invoice_id):
+        if not settled:
+            # Another transaction marked it paid and committed before this lock was granted.
+            db.execute(update(Invoice).where(Invoice.id == invoice_id).values(status=InvoiceStatus.PAID))
+            settled.append(invoice_id)
+        return real_invoice_row(db, invoice_id)
+
+    monkeypatch.setattr(BillingLocks, "invoice_row", staticmethod(invoice_row))
+    response = client.post(f"/api/admin/commerce/invoices/{invoice.id}/void", headers=admin)
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "Cannot void a paid invoice"
+
+
 def test_delete_removes_the_series_counters(client, db_session, admin):
     series_id = _new(client, admin, start_value=40).json()["id"]
     names = [series_counter_name(series_id, ""), series_start_name(series_id, "")]

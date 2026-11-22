@@ -390,12 +390,23 @@ def _descends_from(transaction, ancestor) -> bool:
 
 
 def _write_on_root_commit(session: Session) -> None:
-    """Write log-mode records once the outermost transaction commits (not a savepoint)."""
+    """Write log-mode records once the outermost transaction commits (not a savepoint).
+
+    This runs after the caller's data has committed, so a failed record write
+    is logged and dropped: raising would make the caller's ``commit()`` report
+    a committed transaction as failed.
+    """
     if session.get_nested_transaction() is not None:
         return
     pending = session.info.pop(_PENDING_KEY, None)
     if pending:
-        _record([record for _transaction, record in pending])
+        try:
+            _record([record for _transaction, record in pending])
+        except Exception:  # noqa: BLE001 - never fail a commit that has happened
+            logger.exception(
+                "invoice guard: %d log-mode record(s) could not be written after commit",
+                len(pending),
+            )
 
 
 def _drop_rolled_back(session: Session, previous_transaction) -> None:

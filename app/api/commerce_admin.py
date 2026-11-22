@@ -31,7 +31,9 @@ from app.services.commerce_lifecycle_service import (
 )
 from app.services import settings_store
 from app.services.billing.manual_payments import (
+    ManualPaymentConflict,
     ManualPaymentError,
+    ManualPaymentInvalid,
     ManualPaymentNotAllowed,
     record_manual_payment,
 )
@@ -470,9 +472,14 @@ def mark_invoice_paid(
             amount_cents=body.amount_cents,
             write_off_rest=body.write_off_rest,
         )
-    except ManualPaymentNotAllowed as exc:
+    except (ManualPaymentNotAllowed, ManualPaymentInvalid) as exc:
+        db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ManualPaymentConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ManualPaymentError as exc:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     AuditService.log(
         db,
@@ -503,8 +510,13 @@ def void_invoice(
     db: DbDep,
     body: Optional[VoidInvoiceBody] = None,
 ):
-    invoice = _get_invoice_or_404(db, invoice_id)
+    # The paid check reads the locked row, so a payment that settles the
+    # invoice meanwhile is seen; void() locks it again, which is a no-op.
+    invoice = InvoiceService.get_for_update(db, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="Invoice not found")
     if invoice.status == InvoiceStatus.PAID:
+        db.rollback()
         raise HTTPException(status_code=400, detail="Cannot void a paid invoice")
     try:
         invoice = InvoiceService.void(

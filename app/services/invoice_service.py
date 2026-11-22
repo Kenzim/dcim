@@ -470,6 +470,8 @@ class InvoiceService:
             raise InvoiceError("currency must be a three-letter code")
         if reseller_id is None and billing_account_id is None:
             raise InvoiceError("reseller_id or billing_account_id is required")
+        if mode == "v2":
+            InvoiceService._lock_owner(db, reseller_id=reseller_id, billing_account_id=billing_account_id)
         if lines is None:
             lines = [
                 NewLine(
@@ -551,8 +553,31 @@ class InvoiceService:
                     f"invoice lines add up to {totals.amount_cents}, not {int(amount_cents)}"
                 )
         if publish:
-            InvoiceService.publish(db, invoice)
+            InvoiceService._publish(db, invoice, inserted=True)
         return invoice
+
+    @staticmethod
+    def _lock_owner(
+        db: Session, *, reseller_id: Optional[int], billing_account_id: Optional[int]
+    ) -> None:
+        """Lock the new invoice's reseller and billing account before any number row.
+
+        The account is the one ``BillingLocks.for_invoice`` will lock for the
+        invoice: its own, else the reseller's. In engine ``v2`` publish settles
+        in the same transaction, and settlement locks both.
+        """
+        from app.models.commerce_account import BillingAccount
+        from app.services.billing_locks import BillingLocks
+
+        if reseller_id is not None:
+            BillingLocks.reseller(db, int(reseller_id))
+        account_id = billing_account_id
+        if account_id is None and reseller_id is not None:
+            account_id = db.scalar(
+                select(BillingAccount.id).where(BillingAccount.reseller_id == reseller_id)
+            )
+        if account_id is not None:
+            BillingLocks.billing_account(db, int(account_id))
 
     @staticmethod
     def publish(db: Session, invoice: Invoice) -> Invoice:
@@ -562,9 +587,34 @@ class InvoiceService:
         other invoice keeps its legacy total and NULL v2 totals. The number is
         allocated last. A v2 invoice is then recomputed, so a zero total
         settles at once.
+
+        The invoice is locked and re-read before the status check, so of two
+        concurrent publishes of one draft the second sees it published and
+        allocates nothing. In v2 its reseller and billing account are locked
+        first: the recompute settles and may credit an overpayment, and
+        auto-apply writes the ledger. All of these come before the number
+        counter in the lock order.
+        """
+        return InvoiceService._publish(db, invoice, inserted=False)
+
+    @staticmethod
+    def _publish(db: Session, invoice: Invoice, *, inserted: bool) -> Invoice:
+        """``publish``; ``inserted`` is set by ``create`` for the row it has just inserted.
+
+        No other transaction can see that row, so a legacy or shadow publish
+        of it needs no lock and keeps its lock sequence. A v2 publish still
+        locks reseller, account and invoice, for the settlement after it.
         """
         from app.services.billing import settlement
+        from app.services.billing_locks import BillingLocks
 
+        v2 = invoice.model_version == 2
+        db.flush()
+        if v2 or not inserted:
+            locked = BillingLocks.for_invoice(db, invoice.id, reseller=v2, billing_account=v2)
+            if locked is None:
+                raise InvoiceError("Invoice not found")
+            invoice = locked
         if invoice.status != InvoiceStatus.DRAFT:
             raise InvoiceTransitionError(
                 f"invoice {invoice.id} is {invoice.status.value}, only a draft can be published"
@@ -577,7 +627,6 @@ class InvoiceService:
                 .order_by(InvoiceLine.sort_order, InvoiceLine.id)
             ).scalars()
         )
-        v2 = invoice.model_version == 2
         if v2:
             prices_include_tax = bool(invoice.prices_include_tax)
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)
@@ -597,11 +646,6 @@ class InvoiceService:
         invoice.seller_snapshot = seller_snapshot(now)
         invoice.buyer_snapshot = buyer_snapshot(db, invoice, now)
         auto_apply = v2 and InvoiceService._auto_apply_credit(db, invoice)
-        if auto_apply:
-            # The account comes before the number counter in the lock order.
-            from app.services.billing_locks import BillingLocks
-
-            BillingLocks.for_invoice(db, invoice.id, billing_account=True)
         InvoiceService._allocate_publish_number(db, invoice, now, required=v2)
         InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause=CAUSE_PUBLISH)
         settlement.fire(db, settlement.INVOICE_CREATED, settlement.InvoiceCreated(invoice=invoice))
@@ -617,8 +661,13 @@ class InvoiceService:
 
     @staticmethod
     def _auto_apply_credit(db: Session, invoice: Invoice) -> bool:
-        """Retail auto-apply of account credit after publish (design 6.7); needs credit engine v2."""
-        from app.services.billing_shadow import billing_engine_mode
+        """Retail auto-apply of account credit after publish (design 6.7).
+
+        Needs retail credit to be live (``retail_credit_available``: credit
+        engine v2 and ``billing_credit_enabled_retail``) as well as the
+        auto-apply setting.
+        """
+        from app.services.credit_ledger_service import CreditLedgerService
         from app.services.settings_store import get_setting
 
         if invoice.reseller_id is not None or invoice.billing_account_id is None:
@@ -627,7 +676,7 @@ class InvoiceService:
             return False
         if not get_setting(db, "billing_credit_auto_apply_retail"):
             return False
-        return billing_engine_mode(db, "credit") == "v2"
+        return CreditLedgerService.retail_credit_available(db)
 
     @staticmethod
     def _allocate_publish_number(
@@ -699,12 +748,19 @@ class InvoiceService:
 
     @staticmethod
     def delete_draft(db: Session, invoice: Invoice) -> None:
-        """Hard delete a draft and its lines (design 3.3); never a published invoice."""
-        if invoice.status != InvoiceStatus.DRAFT:
+        """Hard delete a draft and its lines (design 3.3); never a published invoice.
+
+        Status and numbers are checked on the locked, re-read row, so a
+        publish that commits meanwhile is seen.
+        """
+        locked = InvoiceService.get_for_update(db, invoice.id)
+        if locked is None:
+            raise InvoiceError("Invoice not found")
+        if locked.status != InvoiceStatus.DRAFT:
             raise InvoiceTransitionError("only a draft invoice can be deleted")
-        if invoice.number_display is not None or invoice.proforma_number_display is not None:
+        if locked.number_display is not None or locked.proforma_number_display is not None:
             raise InvoiceTransitionError("an invoice with a legal number cannot be deleted")
-        db.delete(invoice)
+        db.delete(locked)
         db.flush()
 
     @staticmethod
@@ -797,14 +853,20 @@ class InvoiceService:
     # --- Balance ---
 
     @staticmethod
-    def _legacy_allocated_cents(db: Session, invoice_id: int) -> int:
-        value = db.scalar(
-            select(func.coalesce(func.sum(Payment.amount_cents), 0)).where(
-                Payment.invoice_id == invoice_id,
-                Payment.status == PaymentStatus.SUCCEEDED,
-            )
+    def _legacy_allocated_cents(db: Session, invoice_id: int, *, for_update: bool = False) -> int:
+        """The sum of the invoice's succeeded payments.
+
+        ``for_update`` makes it a locking read, for a caller holding the invoice
+        lock that decides from it (see ``balance``).
+        """
+        query = select(func.coalesce(func.sum(Payment.amount_cents), 0)).where(
+            Payment.invoice_id == invoice_id,
+            Payment.status == PaymentStatus.SUCCEEDED,
         )
-        return int(value or 0)
+        if for_update:
+            db.flush()
+            query = query.with_for_update()
+        return int(db.scalar(query) or 0)
 
     @staticmethod
     def allocated_cents(db: Session, invoice_id: int) -> int:
@@ -819,7 +881,7 @@ class InvoiceService:
         return InvoiceService._legacy_allocated_cents(db, invoice_id)
 
     @staticmethod
-    def balance(db: Session, invoice: Invoice) -> InvoiceBalance:
+    def balance(db: Session, invoice: Invoice, *, for_update: bool = False) -> InvoiceBalance:
         """The invoice's balance from two aggregate queries. Never writes.
 
         A payment marked ``refunded`` whose ``refunded_cents`` is still 0 was
@@ -827,6 +889,13 @@ class InvoiceService:
         refunded in full, the fact ``billing_backfill`` records for older rows.
         A partially refunded payment never counts more than its amount as
         refunded. An invoice that is not flushed yet has no payments or notes.
+
+        ``for_update`` makes both queries locking reads of the invoice's
+        payments and notes, for a caller that holds the invoice lock and
+        decides money from the result: under REPEATABLE READ (MySQL, MariaDB)
+        a plain read sees the transaction's first snapshot, which may predate
+        a payment committed while it waited for the lock. Payments and notes
+        come after the invoice in the lock order.
         """
         total = int(invoice.amount_cents or 0)
         if invoice.id is None:
@@ -839,7 +908,7 @@ class InvoiceService:
             (Payment.refunded_cents > Payment.amount_cents, Payment.amount_cents),
             else_=Payment.refunded_cents,
         )
-        payments = db.execute(
+        payments_query = (
             select(
                 Payment.status,
                 func.coalesce(func.sum(Payment.amount_cents), 0),
@@ -847,7 +916,20 @@ class InvoiceService:
             )
             .where(Payment.invoice_id == invoice.id)
             .group_by(Payment.status)
-        ).all()
+        )
+        notes_query = (
+            select(
+                InvoiceAdjustment.kind,
+                func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
+            )
+            .where(InvoiceAdjustment.invoice_id == invoice.id)
+            .group_by(InvoiceAdjustment.kind)
+        )
+        if for_update:
+            db.flush()
+            payments_query = payments_query.with_for_update()
+            notes_query = notes_query.with_for_update()
+        payments = db.execute(payments_query).all()
         paid_gross = refunded = pending = 0
         for status, amount, refunded_sum in payments:
             if status in _PAID_PAYMENT_STATUSES:
@@ -855,16 +937,7 @@ class InvoiceService:
                 refunded += int(refunded_sum)
             elif status == PaymentStatus.PENDING:
                 pending += int(amount)
-        notes = dict(
-            db.execute(
-                select(
-                    InvoiceAdjustment.kind,
-                    func.coalesce(func.sum(InvoiceAdjustment.total_cents), 0),
-                )
-                .where(InvoiceAdjustment.invoice_id == invoice.id)
-                .group_by(InvoiceAdjustment.kind)
-            ).all()
-        )
+        notes = dict(db.execute(notes_query).all())
         debit = int(notes.get(AdjustmentKind.DEBIT, 0))
         credit = int(notes.get(AdjustmentKind.CREDIT, 0))
         worth = total + debit - credit
@@ -1063,16 +1136,20 @@ class InvoiceService:
                 raise InvoiceTransitionError(
                     f"a {locked.status.value} invoice cannot be voided; issue a credit note"
                 )
-            balance = InvoiceService.balance(db, locked)
+            # Locking reads, so payments, notes and refunds committed while
+            # this transaction waited for the invoice lock are seen.
+            balance = InvoiceService.balance(db, locked, for_update=True)
             if balance.paid_net_cents or balance.pending_cents:
                 raise InvoiceTransitionError("an invoice with payments cannot be voided")
             if balance.debit_cents or balance.credit_cents:
                 raise InvoiceTransitionError("an invoice with credit or debit notes cannot be voided")
             refunding = db.scalar(
-                select(func.count(Refund.id)).where(
+                select(func.count(Refund.id))
+                .where(
                     Refund.invoice_id == locked.id,
                     Refund.status.in_([RefundStatus.PENDING, RefundStatus.REVIEW]),
                 )
+                .with_for_update()
             )
             if refunding:
                 raise InvoiceTransitionError("an invoice with a refund in progress cannot be voided")
