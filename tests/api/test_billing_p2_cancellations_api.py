@@ -220,3 +220,30 @@ def test_policy_routes_require_an_admin(client, db_session):
     assert client.put(
         "/api/admin/billing/nonpayment-policies", headers=headers, json={"scope": "retail_default"}
     ).status_code == 403
+
+
+def test_admin_queue_reports_its_total_in_a_header_and_keeps_the_list_body(client, db_session, admin_headers):
+    owner = _user(db_session, "p2l-total-client")
+    ids = []
+    for _ in range(3):
+        service, _billing = _service(db_session, owner=owner)
+        created = client.post(
+            "/api/admin/billing/cancellation-requests", headers=admin_headers, json={"service_id": service.id}
+        )
+        assert created.status_code == 200, created.text
+        ids.append(created.json()["request"]["id"])
+    assert client.post(
+        f"/api/admin/billing/cancellation-requests/{ids[0]}/withdraw", headers=admin_headers
+    ).status_code == 200
+
+    page = client.get("/api/admin/billing/cancellation-requests?limit=1", headers=admin_headers)
+    assert isinstance(page.json(), list) and len(page.json()) == 1
+    assert page.headers["X-Total-Count"] == "3"
+    scheduled = client.get(
+        "/api/admin/billing/cancellation-requests?status=scheduled&limit=1&offset=1", headers=admin_headers
+    )
+    assert len(scheduled.json()) == 1 and scheduled.headers["X-Total-Count"] == "2"
+    one = client.get(
+        f"/api/admin/billing/cancellation-requests?billing_account_id=999999", headers=admin_headers
+    )
+    assert one.json() == [] and one.headers["X-Total-Count"] == "0"

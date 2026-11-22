@@ -856,7 +856,7 @@ Every job: mode `off` by default; acts only on triggers at or after its watermar
 
 **Refunds.** Pro-rata refund on cancellation needs A6 and stays off (decided default 2, `billing_refund_on_cancel` false); phase 2 adds no refund path.
 
-**Routes.** The existing client route `POST /api/client/commerce/services/{service_id}/cancel` (`app/api/commerce_client.py:728`) keeps its request and response shape and now goes through `CancellationService.request`, adding `request_id` to the response. New: `GET /api/client/commerce/cancellation-requests`, `POST /api/client/commerce/cancellation-requests/{id}/withdraw`; admin `GET /api/admin/billing/cancellation-requests` (queue with filters), `POST` (on behalf), `POST .../{id}/withdraw`; reseller panel the same for its own services. **WHMCS visibility:** none; the WHMCS terminate route (`DELETE /api/billing/services/{service_id}`) is unchanged and writes no request.
+**Routes.** The existing client route `POST /api/client/commerce/services/{service_id}/cancel` (`app/api/commerce_client.py:728`) keeps its request and response shape and now goes through `CancellationService.request`, adding `request_id` to the response. New: `GET /api/client/commerce/cancellation-requests`, `POST /api/client/commerce/cancellation-requests/{id}/withdraw`; admin `GET /api/admin/billing/cancellation-requests` (queue with filters; the body is the page's list and the header `X-Total-Count` the number of requests matching the filters), `POST` (on behalf), `POST .../{id}/withdraw`; reseller panel the same for its own services. **WHMCS visibility:** none; the WHMCS terminate route (`DELETE /api/billing/services/{service_id}`) is unchanged and writes no request.
 
 ### 10.7 `tax_id_recheck`
 
