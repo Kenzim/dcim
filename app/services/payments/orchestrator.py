@@ -7,12 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.dao.reseller_dao import ResellerDAO
 from app.models.reseller import (
-    CreditLedgerEntry,
     Invoice,
     InvoicePurpose,
     InvoiceStatus,
@@ -23,6 +22,7 @@ from app.models.reseller import (
     ResellerChargePreference,
     ResellerPaymentMethod,
 )
+from app.services.billing_locks import BillingLocks
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.invoice_service import InvoiceError, InvoiceService
 from app.services.payments.base import (
@@ -414,7 +414,8 @@ class PaymentOrchestrator:
     def _lock_funding_rows(
         db: Session, reseller_id: int, invoice_id: int
     ) -> tuple[Reseller, Invoice]:
-        reseller = ResellerDAO.get_for_update(db, reseller_id)
+        """Lock the reseller, its billing account, then the invoice (design 6.3)."""
+        reseller, _account = BillingLocks.reseller_and_account(db, reseller_id)
         if reseller is None:
             raise InvoiceError("Reseller not found")
         invoice = InvoiceService.get_for_update(db, invoice_id)
@@ -486,51 +487,18 @@ class PaymentOrchestrator:
         reseller: Reseller,
         invoice: Invoice,
         requested_cents: int,
-    ) -> Optional[CreditLedgerEntry]:
-        available = max(0, int(reseller.cached_balance_cents))
+    ) -> Optional[Payment]:
+        available = CreditLedgerService.available_cents(db, reseller)
         amount = min(available, requested_cents)
         if amount <= 0:
             return None
-        ordinal = int(
-            db.scalar(
-                select(func.count(Payment.id)).where(
-                    Payment.invoice_id == invoice.id,
-                    Payment.gateway == "credit",
-                )
-            )
-            or 0
-        )
-        payment = Payment(
-            invoice_id=invoice.id,
-            gateway="credit",
-            status=PaymentStatus.SUCCEEDED,
-            amount_cents=amount,
-            currency=invoice.currency,
-            external_ref=f"credit:{invoice.id}:{ordinal + 1}",
-            payment_metadata={"source": "reseller_credit"},
-            processed_at=datetime.now(timezone.utc),
-        )
-        db.add(payment)
-        db.flush()
-        ledger = CreditLedgerService.debit(
+        return CreditLedgerService.allocate_to_locked_invoice(
             db,
-            reseller.id,
-            amount,
-            description=f"Credit allocation to invoice {invoice.invoice_number}",
-            invoice_id=invoice.id,
-            payment_id=payment.id,
-            service_id=invoice.service_id,
-            reference_type="invoice_credit",
-            reference_id=str(invoice.id),
-            idempotency_key=f"invoice-credit:{invoice.id}:{payment.id}",
+            invoice,
+            reseller=reseller,
+            amount_cents=amount,
             created_by_user_id=reseller.user_id,
         )
-        payment.payment_metadata = {
-            "source": "reseller_credit",
-            "ledger_entry_id": ledger.id,
-        }
-        InvoiceService.mark_paid_if_fully_allocated(db, invoice.id)
-        return ledger
 
     def _charge_methods(
         self,
@@ -614,7 +582,9 @@ class PaymentOrchestrator:
             self.finalize_success(db, payment)
             return self._result(db, invoice, payment_id=payment.id)
         if status == PaymentStatus.PENDING:
-            invoice.status = InvoiceStatus.PENDING_ACTION
+            InvoiceService.transition(
+                db, invoice, InvoiceStatus.PENDING_ACTION, cause="payment_requires_action"
+            )
             db.flush()
             return self._result(
                 db,
@@ -672,6 +642,20 @@ class PaymentOrchestrator:
         return True
 
     @staticmethod
+    def _credit_topup(db: Session, invoice: Invoice, **keywords) -> None:
+        """Credit a paid top-up invoice to its reseller's or retail account's balance."""
+        if invoice.reseller_id is not None:
+            CreditLedgerService.credit(
+                db, invoice.reseller_id, invoice.amount_cents, **keywords
+            )
+            return
+        if invoice.billing_account_id is None:
+            raise InvoiceError("Top-up invoice has no billing account")
+        CreditLedgerService.credit_account(
+            db, invoice.billing_account_id, invoice.amount_cents, **keywords
+        )
+
+    @staticmethod
     def finalize_success(db: Session, payment: Payment) -> Invoice:
         """Record a gateway-confirmed payment and settle its invoice.
 
@@ -692,10 +676,9 @@ class PaymentOrchestrator:
             invoice.status == InvoiceStatus.PAID
             and invoice.purpose == InvoicePurpose.CREDIT_TOPUP
         ):
-            CreditLedgerService.credit(
+            PaymentOrchestrator._credit_topup(
                 db,
-                invoice.reseller_id,
-                invoice.amount_cents,
+                invoice,
                 description=f"Paid top-up invoice {invoice.invoice_number}",
                 invoice_id=invoice.id,
                 payment_id=payment.id,
@@ -703,6 +686,9 @@ class PaymentOrchestrator:
                 reference_id=str(invoice.id),
                 idempotency_key=f"topup-invoice:{invoice.id}",
             )
+            if invoice.reseller_id is None:
+                db.flush()
+                return invoice
             from app.services.notification_service import (
                 NotificationEvent,
                 NotificationService,

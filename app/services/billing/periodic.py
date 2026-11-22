@@ -9,7 +9,8 @@ settings read.
 Jobs (docs/billing-phase1-design.md 6.4 and 7.4):
 
 - ``billing_shadow_scan``: daily at ``billing_shadow_scan_hour_utc``; the scan
-  body is ``BillingShadowService.scan`` (P1-C).
+  body is ``BillingShadowService.scan``, run as the scheduled scan that may
+  start an engine's ``shadow_since`` clock.
 - ``billing_refund_reconciler``: every ``billing_refund_reconcile_minutes``;
   the body is the refund reconciler (P1-R).
 """
@@ -92,7 +93,7 @@ def _shadow_scan_due(db: Session, now: datetime) -> bool:
 def _run_shadow_scan(db: Session, now: datetime, dry_run: bool) -> dict:
     from app.services.billing_shadow import BillingShadowService
 
-    return BillingShadowService.scan(db, now, dry_run=dry_run)
+    return BillingShadowService.scan(db, now, dry_run=dry_run, scheduled=True)
 
 
 def _run_refund_reconciler(db: Session, now: datetime, dry_run: bool) -> dict:

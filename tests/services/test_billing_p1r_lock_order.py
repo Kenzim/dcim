@@ -79,7 +79,10 @@ def test_admin_refund_reversal_locks_billing_account(db_session, lock_calls, tra
     segments = transactions()
     assert len(segments) >= 2  # reservation, then completion after the gateway call
     _check(segments)
-    assert ["reseller", "billing_account"] == [k for k, _ in segments[-1] if k in ("reseller", "billing_account")]
+    last = segments[-1]
+    assert [kind for kind, _ in last[:2]] == ["reseller", "billing_account"]
+    # The ledger reversal re-takes the same reseller and account rows, already held.
+    assert {call for call in last[2:] if call[0] in ("reseller", "billing_account")} <= set(last[:2])
 
 
 def test_dispute_reversal_locks_billing_account(db_session, lock_calls, transactions):  # noqa: F811

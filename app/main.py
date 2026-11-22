@@ -437,6 +437,8 @@ from app.api import commerce_support_admin as commerce_support_admin_api
 from app.api import commerce_auth_public as commerce_auth_public_api
 api_router.include_router(commerce_store_admin_api.router, tags=["commerce-store-admin"])
 api_router.include_router(commerce_admin_api.router, tags=["commerce-admin"])
+from app.api import billing_series_admin as billing_series_admin_api
+api_router.include_router(billing_series_admin_api.router)
 api_router.include_router(commerce_client_api.router, tags=["commerce-client"])
 api_router.include_router(commerce_support_admin_api.router, tags=["commerce-support-admin"])
 api_router.include_router(commerce_auth_public_api.router, tags=["commerce-auth"])
@@ -452,6 +454,10 @@ api_router.include_router(settings_admin_api.router, tags=["settings-admin"])
 # Refunds and refund reviews (retail and reseller payments)
 from app.api import billing_refunds_admin as billing_refunds_admin_api
 api_router.include_router(billing_refunds_admin_api.router, tags=["billing-refunds-admin"])
+
+# Billing engines: modes, shadow mismatches, scans and the v2 switch
+from app.api import billing_engines_admin as billing_engines_admin_api
+api_router.include_router(billing_engines_admin_api.router, tags=["billing-engines-admin"])
 
 # Include scripts admin routes
 from app.api import scripts_admin as scripts_admin_api

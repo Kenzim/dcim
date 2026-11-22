@@ -12,7 +12,12 @@ from app.core.auth import require_admin
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.services import settings_store
+from app.services.billing_shadow import ENGINE_SETTING
 from app.services.settings_store import SettingValidationError
+
+# Settings written only through another endpoint, with its own rules and audit.
+_MANAGED_KEYS = {key: "billing_engines" for key in ENGINE_SETTING.values()}
+_MANAGED_ENDPOINTS = {"billing_engines": "POST /api/admin/billing/engines/{engine}/switch"}
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -45,12 +50,28 @@ def _item(key: str, resolved: settings_store.ResolvedSetting) -> dict[str, Any]:
         "source": resolved.source,
         "requires_restart": definition.requires_restart,
         "validation": definition.describe_validation(),
+        "managed_by": _MANAGED_KEYS.get(key),
+        "read_only": key in _MANAGED_KEYS,
     }
 
 
 def _definition_or_404(key: str) -> None:
     if key not in settings_store.SCHEMA:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown setting")
+
+
+def _refuse_managed(key: str) -> None:
+    manager = _MANAGED_KEYS.get(key)
+    if manager is None:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "setting_managed_elsewhere",
+            "managed_by": manager,
+            "message": f"{key} can only be changed with {_MANAGED_ENDPOINTS[manager]}",
+        },
+    )
 
 
 @router.get("", responses=COMMON_ERROR_RESPONSES)
@@ -68,6 +89,7 @@ def list_settings(db: DbDep):
 @router.put("/{key}", responses=COMMON_ERROR_RESPONSES)
 def update_setting(key: str, body: SettingUpdateBody, db: DbDep, auth: AdminDep):
     _definition_or_404(key)
+    _refuse_managed(key)
     try:
         settings_store.set_setting(db, key, body.value, auth.get("user_id"))
     except SettingValidationError as exc:
@@ -82,6 +104,7 @@ def update_setting(key: str, body: SettingUpdateBody, db: DbDep, auth: AdminDep)
 @router.delete("/{key}", responses=COMMON_ERROR_RESPONSES)
 def reset_setting(key: str, db: DbDep, auth: AdminDep):
     _definition_or_404(key)
+    _refuse_managed(key)
     try:
         settings_store.reset_setting(db, key, auth.get("user_id"))
     except SettingValidationError as exc:

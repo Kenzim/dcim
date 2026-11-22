@@ -85,7 +85,7 @@ def _reseller(db, suffix):
 _NUMBER = [960000]
 
 
-def _paid(db, *, reseller=None, account=None, gateway="stripe", amount=2000, purpose=InvoicePurpose.DEPLOY_CHARGE, ref=None):
+def _paid(db, *, reseller=None, account=None, gateway="stripe", amount=2000, purpose=InvoicePurpose.DEPLOY_CHARGE, ref=None, tax=0):
     _NUMBER[0] += 1
     invoice = Invoice(
         invoice_number=_NUMBER[0],
@@ -94,6 +94,7 @@ def _paid(db, *, reseller=None, account=None, gateway="stripe", amount=2000, pur
         purpose=purpose,
         status=InvoiceStatus.PAID,
         amount_cents=amount,
+        tax_cents=tax,
         currency="USD",
     )
     db.add(invoice)
@@ -285,9 +286,7 @@ def test_v2_partial_gateway_refund_issues_credit_note_and_recomputes(db_session,
 )
 def test_v2_partial_refund_tax_is_cumulative(db_session, v2, total, tax, parts):
     account = _retail_account(db_session, f"tax{total}{len(parts)}")
-    invoice, payment = _paid(db_session, account=account, amount=total)
-    invoice.tax_cents = tax
-    db_session.commit()
+    _invoice, payment = _paid(db_session, account=account, amount=total, tax=tax)
     taxes = []
     for index, part in enumerate(parts):
         ref = GatewayRefundResult(status=GatewayResultStatus.SUCCEEDED, external_ref=f"re_tax_{total}_{index}")
