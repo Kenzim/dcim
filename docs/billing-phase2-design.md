@@ -934,7 +934,7 @@ call_provider(kind: str, provider_ref: str, method: str, *args) -> Any   # raise
 providers_of(kind: str) -> list[ProviderRef]                             # enabled, circuit closed
 
 # P2-P
-TaxIdService.check(db, profile, *, force: bool = False) -> TaxIdCheck
+TaxIdService.check(db, profile, *, force: bool = False) -> TaxIdCheck | None   # None: no check made (no tax ID, country unknown, type other, no validator); status set to unchecked
 PackRegistry.list(db) -> list[PackInfo]; PackRegistry.load(db, pack_id, version) -> PackData
 PackImporter.preview(db, pack_id, version, effective_from) -> PackDiff
 PackImporter.apply(db, pack_id, version, effective_from, *, diff_hash, actor_user_id) -> PackDiff

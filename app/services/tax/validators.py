@@ -9,7 +9,6 @@ checkout one of ``ensure_checkout_allowed`` under the ``block_checkout`` policy.
 
 from __future__ import annotations
 
-import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -53,9 +52,11 @@ class TaxIdUnverifiable(Exception):
     code = "tax_id_unverifiable"
 
 
-try:  # The request type of plugin API 1.1 (design 8.5).
+# Local copy of the plugin API 1.1 request type (design 8.5), used only while
+# ``app.plugin_host.kinds`` does not exist; it is the only place to switch.
+try:
     from app.plugin_host.kinds import TaxIdCheckRequest
-except ImportError:  # pragma: no cover - only until the plugin API 1.1 kinds module exists
+except ImportError:  # pragma: no cover
 
     @dataclass(frozen=True)
     class TaxIdCheckRequest:  # type: ignore[no-redef]
@@ -113,13 +114,6 @@ def _supporting_validators(db: Session, country: str, id_type: str) -> list[str]
     return out
 
 
-def _accepts_timeout() -> bool:
-    try:
-        return "timeout_seconds" in inspect.signature(plugin_providers.call_provider).parameters
-    except (TypeError, ValueError):
-        return False
-
-
 def _requester(db: Session, at: datetime) -> tuple[Optional[str], Optional[str]]:
     """Country (VIES code) and number of the seller's establishment registration, if any."""
     country = (get_setting(db, "billing_tax_seller_country") or "").upper()
@@ -151,15 +145,12 @@ def _expires(db: Session, status: str, checked_at: datetime) -> datetime:
 
 
 def _online(db: Session, ref: str, request: Any) -> dict[str, Any]:
-    """Call ``check_online``; every failure becomes an ``unavailable`` answer."""
+    """Call ``check_online``; every failure becomes an ``unavailable`` answer.
+
+    The host applies the provider's own ``timeout_seconds`` (design 8.6).
+    """
     try:
-        if _accepts_timeout():
-            timeout = int(get_setting(db, "billing_tax_id_check_timeout_seconds"))
-            answer = plugin_providers.call_provider(
-                VALIDATOR_KIND, ref, "check_online", request, timeout_seconds=timeout
-            )
-        else:
-            answer = plugin_providers.call_provider(VALIDATOR_KIND, ref, "check_online", request)
+        answer = plugin_providers.call_provider(VALIDATOR_KIND, ref, "check_online", request)
     except ProviderUnavailable as exc:
         return {"status": TaxIdStatus.UNAVAILABLE.value, "error_code": (exc.reason or "PLUGIN_ERROR").upper()}
     except Exception:  # noqa: BLE001 - call_provider should only raise ProviderUnavailable
