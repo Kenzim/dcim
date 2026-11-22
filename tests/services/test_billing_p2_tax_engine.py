@@ -151,6 +151,61 @@ def test_inclusive_with_two_taxes_adds_up_to_the_gross(db_session):
     assert parts[0].base_cents + sum(p.tax_cents for p in parts) == 11_549
 
 
+def test_inclusive_with_three_taxes_adds_up_to_the_gross(db_session):
+    for name, rate in (("a", "5"), ("b", "7"), ("c", "3")):
+        add_rule(db_session, name=name, rate=rate, country="CA", rounding_point="line")
+        db_session.flush()
+    # Three plain taxes of the same specificity: only the first applies; make b and c compound.
+    from app.models.tax import TaxRule
+
+    for order, name in enumerate(("b", "c"), start=1):
+        rule = db_session.query(TaxRule).filter_by(name=name).one()
+        rule.compound, rule.compound_order = True, order
+    db_session.flush()
+    for gross in (1, 2, 3, 99, 101, 1_000):
+        parts = _calc(db_session, [line("a", gross)], facts=buyer("CA"), inclusive=True).lines["a"].parts
+        assert len(parts) == 3
+        assert parts[0].base_cents + sum(p.tax_cents for p in parts) == gross
+
+
+INCLUSIVE_COMBINATIONS = [
+    # (rate_percent, compound, reverse_charge) per part, in compound order.
+    [("5", False, False), ("7", False, False), ("3", False, False)],
+    [("5", False, False), ("9.975", True, False)],
+    [("5", False, False), ("7", False, False), ("9.975", True, False)],
+    [("20", False, False), ("0", False, True), ("5", True, False)],
+    [("1", False, False), ("1", False, False), ("1", False, False), ("1", True, False)],
+    [("33.3333", False, False), ("33.3333", False, False), ("33.3333", True, False)],
+    [("0", False, True), ("0", False, True)],
+]
+
+
+@pytest.mark.parametrize("rule", ["round_half_up", "tax_floor", "round_half_even"])
+@pytest.mark.parametrize("rates", INCLUSIVE_COMBINATIONS)
+def test_inclusive_multi_always_adds_up_to_the_gross(rates, rule):
+    from app.services.tax.engine import _inclusive_multi, _Part
+
+    for gross in range(0, 501):
+        parts = [
+            _Part(
+                rule=None, name=f"t{i}", rate_percent=Decimal(rate), rate_ppm=0 if rc else rate_ppm(rate),
+                jurisdiction="ANY", reverse_charge=rc, legal_note_key=None, rounding_point="line",
+                rounding_rule=rule, compound=compound, source="rules",
+            )
+            for i, (rate, compound, rc) in enumerate(rates)
+        ]
+        _inclusive_multi(parts, gross)
+        net = parts[0].base
+        assert net + sum(p.tax for p in parts) == gross, (gross, [(p.base, p.tax) for p in parts])
+        assert all(p.tax >= 0 for p in parts) and net >= 0
+        assert all(p.tax == 0 for p in parts if p.reverse_charge)
+        for index, part in enumerate(parts):
+            if part.compound:
+                assert part.base == net + sum(p.tax for p in parts[:index])
+            else:
+                assert part.base == net
+
+
 def test_discount_reduces_each_line_base_by_its_share(db_session):
     add_rule(db_session, rate="20", rounding_point="line", rounding_rule="round_half_up")
     result = _calc(

@@ -347,8 +347,10 @@ def _inclusive_multi(parts: list[_Part], gross: int) -> None:
 
     Plain taxes share the net as base; compound taxes add the earlier taxes.
     The total tax is rounded with the first rule (so ``tax_floor`` floors the
-    tax, not the net); the last taxed part takes the unit left over so that
-    net plus taxes equals the gross exactly.
+    tax, not the net). The parts' own roundings may add up to a unit or two
+    more or less than that total: the difference is taken from (or given to)
+    the largest taxed part, then the next largest, never below zero, so net
+    plus taxes equals the gross exactly. Compound bases follow the final taxes.
     """
     plain_ppm = sum(p.rate_ppm for p in parts if not p.compound and not p.reverse_charge)
     numerator = PPM + plain_ppm
@@ -363,9 +365,18 @@ def _inclusive_multi(parts: list[_Part], gross: int) -> None:
         part.base = base
         part.tax = 0 if part.reverse_charge else tax_exclusive(base, part.rate_ppm, part.rounding_rule)
     taxed = [p for p in parts if not p.reverse_charge and p.rate_ppm]
-    if taxed:
-        taxed[-1].tax += gross - net - sum(p.tax for p in parts)
-        taxed[-1].tax = max(0, taxed[-1].tax)
+    leftover = gross - net - sum(p.tax for p in parts)
+    if taxed and leftover > 0:
+        max(taxed, key=lambda p: p.tax).tax += leftover
+    for part in sorted(taxed, key=lambda p: -p.tax):
+        if leftover >= 0:
+            break
+        taken = min(part.tax, -leftover)
+        part.tax -= taken
+        leftover += taken
+    for index, part in enumerate(parts):
+        if part.compound:
+            part.base = net + sum(p.tax for p in parts[:index])
 
 
 def _canonical(value: Any) -> Any:
