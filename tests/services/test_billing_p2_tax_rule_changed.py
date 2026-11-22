@@ -22,6 +22,7 @@ from app.services.checkout_service import CheckoutError
 from app.services.invoice_service import InvoiceService, NewLine
 from app.services.tax import invoice_tax
 from app.services.tax.errors import RetryableTaxPublishError
+from app.services.tax.exchange_rates import ExchangeRateMissing
 from app.services.tax.invoice_tax import TAX_RULES_CHANGED_MESSAGE, TaxRuleChanged
 from tests.services.tax_helpers import (
     add_registration,
@@ -172,7 +173,11 @@ def test_checkout_asks_the_customer_to_try_again(db_session, rule, monkeypatch, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", [lambda: TaxRuleChanged([1]), RateMissing], ids=["rule_changed", "subclass"])
+@pytest.mark.parametrize(
+    "error",
+    [lambda: TaxRuleChanged([1]), RateMissing, lambda: ExchangeRateMissing("USD", "2027-05")],
+    ids=["rule_changed", "subclass", "fx_rate_missing"],
+)
 async def test_recurring_worker_leaves_the_billing_for_its_next_pass(db_session, monkeypatch, error):
     from tests.services.test_recurring_billing_service import (
         FakeGateway,

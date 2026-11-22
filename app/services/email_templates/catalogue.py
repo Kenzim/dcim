@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.services.email_layout import render_email_html
+from app.services.billing.operator_currency import operator_currency
 from app.services.notification_service import NotificationEvent, render_notification
 
 _NOTIFICATION_EVENTS = frozenset(
@@ -307,7 +308,7 @@ EVENTS: dict[str, EventTemplateSpec] = {spec.key: spec for spec in _SPECS}
 
 def money_text(data: dict) -> str:
     cents = int(data.get("amount_cents") or 0)
-    currency = str(data.get("currency") or "USD").upper()
+    currency = str(data.get("currency") or operator_currency()).upper()
     return f"{currency} {cents / 100:.2f}"
 
 

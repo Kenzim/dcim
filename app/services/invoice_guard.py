@@ -56,6 +56,10 @@ FROZEN_COLUMNS = frozenset(
         "tax_summary",
         "tax_evidence",
         "legal_notes",
+        "fx_rate",
+        "fx_period",
+        "fx_source",
+        "tax_total_gbp_cents",
     }
 )
 # NULL to a value once; a value never changes. ``service_id`` is here because a

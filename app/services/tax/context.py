@@ -8,6 +8,8 @@ from typing import Any, Mapping, Optional, Sequence
 
 from sqlalchemy.orm import Session
 
+from app.services.billing.operator_currency import operator_currency
+
 
 @dataclass(frozen=True)
 class BuyerTaxFacts:
@@ -178,7 +180,7 @@ def invoice_account(db: Session, invoice: Any) -> tuple[Any, Any]:
 
 
 def _currency(value: Any) -> str:
-    return str(value or "USD").strip().upper()
+    return str(value or operator_currency()).strip().upper()
 
 
 class TaxContextBuilder:

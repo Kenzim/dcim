@@ -13,7 +13,6 @@ from app.models.tax import InvoiceLineTax, TaxRule
 from app.services import invoice_guard
 from app.services.invoice_guard import FrozenInvoiceError
 from app.services.invoice_service import InvoiceError, InvoiceService, NewLine
-from app.services.settings_store import set_setting
 from app.services.tax.context import TaxContextBuilder
 from app.services.tax.engine import TaxEngine
 from tests.services.tax_helpers import (
@@ -289,17 +288,6 @@ def test_published_tax_rows_are_frozen(db_session, gb_account, tax_v2):
             savepoint.rollback()
     finally:
         invoice_guard.set_mode_override(None)
-
-
-def test_uk_vat_invoice_in_another_currency_is_refused(db_session, gb_account, tax_v2):
-    with pytest.raises(InvoiceError):
-        _cycle(db_session, gb_account, currency="USD")
-    db_session.rollback()
-
-
-def test_uk_vat_invoice_in_another_currency_with_the_setting(db_session, gb_account, tax_v2):
-    set_setting(db_session, "billing_tax_allow_foreign_currency_gb", True)
-    assert _cycle(db_session, gb_account, currency="USD").tax_cents == 200
 
 
 def test_legal_notes_are_rendered_and_frozen(db_session, monkeypatch, tax_v2):
