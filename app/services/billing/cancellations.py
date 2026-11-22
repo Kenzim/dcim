@@ -56,8 +56,9 @@ def _billing_for_service(db: Session, service_id: int) -> Optional[ServiceBillin
     return BillingLocks.service_billing(db, int(billing_id)) if billing_id is not None else None
 
 
-def open_request(db: Session, service_id: int) -> Optional[CancellationRequest]:
-    return db.execute(
+def open_request(db: Session, service_id: int, *, lock: bool = False) -> Optional[CancellationRequest]:
+    """The service's latest open request; ``lock`` reads it with a lock (after the service billing)."""
+    statement = (
         select(CancellationRequest)
         .where(
             CancellationRequest.service_id == service_id,
@@ -65,7 +66,11 @@ def open_request(db: Session, service_id: int) -> Optional[CancellationRequest]:
         )
         .order_by(CancellationRequest.id.desc())
         .limit(1)
-    ).scalar_one_or_none()
+    )
+    if lock:
+        db.flush()
+        statement = statement.with_for_update().execution_options(populate_existing=True)
+    return db.execute(statement).scalar_one_or_none()
 
 
 class CancellationService:
@@ -161,7 +166,17 @@ class CancellationService:
             raise CancellationError("Service is already terminated", status_code=409)
         if billing is not None and billing.status == ServiceBillingStatus.CANCELLED:
             raise CancellationError("Service billing is already cancelled", status_code=409)
-        previous = open_request(db, service_id)
+        previous = open_request(db, service_id, lock=True)
+        if (
+            previous is not None
+            and kind == CancellationType.IMMEDIATE
+            and previous.type == CancellationType.IMMEDIATE
+            and previous.source == origin
+        ):
+            # A repeated immediate request (a double submit, or a retry with a
+            # new key) while the first is still open: the power-off is not
+            # attempted again.
+            return previous
         if previous is not None and kind == CancellationType.END_OF_PERIOD:
             raise CancellationError("A cancellation is already scheduled for this service", status_code=409)
 
