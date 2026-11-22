@@ -183,7 +183,7 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
 
     if method in spec.metered and provide.rate_limit is not None:
         limit = provide.rate_limit
-        if not rate_hit(f"provider:{plugin_id}:{provider_id}", limit.calls, limit.per_seconds):
+        if not rate_hit(f"provider:{plugin_id}:{kind}:{provider_id}", limit.calls, limit.per_seconds):
             raise ProviderUnavailable("rate_limited")
 
     seconds = float(provide.timeout_seconds)
