@@ -4,6 +4,8 @@
   import TwoFactorPanel from '../TwoFactorPanel.svelte';
   import ClientMcpKeys from './ClientMcpKeys.svelte';
   import ClientNotifications from './ClientNotifications.svelte';
+  import ClientCreditPanel from '../billing/client/ClientCreditPanel.svelte';
+  import { clientGetCredit } from '../../lib/billingClientApi.js';
   import {
     clientCommerceDiscordAuthorizeUrl,
     clientCommerceDiscordUnlink,
@@ -14,8 +16,11 @@
   } from '../../lib/api.js';
 
   export let impersonating = false;
+  /** 'profile' | 'credit' | ... ; 'credit' only applies while account credit is on. */
+  export let initialTab = 'profile';
 
-  let tab = 'profile';
+  let tab = initialTab;
+  let credit = null;
   let profile = {};
   let activity = [];
   let emails = [];
@@ -30,16 +35,32 @@
     loading = true;
     error = '';
     try {
-      [profile, activity, emails] = await Promise.all([
+      [profile, activity, emails, credit] = await Promise.all([
         clientCommerceGetProfile().catch(() => ({})),
         clientCommerceListActivity().catch(() => []),
         clientCommerceListEmails().catch(() => []),
+        loadCredit(),
       ]);
+      if (tab === 'credit' && !credit) tab = 'profile';
     } catch (err) {
       error = err.message || 'Failed to load account data';
     } finally {
       loading = false;
     }
+  }
+
+  /** The credit summary when account credit is on for this account, else null. */
+  async function loadCredit() {
+    try {
+      const summary = await clientGetCredit();
+      return summary.enabled ? summary : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function refreshCredit() {
+    credit = await loadCredit();
   }
 
   async function saveProfile() {
@@ -111,6 +132,7 @@
   <Tabs
     tabs={[
       { id: 'profile', label: 'Profile' },
+      ...(credit ? [{ id: 'credit', label: 'Credit' }] : []),
       { id: 'activity', label: 'Activity' },
       { id: 'security', label: 'Security' },
       { id: 'notifications', label: 'Notifications' },
@@ -128,6 +150,8 @@
     <ClientNotifications {impersonating} />
   {:else if loading}
     <div class="state"><Spinner /><span>Loading…</span></div>
+  {:else if tab === 'credit' && credit}
+    <ClientCreditPanel {credit} {impersonating} on:changed={refreshCredit} />
   {:else if tab === 'profile'}
     <div class="panel">
       <h2>Billing profile</h2>
