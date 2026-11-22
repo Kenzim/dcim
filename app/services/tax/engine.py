@@ -55,6 +55,15 @@ NOTE_GB_OUTSIDE_SCOPE_B2B = "gb_outside_scope_b2b"
 NOTE_OUTSIDE_SCOPE = "outside_scope"
 NOTE_EXEMPT_CUSTOMER = "exempt_customer"
 EVIDENCE_NOT_REGISTERED = "not_registered"
+EVIDENCE_BUYER_COUNTRY_MISSING = "buyer_country_missing"
+EVIDENCE_NO_RULE_FOR_CLASS = "no_rule_for_class"
+
+# Places of supply where the chosen registration's rules are expected to tax every taxable line.
+PLACES_WITH_RULES = frozenset(
+    {"seller_country", "buyer_country_registration", "oss", "seller_country_distance", "buyer_country_missing"}
+)
+# Classes that are untaxed by design, so no rule is expected for them.
+CLASSES_WITHOUT_RULES = frozenset({TaxClassCode.EXEMPT.value, TaxClassCode.OUTSIDE_SCOPE.value})
 
 DISCOUNT_KIND = "discount"
 
@@ -121,7 +130,8 @@ class _Place:
     reverse_charge: bool = False
     rc_countries: dict[str, Optional[str]] = field(default_factory=dict)
     fallback_note: Optional[str] = None  # legal note when no rule taxes any line
-    evidence_notes: list[str] = field(default_factory=list)
+    evidence_notes: list[str] = field(default_factory=list)  # recorded when no rule taxes any line
+    notes: list[str] = field(default_factory=list)  # recorded always
     label: str = "buyer_country"
 
 
@@ -214,6 +224,27 @@ def _tax_id_freshness(db: Session, context: TaxContext, settings: TaxSettings) -
     return True, None, checked_at.isoformat()
 
 
+REASON_TAX_ID_COUNTRY_MISMATCH = "tax_id_country_mismatch"
+
+
+def _tax_id_country(db: Session, buyer: Any, buyer_country: str) -> Optional[str]:
+    """The country of the buyer's tax ID, mapped as the buyer's country is (``XI`` and ``IM`` are ``GB``).
+
+    The country of the check that validated it when there is one, else the
+    number's own prefix read against the buyer's country.
+    """
+    from app.services.tax import id_formats
+
+    country = None
+    if buyer.tax_id_check_id is not None:
+        check = db.get(TaxIdCheck, int(buyer.tax_id_check_id))
+        country = check.country if check is not None else None
+    if not country:
+        number = id_formats.normalise(buyer.tax_id or "", buyer_country)
+        country = number.country if number is not None else None
+    return normalise_country(country, mapped=True)
+
+
 def _domestic(registrations: Sequence[rules_repo.RegistrationView], country: Optional[str]):
     for registration in registrations:
         if registration.scheme == TaxRegistrationScheme.DOMESTIC.value and registration.jurisdiction == country:
@@ -241,7 +272,16 @@ def _place(
         return _Place(countries=any_only, label="no_seller_country")
     establishment = _domestic(registrations, seller)
     if buyer_country is None:
-        return _Place(countries=any_only, registration=establishment, label="buyer_country_missing")
+        # No evidence of where the buyer is: a consumer in the seller's country, so VAT is not left uncharged.
+        countries = {JURISDICTION_ANY: seller}
+        if establishment is not None:
+            countries[establishment.jurisdiction] = seller
+        return _Place(
+            countries=countries,
+            registration=establishment,
+            notes=[EVIDENCE_BUYER_COUNTRY_MISSING],
+            label="buyer_country_missing",
+        )
     if buyer_country == seller:
         countries = dict(any_only)
         if establishment is not None:
@@ -515,6 +555,14 @@ class TaxEngine:
                 evidence["tax_id_checked_at"] = checked_at
                 if reason:
                     reasons.append(reason)
+                # A business abroad only on a number of the buyer's own country; otherwise a consumer there.
+                if business_valid and buyer_country is not None and buyer_country != settings.seller_country:
+                    number_country = _tax_id_country(db, buyer, buyer_country)
+                    if number_country is not None and number_country != buyer_country:
+                        business_valid = False
+                        reasons.append(REASON_TAX_ID_COUNTRY_MISMATCH)
+                        evidence["tax_id_country"] = number_country
+                        evidence["tax_id_country_mismatch"] = True
             place = _place(settings, buyer_country, business_valid, registrations)
             jurisdictions = sorted(set(place.countries) | set(place.rc_countries))
             candidates = rules_repo.rules_valid_at(
@@ -526,6 +574,8 @@ class TaxEngine:
             candidates = rules_repo.rules_valid_at(db, at, class_ids=wanted_classes, mirrored_only=True)
         exemptions = rules_repo.exemptions_by_id(db, buyer.exemption_ids, at)
         evidence["place_of_supply"] = place.label
+        if place.label == "buyer_country_missing":
+            evidence["buyer_country_assumed"] = settings.seller_country
         evidence["registration_jurisdiction"] = place.registration.jurisdiction if place.registration else None
         if reasons:
             evidence["reasons"] = reasons
@@ -535,6 +585,7 @@ class TaxEngine:
         note_keys: list[str] = []
         explained: list[str] = []
         note_values: dict[str, dict] = {}
+        no_rule: list[dict] = []
         for line in context.lines:
             class_id = line_class_ids[line.key]
             if line.kind == DISCOUNT_KIND or class_id is None:
@@ -588,6 +639,20 @@ class TaxEngine:
                     reverse_charge=False,
                     mapped_countries=mapped,
                 )
+                code = line.tax_class_code or TaxClassCode.STANDARD.value
+                if (
+                    not rules
+                    and place.registration is not None
+                    and place.label in PLACES_WITH_RULES
+                    and code not in CLASSES_WITHOUT_RULES
+                ):
+                    missing = {
+                        "tax_class": code,
+                        "jurisdiction": place.registration.jurisdiction,
+                        "country": place.countries.get(place.registration.jurisdiction),
+                    }
+                    if missing not in no_rule:
+                        no_rule.append(missing)
             parts_by_line[line.key] = [_part_of(rule) for rule in rules]
 
         _apply_amounts(parts_by_line, nets, bool(context.prices_include_tax))
@@ -620,8 +685,12 @@ class TaxEngine:
             lines[line.key] = LineTax(key=line.key, parts=parts, tax_cents=sum(p.tax_cents for p in parts))
         if place.fallback_note and not any_part:
             note_keys.append(place.fallback_note)
-        if place.evidence_notes and not any_part:
-            evidence["notes"] = list(place.evidence_notes)
+        evidence_notes = (list(place.evidence_notes) if not any_part else []) + list(place.notes)
+        if no_rule:
+            evidence_notes.append(EVIDENCE_NO_RULE_FOR_CLASS)
+            evidence["no_rule_for_class"] = no_rule
+        if evidence_notes:
+            evidence["notes"] = list(dict.fromkeys(evidence_notes))
         if explained:
             evidence["explained_by"] = list(dict.fromkeys(explained))
         if note_values:

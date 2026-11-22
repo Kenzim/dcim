@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,6 +29,7 @@ from app.models.billing_jobs import (
 )
 from app.services.audit_service import AuditService
 from app.services.billing import periodic
+from app.services.billing.jobs import actions as job_actions
 from app.services.billing.jobs import registry, runner
 
 DbDep = Annotated[Session, Depends(get_db)]
@@ -47,6 +48,24 @@ class ModeBody(BaseModel):
 
     to: Literal["off", "dry_run", "live"]
     confirm: bool = False
+
+
+class ResolveBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    to: Literal["done", "failed"]
+    note: str
+    confirm: bool = False
+
+    @field_validator("note")
+    @classmethod
+    def _note_required(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A note is required")
+        if len(value) > 1000:
+            raise ValueError("The note is at most 1000 characters")
+        return value
 
 
 class RunBody(BaseModel):
@@ -110,6 +129,7 @@ def _state_payload(db: Session, state: BillingJobState, now: datetime) -> dict:
             .group_by(BillingJobAction.status)
         ).all()
     )
+    dry_runs_done, dry_runs_needed = runner.dry_run_progress(db, state)
     return {
         "job": state.job,
         "mode": _value(state.mode),
@@ -120,9 +140,8 @@ def _state_payload(db: Session, state: BillingJobState, now: datetime) -> dict:
         "changed_at": _iso(state.changed_at),
         "changed_by_user_id": state.changed_by_user_id,
         "preconditions_unmet": runner.live_preconditions(db, job),
-        "completed_scheduled_dry_runs": runner.completed_scheduled_dry_runs(db, state.job, state.dry_run_since)
-        if state.mode == BillingJobMode.DRY_RUN
-        else 0,
+        "completed_scheduled_dry_runs": dry_runs_done,
+        "min_dry_runs": dry_runs_needed,
         "last_run": _run_payload(last) if last is not None else None,
         "next_run_at": _iso(next_run),
         "claims": {_value(key): int(count) for key, count in claims.items()},
@@ -137,6 +156,67 @@ def list_jobs(db: DbDep) -> dict:
     order = [name for name, _ in periodic.AUTOMATION_JOBS]
     rows = sorted(states, key=lambda s: order.index(s.job) if s.job in order else len(order))
     return {"items": [_state_payload(db, state, now) for state in rows]}
+
+
+@router.get("/actions")
+def list_actions(
+    db: DbDep,
+    status_filter: Annotated[
+        Literal["claimed", "done", "failed", "needs_review"], Query(alias="status")
+    ] = "needs_review",
+    job: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """Claim rows by status (default ``needs_review``), oldest first, with the total."""
+    if job is not None:
+        _known(job)
+    rows, total = job_actions.list_actions(db, status=status_filter, job=job, limit=limit, offset=offset)
+    return {
+        "items": [job_actions.serialise_action(db, row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.post("/actions/{action_id}/resolve")
+def resolve_action(action_id: int, body: ResolveBody, db: DbDep, auth: AdminDep) -> dict:
+    """Record that an admin checked a ``needs_review`` action and found it done or failed.
+
+    Nothing is performed or retried; the claim row stays, so no job picks the
+    subject up again.
+    """
+    if not body.confirm:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Set confirm to true to resolve an action")
+    try:
+        row, previous = job_actions.resolve_action(
+            db, action_id, to=body.to, note=body.note, actor_user_id=auth["user_id"], now=_now()
+        )
+    except LookupError:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job action not found") from None
+    except job_actions.ActionNotResolvable as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    AuditService.log(
+        db,
+        actor_user_id=auth["user_id"],
+        action="billing.job.action_resolved",
+        resource_type="billing_job_action",
+        resource_id=str(row.id),
+        metadata={
+            "from": previous,
+            "to": body.to,
+            "note": body.note,
+            "job": row.job,
+            "subject_key": row.subject_key,
+            "action_id": row.id,
+        },
+    )
+    payload = job_actions.serialise_action(db, row)
+    db.commit()
+    return payload
 
 
 @router.post("/{job}/mode")

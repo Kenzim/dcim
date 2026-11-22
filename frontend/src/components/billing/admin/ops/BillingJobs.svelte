@@ -4,6 +4,7 @@
   import { Alert, Button, Modal, Spinner } from '../../../ui/index.js';
   import { changeJobMode, getJobForecast, listJobs, runJob } from '../../../../lib/billingOpsAdminApi.js';
   import JobDetail from './JobDetail.svelte';
+  import NeedsReview from './NeedsReview.svelte';
   import { label, when } from './opsFormat.js';
   import '../billingAdmin.css';
   import './opsAdmin.css';
@@ -29,6 +30,7 @@
   let working = false;
   let selected = null;
   let refreshKey = 0;
+  let reviewKey = 0;
 
   let change = null;
   let changeError = '';
@@ -55,6 +57,22 @@
   }
 
   $: needsReviewTotal = jobs.reduce((sum, job) => sum + (job.needs_review || 0), 0);
+
+  const dryRunsDone = (job) => job.completed_scheduled_dry_runs ?? 0;
+  const dryRunsNeeded = (job) => job.min_dry_runs ?? 0;
+  const dryRunsShort = (job) => dryRunsDone(job) < dryRunsNeeded(job);
+  const dryRunsReason = (job) =>
+    `Dry runs completed: ${dryRunsDone(job)} of ${dryRunsNeeded(job)} needed. A job goes live only after that many completed scheduled dry runs.`;
+
+  async function reviewResolved() {
+    await load();
+    reviewKey += 1;
+  }
+
+  async function listResolved() {
+    await load();
+    refreshKey += 1;
+  }
 
   async function openChange(job, to) {
     changeError = '';
@@ -135,15 +153,15 @@
 
 <div class="ba-page">
   <p class="ba-muted ba-wide-note">
-    Each job is off, in dry run (it records what it would do and changes nothing) or live. A job goes live only from dry run, after at least one completed
-    scheduled dry run and with its preconditions met. A live job acts only on triggers that fall after it went live, so switching it on never reaches back in time.
+    Each job is off, in dry run (it records what it would do and changes nothing) or live. A job goes live only from dry run, after the number of completed
+    scheduled dry runs shown against it and with its preconditions met. A live job acts only on triggers that fall after it went live, so switching it on never reaches back in time.
   </p>
   {#if error}<Alert type="danger">{error}</Alert>{/if}
   {#if success}<Alert type="success">{success}</Alert>{/if}
   {#if needsReviewTotal > 0}
     <div class="ba-review" role="alert">
       <strong>{needsReviewTotal} job action{needsReviewTotal === 1 ? '' : 's'} need{needsReviewTotal === 1 ? 's' : ''} review.</strong>
-      A job left them for staff and will not retry them. They are marked in the table below; open the job's runs to see the failed or conflicting items.
+      A job left them for staff and will not retry them. They are listed under Needs review below, where you can record what you found.
     </div>
   {/if}
 
@@ -170,7 +188,7 @@
                   <span class="ba-pill {MODE_TONE[job.mode] || ''}">{MODE_NAME[job.mode] || label(job.mode)}</span>
                   {#if job.mode === 'dry_run'}
                     <div class="ba-sub">Since {when(job.dry_run_since)}</div>
-                    <div class="ba-sub">{job.completed_scheduled_dry_runs} completed scheduled dry run{job.completed_scheduled_dry_runs === 1 ? '' : 's'}</div>
+                    <div class="ba-sub" class:ba-short={dryRunsShort(job)}>Dry runs completed: {dryRunsDone(job)} of {dryRunsNeeded(job)} needed</div>
                   {:else if job.mode === 'live'}
                     <div class="ba-sub">Live since {when(job.live_since)}</div>
                   {/if}
@@ -212,7 +230,7 @@
                       <Button size="small" variant="secondary" disabled={working} on:click={() => requestMode(job, 'dry_run')}>Start dry run</Button>
                     {:else}
                       {#if job.mode === 'dry_run'}
-                        <Button size="small" disabled={working} on:click={() => requestMode(job, 'live')}>Go live</Button>
+                        <Button size="small" disabled={working || dryRunsShort(job)} title={dryRunsShort(job) ? dryRunsReason(job) : ''} on:click={() => requestMode(job, 'live')}>Go live</Button>
                       {/if}
                       <Button size="small" variant="secondary" disabled={working} on:click={() => requestMode(job, 'off')}>Turn off</Button>
                     {/if}
@@ -227,6 +245,13 @@
     </div>
   {/if}
 
+  {#if needsReviewTotal > 0}
+    <div class="ba-panel" style="margin-top:18px">
+      <h3 style="margin:0 0 8px">Needs review</h3>
+      <NeedsReview refreshKey={reviewKey} on:resolved={listResolved} />
+    </div>
+  {/if}
+
   {#if selectedJob}
     <div class="ba-actions" style="margin-top:0">
       <Button variant="secondary" size="small" disabled={working} on:click={() => askRun(selectedJob, true)}>Dry run now</Button>
@@ -234,7 +259,13 @@
         <Button variant="secondary" size="small" disabled={working} on:click={() => askRun(selectedJob, false)}>Run live now</Button>
       {/if}
     </div>
-    <JobDetail job={selectedJob.job} {refreshKey} on:close={() => (selected = null)} />
+    <JobDetail
+      job={selectedJob.job}
+      {refreshKey}
+      needsReview={selectedJob.needs_review || 0}
+      on:close={() => (selected = null)}
+      on:resolved={reviewResolved}
+    />
   {/if}
 </div>
 
@@ -245,11 +276,14 @@
         <strong>{label(change.job.job)}</strong> will start acting for real: sending email, changing invoices and services as its rules say. It acts only on triggers that fall after this moment.
         The change is recorded in the audit log.
       </p>
+      {#if dryRunsShort(change.job)}
+        <Alert type="warning">{dryRunsReason(change.job)}</Alert>
+      {/if}
       {#if change.job.preconditions_unmet?.length}
         <Alert type="warning">Preconditions not met: {change.job.preconditions_unmet.join('; ')}. The server will refuse until they are.</Alert>
       {/if}
       <p class="ba-muted">
-        {change.job.completed_scheduled_dry_runs} completed scheduled dry run{change.job.completed_scheduled_dry_runs === 1 ? '' : 's'} so far.
+        Dry runs completed: {dryRunsDone(change.job)} of {dryRunsNeeded(change.job)} needed.
         {#if forecastFailed}
           The forecast could not be loaded.
         {:else if forecastCount === null}
@@ -274,7 +308,7 @@
       <Button variant="secondary" on:click={() => (change = null)}>Cancel</Button>
       <Button
         variant={change.to === 'live' ? 'danger' : 'primary'}
-        disabled={working || (change.to === 'live' && typed.trim() !== 'live')}
+        disabled={working || (change.to === 'live' && (typed.trim() !== 'live' || dryRunsShort(change.job)))}
         on:click={() => applyMode(change.job, change.to)}
       >{change.to === 'live' ? 'Go live' : 'Turn off'}</Button>
     </svelte:fragment>

@@ -13,9 +13,9 @@ import hashlib
 from typing import Annotated, Literal, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from app.api.reseller_panel import ResellerDep
@@ -224,6 +224,7 @@ admin_router = APIRouter(
 
 @admin_router.get("/cancellation-requests")
 def admin_list_cancellation_requests(
+    response: Response,
     db: DbDep,
     status: StatusQuery = None,
     service_id: Annotated[Optional[int], Query(gt=0)] = None,
@@ -239,6 +240,10 @@ def admin_list_cancellation_requests(
         conditions.append(CancellationRequest.billing_account_id == billing_account_id)
     if reseller_id is not None:
         conditions.append(CancellationRequest.reseller_id == reseller_id)
+    if status is not None:
+        conditions.append(CancellationRequest.status == status)
+    total = db.scalar(select(func.count(CancellationRequest.id)).where(*conditions))
+    response.headers["X-Total-Count"] = str(int(total or 0))
     return _list(db, *conditions, status=status, limit=limit, offset=offset)
 
 

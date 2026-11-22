@@ -1,13 +1,13 @@
 <script>
   import { formatMoney } from '../../../lib/resellerMoney.js';
-  import { legalNoteView, taxEntryLabel } from '../../../lib/billingTaxFormat.js';
+  import { legalNotesOf, legalNoteView, taxEntryLabel } from '../../../lib/billingTaxFormat.js';
 
-  /** A quote or invoice that carries `tax_summary`, `legal_notes` and `reverse_charge`. */
+  /** A quote or invoice that carries `tax_summary`, its legal notes (`legal_note_texts` on a quote, `legal_notes` on an invoice) and `reverse_charge`. */
   export let source;
   export let currency = 'USD';
 
   $: summary = Array.isArray(source?.tax_summary) ? source.tax_summary : [];
-  $: notes = (Array.isArray(source?.legal_notes) ? source.legal_notes : []).map(legalNoteView);
+  $: notes = legalNotesOf(source).map(legalNoteView);
   $: reverseCharge = source?.reverse_charge === true || summary.some((entry) => entry.reverse_charge);
 </script>
 

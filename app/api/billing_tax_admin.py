@@ -38,7 +38,7 @@ from app.models.tax import (
 )
 from app.services.audit_service import AuditService
 from app.services.billing.rounding import TAX_ROUNDING_RULES
-from app.services.tax.rules_repo import TaxRateError, normalise_rate
+from app.services.tax.rules_repo import MAPPED_RULE_COUNTRIES, TaxRateError, normalise_rate
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -283,9 +283,15 @@ def _check_rule(db: Session, values: dict, valid_from: datetime) -> None:
     # A rule holds on [valid_from, valid_to): an end at or before the start leaves it empty.
     if valid_to is not None and _aware(valid_to) <= _aware(valid_from):
         raise _unprocessable("valid_to_not_after_valid_from", "valid_to must be after valid_from")
-    # Buyers in Northern Ireland are matched as GB, so a rule for XI would never apply.
-    if values.get("country") == "XI":
-        raise _unprocessable("country_xi", "Northern Ireland (XI) is taxed by GB rules; use country GB")
+    # Buyers in Northern Ireland and the Isle of Man are matched as GB, in Monaco as FR, so a rule
+    # for XI, IM or MC would never apply.
+    country = values.get("country")
+    if country in MAPPED_RULE_COUNTRIES:
+        names = {"XI": "Northern Ireland", "IM": "The Isle of Man", "MC": "Monaco"}
+        target = MAPPED_RULE_COUNTRIES[country]
+        raise _unprocessable(
+            f"country_{country.lower()}", f"{names[country]} ({country}) is taxed by {target} rules; use country {target}"
+        )
     if values.get("tax_class_id") is not None and db.get(TaxClass, values["tax_class_id"]) is None:
         raise _unprocessable("unknown_tax_class", "Unknown tax class")
     jurisdiction = values.get("jurisdiction") or JURISDICTION_ANY
@@ -452,9 +458,27 @@ def list_registrations(db: DbDep):
     return [_registration_payload(row) for row in rows]
 
 
+# Codes a registration may not take, with the code to use: the engine finds registrations by mapped ISO codes.
+REGISTRATION_CODES_REFUSED = {
+    "EL": "EL is the VAT prefix of Greece; use GR",
+    "UK": "UK is not an ISO code; use GB",
+    "XI": "Northern Ireland (XI) is in the UK registration; use GB",
+    "IM": "The Isle of Man (IM) is in the UK registration; use GB",
+    "MC": "Monaco (MC) is in the French registration; use FR",
+}
+
+
+def _check_registration(data: dict) -> None:
+    for name in ("jurisdiction", "country"):
+        code = data.get(name)
+        if code in REGISTRATION_CODES_REFUSED:
+            raise _unprocessable(f"invalid_registration_{name}", f"{name}: {REGISTRATION_CODES_REFUSED[code]}")
+
+
 @router.post("/tax/registrations", status_code=status.HTTP_201_CREATED)
 def create_registration(body: RegistrationCreate, auth: AdminDep, db: DbDep):
     data = body.model_dump(exclude_unset=True)
+    _check_registration(data)
     data["scheme"] = body.scheme.value
     data.setdefault("valid_from", _now())
     row = SellerTaxRegistration(**data)
@@ -471,6 +495,7 @@ def update_registration(registration_id: int, body: RegistrationFields, auth: Ad
     if row is None:
         raise HTTPException(status_code=404, detail="Registration not found")
     data = body.model_dump(exclude_unset=True)
+    _check_registration(data)
     if "scheme" in data and data["scheme"] is not None:
         data["scheme"] = TaxRegistrationScheme(data["scheme"]).value
     for name, value in data.items():

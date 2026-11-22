@@ -64,13 +64,18 @@ def normalise_rate(rate_percent: object) -> Decimal:
     return (Decimal(rate_ppm(rate_percent)) / RATE_SCALE).quantize(Decimal("0.0001"))
 
 
-# Codes that are another country's for place of supply: the VIES code EL is Greece, and Northern
-# Ireland (XI) is the UK for services (design appendix C).
-COUNTRY_ALIASES = {"EL": "GR", "XI": "GB"}
+# Codes that are another country's for place of supply: the VIES code EL is Greece, Northern
+# Ireland (XI) and the Isle of Man (IM) are the UK for services, and Monaco (MC) is France for
+# EU VAT (design appendix C).
+COUNTRY_ALIASES = {"EL": "GR", "XI": "GB", "IM": "GB", "MC": "FR"}
+
+# Codes a rule's country may not take, with the code to use instead: buyers there are matched
+# under the mapped code, so such a rule would never apply.
+MAPPED_RULE_COUNTRIES = {"XI": "GB", "IM": "GB", "MC": "FR"}
 
 
 def normalise_country(country: Optional[str], *, mapped: bool = True) -> Optional[str]:
-    """Upper case ISO alpha-2; with ``mapped``, ``COUNTRY_ALIASES`` applied (``EL`` is ``GR``, ``XI`` is ``GB``).
+    """Upper case ISO alpha-2; with ``mapped``, ``COUNTRY_ALIASES`` applied (``EL`` is ``GR``; ``XI`` and ``IM`` are ``GB``; ``MC`` is ``FR``).
 
     The engine maps only when ``billing_tax_enabled`` is true; with tax
     disabled it keeps the literal code, as the ``tax_rates`` lookup does.

@@ -1333,6 +1333,17 @@ class InvoiceService:
             "reason_code": _kind(row.reason_code),
             "outcome": _kind(row.outcome),
             "issued_at": row.issued_at,
+            **InvoiceService._sterling_fields(row),
+        }
+
+    @staticmethod
+    def _sterling_fields(row: Any) -> dict:
+        """The frozen sterling VAT of an invoice or note (design 4.10); ``fx_rate_id`` stays internal."""
+        return {
+            "fx_rate": str(row.fx_rate) if row.fx_rate is not None else None,
+            "fx_period": row.fx_period,
+            "fx_source": row.fx_source,
+            "tax_total_gbp_cents": row.tax_total_gbp_cents,
         }
 
     @staticmethod
@@ -1389,6 +1400,10 @@ class InvoiceService:
             "document_type": _kind(invoice.document_type) or InvoiceDocumentType.INVOICE.value,
             "issued_at": invoice.issued_at,
             "balance": balance.as_dict(),
+            "tax_summary": invoice.tax_summary or [],
+            "legal_notes": invoice.legal_notes or [],
+            "tax_point_at": invoice.tax_point_at,
+            **InvoiceService._sterling_fields(invoice),
         }
         if payments:
             from app.models.refund import Refund
