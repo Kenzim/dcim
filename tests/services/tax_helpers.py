@@ -167,6 +167,38 @@ def set_engine(db, engine: str, mode: str) -> None:
     db.flush()
 
 
+def invoice_v2(db) -> None:
+    """Invoice engine ``v2`` with a default invoice series."""
+    from app.models.billing_series import DocumentSeries, DocumentType
+
+    set_engine(db, "invoice", "v2")
+    if db.query(DocumentSeries).filter_by(code="INV").one_or_none() is None:
+        db.add(
+            DocumentSeries(
+                code="INV", document_type=DocumentType.INVOICE, name="INV", format="{SERIES}-{NUMBER}",
+                number_padding=0, number_source="own", gapless=True, reset_period="never", enabled=True,
+                default_for=DocumentType.INVOICE.value,
+            )
+        )
+    db.flush()
+
+
+def capture_shadow(monkeypatch) -> list[dict]:
+    """Every ``BillingShadowService.record`` call, instead of writing it."""
+    from app.services.billing_shadow import BillingShadowService
+
+    records: list[dict] = []
+
+    def record(engine, check_key, subject_type, subject_id, legacy, v2, context=None, **_):
+        records.append(
+            {"engine": engine, "check": check_key, "subject": (subject_type, subject_id),
+             "legacy": legacy, "v2": v2, "context": context}
+        )
+
+    monkeypatch.setattr(BillingShadowService, "record", staticmethod(record))
+    return records
+
+
 def retail_account(db, suffix: str = "", **profile):
     """A client billing account with a billing profile of ``profile`` fields."""
     import uuid
