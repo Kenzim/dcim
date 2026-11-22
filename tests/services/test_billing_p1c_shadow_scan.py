@@ -350,14 +350,10 @@ def test_on_demand_scans_do_not_satisfy_the_daily_scan_criterion(db_session):
     set_credit_mode(db_session, "shadow")
     _reseller(db_session, "ondemand", 500)
     billing_shadow.set_shadow_since(db_session, "credit", at=NOW - timedelta(days=15), by="test")
-    for minute in range(14):
-        started = NOW - timedelta(hours=1) + timedelta(minutes=minute * 4)
-        billing_shadow._append_history(db_session, "credit", {
-            "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
-            "subjects_checked": 1, "mismatches_found": 0, "expected_differences_found": 0,
-            "scheduled": False, "complete": True,
-        })
     db_session.commit()
+    for _ in range(14):
+        _scan(db_session)
+    assert len(BillingShadowService.scan_history(db_session, "credit")) == 14
     assert "daily_scans" in _failing(db_session)
 
 
