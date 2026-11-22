@@ -49,6 +49,10 @@ EVENT_NOTES: dict[str, str] = {
     "credit.added": "Credit was added to an account's balance.",
     "credit.applied": "Account credit was applied to an invoice.",
     "ticket.created": "A support ticket was opened.",
+    "tax_id.checked": "A customer's tax ID was checked. The payload carries the outcome, never the number.",
+    "invoice.reminder_sent": "An invoice reminder email was queued (kind upcoming or overdue).",
+    "service.termination_scheduled": "A service suspended for non-payment was given a termination date.",
+    "service.cancellation_requested": "A cancellation of a service was requested.",
 }
 
 SDK_NOTES: dict[str, str] = {

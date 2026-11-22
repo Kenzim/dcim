@@ -1,0 +1,614 @@
+{
+  "api_version": "1.1",
+  "errors": [
+    "ActionError",
+    "GuestAgentError",
+    "NotActive",
+    "PermissionDenied",
+    "PluginError",
+    "RateLimited"
+  ],
+  "events": {
+    "credit.added": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "invoice_id",
+        "refund_id",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "amount_cents",
+        "balance_cents",
+        "billing_account_id",
+        "currency",
+        "entry_type",
+        "ledger_entry_id"
+      ]
+    },
+    "credit.applied": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "payment_id",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "amount_cents",
+        "balance_cents",
+        "billing_account_id",
+        "currency",
+        "invoice_id",
+        "ledger_entry_id"
+      ]
+    },
+    "credit_note.issued": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "number_display",
+        "refund_id",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "credit_note_id",
+        "currency",
+        "invoice_id",
+        "outcome",
+        "reason",
+        "total_cents"
+      ]
+    },
+    "debit_note.issued": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "number_display",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "currency",
+        "debit_note_id",
+        "invoice_id",
+        "outcome",
+        "reason",
+        "total_cents"
+      ]
+    },
+    "invoice.created": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "document_type",
+        "due_at",
+        "invoice_number",
+        "number_display",
+        "order_id",
+        "reseller_id",
+        "service_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "currency",
+        "invoice_id",
+        "purpose",
+        "total_cents"
+      ]
+    },
+    "invoice.overdue": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "due_at",
+        "invoice_number",
+        "number_display",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "currency",
+        "due_cents",
+        "invoice_id"
+      ]
+    },
+    "invoice.paid": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "currency",
+        "document_type",
+        "invoice_number",
+        "number_display",
+        "order_id",
+        "reseller_id",
+        "total_cents"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "invoice_id"
+      ]
+    },
+    "invoice.refunded": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "invoice_number",
+        "number_display",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "currency",
+        "invoice_id",
+        "refunded_cents"
+      ]
+    },
+    "invoice.reminder_sent": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "invoice_id",
+        "kind",
+        "reseller_id"
+      ]
+    },
+    "invoice.voided": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "invoice_number",
+        "number_display",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "invoice_id",
+        "reason"
+      ]
+    },
+    "order.paid": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "currency",
+        "order_id",
+        "order_number",
+        "total_cents"
+      ]
+    },
+    "payment.refunded": {
+      "before": false,
+      "mutable": [],
+      "optional": [
+        "credit_note_id",
+        "gateway",
+        "gateway_refund_ref",
+        "reseller_id"
+      ],
+      "permission": "billing.read",
+      "required": [
+        "amount_cents",
+        "billing_account_id",
+        "currency",
+        "destination",
+        "invoice_id",
+        "payment_id",
+        "reason",
+        "refund_id"
+      ]
+    },
+    "service.activated": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "service.read",
+      "required": [
+        "owner_user_id",
+        "previous_status",
+        "service_id",
+        "service_type"
+      ]
+    },
+    "service.cancellation_requested": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "billing.read",
+      "required": [
+        "effective_at",
+        "request_id",
+        "service_id",
+        "type"
+      ]
+    },
+    "service.created": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "service.read",
+      "required": [
+        "os_code",
+        "owner_user_id",
+        "product_code",
+        "provisioning_source",
+        "service_id",
+        "service_type",
+        "status"
+      ]
+    },
+    "service.power_requested": {
+      "before": true,
+      "mutable": [],
+      "optional": [],
+      "permission": "service.read",
+      "required": [
+        "action",
+        "actor_user_id",
+        "service_id",
+        "service_type",
+        "source"
+      ]
+    },
+    "service.suspended": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "service.read",
+      "required": [
+        "owner_user_id",
+        "previous_status",
+        "service_id",
+        "service_type"
+      ]
+    },
+    "service.terminated": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "service.read",
+      "required": [
+        "owner_user_id",
+        "previous_status",
+        "service_id",
+        "service_type"
+      ]
+    },
+    "service.termination_scheduled": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "billing.read",
+      "required": [
+        "reason",
+        "service_id",
+        "terminate_at"
+      ]
+    },
+    "service.unsuspended": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "service.read",
+      "required": [
+        "owner_user_id",
+        "service_id",
+        "service_type",
+        "status"
+      ]
+    },
+    "tax_id.checked": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "billing.read",
+      "required": [
+        "billing_account_id",
+        "checked_at",
+        "country",
+        "status",
+        "validator"
+      ]
+    },
+    "ticket.created": {
+      "before": false,
+      "mutable": [],
+      "optional": [],
+      "permission": "support.read",
+      "required": [
+        "billing_account_id",
+        "department_id",
+        "subject",
+        "ticket_id",
+        "ticket_number"
+      ]
+    }
+  },
+  "lifecycle": [
+    "disable",
+    "enable",
+    "install",
+    "uninstall",
+    "upgrade"
+  ],
+  "manifest": {
+    "ActionSpec": {
+      "fields": [
+        "audience",
+        "confirm",
+        "id",
+        "label",
+        "params",
+        "style",
+        "timeout",
+        "when"
+      ],
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "BadgeStyle": {
+      "fields": [
+        "text",
+        "tone"
+      ],
+      "required": [
+        "text"
+      ]
+    },
+    "Condition": {
+      "fields": [
+        "eq",
+        "falsy",
+        "in",
+        "ne",
+        "state",
+        "truthy"
+      ],
+      "required": [
+        "state"
+      ]
+    },
+    "Element": {
+      "fields": [
+        "action",
+        "audience",
+        "default",
+        "empty",
+        "format",
+        "label",
+        "map",
+        "state",
+        "text",
+        "tone",
+        "type",
+        "value",
+        "when"
+      ],
+      "required": [
+        "type"
+      ]
+    },
+    "Manifest": {
+      "fields": [
+        "actions",
+        "author",
+        "description",
+        "entry",
+        "events",
+        "homepage",
+        "hooks",
+        "id",
+        "licence",
+        "mcp_tools",
+        "name",
+        "permissions",
+        "rackflow_api",
+        "schedules",
+        "services",
+        "settings",
+        "tables",
+        "ui",
+        "version"
+      ],
+      "required": [
+        "entry",
+        "id",
+        "name",
+        "rackflow_api",
+        "version"
+      ]
+    },
+    "McpToolSpec": {
+      "fields": [
+        "audience",
+        "description",
+        "id",
+        "params",
+        "scope",
+        "timeout"
+      ],
+      "required": [
+        "description",
+        "id"
+      ]
+    },
+    "Option": {
+      "fields": [
+        "label",
+        "value"
+      ],
+      "required": [
+        "label",
+        "value"
+      ]
+    },
+    "Panel": {
+      "fields": [
+        "audience",
+        "elements",
+        "id",
+        "placement",
+        "title",
+        "when"
+      ],
+      "required": [
+        "id",
+        "title"
+      ]
+    },
+    "ParamField": {
+      "fields": [
+        "default",
+        "default_state",
+        "help",
+        "key",
+        "label",
+        "max",
+        "max_length",
+        "min",
+        "options",
+        "pattern",
+        "required",
+        "type"
+      ],
+      "required": [
+        "key",
+        "label",
+        "type"
+      ]
+    },
+    "ScheduleSpec": {
+      "fields": [
+        "every",
+        "id",
+        "jitter",
+        "scope",
+        "timeout"
+      ],
+      "required": [
+        "every",
+        "id"
+      ]
+    },
+    "ServicesSpec": {
+      "fields": [
+        "enablement",
+        "types"
+      ],
+      "required": [
+        "types"
+      ]
+    },
+    "SettingField": {
+      "fields": [
+        "default",
+        "help",
+        "key",
+        "label",
+        "max",
+        "max_length",
+        "min",
+        "options",
+        "pattern",
+        "required",
+        "type"
+      ],
+      "required": [
+        "key",
+        "label",
+        "type"
+      ]
+    },
+    "UiSpec": {
+      "fields": [
+        "panels"
+      ],
+      "required": []
+    }
+  },
+  "permissions": [
+    "billing.read",
+    "events.veto",
+    "guest.exec",
+    "http.outbound",
+    "mcp.client",
+    "mcp.staff",
+    "notify.client",
+    "service.read",
+    "support.read",
+    "tax.calculate",
+    "tax.rule_pack",
+    "tax.validate_id",
+    "ui.client",
+    "vm.power"
+  ],
+  "power_actions": [
+    "off",
+    "on",
+    "reboot",
+    "reset",
+    "shutdown"
+  ],
+  "power_sources": [
+    "admin",
+    "billing",
+    "client",
+    "client_mcp",
+    "console",
+    "mcp",
+    "plugin",
+    "reseller"
+  ],
+  "sdk": [
+    "ctx.actor",
+    "ctx.alter",
+    "ctx.api_version",
+    "ctx.audit",
+    "ctx.guest.exec",
+    "ctx.guest.ping",
+    "ctx.http.get",
+    "ctx.http.post",
+    "ctx.in_window",
+    "ctx.kind",
+    "ctx.log.debug",
+    "ctx.log.error",
+    "ctx.log.info",
+    "ctx.log.warning",
+    "ctx.notify.client",
+    "ctx.now",
+    "ctx.plugin_id",
+    "ctx.plugin_version",
+    "ctx.services.active",
+    "ctx.services.get",
+    "ctx.set_active",
+    "ctx.settings.all",
+    "ctx.settings.get",
+    "ctx.state",
+    "ctx.store",
+    "ctx.veto",
+    "ctx.vm.power",
+    "state.all",
+    "state.delete",
+    "state.get",
+    "state.keys",
+    "state.set"
+  ]
+}

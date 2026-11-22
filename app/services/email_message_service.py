@@ -168,7 +168,12 @@ class EmailMessageService:
         user_id: Optional[int] = None,
         related_type: Optional[str] = None,
         related_id: Optional[str] = None,
+        variables: Optional[dict[str, Any]] = None,
     ) -> EmailMessage:
+        # ``variables`` renders through the email templates (billing phase 2,
+        # docs/billing-phase2-design.md 12.1); that path is not built yet.
+        if variables is not None:
+            raise NotImplementedError("rendering email through templates is built by the email templates worker")
         email = to_address.strip()
         if not email or "@" not in email:
             raise ValueError("Email recipient is unavailable")

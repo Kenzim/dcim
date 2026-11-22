@@ -1,4 +1,4 @@
-# Rackflow plugin API 1.0 reference
+# Rackflow plugin API 1.1 reference
 
 Generated from the code by `python -m app.plugin_host.testkit.reference --write`. Do not edit by hand: `tests/plugin_host/test_reference.py` fails when this file and the code disagree. For how to use these pieces see the [author guide](README.md); for the rules on changing them see the [deprecation policy](deprecation-policy.md).
 
@@ -7,7 +7,7 @@ Generated from the code by `python -m app.plugin_host.testkit.reference --write`
 | Key | Label | Risk | Lets the plugin |
 |---|---|---|---|
 | `service.read` | Read services | low | Read basic facts of the services it is active for and receive service events. |
-| `billing.read` | Billing events | low | Receive billing events: orders and invoices paid, invoices created, overdue, voided and refunded, credit and debit notes issued, payments refunded, and account credit added or applied. |
+| `billing.read` | Billing events | low | Receive billing events: orders and invoices paid, invoices created, overdue, voided and refunded, credit and debit notes issued, payments refunded, account credit added or applied, invoice reminders sent, tax ID check results, service terminations scheduled and cancellations requested. |
 | `support.read` | Support events | low | Receive ticket created events. |
 | `events.veto` | Refuse operations | medium | Run checks before operations such as power actions and refuse them. |
 | `notify.client` | Notify clients | medium | Send notices to the owners of services it is active for. |
@@ -17,6 +17,9 @@ Generated from the code by `python -m app.plugin_host.testkit.reference --write`
 | `mcp.client` | Client MCP tools | medium | Offer tools to client MCP keys. |
 | `vm.power` | VM power | high | Start, shut down, stop, reboot or reset VMs it is active for. |
 | `guest.exec` | Run commands in VMs | high | Run commands inside VMs it is active for through the QEMU guest agent. |
+| `tax.validate_id` | Validate tax IDs | medium | Receive customers' tax identification numbers and countries to check them. |
+| `tax.rule_pack` | Offer tax rule packs | medium | Offer tax rules that an administrator may review and apply. |
+| `tax.calculate` | Calculate tax | high | Receive basket lines, amounts and the buyer's address and tax ID, and decide the tax on invoices. |
 
 ## Events
 
@@ -41,6 +44,10 @@ Each event is delivered inside an envelope: `id`, `name`, `version`, `occurred_a
 | [`payment.refunded`](#paymentrefunded) | `billing.read` | no | no |
 | [`credit.added`](#creditadded) | `billing.read` | no | no |
 | [`credit.applied`](#creditapplied) | `billing.read` | no | no |
+| [`tax_id.checked`](#tax_idchecked) | `billing.read` | no | no |
+| [`invoice.reminder_sent`](#invoicereminder_sent) | `billing.read` | no | no |
+| [`service.termination_scheduled`](#servicetermination_scheduled) | `billing.read` | no | no |
+| [`service.cancellation_requested`](#servicecancellation_requested) | `billing.read` | no | no |
 | [`ticket.created`](#ticketcreated) | `support.read` | no | no |
 
 ### service.created
@@ -156,6 +163,30 @@ Account credit was applied to an invoice.
 
 - Required fields: `ledger_entry_id`, `billing_account_id`, `invoice_id`, `amount_cents`, `balance_cents`, `currency`
 - Optional fields: `reseller_id`, `payment_id`
+
+### tax_id.checked
+
+A customer's tax ID was checked. The payload carries the outcome, never the number.
+
+- Required fields: `billing_account_id`, `country`, `status`, `validator`, `checked_at`
+
+### invoice.reminder_sent
+
+An invoice reminder email was queued (kind upcoming or overdue).
+
+- Required fields: `invoice_id`, `billing_account_id`, `reseller_id`, `kind`
+
+### service.termination_scheduled
+
+A service suspended for non-payment was given a termination date.
+
+- Required fields: `service_id`, `terminate_at`, `reason`
+
+### service.cancellation_requested
+
+A cancellation of a service was requested.
+
+- Required fields: `service_id`, `request_id`, `type`, `effective_at`
 
 ### ticket.created
 

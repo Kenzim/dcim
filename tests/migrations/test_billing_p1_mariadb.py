@@ -111,8 +111,8 @@ def test_chain_up_down_up_on_mariadb(mariadb):
     with pytest.raises(sa.exc.DBAPIError):
         _insert_invoice(engine, 2, 0)
 
-    helpers.migrate(engine, helpers.HEAD)
-    assert helpers.current(engine) == helpers.HEAD
+    helpers.migrate(engine, helpers.P1_HEAD)
+    assert helpers.current(engine) == helpers.P1_HEAD
     assert helpers.NEW_TABLES <= helpers.tables(engine)
     assert {"ck_invoices_amount_nonnegative", "ck_invoices_v2_totals", "ck_invoices_v2_number"} <= _checks(
         engine, "invoices"
@@ -139,5 +139,5 @@ def test_chain_up_down_up_on_mariadb(mariadb):
     assert "ck_invoices_positive_amount" in _checks(engine, "invoices")
     assert not helpers.NEW_TABLES & helpers.tables(engine)
 
-    helpers.migrate(engine, helpers.HEAD)
-    assert helpers.current(engine) == helpers.HEAD
+    helpers.migrate(engine, helpers.P1_HEAD)
+    assert helpers.current(engine) == helpers.P1_HEAD

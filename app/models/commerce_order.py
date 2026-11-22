@@ -114,6 +114,8 @@ class Order(Base):
     )
     fraud_score = Column(Integer, nullable=True)
     client_ip = Column(String(45), nullable=True)
+    # Location evidence captured at checkout (billing phase 2, design 7.6).
+    tax_evidence = Column(JSON, nullable=True)
     invoice_id = Column(
         Integer,
         ForeignKey(_FK_INVOICES, ondelete=_ON_DELETE_SET_NULL),

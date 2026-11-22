@@ -609,6 +609,23 @@ class Invoice(Base):
     status_changed_at = Column(DateTime(timezone=True), nullable=True)
     voided_at = Column(DateTime(timezone=True), nullable=True)
     void_reason = Column(String(255), nullable=True)
+    # Billing phase 2 tax (docs/billing-phase2-design.md 1.7); NULL before phase 2
+    # and on legacy and shadow invoices. Frozen at publish.
+    tax_engine = Column(String(128), nullable=True)
+    tax_point_at = Column(DateTime(timezone=True), nullable=True)
+    tax_summary = Column(JSON, nullable=True)
+    tax_evidence = Column(JSON, nullable=True)
+    legal_notes = Column(JSON, nullable=True)
+    seller_registration_id = Column(
+        Integer,
+        ForeignKey(
+            "seller_tax_registrations.id",
+            ondelete="RESTRICT",
+            name="fk_invoices_seller_registration_id",
+        ),
+        nullable=True,
+        index=True,
+    )
 
     reseller = relationship("Reseller", back_populates="invoices")
     service = relationship("Service")

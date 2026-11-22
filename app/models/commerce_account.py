@@ -90,6 +90,9 @@ class BillingAccount(Base):
         BigInteger, nullable=False, default=0, server_default="0"
     )
     tax_exempt = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Billing phase 2: the reason shown for ``tax_exempt`` and the late fee exemption (B5).
+    tax_exempt_reason = Column(String(255), nullable=True)
+    billing_late_fee_exempt = Column(Boolean, nullable=False, default=False, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -130,6 +133,17 @@ class BillingProfile(Base):
     phone = Column(String(32), nullable=True)
     tax_id = Column(String(64), nullable=True)
     invoice_email = Column(String(320), nullable=True)
+    # Billing phase 2 tax facts; values are those of app.models.tax.TaxIdType and TaxIdStatus.
+    tax_id_type = Column(String(16), nullable=True)
+    tax_id_status = Column(String(16), nullable=False, default="unchecked", server_default="unchecked")
+    tax_id_checked_at = Column(DateTime(timezone=True), nullable=True)
+    tax_id_check_id = Column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        ForeignKey("tax_id_checks.id", ondelete=_ON_DELETE_SET_NULL, name="fk_billing_profiles_tax_id_check_id"),
+        nullable=True,
+        index=True,
+    )
+    is_business = Column(Boolean, nullable=False, default=False, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

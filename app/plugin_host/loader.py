@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from app.core.config import settings
-from app.plugin_host.catalogue import API_VERSION
+from app.plugin_host.catalogue import SUPPORTED_API_VERSIONS
 from app.plugin_host.manifest import Manifest, ManifestError, validate_manifest
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,8 @@ def read_package(path: Path) -> Package:
         package.errors.append(f"the directory name must equal the plugin id {manifest.id!r}")
     if not manifest.compatible():
         package.errors.append(
-            f"needs Rackflow plugin API {manifest.rackflow_api}; this Rackflow provides {API_VERSION}"
+            f"needs Rackflow plugin API {manifest.rackflow_api}; this Rackflow provides "
+            f"{', '.join(SUPPORTED_API_VERSIONS)}"
         )
     entry = path / manifest.entry
     if not entry.resolve().is_relative_to(path.resolve()) or not entry.is_file():

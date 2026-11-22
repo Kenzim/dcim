@@ -1015,6 +1015,46 @@ def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]
     return out
 
 
+# ------------------------------------------------------------------ billing phase 2 (stubs)
+# docs/billing-phase2-design.md 15.4. Each returns no findings until the worker
+# that owns its data fills it in; the types ship disabled.
+
+
+def tax_line_sum(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2 tax invoice line whose tax differs from the sum of its tax rows."""
+    return []
+
+
+def tax_summary_consistent(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2 tax invoice whose ``tax_summary`` differs from its tax rows."""
+    return []
+
+
+def tax_evidence_conflict(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A published invoice whose location evidence disagrees with the country taxed."""
+    return []
+
+
+def tax_not_registered(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A rule that needs a seller registration was skipped because none is in force."""
+    return []
+
+
+def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A billing job action left in ``needs_review``."""
+    return []
+
+
+def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A live billing job whose last scheduled run is older than twice its cadence."""
+    return []
+
+
+def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Email messages sent with the built-in text because their template failed to render."""
+    return []
+
+
 BILLING_DETECTORS = {
     "billing_invoice_lines_mismatch": invoice_lines_mismatch,
     "billing_paid_without_payment": paid_invoice_without_payment,
@@ -1031,4 +1071,11 @@ BILLING_DETECTORS = {
     "billing_numbering_gaps": numbering_gaps,
     "billing_refund_mismatch": refund_mismatch,
     "billing_adjustment_bounds": adjustment_bounds,
+    "billing_tax_line_sum": tax_line_sum,
+    "billing_tax_summary_consistent": tax_summary_consistent,
+    "billing_tax_evidence_conflict": tax_evidence_conflict,
+    "billing_tax_not_registered": tax_not_registered,
+    "billing_job_needs_review": billing_job_needs_review,
+    "billing_job_stale": billing_job_stale,
+    "billing_email_template_render_failed": email_template_render_failed,
 }

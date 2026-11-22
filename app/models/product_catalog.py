@@ -38,6 +38,13 @@ class Product(Base):
     # below a per-user preset and above per-service overrides in the
     # resolution hierarchy (see app.services.client_permission_resolver).
     permission_set_id = Column(Integer, ForeignKey("permission_sets.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Tax class of the product's lines (billing phase 2); NULL means "standard".
+    tax_class_id = Column(
+        Integer,
+        ForeignKey("tax_classes.id", ondelete="RESTRICT", name="fk_products_tax_class_id"),
+        nullable=True,
+        index=True,
+    )
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

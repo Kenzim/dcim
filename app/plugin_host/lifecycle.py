@@ -96,6 +96,7 @@ async def install(
         manifest=package.raw,
         directory=package.directory,
         code_hash=package.code_hash,
+        effective_api=manifest.effective_api(),
         status=PluginStatus.DISABLED,
         granted_permissions=sorted(manifest.permissions),
         addon_refs=[],
@@ -182,6 +183,7 @@ async def upgrade(
     inst.version = manifest.version
     inst.manifest = package.raw
     inst.code_hash = package.code_hash
+    inst.effective_api = manifest.effective_api()
     inst.granted_permissions = sorted(manifest.permissions)
     inst.status = PluginStatus.DISABLED
     inst.disabled_reason = None
@@ -280,6 +282,7 @@ def summary(db: Session, inst: PluginInstallation, package: Optional[Package] = 
         "id": inst.id,
         "name": inst.name,
         "version": inst.version,
+        "effective_api": inst.effective_api,
         "description": manifest.description if manifest else "",
         "author": manifest.author if manifest else None,
         "homepage": manifest.homepage if manifest else None,

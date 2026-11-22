@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence, Union
 
 from sqlalchemy import and_, case, func, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -32,6 +32,9 @@ from app.models.reseller import (
     PaymentStatus,
 )
 from app.services import invoice_guard  # noqa: F401  (installs the frozen-column guard)
+
+if TYPE_CHECKING:
+    from app.services.tax.result import TaxResult
 
 logger = logging.getLogger(__name__)
 
@@ -449,6 +452,7 @@ class InvoiceService:
         locale: Optional[str] = None,
         series_id: Optional[int] = None,
         publish: bool = True,
+        tax_result: Optional["TaxResult"] = None,
     ) -> Invoice:
         """Create an invoice as ``draft`` with its lines and, by default, publish it.
 
@@ -457,7 +461,10 @@ class InvoiceService:
         and must equal ``amount_cents``. ``shadow_lines`` are the lines the v2
         engine would write when they differ from ``lines`` (checkout's tax
         line); in ``shadow`` their total is compared with the legacy total.
+        ``tax_result`` (billing phase 2, docs/billing-phase2-design.md 4.7) is
+        accepted and not yet used.
         """
+        del tax_result
         mode = engine_mode(db)
         if mode == "v2" and type(amount_cents) is int and amount_cents == 0:
             if not zero_amounts_supported(db):
@@ -821,7 +828,10 @@ class InvoiceService:
         service_billing_id: Optional[int] = None,
         period_start: Optional[datetime] = None,
         period_end: Optional[datetime] = None,
+        tax_result: Optional["TaxResult"] = None,
     ) -> Invoice:
+        # ``tax_result`` (billing phase 2) is accepted and not yet used.
+        del tax_result
         line = NewLine(
             description=description[:512],
             unit_cents=int(amount_cents) if type(amount_cents) is int else amount_cents,
