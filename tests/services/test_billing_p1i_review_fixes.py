@@ -349,6 +349,93 @@ def test_guard_log_record_failure_after_commit_is_logged_not_raised(db_session, 
     assert db_session.get(Invoice, invoice.id).description == "edited after publish"
 
 
+# ------------------------------------------------------------------ refund tax base (v2)
+
+
+def _taxed_paid(db, account, *, fee_cents=0, fee_tax=0, paid=None):
+    """The 1,200 invoice with 200 tax, an optional late fee debit note, paid in one stripe payment."""
+    _series(db, DocumentType.DEBIT_NOTE, "DN")
+    _series(db, DocumentType.CREDIT_NOTE, "CN")
+    invoice = _taxed_invoice(db, account)
+    if fee_cents:
+        InvoiceAdjustmentService.issue_debit_note(
+            db, invoice, lines=[{"description": "Late fee", "unit_cents": fee_cents - fee_tax, "tax_cents": fee_tax}],
+            reason=AdjustmentReason.LATE_FEE, actor_user_id=None, idempotency_key=f"fee-{invoice.id}",
+        )
+    payment = _pay(db, invoice, paid if paid is not None else 1200 + fee_cents)
+    payment.gateway, payment.external_ref = "stripe", f"pi_tax_{invoice.id}"
+    InvoiceService.recompute(db, invoice, cause="payment", payment=payment)
+    db.commit()
+    return invoice, payment
+
+
+def _gateway_refund(db, payment, amount, key):
+    from app.services.payments.base import GatewayRefundResult, GatewayResultStatus
+    from app.services.refund_service import RefundService
+    from tests.services.test_billing_p1r_refund_service import FakeGateway, _registry
+
+    gateway = FakeGateway(outcome=GatewayRefundResult(status=GatewayResultStatus.SUCCEEDED, external_ref=f"re_{key}"))
+    refund = RefundService.request(
+        db, payment_id=payment.id, amount_cents=amount, destination="gateway", reason="customer_request",
+        actor_user_id=None, idempotency_key=key, registry=_registry(gateway),
+    )
+    db.commit()
+    assert refund.status == RefundStatus.SUCCEEDED, refund.failure_code
+    return refund
+
+
+def _refund_tax(db, refund):
+    note = db.get(InvoiceAdjustment, refund.adjustment_id)
+    assert note.tax_cents == refund.refund_metadata["tax_cents"]
+    return note.tax_cents
+
+
+def test_v2_full_refund_takes_the_tax_of_a_taxed_late_fee(db_session, account):
+    _v2(db_session)
+    invoice, payment = _taxed_paid(db_session, account, fee_cents=300, fee_tax=60)
+    assert invoice.status == S.PAID
+    assert _refund_tax(db_session, _gateway_refund(db_session, payment, 1500, "tax-full")) == 260
+
+
+@pytest.mark.parametrize("parts", [(750, 750), (1000, 500), (1, 1499), (333, 333, 834)])
+def test_v2_refund_in_parts_takes_exactly_the_whole_tax(db_session, account, parts):
+    _v2(db_session)
+    _invoice, payment = _taxed_paid(db_session, account, fee_cents=300, fee_tax=60)
+    taxes = [_refund_tax(db_session, _gateway_refund(db_session, payment, part, f"tax-part-{i}"))
+             for i, part in enumerate(parts)]
+    assert sum(taxes) == 260, taxes
+    assert all(0 <= tax <= part for tax, part in zip(taxes, parts))
+
+
+def test_v2_refund_after_an_untaxed_late_fee_takes_tax_on_the_larger_base(db_session, account):
+    _v2(db_session)
+    _invoice, payment = _taxed_paid(db_session, account, fee_cents=300)
+    assert _refund_tax(db_session, _gateway_refund(db_session, payment, 600, "tax-untaxed-fee")) == 80
+
+
+def test_v2_full_refund_after_an_overpayment_keeps_the_invoice_tax(db_session, account):
+    _v2(db_session)
+    invoice, payment = _taxed_paid(db_session, account, paid=1500)
+    [overpayment] = _notes(db_session, invoice)
+    assert overpayment.reason_code == AdjustmentReason.OVERPAYMENT
+    assert _refund_tax(db_session, _gateway_refund(db_session, payment, 1200, "tax-overpaid")) == 200
+
+
+def test_v2_retried_refund_keeps_its_tax(db_session, account):
+    _v2(db_session)
+    invoice, payment = _taxed_paid(db_session, account, fee_cents=300, fee_tax=60)
+    refund = _gateway_refund(db_session, payment, 600, "tax-retry")
+    tax = _refund_tax(db_session, refund)
+    InvoiceAdjustmentService.issue_debit_note(
+        db_session, invoice, lines=[{"description": "Correction", "unit_cents": 100, "tax_cents": 100}],
+        reason=AdjustmentReason.CORRECTION, actor_user_id=None, idempotency_key="tax-retry-later",
+    )
+    db_session.commit()
+    again = _gateway_refund(db_session, payment, 600, "tax-retry")
+    assert again.id == refund.id and again.adjustment_id == refund.adjustment_id
+    assert _refund_tax(db_session, again) == tax == 104
+
+
 # ------------------------------------------------------------------ finding 4: refund tax after an overpayment
 
 
