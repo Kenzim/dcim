@@ -80,12 +80,21 @@ def _series(sessions, code, gapless=True):
         return series
 
 
-def _publish(sessions, series, hold=0.0) -> int:
-    """Allocate a number and commit an invoice carrying it in the same transaction."""
-    from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus
+def _publish(sessions, series, hold=0.0, read_first=False) -> int:
+    """Allocate a number and commit an invoice carrying it in the same transaction.
+
+    With ``read_first`` the transaction reads the counter row before locking it,
+    as a publish does when it has already loaded data; on MariaDB 11.6 and later
+    that fails with error 1020 unless snapshot isolation is off.
+    """
+    from app.models.reseller import Invoice, InvoicePurpose, InvoiceStatus, InvoiceSequence
     from app.services.invoice_numbering import InvoiceNumbering
 
     with sessions() as db:
+        if read_first:
+            db.execute(sa.select(InvoiceSequence.next_value)
+                       .where(InvoiceSequence.name == f"series:{series.id}:")).all()
+            time.sleep(hold)
         period, value, display = InvoiceNumbering.allocate(db, series, at=AT, session_factory=sessions)
         time.sleep(hold)
         db.add(Invoice(invoice_number=next(_numbers), purpose=InvoicePurpose.UPGRADE,
@@ -170,6 +179,16 @@ def test_non_gapless_allocations_on_a_new_counter(sessions):
     results = _together(lambda: _publish(sessions, series), lambda: _publish(sessions, series))
     assert sorted(results) == [1, 2], results
     assert _rows(sessions, series.id)[f"series-start:{series.id}:"] == 1
+
+
+def test_publishes_that_read_before_locking_do_not_hit_1020(sessions):
+    series = _series(sessions, "READ")
+    assert _publish(sessions, series) == 1
+    results = _together(*[lambda: _publish(sessions, series, 0.2, read_first=True) for _ in range(10)])
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert not errors, errors
+    assert sorted(results) == list(range(2, 12)), results
+    assert _findings(sessions) == []
 
 
 def test_raising_a_new_gapless_counter_while_a_number_is_allocated(sessions):
