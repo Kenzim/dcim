@@ -59,11 +59,15 @@ def mirrored_values(tax_rate: TaxRate) -> dict[str, Any]:
 
 
 def _same(rule: TaxRule, values: dict[str, Any]) -> bool:
+    """Whether the rule already mirrors ``values``; a region of NULL and one of ``''`` differ (``''`` is literal)."""
     for name in MIRRORED_FIELDS:
         current = getattr(rule, name)
         wanted = values[name]
         if name == "rate_percent":
             if Decimal(str(current)) != wanted:
+                return False
+        elif name == "region":
+            if current != wanted:
                 return False
         elif isinstance(wanted, str) or wanted is None:
             if (current or None) != (wanted or None):

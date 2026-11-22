@@ -353,6 +353,22 @@ def test_mirror_keeps_an_empty_region_literal(db_session):
     assert rule.region == "" and rule.priority == 0
 
 
+@pytest.mark.parametrize("before,after", [(None, ""), ("", None)])
+def test_mirror_sees_a_change_between_no_region_and_an_empty_region(db_session, before, after):
+    rate = _rate(db_session, "FR", before, 2000)
+    old = TaxRuleMirror.current(db_session, rate.id)
+    rate.region = after
+    new = TaxRuleMirror.sync(db_session, rate)
+    assert new.id != old.id and new.supersedes_id == old.id
+    assert new.region == after
+    # Legacy and engine still agree for a buyer with and without a region (a literal '' matches no region only).
+    for profile in (("FR", None), ("FR", "Paris")):
+        _user, account = _buyer(db_session, *profile)
+        product, plan = _product(db_session, price_cents=10_000)
+        quote = _quote(db_session, account, product, plan)
+        assert quote.tax_result.tax_cents == quote.tax_cents
+
+
 def test_prices_include_tax_setting_is_read(db_session):
     set_setting(db_session, "billing_tax_prices_include_tax", True)
     assert CheckoutService._prices_include_tax(db_session) is True
