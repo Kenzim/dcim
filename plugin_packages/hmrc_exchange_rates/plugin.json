@@ -1,0 +1,24 @@
+{
+  "id": "hmrc_exchange_rates",
+  "name": "HMRC monthly exchange rates",
+  "version": "1.0.0",
+  "description": "Reads HMRC's published monthly exchange rates from the UK Trade Tariff service, so Rackflow can show the VAT of a UK VAT invoice in another currency in sterling.",
+  "author": "Rackflow",
+  "rackflow_api": ">=1.1,<2.0",
+  "entry": "plugin.py",
+  "permissions": ["currency.rates", "http.outbound"],
+  "settings": [
+    {"key": "base_url", "label": "Trade Tariff address", "type": "url", "default": "https://www.trade-tariff.service.gov.uk", "required": true,
+     "help": "The address of the UK Trade Tariff service. The plugin reads /api/v2/exchange_rates/files/monthly_xml_<year>-<month>.xml from it."}
+  ],
+  "provides": [
+    {
+      "kind": "currency_rates",
+      "id": "hmrc_monthly",
+      "label": "HMRC monthly exchange rates",
+      "description": "HMRC's monthly rates for customs and VAT, in currency units per GBP 1.",
+      "timeout_seconds": 15,
+      "rate_limit": {"calls": 30, "per_seconds": 3600}
+    }
+  ]
+}
