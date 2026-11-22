@@ -81,24 +81,40 @@ def _trace(exc: BaseException) -> str:
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=8))[-4000:]
 
 
+# The helpers below format a plugin's exception. Its __str__, __repr__ and even its class name
+# are plugin code, which may raise anything, KeyboardInterrupt included; they catch BaseException
+# so that nothing a plugin raises while being described reaches billing.
+
+
 def _safe_trace(exc: BaseException) -> Optional[str]:
     try:
         return _trace(exc)
-    except Exception:  # noqa: BLE001 - a plugin exception that cannot be formatted has no traceback text
+    except BaseException:  # noqa: BLE001 - a plugin exception that cannot be formatted has no traceback text
         return None
 
 
-def _text_of(exc: BaseException) -> str:
-    """The message of a plugin's exception; never raises, whatever its __str__ does."""
+def _type_name(exc: BaseException) -> str:
     try:
-        text = str(exc)
-    except Exception:  # noqa: BLE001
-        return "<the message could not be shown>"
-    return text if type(text) is str else "<the message could not be shown>"
+        name = type(exc).__name__
+    except BaseException:  # noqa: BLE001
+        return "Exception"
+    return name if type(name) is str else "Exception"
+
+
+def _text_of(exc: BaseException) -> str:
+    """The message of a plugin's exception, else its repr; never raises."""
+    for show in (str, repr):
+        try:
+            text = show(exc)
+        except BaseException:  # noqa: BLE001
+            continue
+        if type(text) is str:
+            return text
+    return "<the message could not be shown>"
 
 
 def _describe(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {_text_of(exc)}"
+    return f"{_type_name(exc)}: {_text_of(exc)}"
 
 
 async def _await(awaitable: Any, timeout: float) -> Any:
@@ -132,7 +148,7 @@ def _run(ctx: PluginContext, fn: Any, kind: str, method: str, call_args: tuple, 
         raise
     except BaseException as exc:  # a plugin's SystemExit must not unwind billing's thread
         _finish(ctx, False)
-        raise RuntimeError(f"the provider raised {type(exc).__name__}") from exc
+        raise RuntimeError(f"the provider raised {_type_name(exc)}") from exc
     else:
         _finish(ctx, True)
         return answer
