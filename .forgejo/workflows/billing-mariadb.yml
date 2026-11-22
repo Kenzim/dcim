@@ -4,7 +4,9 @@
 # phase 1 included, from an empty database),
 # tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
 # billing_p1_* chain), tests/migrations/test_billing_p2_mariadb.py (up, down,
-# up of the billing phase 2 chain, with data present), the snapshot isolation connect hook test,
+# up of the billing phase 2 chain, with data present),
+# tests/services/test_billing_p2_tax_publish_mariadb.py (a tax rule superseded
+# during a publish), the snapshot isolation connect hook test,
 # tests/services/test_billing_p1i_numbering_mariadb.py (series counters under
 # concurrency), tests/services/test_billing_p1i_settlement_mariadb.py (two
 # payments settling one invoice at once) and
@@ -67,3 +69,5 @@ jobs:
         run: python -m pytest tests/services/test_billing_core_status_mariadb.py -q
       - name: Billing phase 2 chain on MariaDB
         run: python -m pytest tests/migrations/test_billing_p2_mariadb.py -q
+      - name: Tax rule superseded during a publish on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_tax_publish_mariadb.py -q
