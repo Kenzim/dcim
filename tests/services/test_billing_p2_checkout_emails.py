@@ -38,13 +38,13 @@ def _fulfilled_free_order(db):
     return order
 
 
-def test_seeded_defaults_send_no_provisioned_email_and_fulfilment_succeeds(db_session, provisioned):
+def test_seeded_defaults_send_no_provisioned_email_and_fulfilment_succeeds(db_session, provisioned):  # noqa: F811
     _fulfilled_free_order(db_session)
     sent = _messages(db_session, "service_provisioned")
     assert all(message.status == EmailMessageStatus.SKIPPED for message in sent)
 
 
-def test_enabled_provisioned_template_queues_one_email(db_session, provisioned):
+def test_enabled_provisioned_template_queues_one_email(db_session, provisioned):  # noqa: F811
     db_session.execute(
         EmailTemplate.__table__.update().where(EmailTemplate.event_key == "service_provisioned").values(enabled=True)
     )
@@ -57,7 +57,7 @@ def test_enabled_provisioned_template_queues_one_email(db_session, provisioned):
     assert sent[0].idempotency_key == f"service:{item.service_id}:provisioned"
 
 
-def test_a_provisioned_email_failure_never_fails_fulfilment(db_session, provisioned, monkeypatch):
+def test_a_provisioned_email_failure_never_fails_fulfilment(db_session, provisioned, monkeypatch):  # noqa: F811
     original = EmailMessageService.enqueue
 
     def enqueue(db, **kwargs):
