@@ -1,9 +1,23 @@
 """A tax_id_validator for the host tests. The `mode` setting decides what check_online does."""
 
+import os
 import time
 from datetime import datetime, timezone
 
 from rackflow_plugin.kinds import TaxIdCheckResult, current_context
+
+
+class Unprintable(Exception):
+    """An exception that raises ``error`` when anything tries to show it."""
+
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def __str__(self):
+        raise self.error("no message for you")
+
+    __repr__ = __str__
 
 
 def _now():
@@ -26,8 +40,17 @@ def register(plugin):
                 raise RuntimeError("the registry exploded")
             if mode == "sysexit":
                 raise SystemExit(3)
+            if mode == "unprintable_value_error":
+                raise Unprintable(ValueError)
+            if mode == "unprintable_interrupt":
+                raise Unprintable(KeyboardInterrupt)
             if mode == "hang":
                 time.sleep(3)
+            if mode == "block":  # until the file named by RF_TEST_RELEASE exists, for at most 30 s
+                release = os.environ.get("RF_TEST_RELEASE", "")
+                deadline = time.monotonic() + 30
+                while not os.path.exists(release) and time.monotonic() < deadline:
+                    time.sleep(0.02)
             if mode == "bad_status":
                 return TaxIdCheckResult(status="maybe", checked_at=_now())
             if mode == "no_error_code":
