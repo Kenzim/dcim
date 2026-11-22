@@ -72,10 +72,6 @@ def _unprocessable(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=422, detail={"code": code, "message": message})
 
 
-def _not_built(exc: NotImplementedError) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
-
-
 def _audit(db: Session, auth: dict, action: str, resource_type: str, resource_id: Any, metadata: dict) -> None:
     AuditService.log(
         db,
@@ -740,10 +736,7 @@ def recheck_tax_id(body: Recheck, auth: AdminDep, db: DbDep):
     ).scalar_one_or_none()
     if profile is None or not profile.tax_id:
         raise HTTPException(status_code=404, detail="No tax ID on this billing account")
-    try:
-        check = TaxIdService.check(db, profile, force=True)
-    except NotImplementedError as exc:
-        raise _not_built(exc) from None
+    check = TaxIdService.check(db, profile, force=True)
     _audit(db, auth, "id_check.recheck", "billing_profile", profile.id,
            {"billing_account_id": body.billing_account_id, "status": _json(getattr(check, "status", None))})
     db.commit()

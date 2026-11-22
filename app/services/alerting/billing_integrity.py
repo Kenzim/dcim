@@ -1017,9 +1017,8 @@ def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]
     return out
 
 
-# ------------------------------------------------------------------ billing phase 2 (stubs)
-# docs/billing-phase2-design.md 15.4. Each returns no findings until the worker
-# that owns its data fills it in; the types ship disabled.
+# ------------------------------------------------------------------ billing phase 2
+# docs/billing-phase2-design.md 15.4. The types ship disabled.
 
 
 def _engine_taxed_invoices(params: dict, now: datetime):
