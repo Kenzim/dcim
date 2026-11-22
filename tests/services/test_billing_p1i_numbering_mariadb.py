@@ -10,7 +10,8 @@ Each case runs at the server's default isolation level and at READ COMMITTED.
 The engine is built through ``configure_engine()`` as the application's is, so
 every session runs with ``innodb_snapshot_isolation`` off. An allocation here
 commits an invoice carrying its number in the same transaction, as a publish
-does, so ``set_counter_at_least`` sees what was issued.
+does, so ``set_counter_at_least`` sees what was issued. The last case has two
+sessions publish one v2 draft through ``InvoiceService.publish`` at once.
 """
 
 from __future__ import annotations
@@ -238,3 +239,72 @@ def test_an_existing_counter_past_one_is_left_alone_and_gets_no_start_row(sessio
     assert _rows(sessions, series.id) == {f"series:{series.id}:": 7}
     assert _publish(sessions, series) == 7
     assert [f.resource_id for f in _findings(sessions)] == [f"{series.id}::start"]
+
+
+def _v2_draft(sessions) -> int:
+    """A v2 engine, a gapless invoice series and a committed v2 draft of 1,000."""
+    from app.models.billing_series import DocumentSeries, DocumentType
+    from app.models.commerce_account import BillingAccount, SystemSetting
+    from app.models.reseller import InvoicePurpose
+    from app.models.user import User
+    from app.services.invoice_service import InvoiceService
+    from app.services.settings_store import set_setting
+
+    with sessions() as db:
+        set_setting(db, "billing_invoice_engine", "v2")
+        db.add(SystemSetting(key="billing_engine_switch:invoice", value={"mode": "v2"}))
+        db.add(DocumentSeries(code="INV", document_type=DocumentType.INVOICE, name="INV",
+                              format="{SERIES}-{NUMBER}", number_source="own", gapless=True,
+                              reset_period="never", default_for="invoice"))
+        user = User(username="p1i-publish-race", email="p1i-publish-race@example.com", is_admin=False)
+        user.set_password("p1i-publish-race-pw")
+        db.add(user)
+        db.flush()
+        account = BillingAccount(account_type="client", user_id=user.id, status="active", currency="USD")
+        db.add(account)
+        db.commit()
+        draft = InvoiceService.create(db, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE,
+                                      amount_cents=1000, description="Upgrade", publish=False)
+        db.commit()
+        return int(draft.id)
+
+
+def _publish_draft(sessions, invoice_id: int, *, delay: float, hold: float, loaded: threading.Barrier):
+    """Load the draft, wait until the other session has loaded it too, then publish and commit."""
+    from app.models.reseller import Invoice
+    from app.services.invoice_service import InvoiceService
+
+    with sessions() as db:
+        invoice = db.get(Invoice, invoice_id)
+        loaded.wait()
+        time.sleep(delay)
+        InvoiceService.publish(db, invoice)
+        time.sleep(hold)
+        db.commit()
+        return invoice.number_display
+
+
+def test_two_sessions_publishing_one_draft_number_it_once(sessions):
+    from app.models.reseller import Invoice, InvoiceStatus
+    from app.services.invoice_service import InvoiceTransitionError
+
+    invoice_id = _v2_draft(sessions)
+    series_id = _series_id(sessions, "INV")
+    loaded = threading.Barrier(2)
+    first, second = _together(
+        lambda: _publish_draft(sessions, invoice_id, delay=0.0, hold=1.0, loaded=loaded),
+        lambda: _publish_draft(sessions, invoice_id, delay=0.3, hold=0.0, loaded=loaded),
+    )
+    assert first == "INV-1", first
+    assert isinstance(second, InvoiceTransitionError), second
+    with sessions() as db:
+        invoice = db.get(Invoice, invoice_id)
+        assert (invoice.status, invoice.number_display) == (InvoiceStatus.OPEN, "INV-1")
+    assert _rows(sessions, series_id)[f"series:{series_id}:"] == 2
+
+
+def _series_id(sessions, code) -> int:
+    from app.models.billing_series import DocumentSeries
+
+    with sessions() as db:
+        return int(db.scalar(sa.select(DocumentSeries.id).where(DocumentSeries.code == code)))

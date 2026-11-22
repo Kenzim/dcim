@@ -3,6 +3,7 @@ order and the tax base of credit notes after an overpayment debit note."""
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -21,9 +22,10 @@ from app.models.reseller import (
     Reseller,
 )
 from app.models.user import User
+from app.services import invoice_guard
 from app.services.billing import settlement
 from app.services.invoice_adjustment_service import InvoiceAdjustmentService
-from app.services.invoice_service import InvoiceError, InvoiceService, NewLine
+from app.services.invoice_service import InvoiceError, InvoiceService, InvoiceTransitionError, NewLine
 from app.services.settings_store import set_setting
 from tests.services.test_billing_p1i_invoice_engine import (  # noqa: F401
     _create,
@@ -257,6 +259,94 @@ def test_auto_apply_at_publish_needs_retail_credit_enabled(db_session, account, 
     else:
         assert (remaining, account.credit_balance_cents) == (invoice.amount_cents, 300)
         assert invoice.status == S.OPEN
+
+
+# ------------------------------------------------------------------ state machine and guard review
+
+
+def _published_behind_the_session(db, invoice, number="INV-9"):
+    """Publish the row in the database while the session's copy still reads ``draft``.
+
+    Stands in for another transaction that published the draft and committed
+    after this session loaded it.
+    """
+    from sqlalchemy import update
+
+    from app.models.reseller import Invoice
+
+    db.execute(
+        update(Invoice)
+        .where(Invoice.id == invoice.id)
+        .values(status=S.OPEN, number_display=number, invoice_number=number),
+        execution_options={"synchronize_session": False},
+    )
+    assert invoice.status == S.DRAFT
+
+
+@pytest.mark.parametrize("engine", ["legacy", "v2"])
+def test_publish_of_a_stale_draft_raises_and_allocates_nothing(db_session, account, monkeypatch, engine):
+    if engine == "v2":
+        _v2(db_session)
+    draft = _create(db_session, account, publish=False)
+    db_session.commit()
+    _published_behind_the_session(db_session, draft)
+    allocations = []
+    monkeypatch.setattr(InvoiceService, "_allocate_publish_number",
+                        staticmethod(lambda *args, **kwargs: allocations.append(args)))
+    with pytest.raises(InvoiceTransitionError, match="only a draft can be published"):
+        InvoiceService.publish(db_session, draft)
+    assert allocations == []
+    assert draft.status == S.OPEN and draft.number_display == "INV-9"
+
+
+def test_delete_draft_of_a_stale_copy_keeps_the_published_invoice(db_session, account):
+    from app.models.reseller import Invoice
+
+    draft = _create(db_session, account, publish=False)
+    db_session.commit()
+    _published_behind_the_session(db_session, draft)
+    previous = invoice_guard.set_mode_override("log")
+    try:
+        with pytest.raises(InvoiceTransitionError):
+            InvoiceService.delete_draft(db_session, draft)
+        db_session.commit()
+    finally:
+        invoice_guard.set_mode_override(previous)
+    db_session.expire_all()
+    kept = db_session.get(Invoice, draft.id)
+    assert kept is not None and (kept.status, kept.number_display) == (S.OPEN, "INV-9")
+
+
+def test_delete_draft_still_deletes_a_draft(db_session, account):
+    from app.models.reseller import Invoice
+
+    draft = _create(db_session, account, publish=False)
+    db_session.commit()
+    InvoiceService.delete_draft(db_session, draft)
+    db_session.commit()
+    assert db_session.get(Invoice, draft.id) is None
+
+
+def test_guard_log_record_failure_after_commit_is_logged_not_raised(db_session, account, monkeypatch, caplog):
+    from app.models.reseller import Invoice
+    from app.services.billing_shadow import BillingShadowService
+
+    def failing_record(*args, **kwargs):
+        raise RuntimeError("shadow store unavailable")
+
+    invoice = _create(db_session, account)
+    db_session.commit()
+    monkeypatch.setattr(BillingShadowService, "record", staticmethod(failing_record))
+    previous = invoice_guard.set_mode_override("log")
+    try:
+        invoice.description = "edited after publish"
+        with caplog.at_level(logging.ERROR, logger=invoice_guard.__name__):
+            db_session.commit()
+    finally:
+        invoice_guard.set_mode_override(previous)
+    assert any("could not be written after commit" in r.getMessage() and r.exc_info for r in caplog.records)
+    db_session.expire_all()
+    assert db_session.get(Invoice, invoice.id).description == "edited after publish"
 
 
 # ------------------------------------------------------------------ finding 4: refund tax after an overpayment

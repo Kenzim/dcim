@@ -553,7 +553,7 @@ class InvoiceService:
                     f"invoice lines add up to {totals.amount_cents}, not {int(amount_cents)}"
                 )
         if publish:
-            InvoiceService.publish(db, invoice)
+            InvoiceService._publish(db, invoice, inserted=True)
         return invoice
 
     @staticmethod
@@ -587,9 +587,34 @@ class InvoiceService:
         other invoice keeps its legacy total and NULL v2 totals. The number is
         allocated last. A v2 invoice is then recomputed, so a zero total
         settles at once.
+
+        The invoice is locked and re-read before the status check, so of two
+        concurrent publishes of one draft the second sees it published and
+        allocates nothing. In v2 its reseller and billing account are locked
+        first: the recompute settles and may credit an overpayment, and
+        auto-apply writes the ledger. All of these come before the number
+        counter in the lock order.
+        """
+        return InvoiceService._publish(db, invoice, inserted=False)
+
+    @staticmethod
+    def _publish(db: Session, invoice: Invoice, *, inserted: bool) -> Invoice:
+        """``publish``; ``inserted`` is set by ``create`` for the row it has just inserted.
+
+        No other transaction can see that row, so a legacy or shadow publish
+        of it needs no lock and keeps its lock sequence. A v2 publish still
+        locks reseller, account and invoice, for the settlement after it.
         """
         from app.services.billing import settlement
+        from app.services.billing_locks import BillingLocks
 
+        v2 = invoice.model_version == 2
+        db.flush()
+        if v2 or not inserted:
+            locked = BillingLocks.for_invoice(db, invoice.id, reseller=v2, billing_account=v2)
+            if locked is None:
+                raise InvoiceError("Invoice not found")
+            invoice = locked
         if invoice.status != InvoiceStatus.DRAFT:
             raise InvoiceTransitionError(
                 f"invoice {invoice.id} is {invoice.status.value}, only a draft can be published"
@@ -602,7 +627,6 @@ class InvoiceService:
                 .order_by(InvoiceLine.sort_order, InvoiceLine.id)
             ).scalars()
         )
-        v2 = invoice.model_version == 2
         if v2:
             prices_include_tax = bool(invoice.prices_include_tax)
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)
@@ -622,13 +646,6 @@ class InvoiceService:
         invoice.seller_snapshot = seller_snapshot(now)
         invoice.buyer_snapshot = buyer_snapshot(db, invoice, now)
         auto_apply = v2 and InvoiceService._auto_apply_credit(db, invoice)
-        if v2:
-            # The recompute below settles and may credit an overpayment, and
-            # auto-apply writes the ledger: reseller, account and invoice come
-            # before the number counter in the lock order.
-            from app.services.billing_locks import BillingLocks
-
-            BillingLocks.for_invoice(db, invoice.id, reseller=True, billing_account=True)
         InvoiceService._allocate_publish_number(db, invoice, now, required=v2)
         InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause=CAUSE_PUBLISH)
         settlement.fire(db, settlement.INVOICE_CREATED, settlement.InvoiceCreated(invoice=invoice))
@@ -731,12 +748,19 @@ class InvoiceService:
 
     @staticmethod
     def delete_draft(db: Session, invoice: Invoice) -> None:
-        """Hard delete a draft and its lines (design 3.3); never a published invoice."""
-        if invoice.status != InvoiceStatus.DRAFT:
+        """Hard delete a draft and its lines (design 3.3); never a published invoice.
+
+        Status and numbers are checked on the locked, re-read row, so a
+        publish that commits meanwhile is seen.
+        """
+        locked = InvoiceService.get_for_update(db, invoice.id)
+        if locked is None:
+            raise InvoiceError("Invoice not found")
+        if locked.status != InvoiceStatus.DRAFT:
             raise InvoiceTransitionError("only a draft invoice can be deleted")
-        if invoice.number_display is not None or invoice.proforma_number_display is not None:
+        if locked.number_display is not None or locked.proforma_number_display is not None:
             raise InvoiceTransitionError("an invoice with a legal number cannot be deleted")
-        db.delete(invoice)
+        db.delete(locked)
         db.flush()
 
     @staticmethod
