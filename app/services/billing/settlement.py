@@ -314,13 +314,21 @@ def settle_invoice(
     mode = engine_mode(db)
     if mode == "v2":
         return _settle_v2(db, invoice_id, payment=payment, source=source, cause=cause)
+    status_before: Optional[InvoiceStatus] = None
+    if mode == "shadow":
+        from app.services.invoice_service import InvoiceService
+
+        # v2 decides from the status before the legacy move (the same row
+        # lock _settle_legacy takes, taken first).
+        locked = InvoiceService.get_for_update(db, invoice_id)
+        status_before = locked.status if locked is not None else None
     invoice = _settle_legacy(
         db, invoice_id, payment=payment, source=source, cause=cause, shadow=mode == "shadow"
     )
     if invoice is None:
         raise InvoiceError("Invoice not found")
     if mode == "shadow":
-        _compare_decision(db, invoice, cause=cause)
+        _compare_decision(db, invoice, cause=cause, status_before=status_before)
     return invoice
 
 
@@ -396,8 +404,19 @@ def _mark_paid(db: Session, invoice: Invoice) -> None:
     InvoiceService.convert_proforma(db, invoice, invoice.paid_at or now)
 
 
-def _compare_decision(db: Session, invoice: Invoice, *, cause: Optional[str]) -> None:
-    """Shadow check ``i1_decision``: the legacy answer against ``balance()`` and the v2 rule."""
+def _compare_decision(
+    db: Session,
+    invoice: Invoice,
+    *,
+    cause: Optional[str],
+    status_before: Optional[InvoiceStatus] = None,
+) -> None:
+    """Shadow check ``i1_decision``: the legacy answer against ``balance()`` and the v2 rule.
+
+    The v2 rule is evaluated from ``status_before``, the status before the
+    legacy move, so a terminal invoice that legacy marked paid is compared
+    as the terminal invoice v2 would have kept.
+    """
     from app.services.billing_shadow import BillingShadowService
     from app.services.invoice_service import InvoiceService
 
@@ -409,7 +428,7 @@ def _compare_decision(db: Session, invoice: Invoice, *, cause: Optional[str]) ->
         }
         balance = InvoiceService.balance(db, invoice, for_update=True)
         v2_status = InvoiceService.target_status(
-            db, invoice, balance, cause=cause or "settlement"
+            db, invoice, balance, cause=cause or "settlement", status=status_before
         )
         v2 = {
             "remaining_cents": balance.remaining_cents,

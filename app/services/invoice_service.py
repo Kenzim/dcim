@@ -966,13 +966,16 @@ class InvoiceService:
         balance: InvoiceBalance,
         *,
         cause: str,
+        status: Optional[InvoiceStatus] = None,
     ) -> InvoiceStatus:
         """The status the v2 rule gives (design 3.2), for a balance with ``due >= 0``.
 
         Terminal statuses and drafts are returned unchanged. A negative due is
         reported as ``paid``; the caller converts the overpayment first.
+        ``status`` evaluates the rule from that status instead of the
+        invoice's current one (the shadow check, after legacy has moved it).
         """
-        status = invoice.status
+        status = invoice.status if status is None else InvoiceStatus(status)
         if status in TERMINAL_V2 or status == S.DRAFT:
             return status
         if balance.due_cents <= 0:

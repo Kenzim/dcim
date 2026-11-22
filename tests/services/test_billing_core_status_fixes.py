@@ -22,7 +22,7 @@ from app.services.billing_shadow import BillingShadowService
 from app.services.invoice_service import InvoiceError, InvoiceService
 from app.services.payments.base import GatewayChargeResult, GatewayResultStatus
 from app.services.settings_store import set_setting
-from tests.services.test_billing_p1i_invoice_engine import _v2, account  # noqa: F401
+from tests.services.test_billing_p1i_invoice_engine import _v2, account, shadow_records  # noqa: F401
 from tests.services.test_billing_w0e_review_fixes import _assert_lock_order, lock_calls  # noqa: F401
 from tests.services.test_invoice_payment_services import (
     FakeGateway,
@@ -457,3 +457,28 @@ def test_b5_legacy_failed_deploy_still_reverses_credit_and_voids(db_session, mod
     db_session.expire_all()
     assert db_session.get(Invoice, invoice.id).status == S.VOID
     assert CreditLedgerService.balance_cents(db_session, reseller) == before + 1000
+
+
+# ------------------------------------------------------------------ B6
+
+
+@pytest.mark.parametrize("before", [S.FAILED, S.VOID])
+def test_b6_shadow_records_i1_decision_when_legacy_pays_a_terminal_invoice(
+    db_session, shadow_records, before
+):
+    _shadow(db_session)
+    reseller = _reseller(db_session, preference="payment_first")
+    invoice = InvoiceService.create_deploy(
+        db_session, reseller_id=reseller.id, amount_cents=1000, description="Deploy"
+    )
+    _set_status(db_session, invoice, before)
+    payment = _gateway_payment(db_session, invoice, 1000, f"pi_b6_{before.value}", status=PaymentStatus.SUCCEEDED)
+
+    InvoiceService.recompute(db_session, invoice, cause="payment", payment=payment)
+
+    assert invoice.status == S.PAID
+    decisions = [r for r in shadow_records if r["check"] == "i1_decision"]
+    assert decisions, shadow_records
+    assert decisions[0]["legacy"]["paid"] is True
+    assert decisions[0]["v2"]["paid"] is False
+    assert decisions[0]["v2"]["status"] == before.value
