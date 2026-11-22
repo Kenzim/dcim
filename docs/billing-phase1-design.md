@@ -621,6 +621,7 @@ The PDF for a v2 invoice reads only the snapshots. Legacy invoices (`model_versi
   4. if a mirror exists and differs from `authoritative`, record check `c1_cache_pair` (6.4). The mirror is written as computed, not overwritten with the authoritative value, so drift stays visible to the daily scan until someone resolves it;
   5. insert the entry, then fire the internal credit event (`credit.added` for a positive entry, section 9.2).
 - `available_cents(db, account)` returns `max(0, authoritative cache)` by the same mode rule. Every reader listed in 6.6 uses it.
+- `apply_to_invoice`, `adjust_account` and `debit_account` take `allow_negative_balance` (default `False`). With `True`, `apply_to_invoice` is no longer capped by the available credit, only by the invoice's remaining amount, and the balance carries the shortfall (the reseller `debit_balance` dispute policy, 7.6). Every other caller keeps the default.
 
 ### 6.3 Lock order in practice
 
@@ -652,6 +653,7 @@ Two engines run in shadow during phase 1: the invoice engine (`billing_invoice_e
 | `c2_unlinked` | credit | daily scan | count of entries with `reseller_id` set and `billing_account_id` NULL is 0 (subject is the reseller) |
 | `i1_decision` | invoice | every call site of 4.2 in shadow mode | legacy `remaining_cents` and paid/not-paid decision against `balance().remaining_cents` and the `v2` status rule's paid/not-paid answer |
 | `i2_scan` | invoice | daily scan, invoices with `updated_at` in the last 48 hours plus every invoice with `id % 7` equal to the weekday number (a full sweep each week) | same as `i1` |
+| `i2_expected_partial_refund` | invoice | daily scan, as `i2_scan` | an `i2` difference that equals exactly the sum, over the invoice's partially refunded payments, of the amount minus `refunded_cents`; listed separately and not counted by the switch criterion (6.5), the quiet period or the mismatch alert. Any other difference stays `i2_scan` |
 | `i3_totals` | invoice | at publish in shadow mode | the legacy `amount_cents` against the total computed from v2 lines (1.3.1) |
 | `i4_frozen_write` | invoice | guard in `log` mode | a frozen column was written (3.5) |
 
@@ -678,7 +680,13 @@ An engine moves to `v2` only through `POST /api/admin/billing/engines/{engine}/s
 
 On success the endpoint writes the setting and a `system_settings` row `billing_engine_switch:<engine>` with the mode, time, admin and a copy of the criteria values. The engine treats the setting as `v2` only if that record agrees; a setting edited to `v2` by other means is treated as `shadow` and logged at ERROR.
 
-Rollback: switching the credit engine back to `shadow` is always allowed (both caches are written in every non-legacy mode). Switching the invoice engine back is refused once any credit note, debit note or partial refund exists, because the legacy rule ignores them; the only way forward then is a fix in `v2`. Switching to `legacy` is allowed only from `shadow`.
+Rollback (as built by P1-C; every switch is audited as `billing.engine.switch` with the admin and the from and to modes):
+
+- The credit engine may go from `v2` back to `shadow` or to `legacy` at any time. The reseller cache becomes authoritative again, and the response and audit record list any reseller accounts whose two caches differ at that moment, for staff to resynchronise.
+- The invoice engine may go from `v2` back to `shadow` or `legacy` only while no credit note, debit note or partial refund exists, because the legacy rule ignores them; the only way forward then is a fix in `v2`.
+- Going back to `shadow` restarts the quiet period; going to `legacy` clears `shadow_since`; `legacy` to `shadow` starts it. Deviation: the design first allowed `legacy` only from `shadow`; the direct `v2` to `legacy` path was added so both rollbacks exist.
+
+The engine settings change only through this endpoint: `PUT` and `DELETE` on `billing_credit_engine` and `billing_invoice_engine` in `/api/admin/settings` return 409 `setting_managed_elsewhere`, and its listing marks them `read_only` with `managed_by: "billing_engines"`.
 
 ### 6.6 Readers of the reseller cache
 
