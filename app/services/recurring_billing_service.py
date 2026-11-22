@@ -59,6 +59,10 @@ _TERMINAL_STATES = {
     BillingCycleState.CANCELLED,
     BillingCycleState.MANUAL_REVIEW,
 }
+# Invoice statuses a failed renewal never chases: the cycle goes to manual review.
+_UNCHASED_INVOICE_STATUSES = frozenset(
+    {InvoiceStatus.VOID, InvoiceStatus.REFUNDED, InvoiceStatus.FAILED, InvoiceStatus.DRAFT}
+)
 
 
 def _utc(value: datetime) -> datetime:
@@ -672,6 +676,31 @@ class RecurringBillingService:
         if increment:
             cycle.attempts += 1
             cycle.last_attempt_at = now
+        # The invoice lock (after the service billing, LOCK_ORDER) re-reads the
+        # status, so a void or payment committed meanwhile is seen.
+        invoice = (
+            BillingLocks.for_invoice(db, cycle.invoice_id)
+            if cycle.invoice_id is not None
+            else None
+        )
+        if invoice is None or invoice.status in _UNCHASED_INVOICE_STATUSES:
+            cycle.claim_token = None
+            cycle.claim_expires_at = None
+            status = invoice.status.value if invoice is not None else "missing"
+            self._mark_manual(
+                billing,
+                cycle,
+                code=f"invoice_{status}",
+                message=(
+                    f"Renewal invoice is {status}; decide whether to reissue or cancel"
+                ),
+            )
+            return
+        if invoice.status == InvoiceStatus.PAID:
+            # Paid meanwhile: the paid-cycle recovery completes the cycle.
+            cycle.claim_token = None
+            cycle.claim_expires_at = None
+            return
         safe_code, safe_message = self._last_safe_failure(
             db, cycle.invoice_id, code=code, message=message
         )
@@ -693,9 +722,9 @@ class RecurringBillingService:
             if cycle.attempts == 1
             else BillingCycleState.GRACE
         )
-        if cycle.invoice.status != InvoiceStatus.PENDING_ACTION:
+        if invoice.status in (InvoiceStatus.OPEN, InvoiceStatus.PARTIALLY_PAID):
             InvoiceService.transition(
-                db, cycle.invoice, InvoiceStatus.OVERDUE, cause="renewal_past_due"
+                db, invoice, InvoiceStatus.OVERDUE, cause="renewal_past_due"
             )
         billing.status = (
             ServiceBillingStatus.PAST_DUE
