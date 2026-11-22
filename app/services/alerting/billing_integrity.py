@@ -1208,6 +1208,33 @@ def tax_buyer_country_missing(db: Session, params: dict, now: datetime) -> list[
     return out
 
 
+def tax_no_rule_for_class(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2-taxed invoice with a line whose class has no rule where it was taxed (``no_rule_for_class``).
+
+    The line was charged no tax; the evidence names each class, jurisdiction
+    and country without a rule.
+    """
+    max_rows = params["max_rows"]
+    found = _invoices_with_note(db, params, now, "no_rule_for_class")
+    out = []
+    for invoice, evidence in found[:max_rows]:
+        missing = [m for m in evidence.get("no_rule_for_class") or [] if isinstance(m, dict)]
+        names = ", ".join(
+            f"{m.get('tax_class')} in {m.get('jurisdiction')}" + (f" ({m['country']})" if m.get("country") else "")
+            for m in missing
+        )
+        out.append(Finding(
+            "billing_tax_no_rule_for_class", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} has lines taxed at 0% for want of a rule",
+            f"No tax rule covers {names or 'a line class'}, so those lines were charged no tax. Add a rule for "
+            "the class in that jurisdiction, or move the product to a class that has one.",
+            details={"invoice_id": invoice.id, "missing": missing},
+        ))
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_no_rule_for_class", "invoice", "invoices", len(found) - max_rows, max_rows))
+    return out
+
+
 def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[Finding]:
     """A billing job action left in ``needs_review``."""
     del now
@@ -1468,4 +1495,5 @@ BILLING_DETECTORS = {
     "billing_email_template_render_failed": email_template_render_failed,
     "billing_tax_fx_rate_missing": tax_fx_rate_missing,
     "billing_tax_buyer_country_missing": tax_buyer_country_missing,
+    "billing_tax_no_rule_for_class": tax_no_rule_for_class,
 }

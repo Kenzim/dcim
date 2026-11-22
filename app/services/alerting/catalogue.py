@@ -470,6 +470,15 @@ _SPECS = (
         enabled_by_default=False,
     ),
     AlertTypeSpec(
+        "billing_tax_no_rule_for_class",
+        "Invoice line untaxed: no rule for its class",
+        "A line's tax class has no rule in the jurisdiction the sale was taxed in, so it was charged no tax.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
         "billing_tax_context_changed",
         "Tax results often discarded at invoice create",
         "More invoices than the threshold had their prepared tax result discarded in the last 24 hours "

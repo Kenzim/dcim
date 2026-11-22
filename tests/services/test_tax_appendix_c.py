@@ -164,6 +164,14 @@ REVIEW = [
          registration="DE", evidence_notes=frozenset({"buyer_country_missing"})),
     Case("de-business-country-missing-valid-number", "DE", ("DE", "OSS_DE"), None, True, "valid", DE19, "19.0000",
          registration="DE", tax_id="FR123456789", evidence_notes=frozenset({"buyer_country_missing"})),
+    # A class with no rule in the chosen jurisdiction is still untaxed, but the evidence names it.
+    Case("de-consumer-reduced-class", "DE", ("DE",), "DE", False, "unchecked", {"line:0": 1900, "line:1": 0},
+         registration="DE", line1_class="reduced", evidence_notes=frozenset({"no_rule_for_class"})),
+    Case("uk-to-fr-consumer-oss-zero-class", "GB", ("GB", "OSS_IE"), "FR", False, "unchecked",
+         {"line:0": 2000, "line:1": 0}, registration="OSS_IE", line1_class="zero",
+         evidence_notes=frozenset({"no_rule_for_class"})),
+    Case("uk-consumer-exempt-class", "GB", ("GB",), "GB", False, "unchecked", {"line:0": 2000, "line:1": 0},
+         registration="GB", line1_class="exempt"),
 ]
 
 _REGISTRATIONS = {
@@ -277,6 +285,13 @@ def test_a_tax_id_without_a_check_row_is_read_from_its_prefix(db_session):
     assert [result.lines[key].tax_cents for key in ("line:0", "line:1")] == [2200, 440]
     values = result.evidence.values
     assert "tax_id_country_mismatch" in values["reasons"] and values["tax_id_country"] == "GB"
+
+
+def test_no_rule_for_class_names_the_class_and_jurisdiction(db_session):
+    case = next(c for c in REVIEW if c.id == "uk-to-fr-consumer-oss-zero-class")
+    context, _regs = _setup(db_session, case)
+    values = TaxEngine.calculate(db_session, context).evidence.values
+    assert values["no_rule_for_class"] == [{"tax_class": "zero", "jurisdiction": "EU_OSS", "country": "FR"}]
 
 
 def test_the_table_covers_every_row_of_appendix_c():

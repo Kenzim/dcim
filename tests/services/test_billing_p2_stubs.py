@@ -49,6 +49,7 @@ PHASE2_DETECTORS = (
     "billing_tax_evidence_conflict",
     "billing_tax_not_registered",
     "billing_tax_buyer_country_missing",
+    "billing_tax_no_rule_for_class",
     "billing_job_needs_review",
     "billing_job_stale",
     "billing_email_template_render_failed",

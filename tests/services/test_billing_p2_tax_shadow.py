@@ -179,6 +179,48 @@ def test_buyer_country_missing_detector(db_session, invoice):
     assert bi.tax_buyer_country_missing(db_session, PARAMS, _now()) == []
 
 
+def test_no_rule_for_class_detector(db_session, invoice):
+    assert bi.tax_no_rule_for_class(db_session, PARAMS, _now()) == []
+    evidence = dict(invoice.tax_evidence)
+    missing = [{"tax_class": "reduced", "jurisdiction": "GB", "country": "GB"}]
+    db_session.execute(
+        Invoice.__table__.update().where(Invoice.id == invoice.id).values(
+            tax_evidence={**evidence, "notes": ["no_rule_for_class"], "no_rule_for_class": missing}
+        )
+    )
+    db_session.expire_all()
+    (finding,) = bi.tax_no_rule_for_class(db_session, PARAMS, _now())
+    assert finding.resource_id == str(invoice.id) and finding.details["missing"] == missing
+    assert "reduced" in finding.message
+
+
+def test_switch_lists_products_whose_class_has_no_rule_where_registered(db_session):
+    from app.models.product_catalog import Product
+
+    classes = seed_classes(db_session)
+    enable_tax(db_session, "GB")
+    add_registration(db_session, "GB")
+    add_registration(db_session, "EU_OSS", scheme="oss_non_union")
+    add_rule(db_session, name="UK 20%", jurisdiction="GB", source="pack")
+    add_rule(db_session, name="OSS FR", country="FR", jurisdiction="EU_OSS", source="pack")
+    db_session.add_all([
+        Product(name="Plain", code="plain"),
+        Product(name="Book", code="book", tax_class_id=classes["reduced"]),
+        Product(name="Old", code="old", tax_class_id=classes["zero"], enabled=False),
+        Product(name="Fee", code="fee", tax_class_id=classes["exempt"]),
+    ])
+    db_session.flush()
+    item = _items(db_session)["product_classes_have_rules"]
+    assert not item["ok"]
+    assert [(m["product_code"], m["tax_class"], m["jurisdiction"]) for m in item["missing"]] == [
+        ("book", "reduced", "EU_OSS"), ("book", "reduced", "GB"),
+    ]
+    add_rule(db_session, name="UK 5%", rate="5", tax_class="reduced", jurisdiction="GB", source="pack")
+    add_rule(db_session, name="OSS FR 5.5", rate="5.5", country="FR", tax_class="reduced", jurisdiction="EU_OSS",
+             source="pack")
+    assert _items(db_session)["product_classes_have_rules"]["ok"]
+
+
 def test_a_tax_id_country_mismatch_raises_the_evidence_conflict_alert(db_session, invoice):
     evidence = dict(invoice.tax_evidence)
     db_session.execute(

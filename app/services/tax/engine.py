@@ -56,6 +56,14 @@ NOTE_OUTSIDE_SCOPE = "outside_scope"
 NOTE_EXEMPT_CUSTOMER = "exempt_customer"
 EVIDENCE_NOT_REGISTERED = "not_registered"
 EVIDENCE_BUYER_COUNTRY_MISSING = "buyer_country_missing"
+EVIDENCE_NO_RULE_FOR_CLASS = "no_rule_for_class"
+
+# Places of supply where the chosen registration's rules are expected to tax every taxable line.
+PLACES_WITH_RULES = frozenset(
+    {"seller_country", "buyer_country_registration", "oss", "seller_country_distance", "buyer_country_missing"}
+)
+# Classes that are untaxed by design, so no rule is expected for them.
+CLASSES_WITHOUT_RULES = frozenset({TaxClassCode.EXEMPT.value, TaxClassCode.OUTSIDE_SCOPE.value})
 
 DISCOUNT_KIND = "discount"
 
@@ -577,6 +585,7 @@ class TaxEngine:
         note_keys: list[str] = []
         explained: list[str] = []
         note_values: dict[str, dict] = {}
+        no_rule: list[dict] = []
         for line in context.lines:
             class_id = line_class_ids[line.key]
             if line.kind == DISCOUNT_KIND or class_id is None:
@@ -630,6 +639,20 @@ class TaxEngine:
                     reverse_charge=False,
                     mapped_countries=mapped,
                 )
+                code = line.tax_class_code or TaxClassCode.STANDARD.value
+                if (
+                    not rules
+                    and place.registration is not None
+                    and place.label in PLACES_WITH_RULES
+                    and code not in CLASSES_WITHOUT_RULES
+                ):
+                    missing = {
+                        "tax_class": code,
+                        "jurisdiction": place.registration.jurisdiction,
+                        "country": place.countries.get(place.registration.jurisdiction),
+                    }
+                    if missing not in no_rule:
+                        no_rule.append(missing)
             parts_by_line[line.key] = [_part_of(rule) for rule in rules]
 
         _apply_amounts(parts_by_line, nets, bool(context.prices_include_tax))
@@ -663,6 +686,9 @@ class TaxEngine:
         if place.fallback_note and not any_part:
             note_keys.append(place.fallback_note)
         evidence_notes = (list(place.evidence_notes) if not any_part else []) + list(place.notes)
+        if no_rule:
+            evidence_notes.append(EVIDENCE_NO_RULE_FOR_CLASS)
+            evidence["no_rule_for_class"] = no_rule
         if evidence_notes:
             evidence["notes"] = list(dict.fromkeys(evidence_notes))
         if explained:
