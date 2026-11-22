@@ -23,6 +23,7 @@ from typing import Any, Optional
 import redis
 from redis.backoff import NoBackoff
 from redis.retry import Retry
+from sqlalchemy.orm import Session
 
 from app.models.plugin_host import PluginInstallation, PluginStatus
 from app.plugin_host import common, health, kinds, runtime
@@ -328,8 +329,10 @@ def _rate_hit(key: str, limit: int, window_seconds: int) -> bool:
         return count <= limit
 
 
-def _fail(plugin_id: str, provider: str, reason: str, message: str, detail: Optional[str] = None) -> ProviderUnavailable:
-    health.record_failure(plugin_id, message, detail=detail, provider=provider)
+def _fail(
+    plugin_id: str, provider: str, reason: str, message: str, detail: Optional[str] = None, *, db: Optional[Session] = None
+) -> ProviderUnavailable:
+    health.record_failure(plugin_id, message, detail=detail, provider=provider, db=db)
     return ProviderUnavailable(reason)
 
 
@@ -359,15 +362,25 @@ def _resolve(kind: str, plugin_id: str, provider_id: str):
     return inst, manifest, provide
 
 
-def call_provider(kind: str, provider_ref: str, method: str, *args: Any, timeout_seconds: Optional[float] = None) -> Any:
+def call_provider(
+    kind: str,
+    provider_ref: str,
+    method: str,
+    *args: Any,
+    timeout_seconds: Optional[float] = None,
+    db: Optional[Session] = None,
+) -> Any:
     """Call ``method`` of the provider ``provider_ref`` (``<plugin_id>:<provider_id>``) and return its validated answer.
 
-    ``timeout_seconds`` may only lower the provider's own ``timeout_seconds``. Raises only
+    ``timeout_seconds`` may only lower the provider's own ``timeout_seconds``. ``db`` is the caller's
+    session: on SQLite the call's success or failure is recorded in a savepoint of its transaction,
+    because a separate connection cannot write while the caller holds SQLite's write lock; on other
+    databases, and without ``db``, it is recorded on a separate session as before. Raises only
     ``ProviderUnavailable``. Every timeout, exception and invalid answer counts as a failure for the
     plugin's circuit breaker; a valid answer of a metered method counts as a success.
     """
     try:
-        return _call(kind, provider_ref, method, args, timeout_seconds)
+        return _call(kind, provider_ref, method, args, timeout_seconds, db)
     except ProviderUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - the contract: nothing else leaves this function
@@ -375,7 +388,9 @@ def call_provider(kind: str, provider_ref: str, method: str, *args: Any, timeout
         raise ProviderUnavailable("error") from exc
 
 
-def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_seconds: Optional[float]) -> Any:
+def _call(
+    kind: str, provider_ref: str, method: str, args: tuple, timeout_seconds: Optional[float], db: Optional[Session]
+) -> Any:
     spec = kinds.KINDS.get(kind)
     if spec is None or method not in spec.methods:
         raise ProviderUnavailable("unknown_method")
@@ -427,15 +442,15 @@ def _call(kind: str, provider_ref: str, method: str, args: tuple, timeout_second
     # The plugin's time starts when its code starts.
     left = seconds - (time.monotonic() - call.started_at)
     if not call.done.wait(max(0.0, left)) and _abandon(call):
-        raise _fail(plugin_id, provider, "timeout", f"{label} timed out after {seconds:g}s")
+        raise _fail(plugin_id, provider, "timeout", f"{label} timed out after {seconds:g}s", db=db)
     call.done.wait()  # finished just as the time ran out: the outcome is being stored
     if call.refusal is not None:
         raise ProviderUnavailable(call.refusal)
     if call.failure is not None:
         reason, message, detail = call.failure
-        raise _fail(plugin_id, provider, reason, f"{label} {message}"[:500], detail)
+        raise _fail(plugin_id, provider, reason, f"{label} {message}"[:500], detail, db=db)
     if method in spec.metered:
         # Only the methods that do real work prove the plugin healthy; a cheap supports() answer
         # before every failing check_online must not keep resetting the circuit.
-        health.record_success(plugin_id)
+        health.record_success(plugin_id, db=db)
     return call.answer
