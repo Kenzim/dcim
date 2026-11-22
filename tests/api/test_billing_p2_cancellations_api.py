@@ -136,6 +136,30 @@ def test_reseller_requests_and_withdraws_for_its_own_services_only(client, db_se
     assert client.post(f"/api/reseller-panel/cancellation-requests/{request_id}/withdraw", headers=headers).status_code == 200
 
 
+def test_reseller_cancellation_routes_use_the_panel_reseller_dependency(client, db_session):
+    from fastapi.routing import APIRoute
+
+    from app.api import reseller_panel
+    from app.main import app as fastapi_app
+    from app.models.reseller import ResellerStatus
+
+    routes = [
+        route for route in fastapi_app.routes
+        if isinstance(route, APIRoute) and route.path.startswith("/api/reseller-panel/cancellation-requests")
+    ]
+    assert len(routes) == 3
+    for route in routes:
+        calls = {dependency.call for dependency in route.dependant.dependencies}
+        assert reseller_panel._current_reseller in calls
+
+    suspended = Reseller(user=_user(db_session, "p2l-rsl-off", is_reseller=True), status=ResellerStatus.SUSPENDED)
+    db_session.add(suspended)
+    db_session.commit()
+    response = client.get("/api/reseller-panel/cancellation-requests", headers=_bearer(client, "p2l-rsl-off"))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Reseller account is not active"
+
+
 def test_admin_queue_on_behalf_and_withdraw(client, db_session, admin_headers):
     owner = _user(db_session, "p2l-admin-client")
     service, _ = _service(db_session, owner=owner)

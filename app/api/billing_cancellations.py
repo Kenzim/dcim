@@ -17,7 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
-from app.core.auth import require_admin, require_reseller
+from app.api.reseller_panel import ResellerDep
+from app.core.auth import require_admin
 from app.core.commerce_auth import (
     get_client_billing_account,
     require_client_session,
@@ -25,7 +26,6 @@ from app.core.commerce_auth import (
 )
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
-from app.dao.reseller_dao import ResellerDAO
 from app.models.billing_jobs import (
     BillingNonpaymentPolicy,
     CancellationRequest,
@@ -34,7 +34,7 @@ from app.models.billing_jobs import (
     UnpaidInvoiceAction,
 )
 from app.models.commerce_account import BillingAccount
-from app.models.reseller import Reseller, ResellerProductAccess, ResellerStatus, ServiceBilling
+from app.models.reseller import ResellerProductAccess, ServiceBilling
 from app.services.audit_service import AuditService
 from app.services.billing.cancellations import (
     CancellationError,
@@ -45,7 +45,6 @@ from app.services.billing.cancellations import (
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
 ClientAccountDep = Annotated[BillingAccount, Depends(get_client_billing_account)]
-ResellerAuthDep = Annotated[dict, Depends(require_reseller)]
 IdempotencyHeader = Annotated[
     Optional[str], Header(alias="Idempotency-Key", min_length=1, max_length=128)
 ]
@@ -165,18 +164,6 @@ reseller_router = APIRouter(
     tags=["reseller-panel"],
     responses=COMMON_ERROR_RESPONSES,
 )
-
-
-def _current_reseller(auth: ResellerAuthDep, db: DbDep) -> Reseller:
-    reseller = ResellerDAO.get_by_user_id(db, int(auth["user_id"]))
-    if reseller is None:
-        raise HTTPException(status_code=403, detail="Reseller account not found")
-    if reseller.status != ResellerStatus.ACTIVE:
-        raise HTTPException(status_code=403, detail="Reseller account is not active")
-    return reseller
-
-
-ResellerDep = Annotated[Reseller, Depends(_current_reseller)]
 
 
 @reseller_router.get("/cancellation-requests")
