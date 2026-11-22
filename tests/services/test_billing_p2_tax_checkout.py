@@ -366,6 +366,8 @@ def _ten_percent_provider(monkeypatch):
     from app.plugin_host.kinds import TaxProviderPart, TaxProviderResult
 
     def call_provider(kind, ref, method, request, *args, **kwargs):
+        if method == "supports":
+            return True
         lines = {}
         for item in request.lines:
             net = int(item.net_cents)
