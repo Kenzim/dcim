@@ -411,3 +411,34 @@ def test_window_never_admits_a_trigger_before_the_watermark(watermark, trigger, 
         assert at >= run.now - timedelta(days=catch_up)
     if trigger < watermark:
         assert not run.in_window(at) and not run.reached(at)
+
+
+# ------------------------------------------------------------------ detectors
+
+
+def test_needs_review_and_stale_detectors(factory, job):
+    from app.services.alerting import billing_integrity
+
+    params = {"max_rows": 1}
+    db = factory()
+    assert billing_integrity.billing_job_needs_review(db, params, T0) == []
+    assert billing_integrity.billing_job_stale(db, params, T0) == []
+    db.close()
+    _dry_run_then_live(factory, job, dry_at=T0 - timedelta(days=1), live_at=T0)
+    db = factory()
+    for key in ("a", "b"):
+        db.add(BillingJobAction(job=job.name, subject_key=key, status="needs_review", claimed_at=T0))
+    db.add(BillingJobAction(job=job.name, subject_key="c", status="done", claimed_at=T0))
+    db.commit()
+    found = billing_integrity.billing_job_needs_review(db, params, T0)
+    assert [f.resource_id.split(":")[0] for f in found] == ["billing_job_action", "overflow"]
+    # Hourly job: live for under two hours is never stale.
+    assert billing_integrity.billing_job_stale(db, params, T0 + timedelta(hours=2)) == []
+    stale = billing_integrity.billing_job_stale(db, params, T0 + timedelta(hours=2, minutes=1))
+    assert [f.resource_id for f in stale] == ["billing_job:generate_invoices_ahead"]
+    db.close()
+    periodic.run_automation_jobs(owner="w", now=T0 + timedelta(hours=2, minutes=5), session_factory=factory)
+    db = factory()
+    assert billing_integrity.billing_job_stale(db, params, T0 + timedelta(hours=3)) == []
+    assert billing_integrity.billing_job_stale(db, params, T0 + timedelta(hours=4, minutes=6)) != []
+    db.close()
