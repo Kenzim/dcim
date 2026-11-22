@@ -429,3 +429,39 @@ def test_scan_records_scheduled_and_complete(db_session):
     _scan(db_session, scheduled=True)
     history = BillingShadowService.scan_history(db_session, "credit")
     assert [(entry["scheduled"], entry["complete"]) for entry in history[-2:]] == [(False, True), (True, True)]
+
+
+def test_a_balance_without_ledger_entries_is_a_blocking_cache_without_entries_finding(db_session):
+    from app.models.commerce_account import BillingAccount, BillingAccountStatus, BillingAccountType
+
+    set_credit_mode(db_session, "shadow")
+    _reseller(db_session, "explained", 300)
+    legacy_only = _reseller(db_session, "legacy-only")
+    legacy_only.cached_balance_cents = 500  # set by an old direct write, no entry
+    db_session.commit()
+    new_account = BillingAccountDAO.ensure_reseller_account(db_session, legacy_only)
+    assert new_account.credit_balance_cents == 0
+    mirrored = _reseller(db_session, "mirrored")
+    mirrored.cached_balance_cents = 200
+    db_session.commit()
+    # As the A3 backfill leaves it: account cache copied, still no entry.
+    BillingAccountDAO.ensure_reseller_account(db_session, mirrored).credit_balance_cents = 200
+    retail = BillingAccount(account_type=BillingAccountType.CLIENT, user=User(username="retail-s", email="retail-s@example.com"),
+                            currency="USD", status=BillingAccountStatus.ACTIVE, credit_balance_cents=75)
+    db_session.add(retail)
+    db_session.commit()
+
+    findings = _scan(db_session)["engines"]["credit"]["findings"]
+    unexplained = sorted(
+        (f["subject_type"], f["subject_id"], f["legacy_value"], f["v2_value"])
+        for f in findings if f["check_key"] == "c2_cache_without_entries"
+    )
+    assert unexplained == sorted([
+        ("reseller", legacy_only.id, 500, 0), ("reseller", mirrored.id, 200, 200), ("billing_account", retail.id, 0, 75),
+    ])
+    assert all("cache_without_entries" in f["context"] for f in findings if f["check_key"] == "c2_cache_without_entries")
+    # Reported once per reseller: no separate mirror finding for the same account.
+    assert ("c2_mirror", new_account.id) not in {(f["check_key"], f["subject_id"]) for f in findings}
+    items = {item["item"]: item for item in billing_shadow.evaluate_switch(db_session, "credit", NOW)}
+    assert not all(item["ok"] for item in items.values())
+    assert "c2_cache_without_entries" in {row.check_key for row in _open_rows(db_session)}

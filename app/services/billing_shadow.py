@@ -331,6 +331,8 @@ class BillingShadowService:
 
 HISTORY_LIMIT = 90
 
+# A blocking credit finding: a balance with no ledger entries behind it.
+CACHE_WITHOUT_ENTRIES = "c2_cache_without_entries"
 # Check keys for differences the two engines are known to produce. They are
 # recorded and listed, but do not count against the switch criterion.
 EXPECTED_PARTIAL_REFUND = "i2_expected_partial_refund"
@@ -422,6 +424,61 @@ def reseller_cache_differences(db: Session) -> list[tuple[int, int, int]]:
         .order_by(BillingAccount.id)
     ).all()
     return [(int(a), int(r or 0), int(c or 0)) for a, r, c in rows]
+
+
+def caches_without_entries(db: Session) -> list[tuple[str, int, int, int]]:
+    """Balances no ledger entry explains: (subject type, subject id, legacy value, v2 value).
+
+    A reseller with no entries (by ``reseller_id`` or through its account)
+    and a non-zero reseller or account cache is reported as subject
+    ``reseller`` with the reseller cache and the account cache (0 without an
+    account). A retail account with no entries and a non-zero cache is
+    reported as subject ``billing_account`` with 0 and its cache. Every ledger
+    write moves a cache and the entry sum by the same amount, so no ledger
+    write can make such a balance agree with its entries.
+    """
+    from app.models.commerce_account import BillingAccount, BillingAccountType
+    from app.models.reseller import CreditLedgerEntry, Reseller
+
+    account = BillingAccount.__table__.alias("reseller_account")
+    reseller_entries = select(CreditLedgerEntry.id).where(
+        or_(
+            CreditLedgerEntry.reseller_id == Reseller.id,
+            and_(account.c.id.is_not(None), CreditLedgerEntry.billing_account_id == account.c.id),
+        )
+    )
+    resellers = db.execute(
+        select(Reseller.id, Reseller.cached_balance_cents, account.c.credit_balance_cents)
+        .outerjoin(
+            account,
+            and_(
+                account.c.reseller_id == Reseller.id,
+                account.c.account_type == BillingAccountType.RESELLER,
+            ),
+        )
+        .where(
+            or_(
+                func.coalesce(Reseller.cached_balance_cents, 0) != 0,
+                func.coalesce(account.c.credit_balance_cents, 0) != 0,
+            ),
+            ~reseller_entries.exists(),
+        )
+        .order_by(Reseller.id)
+    ).all()
+    retail = db.execute(
+        select(BillingAccount.id, BillingAccount.credit_balance_cents)
+        .where(
+            BillingAccount.account_type == BillingAccountType.CLIENT,
+            func.coalesce(BillingAccount.credit_balance_cents, 0) != 0,
+            ~select(CreditLedgerEntry.id)
+            .where(CreditLedgerEntry.billing_account_id == BillingAccount.id)
+            .exists(),
+        )
+        .order_by(BillingAccount.id)
+    ).all()
+    return [("reseller", int(rid), int(r or 0), int(a or 0)) for rid, r, a in resellers] + [
+        ("billing_account", int(aid), 0, int(c or 0)) for aid, c in retail
+    ]
 
 
 def resellers_without_account(db: Session) -> list[int]:
@@ -558,7 +615,17 @@ def _credit_scan(db: Session, mode: str) -> tuple[int, list[dict]]:
                 entry_id, expected, actual = breaks[account_id]
                 findings.append(_finding("c2_chain_continuity", "billing_account", account_id,
                                          expected, actual, f"ledger_entry:{entry_id}"))
+    unexplained = caches_without_entries(db)
+    unexplained_resellers = {sid for kind, sid, _, _ in unexplained if kind == "reseller"}
+    for subject_type, subject_id, legacy_value, v2_value in unexplained:
+        findings.append(_finding(CACHE_WITHOUT_ENTRIES, subject_type, subject_id, legacy_value, v2_value,
+                                 "cache_without_entries: non-zero balance with no ledger entries"))
+    from app.models.commerce_account import BillingAccount
+
     for account_id, reseller_cache, account_cache in reseller_cache_differences(db):
+        # A reseller with no entries is reported once, above, with both caches.
+        if db.scalar(select(BillingAccount.reseller_id).where(BillingAccount.id == account_id)) in unexplained_resellers:
+            continue
         findings.append(_finding("c2_mirror", "billing_account", account_id,
                                  reseller_cache, account_cache, "reseller cache vs account cache"))
     for reseller_id, count in unlinked_entry_counts(db).items():
