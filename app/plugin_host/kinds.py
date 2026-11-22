@@ -12,7 +12,7 @@ import json
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
@@ -208,7 +208,12 @@ class InvalidAnswer(ValueError):
 MAX_PACK_BYTES = 1024 * 1024
 MAX_VERSIONS = 500
 _PACK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_RATE_RE = re.compile(r"^\d{1,3}(\.\d{1,4})?$")
+_RATE_RE = re.compile(r"[0-9]{1,3}(\.[0-9]{1,4})?\Z")
+# Amounts must fit the BigInteger columns billing stores them in.
+MAX_CENTS = 2**63 - 1
+# A check time before this, or more than CHECKED_AT_AHEAD after now, is refused.
+EARLIEST_CHECKED_AT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+CHECKED_AT_AHEAD = timedelta(days=1)
 
 
 # Answers are checked by exact type (``type(x) is str``, not ``isinstance``) and rebuilt from new
@@ -246,6 +251,8 @@ def _checked_at(value: Any) -> datetime:
         raise InvalidAnswer("checked_at has an unusable time zone") from exc
     if type(moment) is not datetime:
         raise InvalidAnswer("checked_at must be a datetime")
+    if moment < EARLIEST_CHECKED_AT or moment > datetime.now(timezone.utc) + CHECKED_AT_AHEAD:
+        raise InvalidAnswer("checked_at must be after 2000 and no more than a day ahead of now")
     return datetime(
         moment.year, moment.month, moment.day, moment.hour, moment.minute, moment.second, moment.microsecond,
         tzinfo=timezone.utc,
@@ -285,8 +292,8 @@ def _pack_json(value: Any) -> dict:
     if not isinstance(value, dict):
         raise InvalidAnswer("load must return a dict")
     try:
-        text = json.dumps(value)
-    except (TypeError, ValueError) as exc:
+        text = json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as exc:
         raise InvalidAnswer(f"the pack is not JSON: {exc}") from exc
     if len(text.encode("utf-8")) > MAX_PACK_BYTES:
         raise InvalidAnswer("the pack is larger than 1 MB")
@@ -305,6 +312,8 @@ def _part(value: Any, key: str) -> TaxProviderPart:
         raise InvalidAnswer(f"line {key!r} has an amount that is not an integer")
     if base_cents < 0 or tax_cents < 0:
         raise InvalidAnswer(f"line {key!r} has a negative amount")
+    if base_cents > MAX_CENTS or tax_cents > MAX_CENTS:
+        raise InvalidAnswer(f"line {key!r} has an amount larger than {MAX_CENTS}")
     if type(rate_percent) is not str or not _RATE_RE.match(rate_percent):
         raise InvalidAnswer(f"line {key!r} has a rate that is not a percentage with at most four decimals")
     if reverse_charge:

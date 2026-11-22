@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from tests.plugin_host.helpers import base_manifest, install, write_plugin
 from tests.plugin_host.test_provider_kinds import (  # noqa: F401 - shared helpers of the provider tests
@@ -147,6 +147,39 @@ def test_answers_are_new_objects_of_the_exact_types():
     checked = kinds.validate_answer("tax_id_validator", "check_online", (), check)
     assert type(checked) is kinds.TaxIdCheckResult and checked is not check and checked == check
     assert type(checked.checked_at) is datetime and checked.checked_at.tzinfo is timezone.utc
+
+
+def test_amounts_must_fit_a_big_integer():
+    biggest = 2**63 - 1
+    ok = good_part(base_cents=biggest, tax_cents=0, rate_percent="0.0000")
+    assert validate_calc(kinds.TaxProviderResult(lines={"a": (ok,)})).lines["a"][0].base_cents == biggest
+    for changes in ({"base_cents": 10**40, "tax_cents": 0, "rate_percent": "0.0000"}, {"base_cents": biggest + 1, "tax_cents": 0, "rate_percent": "0.0000"}):
+        with pytest.raises(kinds.InvalidAnswer, match="larger than"):
+            validate_calc(kinds.TaxProviderResult(lines={"a": (good_part(**changes),)}))
+
+
+@pytest.mark.parametrize("rate", ["20\n", "20.0000\n", "\uff12\uff10.0000", "\u0662\u0660", "20.\u0660"])
+def test_rates_are_ascii_digits_with_nothing_after(rate):
+    with pytest.raises(kinds.InvalidAnswer, match="rate"):
+        validate_calc(kinds.TaxProviderResult(lines={"a": (good_part(rate_percent=rate),)}))
+
+
+def test_checked_at_must_be_near_now():
+    def check(moment):
+        return kinds.validate_answer("tax_id_validator", "check_online", (), kinds.TaxIdCheckResult("valid", moment))
+
+    now = datetime.now(timezone.utc)
+    assert check(now + timedelta(hours=1)).checked_at == now + timedelta(hours=1)
+    assert check(datetime(2000, 1, 1, tzinfo=timezone.utc)).checked_at.year == 2000
+    for moment in (datetime(9999, 1, 1, tzinfo=timezone.utc), now + timedelta(days=2), datetime(1999, 12, 31, tzinfo=timezone.utc)):
+        with pytest.raises(kinds.InvalidAnswer, match="checked_at"):
+            check(moment)
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
+def test_a_pack_with_nan_or_infinity_is_not_json(number):
+    with pytest.raises(kinds.InvalidAnswer, match="not JSON"):
+        kinds.validate_answer("tax_rule_pack", "load", ("1",), {"rules": [{"rate": number}]})
 
 
 def test_two_kinds_with_the_same_provider_id_have_separate_rate_limits(plugin_env, db_session):
