@@ -1094,3 +1094,22 @@ def test_pay_invoice_is_blocked_during_impersonation(client, db_session, fake_st
         f"/api/reseller-panel/invoices/{invoice.id}/pay", headers=headers, json={}
     )
     assert own.status_code != 403
+
+
+def test_pay_is_refused_while_a_usdt_deposit_is_open_on_the_topup(client, db_session):
+    from tests.services.test_billing_core_status_fixes import _usdt_topup
+
+    reseller, headers = _login(client, db_session, "usdt-open-pay")
+    invoice, _deposit, payment = _usdt_topup(db_session, reseller)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/reseller-panel/invoices/{invoice.id}/pay", headers=headers, json={}
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "invoice_payment_pending",
+        "invoice_id": invoice.id,
+        "payment_id": payment.id,
+    }

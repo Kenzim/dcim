@@ -29,7 +29,7 @@ from app.models.service import Service
 from app.services.audit_service import AuditService
 from app.services.credit_ledger_service import CreditLedgerService
 from app.services.email_message_service import EmailEvent, EmailMessageService
-from app.services.invoice_service import InvoiceService
+from app.services.invoice_service import InvoiceService, engine_mode
 from app.services.payments.base import (
     GatewayWebhookAction,
     NormalizedGatewayWebhookEvent,
@@ -358,7 +358,10 @@ class PaymentWebhookService:
         payment.failure_message = "The payment could not be completed"
         payment.processed_at = datetime.now(timezone.utc)
         invoice = payment.invoice
-        if invoice.status == InvoiceStatus.PENDING_ACTION:
+        if engine_mode(db) == "v2":
+            # The status rule decides: part-paid, still pending or open.
+            InvoiceService.recompute(db, invoice, cause="payment_failed", payment=payment)
+        elif invoice.status == InvoiceStatus.PENDING_ACTION:
             InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause="payment_failed")
 
     @staticmethod

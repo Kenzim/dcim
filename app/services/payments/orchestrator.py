@@ -23,8 +23,16 @@ from app.models.reseller import (
     ResellerPaymentMethod,
 )
 from app.services.billing_locks import BillingLocks
-from app.services.credit_ledger_service import CreditLedgerService
-from app.services.invoice_service import InvoiceError, InvoiceService
+from app.services.credit_ledger_service import (
+    CreditLedgerService,
+    InvoicePaymentPendingError,
+)
+from app.services.invoice_service import (
+    TERMINAL_V2,
+    InvoiceError,
+    InvoiceService,
+    engine_mode,
+)
 from app.services.payments.base import (
     GatewayPaymentMethod,
     GatewayResultStatus,
@@ -414,27 +422,51 @@ class PaymentOrchestrator:
     def _lock_funding_rows(
         db: Session, reseller_id: int, invoice_id: int
     ) -> tuple[Reseller, Invoice]:
-        """Lock the reseller, its billing account, then the invoice (design 6.3)."""
+        """Lock the invoice's rows in LOCK_ORDER (design 6.3).
+
+        A cycle invoice's service billing first (as the renewal worker locks
+        it), then the reseller, its billing account and the invoice.
+        """
+        if db.get(Reseller, reseller_id) is None:
+            raise InvoiceError("Reseller not found")
+        owner_id = db.scalar(select(Invoice.reseller_id).where(Invoice.id == invoice_id))
+        if owner_id is None or owner_id != reseller_id:
+            raise InvoiceError("Invoice not found")
+        invoice = BillingLocks.for_invoice(
+            db, invoice_id, reseller=True, billing_account=True
+        )
         reseller, _account = BillingLocks.reseller_and_account(db, reseller_id)
         if reseller is None:
             raise InvoiceError("Reseller not found")
-        invoice = InvoiceService.get_for_update(db, invoice_id)
         if invoice is None or invoice.reseller_id != reseller.id:
             raise InvoiceError("Invoice not found")
-        if invoice.status == InvoiceStatus.VOID:
+        if invoice.status == InvoiceStatus.VOID or (
+            invoice.status in TERMINAL_V2 and engine_mode(db) == "v2"
+        ):
+            # Refused before any gateway call: a terminal v2 invoice takes no payment.
             raise InvoiceError("Invoice cannot be paid in its current state")
         return reseller, invoice
 
     def _pending_funding_result(
         self, db: Session, invoice: Invoice
     ) -> Optional[InvoiceFundingResult]:
-        if invoice.status != InvoiceStatus.PENDING_ACTION:
-            return None
+        """Never charge while a gateway payment of the invoice may still settle it.
+
+        A ``pending_action`` invoice returns its pending payment for the
+        client to complete, as before. Any other invoice with a live pending
+        payment (an open USDT deposit on a top-up, say) raises
+        ``InvoicePaymentPendingError``: a second funding would overpay it when
+        the first completes. An expired USDT deposit does not count.
+        """
         pending_payment = CreditLedgerService.live_pending_payment(
             db, CreditLedgerService.lock_invoice_payments(db, invoice.id)
         )
         if pending_payment is None:
             return None
+        if invoice.status != InvoiceStatus.PENDING_ACTION:
+            raise InvoicePaymentPendingError(
+                invoice_id=invoice.id, payment_id=pending_payment.id
+            )
         return self._result(
             db,
             invoice,

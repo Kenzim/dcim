@@ -98,14 +98,15 @@ V2_EDGES: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
 # Engines legacy and shadow (design 3.4): today's edges, plus the ones today's
 # writers reach that 3.4 does not list (an overdue invoice that starts a card
 # payment, a reseller deploy charge voided after a failed deploy, a reseller
-# invoice paid after it was voided, a cancelled cycle whose invoice had failed).
+# invoice paid after it was voided, a cancelled cycle whose invoice had failed,
+# a 3-D Secure card charge on a failed invoice).
 LEGACY_EDGES: dict[InvoiceStatus, frozenset[InvoiceStatus]] = {
     S.DRAFT: frozenset({S.OPEN}),
     S.OPEN: frozenset({S.PAID, S.PENDING_ACTION, S.OVERDUE, S.VOID, S.FAILED}),
-    S.PENDING_ACTION: frozenset({S.PAID, S.OPEN, S.OVERDUE, S.VOID, S.FAILED}),
+    S.PENDING_ACTION: frozenset({S.PAID, S.OPEN, S.VOID, S.FAILED}),
     S.OVERDUE: frozenset({S.PAID, S.PENDING_ACTION, S.VOID, S.FAILED}),
     S.PAID: frozenset({S.OPEN, S.VOID, S.FAILED}),
-    S.FAILED: frozenset({S.PAID, S.VOID}),
+    S.FAILED: frozenset({S.PAID, S.PENDING_ACTION, S.VOID}),
     S.VOID: frozenset({S.PAID}),
 }
 # Statuses only v2 writes, read as their legacy counterpart if the engine is
@@ -965,13 +966,16 @@ class InvoiceService:
         balance: InvoiceBalance,
         *,
         cause: str,
+        status: Optional[InvoiceStatus] = None,
     ) -> InvoiceStatus:
         """The status the v2 rule gives (design 3.2), for a balance with ``due >= 0``.
 
         Terminal statuses and drafts are returned unchanged. A negative due is
         reported as ``paid``; the caller converts the overpayment first.
+        ``status`` evaluates the rule from that status instead of the
+        invoice's current one (the shadow check, after legacy has moved it).
         """
-        status = invoice.status
+        status = invoice.status if status is None else InvoiceStatus(status)
         if status in TERMINAL_V2 or status == S.DRAFT:
             return status
         if balance.due_cents <= 0:
@@ -1061,6 +1065,17 @@ class InvoiceService:
                 f"invoice {invoice.id} cannot move from {current.value} to {to.value} "
                 f"(engine {mode})"
             )
+        if (
+            mode == "v2"
+            and current == S.PAID
+            and to == S.VOID
+            and InvoiceService.balance(db, invoice, for_update=True).paid_net_cents > 0
+        ):
+            # Only the status rule's "credited" move (paid net 0) voids a paid
+            # invoice; money kept on it is refunded first.
+            raise InvoiceTransitionError(
+                f"invoice {invoice.id} has money paid; refund it before voiding"
+            )
         now = _utcnow()
         invoice.status = to
         invoice.status_changed_at = now
@@ -1090,7 +1105,8 @@ class InvoiceService:
         )
         if mode == "v2":
             if to == S.OVERDUE:
-                due = InvoiceService.balance(db, invoice).remaining_cents
+                # The caller holds the invoice lock: locking reads (REPEATABLE READ).
+                due = InvoiceService.balance(db, invoice, for_update=True).remaining_cents
                 settlement.fire(
                     db,
                     settlement.INVOICE_OVERDUE,
@@ -1103,7 +1119,7 @@ class InvoiceService:
                     settlement.InvoiceVoided(invoice=invoice, reason=invoice.void_reason),
                 )
             elif to == S.REFUNDED:
-                refunded = InvoiceService.balance(db, invoice).refunded_cents
+                refunded = InvoiceService.balance(db, invoice, for_update=True).refunded_cents
                 settlement.fire(
                     db,
                     settlement.INVOICE_REFUNDED,

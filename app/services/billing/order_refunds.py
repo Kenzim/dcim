@@ -334,6 +334,81 @@ def _refund_order_payments(
     )
 
 
+def void_cancelled_invoice_v2(
+    db: Session, invoice: Invoice, *, reason: str, actor_user_id: Optional[int]
+) -> bool:
+    """Engine v2: void a cancelled ``open`` or ``overdue`` invoice through ``InvoiceService.void``.
+
+    Returns False, leaving the invoice as it is, when ``void()``'s guards
+    refuse it (money paid or pending, a note, a refund in progress) or the
+    invoice is in any other status.
+    """
+    from app.services.invoice_service import InvoiceService, InvoiceTransitionError
+
+    if invoice.status not in (InvoiceStatus.OPEN, InvoiceStatus.OVERDUE):
+        return False
+    try:
+        with db.begin_nested():
+            InvoiceService.void(db, invoice, reason=reason, actor_user_id=actor_user_id)
+    except InvoiceTransitionError:
+        return False
+    return True
+
+
+def close_kept_invoice_v2(
+    db: Session, invoice: Invoice, *, reason: str, actor_user_id: Optional[int]
+) -> Optional[RefundDecision]:
+    """Engine v2: what is still owed on a cancelled invoice that could not be voided.
+
+    Called after the refund policy, holding the reseller, account and invoice
+    locks. With nothing paid net and nothing pending, a credit note (reason
+    ``cancel``) covers what is still owed, so the status rule makes the
+    invoice ``void`` (credited) or ``refunded`` (design 3.3). Otherwise, or
+    when the note is refused, the invoice is recorded for review as
+    ``<reason>_invoice_open`` for the money held (paid net and pending), or
+    what is owed when nothing is held, so staff decide. Returns the review,
+    or None.
+    """
+    from app.models.invoice_adjustment import AdjustmentOutcome, AdjustmentReason
+    from app.services.invoice_adjustment_service import InvoiceAdjustmentService
+    from app.services.invoice_service import UNPAID_STATUSES, InvoiceService
+
+    if invoice.status not in UNPAID_STATUSES:
+        return None
+    balance = InvoiceService.balance(db, invoice, for_update=True)
+    if balance.remaining_cents <= 0:
+        return None
+    if balance.paid_net_cents == 0 and balance.pending_cents == 0:
+        try:
+            with db.begin_nested():
+                InvoiceAdjustmentService.issue_credit_note(
+                    db,
+                    invoice,
+                    amount_cents=balance.remaining_cents,
+                    reason=AdjustmentReason.CANCEL,
+                    outcome=AdjustmentOutcome.REDUCED_BALANCE,
+                    actor_user_id=actor_user_id,
+                    idempotency_key=f"{reason}:credit-note:{invoice.id}",
+                    reason_text=f"Cancelled ({reason})",
+                )
+            return None
+        except ValueError as exc:
+            detail = f"the cancellation credit note was refused: {exc}; issue a credit note or refund"
+    elif balance.pending_cents:
+        detail = "a payment is still pending, so the invoice was not voided; decide once it settles"
+    else:
+        detail = "part of the invoice was paid and kept, so it was not voided; credit or refund it"
+    held = balance.paid_net_cents + balance.pending_cents
+    return record_refund_review(
+        db,
+        invoice=invoice,
+        amount_cents=held or balance.remaining_cents,
+        reason=f"{reason}_invoice_open",
+        actor_user_id=actor_user_id,
+        detail=detail,
+    )
+
+
 def cancel_order(
     db: Session,
     order: Order,
@@ -341,11 +416,18 @@ def cancel_order(
     actor_user_id: Optional[int] = None,
     note: str = "Cancelled by admin",
 ) -> tuple[Order, Optional[RefundDecision]]:
-    """Cancel an order, void its unpaid invoice, and apply the refund policy to money received."""
-    from app.services.invoice_service import InvoiceService
+    """Cancel an order, void its unpaid invoice, and apply the refund policy to money received.
 
-    if order.invoice_id is not None and _automatic_policy(db, "order_cancelled") is not None:
-        # Refunds write the account's ledger, whose lock comes before the order's.
+    In engine ``v2`` the invoice is voided only through ``InvoiceService.void``;
+    one with money on it is refunded by the policy and what is still owed is
+    credited or reviewed (``close_kept_invoice_v2``).
+    """
+    from app.services.invoice_service import InvoiceService
+    from app.services.refund_service import invoice_engine_mode
+
+    v2 = invoice_engine_mode(db) == "v2"
+    if order.invoice_id is not None and (v2 or _automatic_policy(db, "order_cancelled") is not None):
+        # Refunds and credit notes write the account's ledger, whose lock comes before the order's.
         BillingLocks.for_invoice(db, int(order.invoice_id), reseller=True, billing_account=True)
     locked = OrderDAO.get_for_update(db, order.id)
     if locked is None:
@@ -357,7 +439,12 @@ def cancel_order(
     decision: Optional[RefundDecision] = None
     if locked.invoice_id is not None:
         invoice = InvoiceService.get_for_update(db, locked.invoice_id)
-        if invoice is not None and invoice.status not in {
+        voided = False
+        if invoice is not None and v2:
+            voided = void_cancelled_invoice_v2(
+                db, invoice, reason="order_cancelled", actor_user_id=actor_user_id
+            )
+        elif invoice is not None and invoice.status not in {
             InvoiceStatus.PAID,
             InvoiceStatus.VOID,
         }:
@@ -367,6 +454,11 @@ def cancel_order(
         decision = apply_order_refund_policy(
             db, locked, reason="order_cancelled", actor_user_id=actor_user_id
         )
+        if invoice is not None and v2 and not voided:
+            kept = close_kept_invoice_v2(
+                db, invoice, reason="order_cancelled", actor_user_id=actor_user_id
+            )
+            decision = decision or kept
     if decision is None:
         # No money is held for the order, so its coupon use is given back.
         release_coupon_usage(

@@ -62,3 +62,5 @@ jobs:
         run: python -m pytest tests/services/test_billing_p1i_settlement_mariadb.py -q
       - name: Credit applied to invoices under concurrency on MariaDB
         run: python -m pytest tests/services/test_billing_p1c_credit_mariadb.py -q
+      - name: Core invoice status fixes under concurrency on MariaDB
+        run: python -m pytest tests/services/test_billing_core_status_mariadb.py -q
