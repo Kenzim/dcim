@@ -8,7 +8,9 @@ and section 3): class ``standard``, ``customer_type = any``,
 and 0 without, ``jurisdiction = ANY``, ``rounding_point = invoice_rate``,
 ``rounding_rule = tax_floor``, ``valid_from = 1970-01-01``, ``enabled`` copied,
 ``source = tax_rates`` and ``legacy_tax_rate_id``. No pack rules are inserted.
-One INSERT per ``tax_rates`` row; installations have a handful.
+One INSERT per ``tax_rates`` row; installations have a handful. The upgrade
+refuses, before inserting anything, while a ``tax_rates`` row has a rate below
+0 or above 10,000 basis points (100%), naming the rows to correct.
 
 The downgrade deletes exactly the rows this revision inserted: the mirrored
 rules (``source = tax_rates``), the system classes, the ``default`` profile and
@@ -147,8 +149,31 @@ def mirror_row(tax_rate, standard_class_id: int) -> dict:
     }
 
 
+MAX_RATE_BPS = 10_000
+
+
+def _out_of_range_rates(bind) -> list[str]:
+    """``tax_rates`` rows whose rate is not 0 to 100% (``tax_rules.rate_percent`` is ``Numeric(9, 4)``)."""
+    rows = bind.execute(
+        sa.text(
+            "SELECT id, rate_bps FROM tax_rates "
+            "WHERE rate_bps IS NULL OR rate_bps < 0 OR rate_bps > :max ORDER BY id"
+        ),
+        {"max": MAX_RATE_BPS},
+    ).all()
+    return [f"id {row.id} has rate_bps {row.rate_bps}" for row in rows]
+
+
 def upgrade() -> None:
     bind = op.get_bind()
+    bad_rates = _out_of_range_rates(bind)
+    if bad_rates:
+        raise RuntimeError(
+            "billing_p2_tax_seed upgrade refused: tax_rates rows with a rate outside 0 to "
+            f"{MAX_RATE_BPS} basis points (0% to 100%): " + ", ".join(bad_rates) + ". "
+            "Correct each row's rate_bps or delete the row (for example "
+            "UPDATE tax_rates SET rate_bps = 2000 WHERE id = <id>), then rerun the upgrade."
+        )
     bind.execute(
         tax_classes.insert(),
         [{"code": code, "name": name, "description": description, "system": True}

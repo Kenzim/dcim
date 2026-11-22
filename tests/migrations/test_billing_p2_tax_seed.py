@@ -78,6 +78,26 @@ def test_up_down_up_with_data(p2_engine_at):
     _assert_seeded(engine)
 
 
+@pytest.mark.parametrize("bad_bps", [10_001, 10_000_000, -1])
+def test_upgrade_refuses_a_rate_outside_0_to_100_percent(p2_engine_at, bad_bps):
+    engine = p2_engine_at(helpers.before(REVISION))
+    helpers.execute(
+        engine,
+        "INSERT INTO tax_rates (id, country, region, rate_bps, name, enabled) VALUES (9, 'XX', NULL, :b, 'Bad', 1)",
+        b=bad_bps,
+    )
+    with pytest.raises(RuntimeError, match=rf"tax_rates rows .*: id 9 has rate_bps {bad_bps}\. "):
+        helpers.migrate(engine, REVISION)
+    assert helpers.current(engine) == helpers.before(REVISION)
+    for table in ("tax_classes", "tax_rules", "invoice_profiles", "tax_legal_notes"):
+        assert helpers.scalar(engine, f"SELECT COUNT(*) FROM {table}") == 0, table
+
+    helpers.execute(engine, "UPDATE tax_rates SET rate_bps = 10000 WHERE id = 9")
+    helpers.migrate(engine, REVISION)
+    rate = helpers.scalar(engine, "SELECT rate_percent FROM tax_rules WHERE legacy_tax_rate_id = 9")
+    assert Decimal(str(rate)) == Decimal("100")
+
+
 def test_rate_percent_is_exact():
     module = helpers.load_revision(REVISION)
     assert module.rate_percent_of(2000) == "20.0000"
