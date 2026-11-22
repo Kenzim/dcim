@@ -355,15 +355,25 @@ class PluginContext:
             raise NotActive("The service is not active")
         return service
 
+    def _audit_session(self) -> Optional[Session]:
+        """The session to write audit entries on, or ``None`` for a separate one.
+
+        A separate session lets an entry outlive a handler that rolls back. SQLite has one
+        write lock for the whole database, so a second connection cannot write while the
+        handler's transaction holds it; there the entry joins the handler's transaction.
+        """
+        bind = self._db.get_bind()
+        return self._db if bind.dialect.name == "sqlite" else None
+
     def _audit(self, action: str, metadata: dict) -> None:
         user_id = (self.actor or {}).get("user_id") if (self.actor or {}).get("type") == "staff" else None
         audit(action, plugin_id=self.plugin_id, actor_user_id=user_id, resource_type="plugin",
-              resource_id=self.plugin_id, metadata=metadata)
+              resource_id=self.plugin_id, metadata=metadata, db=self._audit_session())
 
     def _audit_service(self, action: str, service_id: int, metadata: dict) -> None:
         user_id = (self.actor or {}).get("user_id")
         audit(action, plugin_id=self.plugin_id, actor_user_id=user_id, resource_type="service",
-              resource_id=str(service_id), metadata=metadata)
+              resource_id=str(service_id), metadata=metadata, db=self._audit_session())
 
     def now(self) -> datetime:
         return utcnow()
