@@ -20,6 +20,15 @@ from app.plugins.capabilities import Capability, ActionDef, UIPattern
 
 logger = logging.getLogger(__name__)
 
+
+def proxmox_token_header(username: Optional[str], password: Optional[str]) -> Optional[Dict[str, str]]:
+    """The ``Authorization`` header for an API token credential (username ``user@realm!tokenid``,
+    password the token secret), or None for a password user, which logs in for a ticket."""
+    if username and "!" in username:
+        return {"Authorization": f"PVEAPIToken={username}={password or ''}"}
+    return None
+
+
 _SERIAL_DEVICE_KEY_RE = re.compile(r"^serial\d+$")
 # UPID:<node>:<hexpid>:<hexpstart>:<hexstarttime>:<type>:<id>:<user>:
 _UPID_NODE_RE = re.compile(r"^UPID:([^:]+):")
@@ -303,6 +312,9 @@ class ProxmoxPlugin(ServerPlugin):
     
     async def _get_headers(self) -> Dict[str, str]:
         """Get HTTP headers with authentication."""
+        token = proxmox_token_header(self.username, self.password)
+        if token is not None:
+            return token
         if not self.ticket:
             auth_data = await self._get_auth_ticket()
             self.ticket = auth_data["ticket"]
