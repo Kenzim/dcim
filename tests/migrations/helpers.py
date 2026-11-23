@@ -23,7 +23,8 @@ from alembic.script import ScriptDirectory
 ROOT = Path(__file__).resolve().parents[2]
 A0 = "billing_a0_renewals"
 P1_HEAD = "billing_p1_ledger_owner_check"
-# The single alembic head; the phase 2 chain follows the phase 1 head.
+# The end of the phase 2 chain, which follows the phase 1 head. Later revisions (``vm_firewall``)
+# sit above it, so ``alembic upgrade head`` goes further; compare that with ``script().get_current_head()``.
 HEAD = "plugin_bundled_identity"
 CHAIN = [
     "billing_p1_series_shadow",
