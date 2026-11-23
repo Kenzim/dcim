@@ -231,6 +231,40 @@ class ProxmoxPlugin(ServerPlugin):
                 response = await client.post(url_for_node(), headers=headers, data=data)
         return response
 
+    async def _put_with_relocate(
+        self,
+        url_for_node: Callable[[], str],
+        *,
+        data: Optional[Dict[str, Any]] = None,
+        http_timeout: float = 15.0,
+    ):
+        """PUT a node-scoped URL; on 404, try one relocate + retry (see
+        :meth:`_get_with_relocate`)."""
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
+            response = await client.put(url_for_node(), headers=headers, data=data)
+        if response.status_code == 404 and await self._relocate_and_retry():
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
+                response = await client.put(url_for_node(), headers=headers, data=data)
+        return response
+
+    async def _delete_with_relocate(
+        self,
+        url_for_node: Callable[[], str],
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        http_timeout: float = 15.0,
+    ):
+        """DELETE a node-scoped URL; on 404, try one relocate + retry (see
+        :meth:`_get_with_relocate`)."""
+        headers = await self._get_headers()
+        async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
+            response = await client.delete(url_for_node(), headers=headers, params=params)
+        if response.status_code == 404 and await self._relocate_and_retry():
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=http_timeout) as client:
+                response = await client.delete(url_for_node(), headers=headers, params=params)
+        return response
+
     async def _get_auth_ticket(self) -> Dict[str, str]:
         """
         Authenticate with Proxmox API and get ticket/CSRF token.
