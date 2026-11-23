@@ -221,6 +221,7 @@ wins; rules are concatenated in that order (global rules first). Unique (`scope_
 | `enabled` | Location opt-in |
 | `nic_flag_on_provision` | Set `net0` `firewall=1` on new VMs (default true once enabled) |
 | `enforce_baseline_on_all` | Apply the baseline to every eligible VM, opted in or not (default false) |
+| `ipv6_allowed_prefixes` | JSON list, null. Prefixes added to `ipfilter-net0` for VMs on a bridge listed in `vm_firewall_ipv6_ra_bridges`; while empty such VMs are not eligible (reason `ipv6_ra_bridge_needs_prefix`) |
 | `readiness` | JSON cache of the last readiness check per cluster (section 9.2) |
 | `readiness_checked_at` | datetime |
 
@@ -230,7 +231,8 @@ Global numbers are settings in a new `vm_firewall` group of `app/services/settin
 `vm_firewall_max_rules_per_group` (50), `vm_firewall_max_groups_per_vm` (5),
 `vm_firewall_max_ipsets_per_client` (20), `vm_firewall_max_ipset_entries` (64),
 `vm_firewall_cluster_concurrency` (4), `vm_firewall_drift_mode` (`repair` or `report`),
-`firewall_client_logging` (false), `vm_firewall_infrastructure_bridges` (comma-separated, empty). The
+`firewall_client_logging` (false), `vm_firewall_infrastructure_bridges` (comma-separated, empty), `vm_firewall_ipv6_ra_bridges`
+(comma-separated, empty; bridges with router adverts, `vmbr750` on production). The
 worker switch `run_vm_firewall_worker` (default true) and its
 lease settings stay env-only in `config.py`, like the alert worker.
 
@@ -502,8 +504,12 @@ Production cluster `pve-06` (23 nodes, hv-01 to hv-23, PVE 9.2.3, the same versi
   `policy_in DROP` and one rule. 22 VMs have `firewall=1` on a NIC. **The guests with both would start
   filtering as soon as the datacenter firewall is enabled**, with a VM default `policy_in` of DROP.
 - Ceph is hyper-converged (public and cluster network on `bond1.230`), corosync rings on `bond0` VLAN
-  220 and `bond1.230`: host interfaces, not bridges. A host firewall in DROP mode would cut both. The
-  public bridge `vmbr0` (VLAN 733) has IPv6 on the hosts, so VMs may be using IPv6 there (Q6).
+  220 and `bond1.230`: host interfaces, not bridges. A host firewall in DROP mode would cut both.
+- IPv6 (read-only check on hv-05, 2026-11-23, ledger 46c899d9): VMs on the public bridge `vmbr0`
+  (VLAN 733) have no IPv6 today. No router advertisements in about 130 s of capture, no global IPv6
+  neighbours, only link-local guest traffic, and no VM config sets `ip6=`. hv-01 has a static host
+  address there, hv-05 none. The Cogent bridge `vmbr750` (VLAN 750) does carry router adverts; any VM
+  NIC on it needs the per-location IPv6 prefix before anti-spoofing is enabled for it.
 
 ### 9.3 Why enabling the datacenter firewall is dangerous, and the safe order
 
@@ -740,7 +746,7 @@ Recommended defaults are what will be built unless told otherwise.
 | Q4 | Enabling the datacenter firewall on production cluster `pve-06` after the nested test, and which backend | nftables backend (production runs PVE 9.2.3 with `proxmox-firewall` already installed and running), following 9.3 exactly: `host.fw` with `enable: 0` and `nftables: 1` on all 23 nodes, ACCEPT policies, then `enable: 1`; done by the deploy agent with your approval, in a quiet hour, with the rollback ready |
 | Q4a | 46 production guests already have `enable: 1` in their VM firewall file and 22 have `firewall=1` on a NIC; those with both would start filtering (default inbound DROP) the moment the datacenter firewall is on. Switch their VM firewall off first (9.3 step 2)? | Yes: write `enable: 0` on every guest the pre-enable audit lists that Rackflow does not manage (a no-op today), and tell the owners they can opt in through Rackflow |
 | Q5 | Anti-spoofing baseline on every VM in a location (each existing VM gets one blip of about 0.1 s), or only VMs whose owners opt in? | Opt-in VMs only at first; a staged rollout to all VMs later, announced to clients |
-| Q6 | Do production public networks carry IPv6 (router adverts) that VMs use today? The hosts have IPv6 on the public bridge `vmbr0`. With `ipfilter` on, a VM's global IPv6 traffic is dropped unless Rackflow knows its addresses | Find out before anti-spoofing is enabled anywhere (a read-only check of router adverts on VLAN 733). If VMs use SLAAC there, add a per-location "allowed IPv6 prefix" to `ipfilter-net0` (weaker: any address in the prefix) until Rackflow assigns IPv6 per VM |
+| Q6 | Do production public networks carry IPv6 that VMs use today? | Answered 2026-11-23 (9.2a): no on `vmbr0` (no router adverts, no global IPv6 in use), so anti-spoofing with IPv4 plus the link-local address breaks nothing; `ndp` stays allowed. `vmbr750` does have router adverts: a VM NIC there is refused by eligibility until a per-location "allowed IPv6 prefix" is configured |
 | Q7 | `vm.firewall` permission on by default for every VM client, including resellers' clients? | Yes; resellers can turn it off through their product permission ceiling |
 | Q8 | WHMCS: full editor in the client area, or rules and presets in WHMCS with groups and IP sets in the Rackflow portal? | The latter (section 10.5) |
 
