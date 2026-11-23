@@ -1879,6 +1879,11 @@ async def unsuspend_service(
         message=f"Unsuspending service {service.id}",
         details={"service_id": service.id, "integration_id": integration.id},
     )
+    # Billing before the service row (BillingLocks order).
+    if service.status == ServiceStatus.SUSPENDED:
+        from app.services.billing.jobs.nonpayment import release_after_staff_unsuspend
+
+        release_after_staff_unsuspend(db, service, None)
     await ServiceLifecycle().unsuspend(
         db, service, reason=action.reason or "billing_api"
     )

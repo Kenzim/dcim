@@ -29,6 +29,7 @@ from app.models.reseller import (
     Invoice,
     InvoicePurpose,
     ServiceBilling,
+    ServiceBillingStatus,
 )
 from app.services.invoice_service import UNPAID_STATUSES, InvoiceService
 
@@ -38,6 +39,7 @@ SUSPENSION_JOB = "nonpayment_suspension"
 TERMINATION_JOB = "nonpayment_termination"
 
 AUDIT_UNSUSPENDED = "billing.nonpayment_unsuspended"
+AUDIT_RELEASED_BY_STAFF = "billing.nonpayment_suspension_released_by_staff"
 
 # Events without a sender before phase 2 (design 12.5): sent only while an
 # enabled template exists for them.
@@ -361,9 +363,10 @@ def suspension_claim_is_current(
     """Whether ``claim`` records the service's current non-payment episode.
 
     True when the claim's invoice is ``paid_invoice_id`` or still has a
-    balance, and no billing lift (``AUDIT_UNSUSPENDED``) was recorded for the
-    service after the claim's marks. A claim of an episode billing already
-    ended says nothing about a later suspension.
+    balance, and neither a billing lift (``AUDIT_UNSUSPENDED``) nor a staff
+    release (``AUDIT_RELEASED_BY_STAFF``) was recorded for the service after
+    the claim's marks. A claim of an episode that already ended says nothing
+    about a later suspension.
     """
     detail = claim.detail or {}
     invoice_id = detail.get("invoice_id")
@@ -382,7 +385,7 @@ def suspension_claim_is_current(
     lifted = db.scalar(
         select(
             exists().where(
-                UserAuditEvent.action == AUDIT_UNSUSPENDED,
+                UserAuditEvent.action.in_([AUDIT_UNSUSPENDED, AUDIT_RELEASED_BY_STAFF]),
                 UserAuditEvent.resource_type == "service",
                 UserAuditEvent.resource_id == str(int(service_id)),
                 UserAuditEvent.id > int(marks.get("audit_id", 0)),
@@ -390,6 +393,50 @@ def suspension_claim_is_current(
         )
     )
     return not lifted
+
+
+def release_after_staff_unsuspend(db: Session, service, actor_user_id: Optional[int]) -> bool:
+    """End the non-payment suspension of a retail billing when staff unsuspend its service.
+
+    Called by the staff paths that take a service from ``suspended`` to
+    ``active`` (the admin status route, which the MCP services tool wraps,
+    and the WHMCS unsuspend), before they write the service row: the billing
+    lock comes first. A retail billing in ``suspended_nonpayment`` is set
+    ``active`` and audited with the cycle invoices still unpaid, in the
+    caller's transaction. Reseller billings mirror the recurring pass's cycle
+    state and are left alone. Returns True when the billing was released.
+    """
+    from app.services.audit_service import AuditService
+    from app.services.billing_locks import BillingLocks
+
+    billing_id = db.scalar(select(ServiceBilling.id).where(ServiceBilling.service_id == int(service.id)))
+    if billing_id is None:
+        return False
+    billing = BillingLocks.service_billing(db, int(billing_id))
+    if (
+        billing is None
+        or billing.reseller_id is not None
+        or billing.status != ServiceBillingStatus.SUSPENDED_NONPAYMENT
+    ):
+        return False
+    unpaid = [int(invoice.id) for invoice in unpaid_cycle_invoices(db, billing.id)]
+    billing.status = ServiceBillingStatus.ACTIVE
+    AuditService.log(
+        db,
+        actor_user_id=actor_user_id,
+        action=AUDIT_RELEASED_BY_STAFF,
+        resource_type="service",
+        resource_id=str(int(service.id)),
+        billing_account_id=billing.billing_account_id,
+        metadata={
+            "billing_id": int(billing.id),
+            "old_status": ServiceBillingStatus.SUSPENDED_NONPAYMENT.value,
+            "new_status": ServiceBillingStatus.ACTIVE.value,
+            "unpaid_invoice_ids": unpaid,
+        },
+    )
+    db.flush()
+    return True
 
 
 # ---------------------------------------------------------------- email

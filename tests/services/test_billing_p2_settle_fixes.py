@@ -212,3 +212,24 @@ def test_a_suspension_settled_failed_after_a_manual_suspend_is_still_terminated(
     }
     assert list(run_job(db_session, term, make_run(TERMINATE, now=NOW + timedelta(days=7))).values()) == ["done"]
     assert db_session.get(Service, billing.service_id).status == ServiceStatus.TERMINATED
+
+
+# ---------------------------------------------------------------- M5
+
+
+def test_after_a_staff_release_an_admin_hold_and_a_payment_do_not_relabel_the_billing(db_session, env):
+    from app.services.billing.jobs.nonpayment import release_after_staff_unsuspend
+
+    _, billing, lifecycle, job = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    run_job(db_session, job, make_run(SUSPEND))
+    # Staff unsuspend (the status route: release first, then the service row).
+    service = db_session.get(Service, billing.service_id)
+    assert release_after_staff_unsuspend(db_session, service, None) is True
+    _staff_status(db_session, billing, ServiceStatus.ACTIVE)
+    assert _state(db_session, billing) == (ServiceStatus.ACTIVE, ServiceBillingStatus.ACTIVE)
+    # Then an admin hold, and the client pays the invoice the job suspended for.
+    _staff_status(db_session, billing, ServiceStatus.SUSPENDED)
+    _pay(db_session, db_session.get(Invoice, invoice.id))
+    assert _state(db_session, billing) == (ServiceStatus.SUSPENDED, ServiceBillingStatus.ACTIVE)
+    assert billing_integrity.nonpayment_suspended_paid(db_session, PARAMS, NOW) == []
