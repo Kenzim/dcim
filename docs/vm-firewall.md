@@ -543,7 +543,11 @@ in the `bridge proxmox-firewall-guests` table. The iptables backend needs `br_ne
 `bridge-nf-call-iptables`, which sends bridged traffic through iptables and conntrack on the host;
 on production that would be 851 VMs' traffic on 25G uplinks against a 262,144-entry conntrack table
 per node. Choosing nftables is the `nftables: 1` line in each node's `host.fw` in step 3, so the
-production step writes `host.fw` with `enable: 0` and `nftables: 1` on all 23 nodes. The nested test
+production step writes `host.fw` with `enable: 0` and `nftables: 1` on all 23 nodes. Both daemons
+running on every node is the normal PVE 9 install (epyc is the same): the `nftables` host option picks
+which one generates rules, and the other stays idle, so they do not both manage rules. The option must
+still be identical on every node of the cluster, and the readiness check (9.2) flags a node whose
+`nftables` setting differs from the rest. The nested test
 (9.4) still confirms the iptables behaviour so the choice is backed by a measurement both ways.
 
 ### 9.4 Proving the procedure first (nested test cluster on epyc)
