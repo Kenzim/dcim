@@ -190,7 +190,7 @@
 </div>
 
 {#if showModal}
-  <button type="button" class="modal-overlay" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeModal()}>
+  <div class="modal-overlay" role="presentation" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeModal()} on:keydown={(e) => e.key === 'Escape' && closeModal()}>
     <div class="modal-content modal-large" role="dialog">
       <div class="modal-header">
         <h3>{editingPreset ? 'Edit Permission Preset' : 'New Permission Preset'}</h3>
@@ -248,7 +248,7 @@
         <button class="btn-primary" on:click={handleSubmit}>{editingPreset ? 'Update' : 'Create'}</button>
       </div>
     </div>
-  </button>
+  </div>
 {/if}
 
 <style>
@@ -283,7 +283,6 @@
   .btn-icon-only.btn-danger:hover { background: var(--danger-color); color: white; border-color: var(--danger-color); }
   .btn-icon-only svg { width: 18px; height: 18px; }
 
-  button.modal-overlay { padding: 0; border: none; font: inherit; color: inherit; cursor: default; width: 100%; height: 100%; text-align: left; }
   .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: var(--overlay-bg); display: flex; align-items: center; justify-content: center; z-index: 1000; }
   .modal-content { background: var(--bg-primary); border-radius: 12px; width: 90%; max-width: 640px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); }
   .modal-large { max-width: 720px; }

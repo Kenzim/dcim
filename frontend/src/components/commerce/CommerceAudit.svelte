@@ -9,6 +9,34 @@
   let error = '';
   let actionFilter = '';
 
+  const valueText = (key, value) => {
+    if (typeof value === 'boolean') return key === 'enabled' ? (value ? 'on' : 'off') : value ? 'yes' : 'no';
+    if (value === null || value === undefined || value === '') return 'none';
+    return typeof value === 'object' ? JSON.stringify(value) : String(value);
+  };
+
+  function changeParts(oldValues, newValues, keys) {
+    const old = oldValues && typeof oldValues === 'object' ? oldValues : {};
+    const next = newValues && typeof newValues === 'object' ? newValues : {};
+    const names = keys?.length ? keys : [...new Set([...Object.keys(old), ...Object.keys(next)])];
+    return names
+      .filter((key) => JSON.stringify(old[key]) !== JSON.stringify(next[key]))
+      .map((key) => `${key.replace(/_/g, ' ')}: ${valueText(key, old[key])} → ${valueText(key, next[key])}`);
+  }
+
+  function alertDetail(row) {
+    if (!row.action.startsWith('alert.')) return '';
+    const meta = row.metadata || {};
+    if (row.action === 'alert.recipients_updated') {
+      return (meta.changes || [])
+        .map((c) => `${c.username}: ${changeParts(c.old, c.new).join(', ')}`)
+        .join('; ');
+    }
+    const parts = changeParts(meta.old, meta.new, meta.changed);
+    if (meta.secret_changed) parts.push('secret changed');
+    return parts.join('; ');
+  }
+
   onMount(load);
 
   async function load() {
@@ -45,7 +73,7 @@
     <div class="panel">
       <table>
         <thead>
-          <tr><th>Time</th><th>Action</th><th>Resource</th><th>Account</th><th>IP</th></tr>
+          <tr><th>Time</th><th>Action</th><th>Resource</th><th>By</th><th>Detail</th><th>Account</th><th>IP</th></tr>
         </thead>
         <tbody>
           {#each events as row (row.id)}
@@ -53,6 +81,8 @@
               <td>{new Date(row.created_at).toLocaleString()}</td>
               <td><code>{row.action}</code></td>
               <td>{row.resource_type}{row.resource_id ? ` #${row.resource_id}` : ''}</td>
+              <td>{row.actor_username ?? (row.actor_user_id ? `#${row.actor_user_id}` : '—')}</td>
+              <td class="detail">{alertDetail(row) || '—'}</td>
               <td>{row.billing_account_id ?? '—'}</td>
               <td>{row.ip ?? '—'}</td>
             </tr>
@@ -74,5 +104,6 @@
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border-color); }
   th { font-size: 11px; text-transform: uppercase; color: var(--text-tertiary); }
+  .detail { max-width: 420px; overflow-wrap: anywhere; }
   .empty { color: var(--text-tertiary); padding: 24px; }
 </style>

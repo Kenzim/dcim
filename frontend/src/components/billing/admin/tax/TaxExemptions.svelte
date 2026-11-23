@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { Alert, Button, Modal, Spinner } from '../../../ui/index.js';
   import {
     createTaxExemption,
@@ -59,6 +59,7 @@
   }
 
   function openCreate() {
+    cancelAccountSearch();
     creating = true;
     form = blank();
     formError = '';
@@ -70,25 +71,51 @@
 
   const accountName = (account) => account.reseller_name || account.username || 'Account';
 
+  const SEARCH_DELAY_MS = 300;
+  let searchTimer;
+  let searchSeq = 0;
+
+  onDestroy(() => clearTimeout(searchTimer));
+
+  function cancelAccountSearch() {
+    clearTimeout(searchTimer);
+    searchSeq += 1;
+    accountSearching = false;
+  }
+
+  function searchAsYouType() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(findAccounts, SEARCH_DELAY_MS);
+  }
+
   async function findAccounts() {
+    clearTimeout(searchTimer);
     const text = accountSearch.trim();
+    const seq = ++searchSeq;
     if (!text) {
       accountMatches = [];
+      accountSearchError = '';
+      accountSearching = false;
       return;
     }
     accountSearching = true;
     accountSearchError = '';
     try {
-      accountMatches = await searchCommerceBillingAccounts({ q: text, limit: 8 });
-      if (!accountMatches.length) accountSearchError = 'No billing account matches.';
+      const matches = await searchCommerceBillingAccounts({ q: text, limit: 8 });
+      if (seq !== searchSeq) return;
+      accountMatches = matches;
+      if (!matches.length) accountSearchError = 'No billing account matches.';
     } catch (err) {
+      if (seq !== searchSeq) return;
+      accountMatches = [];
       accountSearchError = err.message;
     } finally {
-      accountSearching = false;
+      if (seq === searchSeq) accountSearching = false;
     }
   }
 
   function chooseAccount(account) {
+    cancelAccountSearch();
     chosenAccount = account;
     form.billing_account_id = String(account.id);
     accountMatches = [];
@@ -222,9 +249,10 @@
             </div>
           {:else}
             <div class="ba-inline">
-              <input bind:value={accountSearch} placeholder="Name, email or account number" aria-label="Search billing accounts" on:keydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); findAccounts(); } }} />
-              <Button variant="secondary" size="small" on:click={findAccounts} disabled={accountSearching}>Search</Button>
+              <input bind:value={accountSearch} placeholder="Name, email or account number" aria-label="Search billing accounts" on:input={searchAsYouType} on:keydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); findAccounts(); } }} />
+              <Button variant="secondary" size="small" on:click={findAccounts}>Search</Button>
             </div>
+            {#if accountSearching}<span class="ba-hint">Searching…</span>{/if}
             {#if accountSearchError}<span class="ba-hint">{accountSearchError}</span>{/if}
             {#if accountMatches.length}
               <ul class="picker">

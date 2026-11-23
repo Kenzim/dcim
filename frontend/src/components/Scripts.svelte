@@ -1,6 +1,7 @@
 <script>
   import PageHeader from './PageHeader.svelte';
   import CodeEditor from './CodeEditor.svelte';
+  import { Button, Modal } from './ui/index.js';
   import { 
     getScripts, 
     createScript, 
@@ -203,85 +204,52 @@
 </div>
 
 {#if showModal}
-  <button type="button" class="modal-overlay" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeModal()}>
-    <div class="modal-content modal-large" role="dialog">
-      <div class="modal-header">
-        <h3>{editingScript ? 'Edit Script' : 'Add Script'}</h3>
-        <button class="btn-icon-only" on:click={closeModal}>
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-      <div class="modal-body">
-        {#if formError}
-          <div class="form-error">{formError}</div>
-        {/if}
-        <div class="form-group">
-          <label for="script-name">Name *</label>
-          <input
-            id="script-name"
-            type="text"
-            bind:value={formData.name}
-            placeholder="e.g., install-services.sh"
-            required
-          />
-        </div>
-        <div class="form-group">
-          <label for="script-description">Description</label>
-          <textarea
-            id="script-description"
-            bind:value={formData.description}
-            placeholder="What does this script do?"
-            rows="2"
-          ></textarea>
-        </div>
-        <div class="form-group">
-          <label for="script-content">Script Content *</label>
-          <CodeEditor bind:value={formData.content} />
-          <p class="form-help">Use <code>{'$'}{'{SERVER_IP}'}</code>, <code>{'$'}{'{SERVER_MAC}'}</code>, <code>{'$'}{'{SERVER_ID}'}</code> for variable substitution</p>
-        </div>
-        <div class="form-group form-group-inline">
-          <label>
-            <input type="checkbox" bind:checked={formData.enabled} />
-            Enabled
-          </label>
-          <label>
-            <input type="checkbox" bind:checked={formData.user_executable} />
-            User Executable (available via billing API)
-          </label>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-secondary" on:click={closeModal}>Cancel</button>
-        <button class="btn-primary" on:click={handleSubmit}>
-          {editingScript ? 'Update' : 'Create'}
-        </button>
-      </div>
+  <Modal title={editingScript ? 'Edit Script' : 'Add Script'} size="large" onClose={closeModal}>
+    {#if formError}
+      <div class="form-error">{formError}</div>
+    {/if}
+    <div class="form-group">
+      <label for="script-name">Name *</label>
+      <input
+        id="script-name"
+        type="text"
+        bind:value={formData.name}
+        placeholder="e.g., install-services.sh"
+        required
+      />
     </div>
-  </button>
+    <div class="form-group">
+      <label for="script-description">Description</label>
+      <textarea
+        id="script-description"
+        bind:value={formData.description}
+        placeholder="What does this script do?"
+        rows="2"
+      ></textarea>
+    </div>
+    <div class="form-group">
+      <label for="script-content">Script Content *</label>
+      <CodeEditor bind:value={formData.content} />
+      <p class="form-help">Use <code>{'$'}{'{SERVER_IP}'}</code>, <code>{'$'}{'{SERVER_MAC}'}</code>, <code>{'$'}{'{SERVER_ID}'}</code> for variable substitution</p>
+    </div>
+    <div class="form-group form-group-inline">
+      <label>
+        <input type="checkbox" bind:checked={formData.enabled} />
+        Enabled
+      </label>
+      <label>
+        <input type="checkbox" bind:checked={formData.user_executable} />
+        User Executable (available via billing API)
+      </label>
+    </div>
+    <svelte:fragment slot="footer">
+      <Button variant="secondary" on:click={closeModal}>Cancel</Button>
+      <Button on:click={handleSubmit}>{editingScript ? 'Update' : 'Create'}</Button>
+    </svelte:fragment>
+  </Modal>
 {/if}
 
 <style>
-  .modal-content .btn-primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 9px 16px;
-    background: var(--accent-color);
-    color: var(--accent-contrast, white);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    font-size: 13.5px;
-    cursor: pointer;
-  }
-
-  .modal-content .btn-primary:hover {
-    background: var(--accent-dark);
-    box-shadow: var(--shadow-lg);
-  }
-
   .btn-icon {
     width: 15px;
     height: 15px;
@@ -443,62 +411,6 @@
     font-family: inherit;
   }
 
-  button.modal-overlay {
-    padding: 0;
-    border: none;
-    font: inherit;
-    color: inherit;
-    cursor: default;
-    width: 100%;
-    height: 100%;
-    text-align: left;
-  }
-
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: var(--overlay-bg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal-content {
-    background: var(--bg-primary);
-    border-radius: 12px;
-    width: 90%;
-    max-width: 500px;
-    max-height: 90vh;
-    overflow-y: auto;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
-  }
-
-  .modal-large {
-    max-width: 900px;
-  }
-
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 20px 24px;
-    border-color: var(--border-color);
-  }
-
-  .modal-header h3 {
-    margin: 0;
-    font-size: 20px;
-    font-weight: 600;
-  }
-
-  .modal-body {
-    padding: 24px;
-  }
-
   .form-error {
     background: var(--danger-bg);
     color: var(--danger-text);
@@ -566,26 +478,4 @@
     color: var(--text-secondary);
   }
 
-  .modal-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 12px;
-    padding: 20px 24px;
-    border-color: var(--border-color);
-  }
-
-  .btn-secondary {
-    padding: 10px 20px;
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-    border: none;
-    border-radius: 8px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.2s ease;
-  }
-
-  .btn-secondary:hover {
-    background: var(--accent-color);
-  }
 </style>

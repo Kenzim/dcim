@@ -114,7 +114,7 @@
       await Promise.all([loadEngines(), loadMismatches()]);
     } catch (err) {
       switchError = {
-        message: err.message,
+        message: err.code === 'switch_criterion_not_met' ? 'The switch criterion is not met. These checks are failing:' : err.message,
         failing: err.detail?.failing || [],
         criteria: (err.detail?.criteria || []).filter((item) => !item.ok),
       };
@@ -205,8 +205,9 @@
           <div><dt>Switched to v2</dt><dd>{engine.switch_record?.switched_at ? when(engine.switch_record.switched_at) : 'never'}</dd></div>
         </dl>
         {#if engine.mode !== 'v2'}
-        <h3 style="margin-top:16px">Switch criterion to v2
-          <span class="ba-pill {engine.switch_criterion.ok ? 'ok' : 'bad'}">{engine.switch_criterion.ok ? 'met' : 'not met'}</span>
+        <h3 class="criterion-heading">
+          <span>Switch criterion to v2</span>
+          <span class="ba-pill criterion-pill {engine.switch_criterion.ok ? 'ok' : 'bad'}">{engine.switch_criterion.ok ? 'Met' : 'Not met'}</span>
         </h3>
         <ul class="checklist">
           {#each engine.switch_criterion.items as item (item.item)}
@@ -349,6 +350,8 @@
 {/if}
 
 <style>
+  .criterion-heading { margin-top: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .criterion-pill { text-transform: none; }
   .checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
   .checklist li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; background: var(--bg-secondary); }
   .mark { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; flex-shrink: 0; margin-top: 1px; }

@@ -24,7 +24,7 @@
   tabindex="-1"
   on:click={(e) => e.target === e.currentTarget && onClose?.()}
 >
-  <!-- stopPropagation only (clicks inside must not close overlay) -->
+  <!-- Clicks inside must not close the overlay; keys typed inside must not reach page shortcuts, but Escape still closes -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
   <div
@@ -34,7 +34,10 @@
     aria-modal="true"
     aria-labelledby="modal-title"
     on:click|stopPropagation
-    on:keydown|stopPropagation
+    on:keydown={(e) => {
+      e.stopPropagation();
+      handleKeydown(e);
+    }}
   >
     <div class="modal-header">
       <h3 id="modal-title">{title}</h3>

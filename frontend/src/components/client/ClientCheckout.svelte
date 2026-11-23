@@ -27,6 +27,8 @@
   let confirmOpen = false;
   /** What the last failed order attempt allows: `requote`, `retry`, `later` or `none` (by error code). */
   let refusal = 'none';
+  /** Whether the refusal came from pricing (`quote`) or from placing the order (`order`). */
+  let refusalFrom = 'order';
   let config = {
     price_plan_id: '',
     cycle_interval: '',
@@ -80,6 +82,7 @@
     working = true;
     error = '';
     refusal = 'none';
+    refusalFrom = 'quote';
     try {
       quote = await clientCommerceQuote({
         frontend_product_id: product.id,
@@ -114,6 +117,7 @@
     working = true;
     error = '';
     refusal = 'none';
+    refusalFrom = 'order';
     try {
       const order = await clientCommerceCheckout({
         frontend_product_id: product.id,
@@ -149,7 +153,16 @@
   </div>
 
   {#if error}<Alert type="danger">{error}</Alert>{/if}
-  {#if step === 'checkout' && refusal === 'requote'}
+  {#if refusalFrom === 'quote' && refusal !== 'none'}
+    <div class="requote">
+      {#if refusal === 'later'}
+        <p>We could not price this order. Please try again later.</p>
+      {:else}
+        <p>We could not price this order. Try again to get a current quote.</p>
+        <Button variant="secondary" on:click={runQuote} disabled={working}>{working ? 'Getting a new quote…' : 'Get a new quote'}</Button>
+      {/if}
+    </div>
+  {:else if step === 'checkout' && refusal === 'requote'}
     <div class="requote">
       <p>Your order was not placed. Get a new quote to see the current price, then place the order again.</p>
       <Button variant="secondary" on:click={runQuote} disabled={working}>{working ? 'Getting a new quote…' : 'Get a new quote'}</Button>
