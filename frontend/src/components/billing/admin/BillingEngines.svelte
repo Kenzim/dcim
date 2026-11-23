@@ -9,6 +9,7 @@
     runScan,
     switchEngine,
   } from '../../../lib/billingAdminApi.js';
+  import CriterionDetail from './CriterionDetail.svelte';
   import './billingAdmin.css';
 
   const MODE_TONE = { v2: 'ok', shadow: 'info', legacy: '' };
@@ -16,6 +17,7 @@
   const ENGINE_TEXT = {
     invoice: 'Invoice engine: balances, statuses, credit and debit notes, partial refunds.',
     credit: 'Credit engine: the credit balance ledger for every account.',
+    tax: 'Tax engine: which rules and registrations decide the VAT on invoices.',
   };
 
   let data = null;
@@ -153,13 +155,6 @@
     return String(value);
   }
 
-  function details(item) {
-    return Object.entries(item)
-      .filter(([key]) => key !== 'item' && key !== 'ok')
-      .map(([key, value]) => `${label(key)}: ${show(value)}`)
-      .join(' · ');
-  }
-
   function openCounts(engine) {
     const counts = engine.open_mismatches || {};
     const text = Object.entries(counts).map(([key, value]) => `${key} ${value}`).join(', ');
@@ -200,7 +195,7 @@
             {/each}
           </div>
         </div>
-        <p class="ba-muted">{ENGINE_TEXT[engine.engine]}</p>
+        <p class="ba-muted">{ENGINE_TEXT[engine.engine] ?? ''}</p>
         <dl class="ba-grid">
           <div><dt>Shadow since</dt><dd>{when(engine.shadow_since)}</dd></div>
           <div><dt>Last scan finished</dt><dd>{when(engine.last_scan?.finished_at)}</dd></div>
@@ -209,6 +204,7 @@
           <div><dt>Open mismatches</dt><dd>{openCounts(engine)}</dd></div>
           <div><dt>Switched to v2</dt><dd>{engine.switch_record?.switched_at ? when(engine.switch_record.switched_at) : 'never'}</dd></div>
         </dl>
+        {#if engine.mode !== 'v2'}
         <h3 style="margin-top:16px">Switch criterion to v2
           <span class="ba-pill {engine.switch_criterion.ok ? 'ok' : 'bad'}">{engine.switch_criterion.ok ? 'met' : 'not met'}</span>
         </h3>
@@ -218,11 +214,12 @@
               <span class="mark {item.ok ? 'ok' : 'bad'}" aria-hidden="true">{item.ok ? '✓' : '✗'}</span>
               <div>
                 <strong>{label(item.item)}</strong> <span class="ba-hint">{item.ok ? 'ok' : 'failing'}</span>
-                <div class="ba-hint">{details(item)}</div>
+                <CriterionDetail {item} />
               </div>
             </li>
           {/each}
         </ul>
+        {/if}
       </div>
     {/each}
   {/if}
@@ -338,7 +335,7 @@
       <div class="ba-error">
         {switchError.message}
         {#if switchError.criteria.length}
-          <ul>{#each switchError.criteria as item}<li><strong>{label(item.item)}</strong>: {details(item)}</li>{/each}</ul>
+          <ul>{#each switchError.criteria as item}<li><strong>{label(item.item)}</strong><CriterionDetail {item} /></li>{/each}</ul>
         {:else if switchError.failing.length}
           <ul>{#each switchError.failing as name}<li>{label(name)}</li>{/each}</ul>
         {/if}
