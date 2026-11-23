@@ -358,7 +358,7 @@
 </div>
 
 {#if showAddServerModal}
-  <button type="button" class="modal-overlay" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeAddServerModal()} aria-label="Close modal">
+  <div class="modal-overlay" role="presentation" tabindex="-1" on:click={(e) => e.target === e.currentTarget && closeAddServerModal()} on:keydown={(e) => e.key === 'Escape' && closeAddServerModal()}>
     <div class="modal modal-large" role="dialog">
       <div class="modal-header">
         <h3>Add Servers to Group</h3>
@@ -411,21 +411,10 @@
         </div>
       </div>
     </div>
-  </button>
+  </div>
 {/if}
 
 <style>
-  button.modal-overlay {
-    padding: 0;
-    border: none;
-    font: inherit;
-    color: inherit;
-    cursor: default;
-    width: 100%;
-    height: 100%;
-    text-align: left;
-  }
-
   .server-group-detail-container {
     padding: 20px;
   }
