@@ -85,7 +85,9 @@ def suspended_for_nonpayment(db: Session, billing: ServiceBilling, invoice: Invo
     if billing.status != ServiceBillingStatus.SUSPENDED_NONPAYMENT:
         return False
     if billing.reseller_id is None:
-        ours, _ = suspension_is_ours(db, service.id, latest_suspension_claim(db, service.id))
+        # A claim an admin settled counts as for the lift: the service's own
+        # status decides (design 9.2), and one still in review does not.
+        ours, _ = suspension_is_ours(db, service.id, latest_suspension_claim(db, service.id, settled=True))
         return ours
     state = db.scalar(select(BillingCycle.state).where(BillingCycle.invoice_id == invoice.id))
     return state == BillingCycleState.SUSPENDED

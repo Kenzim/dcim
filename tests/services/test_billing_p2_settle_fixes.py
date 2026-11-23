@@ -183,3 +183,32 @@ def test_an_old_per_service_terminate_claim_is_still_reported(db_session, env):
     db_session.commit()
     (finding,) = billing_integrity.nonpayment_termination_unsettled(db_session, PARAMS, NOW)
     assert finding.resource_id == str(billing.service_id)
+
+
+# ---------------------------------------------------------------- M3
+
+
+def test_a_suspension_settled_failed_after_a_manual_suspend_is_still_terminated(db_session, env):
+    from app.models.billing_jobs import BillingJobActionStatus
+    from app.services.billing.jobs.actions import resolve_action
+    from app.services.billing.jobs.termination import notice_key
+
+    _, billing, lifecycle, job = env
+    lifecycle.fail = True
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=24))
+    run_job(db_session, job, make_run(SUSPEND, now=NOW - timedelta(days=18)))
+    (claim,) = db_session.query(BillingJobAction).all()
+    assert claim.status == BillingJobActionStatus.NEEDS_REVIEW
+    # Staff suspend it by hand, then settle the job's action as failed.
+    _staff_status(db_session, billing, ServiceStatus.SUSPENDED)
+    resolve_action(db_session, claim.id, to="failed", note="suspended by hand", actor_user_id=None,
+                   now=NOW - timedelta(days=17))
+    db_session.commit()
+    assert _state(db_session, billing) == (ServiceStatus.SUSPENDED, ServiceBillingStatus.SUSPENDED_NONPAYMENT)
+
+    term = NonpaymentTerminationJob()
+    assert run_job(db_session, term, make_run(TERMINATE, now=NOW)) == {
+        notice_key(billing.service_id, invoice.id): "done"
+    }
+    assert list(run_job(db_session, term, make_run(TERMINATE, now=NOW + timedelta(days=7))).values()) == ["done"]
+    assert db_session.get(Service, billing.service_id).status == ServiceStatus.TERMINATED
