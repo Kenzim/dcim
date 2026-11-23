@@ -331,10 +331,14 @@ async def run_action(
     meta = {"action": action.id, "via": actor.get("via"), "actor_type": actor.get("type"), "ok": outcome.ok}
     if outcome.refused:
         meta["refused"] = outcome.refused
+    if outcome.busy:
+        meta["busy"] = True
     audit("plugin.action", plugin_id=inst.id, actor_user_id=actor.get("user_id"), resource_type="service",
           resource_id=str(service.id), metadata=meta)
     if outcome.refused:
         raise PluginRequestError(409, outcome.refused)
+    if outcome.busy:
+        raise PluginRequestError(503, outcome.error or "The plugin is busy; try again shortly")
     if not outcome.ok:
         raise PluginRequestError(503, "The plugin could not complete this action; try again later")
     value = outcome.value
@@ -386,9 +390,11 @@ async def run_tool(
                            service_id=service_id)
     audit("plugin.mcp_tool", plugin_id=inst.id, actor_user_id=actor.get("user_id"),
           resource_type="service" if service_id else "plugin", resource_id=str(service_id or inst.id),
-          metadata={"tool": tool.id, "audience": audience, "ok": outcome.ok})
+          metadata={"tool": tool.id, "audience": audience, "ok": outcome.ok, **({"busy": True} if outcome.busy else {})})
     if outcome.refused:
         raise PluginRequestError(409, outcome.refused)
+    if outcome.busy:
+        raise PluginRequestError(503, outcome.error or "The plugin is busy; try again shortly")
     if not outcome.ok:
         raise PluginRequestError(503, "The plugin could not complete this request; try again later")
     try:

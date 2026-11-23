@@ -22,22 +22,16 @@ def plugin_invocations_finish(monkeypatch):
 
     The handler's thread commits or rolls back and closes its session on the shared test connection when
     it returns, which would otherwise roll back whatever uncommitted rows the next test on this worker has.
+    The report writer for abandoned handlers is waited for too: it writes on the same connection. Asking
+    for ``monkeypatch`` keeps the test's patches (the test database among them) in place until both are done.
     """
-    from concurrent.futures import wait
-
+    yield
     from app.plugin_host import invoke
 
-    submitted = []
-    submit = invoke._executor.submit
-
-    def recording_submit(*args, **kwargs):
-        future = submit(*args, **kwargs)
-        submitted.append(future)
-        return future
-
-    monkeypatch.setattr(invoke._executor, "submit", recording_submit)
-    yield
-    wait(submitted, timeout=10)
+    deadline = time.monotonic() + 10
+    for _ in range(2):  # the handler threads, then the report writer they woke
+        for thread in invoke._threads():
+            thread.join(max(0.0, deadline - time.monotonic()))
 
 
 @pytest.fixture
