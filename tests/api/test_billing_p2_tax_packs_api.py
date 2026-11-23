@@ -147,3 +147,15 @@ def test_pack_routes_are_admin_only(client, db_session, headers, test_user):
     assert client.post(f"{BASE}/uk_vat/preview", headers=user, json=body).status_code == 403
     assert client.post(f"{BASE}/uk_vat/apply", headers=user, json={**body, "diff_hash": "0" * 64}).status_code == 403
     assert db_session.scalar(select(func.count()).select_from(TaxRule).where(TaxRule.pack_id == "uk_vat")) == 0
+
+
+def test_the_pack_list_carries_every_version_and_what_is_applied(client, db_session, headers, uk_version):
+    packs = {pack["pack_id"]: pack for pack in client.get(BASE, headers=headers).json()}
+    assert packs["uk_vat"]["versions"] == [uk_version]
+    assert packs["uk_vat"]["applied_versions"] == [] and packs["uk_vat"]["applied_rule_count"] == 0
+    when = _later(days=30)
+    diff_hash = _preview(client, headers, uk_version, when).json()["diff_hash"]
+    assert _apply(client, headers, uk_version, when, diff_hash).status_code == 200
+    packs = {pack["pack_id"]: pack for pack in client.get(BASE, headers=headers).json()}
+    assert packs["uk_vat"]["applied_versions"] == [uk_version] and packs["uk_vat"]["applied_rule_count"] == 12
+    assert packs["eu_vat"]["applied_versions"] == []

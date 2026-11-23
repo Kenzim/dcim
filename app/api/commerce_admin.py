@@ -229,11 +229,14 @@ def _serialize_billing_account(row) -> dict:
         "currency": row.currency,
         "credit_balance_cents": row.credit_balance_cents,
         "tax_exempt": row.tax_exempt,
+        "tax_exempt_reason": row.tax_exempt_reason,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "username": row.user.username if row.user else None,
         "email": row.user.email if row.user else None,
-        "reseller_name": row.reseller.name if row.reseller else None,
+        "reseller_name": (
+            row.reseller.user.username if row.reseller is not None and row.reseller.user is not None else None
+        ),
     }
 
 
@@ -715,6 +718,10 @@ def get_billing_account(account_id: int, db: DbDep):
             "country": row.profile.country,
             "phone": row.profile.phone,
             "tax_id": row.profile.tax_id,
+            "tax_id_type": row.profile.tax_id_type,
+            "tax_id_status": row.profile.tax_id_status,
+            "tax_id_checked_at": row.profile.tax_id_checked_at,
+            "is_business": row.profile.is_business,
             "invoice_email": row.profile.invoice_email,
         }
     return payload

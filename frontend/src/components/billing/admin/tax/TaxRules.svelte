@@ -3,8 +3,10 @@
   import { Alert, Button, Modal, Spinner } from '../../../ui/index.js';
   import {
     createTaxRule,
+    getTaxRuleHistory,
     getTaxRuleUsage,
     listTaxClasses,
+    listTaxPacks,
     listTaxRules,
     supersedeTaxRule,
     updateTaxRule,
@@ -13,7 +15,12 @@
 
   const NULLABLE_TEXT = ['country', 'region', 'postcode_pattern', 'reverse_charge_zone', 'legal_note_key'];
 
+  const PAGE_SIZE = 100;
+
   let rules = [];
+  let total = 0;
+  let offset = 0;
+  let packList = [];
   let classes = [];
   let loading = true;
   let error = '';
@@ -33,29 +40,37 @@
 
   onMount(async () => {
     try {
-      classes = await listTaxClasses();
+      [classes, packList] = await Promise.all([listTaxClasses(), listTaxPacks()]);
     } catch (err) {
       error = err.message;
     }
     await load();
   });
 
-  async function load() {
+  async function load(page = offset) {
     loading = true;
     error = '';
     try {
-      rules = await listTaxRules({
+      const result = await listTaxRules({
         country: filters.country.trim(),
         jurisdiction: filters.jurisdiction.trim(),
+        tax_class_id: filters.classId,
+        pack_id: filters.pack,
         current_only: filters.currentOnly ? 'true' : '',
-        limit: 500,
+        limit: PAGE_SIZE,
+        offset: page,
       });
+      rules = result.items;
+      total = result.total;
+      offset = page;
     } catch (err) {
       error = err.message;
     } finally {
       loading = false;
     }
   }
+
+  const filtersChanged = () => load(0);
 
   function blankForm() {
     return {
@@ -201,17 +216,7 @@
   async function openHistory(row) {
     history = { row, rows: [], usage: {}, loading: true, error: '' };
     try {
-      const all = await listTaxRules({ limit: 500 });
-      const byId = new Map(all.map((item) => [item.id, item]));
-      let head = byId.get(row.id) || row;
-      while (head.supersedes_id && byId.has(head.supersedes_id)) head = byId.get(head.supersedes_id);
-      const chain = [head];
-      let next = all.find((item) => item.supersedes_id === head.id);
-      while (next) {
-        chain.push(next);
-        const current = next;
-        next = all.find((item) => item.supersedes_id === current.id);
-      }
+      const chain = await getTaxRuleHistory(row.id);
       const usage = {};
       await Promise.all(chain.map(async (item) => {
         usage[item.id] = (await getTaxRuleUsage(item.id)).invoice_line_taxes;
@@ -239,38 +244,37 @@
     return label(row.source);
   }
 
-  $: packs = [...new Set(rules.map((r) => r.pack_id).filter(Boolean))].sort();
-  $: shown = rules.filter((r) => (!filters.classId || String(r.tax_class_id) === filters.classId)
-    && (!filters.pack || (filters.pack === '_none' ? !r.pack_id : r.pack_id === filters.pack)));
+  $: packs = packList.map((p) => p.pack_id);
+  $: shown = rules;
+  $: lastShown = Math.min(offset + rules.length, total);
 </script>
 
 <div class="ba-panel">
   <div class="ba-inline" style="justify-content: space-between">
-    <h3 style="margin:0">Tax rules <small>{shown.length} shown</small></h3>
+    <h3 style="margin:0">Tax rules <small>{total} in all</small></h3>
     <Button on:click={openCreate}>New rule</Button>
   </div>
   <p class="ba-muted">A rule that has started is never edited: supersede it to end it at a chosen time and start a changed copy, so published invoices keep the rule they used.</p>
   {#if error}<Alert type="danger">{error}</Alert>{/if}
   {#if success}<Alert type="success">{success}</Alert>{/if}
   <div class="ba-toolbar">
-    <label>Country<input bind:value={filters.country} maxlength="2" placeholder="e.g. DE" style="width:80px" on:change={load} /></label>
-    <label>Jurisdiction<input bind:value={filters.jurisdiction} maxlength="16" placeholder="e.g. EU_OSS" style="width:120px" on:change={load} /></label>
+    <label>Country<input bind:value={filters.country} maxlength="2" placeholder="e.g. DE" style="width:80px" on:change={filtersChanged} /></label>
+    <label>Jurisdiction<input bind:value={filters.jurisdiction} maxlength="16" placeholder="e.g. EU_OSS" style="width:120px" on:change={filtersChanged} /></label>
     <label>Class
-      <select bind:value={filters.classId}>
+      <select bind:value={filters.classId} on:change={filtersChanged}>
         <option value="">All</option>
         {#each classes as c (c.id)}<option value={String(c.id)}>{c.code}</option>{/each}
       </select>
     </label>
     <label>Pack
-      <select bind:value={filters.pack}>
+      <select bind:value={filters.pack} on:change={filtersChanged}>
         <option value="">All</option>
         <option value="_none">Not from a pack</option>
         {#each packs as p}<option value={p}>{p}</option>{/each}
       </select>
     </label>
-    <label class="ba-inline" style="gap:8px;font-weight:500"><input type="checkbox" bind:checked={filters.currentOnly} on:change={load} /> In effect now</label>
+    <label class="ba-inline" style="gap:8px;font-weight:500"><input type="checkbox" bind:checked={filters.currentOnly} on:change={filtersChanged} /> In effect now</label>
   </div>
-  {#if rules.length >= 500}<p class="ba-hint">Only the first 500 rules are listed; narrow the filters.</p>{/if}
   {#if loading}
     <div class="ba-state"><Spinner /></div>
   {:else if shown.length === 0}
@@ -305,6 +309,11 @@
           {/each}
         </tbody>
       </table>
+    </div>
+    <div class="ba-inline" style="margin-top:8px">
+      <Button variant="secondary" size="small" disabled={offset === 0 || loading} on:click={() => load(Math.max(0, offset - PAGE_SIZE))}>Previous</Button>
+      <span class="ba-hint">Rules {offset + 1} to {lastShown} of {total}, newest first</span>
+      <Button variant="secondary" size="small" disabled={offset + PAGE_SIZE >= total || loading} on:click={() => load(offset + PAGE_SIZE)}>Next</Button>
     </div>
   {/if}
 </div>

@@ -91,6 +91,7 @@
       step = 'checkout';
     } catch (err) {
       error = err.message || 'Quote failed';
+      refusal = taxRefusalAction(err);
     } finally {
       working = false;
     }
@@ -158,7 +159,7 @@
       <p>Your order was not placed and you have not been charged. You can try again now.</p>
       <Button variant="secondary" on:click={placeOrder} disabled={working}>{working ? 'Trying again…' : 'Try again'}</Button>
     </div>
-  {:else if step === 'checkout' && refusal === 'later'}
+  {:else if refusal === 'later'}
     <div class="requote"><p>Your order was not placed and you have not been charged. Please try again later.</p></div>
   {/if}
   {#if success}<Alert type="success">{success}</Alert>{/if}
@@ -230,7 +231,7 @@
     <div class="panel">
       <h2>Review & checkout</h2>
       <ul class="lines">
-        {#each quote.lines || [] as line}
+        {#each (quote.lines || []).filter((line) => line.kind !== 'tax') as line}
           <li><span>{line.description}</span><strong>{formatMoney(line.total_cents, quote.currency)}</strong></li>
         {/each}
       </ul>

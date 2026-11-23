@@ -4,7 +4,7 @@
   import { formatMoney } from '../../../../lib/resellerMoney.js';
   import { parseCents } from '../../../../lib/billingAdminApi.js';
   import { listTaxClasses, listTaxLegalNotes, previewTax } from '../../../../lib/billingTaxAdminApi.js';
-  import { TAX_ID_TONE, fromInput, label, show } from './taxUi.js';
+  import { TAX_ID_TONE, fromInput, label } from './taxUi.js';
 
   const STATUSES = ['unchecked', 'valid', 'invalid', 'unavailable', 'format_invalid'];
 
@@ -102,6 +102,20 @@
     } finally {
       running = false;
     }
+  }
+
+  // Evidence values in words: lists joined, empty ones as "none", yes or no for flags, codes without underscores.
+  function evidenceText(value) {
+    if (value === null || value === undefined || value === '') return '-';
+    if (typeof value === 'boolean') return value ? 'yes' : 'no';
+    if (Array.isArray(value)) return value.length ? value.map(evidenceText).join(', ') : 'none';
+    if (typeof value === 'object') {
+      const entries = Object.entries(value);
+      return entries.length ? entries.map(([k, v]) => `${label(k)} ${evidenceText(v)}`).join(', ') : 'none';
+    }
+    const text = String(value);
+    if (/^rule:\d+$/.test(text)) return text.replace(':', ' ');
+    return /^[a-z_]+$/.test(text) ? text.replaceAll('_', ' ') : text;
   }
 
   function noteText(key) {
@@ -267,7 +281,7 @@
       <dl class="ba-grid">
         {#each Object.entries(result.evidence) as [key, value]}
           <div><dt>{label(key)}</dt><dd style="font-weight:500; word-break:break-word">
-            {#if key === 'tax_id_status'}<span class="ba-pill {TAX_ID_TONE[value] ?? ''}">{label(value)}</span>{:else}{show(value)}{/if}
+            {#if key === 'tax_id_status'}<span class="ba-pill {TAX_ID_TONE[value] ?? ''}">{label(value)}</span>{:else}{evidenceText(value)}{/if}
           </dd></div>
         {/each}
       </dl>

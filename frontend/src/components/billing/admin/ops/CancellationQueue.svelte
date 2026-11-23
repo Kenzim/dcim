@@ -191,9 +191,9 @@
             {#each rows as row (row.id)}
               <tr>
                 <td>#{row.id}<div class="ba-sub">{when(row.created_at)}</div></td>
-                <td>{row.service_id}</td>
+                <td><a href="/admin/services/{row.service_id}">{row.service_label || `Service #${row.service_id}`}</a></td>
                 <td>
-                  {#if row.reseller_id}Reseller {row.reseller_id}{:else if row.billing_account_id}Account {row.billing_account_id}{:else}-{/if}
+                  {#if row.reseller_id}{row.reseller_name || `Reseller #${row.reseller_id}`}<div class="ba-sub">reseller</div>{:else if row.billing_account_id}{row.account_name || `Account #${row.billing_account_id}`}<div class="ba-sub">account #{row.billing_account_id}</div>{:else}-{/if}
                 </td>
                 <td>{row.type === 'immediate' ? 'Immediate' : 'End of period'}</td>
                 <td>
@@ -284,7 +284,7 @@
 {#if withdrawing}
   <Modal title="Withdraw cancellation request #{withdrawing.id}" onClose={() => (withdrawing = null)}>
     <p>
-      Withdraw the request to cancel service {withdrawing.service_id}? The service stays active and renews as normal.
+      Withdraw the request to cancel {withdrawing.service_label || `service ${withdrawing.service_id}`}? The service stays active and renews as normal.
       Withdrawing does not restore invoices the request already cancelled.
     </p>
     {#if withdrawError}<div class="ba-error">{withdrawError}</div>{/if}

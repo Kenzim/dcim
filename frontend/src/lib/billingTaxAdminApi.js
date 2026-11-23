@@ -6,7 +6,7 @@ import { describeDetail } from './billingAdminApi.js';
 const API_BASE = '/api';
 const TAX = '/admin/billing/tax';
 
-async function request(path, { method = 'GET', body, errorMessage } = {}) {
+async function request(path, { method = 'GET', body, errorMessage, withTotal = false } = {}) {
   const headers = new Headers();
   if (body !== undefined) headers.set('Content-Type', 'application/json');
   const response = await fetch(`${API_BASE}${path}`, {
@@ -25,7 +25,10 @@ async function request(path, { method = 'GET', body, errorMessage } = {}) {
     throw error;
   }
   if (response.status === 204) return null;
-  return response.json();
+  const data = await response.json();
+  if (!withTotal) return data;
+  const total = Number(response.headers.get('X-Total-Count'));
+  return { items: data, total: response.headers.has('X-Total-Count') && Number.isFinite(total) ? total : data.length };
 }
 
 function query(filters = {}) {
@@ -49,8 +52,12 @@ export const deleteTaxClass = (id) =>
 
 // --- Rules ---
 
+// One page of rules, newest first: { items, total } with the total across all pages.
 export const listTaxRules = (filters = {}) =>
-  request(`${TAX}/rules${query(filters)}`, { errorMessage: 'Failed to load tax rules' });
+  request(`${TAX}/rules${query(filters)}`, { errorMessage: 'Failed to load tax rules', withTotal: true });
+// The chain of rules a rule belongs to, oldest first.
+export const getTaxRuleHistory = (id) =>
+  request(`${TAX}/rules/${id}/history`, { errorMessage: 'Failed to load the rule history' });
 export const getTaxRule = (id) => request(`${TAX}/rules/${id}`, { errorMessage: 'Failed to load the tax rule' });
 export const createTaxRule = (body) =>
   request(`${TAX}/rules`, { method: 'POST', body, errorMessage: 'Failed to create the tax rule' });

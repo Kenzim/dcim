@@ -12,17 +12,17 @@
   let engine = null;
   let settings = {};
   let registrations = [];
-  let currentRules = [];
+  let currentRuleCount = null;
   let loading = true;
   let errors = [];
 
   onMount(async () => {
-    const results = await Promise.allSettled([getEngines(), getTaxSettings(), listTaxRegistrations(), listTaxRules({ current_only: 'true', limit: 500 })]);
+    const results = await Promise.allSettled([getEngines(), getTaxSettings(), listTaxRegistrations(), listTaxRules({ current_only: 'true', limit: 1 })]);
     const [engines, taxSettings, regs, rules] = results;
     if (engines.status === 'fulfilled') engine = engines.value.engines.find((e) => e.engine === 'tax') || null;
     if (taxSettings.status === 'fulfilled') settings = taxSettings.value;
     if (regs.status === 'fulfilled') registrations = regs.value;
-    if (rules.status === 'fulfilled') currentRules = rules.value;
+    if (rules.status === 'fulfilled') currentRuleCount = rules.value.total;
     errors = results.filter((r) => r.status === 'rejected').map((r) => r.reason.message);
     loading = false;
   });
@@ -47,7 +47,7 @@
       <div><dt>Mode</dt><dd>{#if engine}<span class="ba-pill {MODE_TONE[engine.mode]}">{engine.mode}</span>{:else}-{/if}</dd></div>
       <div><dt>Rules and registrations</dt><dd>{#if settings.billing_tax_enabled === undefined}-{:else}<span class="ba-pill {settings.billing_tax_enabled ? 'ok' : 'warn'}">{settings.billing_tax_enabled ? 'enabled' : 'not enabled'}</span>{/if}</dd></div>
       <div><dt>Seller country</dt><dd>{settings.billing_tax_seller_country || 'not set'}</dd></div>
-      <div><dt>Rules in effect now</dt><dd>{currentRules.length}</dd></div>
+      <div><dt>Rules in effect now</dt><dd>{currentRuleCount ?? '-'}</dd></div>
       <div><dt>Active registrations</dt><dd>{activeRegs.length} of {registrations.length}</dd></div>
       <div><dt>Open mismatches</dt><dd>{engine ? openCount : '-'}</dd></div>
     </dl>

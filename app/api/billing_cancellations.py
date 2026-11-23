@@ -16,7 +16,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from sqlalchemy import exists, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.reseller_panel import ResellerDep
 from app.core.auth import require_admin
@@ -35,7 +35,8 @@ from app.models.billing_jobs import (
     UnpaidInvoiceAction,
 )
 from app.models.commerce_account import BillingAccount
-from app.models.reseller import ResellerProductAccess, ServiceBilling
+from app.models.reseller import Reseller, ResellerProductAccess, ServiceBilling
+from app.models.service import Service
 from app.services.audit_service import AuditService
 from app.services.billing.cancellations import (
     CancellationError,
@@ -79,14 +80,46 @@ def _http(exc: CancellationError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=str(exc))
 
 
-def _list(db: Session, *conditions, status: Optional[CancellationStatus], limit: int, offset: int) -> list[dict]:
+def _list(
+    db: Session, *conditions, status: Optional[CancellationStatus], limit: int, offset: int, names: bool = False
+) -> list[dict]:
+    """One page of requests, each with the service's name (``service_label``).
+
+    ``names`` (the admin queue) adds ``account_name`` and ``reseller_name`` too.
+    """
     statement = select(CancellationRequest).where(*conditions)
     if status is not None:
         statement = statement.where(CancellationRequest.status == status)
-    rows = db.execute(
-        statement.order_by(CancellationRequest.id.desc()).limit(limit).offset(offset)
-    ).scalars()
-    return [serialise_request(row) for row in rows]
+    rows = list(db.execute(statement.order_by(CancellationRequest.id.desc()).limit(limit).offset(offset)).scalars())
+    payloads = [serialise_request(row) for row in rows]
+    service_names = dict(
+        db.execute(select(Service.id, Service.name).where(Service.id.in_({row.service_id for row in rows}))).all()
+    )
+    accounts: dict[int, BillingAccount] = {}
+    resellers: dict[int, Reseller] = {}
+    if names:
+        account_ids = {row.billing_account_id for row in rows if row.billing_account_id is not None}
+        reseller_ids = {row.reseller_id for row in rows if row.reseller_id is not None}
+        accounts = {
+            account.id: account
+            for account in db.scalars(
+                select(BillingAccount).options(joinedload(BillingAccount.user)).where(BillingAccount.id.in_(account_ids))
+            ).unique()
+        }
+        resellers = {
+            reseller.id: reseller
+            for reseller in db.scalars(
+                select(Reseller).options(joinedload(Reseller.user)).where(Reseller.id.in_(reseller_ids))
+            ).unique()
+        }
+    for row, payload in zip(rows, payloads):
+        payload["service_label"] = service_names.get(row.service_id)
+        if names:
+            account = accounts.get(row.billing_account_id)
+            reseller = resellers.get(row.reseller_id)
+            payload["account_name"] = account.user.username if account is not None and account.user else None
+            payload["reseller_name"] = reseller.user.username if reseller is not None and reseller.user else None
+    return payloads
 
 
 def _own_request(db: Session, request_id: int, *condition) -> CancellationRequest:
@@ -244,7 +277,7 @@ def admin_list_cancellation_requests(
         conditions.append(CancellationRequest.status == status)
     total = db.scalar(select(func.count(CancellationRequest.id)).where(*conditions))
     response.headers["X-Total-Count"] = str(int(total or 0))
-    return _list(db, *conditions, status=status, limit=limit, offset=offset)
+    return _list(db, *conditions, status=status, limit=limit, offset=offset, names=True)
 
 
 @admin_router.post("/cancellation-requests")

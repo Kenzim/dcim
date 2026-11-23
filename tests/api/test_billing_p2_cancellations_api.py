@@ -247,3 +247,28 @@ def test_admin_queue_reports_its_total_in_a_header_and_keeps_the_list_body(clien
         f"/api/admin/billing/cancellation-requests?billing_account_id=999999", headers=admin_headers
     )
     assert one.json() == [] and one.headers["X-Total-Count"] == "0"
+
+
+def test_cancellation_lists_carry_the_service_label_and_the_admin_queue_the_names(client, db_session, admin_headers):
+    owner = _user(db_session, "p2l-label-client")
+    client_service, _ = _service(db_session, owner=owner)
+    reseller = Reseller(user=_user(db_session, "p2l-label-rsl", is_reseller=True))
+    db_session.add(reseller)
+    db_session.commit()
+    reseller_service, _ = _service(db_session, reseller=reseller)
+    for service in (client_service, reseller_service):
+        service.name = f"label-{service.id}"
+    db_session.commit()
+    for body in ({"service_id": client_service.id}, {"service_id": reseller_service.id}):
+        assert client.post("/api/admin/billing/cancellation-requests", headers=admin_headers, json=body).status_code == 200
+
+    queue = {row["service_id"]: row for row in client.get("/api/admin/billing/cancellation-requests", headers=admin_headers).json()}
+    assert queue[client_service.id]["service_label"] == f"label-{client_service.id}"
+    assert queue[client_service.id]["account_name"] == "p2l-label-client" and queue[client_service.id]["reseller_name"] is None
+    assert queue[reseller_service.id]["reseller_name"] == "p2l-label-rsl" and queue[reseller_service.id]["account_name"] is None
+
+    mine = client.get("/api/reseller-panel/cancellation-requests", headers=_bearer(client, "p2l-label-rsl")).json()
+    assert [(row["service_id"], row["service_label"]) for row in mine] == [(reseller_service.id, f"label-{reseller_service.id}")]
+    assert "account_name" not in mine[0] and "reseller_name" not in mine[0]
+    theirs = client.get("/api/client/commerce/cancellation-requests", headers=_bearer(client, "p2l-label-client")).json()
+    assert [row["service_label"] for row in theirs] == [f"label-{client_service.id}"]
