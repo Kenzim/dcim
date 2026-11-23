@@ -32,6 +32,7 @@ from app.models.vm_firewall import (
     ServiceFirewall,
 )
 from app.services.vm_firewall import presets as fw_presets
+from app.services.vm_firewall import reconcile
 from app.services.vm_firewall import service as svc
 from app.services.vm_firewall.apply import Readiness, readiness
 from app.services.vm_firewall.errors import (
@@ -408,10 +409,12 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
     cluster_id = ctx.vm.proxmox_cluster_id if ctx.vm is not None else None
     cluster_ready = _cluster_ready(ctx.location_settings, cluster_id)
     reasons = list(result.reasons)
+    held = [reason for reason in reconcile.held_reasons(row) if reason not in reasons]
+    reasons.extend(held)
     if ctx.location_settings is not None and ctx.location_settings.enabled and not cluster_ready:
         reasons.append("cluster_not_ready")
     # A location switched on in staging (readiness not passed) stays hidden from clients.
-    available = result.eligible and (cluster_ready or audience == STAFF)
+    available = result.eligible and not held and (cluster_ready or audience == STAFF)
     reasons.extend(rendered.reasons)
     state = _value(row.state)
     if not available:

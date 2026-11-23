@@ -367,6 +367,22 @@ def test_apply_refuses_a_vm_its_live_config_makes_ineligible(
     assert fake.writes == []
 
 
+def test_view_of_a_vm_the_worker_holds_as_ineligible_shows_why(client, db_session, world, admin):
+    """The worker holds a managed VM whose live config is ineligible (here a trunk NIC) as
+    ``unmanaged``; the view must say it is not offered and why, not that staff switched it off."""
+    from app.services.vm_firewall import service as fw
+
+    vm = _vm(world, db_session)
+    row = fw.get_or_create(db_session, vm.id)
+    row.state = "unmanaged"
+    row.last_error = "not eligible: nic_trunk, infrastructure_bridge"
+    db_session.commit()
+    body = client.get(ADMIN + f"/services/{vm.id}", headers=admin).json()
+    assert body["available"] is False
+    assert {"nic_trunk", "infrastructure_bridge"} <= set(body["reasons"])
+    assert body["message"] == "The firewall is not available for this server."
+
+
 def test_apply_reports_an_unreachable_proxmox(client, monkeypatch, db_session, world, admin):
     from app.api import vm_firewall_common
 

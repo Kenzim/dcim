@@ -293,11 +293,23 @@ def _hard_reasons(reasons: list[str]) -> list[str]:
     return [reason for reason in reasons if reason not in RENDERED_REASONS]
 
 
+_HELD_PREFIX = "not eligible: "
+
+
+def held_reasons(row: ServiceFirewall) -> list[str]:
+    """The reasons the worker found when it last held this VM as ineligible (``_hold_ineligible``),
+    which can come from its live config and so are not in the stored eligibility; empty otherwise."""
+    state = getattr(row.state, "value", row.state)
+    if state != FirewallState.UNMANAGED.value or not (row.last_error or "").startswith(_HELD_PREFIX):
+        return []
+    return [reason.strip() for reason in row.last_error[len(_HELD_PREFIX):].split(",") if reason.strip()]
+
+
 def _hold_ineligible(db: Session, row: ServiceFirewall, reasons: list[str], now: datetime) -> None:
     """An ineligible VM (infrastructure, no VM record, ...) is never written; the queue looks at it
     again after one reconcile interval, the sweep each interval."""
     row.state = FirewallState.UNMANAGED
-    row.last_error = ("not eligible: " + ", ".join(reasons))[:2000]
+    row.last_error = (_HELD_PREFIX + ", ".join(reasons))[:2000]
     row.last_checked_at = now
     row.next_attempt_at = now + timedelta(seconds=reconcile_interval(db))
     db.flush()
