@@ -37,6 +37,7 @@ from app.services.vm_firewall.proxmox_fw import (
     ProxmoxApiError,
     VmFirewallClient,
     VmMissing,
+    net_firewall_flag,
 )
 from app.services.vm_firewall.render import as_utc, render
 
@@ -342,6 +343,57 @@ async def apply_one(db: Session, service_id: int, access: ProxmoxAccess, *, now:
         return result
     finally:
         db.commit()
+
+
+class ProvisionFirewallError(RuntimeError):
+    pass
+
+
+def firewall_configured(db: Session, service_id: int) -> bool:
+    """Whether ``ApplyFirewallStep`` has work: the VM has a firewall row, or its location has
+    firewall settings (on or off). A location staff never configured is left as it is today."""
+    return db.get(ServiceFirewall, service_id) is not None or _location(db, service_id) is not None
+
+
+async def apply_for_provision(
+    db: Session, service_id: int, client: VmFirewallClient, *, owner: str, now: Optional[datetime] = None
+) -> Optional[ApplyResult]:
+    """The firewall work of ``ApplyFirewallStep`` (section 6.5), run while the VM is off: create the
+    row (SMTP block for new VMs), set net0's firewall flag when the location asks for it, and write
+    the rendered firewall, ``enable: 0`` included, so a ``.fw`` the clone inherited is replaced.
+    Ineligible VMs are left alone (returns None). Raises ``ProvisionFirewallError`` when the write
+    fails, so the deployment step is retried. Commits."""
+    now = now or utcnow()
+    fw.init_for_new_vm(db, service_id, fw.Actor.system())
+    db.commit()
+    if not claim(db, service_id, owner=owner, now=now):
+        raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
+    try:
+        row = db.get(ServiceFirewall, service_id)
+        if not row.managed or row.excluded:
+            return None
+        try:
+            config = await client.get_config()
+            hard = _hard_reasons(fw.eligibility(db, service_id, vm_config=config).reasons)
+            if hard:
+                _hold_ineligible(db, row, hard, now)
+                return None
+            location = _location(db, service_id)
+            if location is not None and location.enabled and location.nic_flag_on_provision:
+                if not net_firewall_flag(config.get("net0")):
+                    await client.set_net0_firewall_flag(True)
+                    config = await client.get_config()
+        except Exception as exc:  # Proxmox errors, transport failures
+            failure = record_failure(db, row, exc, now=now)
+            raise ProvisionFirewallError(f"firewall apply failed: {failure.error or failure.state}") from exc
+        result = await apply(db, service_id, client, now=now, vm_config=config)
+        _after_apply(db, row, result, now)
+        if not result.ok:
+            raise ProvisionFirewallError(f"firewall apply failed: {result.error or result.state}")
+        return result
+    finally:
+        db.commit()
+        unclaim(db, service_id, owner=owner)
 
 
 # Apply queue (section 6.2, duty 1)

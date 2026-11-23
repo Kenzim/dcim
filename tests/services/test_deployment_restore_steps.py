@@ -82,6 +82,7 @@ class RestoreCtx:
         self._plugin = plugin
         self.db = db
         self.service = SimpleNamespace(
+            id=1,
             name="restore-vm",
             config=config if config is not None else {},
             vm=SimpleNamespace(guest_state=None, guest_last_error="old"),
@@ -237,9 +238,10 @@ def test_set_guest_state_after_restore_and_finalize():
     ), patch(
         "app.services.vm_backup_service.lookup_backup_notes",
         new=AsyncMock(return_value="rf1 notes"),
-    ):
+    ), patch("app.services.vm_firewall.service.bump_revisions") as bump:
         _run(FinalizeBackupRestoreStep().execute(ctx))
         apply_meta.assert_called_once()
+        bump.assert_called_once()
     assert ctx.service.config["vm_restore"]["status"] == "success"
     assert ctx.service.vm.guest_last_error is None
 

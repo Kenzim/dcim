@@ -167,6 +167,7 @@ def test_cloudinit_strategy_step_order():
         "clone_from_template",
         "configure_sizing",
         "configure_cloudinit_network",
+        "apply_firewall",
         "power_on",
         "stamp_vm_identity",
     ]
@@ -176,6 +177,7 @@ def test_guest_agent_strategy_step_order():
     assert GuestAgentStrategy().step_names() == [
         "clone_from_template",
         "configure_sizing",
+        "apply_firewall",
         "power_on",
         "wait_for_guest_agent",
         "configure_via_guest_agent",
@@ -187,6 +189,7 @@ def test_windows_guest_agent_strategy_step_order():
     assert WindowsGuestAgentStrategy().step_names() == [
         "clone_from_template",
         "configure_sizing",
+        "apply_firewall",
         "power_on",
         "wait_for_guest_agent",
         "configure_windows_guest",
