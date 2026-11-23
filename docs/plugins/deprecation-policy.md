@@ -8,14 +8,31 @@ This is the promise Rackflow makes to plugin authors about changing the plugin A
 - A plugin states which versions it was written for in `plugin.json`, in `rackflow_api`: a comma-separated list of comparisons joined by "and", such as `>=1.0,<2.0`. The operators are `>=`, `>`, `<=`, `<` and `==`; the version numbers have one to three parts, such as `1`, `1.0` or `1.2.3`. Write the lower bound as the oldest API version that has everything the plugin uses, and the upper bound as the next major version. A manifest without an upper bound claims to work on every future major version, which no author can promise. The test kit warns about it.
 - The plugin's own `version` is separate. It is `MAJOR.MINOR.PATCH`, set by the author, and decides what an upgrade may do: Rackflow refuses downgrades, and asks the admin to accept again any permission an upgrade adds.
 
+## `effective_api`: what version a plugin runs as
+
+A Rackflow release can run more than one plugin API version at once. The list is `SUPPORTED_API_VERSIONS` in `app/plugin_host/catalogue.py`; in this release it is 1.0 and 1.1, and `API_VERSION` (1.1) is the newest. A plugin's `rackflow_api` range decides which of them it is run as:
+
+- The **`effective_api`** of a plugin is the newest supported version that its range allows, or none when the range allows none of them.
+- `>=1.0,<2.0` and `>=1.1,<2.0` both give 1.1. `==1.0` and `<1.1` give 1.0. `==1.1` gives 1.1. `>=2.0` gives none, so the plugin is incompatible.
+- An installation records its `effective_api` at install and again at upgrade, and the admin plugin API returns it. The manifest holds the range; the installation holds the result.
+
+What the version changes today is small, on purpose, because a minor version only adds:
+
+- `provides` is refused when the manifest's `effective_api` is 1.0, with the message "provides needs plugin API 1.1; this manifest allows only 1.0". This is the only feature gated by the version.
+- Nothing else depends on it. A plugin whose range allows only 1.0 receives the same events (the four added in 1.1 included, when it subscribes and has the permission), the same SDK and the same limits. `ctx.api_version` and the `version` of every event envelope are the running Rackflow's `API_VERSION`, not the plugin's `effective_api`.
+
+So the way to say "I was written for 1.0 and want nothing new" is the range `>=1.0,<2.0`: you get 1.1 and lose nothing. Use `>=1.1,<2.0` once you use something that only 1.1 has.
+
 ## Where the version is checked
 
-| When | What Rackflow does if the range does not include the running API version |
+The range is checked against the supported versions (not against `API_VERSION` alone) in these places. All of them read the package through the same code, `read_package` in `app/plugin_host/loader.py`, which calls `Manifest.compatible()`, that is, whether `effective_api` is not none. The `provides` rule is checked earlier, when the manifest itself is validated (`app/plugin_host/manifest.py`).
+
+| When | What Rackflow does if the range allows none of the supported versions |
 |---|---|
-| The admin lists available plugins | The package is shown as invalid with the message "needs Rackflow plugin API ...". |
+| The admin lists available plugins | The package is shown as invalid with the message "needs Rackflow plugin API ...; this Rackflow provides 1.0, 1.1". |
 | Install and upgrade | Refused with the same message. |
 | A plugin's files are loaded (after a restart or an upgrade of Rackflow) | The plugin cannot be loaded; it is not run and the admin sees the same message. |
-| In the author's tests | `check_package(path).supports("2.0")` tells the author whether the range admits a version, and `assert_valid_package` fails on a range that excludes the current version. |
+| In the author's tests | `check_package(path).supports("2.0")` tells the author whether the range admits a version, and `assert_valid_package` fails on a range that allows none of the supported versions. A range that allows only the older 1.0 passes, as it does at install. |
 
 The design document also describes an admin warning for plugins whose range excludes the next major version before it ships. That warning is not built yet; until it is, authors learn about a major version from the changelog (below) and the notice period in this policy.
 
@@ -40,9 +57,9 @@ These are not breaking, and may arrive in a minor version:
 - more generous limits, faster or more reliable delivery, clearer messages and better admin screens;
 - bug fixes that make the host do what the documentation already said.
 
-Plugin kinds (the `provides` section of the design document) will arrive as an additive minor version: a new optional manifest key, new permissions and new registration decorators. They change nothing for a plugin that does not use them.
+Plugin kinds (the `provides` section of the design document) arrived in API 1.1 in exactly this way: a new optional manifest key, new permissions, new events and a new registration decorator. They change nothing for a plugin that does not use them. The value of `ctx.api_version` and of the event envelope's `version` follows the running Rackflow (it became `1.1`), which is why plugins must not depend on its exact value.
 
-The reserved key `tables` is refused in API 1.0. Accepting it later is an addition.
+The reserved key `tables` is refused in API 1.0 and 1.1. Accepting it later is an addition.
 
 ## How the promise is enforced
 
@@ -66,7 +83,7 @@ Security fixes are the exception. When an item cannot be kept without exposing a
 - **The changelog.** [`CHANGELOG.md`](CHANGELOG.md) lists, for each API version, what was added, deprecated, removed and fixed. Read it when you upgrade Rackflow or when you raise `rackflow_api`.
 - **The test kit.** `check_package(path)` and `assert_valid_package(path)` (see [testing](testing.md)) add a warning for every deprecated permission, event, hook, manifest key or SDK member that the package uses, with the version that removes it and what to use instead. Run them in the plugin's test suite; treat a warning as a to-do.
 - **The reference.** The "Deprecated items" section of the [API reference](api-reference.md) lists every deprecated item. It is generated from the same registry, so it cannot disagree with the warnings.
-- **The admin.** The plugin page shows the plugin API version and flags a plugin that is invalid for it. There is no runtime warning to admins for a deprecated item in API 1.0.
+- **The admin.** The plugin page shows the plugin API version and flags a plugin that is invalid for it. There is no runtime warning to admins for a deprecated item in API 1.0 or 1.1; nothing is deprecated in 1.1.
 
 ## What authors should do
 
