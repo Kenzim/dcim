@@ -404,6 +404,76 @@ async def test_bridge_bump_during_an_apply_does_not_swallow_a_concurrent_save(wo
     assert sweep.in_sync == [vm.id] and sweep.reported == [] and sweep.repaired == []
 
 
+def _two_saves_then_cancel(world, vm_id, saved):
+    """The first Proxmox write: two client saves commit from another session, then the applier is
+    cancelled (worker stop or step timeout) while the write is in flight."""
+    def hook(_fake):
+        saved.append(_client_saves(world, vm_id, "8443"))
+        saved.append(_client_saves(world, vm_id, "8444"))
+        raise asyncio.CancelledError()
+
+    return hook
+
+
+@pytest.mark.asyncio
+async def test_cancelled_queue_apply_records_nothing_and_releases_its_claim(world, fake, access):
+    """A cancelled apply must not commit its unsettled bridge bump: that would move the revision
+    back below the saves made during the apply and reuse a save's number."""
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    _client_saves(world, vm.id, "80")
+    world.db.expire_all()
+    before = world.db.get(ServiceFirewall, vm.id)
+    applied_before, bridge_before = before.applied_revision, before.net0_bridge
+    fake_vm.config["net0"] = MOVED_NET0
+    saved = []
+    fake.on_next_write(_two_saves_then_cancel(world, vm.id, saved))
+
+    with pytest.raises(asyncio.CancelledError):
+        await _queue(world, access)
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.revision == saved[-1]
+    assert row.applied_revision == applied_before and row.net0_bridge == bridge_before
+    assert row.claimed_by is None and row.claimed_until is None
+
+    again = await _queue(world, access, now=T0 + timedelta(seconds=5))
+    assert again.applied == [vm.id]
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert {"80", "8443", "8444"} <= {rule.get("dport") for rule in fake_vm.rules}
+    assert row.net0_bridge == "vmbr7" and row.revision == saved[-1] + 1 == row.applied_revision
+
+
+@pytest.mark.asyncio
+async def test_cancelled_deployment_step_records_nothing_and_releases_its_claim(world, fake):
+    world.enable_location(nic_flag_on_provision=False)
+    vm = world.vm()
+    fake.add_vm(vm.vm.proxmox_vmid, net0=MOVED_NET0)
+    fw.init_for_new_vm(world.db, vm.id, fw.Actor.system())
+    world.db.commit()
+    before = world.db.get(ServiceFirewall, vm.id)
+    applied_before, bridge_before = before.applied_revision, before.net0_bridge
+    saved = []
+    fake.on_next_write(_two_saves_then_cancel(world, vm.id, saved))
+
+    with pytest.raises(asyncio.CancelledError):
+        await reconcile.apply_for_provision(world.db, vm.id, fake.client(vm.vm.proxmox_vmid),
+                                            owner="deployment-job-1-a", now=T0)
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.revision == saved[-1]
+    assert row.applied_revision == applied_before and row.net0_bridge == bridge_before
+    assert row.claimed_by is None and row.claimed_until is None
+
+    result = await reconcile.apply_for_provision(world.db, vm.id, fake.client(vm.vm.proxmox_vmid),
+                                                 owner="deployment-job-1-b", now=T0 + timedelta(seconds=30))
+    assert result is not None and result.ok and result.revision == saved[-1] + 1
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.net0_bridge == "vmbr7" and row.applied_revision == row.revision == saved[-1] + 1
+
+
 @pytest.mark.asyncio
 async def test_sweep_that_lost_its_claim_never_moves_the_revision_backwards(world):
     """Sweep S loads revision r and reads a moved bridge; while it reads, the client saves (r+1)

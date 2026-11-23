@@ -451,6 +451,11 @@ async def apply_one(
             return None
         _after_apply(db, row, result, now)
         return result
+    except BaseException:
+        # A crash or cancellation records nothing: what the apply observed (a bridge bump) was
+        # never settled under the claim's row lock (``Claim.confirm``).
+        db.rollback()
+        raise
     finally:
         db.commit()
 
@@ -517,6 +522,12 @@ async def apply_for_provision(
         if not result.ok:
             raise ProvisionFirewallError(f"firewall apply failed: {result.error or result.state}")
         return result
+    except BaseException as exc:
+        # ``ProvisionFirewallError`` follows an outcome recorded under the claim (or a lost claim,
+        # already discarded); anything else is a crash or cancellation and records nothing.
+        if not isinstance(exc, ProvisionFirewallError):
+            db.rollback()
+        raise
     finally:
         db.commit()
         unclaim(db, service_id, owner=owner)
