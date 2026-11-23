@@ -63,6 +63,13 @@ IPV6_ALLOWED_PREFIXES_HELP = (
     "Per-VM IPv6 assignment will replace this."
 )
 
+# Shown with a VM's firewall when its merged baseline blocks outbound port 25.
+SMTP_BLOCK_HELP = (
+    "Outgoing mail on port 25 is blocked by default to protect our network from spam. "
+    "Sending through a mail provider on ports 465 or 587 works as normal. "
+    "If you need port 25, ask support to unblock it."
+)
+
 _MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
 
@@ -202,6 +209,26 @@ def _check_service_access(service: Service, actor: Actor) -> None:
         raise FirewallNotFound("Service not found", code="service_not_found")
 
 
+def default_firewall(service_id: int) -> ServiceFirewall:
+    """A firewall row with the defaults, not added to the session (reads use it for a VM that
+    has none yet)."""
+    return ServiceFirewall(
+        service_id=service_id,
+        client_enabled=False,
+        policy_in="DROP",
+        policy_out="ACCEPT",
+        log_level_in="nolog",
+        log_level_out="nolog",
+        managed=True,
+        enforce_baseline=False,
+        excluded=False,
+        revision=1,
+        nic_flag="unknown",
+        state=FirewallState.OFF,
+        drift_repairs_24h=0,
+    )
+
+
 def get_or_create(db: Session, service_id: int) -> ServiceFirewall:
     """The firewall row of a VM service, created with the defaults on first use."""
     service = _service(db, service_id)
@@ -209,21 +236,7 @@ def get_or_create(db: Session, service_id: int) -> ServiceFirewall:
         raise FirewallNotEligible(["not_vm"])
     row = db.get(ServiceFirewall, service_id)
     if row is None:
-        row = ServiceFirewall(
-            service_id=service_id,
-            client_enabled=False,
-            policy_in="DROP",
-            policy_out="ACCEPT",
-            log_level_in="nolog",
-            log_level_out="nolog",
-            managed=True,
-            enforce_baseline=False,
-            excluded=False,
-            revision=1,
-            nic_flag="unknown",
-            state=FirewallState.OFF,
-            drift_repairs_24h=0,
-        )
+        row = default_firewall(service_id)
         db.add(row)
         db.flush()
     return row
@@ -393,6 +406,22 @@ def _group_size(db: Session, group_id: int) -> int:
     )
 
 
+def _check_visible_reference(
+    obj: Any, owner_id: Optional[int], actor: Actor, actor_is_staff: bool, field: str, what: str
+) -> None:
+    """A missing object, and for a client or billing actor any object it may not use, get the
+    same error, so ids do not reveal which groups and IP sets exist."""
+    missing = FirewallValidationError(f"no such {what}", code="reference_not_found", field=field)
+    if obj is None:
+        raise missing
+    try:
+        v.check_reference(obj, owner_id, actor_is_staff=actor_is_staff, field_path=field)
+    except FirewallValidationError:
+        if actor.is_staff:
+            raise
+        raise missing from None
+
+
 def _check_references(
     db: Session,
     specs: Sequence[v.RuleSpec],
@@ -406,15 +435,11 @@ def _check_references(
         path = f"{field_path}[{index}]"
         if spec.ref_group_id is not None:
             group = db.get(FirewallGroup, spec.ref_group_id)
-            if group is None:
-                raise FirewallValidationError("no such security group", code="reference_not_found", field=f"{path}.group_id")
-            v.check_reference(group, owner_id, actor_is_staff=actor.is_staff, field_path=f"{path}.group_id")
+            _check_visible_reference(group, owner_id, actor, actor.is_staff, f"{path}.group_id", "security group")
         if spec.remote_ipset_id is not None:
             ipset = db.get(FirewallIpset, spec.remote_ipset_id)
-            if ipset is None:
-                raise FirewallValidationError("no such IP set", code="reference_not_found", field=f"{path}.remote_ipset_id")
             staff = actor.is_staff and (not is_group or owner_id is None)
-            v.check_reference(ipset, owner_id, actor_is_staff=staff, field_path=f"{path}.remote_ipset_id")
+            _check_visible_reference(ipset, owner_id, actor, staff, f"{path}.remote_ipset_id", "IP set")
 
 
 def _expanded(db: Session, specs: Sequence[v.RuleSpec], sizes: Optional[dict[int, int]] = None) -> int:
@@ -798,6 +823,9 @@ def attach_group(
         created = _insert(db, service, row, actor, {"kind": "group", "group_id": group_id}, position, "group_id")
     except FirewallValidationError as exc:
         prefix = f"rules[{index}]"
+        if exc.code == "reference_not_found" and (exc.field or "").endswith(".group_id"):
+            # The group is named in the path, so a group the actor cannot see is a missing resource.
+            raise FirewallNotFound("Security group not found", code="not_found", field="group_id") from None
         if exc.field and exc.field.startswith(prefix):
             exc.field = "group_id" if exc.field.endswith(".group_id") else exc.field[len(prefix):].lstrip(".") or "group_id"
         raise
@@ -952,6 +980,9 @@ def _owner_for_new(actor: Actor, owner_user_id: Optional[int]) -> tuple[str, Opt
 
 def _check_object_access(obj: Any, actor: Actor, what: str) -> None:
     if _value(obj.scope) == FirewallObjectScope.ADMIN.value:
+        if not actor.is_staff and not obj.client_selectable:
+            # Hidden from clients: answer as for a missing id.
+            raise FirewallNotFound(f"{what} not found", code="not_found")
         _require_staff(actor)
         return
     if actor.is_staff:
@@ -1617,12 +1648,22 @@ def _clear_rollouts(db: Session, location_id: int) -> None:
 
 def release_due_rollouts(db: Session, *, now: Optional[datetime] = None) -> list[int]:
     """For the worker: rows whose ``rollout_after`` has come get it cleared and their revision
-    bumped, so the normal apply path picks them up. Returns their service ids; the caller commits."""
+    bumped, so the normal apply path picks them up, and ``rollout_released_at`` set. Rows of a
+    location whose rollout is paused (``rollout_paused_at``) stay where they are. Returns the
+    released service ids; the caller commits."""
     now = now or datetime.now(timezone.utc)
     rows = db.execute(select(ServiceFirewall).where(ServiceFirewall.rollout_after.is_not(None))).scalars()
     due = [row for row in rows if as_utc(row.rollout_after) <= now]
+    if due:
+        paused: set[int] = set()
+        for location_id in db.execute(
+            select(FirewallLocationSettings.location_id).where(FirewallLocationSettings.rollout_paused_at.is_not(None))
+        ).scalars():
+            paused |= _services_in_location(db, location_id)
+        due = [row for row in due if row.service_id not in paused]
     for row in due:
         row.rollout_after = None
+        row.rollout_released_at = now
         _bump(row)
     db.flush()
     return sorted(row.service_id for row in due)

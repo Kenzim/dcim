@@ -195,6 +195,7 @@ def test_cloudinit_restore_strategy_is_unchanged():
         "reapply_target_network",
         "configure_sizing",
         "reapply_cloudinit",
+        "apply_firewall",
         "finalize_backup_restore",
     ]
 

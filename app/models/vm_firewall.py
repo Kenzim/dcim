@@ -142,6 +142,9 @@ class ServiceFirewall(Base):
     # Staged rollout of the location's ``enforce_baseline_on_all`` (section 8.3): render ignores
     # that switch for this row until this time; ``release_due_rollouts`` clears it when due.
     rollout_after = Column(DateTime(timezone=True), nullable=True)
+    # Set when ``release_due_rollouts`` releases the row; the worker counts the outcome of its next
+    # apply towards the location's rollout pause and clears it.
+    rollout_released_at = Column(DateTime(timezone=True), nullable=True)
     revision = Column(Integer, nullable=False, default=1)
     applied_revision = Column(Integer, nullable=True)
     desired_hash = Column(String(64), nullable=True)
@@ -316,5 +319,10 @@ class FirewallLocationSettings(Base):
     ipv6_allowed_prefixes = Column(JSON, nullable=True)
     readiness = Column(JSON, nullable=True)
     readiness_checked_at = Column(DateTime(timezone=True), nullable=True)
+    # Staged rollout (section 8.3): consecutive failed applies among released rows; at 3 the worker
+    # pauses the rollout (no more rows are released) until staff resume it.
+    rollout_failures = Column(Integer, nullable=False, default=0)
+    rollout_paused_at = Column(DateTime(timezone=True), nullable=True)
+    rollout_pause_reason = Column(Text, nullable=True)
     created_at = _created_at()
     updated_at = _updated_at()

@@ -92,6 +92,7 @@ from app.services.sol import sol_ready
 from app.services.virtual_media import virtual_media_ready
 from app.api.sol import perform_sol_send
 from app.api.virtual_media import perform_eject, perform_insert, perform_status
+from app.api.vm_firewall_common import firewall_available
 from app.services.sol.ticket_service import (
     SolTicketUnavailable,
     build_launch_url as build_sol_launch_url,
@@ -1524,7 +1525,13 @@ def _link_service_assign_owner(
         external_username=data.external_username,
         external_email=data.external_email,
     )
+    changed = service.owner_user_id != billing_user.id
     service.owner_user_id = billing_user.id
+    if changed:
+        from app.services.vm_firewall.service import Actor, remove_foreign_references
+
+        db.flush()
+        remove_foreign_references(db, service.id, Actor.system())
     if service.provisioning_source == ProvisioningSource.INTERNAL:
         service.provisioning_source = ProvisioningSource.BILLING
 
@@ -2185,6 +2192,7 @@ async def get_service_status(
         "virtual_media_available": virtual_media_available,
         "vnc_console_available": vnc_console_available,
         "backups_available": backups_available,
+        "firewall_available": service.service_type == ServiceType.VM and firewall_available(db, service),
         "proxy_credentials_available": proxy_credentials_available,
         "proxy_rotate_available": proxy_rotate_available,
         "proxy_assignments": proxy_assignments,

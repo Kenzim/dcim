@@ -179,6 +179,27 @@ ROUTES: tuple[Route, ...] = (
           ("rackflow_runPluginAction", "plugin_action.php"), query=("audience",), body=("params", "confirm")),
     Route("addons", "POST", _SVC + "/addons", ("rackflow_reportAddonStatus (addon hooks in hooks.php)",),
           body=("addon_ref", "status")),
+    # VM firewall (docs/vm-firewall.md 10.3 and 10.5). The module's native firewall section and
+    # firewall_action.php are not written yet (B4b); the callers below are the planned ones.
+    Route("firewall", "GET", _SVC + "/firewall", ("rackflow_ClientArea (planned)",),
+          reads=("available", "client_enabled", "state", "needs_interruption", "policy_in", "policy_out",
+                 "rules", "groups", "baseline", "smtp_block_help", "revision", "message"),
+          note="Fetched only when /status reports firewall_available."),
+    Route("firewall_update", "PUT", _SVC + "/firewall", ("firewall_action.php (planned)",),
+          body=("revision", "client_enabled", "policy_in", "policy_out", "confirm_interruption"),
+          reads=("revision",),
+          note="409 interruption_confirmation_required until confirm_interruption is sent; 409 "
+               "firewall_changed with current_revision when the revision is stale."),
+    Route("firewall_rules_replace", "PUT", _SVC + "/firewall/rules", ("firewall_action.php (planned)",),
+          body=("revision", "rules"), reads=("rules", "revision")),
+    Route("firewall_rule_create", "POST", _SVC + "/firewall/rules", ("firewall_action.php (planned)",),
+          body=("revision", "rule", "position"), reads=("rules", "revision")),
+    Route("firewall_rule_delete", "DELETE", _SVC + "/firewall/rules/{rule_id}", ("firewall_action.php (planned)",),
+          query=("revision",), reads=("rules", "revision")),
+    Route("firewall_preset", "POST", _SVC + "/firewall/presets/{preset}", ("firewall_action.php (planned)",),
+          body=("revision",), reads=("rules", "revision", "policy_in")),
+    Route("firewall_groups", "GET", _SVC + "/firewall/groups", ("rackflow_ClientArea (planned)",),
+          reads=("id", "name", "description", "scope")),
 )
 
 BY_KEY: dict[str, Route] = {route.key: route for route in ROUTES}

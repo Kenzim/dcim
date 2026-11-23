@@ -176,6 +176,10 @@ async def reassign_vm_ip(
     cfg["vm_ip_address"] = new_alloc.ip_address
     service.config = cfg
     ServiceDAO.update(db, service)
+    # ``ipfilter-net0`` holds the VM's addresses: queue the firewall apply before the guest moves.
+    from app.services.vm_firewall.service import bump_revisions
+
+    bump_revisions(db, [service.id])
     db.commit()
     db.refresh(service)
 

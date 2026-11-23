@@ -40,9 +40,14 @@ SAMPLE_BODIES = {
     "virtual_media_insert": {"filename": "a.iso", "boot_once": False},
     "plugin_action": {"params": {}, "confirm": False},
     "addons": {"addon_ref": "whmcs:1", "status": "active"},
+    "firewall_update": {"revision": 1},
+    "firewall_rules_replace": {"revision": 1, "rules": []},
+    "firewall_rule_create": {"revision": 1, "rule": {}},
+    "firewall_preset": {"revision": 1},
 }
-PATH_FILLERS = {"product_code": "x", "action_name": "reset_network", "plugin_id": "demo_plugin", "action_id": "go"}
-QUERY_FILLERS = {"ip": "10.0.0.1", "audience": "client"}
+PATH_FILLERS = {"product_code": "x", "action_name": "reset_network", "plugin_id": "demo_plugin", "action_id": "go",
+                "rule_id": 1, "preset": "ssh"}
+QUERY_FILLERS = {"ip": "10.0.0.1", "audience": "client", "revision": 1}
 
 
 def _send(whmcs, route, **overrides):
