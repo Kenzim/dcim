@@ -525,6 +525,18 @@ api_router.include_router(backup_slots_api.admin_router)
 api_router.include_router(backup_slots_api.client_router)
 api_router.include_router(runner_storage_api.router)
 
+# VM firewall: client, reseller panel, admin and billing (WHMCS) surfaces
+from app.api import billing_vm_firewall as billing_vm_firewall_api
+from app.api import vm_firewall_admin as vm_firewall_admin_api
+from app.api import vm_firewall_client as vm_firewall_client_api
+from app.api.vm_firewall_common import firewall_error_handler
+from app.services.vm_firewall.errors import FirewallError
+api_router.include_router(vm_firewall_client_api.router)
+api_router.include_router(vm_firewall_client_api.reseller_router)
+api_router.include_router(vm_firewall_admin_api.router)
+api_router.include_router(billing_vm_firewall_api.router)
+app.add_exception_handler(FirewallError, firewall_error_handler)
+
 # Mount the API router FIRST (before static files)
 app.include_router(api_router)
 

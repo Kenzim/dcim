@@ -137,10 +137,11 @@ def test_client_cannot_reference_another_clients_group_or_ipset(world):
     ):
         with pytest.raises(FirewallValidationError) as info:
             fw.replace_rules(world.db, vm.id, world.actor("alice"), rules, revision=1)
-        assert (info.value.code, info.value.field) == ("reference_not_allowed", field)
-    with pytest.raises(FirewallValidationError) as info:
+        # Answered as for a missing id, so ids do not reveal another client's objects.
+        assert (info.value.code, info.value.field) == ("reference_not_found", field)
+    with pytest.raises(FirewallNotFound) as missing:
         fw.attach_group(world.db, vm.id, world.actor("alice"), group.id, revision=1)
-    assert info.value.field == "group_id"
+    assert missing.value.field == "group_id"
     # Staff acting on alice's VM cannot put bob's objects there either.
     with pytest.raises(FirewallValidationError):
         fw.attach_group(world.db, vm.id, world.staff_actor, group.id, revision=1)
@@ -159,12 +160,50 @@ def test_group_references_are_checked_against_the_service_owner(world):
         fw.attach_group(world.db, vm.id, world.staff_actor, bob_group.id, revision=2)
 
 
+def _error(call):
+    try:
+        call()
+    except (FirewallNotFound, FirewallValidationError) as exc:
+        return type(exc), exc.to_dict()
+    raise AssertionError("expected an error")
+
+
+@pytest.mark.parametrize("kind", ["client", "billing"])
+def test_hidden_admin_objects_answer_like_missing_ids(world, kind):
+    vm = world.vm("alice")
+    alice = world.user("alice").id
+    actor = Actor.client(alice) if kind == "client" else Actor.billing(1, alice)
+    group = fw.create_group(world.db, world.staff_actor, name="internal", rules=[SSH])
+    ipset = fw.create_ipset(world.db, world.staff_actor, name="internal", entries=["10.0.0.0/8"])
+    missing = 999_999
+
+    def attach(group_id):
+        return lambda: fw.attach_group(world.db, vm.id, actor, group_id, revision=1)
+
+    def replace(rule):
+        return lambda: fw.replace_rules(world.db, vm.id, actor, [rule], revision=1)
+
+    hidden, absent = _error(attach(group.id)), _error(attach(missing))
+    assert hidden == absent and hidden[0] is FirewallNotFound
+    assert absent[1] == {"code": "not_found", "field": "group_id", "message": "Security group not found"}
+    assert _error(replace({"kind": "group", "group_id": group.id})) == _error(
+        replace({"kind": "group", "group_id": missing}))
+    assert _error(replace({**SSH, "remote_ipset_id": ipset.id})) == _error(replace({**SSH, "remote_ipset_id": missing}))
+    if kind == "client":
+        assert _error(lambda: fw.get_group(world.db, actor, group.id)) == _error(
+            lambda: fw.get_group(world.db, actor, missing))
+        assert _error(lambda: fw.get_ipset(world.db, actor, ipset.id)) == _error(
+            lambda: fw.get_ipset(world.db, actor, missing))
+    # Staff may use admin objects.
+    fw.attach_group(world.db, vm.id, world.staff_actor, group.id, revision=1)
+
+
 def test_client_selectable_admin_objects(world):
     vm = world.vm("alice")
     offered = fw.create_group(world.db, world.staff_actor, name="monitoring", rules=[SSH], client_selectable=True)
     private = fw.create_group(world.db, world.staff_actor, name="internal", rules=[SSH])
     fw.attach_group(world.db, vm.id, world.actor("alice"), offered.id, revision=1)
-    with pytest.raises(FirewallValidationError):
+    with pytest.raises(FirewallNotFound):
         fw.attach_group(world.db, vm.id, world.actor("alice"), private.id, revision=2)
     names = {g.name for g in fw.list_groups(world.db, world.actor("alice"))}
     assert names == {"monitoring"}
@@ -211,7 +250,7 @@ def test_admin_only_fields_refused_for_non_staff(world, actor_kind):
     with pytest.raises(FirewallValidationError):
         fw.create_group(world.db, actor, name="g", client_selectable=True)
     admin_group = fw.create_group(world.db, world.staff_actor, name="adm")
-    with pytest.raises(FirewallForbidden):
+    with pytest.raises(FirewallNotFound):
         fw.delete_group(world.db, actor, admin_group.id)
     row = _row(world, vm)
     assert (row.excluded, row.managed, row.admin_overrides) == (False, True, None)
