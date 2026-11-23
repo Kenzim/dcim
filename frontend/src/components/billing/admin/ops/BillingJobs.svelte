@@ -58,6 +58,11 @@
 
   $: needsReviewTotal = jobs.reduce((sum, job) => sum + (job.needs_review || 0), 0);
 
+  $: preconditionsShown =
+    change?.to === 'live' &&
+    change.job.preconditions_unmet?.length > 0 &&
+    /^preconditions not met/i.test(changeError);
+
   const dryRunsDone = (job) => job.completed_scheduled_dry_runs ?? 0;
   const dryRunsNeeded = (job) => job.min_dry_runs ?? 0;
   const dryRunsShort = (job) => dryRunsDone(job) < dryRunsNeeded(job);
@@ -303,7 +308,7 @@
         {/if}
       </p>
     {/if}
-    {#if changeError}<div class="ba-error">{changeError}</div>{/if}
+    {#if changeError && !preconditionsShown}<div class="ba-error">{changeError}</div>{/if}
     <svelte:fragment slot="footer">
       <Button variant="secondary" on:click={() => (change = null)}>Cancel</Button>
       <Button
