@@ -42,10 +42,17 @@ export class FirewallApiError extends Error {
 }
 
 function errorFrom(status, body, fallback) {
-  const source = body && typeof body.detail === 'object' && body.detail !== null && !Array.isArray(body.detail) ? body.detail : body;
+  const detail = body?.detail;
+  // FastAPI's own 422 answers with a list of {loc, msg}; the firewall errors answer {code, field, message, detail}.
+  if (Array.isArray(detail)) {
+    const first = detail[0] || {};
+    const loc = Array.isArray(first.loc) ? first.loc.filter((part) => part !== 'body') : [];
+    const message = detail.map((item) => item?.msg).filter(Boolean).join('; ') || fallback;
+    return new FirewallApiError(message, { status, code: 'validation_error', field: loc.join('.') || null, body });
+  }
+  const source = detail && typeof detail === 'object' ? detail : body;
   let message = source?.message;
-  if (!message && typeof body?.detail === 'string') message = body.detail;
-  if (!message && Array.isArray(body?.detail)) message = body.detail.map((item) => item?.msg).filter(Boolean).join('; ');
+  if (!message && typeof detail === 'string') message = detail;
   return new FirewallApiError(message || fallback, {
     status,
     code: source?.code || '',
@@ -99,7 +106,9 @@ export function normaliseView(raw) {
     suggested_presets: view.suggested_presets || [],
     limits: view.limits || {},
     baseline: { rules: [], ...(view.baseline || {}) },
-    reasons: view.reasons || view.render_reasons || view.not_eligible_reasons || [],
+    rendered: view.rendered || null,
+    reasons: view.reasons || [],
+    smtp_block_help: view.smtp_block_help || null,
     admin_overrides: view.admin_overrides || {},
   };
 }
@@ -158,24 +167,34 @@ export async function updateAdminFields(serviceId, body) {
   );
 }
 
-export function applyNow(serviceId) {
-  return request(`${servicePath('staff', serviceId)}/apply`, { method: 'POST', fallback: 'Failed to apply the firewall' });
+/** Answers `{result: {ok, state, error, reasons, ...}, firewall}`, or 502 when Proxmox is unreachable. */
+export async function applyNow(serviceId) {
+  const data = await request(`${servicePath('staff', serviceId)}/apply`, { method: 'POST', fallback: 'Failed to apply the firewall' });
+  return { result: data?.result || {}, firewall: data?.firewall ? normaliseView(data.firewall) : null };
 }
 
+/** Answers `{in_sync, differences[], ...}`, or 404 `firewall_not_found` when the VM has no firewall yet. */
 export function checkNow(serviceId) {
   return request(`${servicePath('staff', serviceId)}/check`, { method: 'POST', fallback: 'Failed to check the firewall' });
 }
 
 // --- Groups and IP sets (client: the caller's own; staff: admin ones) ---
 
-function objectApi(kind, listKey) {
+function objectApi(kind) {
   return {
     list: async (audience) =>
-      asList(await request(`${objectPath(audience)}/${kind}`, { client: !isStaff(audience), fallback: `Failed to load ${kind}` }), listKey),
+      asList(
+        await request(`${objectPath(audience)}/${kind}`, {
+          params: { scope: isStaff(audience) ? 'admin' : undefined },
+          client: !isStaff(audience),
+          fallback: `Failed to load ${kind}`,
+        }),
+        kind,
+      ),
     get: (audience, id) =>
       request(`${objectPath(audience)}/${kind}/${id}`, { client: !isStaff(audience), fallback: `Failed to load ${kind}` }),
     create: (audience, body) =>
-      request(`${objectPath(audience)}/${kind}`, { method: 'POST', body, client: !isStaff(audience), fallback: `Failed to create` }),
+      request(`${objectPath(audience)}/${kind}`, { method: 'POST', body, client: !isStaff(audience), fallback: 'Failed to create' }),
     update: (audience, id, body) =>
       request(`${objectPath(audience)}/${kind}/${id}`, { method: 'PUT', body, client: !isStaff(audience), fallback: 'Failed to save' }),
     remove: (audience, id, { detach = false } = {}) =>
@@ -188,8 +207,8 @@ function objectApi(kind, listKey) {
   };
 }
 
-const groupApi = objectApi('groups', 'groups');
-const ipsetApi = objectApi('ipsets', 'ipsets');
+const groupApi = objectApi('groups');
+const ipsetApi = objectApi('ipsets');
 
 export const listGroups = groupApi.list;
 export const getGroup = groupApi.get;
@@ -219,13 +238,24 @@ export function recheckReadiness(locationId) {
   return request(`${ADMIN}/locations/${locationId}/readiness`, { method: 'POST', fallback: 'Failed to re-check the location' });
 }
 
-/** What switching on enforce_baseline_on_all would change: {changed, service_ids, blip, blip_service_ids, nic_flag_unknown, nic_flag_unknown_service_ids}. */
-export function previewRollout(locationId) {
-  return request(`${ADMIN}/locations/${locationId}/rollout`, {
+/** What switching on enforce_baseline_on_all would change: {changed, service_ids, services[{id, name}], blip, nic_flag_unknown, ...}. */
+export async function previewRollout(locationId) {
+  const data = await request(`${ADMIN}/locations/${locationId}/rollout`, {
     method: 'POST',
     body: { dry_run: true },
     fallback: 'Failed to preview the rollout',
   });
+  return data.preview;
+}
+
+/** Resume a rollout the worker paused after repeated failures; answers the location. */
+export function resumeRollout(locationId) {
+  return request(`${ADMIN}/locations/${locationId}/rollout/resume`, { method: 'POST', fallback: 'Failed to resume the rollout' });
+}
+
+/** The worker's last reported status (`last_tick_at`, `owner`, ...); `{}` before its first tick. */
+export function getWorkerStatus() {
+  return request(`${ADMIN}/worker`, { fallback: 'Failed to load the worker status' });
 }
 
 export async function listBaselines() {
@@ -238,10 +268,10 @@ export const updateBaseline = (id, body) =>
   request(`${ADMIN}/baselines/${id}`, { method: 'PUT', body, fallback: 'Failed to save the baseline' });
 export const deleteBaseline = (id) => request(`${ADMIN}/baselines/${id}`, { method: 'DELETE', fallback: 'Failed to delete the baseline' });
 
-export async function listStatus({ state, locationId, q } = {}) {
+export async function listStatus({ state, locationId, q, offset, limit } = {}) {
   return asList(
     await request(`${ADMIN}/services`, {
-      params: { state, location_id: locationId, q },
+      params: { state, location_id: locationId, q, offset, limit },
       fallback: 'Failed to load the firewall status list',
     }),
     'services',

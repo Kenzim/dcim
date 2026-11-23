@@ -4,11 +4,19 @@
   /** {anti_spoof, smtp_out, management_blocked, rules[]} from the firewall view. */
   export let baseline = { rules: [] };
   export let ipsets = [];
+  /** Plain-words note about the outgoing mail block; null when there is none. */
+  export let smtpHelp = null;
 
-  $: rows = (baseline.rules || []).map((rule) => ({ rule, ...describeServerRule(rule, ipsets) }));
+  $: rows = (baseline.rules || []).map((rule) => {
+    const described = describeServerRule(rule, ipsets);
+    if (rule.kind === 'group') return { rule, ...described, group: true, groupName: rule.group_name || `group #${rule.group_id}` };
+    if (rule.remote_ipset_name) described.remote = `IP set ${rule.remote_ipset_name}`;
+    return { rule, ...described };
+  });
   $: facts = [
     { label: 'Address anti-spoofing', on: !!baseline.anti_spoof, onText: 'On', offText: 'Off' },
     { label: 'Outgoing mail (port 25)', on: baseline.smtp_out === 'block', onText: 'Blocked', offText: 'Allowed' },
+    { label: 'MAC address filter', on: !!baseline.mac_filter, onText: 'On', offText: 'Off' },
     { label: 'Provider management networks', on: !!baseline.management_blocked, onText: 'Blocked', offText: 'Not blocked' },
   ];
   $: hasAnything = rows.length > 0 || facts.some((fact) => fact.on);
@@ -17,6 +25,7 @@
 <section class="baseline">
   <h4>Provider protections</h4>
   <p class="hint">These apply first and cannot be undone by your own rules.</p>
+  {#if smtpHelp}<p class="help">{smtpHelp}</p>{/if}
   <div class="facts">
     {#each facts as fact}
       <span class="fact" class:on={fact.on}><strong>{fact.label}</strong> {fact.on ? fact.onText : fact.offText}</span>
@@ -31,11 +40,15 @@
         <tbody>
           {#each rows as row}
             <tr class:off={!row.draft.enabled}>
-              <td>{row.action}</td>
-              <td>{row.direction}</td>
-              <td>{row.protocol}</td>
-              <td class="mono">{row.ports}</td>
-              <td class="mono">{row.remote}</td>
+              {#if row.group}
+                <td colspan="5">Group: {row.groupName}</td>
+              {:else}
+                <td>{row.action}</td>
+                <td>{row.direction}</td>
+                <td>{row.protocol}</td>
+                <td class="mono">{row.ports}</td>
+                <td class="mono">{row.remote}</td>
+              {/if}
               <td>{row.draft.comment}</td>
             </tr>
           {/each}
@@ -50,6 +63,7 @@
 <style>
   .baseline { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px dashed var(--border-color); border-radius: 10px; background: var(--bg-secondary); }
   h4 { margin: 0; font-size: 14px; }
+  .help { margin: 0; padding: 8px 10px; border-left: 3px solid var(--info-color); background: var(--info-bg); color: var(--info-text); font-size: 13px; }
   .hint { margin: 0; font-size: 12px; color: var(--text-tertiary); }
   .facts { display: flex; flex-wrap: wrap; gap: 8px; }
   .fact { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--bg-tertiary); color: var(--text-secondary); }

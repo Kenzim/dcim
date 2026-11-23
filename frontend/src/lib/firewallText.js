@@ -30,6 +30,8 @@ export const STATE_INFO = {
 
 export const REASON_TEXT = {
   location_disabled: "The VM firewall is not switched on for this server's location.",
+  cluster_not_ready:
+    "The cluster this server runs on has not passed the firewall readiness check, so clients are not offered the firewall yet.",
   excluded: 'This service is marked as infrastructure and is never managed.',
   not_vm: 'This service is not a virtual machine.',
   no_vm_record: 'This service has no placed virtual machine yet.',

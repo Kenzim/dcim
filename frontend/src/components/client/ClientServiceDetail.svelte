@@ -52,7 +52,7 @@
       const t = [{ id: 'overview', label: 'Overview' }];
       if (d.console_available) t.push({ id: 'console', label: 'Console' });
       if (d.backups_available) t.push({ id: 'backups', label: 'Backups' });
-      if (d.firewall_available !== false) t.push({ id: 'firewall', label: 'Firewall' });
+      if (d.firewall_available) t.push({ id: 'firewall', label: 'Firewall' });
       if (d.permissions?.['vm.reinstall']) t.push({ id: 'reinstall', label: 'Reinstall' });
       const p = d.permissions || {};
       if (d.accepts_ssh_key || p['vm.manage_ssh_keys'] || p['vm.change_password'] || p['vm.reset_network']) {

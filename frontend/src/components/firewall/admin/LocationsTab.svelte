@@ -16,8 +16,9 @@
 
   const idOf = (loc) => loc.location_id ?? loc.id;
   const nameOf = (loc) => loc.name ?? loc.location_name ?? `Location ${idOf(loc)}`;
-  const clustersOf = (loc) => Object.entries(loc.readiness?.clusters || {});
-  const isReady = (loc) => clustersOf(loc).length > 0 && clustersOf(loc).every(([, c]) => c.ready);
+  const clustersOf = (loc) => loc.clusters || [];
+  const isReady = (loc) => !!loc.ready;
+  const checkedCount = (loc) => clustersOf(loc).filter((c) => c.readiness).length;
   const when = (iso) => (iso ? new Date(iso).toLocaleString() : 'never');
 
   function formFrom(loc) {
@@ -112,6 +113,21 @@
     }
   }
 
+  async function resume(loc) {
+    const id = idOf(loc);
+    busyId = id;
+    errors = { ...errors, [id]: '' };
+    try {
+      await api.resumeRollout(id);
+      messages = { ...messages, [id]: 'Rollout resumed.' };
+      adopt(await api.listLocations());
+    } catch (err) {
+      describe(id, err);
+    } finally {
+      busyId = null;
+    }
+  }
+
   const confirmRollout = () => submit(rollout.location, { ...rollout.body, confirm_existing_vms: rollout.preview.changed });
 
   async function recheck(loc) {
@@ -128,8 +144,7 @@
     }
   }
 
-  const serviceLabel = (item) => (typeof item === 'object' ? `${item.name || '#' + item.id}` : `#${item}`);
-  const serviceId = (item) => (typeof item === 'object' ? item.id ?? item.service_id : item);
+  const servicesOf = (preview) => preview.services || (preview.service_ids || []).map((id) => ({ id, name: null }));
 
   onMount(load);
 </script>
@@ -148,10 +163,20 @@
         <header class="card-head">
           <h3>{nameOf(loc)}</h3>
           <span class="tag" class:on={loc.enabled}>{loc.enabled ? 'Firewall enabled' : 'Not enabled'}</span>
-          <span class="tag" class:on={isReady(loc)} class:bad={clustersOf(loc).length > 0 && !isReady(loc)}>
-            {clustersOf(loc).length === 0 ? 'Readiness not checked' : isReady(loc) ? 'Ready' : 'Not ready'}
+          <span class="tag" class:on={isReady(loc)} class:bad={checkedCount(loc) > 0 && !isReady(loc)}>
+            {clustersOf(loc).length === 0 ? 'No clusters' : checkedCount(loc) === 0 ? 'Readiness not checked' : isReady(loc) ? 'Ready' : 'Not ready'}
           </span>
+          {#if loc.rollout_paused_at}<span class="tag bad">Rollout paused</span>{/if}
         </header>
+
+        {#if loc.rollout_paused_at}
+          <Alert type="warning">
+            <strong>The staged rollout is paused</strong> since {when(loc.rollout_paused_at)} after {loc.rollout_failures} failed {loc.rollout_failures === 1 ? 'attempt' : 'attempts'}.
+            {#if loc.rollout_pause_reason}Reason: {loc.rollout_pause_reason}{/if}
+            Servers still waiting are not touched until it is resumed.
+            <div class="resume"><Button size="small" disabled={busyId === id} on:click={() => resume(loc)}>Resume rollout</Button></div>
+          </Alert>
+        {/if}
 
         <section class="readiness">
           <div class="readiness-head">
@@ -159,18 +184,19 @@
             <span class="hint">Checked {when(loc.readiness_checked_at)}</span>
             <Button size="small" variant="secondary" disabled={busyId === id} on:click={() => recheck(loc)}>Re-check now</Button>
           </div>
-          {#each clustersOf(loc) as [clusterId, cluster]}
-            <div class="cluster" class:bad={!cluster.ready}>
-              <strong>{cluster.name || `Cluster ${clusterId}`}</strong>: {cluster.ready ? 'ready' : 'not ready'}
-              {#if cluster.reasons?.length}
-                <ul>{#each cluster.reasons as reason}<li>{reason}</li>{/each}</ul>
+          {#each clustersOf(loc) as cluster (cluster.id)}
+            {@const result = cluster.readiness}
+            <div class="cluster" class:bad={!result?.ready} class:unchecked={!result}>
+              <strong>{cluster.name || `Cluster ${cluster.id}`}</strong>: {result ? (result.ready ? 'ready' : 'not ready') : 'not checked yet'}
+              {#if result?.reasons?.length}
+                <ul>{#each result.reasons as reason}<li>{reason}</li>{/each}</ul>
               {/if}
-              {#if cluster.datacenter && Object.keys(cluster.datacenter).length}
-                <p class="hint">
-                  Datacenter firewall: {cluster.datacenter.enable ? 'on' : 'off'}, policy in {cluster.datacenter.policy_in ?? 'unset'}, policy out {cluster.datacenter.policy_out ?? 'unset'}, ebtables {cluster.datacenter.ebtables ?? 'unset'}
-                </p>
+              {#if result?.datacenter && Object.keys(result.datacenter).length}
+                <p class="hint">Datacenter firewall settings: {Object.entries(result.datacenter).map(([k, v]) => `${k} ${v}`).join(', ')}</p>
               {/if}
             </div>
+          {:else}
+            <p class="hint">No Proxmox clusters are placed in this location.</p>
           {/each}
         </section>
 
@@ -226,12 +252,12 @@
         Rackflow does not know whether they will be interrupted.
       </p>
     {/if}
-    {#if preview.service_ids?.length}
+    {#if servicesOf(preview).length}
       <details>
         <summary>Which servers</summary>
         <p class="services">
-          {#each preview.services || preview.service_ids as item, i}
-            <a href="/admin/services/{serviceId(item)}">{serviceLabel(item)}</a>{i < (preview.services || preview.service_ids).length - 1 ? ', ' : ''}
+          {#each servicesOf(preview) as item, i}
+            <a href="/admin/services/{item.id}" target="_blank" rel="noopener">{item.name || `Service #${item.id}`}</a>{i < servicesOf(preview).length - 1 ? ', ' : ''}
           {/each}
         </p>
       </details>
@@ -258,6 +284,8 @@
   .readiness { display: flex; flex-direction: column; gap: 8px; }
   .readiness-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .cluster { padding: 8px 12px; border-radius: 8px; background: var(--success-bg); color: var(--success-text); font-size: 13px; }
+  .cluster.unchecked { background: var(--bg-tertiary); color: var(--text-secondary); }
+  .resume { margin-top: 8px; }
   .cluster.bad { background: var(--danger-bg); color: var(--danger-text); }
   .cluster ul { margin: 4px 0 0; padding-left: 18px; }
   .settings { display: flex; flex-direction: column; gap: 8px; }

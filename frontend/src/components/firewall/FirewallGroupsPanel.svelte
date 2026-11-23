@@ -183,8 +183,12 @@
             {#if group.rules}<span class="hint">{group.rules.length} {group.rules.length === 1 ? 'rule' : 'rules'}</span>{/if}
           </div>
           <div class="item-actions">
-            <Button size="small" variant="secondary" disabled={busy} on:click={() => startEdit(group)}>Edit</Button>
-            <Button size="small" variant="danger" disabled={busy} on:click={() => remove(group)}>Delete</Button>
+            {#if !staff && group.scope === 'admin'}
+              <span class="hint">Provided by us</span>
+            {:else}
+              <Button size="small" variant="secondary" disabled={busy} on:click={() => startEdit(group)}>Edit</Button>
+              <Button size="small" variant="danger" disabled={busy} on:click={() => remove(group)}>Delete</Button>
+            {/if}
           </div>
         </li>
       {/each}

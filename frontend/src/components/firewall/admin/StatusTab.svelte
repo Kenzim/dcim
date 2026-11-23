@@ -12,17 +12,21 @@
   let state = '';
   let locationId = '';
   let q = '';
+  let more = false;
+  const PAGE = 100;
 
   const locId = (loc) => loc.location_id ?? loc.id;
   const locName = (loc) => loc.name ?? loc.location_name ?? `Location ${locId(loc)}`;
   const idOf = (row) => row.service_id ?? row.id;
   const when = (iso) => (iso ? new Date(iso).toLocaleString() : '');
 
-  async function load() {
+  async function load(append = false) {
     loading = true;
     error = '';
     try {
-      rows = await api.listStatus({ state, locationId, q: q.trim() });
+      const page = await api.listStatus({ state, locationId, q: q.trim(), offset: append ? rows.length : 0, limit: PAGE });
+      rows = append ? [...rows, ...page] : page;
+      more = page.length === PAGE;
     } catch (err) {
       error = err.message || 'Failed to load the status list';
     } finally {
@@ -37,15 +41,15 @@
 </script>
 
 <section class="panel">
-  <form class="filters" on:submit|preventDefault={load}>
+  <form class="filters" on:submit|preventDefault={() => load()}>
     <label>State
-      <select bind:value={state} on:change={load}>
+      <select bind:value={state} on:change={() => load()}>
         <option value="">All states</option>
         {#each Object.entries(STATE_INFO) as [key, info]}<option value={key}>{info.label}</option>{/each}
       </select>
     </label>
     <label>Location
-      <select bind:value={locationId} on:change={load}>
+      <select bind:value={locationId} on:change={() => load()}>
         <option value="">All locations</option>
         {#each locations as loc}<option value={String(locId(loc))}>{locName(loc)}</option>{/each}
       </select>
@@ -58,7 +62,7 @@
 
   {#if error}<Alert type="error">{error}</Alert>{/if}
 
-  {#if loading}
+  {#if loading && rows.length === 0}
     <div class="loading"><Spinner /><span>Loading…</span></div>
   {:else if rows.length === 0}
     <p class="hint">No servers match.</p>
@@ -83,7 +87,8 @@
         </tbody>
       </table>
     </div>
-    <p class="hint">{rows.length} {rows.length === 1 ? 'server' : 'servers'}.</p>
+    <p class="hint">{rows.length} {rows.length === 1 ? 'server' : 'servers'} shown.</p>
+    {#if more}<div><Button variant="secondary" size="small" disabled={loading} on:click={() => load(true)}>Show more</Button></div>{/if}
   {/if}
 </section>
 

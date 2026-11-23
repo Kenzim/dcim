@@ -209,8 +209,12 @@
             {#if set.entries}<span class="hint">{set.entries.length} {set.entries.length === 1 ? 'entry' : 'entries'}</span>{/if}
           </div>
           <div class="item-actions">
-            <Button size="small" variant="secondary" disabled={busy} on:click={() => startEdit(set)}>Edit</Button>
-            <Button size="small" variant="danger" disabled={busy} on:click={() => remove(set)}>Delete</Button>
+            {#if !staff && set.scope === 'admin'}
+              <span class="hint">Provided by us</span>
+            {:else}
+              <Button size="small" variant="secondary" disabled={busy} on:click={() => startEdit(set)}>Edit</Button>
+              <Button size="small" variant="danger" disabled={busy} on:click={() => remove(set)}>Delete</Button>
+            {/if}
           </div>
         </li>
       {/each}

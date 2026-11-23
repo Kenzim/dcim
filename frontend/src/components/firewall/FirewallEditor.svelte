@@ -27,13 +27,15 @@
   let draft = [];
   let saved = [];
   let presets = PRESET_FALLBACK;
-  let fetchedIpsets = [];
+  let groupChoices = [];
+  let showInterruption = false;
   let dialog = null;
   let checkResult = null;
   let admin = adminFrom(null);
 
   $: dirty = !sameDrafts(draft, saved);
-  $: ipsets = fw?.ipsets ?? fetchedIpsets;
+  $: ipsets = fw?.ipsets ?? [];
+  $: allGroups = [...(fw?.groups || []), ...groupChoices.filter((g) => !(fw?.groups || []).some((x) => x.id === g.id))];
   $: locked = !canEdit || busy;
   $: allowLog = staff || !!fw?.limits?.client_logging;
   $: lockout =
@@ -82,7 +84,7 @@
     try {
       applyView(await api.getFirewall(audience, serviceId));
       loadError = '';
-      if (fw.ipsets == null && !staff) api.listIpsets('customer').then((sets) => (fetchedIpsets = sets)).catch(() => {});
+      api.listGroups(staff ? 'staff' : 'customer').then((list) => (groupChoices = list)).catch(() => {});
       api.listPresets().then((list) => list.length && (presets = list)).catch(() => {});
     } catch (err) {
       loadError = err.message || 'Failed to load the firewall';
@@ -108,7 +110,8 @@
         (lost ? ' Your unsaved edits were not kept; please make them again.' : '');
       return;
     }
-    if (/interruption/.test(err.code)) {
+    if (err.code === 'interruption_confirmation_required') {
+      showInterruption = true;
       dialog = 'enable';
       return;
     }
@@ -142,6 +145,7 @@
   function requestEnabled(on) {
     if (!on) return confirmEnabled(false, false);
     if (fw.needs_interruption || lockout) {
+      showInterruption = !!fw.needs_interruption;
       dialog = 'enable';
       return;
     }
@@ -151,7 +155,7 @@
   function confirmEnabled(on, accepted) {
     dialog = null;
     const body = { revision: fw.revision, client_enabled: on };
-    if (on && accepted && fw.needs_interruption) body.confirm_interruption = true;
+    if (on && accepted && showInterruption) body.confirm_interruption = true;
     return write(() => api.updateFirewall(audience, serviceId, body), {
       keepDraft: true,
       done: on ? 'Firewall switched on.' : 'Firewall switched off.',
@@ -216,11 +220,18 @@
   async function runCheck(kind) {
     busy = true;
     error = '';
+    success = '';
     checkResult = null;
     try {
-      const result = kind === 'apply' ? await api.applyNow(serviceId) : await api.checkNow(serviceId);
-      if (kind === 'check') checkResult = result;
-      else success = 'Apply requested.';
+      if (kind === 'check') {
+        checkResult = await api.checkNow(serviceId);
+      } else {
+        const { result, firewall } = await api.applyNow(serviceId);
+        if (firewall) applyView(firewall, { keepDraft: true });
+        if (result.ok) success = 'Applied to the hypervisor.';
+        else error = `The apply did not complete (${result.state || 'error'})${result.error ? `: ${result.error}` : ''}`;
+        return;
+      }
       applyView(await api.getFirewall(audience, serviceId), { keepDraft: true });
     } catch (err) {
       error = err.message;
@@ -247,15 +258,13 @@
         <FirewallStateBadge state={fw.state} />
         {#if STATE_INFO[fw.state]}<span class="state-text">{STATE_INFO[fw.state].text}</span>{/if}
       </div>
-      {#if fw.available !== false}
-        <label class="switch" title={dirty ? 'Save or discard your rule changes first' : ''}>
-          <input type="checkbox" checked={!!fw.client_enabled} disabled={locked || dirty} on:change={onSwitch} />
-          <span>{fw.client_enabled ? 'On' : 'Off'}</span>
-        </label>
-      {/if}
+      <label class="switch" title={fw.available === false ? 'The firewall is not offered for this server' : dirty ? 'Save or discard your rule changes first' : ''}>
+        <input type="checkbox" checked={!!fw.client_enabled} disabled={locked || dirty || fw.available === false} on:change={onSwitch} />
+        <span>{fw.client_enabled ? 'On' : 'Off'}</span>
+      </label>
     </header>
 
-    {#if fw.message}<Alert type="info">{fw.message}</Alert>{/if}
+    {#if fw.message && fw.available !== false}<Alert type="info">{fw.message}</Alert>{/if}
     {#if notice}<Alert type="warning">{notice}</Alert>{/if}
     {#if error}<Alert type="error">{error}</Alert>{/if}
     {#if success}<Alert type="success">{success}</Alert>{/if}
@@ -263,7 +272,7 @@
     {#if fw.last_applied_at}<p class="hint">Last applied {when(fw.last_applied_at)}.</p>{/if}
 
     {#if fw.available === false}
-      <p class="hint">The firewall is not available for this server{fw.message ? '' : ' at the moment'}.</p>
+      <Alert type="info">The firewall is not offered for this server{staff ? '' : ' at the moment'}.{#if staff && fw.reasons.length} See the reasons below.{/if}</Alert>
     {:else}
       <p class="hint">
         {fw.client_enabled
@@ -295,7 +304,7 @@
         </label>
       </section>
 
-      <BaselineView baseline={fw.baseline} {ipsets} />
+      <BaselineView baseline={fw.baseline} {ipsets} smtpHelp={fw.smtp_block_help} />
 
       <section class="rules">
         <div class="rules-head">
@@ -305,7 +314,7 @@
         <RuleEditor
           bind:rules={draft}
           errors={fieldErrors}
-          groups={fw.groups}
+          groups={allGroups}
           {ipsets}
           {staff}
           {allowLog}
@@ -388,7 +397,25 @@
             {/if}
           </div>
         {/if}
-        {#if fw.last_error}<p class="field-error">Last error: {fw.last_error}</p>{/if}
+        {#if fw.last_error}<p class="field-error">Last error: {fw.last_error}{#if fw.failing_since} (failing since {when(fw.failing_since)}){/if}</p>{/if}
+
+        <dl class="facts">
+          <div><dt>In sync</dt><dd>{fw.in_sync ? 'Yes' : 'No'}</dd></div>
+          <div><dt>Revision</dt><dd>{fw.revision}{fw.applied_revision != null ? ` (applied ${fw.applied_revision})` : ' (never applied)'}</dd></div>
+          <div><dt>Cluster ready</dt><dd>{fw.cluster_ready ? 'Yes' : 'No'}</dd></div>
+          <div><dt>Network cards checked</dt><dd>{fw.nics_checked ? 'Yes' : 'Not yet'}</dd></div>
+          <div><dt>net0 bridge</dt><dd>{fw.net0_bridge || 'Unknown'}</dd></div>
+          <div><dt>Last checked</dt><dd>{when(fw.last_checked_at)}</dd></div>
+          <div><dt>Next attempt</dt><dd>{fw.next_attempt_at ? when(fw.next_attempt_at) : 'None queued'}</dd></div>
+          <div><dt>Staged rollout after</dt><dd>{fw.rollout_after ? when(fw.rollout_after) : 'Not staged'}</dd></div>
+          <div><dt>Drift repairs (24 h)</dt><dd>{fw.drift_repairs_24h ?? 0}</dd></div>
+        </dl>
+        {#if fw.rendered}
+          <details>
+            <summary>What would be written to the hypervisor</summary>
+            <pre>{JSON.stringify(fw.rendered, null, 2)}</pre>
+          </details>
+        {/if}
       </section>
     {/if}
   {/if}
@@ -396,7 +423,7 @@
 
 {#if dialog === 'enable'}
   <Modal title="Turn the firewall on?" onClose={() => (dialog = null)}>
-    {#if fw.needs_interruption}
+    {#if showInterruption}
       <p>{INTERRUPTION_WARNING}</p>
     {/if}
     {#if lockout}
@@ -408,7 +435,7 @@
     {/if}
     <svelte:fragment slot="footer">
       <Button variant="secondary" on:click={() => (dialog = null)}>Cancel</Button>
-      <Button on:click={() => confirmEnabled(true, true)}>{fw.needs_interruption ? 'Accept and turn on' : 'Turn on'}</Button>
+      <Button on:click={() => confirmEnabled(true, true)}>{showInterruption ? 'Accept and turn on' : 'Turn on'}</Button>
     </svelte:fragment>
   </Modal>
 {/if}
@@ -442,6 +469,10 @@
   .reasons { padding: 10px 12px; border: 1px solid var(--warning-color); border-radius: 8px; background: var(--warning-bg); color: var(--warning-text); font-size: 13px; }
   .reasons ul { margin: 6px 0 0; padding-left: 18px; }
   .reasons code { font-family: var(--font-mono); font-size: 12px; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 14px; margin: 0; font-size: 13px; }
+  .facts dt { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-tertiary); }
+  .facts dd { margin: 0; }
+  pre { max-height: 300px; overflow: auto; padding: 10px; border-radius: 6px; background: var(--bg-tertiary); font-family: var(--font-mono); font-size: 12px; }
   .check-result { font-size: 13px; }
   .check-result p { margin: 0 0 4px; }
   .field-error { color: var(--danger-text); font-size: 13px; margin: 0; }
