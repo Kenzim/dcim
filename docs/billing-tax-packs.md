@@ -62,7 +62,7 @@ Both packs round per invoice per rate, half up: the bases of all lines sharing a
 3. In the Packs tab, choose the pack and an **effective from** date and time. It may not be in the past: applying a pack never changes the rate of an invoice already issued. Choosing a date a few days ahead gives you time to review the result.
 4. Read the preview. Every rule key is listed as `add`, `unchanged`, `change` (with the old and new values) or `remove`. Legal notes are listed as `add`, `unchanged`, `change`, or `kept_edited` when an administrator edited the text (an edited text is always kept). A tax class the pack needs and you do not have, such as `digital_service`, is listed as an addition.
 5. Apply. The apply uses exactly the preview you saw: if the pack or the applied rules changed since, it is refused (`pack_changed`) and you preview again. The apply is recorded in the audit log as `billing.tax.pack_applied` with the full diff.
-6. Set the tax class of your products. Products are never reassigned automatically. A product with no class is `standard`; the packs give `standard` and `digital_service` the same rates, but set `digital_service` on what you sell as electronically supplied services so the intent is explicit (owner question 8).
+6. Set the tax class of your products. Products are never reassigned automatically. A product with no class is `standard`; the packs give `standard` and `digital_service` the same rates, but set `digital_service` on what you sell as electronically supplied services so the intent is explicit (design question 8, decided on 2026-11-23: section 8 below). The class `digital_service` is not seeded with the installation; the first apply of either pack creates it.
 
 The tax engine uses pack and admin rules only when `billing_tax_enabled` is on and, in production, after the tax engine is switched to `v2` (design section 5).
 
@@ -116,13 +116,59 @@ Not confirmed:
 
 ## 7. Questions for your tax adviser
 
-These are the assumptions the packs make (design section 18):
+These are the assumptions the packs make (design section 18). The project chat decided questions 8 and 10 and the nine questions of 18.1 on 2026-11-23, on the owner's delegation, and the rest stay at their recommended defaults. Section 8 gives the reasons. Rackflow is software for other operators, so the switch item `adviser_signoff` asks you to record that you have reviewed these defaults, with your own adviser where you need one.
 
-- Whether everything you sell (virtual machines, bare metal, proxies, storage, backup) is an electronically supplied service. Bare-metal rental or colocation could be hire of equipment or a service connected to property, with a different place of supply (question 8).
+- Whether everything you sell (virtual machines, bare metal, proxies, storage, backup) is an electronically supplied service. The decision is yes for those products and not for colocation or rack space (question 8, section 8).
 - For a UK seller: no UK VAT on digital services to consumers outside the UK; EU consumers need the non-union One Stop Shop registration, and without one Rackflow charges nothing and raises the `tax_not_registered` alert (question 9).
-- The wording of the reverse charge and outside-the-scope notes (question 10).
+- The wording of the reverse charge and outside-the-scope notes (question 10, kept as seeded).
 - Northern Ireland treated as the UK for services (question 11).
 - No UK domestic reverse charge for hosting (question 16).
 - Rounding per invoice per rate, half up (question 1).
 - Late fees outside the scope of VAT (question 3).
 - For an EU seller: whether the seller-state rows (section 1.4) are right below the 10,000 euro threshold, and how the threshold is calculated from 1 January 2027 under ViDA (Directive 2025/516, Article 2(4)) as transposed in your member state.
+
+## 8. Defaults and why
+
+This section lists what Rackflow does with tax when you change nothing, and the reason for each default. It was checked against the tax engine (`app/services/tax/`) and the two packs on 23 November 2026. The reasons for the decisions on design questions 8 and 10 and 18.1 were recorded by the project chat on 2026-11-23, on the owner's delegation.
+
+**Classes and products**
+
+- A product with no tax class is `standard`. Reason: every line needs a class, and the packs give `standard` the same rate as `digital_service`, so nothing is lost by the default.
+- VMs, proxies, storage, backup slots and dedicated bare-metal servers are electronically supplied services, class `digital_service`. Reason: they are provided remotely over the internet with minimal human involvement. The class is created by the first pack apply, and you set it on the products yourself.
+- Colocation, rack space and anything like them are not `digital_service`. Reason: they can be a service connected to land, which has a different place of supply, so an operator selling them should give them their own tax class (with their own rule) and check it with their adviser.
+- Credit top-ups are never taxed (class `outside_scope`), and late fees are `outside_scope` as compensation for late payment, not a supply. Reason: the tax falls on the invoices the credit pays for.
+- Retail renewals are taxed (`billing_tax_retail_renewals`, on) and reseller recurring and deploy invoices are not (`billing_tax_resellers_enabled`, off). Reason: VAT is due on every supply to a client, and reseller invoices stay as they were until you turn the setting on deliberately.
+
+**Place of supply and reverse charge**
+
+- A consumer is taxed where they are, by their billing country. If you are registered in that country, its rules apply. If not, and the country is in the EU, the One Stop Shop (`EU_OSS`) registration applies when you hold one. Reason: for electronically supplied services to consumers the place of supply is the customer's country.
+- An EU seller with neither of those registrations, selling to a consumer in another member state, charges its own state's rate through the `_seller_state` rows (section 1.4). Reason: the under-10,000-euro treatment, which you declare by the registrations you hold; Rackflow does not track the threshold.
+- A consumer in the EU or the UK where you hold no registration is charged nothing, and Rackflow raises the `tax_not_registered` alert. A consumer anywhere else is charged nothing with the note `outside_scope`. Reason: charging VAT you cannot account for would be wrong, so the alert makes you decide.
+- A business is taxed where it is, and abroad it is not charged your VAT: the invoice is reverse charged, with a zero-tax row and a legal note. Reason: the general rule for supplies between businesses.
+- The reverse charge needs a tax ID found `valid` by a check made within `billing_tax_id_max_age_days` (30) of the tax point, and a buyer in another country than the seller. The note is `eu_reverse_charge` between two EU states, `gb_outside_scope_b2b` from a UK seller to an EU business, and `outside_scope` otherwise. Reason: a number that was never checked, is stale or is invalid is not evidence that the buyer is a business.
+- There is no UK domestic reverse charge. Reason: it covers construction, specified goods, wholesale telecoms and energy, not hosting.
+- The two seeded note texts keep the wording the design proposed ("Reverse charge: VAT to be accounted for by the customer (Article 196, Directive 2006/112/EC)." and "Outside the scope of UK VAT: reverse charge. The customer accounts for any VAT due."), with no extra wording for any seller country. You may edit the texts in the tax admin.
+
+**VAT numbers**
+
+- A number is normalised and its shape checked for the EU 27 and the UK, then checked online by the first enabled validator that supports it. With no validator the status stays `unchecked`, and the buyer is taxed as a consumer. Reason: Rackflow never assumes a number is registered. A UK number is checked online only if a configured validator supports it; otherwise it is only shape checked.
+- A `valid` result is kept for 30 days (`billing_tax_id_valid_days`), an `invalid` one for a day and an `unavailable` one for 15 minutes. When the validator is down, checkout charges VAT as if the buyer had no valid number (`billing_tax_id_unavailable_policy`, `charge_tax`) and renewals are never blocked. Reason: failing towards charging VAT is the safer error, and a refund by credit note can follow.
+- The country of the number must match the billing country when the buyer is not in the seller's own country. If it does not (for example billed in France with a German number, or billed in the EU with a GB number), the buyer is a consumer in the billing country, and the invoice is flagged `tax_id_country_mismatch`. Reason: a number of a third country does not show where the supply is made, and charging VAT is the safer direction.
+
+**Countries Rackflow cannot place**
+
+- A buyer with no country is not refused: the sale is taxed as a sale to a consumer in your own country, whatever the buyer's tax ID, under your establishment registration, and the invoice is flagged `buyer_country_missing`. This needs `billing_tax_seller_country` to be set. Reason: VAT is not left uncharged, and the alert lets you correct the profile.
+- The Isle of Man (`IM`) is taxed as the UK, Northern Ireland (`XI`) as the UK for services, and Monaco (`MC`) as France. A number of those places is read the same way. This happens only while `billing_tax_enabled` is on, and a rule cannot be written for `IM`, `XI` or `MC`. Reason: they are inside the UK or French VAT area, so a rule for them would never match.
+- The Canary Islands, Ceuta, Melilla and other special territories are not treated apart: the billing country decides. Reason: the packs carry no rule that tells them apart from the rest of the country. If you sell there, set a tax exemption on the customer's account where one applies, and ask your adviser about local taxes such as IGIC or IPSI.
+- When the billing country is outside the EU and the IP address is inside it, the billing country decides, and the difference is recorded as `conflict` and flagged when the invoice carries tax. Reason: the billing profile is what the client declared; the IP address is evidence only.
+
+**Classes with no rule, and amounts**
+
+- A line whose class has no rule where your registration should tax it is not taxed. Rackflow records the note `no_rule_for_class` and raises the `billing_tax_no_rule_for_class` alert. `exempt` and `outside_scope` lines never raise it. Reason: Rackflow does not guess a rate for a class you created, so the invoice still issues and the alert tells you to add a rule.
+- An `exempt` line gets no tax row and no note on a domestic or One Stop Shop sale, and is shown as reverse charge on a reverse-charged sale. Reason: it follows the invoice's place of supply rather than adding a second wording.
+- Prices exclude tax by default (`billing_tax_prices_include_tax`, off): tax is added to the price, as checkout has always done. Reason: it keeps current invoices unchanged. With the setting on, the tax is worked out inside the price and net plus tax equals the gross exactly.
+- Tax is rounded once per invoice per rate, half up, for both packs. Reason: it is the common commercial rule; HMRC also accepts rounding down and some member states have their own rule.
+- An invoice in another currency with UK VAT shows the VAT total in sterling at HMRC's monthly rate for the month of the tax point (UK time), frozen at publish. This applies when the chosen registration is `GB`, the VAT is above zero and the currency is not sterling. Reason: a UK VAT invoice must show its VAT in sterling. The rate is stored by a daily job or entered by an administrator, never fetched during publish; with no rate stored, the invoice is not issued and the request is retried. A proforma paid in a month with no stored rate is still paid, and its sterling line waits for the rate.
+- A credit note uses the tax of the invoice it credits: it reverses the invoice's tax rows at the same rate, group by group, so a reverse-charged line stays reverse charged, and it takes exactly the tax that is left and no more. Its sterling VAT uses the HMRC rate stored on the invoice and never a newer one (an invoice that froze none, because its VAT was zero, uses the stored rate of its own tax point's month). Reason: a credit must undo the supply as it was taxed, whatever the rates are now.
+
+**This is not legal advice.** These defaults are a starting point that Rackflow's authors chose; no qualified tax adviser has reviewed them. The tax rules differ between countries, change often and depend on what you sell and where you are established. Check every default above with your own tax adviser before you rely on it, and record in the `billing_tax_adviser_signoff` setting who reviewed them and when.
