@@ -158,7 +158,8 @@ def _seed_quiet_history(db, engine: str, days: int, now: datetime) -> None:
     since = now - timedelta(days=days, hours=1)
     billing_shadow.set_shadow_since(db, engine, at=since, by="test")
     for day in range(days):
-        started = since + timedelta(days=day, minutes=30)
+        # Late on each UTC day from the one ``days`` ago to yesterday, whatever time of day the test runs.
+        started = (now - timedelta(days=days - day)).replace(hour=23, minute=0, second=0, microsecond=0)
         billing_shadow._append_history(db, engine, {
             "started_at": started.isoformat(), "finished_at": (started + timedelta(minutes=1)).isoformat(),
             "subjects_checked": 1, "mismatches_found": 0, "scheduled": True, "complete": True,
