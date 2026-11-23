@@ -79,6 +79,8 @@ def test_delete_only_a_rate_no_invoice_has_frozen(client, db_session, headers, a
     db_session.commit()
     usd = exchange_rates.stored_rate(db_session, "USD", "2026-11").id
     eur = exchange_rates.stored_rate(db_session, "EUR", "2026-11").id
+    listed = {row["currency"]: row["in_use"] for row in client.get(BASE, headers=headers).json()["items"]}
+    assert listed == {"USD": True, "EUR": False}
     refused = client.delete(f"{BASE}/{usd}", headers=headers)
     assert refused.status_code == 409 and refused.json()["detail"]["code"] == "tax_exchange_rate_in_use"
     assert client.delete(f"{BASE}/{eur}", headers=headers).status_code == 204

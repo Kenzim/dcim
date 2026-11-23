@@ -24,7 +24,7 @@ from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus, Bi
 # Action names by claim key, for rows whose run items were purged or never written.
 _ACTION_BY_KEY = (
     (re.compile(r":termination_notice:"), "notice"),
-    (re.compile(r":terminate$"), "terminate"),
+    (re.compile(r":terminate(:invoice:\d+)?$"), "terminate"),
     (re.compile(r":suspend:"), "suspend"),
     (re.compile(r"^period:"), "fetch_exchange_rates"),
     (re.compile(r"^compare:"), "compare_exchange_rate"),

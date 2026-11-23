@@ -118,7 +118,13 @@ def list_rates(
     if currency:
         stmt = stmt.where(TaxExchangeRate.currency == currency.upper())
     stmt = stmt.order_by(TaxExchangeRate.period.desc(), TaxExchangeRate.currency, TaxExchangeRate.id).limit(limit)
-    return {"items": [_payload(row) for row in db.scalars(stmt)]}
+    rows = list(db.scalars(stmt))
+    ids = [row.id for row in rows]
+    used = set()
+    if ids:
+        used.update(db.scalars(select(Invoice.fx_rate_id).where(Invoice.fx_rate_id.in_(ids)).distinct()))
+        used.update(db.scalars(select(InvoiceAdjustment.fx_rate_id).where(InvoiceAdjustment.fx_rate_id.in_(ids)).distinct()))
+    return {"items": [{**_payload(row), "in_use": row.id in used} for row in rows]}
 
 
 def _preview(db: Session, period: str, currency: str) -> dict:
