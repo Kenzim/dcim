@@ -614,9 +614,9 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
    value is the pre-firewall state only if the datacenter firewall has not been enabled on the
    iptables backend since the node booted: enabling it sets both to 1 and disabling it does not set
    them back, and `br_netfilter` is built into the kernel, so a node that ran the iptables firewall
-   earlier reads 1 here already. If the current value differs from the boot value, or `cluster.fw`
-   already has `enable: 1`, record both and say so in the proposal; the rollback then restores the
-   current (recorded) value, and returning to the boot value is a separate decision for Kenzi.
+   earlier reads 1 here already. Where a node's live and boot values differ, or `cluster.fw` already
+   has `enable: 1`, flag that node: record both values, and the proposal to Kenzi lists every flagged
+   node. Nothing is changed to "correct" a flagged node, here or later in this procedure.
 1a. Read only, on one node of each cluster: confirm the cluster's existing Rackflow login (the user
    in its Rackflow cluster record) holds what the worker needs, changing nothing:
    `pveum user permissions <user> --path /`, `--path /vms/<vmid>` for one guest per node, and
@@ -643,10 +643,11 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
    back, on each node, to the values that node had before the enable as recorded in step 1 (never a
    blind 0), with `sysctl -w net.bridge.bridge-nf-call-iptables=<recorded>
    net.bridge.bridge-nf-call-ip6tables=<recorded>` (tested in 9.4; `br_netfilter` is built into the
-   PVE kernel and cannot be unloaded). Rollback rule: restore the current value recorded at step 1,
-   not the boot value. Where step 1 found the two differ (an iptables firewall ran since boot), the
-   rollback still restores the recorded current value, and moving the node to its boot value is a
-   separate change for Kenzi. Check both on each node after the rollback and record them. On
+   PVE kernel and cannot be unloaded). Rollback rule: restore each node's live value recorded at
+   step 1, never the boot value, because the rollback only undoes what this procedure changed. On a
+   node step 1 flagged (live and boot values differ), the rollback still restores the recorded live
+   value and nothing is changed to "correct" it. Check both on each node after the rollback and
+   record them. On
    nftables nothing is left behind and the sysctls are not touched; still read them after the
    rollback to confirm they equal the step 1 record.
 5a. Re-measure the NIC flag flip on production's qemu-server: on one named host, create a throwaway
@@ -748,9 +749,10 @@ fwn1 and fwn2 at 06:37 to 06:38 UTC, with ACCEPT policies; in the 11-minute watc
 after Proxmox's 3 s delay for failed logins). `bridge-nf-call-iptables` and `-ip6tables` read 0 and 0 on both
 nodes at step 1 (06:37:53, before any step and after B0's last reset), stayed 0 after the enable (the
 nftables backend never sets them) and were still 0 at the end; on these nodes they are set at boot by
-`/usr/lib/sysctl.d/10-pve.conf`, and `br_netfilter` is built in. So the step 1 record equalled the boot
-value here, the rollback in case 4 had nothing to restore, and the rollback rule of 9.3 step 5
-(restore the recorded current value, read both back after the rollback) held: 0 and 0 afterwards.
+`/usr/lib/sysctl.d/10-pve.conf`, and `br_netfilter` is built in. So the live value recorded at step 1
+equalled the boot value here (no node flagged), the rollback in case 4 had nothing to restore, and the
+rollback rule of 9.3 step 5 (restore each node's live value recorded at step 1, never the boot value,
+and read both back after the rollback) held: 0 and 0 afterwards.
 Rackflow's readiness check reported the location ready. 6,757 Proxmox requests were logged over the
 run: no 401 and no 403, so the privileges listed above were enough; the only failures were 25 `PUT
 config` answering HTTP 500 "VM is locked (backup)", caused on purpose in case 6. A guest's `.fw` was always written and compiled by `proxmox-firewall`
