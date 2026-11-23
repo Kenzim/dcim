@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import Request
@@ -314,6 +315,22 @@ def _cluster_ready(location_settings: Optional[FirewallLocationSettings], cluste
     return bool((clusters.get(str(cluster_id)) or {}).get("ready"))
 
 
+NOT_ELIGIBLE_STATE = "not_eligible"
+# States the worker sets only after reading the VM config, where it also checks the NICs.
+_CONFIG_READ_STATES = {"off", "applied", "pending_reboot", "drift", "not_enforced"}
+
+
+def _worker_nics_checked_at(row: ServiceFirewall, state: str, held_from_config: bool) -> Optional[datetime]:
+    """When the worker last read this VM's config and checked its NICs, if it has: its apply and
+    sweep read the config at ``last_checked_at`` for a managed VM that ends in one of these states,
+    or that it held for a reason only the config shows (``held_from_config``)."""
+    if row.last_checked_at is None or not row.managed or row.excluded:
+        return None
+    if state in _CONFIG_READ_STATES or (state == NOT_ELIGIBLE_STATE and held_from_config):
+        return row.last_checked_at
+    return None
+
+
 _STATE_MESSAGES = {
     "pending": "Saving the firewall to the server.",
     "pending_reboot": "Some firewall changes take effect after the server is next restarted.",
@@ -455,7 +472,9 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
     # A location switched on in staging (readiness not passed) stays hidden from clients.
     available = result.eligible and not held and (cluster_ready or audience == STAFF)
     reasons.extend(rendered.reasons)
-    state = _value(row.state)
+    # The worker stores a VM it holds as ineligible as ``unmanaged``; the view gives it its own state
+    # so it is not shown as a staff opt-out.
+    state = NOT_ELIGIBLE_STATE if held or reconcile.held_reasons(row) else _value(row.state)
     if not available:
         message = "The firewall is not available for this server."
     else:
@@ -469,6 +488,7 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
     if foreign and audience == STAFF:
         reasons.append("foreign_reference")
     baseline = _baseline_view(db, ctx, rendered, audience)
+    nics_checked_at = _worker_nics_checked_at(row, state, bool(held))
     view: dict[str, Any] = {
         "service_id": service_id,
         "available": available,
@@ -507,13 +527,14 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
             location_id=ctx.location_id,
             cluster_id=cluster_id,
             cluster_ready=cluster_ready,
-            nics_checked=result.nics_checked,
+            nics_checked=result.nics_checked or nics_checked_at is not None,
+            nics_checked_at=_iso(nics_checked_at),
             net0_bridge=row.net0_bridge,
             rollout_after=_iso(row.rollout_after),
             applied_revision=row.applied_revision,
             desired_hash=rendered.desired_hash,
             applied_hash=row.applied_hash,
-            in_sync=row.applied_hash == rendered.desired_hash,
+            in_sync=None if state == NOT_ELIGIBLE_STATE else row.applied_hash == rendered.desired_hash,
             last_error=row.last_error,
             failing_since=_iso(row.failing_since),
             last_checked_at=_iso(row.last_checked_at),

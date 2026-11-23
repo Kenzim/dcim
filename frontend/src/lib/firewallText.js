@@ -25,6 +25,11 @@ export const STATE_INFO = {
     text: 'The rules are written, but the hypervisor firewall is not currently switched on, so nothing is filtered.',
   },
   unmanaged: { label: 'Not managed', variant: 'muted', text: 'Staff have set this server so that Rackflow does not touch its firewall.' },
+  not_eligible: {
+    label: 'Not offered',
+    variant: 'muted',
+    text: "Rackflow does not manage this server's firewall because of how it is set up. The reason is shown below.",
+  },
   vm_missing: { label: 'Server missing', variant: 'danger', text: 'The hypervisor has no such server.' },
 };
 

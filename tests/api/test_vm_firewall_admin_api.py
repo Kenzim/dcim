@@ -367,20 +367,54 @@ def test_apply_refuses_a_vm_its_live_config_makes_ineligible(
     assert fake.writes == []
 
 
-def test_view_of_a_vm_the_worker_holds_as_ineligible_shows_why(client, db_session, world, admin):
+def test_view_of_a_vm_the_worker_holds_as_ineligible_shows_why(client, db_session, world, admin, alice_headers):
     """The worker holds a managed VM whose live config is ineligible (here a trunk NIC) as
     ``unmanaged``; the view must say it is not offered and why, not that staff switched it off."""
+    from datetime import datetime
+
     from app.services.vm_firewall import service as fw
 
     vm = _vm(world, db_session)
     row = fw.get_or_create(db_session, vm.id)
     row.state = "unmanaged"
     row.last_error = "not eligible: nic_trunk, infrastructure_bridge"
+    row.last_checked_at = datetime(2026, 11, 23, 11, 40)
     db_session.commit()
     body = client.get(ADMIN + f"/services/{vm.id}", headers=admin).json()
     assert body["available"] is False
     assert {"nic_trunk", "infrastructure_bridge"} <= set(body["reasons"])
     assert body["message"] == "The firewall is not available for this server."
+    # Its own state, not the staff opt-out; the worker read its NICs when it held it; and it is
+    # neither in sync nor out of sync, since the worker does not maintain a held VM.
+    assert body["state"] == "not_eligible" and body["managed"] is True
+    assert body["nics_checked"] is True and body["nics_checked_at"].startswith("2026-11-23T11:40")
+    assert body["in_sync"] is None
+    client_body = client.get(f"/api/client/services/{vm.id}/firewall", headers=alice_headers).json()
+    assert client_body["state"] == "not_eligible" and client_body["available"] is False
+
+
+def test_view_reports_when_the_worker_checked_the_nics(client, db_session, world, admin):
+    """A VM the worker applied had its config read and NICs checked at ``last_checked_at``; one it
+    never looked at shows not yet; a staff opt-out keeps the unmanaged state."""
+    from datetime import datetime
+
+    from app.services.vm_firewall import service as fw
+
+    vm = _vm(world, db_session)
+    row = fw.get_or_create(db_session, vm.id)
+    body = client.get(ADMIN + f"/services/{vm.id}", headers=admin).json()
+    assert body["nics_checked"] is False and body["nics_checked_at"] is None
+    row.state = "applied"
+    row.last_checked_at = datetime(2026, 11, 23, 11, 41)
+    db_session.commit()
+    body = client.get(ADMIN + f"/services/{vm.id}", headers=admin).json()
+    assert body["nics_checked"] is True and body["nics_checked_at"].startswith("2026-11-23T11:41")
+    row.managed = False
+    row.state = "unmanaged"
+    row.last_error = None
+    db_session.commit()
+    body = client.get(ADMIN + f"/services/{vm.id}", headers=admin).json()
+    assert body["state"] == "unmanaged" and body["nics_checked"] is False
 
 
 def test_apply_reports_an_unreachable_proxmox(client, monkeypatch, db_session, world, admin):

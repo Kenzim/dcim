@@ -400,10 +400,10 @@
         {#if fw.last_error}<p class="field-error">Last error: {fw.last_error}{#if fw.failing_since} (failing since {when(fw.failing_since)}){/if}</p>{/if}
 
         <dl class="facts">
-          <div><dt>In sync</dt><dd>{fw.in_sync ? 'Yes' : 'No'}</dd></div>
+          <div><dt>In sync</dt><dd>{fw.in_sync == null ? 'Not applicable (not offered)' : fw.in_sync ? 'Yes' : 'No'}</dd></div>
           <div><dt>Revision</dt><dd>{fw.revision}{fw.applied_revision != null ? ` (applied ${fw.applied_revision})` : ' (never applied)'}</dd></div>
           <div><dt>Cluster ready</dt><dd>{fw.cluster_ready ? 'Yes' : 'No'}</dd></div>
-          <div><dt>Network cards checked</dt><dd>{fw.nics_checked ? 'Yes' : 'Not yet'}</dd></div>
+          <div><dt>Network cards checked</dt><dd>{fw.nics_checked_at ? when(fw.nics_checked_at) : fw.nics_checked ? 'Yes' : 'Not yet'}</dd></div>
           <div><dt>net0 bridge</dt><dd>{fw.net0_bridge || 'Unknown'}</dd></div>
           <div><dt>Last checked</dt><dd>{when(fw.last_checked_at)}</dd></div>
           <div><dt>Next attempt</dt><dd>{fw.next_attempt_at ? when(fw.next_attempt_at) : 'None queued'}</dd></div>
