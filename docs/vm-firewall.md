@@ -420,14 +420,29 @@ against the real API.
      its row changes unflushed until the outcome is recorded. A renewal that matches no row means
      another applier has the VM (the claim expired and was taken), and the apply stops before that
      write. One apply may therefore run longer than 120 s, as long as no single write does;
-   - before recording any outcome on the row (success with `applied_revision`, `applied_hash` and
-     `applied_digest`; a failure with `error`, `last_error`, `failing_since` and the backoff; a
-     `vm_missing` VM; an unmanaged one), reads `claimed_by` with `SELECT ... FOR UPDATE` in the
-     apply's session and records only if the claim is still its own. The lock lasts until that session
-     commits, so nobody can take the claim in between. This includes a Proxmox or transport error
-     raised after the claim was taken, and the failed Proxmox reads of the queue, the drift sweep and
-     the deployment step before an apply. The check comes after the last renewal, so the apply never
-     holds the lock while its own renewal, in the other session, waits for it.
+   - before writing anything to the row after a Proxmox call, reads `claimed_by` and `revision` with
+     `SELECT ... FOR UPDATE` in the apply's session and writes only if the claim is still its own. The
+     lock lasts until that session commits, so nobody can take the claim in between. This covers every
+     outcome: success with `applied_revision`, `applied_hash` and `applied_digest`; a failure with
+     `error`, `last_error`, `failing_since` and the backoff, including a Proxmox or transport error
+     raised after the claim was taken; a `vm_missing` VM; an unmanaged one; a VM held as ineligible by
+     the queue, the drift sweep or the deployment step; the drift sweep's `in_sync`, `reported` and
+     `queued` results; and an observed `net0` bridge. The check comes after the last renewal, so the
+     apply never holds the lock while its own renewal, in the other session, waits for it;
+   - settles the revision on the locked value. An applier that observes a moved `net0` bridge raises
+     the revision it loaded at the start, without the row lock, while a client save may have raised
+     the same revision in the database meanwhile. Under the lock the bump is moved on top of the
+     database's value (one more than the save's number), so it never reuses the save's number and
+     never moves the revision backwards;
+   - records as applied the revision it rendered, never a later one. When the locked revision is newer
+     (a save committed during the apply), the row keeps `applied_revision` at the rendered revision,
+     `applied_hash` at the rendered document and state `pending`, so the queue applies the save on its
+     next pass without waiting for the drift sweep.
+
+   Each run of the deployment step claims the VM with an owner of its own
+   (`deployment-job-<id>-<random>`): the job lease is not renewed while a step runs, so a job can be
+   reclaimed and its step run again while the first run still writes, and the second run must not
+   inherit the first's claim.
 
    An apply that lost its claim records nothing: its unflushed row changes are discarded, the VM is not
    marked `error`, the staged-rollout count is not touched, and the row is left for whoever holds the
