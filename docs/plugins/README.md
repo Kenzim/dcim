@@ -284,7 +284,8 @@ A plugin can offer tools to MCP clients without growing the tool list: staff rea
 
 Assume your plugin will fail sometimes; Rackflow is built so that it cannot hurt anything else.
 
-- Every call into your code has a time limit (before hooks 2 s, actions up to 30 s, deliveries 30 s, schedules up to 600 s). Async handlers are cancelled at the limit; a blocking plain function cannot be killed, so Rackflow stops waiting and counts a failure.
+- Every call into your code has a time limit (before hooks 2 s, actions up to 30 s, deliveries 30 s, schedules up to 600 s). Async handlers are cancelled at the limit; a blocking plain function cannot be killed, so Rackflow stops waiting, counts a failure and discards its state changes, while its thread runs on until the function returns.
+- A plugin may have at most 4 plain-function handlers running at once in each Rackflow process, counting ones that timed out but are still running. Further calls are refused straight away instead of waiting: deliveries and schedules are tried again a minute later, before hooks are skipped (allow), and actions and tools get "busy" or "not responding". When all 4 are calls that timed out, each refusal counts as a failure too, so the circuit opens, and staff get the `plugin_handlers_abandoned` alert until your handlers return. Never block for ever in a plain function: give every network call and lock wait its own timeout.
 - Exceptions are caught at the boundary, logged to the plugin log with a trimmed traceback, and shown to admins as the last error.
 - After 5 failures in a row the **circuit opens** for 60 seconds, doubling up to 30 minutes: deliveries and schedules wait, before hooks are skipped, actions and tools are refused with "temporarily unavailable". The first success closes it.
 - After 25 failures in a row the plugin is **disabled** (status `failed`), an audit entry is written and staff are alerted. Re-enabling resets the counts.
