@@ -111,3 +111,75 @@ def test_a_staff_hold_during_the_current_episode_still_keeps_the_billing_suspend
         str(billing.service_id)
     ]
     assert db_session.query(BillingJobAction).count() == 1
+
+
+# ---------------------------------------------------------------- M2
+
+
+def _fail_termination(monkeypatch):
+    import app.services.commerce_lifecycle_service as lifecycle_module
+    from app.services.commerce_lifecycle_service import ServiceTerminationError
+
+    real = lifecycle_module.terminate_service
+
+    async def failing(db, service, **kwargs):
+        raise ServiceTerminationError("power off failed")
+
+    monkeypatch.setattr(lifecycle_module, "terminate_service", failing)
+    return lambda: monkeypatch.setattr(lifecycle_module, "terminate_service", real)
+
+
+@pytest.mark.parametrize("to", ["done", "failed"])
+def test_a_second_episode_after_a_settled_termination_is_warned_and_terminated(db_session, env, monkeypatch, to):
+    from app.services.billing.jobs.actions import resolve_action
+    from app.services.billing.jobs.termination import notice_key
+    from tests.services.test_billing_p2_suspension import _emails
+
+    _, billing, _, job = env
+    sid = billing.service_id
+    term = NonpaymentTerminationJob()
+    first = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=24))
+    run_job(db_session, job, make_run(SUSPEND, now=NOW - timedelta(days=18)))
+    assert run_job(db_session, term, make_run(TERMINATE, now=NOW)) == {notice_key(sid, first.id): "done"}
+    restore = _fail_termination(monkeypatch)
+    # Outcomes by value only, so the same assertions run against the per-service key.
+    assert list(run_job(db_session, term, make_run(TERMINATE, now=NOW + timedelta(days=8))).values()) == ["failed"]
+    restore()
+    (claim,) = db_session.query(BillingJobAction).filter(
+        BillingJobAction.subject_key.like(f"service:{sid}:terminate%")
+    ).all()
+    resolve_action(db_session, claim.id, to=to, note="checked", actor_user_id=None, now=NOW + timedelta(days=8))
+    db_session.commit()
+    _pay(db_session, db_session.get(Invoice, first.id))
+    assert _state(db_session, billing) == (ServiceStatus.ACTIVE, ServiceBillingStatus.ACTIVE)
+
+    # Months later the client stops paying again.
+    second = make_cycle_invoice(db_session, billing, due_at=NOW + timedelta(days=40))
+    run_job(db_session, job, make_run(SUSPEND, now=NOW + timedelta(days=46)))
+    assert _state(db_session, billing) == (ServiceStatus.SUSPENDED, ServiceBillingStatus.SUSPENDED_NONPAYMENT)
+    # The settled claim of the first episode is not this episode's: no alert.
+    assert billing_integrity.nonpayment_termination_unsettled(db_session, PARAMS, NOW) == []
+    assert run_job(db_session, term, make_run(TERMINATE, now=NOW + timedelta(days=63))) == {
+        notice_key(sid, second.id): "done"
+    }
+    assert list(run_job(db_session, term, make_run(TERMINATE, now=NOW + timedelta(days=70))).values()) == ["done"]
+    assert db_session.query(BillingJobAction).filter_by(subject_key=f"service:{sid}:terminate:invoice:{second.id}").one()
+    assert db_session.get(Service, sid).status == ServiceStatus.TERMINATED
+    assert db_session.get(ServiceBilling, billing.id).status == ServiceBillingStatus.CANCELLED
+    assert _emails(db_session, "service_termination_warning") == 2
+    assert _emails(db_session, "service_terminated") == 1
+
+
+def test_an_old_per_service_terminate_claim_is_still_reported(db_session, env):
+    from app.models.billing_jobs import BillingJobActionStatus
+
+    _, billing, _, job = env
+    make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=24))
+    run_job(db_session, job, make_run(SUSPEND, now=NOW - timedelta(days=18)))
+    db_session.add(BillingJobAction(
+        job=TERMINATE, subject_key=f"service:{billing.service_id}:terminate", status=BillingJobActionStatus.FAILED,
+        detail={}, claimed_at=NOW,
+    ))
+    db_session.commit()
+    (finding,) = billing_integrity.nonpayment_termination_unsettled(db_session, PARAMS, NOW)
+    assert finding.resource_id == str(billing.service_id)

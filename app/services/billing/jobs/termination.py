@@ -13,7 +13,9 @@ for non-payment, ``T_t = due_at + terminate_after_days`` and the notice time
 - *terminate* (two transactions): when the notice for the same invoice is
   ``done``, was sent at least ``termination_notice_days`` before now,
   ``T_t <= now``, the invoice still has a balance and the service is still
-  suspended for non-payment. Claim ``service:{id}:terminate``, commit, call
+  suspended for non-payment. Claim
+  ``service:{id}:terminate:invoice:{invoice_id}`` (the notice's invoice, so
+  each non-payment episode has its own), commit, call
   ``terminate_service``, then ``JobRun.finish`` with ``done`` (ending the
   billing, applying ``unpaid_invoice_action_on_terminate`` and queueing
   ``service_terminated``) or ``needs_review``, never retried.
@@ -72,8 +74,8 @@ def notice_key(service_id: int, invoice_id: int) -> str:
     return f"service:{int(service_id)}:termination_notice:invoice:{int(invoice_id)}"
 
 
-def terminate_key(service_id: int) -> str:
-    return f"service:{int(service_id)}:terminate"
+def terminate_key(service_id: int, invoice_id: int) -> str:
+    return f"service:{int(service_id)}:terminate:invoice:{int(invoice_id)}"
 
 
 def suspended_for_nonpayment(db: Session, billing: ServiceBilling, invoice: Invoice) -> bool:
@@ -171,7 +173,7 @@ class NonpaymentTerminationJob:
                     return None
                 if not run.reached(terminate_at) or not suspended_for_nonpayment(db, billing, invoice):
                     return None
-                return PlannedAction(terminate_key(service_id), "terminate", terminate_at, detail)
+                return PlannedAction(terminate_key(service_id, invoice.id), "terminate", terminate_at, detail)
             if notice_at > run.now:
                 break
             if not run.reached(notice_at) or not suspended_for_nonpayment(db, billing, invoice):
