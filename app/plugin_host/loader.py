@@ -89,6 +89,7 @@ class Package:
     errors: list[str] = field(default_factory=list)
     code_hash: Optional[str] = None
     bundled: bool = False
+    reserved: bool = False
 
     @property
     def valid(self) -> bool:
@@ -209,47 +210,66 @@ def _manifest_id_at(path: Path) -> Optional[str]:
         return None
 
 
-def _conflict_message(plugin_id: str) -> str:
-    return (
-        f"the plugin {plugin_id!r} exists in both the plugins folder and the bundled plugins folder; "
-        "remove one copy before it can be installed or run"
-    )
+def reserved_names() -> set[str]:
+    """Directory names and manifest ids of the packages Rackflow ships, read from the bundled folder now."""
+    bundled = bundled_root()
+    if bundled == plugins_root():
+        return set()
+    names: set[str] = set()
+    for child in _package_dirs(bundled):
+        names.add(child.name)
+        manifest_id = _manifest_id_at(child)
+        if manifest_id:
+            names.add(manifest_id)
+    return names
+
+
+def _mark_reserved(package: Package, reserved: set[str]) -> None:
+    """Refuse a plugins folder package that uses the folder name or manifest id of a bundled one."""
+    clash = sorted(_claims(package.directory, package.raw) & reserved)
+    if clash:
+        name = _raw_id(package.raw) if _raw_id(package.raw) in clash else clash[0]
+        package.reserved = True
+        package.errors.append(f"`{name}` is a reserved name used by a plugin Rackflow ships; rename this plugin.")
 
 
 def discover(root: Optional[Path] = None) -> list[Package]:
-    """Packages of ``root``, or of the plugins folder and then the bundled folder when no root is given."""
+    """Packages of ``root``, or of the plugins folder and then the bundled folder when no root is given.
+
+    A package of the plugins folder that claims the folder name or manifest id of a bundled package is
+    marked with an error; the bundled package is never marked.
+    """
     if root is not None:
         return _scan(root, False)
     out: list[Package] = []
     for folder, bundled in package_roots():
         out.extend(_scan(folder, bundled))
-    claims = {id(p): _claims(p.directory, p.raw) for p in out}
+    reserved = reserved_names()
     for package in out:
-        mine = claims[id(package)]
-        for other in out:
-            shared = mine & claims[id(other)]
-            if other.bundled != package.bundled and shared:
-                package.errors.append(_conflict_message(_raw_id(package.raw) or sorted(shared)[0]))
-                break
+        if not package.bundled:
+            _mark_reserved(package, reserved)
     return out
 
 
-def find_package(directory: str, root: Optional[Path] = None) -> Package:
+def find_package(directory: str, root: Optional[Path] = None, *, for_install: bool = False) -> Package:
+    """The package called ``directory``.
+
+    A bundled package wins over a plugins folder package of the same name, so an installed bundled plugin
+    keeps loading. ``for_install`` makes the plugins folder win instead, so that installing refuses a
+    package there that uses a reserved name.
+    """
     if not directory or "/" in directory or "\\" in directory or directory.startswith("."):
         raise PluginLoadError("Unknown plugin directory")
     roots = [(root, False)] if root is not None else package_roots()
+    if not for_install:
+        roots = sorted(roots, key=lambda entry: not entry[1])
     found = [(base / directory, bundled) for base, bundled in roots if (base / directory / "plugin.json").is_file()]
     if not found:
         raise PluginLoadError("Unknown plugin directory")
     package = read_package(found[0][0])
     package.bundled = found[0][1]
-    mine = _claims(directory, package.raw)
-    for base, bundled in roots:
-        if bundled == package.bundled:
-            continue
-        if any(child.name in mine or _manifest_id_at(child) in mine for child in _package_dirs(base)):
-            package.errors.append(_conflict_message(_raw_id(package.raw) or directory))
-            break
+    if root is None and not package.bundled:
+        _mark_reserved(package, reserved_names())
     return package
 
 

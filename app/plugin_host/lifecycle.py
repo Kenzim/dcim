@@ -77,9 +77,11 @@ async def install(
     actor_user_id: Optional[int] = None,
 ) -> PluginInstallation:
     try:
-        package = find_package(directory)
+        package = find_package(directory, for_install=True)
     except PluginLoadError as exc:
         raise LifecycleError(str(exc)) from exc
+    if package.reserved:
+        raise LifecycleError("; ".join(package.errors))
     if package.manifest is None:
         raise LifecycleError("; ".join(package.errors) or "The package is not valid")
     manifest = package.manifest
@@ -160,6 +162,8 @@ async def upgrade(
         package = find_package(inst.directory)
     except PluginLoadError as exc:
         raise LifecycleError(str(exc)) from exc
+    if package.reserved:
+        raise LifecycleError("; ".join(package.errors))
     if package.manifest is None:
         raise LifecycleError("; ".join(package.errors) or "The package is not valid")
     manifest = package.manifest
@@ -333,16 +337,16 @@ def overview(db: Session) -> dict:
     installed = list(db.execute(select(PluginInstallation).order_by(PluginInstallation.id)).scalars())
     by_id = {inst.id: inst for inst in installed}
     packages = discover()
-    package_by_id = {p.manifest.id: p for p in packages if p.manifest is not None}
-    package_by_dir = {p.directory: p for p in packages}
+    package_by_id = {p.manifest.id: p for p in packages if p.manifest is not None and not p.reserved}
+    package_by_dir = {p.directory: p for p in packages if not p.reserved}
     return {
         "api_version": API_VERSION,
         "plugins_dir": str(plugins_root()),
         "bundled_plugins_dir": str(bundled_root()),
         "installed": [summary(db, inst, package_by_dir.get(inst.directory)) for inst in installed],
         "available": [
-            available_view(p, by_id.get(p.manifest.id) if p.manifest else None)
+            available_view(p, by_id.get(p.manifest.id) if p.manifest and not p.reserved else None)
             for p in packages
-            if p.manifest is None or p.manifest.id not in by_id or p is package_by_id.get(p.manifest.id)
+            if p.manifest is None or p.reserved or p.manifest.id not in by_id or p is package_by_id.get(p.manifest.id)
         ],
     }

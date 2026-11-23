@@ -19,7 +19,7 @@ Added:
 Things to know when you read an event or the SDK on 1.1:
 
 - `ctx.api_version` and the `version` of every event envelope now say `"1.1"`, for every plugin, whatever its `rackflow_api` range. They name the running Rackflow's API version. Do not compare them for equality.
-- A plugin whose id is also the id of a bundled plugin (`vies_validator`, `hmrc_exchange_rates`) can no longer load while both folders hold it: the admin page shows an error until one is removed.
+- The folder names and manifest ids of the bundled plugins (`vies_validator` and `hmrc_exchange_rates` today, and any Rackflow adds later) are reserved. A plugin in the plugins folder that uses one is refused, with the error "`<name>` is a reserved name used by a plugin Rackflow ships; rename this plugin.", both when an administrator installs or upgrades it and when Rackflow loads it. The bundled plugin is not affected and keeps loading and running.
 - A manifest with `provides` is refused when its `rackflow_api` range allows only 1.0 (for example `==1.0`). The other additions are available to a plugin whatever its range.
 
 Not in 1.1: plugin-owned tables, placements other than the service page, and the kinds the design reserves for later (accounting export, notification channels, import sources, fraud checks and hardware adapters).
