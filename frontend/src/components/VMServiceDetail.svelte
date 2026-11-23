@@ -26,6 +26,7 @@
     listVmTemplates,
   } from '../lib/api.js';
   import ServicePermissionsPanel from './ServicePermissionsPanel.svelte';
+  import FirewallEditor from './firewall/FirewallEditor.svelte';
 
   export let serviceId;
 
@@ -709,6 +710,10 @@
           permissionOverrides={service.permission_overrides}
           on:saved={load}
         />
+
+        <section class="panel">
+          <FirewallEditor serviceId={service.id} audience="staff" />
+        </section>
       </div>
 
       <div class="col controls">
