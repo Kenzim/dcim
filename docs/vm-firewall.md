@@ -448,7 +448,9 @@ against the real API.
    marked `error`, the staged-rollout count is not touched, and the row is left for whoever holds the
    claim now (or the next tick). The worker logs it; the drift sweep counts it under `claim_lost`
    rather than `in_sync`, `repaired`, `reported` or `queued`; the deployment step fails and is retried;
-   staff "apply now" answers 409 `apply_in_progress`.
+   staff "apply now" answers 409 `apply_in_progress`. An apply that crashes or is cancelled part-way
+   (worker stop, step timeout) records nothing either: its session is rolled back, so a bridge bump
+   it observed is never committed without the claim's row lock, and its claim is released.
 2. **Drift sweep** (every `vm_firewall_reconcile_interval_seconds`, spread over the interval): for each
    managed row, `GET .../firewall/options`. If the digest equals `applied_digest` and the options match,
    the VM is in sync (one API call per VM). Otherwise read rules, IP sets and `net0`, compare with the
