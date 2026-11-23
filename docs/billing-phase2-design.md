@@ -460,6 +460,8 @@ The tax engine is a third engine of the P1 engine framework: setting `billing_ta
 
 `/admin/billing/tax` with tabs: Overview (mode, enabled, registrations, mismatches link), Classes, Rules (filter by country, class, pack; supersede; history), Registrations, Exemptions, Packs (available packs with version, preview diff, apply), Legal notes, Tax ID checks (search, recheck), Calculator (a basket and a buyer to `POST /preview`). Account detail gains a Tax panel (exempt flag and reason, exemptions, profile tax ID with status and last check). Product editor gains the tax class.
 
+Invoices show one tax panel component with two audiences: customers (client and reseller) see the tax table, legal notes and the sterling VAT total; staff (admin invoice and admin reseller invoice) also see the tax point, the calculating engine, whether prices include or exclude tax, and an Exchange rates link while the sterling line is pending. The rules list is paged newest first with a total, and the packs list shows every version of a pack and which are applied.
+
 ### 6.2 Admin API (`app/api/billing_tax_admin.py`, new; admin only; every write audited `billing.tax.*`)
 
 | Method and path | Purpose |
