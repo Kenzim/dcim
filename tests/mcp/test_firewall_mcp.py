@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """VM firewall through the client MCP (services view=firewall, service_action action=firewall) and the staff tool."""
 
 from __future__ import annotations
