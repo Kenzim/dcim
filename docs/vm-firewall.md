@@ -133,6 +133,7 @@ Named for services, not VMs, so a later backend (bare metal) fits; `backend` is 
 | `policy_out` | enum, default `ACCEPT` | |
 | `log_level_in`, `log_level_out` | enum `nolog`/`info`/`warning`/..., default `nolog` | Client may change only if `firewall_client_logging` is on |
 | `managed` | bool, default true | Admin emergency switch: false means Rackflow does not touch this VM's firewall at all |
+| `enforce_baseline` | bool, default false | Baseline enforced even while `client_enabled` is false. Set at provisioning in an enabled location (4.5a); staff can change it |
 | `excluded` | bool, default false | Admin: never manage (infrastructure) |
 | `admin_overrides` | JSON | Per-service admin overrides of baseline settings, e.g. `{"smtp_out": "allow", "macfilter": false, "extra_ipfilter": ["203.0.113.9"]}` |
 | `revision` | int, default 1 | Bumped on every change of anything that renders into this VM |
@@ -221,6 +222,7 @@ wins; rules are concatenated in that order (global rules first). Unique (`scope_
 | `enabled` | Location opt-in |
 | `nic_flag_on_provision` | Set `net0` `firewall=1` on new VMs (default true once enabled) |
 | `enforce_baseline_on_all` | Apply the baseline to every eligible VM, opted in or not (default false) |
+| `smtp_block_new_vms` | Default true. New VMs provisioned here get the SMTP block and an enforced baseline from creation (4.5a) |
 | `ipv6_allowed_prefixes` | JSON list, null. Prefixes added to `ipfilter-net0` for VMs on a bridge listed in `vm_firewall_ipv6_ra_bridges`; while empty such VMs are not eligible (reason `ipv6_ra_bridge_needs_prefix`) |
 | `readiness` | JSON cache of the last readiness check per cluster (section 9.2) |
 | `readiness_checked_at` | datetime |
@@ -242,7 +244,7 @@ lease settings stay env-only in `config.py`, like the alert worker.
 canonical document for one VM:
 
 1. **Options**: `enable` = 1 if `client_enabled`, or if the merged baseline has anything enforced and
-   (`client_enabled` or `enforce_baseline_on_all`); `policy_in`/`policy_out` from the client when
+   (`client_enabled` or `enforce_baseline` or `enforce_baseline_on_all`); `policy_in`/`policy_out` from the client when
    `client_enabled`, otherwise `ACCEPT`/`ACCEPT` (baseline only); `ipfilter` = anti_spoof;
    `macfilter`; `dhcp: 1`; `ndp: 1`; `radv: 0`; log levels.
 2. **IP sets**: `ipfilter-net0` = the VM's public address (`VMIPAllocation.ip_address`) plus any
@@ -267,6 +269,22 @@ monitoring) likewise cannot be blocked by a client. When `client_enabled` is fal
 are not rendered and policies are ACCEPT, but the baseline still applies: turning the firewall "off"
 as a client means "allow everything the baseline allows". Clients may disable baseline protections
 only if `client_may_disable` is true (open question Q2).
+
+### 4.5a SMTP block on new VMs (Kenzi, Q3)
+
+Outbound TCP 25 is blocked by default on **new** VMs in firewall-enabled locations; 465 and 587 stay
+open; existing VMs are unchanged, including when they later opt in. It is per service, not a global
+baseline value, so existing VMs never pick it up by inheritance:
+
+- the provisioning step (6.5), in a location with `smtp_block_new_vms`, creates the VM's row with
+  `admin_overrides.smtp_out = "block"` and `enforce_baseline = true`. The VM's firewall is enabled
+  before first boot with ACCEPT policies and the baseline (SMTP block, plus the location's other
+  baseline rules and anti-spoofing), so there is no blip and nothing else is filtered until the
+  client adds rules;
+- staff unblock per service by setting `admin_overrides.smtp_out = "allow"` (audited
+  `firewall.admin_override_changed`); clients cannot change it (Q2);
+- the global, location and product `smtp_out` baseline values stay available for a later wider
+  policy, default null (allow).
 
 ### 4.6 Limits and validation
 
@@ -388,6 +406,8 @@ New idempotent deployment step `ApplyFirewallStep` in `app/services/deployment/s
 every VM strategy in `strategies.py` after the sizing and bridge step and **before** `PowerOnStep`:
 
 - sets `net0` `firewall=1` when the location has `nic_flag_on_provision` (no blip: the VM is off);
+- when the location has `smtp_block_new_vms`, creates the `service_firewalls` row with
+  `enforce_baseline = true` and `admin_overrides.smtp_out = "block"` (section 4.5a);
 - always writes the VM firewall options, so any `.fw` a clone inherited from its template (production
   has 760 such files) is replaced by what Rackflow renders, `enable: 0` included;
 - if anything renders as enforced, writes the full firewall and waits for success, so the VM never
@@ -740,9 +760,9 @@ Recommended defaults are what will be built unless told otherwise.
 
 | # | Question | Recommended default |
 |---|---|---|
-| Q1 | Price: free for every VM, or a paid add-on? | Free. A paid add-on needs a billing hook from the billing programme (a product addon gating `vm.firewall`), which would be requested from it rather than built here |
+| Q1 | Price: free for every VM, or a paid add-on? | **Decided by Kenzi, 2026-11-23: free for every VM, no billing hook** |
 | Q2 | May clients switch off baseline protections (anti-spoofing, SMTP block)? | No. Admins can relax them per service (`admin_overrides`) or per product |
-| Q3 | Outbound SMTP (25) block: default for new VMs, and for existing ones? | Block port 25 on **new** VMs in enabled locations; existing VMs unchanged until you decide; staff unblock per service on request. 465 and 587 stay open |
+| Q3 | Outbound SMTP (25) block: default for new VMs, and for existing ones? | **Decided by Kenzi, 2026-11-23: block outbound port 25 by default on new VMs in firewall-enabled locations; staff can unblock per service; 465 and 587 stay open; existing VMs unchanged.** Built as in 4.5a |
 | Q4 | Enabling the datacenter firewall on production cluster `pve-06` after the nested test, and which backend | nftables backend (production runs PVE 9.2.3 with `proxmox-firewall` already installed and running), following 9.3 exactly: `host.fw` with `enable: 0` and `nftables: 1` on all 23 nodes, ACCEPT policies, then `enable: 1`; done by the deploy agent with your approval, in a quiet hour, with the rollback ready |
 | Q4a | 46 production guests already have `enable: 1` in their VM firewall file and 22 have `firewall=1` on a NIC; those with both would start filtering (default inbound DROP) the moment the datacenter firewall is on. Switch their VM firewall off first (9.3 step 2)? | Yes: write `enable: 0` on every guest the pre-enable audit lists that Rackflow does not manage (a no-op today), and tell the owners they can opt in through Rackflow |
 | Q5 | Anti-spoofing baseline on every VM in a location (each existing VM gets one blip of about 0.1 s), or only VMs whose owners opt in? | Opt-in VMs only at first; a staged rollout to all VMs later, announced to clients |
