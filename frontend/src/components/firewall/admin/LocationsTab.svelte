@@ -243,7 +243,7 @@
     <p>
       Switching this on in <strong>{nameOf(rollout.location)}</strong> changes the firewall of
       <strong>{preview.changed}</strong> existing {preview.changed === 1 ? 'server' : 'servers'}.
-      They are updated in small batches rather than all at once.
+      {#if preview.changed > 1}They are updated in small batches rather than all at once.{/if}
     </p>
     {#if preview.blip > 0}
       <p><strong>{preview.blip}</strong> of them {preview.blip === 1 ? 'is' : 'are'} running and will get a short interruption. {ROLLOUT_INTERRUPTION_WARNING}</p>
