@@ -316,8 +316,10 @@ def test_a_settled_termination_with_the_service_still_suspended_is_alerted(db_se
     assert get_setting(db_session, "billing_tax_engine") == "legacy"
     params = {"max_rows": 10}
     detect = billing_integrity.nonpayment_termination_unsettled
-    # In review, the needs_review alert covers it, not this one.
-    assert detect(db_session, params, NOW) == []
+    # In review it is reported too (billing_job_needs_review is not a go-live alert).
+    (in_review,) = detect(db_session, params, NOW)
+    assert in_review.details["claim_status"] == "needs_review"
+    assert "waits for review" in in_review.title
     resolve_action(
         db_session, _claims(db_session)[terminate].id, to="failed", note="still running", actor_user_id=None,
         now=NOW + timedelta(days=8),
