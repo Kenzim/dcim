@@ -6,7 +6,9 @@
 # billing_p1_* chain), tests/migrations/test_billing_p2_mariadb.py (up, down,
 # up of the billing phase 2 chain, with data present),
 # tests/services/test_billing_p2_tax_publish_mariadb.py (a tax rule superseded
-# during a publish), the snapshot isolation connect hook test,
+# during a publish, and a real UK and EU pack import against a real publish, in
+# both orders of arrival and queued behind a held rule, under REPEATABLE READ and
+# READ COMMITTED), the snapshot isolation connect hook test,
 # tests/services/test_billing_p1i_numbering_mariadb.py (series counters under
 # concurrency), tests/services/test_billing_p1i_settlement_mariadb.py (two
 # payments settling one invoice at once) and
