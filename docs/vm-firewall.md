@@ -620,36 +620,69 @@ The results go into this section before the production step is proposed.
 
 ## 10. Surfaces and API
 
-All writes return the full firewall view (with the new `revision`) so callers never re-fetch.
+All writes return the full firewall view (with the new `revision`) so callers never re-fetch. Lists
+are bare JSON arrays. Domain errors share one body, `{code, field, message, detail}` (`detail` is the
+message, for WHMCS): `firewall_changed` (409) adds `current_revision`, `not_eligible` (409) adds
+`reasons[]`, `confirmation_required` (409) adds `preview`. Turning the firewall on while net0's
+`firewall` flag is not 1 answers 409 `interruption_confirmation_required` (field
+`confirm_interruption`) until `confirm_interruption=true` is sent; the route reads the VM's live
+Proxmox config to decide (and passes it to `eligibility` so the NIC checks run), falling back to the
+observed `nic_flag` when Proxmox cannot be read. Unknown request fields, the admin-only ones among
+them, are refused with 422 on the client and billing routes.
 
 ### 10.1 Client API (`app/api/vm_firewall_client.py`)
 
 | Route | Purpose |
 |---|---|
-| `GET /api/client/services/{id}/firewall` | `{available, location_enabled, client_enabled, state, enforced, nic_flag, needs_interruption, policy_in, policy_out, rules[], groups[], baseline: {anti_spoof, smtp_out, management_blocked, rules[] (read only)}, limits, revision, last_applied_at, message}` |
+| `GET /api/client/services/{id}/firewall` | `{service_id, available, reasons[], location_enabled, client_enabled, state, enforced, nic_flag, needs_interruption, policy_in, policy_out, log_level_in, log_level_out, rules[], groups[], ipsets[], baseline: {anti_spoof, mac_filter, smtp_out, management_blocked, client_may_disable, rules[] (read only)}, smtp_block_help, limits, suggested_presets[], revision, last_applied_at, message}` |
 | `PUT /api/client/services/{id}/firewall` | `{revision, client_enabled?, policy_in?, policy_out?, log_level_in?, log_level_out?, confirm_interruption?}` |
 | `PUT /api/client/services/{id}/firewall/rules` | Replace the whole ordered list `{revision, rules:[...]}` (group references included) |
-| `POST .../firewall/rules`, `PUT .../rules/{rule_id}`, `DELETE .../rules/{rule_id}` | Single rule edits, `revision` required |
+| `POST .../firewall/rules` `{revision, rule, position?}`, `PUT .../rules/{rule_id}` `{revision, rule}`, `DELETE .../rules/{rule_id}?revision=` | Single rule edits, `revision` required |
 | `POST .../firewall/rules/order` | `{revision, ids:[...]}` |
-| `POST .../firewall/presets/{preset}` | `ssh`, `rdp`, `web`, `ping`, `allow_all` (appends rules; `allow_all` sets `policy_in ACCEPT`) |
-| `GET /api/client/firewall/presets` | Preset definitions |
-| `GET/POST /api/client/firewall/groups`, `GET/PUT/DELETE /groups/{id}` | Groups with their rules (PUT replaces rules); delete refused while attached unless `?detach=true` |
-| `GET/POST /api/client/firewall/ipsets`, `GET/PUT/DELETE /ipsets/{id}` | IP sets with entries |
+| `POST .../firewall/presets/{preset}` | `{revision}`; `ssh`, `rdp`, `web`, `ping`, `allow_all` (appends rules; `allow_all` sets `policy_in ACCEPT`) |
+| `POST .../firewall/groups/{group_id}` `{revision, position?}`, `DELETE .../firewall/groups/{group_id}?revision=` | Attach or detach a group |
+| `GET /api/client/firewall/presets` | `[{key, label, description, rules[], policy_in}]` |
+| `GET/POST /api/client/firewall/groups`, `GET/PUT/DELETE /groups/{id}` | Groups with their rules (PUT replaces rules); delete refused while attached unless `?detach=true`. The list includes client-selectable admin groups; GET/PUT/DELETE of one reach only the client's own |
+| `GET/POST /api/client/firewall/ipsets`, `GET/PUT/DELETE /ipsets/{id}` | IP sets with entries, same rules as groups |
+| `GET /api/reseller-panel/services/{id}/firewall` | The client view, read only, for a service whose `ServiceBilling.reseller_id` is the reseller |
+
+Rule items: `{id, position, kind: "rule"|"group", enabled, comment}` plus, for a group reference,
+`group_id`, and otherwise `direction, action, ip_version, protocol, ports, source_ports, icmp_type,
+remote_cidrs, remote_ipset_id, local_cidrs, log`. Groups: `{id, name, description, scope,
+owner_user_id, client_selectable, revision, rules[]}`. IP sets: `{id, name, description, scope,
+owner_user_id, client_selectable, purpose, revision, entries: [{id, cidr, nomatch, comment}]}`. The
+view's `ipsets[]` holds `{id, name, scope, purpose, description}` of the sets a rule may reference.
+Baseline rules are the admin rules (with `baseline_id`, `generated: false`) and then the generated
+SMTP and management blocks (`generated: true`). `smtp_block_help` is `SMTP_BLOCK_HELP` from
+`service.py` when the merged baseline blocks port 25, otherwise null. Groups and IP sets routes need
+a client session (not an API key); writes on service routes need `vm.firewall`. The client service
+detail (`GET /api/services/{id}`) carries `firewall_available`.
 
 ### 10.2 Admin API (`app/api/vm_firewall_admin.py`, `/api/admin/vm-firewall`)
 
-Locations (settings, readiness, `POST /locations/{id}/readiness` to re-check now, `/rollout` with
-`dry_run`); baselines CRUD with rules; admin groups and IP sets CRUD (including `purpose=management`);
-`GET /services?state=&location_id=&q=` status list; `GET/PUT /services/{id}` (everything the client
-route has, plus `managed`, `excluded`, `admin_overrides`); `POST /services/{id}/apply` and `/check`
-(drift check now, returns the differences).
+| Route | Purpose |
+|---|---|
+| `GET /locations`, `GET /locations/{id}` | `{location_id, name, enabled, nic_flag_on_provision, enforce_baseline_on_all, smtp_block_new_vms, anti_spoof_new_vms, ipv6_allowed_prefixes[], readiness: {clusters: {<id>: {ready, reasons[], datacenter, nodes, name}}}, readiness_checked_at, clusters: [{id, name, readiness}], ready, ipv6_allowed_prefixes_help}` |
+| `PUT /locations/{id}` | Any settings field, `staging?`, `confirm_existing_vms?`; 409 `confirmation_required` with `preview` when the change reaches existing VMs, 409 `not_ready` when enabling an unready location without `staging` |
+| `POST /locations/{id}/readiness` | Re-run the read-only readiness check of every cluster; returns the location |
+| `POST /locations/{id}/rollout` | `{dry_run (default true), confirm_existing_vms?}` returns `{dry_run, preview: {changed, service_ids[], services: [{id, name}], ...}, location}`; a real run switches `enforce_baseline_on_all` on |
+| `GET/POST /baselines`, `GET/PUT/DELETE /baselines/{id}` | `{id, name, scope_type, scope_id, enabled, settings, revision, rules[]}` |
+| `GET/POST /groups`, `GET/PUT/DELETE /groups/{id}` | Admin groups and any client's (`?scope=admin\|client&owner_user_id=`); create takes `owner_user_id?`, `client_selectable` |
+| `GET/POST /ipsets`, `GET/PUT/DELETE /ipsets/{id}` | As groups, plus `purpose` (`general`, `management`; also a list filter) |
+| `GET /services?state=&location_id=&q=&offset=&limit=` | `[{service_id, service_name, owner_user_id, owner_username, location_id, location_name, cluster_id, node, vmid, state, client_enabled, managed, excluded, nic_flag, revision, applied_revision, last_applied_at, last_error}]`; a VM never opened shows `off` |
+| `GET/PUT /services/{id}` | The client view plus `managed, excluded, enforce_baseline, admin_overrides, location_id, cluster_id, cluster_ready, nics_checked, net0_bridge, rollout_after, applied_revision, desired_hash, applied_hash, in_sync, last_error, failing_since, last_checked_at, next_attempt_at, drift_repairs_24h, rendered: {options, rules[]}`; PUT takes the client fields and the four admin ones under one `revision`. Staff see the firewall of a VM in a staging location (`available` true) |
+| `PUT/POST /services/{id}/rules`, `PUT/DELETE /services/{id}/rules/{rule_id}`, `POST /services/{id}/rules/order`, `POST /services/{id}/presets/{key}`, `POST/DELETE /services/{id}/groups/{group_id}` | As the client routes, answering the staff view |
+| `POST /services/{id}/apply` | Apply now: `{result: {ok, state, ...}, firewall: <staff view>}`; 502 when Proxmox is unreachable |
+| `POST /services/{id}/check` | Drift check now, writes nothing: `{in_sync, differences[], ...}`; 404 `firewall_not_found` when the VM has no firewall row |
 
 ### 10.3 Billing API for WHMCS (`app/api/billing_vm_firewall.py`)
 
 `GET/PUT /api/billing/services/{id}/firewall`, `PUT .../firewall/rules`, `POST .../firewall/rules`,
-`DELETE .../firewall/rules/{rule_id}`, `POST .../firewall/presets/{preset}`,
-`GET .../firewall/groups` (the owner's groups, to attach). The response shapes are the client ones.
-Every route is added to `tests/contract/whmcs_routes.py`.
+`DELETE .../firewall/rules/{rule_id}?revision=`, `POST .../firewall/presets/{preset}`,
+`GET .../firewall/groups` (the owner's groups and client-selectable admin groups, to attach). The
+request and response shapes are the client ones. A service of another integration answers 404
+`Service not found`; writes need the owner's `vm.firewall`. Every route is in
+`tests/contract/whmcs_routes.py`, and `/status` carries `firewall_available`.
 
 ### 10.4 Admin and client UI
 
