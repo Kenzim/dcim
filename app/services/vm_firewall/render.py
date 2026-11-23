@@ -41,7 +41,8 @@ SMTP_PORTS = ("25",)
 DEFAULT_SETTINGS: dict[str, Any] = {
     "anti_spoof": True,
     "macfilter": True,
-    "smtp_out": "allow",
+    # None (no baseline sets it) means allow; per-service blocks come from ``admin_overrides``.
+    "smtp_out": None,
     "block_management": True,
     # None: every admin IP set with purpose ``management``.
     "management_ipset_ids": None,
@@ -341,19 +342,31 @@ def render_context(db: Session, ctx: RenderContext) -> RenderedFirewall:
         ipsets[ipset_name(ipset_id)] = _entries_of(db, ipset_id)
 
     settings = ctx.settings
+    location = ctx.location_settings
+    enforce_baseline = bool(firewall.enforce_baseline) if firewall is not None else False
+    enforce_all = bool(location and location.enforce_baseline_on_all)
+    # A VM enforced only through ``enforce_baseline`` (a new VM, section 4.5a) gets the narrow
+    # baseline: anti-spoofing and the MAC filter stay off until the client turns the firewall on,
+    # unless the location's ``anti_spoof_new_vms`` says otherwise.
+    narrow = (
+        enforce_baseline
+        and not client_enabled
+        and not enforce_all
+        and not bool(location and location.anti_spoof_new_vms)
+    )
     # An empty ipfilter set would drop all of the VM's IPv4 traffic (section 2), so anti-spoofing
     # needs at least one address.
-    anti_spoof = bool(settings.get("anti_spoof")) and bool(ipsets[IPFILTER_SET])
-    enforced = anti_spoof or bool(settings.get("macfilter")) or bool(baseline)
-    enforce_all = bool(ctx.location_settings and ctx.location_settings.enforce_baseline_on_all)
-    enable = active and (client_enabled or (enforced and enforce_all))
+    anti_spoof = bool(settings.get("anti_spoof")) and bool(ipsets[IPFILTER_SET]) and not narrow
+    macfilter = bool(settings.get("macfilter")) and not narrow
+    enforced = anti_spoof or macfilter or bool(baseline)
+    enable = active and (client_enabled or (enforced and (enforce_baseline or enforce_all)))
 
     options = {
         "enable": 1 if enable else 0,
         "policy_in": _value(firewall.policy_in) if client_enabled else "ACCEPT",
         "policy_out": _value(firewall.policy_out) if client_enabled else "ACCEPT",
         "ipfilter": 1 if anti_spoof else 0,
-        "macfilter": 1 if settings.get("macfilter") else 0,
+        "macfilter": 1 if macfilter else 0,
         "dhcp": 1,
         "ndp": 1,
         "radv": 0,

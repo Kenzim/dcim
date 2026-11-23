@@ -205,6 +205,7 @@ def get_or_create(db: Session, service_id: int) -> ServiceFirewall:
             log_level_in="nolog",
             log_level_out="nolog",
             managed=True,
+            enforce_baseline=False,
             excluded=False,
             revision=1,
             nic_flag="unknown",
@@ -213,6 +214,34 @@ def get_or_create(db: Session, service_id: int) -> ServiceFirewall:
         )
         db.add(row)
         db.flush()
+    return row
+
+
+def init_for_new_vm(db: Session, service_id: int, actor: Actor) -> ServiceFirewall:
+    """Create the firewall row of a VM being provisioned (section 4.5a; called by the provisioning
+    step before first boot). In a firewall-enabled location with ``smtp_block_new_vms`` the row gets
+    ``enforce_baseline`` and ``admin_overrides.smtp_out = "block"``; elsewhere it is a plain row.
+    Idempotent: an existing row is returned unchanged, so a retried step never re-blocks a VM
+    that staff have since unblocked."""
+    _require_staff(actor)
+    service = _service(db, service_id)
+    existing = db.get(ServiceFirewall, service_id)
+    if existing is not None:
+        return existing
+    row = get_or_create(db, service_id)
+    vm = db.get(ServiceVm, service_id)
+    cluster = db.get(ProxmoxCluster, vm.proxmox_cluster_id) if vm and vm.proxmox_cluster_id else None
+    location = db.get(FirewallLocationSettings, cluster.location_id) if cluster and cluster.location_id else None
+    if location is None or not location.enabled or not location.smtp_block_new_vms:
+        return row
+    row.enforce_baseline = True
+    row.admin_overrides = {"smtp_out": "block"}
+    row.state = FirewallState.PENDING
+    db.flush()
+    _audit(db, actor, "firewall.admin_override_changed", resource_type="service", resource_id=service_id,
+           subject_user_id=service.owner_user_id,
+           metadata={"before": {}, "after": {"smtp_out": "block"}, "enforce_baseline": True,
+                     "reason": "new_vm"})
     return row
 
 
@@ -523,23 +552,25 @@ def set_admin_fields(
     revision: int,
     managed: Optional[bool] = None,
     excluded: Optional[bool] = None,
+    enforce_baseline: Optional[bool] = None,
     admin_overrides: Any = UNSET,
 ) -> ServiceFirewall:
-    """Staff only: ``managed``, ``excluded`` and the per-service ``admin_overrides``."""
+    """Staff only: ``managed``, ``excluded``, ``enforce_baseline`` and the per-service
+    ``admin_overrides`` (for example ``{"smtp_out": "allow"}`` to unblock SMTP)."""
     _require_staff(actor)
     service, row = _locked(db, service_id, actor, revision)
-    managed_before = {"managed": bool(row.managed), "excluded": bool(row.excluded)}
+    flags = {"managed": managed, "excluded": excluded, "enforce_baseline": enforce_baseline}
+    managed_before = {key: bool(getattr(row, key)) for key in flags}
     overrides_before = dict(row.admin_overrides or {})
-    for key, value in (("managed", managed), ("excluded", excluded)):
+    for key, value in flags.items():
         if value is not None and not isinstance(value, bool):
             raise FirewallValidationError("must be true or false", field=key)
-    if managed is not None:
-        row.managed = managed
-    if excluded is not None:
-        row.excluded = excluded
+    for key, value in flags.items():
+        if value is not None:
+            setattr(row, key, value)
     if admin_overrides is not UNSET:
         row.admin_overrides = v.validate_admin_overrides(admin_overrides) or None
-    managed_after = {"managed": bool(row.managed), "excluded": bool(row.excluded)}
+    managed_after = {key: bool(getattr(row, key)) for key in flags}
     overrides_after = dict(row.admin_overrides or {})
     if managed_after == managed_before and overrides_after == overrides_before:
         return row
@@ -1407,7 +1438,8 @@ def get_location_settings(db: Session, location_id: int) -> FirewallLocationSett
     row = db.get(FirewallLocationSettings, location_id)
     if row is None:
         row = FirewallLocationSettings(location_id=location_id, enabled=False, nic_flag_on_provision=True,
-                                       enforce_baseline_on_all=False)
+                                       enforce_baseline_on_all=False, smtp_block_new_vms=True,
+                                       anti_spoof_new_vms=False)
         db.add(row)
         db.flush()
     return row
@@ -1418,6 +1450,8 @@ def _location_snapshot(row: FirewallLocationSettings) -> dict[str, Any]:
         "enabled": bool(row.enabled),
         "nic_flag_on_provision": bool(row.nic_flag_on_provision),
         "enforce_baseline_on_all": bool(row.enforce_baseline_on_all),
+        "smtp_block_new_vms": bool(row.smtp_block_new_vms),
+        "anti_spoof_new_vms": bool(row.anti_spoof_new_vms),
         "ipv6_allowed_prefixes": list(row.ipv6_allowed_prefixes or []),
     }
 
@@ -1440,6 +1474,8 @@ def update_location_settings(
     enabled: Optional[bool] = None,
     nic_flag_on_provision: Optional[bool] = None,
     enforce_baseline_on_all: Optional[bool] = None,
+    smtp_block_new_vms: Optional[bool] = None,
+    anti_spoof_new_vms: Optional[bool] = None,
     ipv6_allowed_prefixes: Any = UNSET,
     staging: bool = False,
 ) -> FirewallLocationSettings:
@@ -1449,7 +1485,8 @@ def update_location_settings(
     row = get_location_settings(db, location_id)
     before = _location_snapshot(row)
     for key, value in (("enabled", enabled), ("nic_flag_on_provision", nic_flag_on_provision),
-                       ("enforce_baseline_on_all", enforce_baseline_on_all)):
+                       ("enforce_baseline_on_all", enforce_baseline_on_all),
+                       ("smtp_block_new_vms", smtp_block_new_vms), ("anti_spoof_new_vms", anti_spoof_new_vms)):
         if value is not None and not isinstance(value, bool):
             raise FirewallValidationError("must be true or false", field=key)
     if enabled and not row.enabled and not staging:
@@ -1466,12 +1503,17 @@ def update_location_settings(
         row.nic_flag_on_provision = nic_flag_on_provision
     if enforce_baseline_on_all is not None:
         row.enforce_baseline_on_all = enforce_baseline_on_all
+    if smtp_block_new_vms is not None:
+        row.smtp_block_new_vms = smtp_block_new_vms
+    if anti_spoof_new_vms is not None:
+        row.anti_spoof_new_vms = anti_spoof_new_vms
     if ipv6_allowed_prefixes is not UNSET:
         row.ipv6_allowed_prefixes = v.validate_prefixes(ipv6_allowed_prefixes)
     after = _location_snapshot(row)
     if after == before:
         return row
-    rendered_keys = ("enabled", "enforce_baseline_on_all", "ipv6_allowed_prefixes")
+    # ``smtp_block_new_vms`` only affects VMs provisioned later, so it bumps nothing.
+    rendered_keys = ("enabled", "enforce_baseline_on_all", "anti_spoof_new_vms", "ipv6_allowed_prefixes")
     if any(before[key] != after[key] for key in rendered_keys):
         bump_revisions(db, _services_in_location(db, location_id))
     db.flush()
@@ -1519,6 +1561,7 @@ __all__ = [
     "get_location_settings",
     "get_or_create",
     "group_rules",
+    "init_for_new_vm",
     "ipset_entries",
     "list_groups",
     "list_ipsets",

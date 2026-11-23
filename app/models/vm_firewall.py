@@ -132,6 +132,8 @@ class ServiceFirewall(Base):
     log_level_in = Column(_enum(FirewallLogLevel), nullable=False, default=FirewallLogLevel.NOLOG)
     log_level_out = Column(_enum(FirewallLogLevel), nullable=False, default=FirewallLogLevel.NOLOG)
     managed = Column(Boolean, nullable=False, default=True)
+    # Baseline enforced while ``client_enabled`` is false (set for new VMs, section 4.5a).
+    enforce_baseline = Column(Boolean, nullable=False, default=False)
     excluded = Column(Boolean, nullable=False, default=False)
     admin_overrides = Column(JSON, nullable=True)
     revision = Column(Integer, nullable=False, default=1)
@@ -298,6 +300,10 @@ class FirewallLocationSettings(Base):
     enabled = Column(Boolean, nullable=False, default=False)
     nic_flag_on_provision = Column(Boolean, nullable=False, default=True)
     enforce_baseline_on_all = Column(Boolean, nullable=False, default=False)
+    # New VMs here get ``admin_overrides.smtp_out = "block"`` and an enforced baseline.
+    smtp_block_new_vms = Column(Boolean, nullable=False, default=True)
+    # Whether that enforced baseline also turns on ``ipfilter`` and ``macfilter``.
+    anti_spoof_new_vms = Column(Boolean, nullable=False, default=False)
     # IPv6 prefixes added to every managed VM's ``ipfilter-net0`` here; required before a VM
     # on a bridge in ``vm_firewall_ipv6_ra_bridges`` is managed.
     ipv6_allowed_prefixes = Column(JSON, nullable=True)
