@@ -479,3 +479,40 @@ def test_other_tax_switches_ignore_the_alerts(client, db_session, headers, start
     resp = client.post(f"{ENGINES}/tax/switch", headers=headers, json={"to": target})
     assert resp.status_code == 200, resp.text
     assert resp.json()["mode"] == target
+
+
+def test_rules_list_is_newest_first_with_a_total_and_pages(client, db_session, headers):
+    ids = [add_rule(db_session, name=f"Rule {n}", country=None).id for n in range(5)]
+    db_session.commit()
+    full = client.get(f"{BASE}/rules", headers=headers)
+    assert full.status_code == 200 and full.headers["X-Total-Count"] == "5"
+    assert [row["id"] for row in full.json()] == sorted(ids, reverse=True)
+    page = client.get(f"{BASE}/rules", headers=headers, params={"limit": 2, "offset": 2})
+    assert page.headers["X-Total-Count"] == "5"
+    assert [row["id"] for row in page.json()] == sorted(ids, reverse=True)[2:4]
+    country = client.get(f"{BASE}/rules", headers=headers, params={"country": "GB", "limit": 1})
+    assert country.headers["X-Total-Count"] == "0" and country.json() == []
+    by_class = client.get(f"{BASE}/rules", headers=headers, params={"tax_class_id": 999999})
+    assert by_class.headers["X-Total-Count"] == "0"
+    no_pack = client.get(f"{BASE}/rules", headers=headers, params={"pack_id": "_none"})
+    assert no_pack.headers["X-Total-Count"] == "5"
+    assert client.get(f"{BASE}/rules", headers=headers, params={"pack_id": "uk_vat"}).headers["X-Total-Count"] == "0"
+
+
+def test_rule_history_follows_the_supersede_chain_both_ways(client, db_session, headers):
+    classes = client.get(f"{BASE}/classes", headers=headers).json()
+    standard = next(c["id"] for c in classes if c["code"] == "standard")
+    other = add_rule(db_session, name="Unrelated", country=None)
+    first = client.post(f"{BASE}/rules", headers=headers, json={"name": "V1", "tax_class_id": standard, "rate_percent": "5"}).json()
+    second = client.post(
+        f"{BASE}/rules/{first['id']}/supersede", headers=headers, json={"rate_percent": "6", "valid_from": _later(hours=1)}
+    ).json()
+    third = client.post(
+        f"{BASE}/rules/{second['id']}/supersede", headers=headers, json={"rate_percent": "7", "valid_from": _later(hours=2)}
+    ).json()
+    for start in (first, second, third):
+        chain = client.get(f"{BASE}/rules/{start['id']}/history", headers=headers)
+        assert chain.status_code == 200, chain.text
+        assert [row["id"] for row in chain.json()] == [first["id"], second["id"], third["id"]]
+    assert [row["id"] for row in client.get(f"{BASE}/rules/{other.id}/history", headers=headers).json()] == [other.id]
+    assert client.get(f"{BASE}/rules/999999/history", headers=headers).status_code == 404

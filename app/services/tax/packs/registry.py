@@ -48,6 +48,8 @@ class PackInfo:
     available: bool = True
     error: Optional[str] = None
     title: Optional[str] = None
+    # Every version the pack offers, oldest first; ``version`` is the newest.
+    versions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,7 +112,7 @@ def _plugin_versions(ref: str) -> list[str]:
 class PackRegistry:
     @staticmethod
     def list(db: Session) -> list[PackInfo]:
-        """Every pack with its newest version: the built-in ones first, then plugin packs by ref."""
+        """Every pack with its newest version and all its versions: the built-in ones first, then plugin packs by ref."""
         infos = []
         for pack_id in BUILTIN_PACKS:
             data = _builtin(pack_id)
@@ -118,6 +120,7 @@ class PackRegistry:
                 PackInfo(
                     pack_id=pack_id,
                     version=data.version,
+                    versions=(data.version,),
                     source="builtin",
                     title=data.extra["metadata"].get("title"),
                 )
@@ -127,7 +130,7 @@ class PackRegistry:
                 versions = _plugin_versions(ref)
                 if not versions:
                     raise PackUnavailable("the provider offers no version")
-                infos.append(PackInfo(pack_id=ref, version=versions[-1], source="plugin"))
+                infos.append(PackInfo(pack_id=ref, version=versions[-1], versions=tuple(versions), source="plugin"))
             except (ProviderUnavailable, PackUnavailable) as exc:
                 reason = getattr(exc, "reason", None) or str(exc)
                 infos.append(PackInfo(pack_id=ref, version="", source="plugin", available=False, error=reason))

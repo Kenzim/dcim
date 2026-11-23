@@ -14,9 +14,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated, Any, ClassVar, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
@@ -310,9 +310,12 @@ def _not_in_past(value: datetime, now: datetime) -> datetime:
 
 @router.get("/tax/rules")
 def list_rules(
+    response: Response,
     db: DbDep,
     country: Annotated[Optional[str], Query(max_length=2)] = None,
     jurisdiction: Annotated[Optional[str], Query(max_length=16)] = None,
+    tax_class_id: Annotated[Optional[int], Query(gt=0)] = None,
+    pack_id: Annotated[Optional[str], Query(max_length=128, description="A pack id, or _none for rules not from a pack")] = None,
     current_only: bool = False,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
@@ -322,10 +325,18 @@ def list_rules(
         stmt = stmt.where(TaxRule.country == country.upper())
     if jurisdiction:
         stmt = stmt.where(TaxRule.jurisdiction == jurisdiction.upper())
+    if tax_class_id is not None:
+        stmt = stmt.where(TaxRule.tax_class_id == tax_class_id)
+    if pack_id == "_none":
+        stmt = stmt.where(TaxRule.pack_id.is_(None))
+    elif pack_id:
+        stmt = stmt.where(TaxRule.pack_id == pack_id)
     if current_only:
         now = _now()
         stmt = stmt.where(TaxRule.valid_from <= now, (TaxRule.valid_to.is_(None)) | (TaxRule.valid_to > now))
-    rows = db.scalars(stmt.order_by(TaxRule.id).offset(offset).limit(limit))
+    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
+    response.headers["X-Total-Count"] = str(int(total or 0))
+    rows = db.scalars(stmt.order_by(TaxRule.id.desc()).offset(offset).limit(limit))
     return [_rule_payload(row) for row in rows]
 
 
@@ -351,6 +362,29 @@ def get_rule(rule_id: int, db: DbDep):
     if row is None:
         raise HTTPException(status_code=404, detail="Tax rule not found")
     return _rule_payload(row)
+
+
+@router.get("/tax/rules/{rule_id}/history")
+def rule_history(rule_id: int, db: DbDep):
+    """The chain of rules ``rule_id`` belongs to, oldest first, followed through ``supersedes_id``."""
+    row = db.get(TaxRule, rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tax rule not found")
+    chain = [row]
+    seen = {row.id}
+    while chain[0].supersedes_id is not None and chain[0].supersedes_id not in seen:
+        older = db.get(TaxRule, chain[0].supersedes_id)
+        if older is None:
+            break
+        seen.add(older.id)
+        chain.insert(0, older)
+    while True:
+        newer = db.scalar(select(TaxRule).where(TaxRule.supersedes_id == chain[-1].id).order_by(TaxRule.id).limit(1))
+        if newer is None or newer.id in seen:
+            break
+        seen.add(newer.id)
+        chain.append(newer)
+    return [_rule_payload(item) for item in chain]
 
 
 @router.put("/tax/rules/{rule_id}")
@@ -635,7 +669,23 @@ def _pack_error(exc: Exception) -> Optional[HTTPException]:
 def list_packs(db: DbDep):
     from app.services.tax.packs.registry import PackRegistry
 
-    return _json(PackRegistry.list(db))
+    packs = _json(PackRegistry.list(db))
+    applied: dict[str, dict] = {}
+    rows = db.execute(
+        select(TaxRule.pack_id, TaxRule.pack_version, func.count())
+        .where(TaxRule.pack_id.isnot(None))
+        .group_by(TaxRule.pack_id, TaxRule.pack_version)
+    )
+    for pack_id, pack_version, count in rows:
+        entry = applied.setdefault(pack_id, {"versions": [], "rules": 0})
+        if pack_version:
+            entry["versions"].append(pack_version)
+        entry["rules"] += int(count)
+    for pack in packs:
+        entry = applied.get(pack["pack_id"])
+        pack["applied_versions"] = sorted(entry["versions"]) if entry else []
+        pack["applied_rule_count"] = entry["rules"] if entry else 0
+    return packs
 
 
 # A preview and an apply pass effective_from to the importer as given: it is part of the
@@ -850,7 +900,5 @@ def preview_tax(body: PreviewContext, db: DbDep):
 @router.get("/tax/rules/{rule_id}/usage")
 def rule_usage(rule_id: int, db: DbDep):
     """How many invoice tax rows a rule produced (published rows are frozen)."""
-    from sqlalchemy import func
-
     count = int(db.scalar(select(func.count()).where(InvoiceLineTax.tax_rule_id == rule_id)) or 0)
     return {"rule_id": rule_id, "invoice_line_taxes": count}

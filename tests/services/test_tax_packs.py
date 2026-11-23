@@ -657,3 +657,9 @@ def test_rules_not_from_the_pack_are_never_touched(basics):
     apply_pack(basics, "uk_vat")
     basics.refresh(admin_rule)
     assert admin_rule.valid_to is None and admin_rule.supersedes_id is None
+
+
+def test_registry_lists_every_plugin_version_oldest_first(db_session, plugin_pack):
+    infos = PackRegistry.list(db_session)
+    assert [i.versions for i in infos[:2]] == [(UK["version"],), (EU["version"],)]
+    assert infos[-1].versions == ("0.9", "1.0") and infos[-1].version == "1.0"
