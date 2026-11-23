@@ -26,12 +26,12 @@ def _bridges(value: Any) -> set[str]:
 
 
 def affected_by_bridge_change(db: Session, key: str, old: Any, new: Any) -> list[int]:
-    """Rows whose observed net0 bridge joined or left the list; for the router-advert list also
-    the rows with an unknown bridge when the list goes between empty and not empty."""
+    """Rows whose observed net0 bridge joined or left the list, plus the rows whose bridge is not
+    known yet when the list goes between empty and not empty."""
     before, after = _bridges(old), _bridges(new)
     changed = sorted(before ^ after)
     conditions = [ServiceFirewall.net0_bridge.in_(changed)] if changed else []
-    if key == "vm_firewall_ipv6_ra_bridges" and bool(before) != bool(after):
+    if bool(before) != bool(after):
         conditions.append(ServiceFirewall.net0_bridge.is_(None))
     if not conditions:
         return []

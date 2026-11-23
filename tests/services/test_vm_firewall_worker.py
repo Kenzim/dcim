@@ -327,9 +327,10 @@ def test_bridge_setting_hook_picks_affected_rows(world, fake):
     assert pick("", "vmbr750") == sorted([rows["vmbr750"].service_id, rows[None].service_id])
     assert pick("vmbr750", "vmbr750,vmbr751") == []
     assert pick("vmbr750", "vmbr0") == sorted([rows["vmbr0"].service_id, rows["vmbr750"].service_id])
-    assert affected_by_bridge_change(world.db, "vm_firewall_infrastructure_bridges", "", "vmbr0") == [
-        rows["vmbr0"].service_id
-    ]
+    assert affected_by_bridge_change(world.db, "vm_firewall_infrastructure_bridges", "", "vmbr0") == sorted(
+        [rows["vmbr0"].service_id, rows[None].service_id]
+    )
+    assert affected_by_bridge_change(world.db, "vm_firewall_infrastructure_bridges", "vmbr0", "vmbr0,vmbr9") == []
 
 
 # Bridge moves
