@@ -359,15 +359,12 @@ def _baseline_view(db: Session, ctx, rendered) -> dict[str, Any]:
 
 
 def _needs_interruption(row, config: Optional[dict[str, Any]]) -> bool:
-    """Whether turning the client firewall on now would write net0's ``firewall`` flag on a
-    running VM (the short blip of section 5.2). Without the live config the observed flag is
-    used, and an unknown flag counts as yes."""
+    """Whether turning the client firewall on now would write net0's ``firewall`` flag (the short
+    blip of section 5.2). Without the live config the observed flag is used, and an unknown flag
+    counts as yes."""
     if row.client_enabled:
         return False
     if config is not None:
-        status = config.get("status")
-        if status is not None and status != "running":
-            return False
         return not net_firewall_flag(config.get("net0"))
     return _value(row.nic_flag) in (FirewallNicFlag.OFF.value, FirewallNicFlag.UNKNOWN.value)
 

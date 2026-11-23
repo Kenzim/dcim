@@ -186,11 +186,13 @@ def test_admin_groups_and_management_ipsets(client, world, admin, alice_headers)
     # A client-selectable admin group shows in the client's list, read only.
     assert group["id"] in [g["id"] for g in client.get("/api/client/firewall/groups", headers=alice_headers).json()]
     assert client.put(f"/api/client/firewall/groups/{group['id']}", json={"name": "x"},
-                      headers=alice_headers).status_code in (403, 404)
+                      headers=alice_headers).status_code == 404
+    hidden = client.post(ADMIN + "/groups", json={"name": "hidden"}, headers=admin).json()
+    assert client.get(f"/api/client/firewall/groups/{hidden['id']}", headers=alice_headers).status_code == 404
     renamed = client.put(ADMIN + f"/groups/{group['id']}", json={"name": "ssh"}, headers=admin).json()
     assert renamed["name"] == "ssh"
-    assert [g["id"] for g in client.get(ADMIN + "/groups", params={"scope": "admin"}, headers=admin).json()] == [
-        group["id"]]
+    admin_groups = client.get(ADMIN + "/groups", params={"scope": "admin"}, headers=admin).json()
+    assert sorted(g["id"] for g in admin_groups) == sorted([group["id"], hidden["id"]])
 
     mgmt = client.post(ADMIN + "/ipsets", json={"name": "mgmt", "entries": ["10.0.0.0/8"], "purpose": "management"},
                        headers=admin)
@@ -257,6 +259,8 @@ def test_staff_view_and_admin_fields(client, db_session, world, admin):
     assert {"firewall.managed_changed", "firewall.admin_override_changed", "firewall.policy_changed"} <= actions
     stale = client.put(url, json={"revision": 1, "excluded": True}, headers=admin)
     assert stale.status_code == 409 and stale.json()["current_revision"] == 3
+    only_admin = client.put(url, json={"revision": 3, "excluded": True}, headers=admin)
+    assert only_admin.status_code == 200 and only_admin.json()["excluded"] is True
 
 
 def test_staff_turning_on_also_needs_confirm_interruption(client, monkeypatch, db_session, world, admin):

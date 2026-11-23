@@ -23,6 +23,7 @@ from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.service_dao import ServiceDAO
 from app.models.reseller import ServiceBilling
 from app.models.service import Service
+from app.models.vm_firewall import FirewallGroup, FirewallIpset
 from app.services.client_permission_resolver import require_client_permission
 from app.services.vm_firewall import service as svc
 
@@ -198,11 +199,12 @@ def delete_group(
 
 
 def _client_group(db: Session, caller: _Caller, group_id: int):
-    """A group the client owns; admin groups (even selectable ones) are read through the VM view."""
-    group = svc.get_group(db, caller.actor, group_id)
-    if group.owner_user_id != caller.user_id:
+    """A group the client owns. Admin groups (even selectable ones) and other clients' groups
+    answer 404 alike, so ids do not reveal what exists; they are read through the VM view."""
+    group = db.get(FirewallGroup, group_id)
+    if group is None or group.owner_user_id != caller.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
-    return group
+    return svc.get_group(db, caller.actor, group_id)
 
 
 # IP sets
@@ -244,10 +246,10 @@ def delete_ipset(ipset_id: int, caller: SessionDep, db: DbDep, revision: Optiona
 
 
 def _client_ipset(db: Session, caller: _Caller, ipset_id: int):
-    ipset = svc.get_ipset(db, caller.actor, ipset_id)
-    if ipset.owner_user_id != caller.user_id:
+    ipset = db.get(FirewallIpset, ipset_id)
+    if ipset is None or ipset.owner_user_id != caller.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IP set not found")
-    return ipset
+    return svc.get_ipset(db, caller.actor, ipset_id)
 
 
 # Reseller panel: read only, the reseller's own services

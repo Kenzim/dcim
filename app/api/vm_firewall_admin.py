@@ -434,11 +434,15 @@ async def update_firewall(service_id: int, body: AdminFirewallUpdate, request: R
     row = svc.get_firewall(db, service.id, actor)
     if body.revision != row.revision:
         raise FirewallChanged(row.revision)
-    if any(key in body.model_fields_set for key in _SETTINGS_FIELDS):
+    changed_settings = any(key in body.model_fields_set for key in _SETTINGS_FIELDS)
+    if changed_settings:
         await fw.update_settings(db, service, actor, body)
     admin = fw.given(body, *_ADMIN_FIELDS)
     if admin:
-        svc.set_admin_fields(db, service.id, actor, revision=svc.get_or_create(db, service.id).revision, **admin)
+        # After a settings change the row is locked by this transaction, so its new revision is
+        # the one to compare against; otherwise the caller's revision is checked under the lock.
+        current = svc.get_or_create(db, service.id).revision if changed_settings else body.revision
+        svc.set_admin_fields(db, service.id, actor, revision=current, **admin)
     return _done(db, service)
 
 
