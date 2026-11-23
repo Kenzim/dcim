@@ -224,9 +224,22 @@ wins; rules are concatenated in that order (global rules first). Unique (`scope_
 | `enforce_baseline_on_all` | Apply the baseline to every eligible VM, opted in or not (default false) |
 | `smtp_block_new_vms` | Default true. New VMs provisioned here get the SMTP block and an enforced baseline from creation (4.5a) |
 | `anti_spoof_new_vms` | Default false. Whether that enforced baseline on new VMs also includes `ipfilter` and `macfilter` (4.5a) |
-| `ipv6_allowed_prefixes` | JSON list, null. Prefixes added to `ipfilter-net0` for VMs on a bridge listed in `vm_firewall_ipv6_ra_bridges`; while empty such VMs are not eligible (reason `ipv6_ra_bridge_needs_prefix`) |
+| `ipv6_allowed_prefixes` | JSON list, null. Prefixes added to `ipfilter-net0` for VMs whose observed `net0` bridge (`service_firewalls.net0_bridge`) is listed in `vm_firewall_ipv6_ra_bridges`; while empty such VMs are not eligible (reason `ipv6_ra_bridge_needs_prefix`). Weaker protection, see 4.4a |
 | `readiness` | JSON cache of the last readiness check per cluster (section 9.2) |
 | `readiness_checked_at` | datetime |
+
+### 4.4a IPv6 on router-advert bridges: what the prefix allowance does and does not stop
+
+On a bridge with router adverts (production `vmbr750`), VMs pick their own IPv6 addresses by SLAAC,
+so Rackflow does not know each VM's address. Putting the location's whole prefix into each VM's
+`ipfilter-net0` means IPv6 anti-spoofing there **only stops addresses outside the prefix**. A VM can
+still send from, and take over traffic for, a neighbour's address inside the same prefix. IPv4
+anti-spoofing on the same VM is unaffected (its exact assigned address). The admin help text for
+`ipv6_allowed_prefixes` says this in plain words. The later fix is per-VM IPv6 assignment
+(Rackflow allocates a /128 or a /64 per VM, written by cloud-init instead of SLAAC), after which
+`ipfilter-net0` holds the VM's own IPv6 addresses and the prefix allowance is no longer needed.
+If `net0_bridge` has not been observed yet, render adds no prefixes and leaves `ipfilter` off while
+any router-advert bridge is configured (no anti-spoofing rather than wrong anti-spoofing).
 
 Global numbers are settings in a new `vm_firewall` group of `app/services/settings_store.py`:
 `vm_firewall_reconcile_interval_seconds` (600), `vm_firewall_max_rules_per_vm` (100),
