@@ -202,10 +202,11 @@ def _serialize_gateway_log(row: PaymentGatewayLog) -> dict:
     }
 
 
-def _serialize_audit(row: UserAuditEvent) -> dict:
+def _serialize_audit(row: UserAuditEvent, actor_names: Optional[dict[int, str]] = None) -> dict:
     return {
         "id": row.id,
         "actor_user_id": row.actor_user_id,
+        "actor_username": (actor_names or {}).get(row.actor_user_id),
         "subject_user_id": row.subject_user_id,
         "billing_account_id": row.billing_account_id,
         "action": row.action,
@@ -679,7 +680,13 @@ def list_audit_events(
     if subject_user_id is not None:
         stmt = stmt.where(UserAuditEvent.subject_user_id == subject_user_id)
     rows = list(db.execute(stmt.offset(offset).limit(limit)).scalars())
-    return [_serialize_audit(row) for row in rows]
+    actor_ids = {row.actor_user_id for row in rows if row.actor_user_id is not None}
+    actor_names = (
+        dict(db.execute(select(User.id, User.username).where(User.id.in_(actor_ids))).all())
+        if actor_ids
+        else {}
+    )
+    return [_serialize_audit(row, actor_names) for row in rows]
 
 
 # --- Billing accounts ---
