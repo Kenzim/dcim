@@ -130,6 +130,81 @@ def test_hidden_group_attached_by_staff_is_provided_by_us(client, db_session, wo
                                "provided_by_us": True, "rules": []}]
 
 
+def _resold_vm(client, db_session, world):
+    """A VM of a reseller's client, and the reseller's panel headers."""
+    user = User(username="fw-b5c-res", email="fw-b5c-res@example.test", is_reseller=True)
+    user.set_password("panel-password")
+    reseller = Reseller(user=user)
+    db_session.add(reseller)
+    db_session.flush()
+    client_user(world, "carol", reseller_id=reseller.id)
+    resold = world.vm("carol", product_code="fw-b5c")
+    db_session.query(ServiceBilling).filter_by(service_id=resold.id).one().reseller_id = reseller.id
+    db_session.commit()
+    return resold, login(client, user.username, "panel-password")
+
+
+def test_hidden_group_entry_carries_nothing_more_on_client_and_reseller_responses(client, db_session, world, alice_vm, alice):
+    hidden = seed_hidden_admin_objects(db_session, world.staff_actor, alice_vm.id)["group"]
+    entry = {"id": hidden.id, "name": "Provided by us", "description": None, "provided_by_us": True, "rules": []}
+    view = _view(client, alice, alice_vm.id)
+    assert view["groups"] == [entry]
+    assert [r for r in view["rules"] if r["kind"] == "group"] == [
+        {"id": view["rules"][0]["id"], "position": 0, "kind": "group", "enabled": True, "comment": None,
+         "group_id": hidden.id}
+    ]
+    written = client.put(BASE.format(alice_vm.id) + "/rules", json={"revision": view["revision"], "rules": view["rules"]},
+                         headers=alice)
+    assert written.status_code == 200, written.text
+    assert written.json()["groups"] == [entry]
+
+    resold, panel = _resold_vm(client, db_session, world)
+    row = svc.get_or_create(db_session, resold.id)
+    svc.attach_group(db_session, resold.id, world.staff_actor, hidden.id, revision=row.revision)
+    db_session.commit()
+    response = client.get(f"/api/reseller-panel/services/{resold.id}/firewall", headers=panel)
+    assert response.status_code == 200, response.text
+    assert response.json()["groups"] == [entry]
+
+
+def test_hidden_group_id_answers_like_a_missing_id_on_every_client_route(client, db_session, world, alice_vm, alice):
+    hidden = seed_hidden_admin_objects(db_session, world.staff_actor, alice_vm.id)["group"]
+    other_vm = world.vm("alice")
+    db_session.commit()
+    own = client.post(GROUPS, json={"name": "own", "rules": [SSH]}, headers=alice).json()
+    missing_id = hidden.id + 100000
+    here, there = BASE.format(alice_vm.id), BASE.format(other_vm.id)
+
+    def calls(group_id):
+        other = _view(client, alice, other_vm.id)["revision"]
+        ref = {"kind": "group", "group_id": group_id}
+        return {
+            "get": client.get(f"{GROUPS}/{group_id}", headers=alice),
+            "update": client.put(f"{GROUPS}/{group_id}", json={"name": "renamed"}, headers=alice),
+            "delete": client.delete(f"{GROUPS}/{group_id}", params={"detach": True}, headers=alice),
+            "nest in a new group": client.post(GROUPS, json={"name": "nested", "rules": [ref]}, headers=alice),
+            "nest in own group": client.put(f"{GROUPS}/{own['id']}", json={"rules": [ref]}, headers=alice),
+            "attach on another VM": client.post(f"{there}/groups/{group_id}", json={"revision": other}, headers=alice),
+            "detach on another VM": client.delete(f"{there}/groups/{group_id}", params={"revision": other},
+                                                  headers=alice),
+            "rules on another VM": client.put(f"{there}/rules", json={"revision": other, "rules": [ref]}, headers=alice),
+            "add rule on another VM": client.post(f"{there}/rules", json={"revision": other, "rule": ref}, headers=alice),
+        }
+
+    before = _view(client, alice, alice_vm.id)
+    hidden_calls, missing_calls = calls(hidden.id), calls(missing_id)
+    for name, response in hidden_calls.items():
+        missing = missing_calls[name]
+        assert response.status_code >= 400, (name, response.text)
+        assert (response.status_code, response.json()) == (missing.status_code, missing.json()), name
+    assert hidden_calls["rules on another VM"].json()["code"] == "reference_not_found"
+    # On its own VM the id is already in the view, and a second reference says only that.
+    again = client.post(f"{here}/groups/{hidden.id}", json={"revision": before["revision"]}, headers=alice)
+    assert again.status_code == 422 and again.json()["code"] == "group_already_attached"
+    assert _view(client, alice, alice_vm.id) == before
+    assert _view(client, alice, other_vm.id)["rules"] == []
+
+
 # Saving a list that holds staff references
 
 
