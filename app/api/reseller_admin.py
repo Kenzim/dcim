@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
@@ -64,7 +63,6 @@ from app.models.usdt import (
     UsdtDepositStatus,
     UsdtTransferEvent,
 )
-from app.services.billing_shadow import billing_engine_mode
 from app.services.credit_ledger_service import (
     CreditLedgerError,
     CreditLedgerService,
@@ -695,34 +693,13 @@ def _invoice_payload(
     *,
     include_payments: bool = False,
 ) -> dict:
-    balance = InvoiceService.balance(db, invoice)
-    if billing_engine_mode(db, "invoice") == "v2":
-        allocated = balance.paid_net_cents
-        remaining = balance.remaining_cents
-    else:
-        allocated = InvoiceService.allocated_cents(db, invoice.id)
-        remaining = max(0, invoice.amount_cents - allocated)
-    result = {
-        "id": invoice.id,
-        "invoice_number": invoice.invoice_number,
-        "reseller_id": invoice.reseller_id,
-        "reseller": _reseller_brief(invoice.reseller),
-        "service_id": invoice.service_id,
-        "service": _service_brief(invoice.service),
-        "purpose": _enum_value(invoice.purpose),
-        "status": _enum_value(invoice.status),
-        "status_detail": _enum_value(invoice.status),
-        "amount_cents": invoice.amount_cents,
-        "allocated_cents": allocated,
-        "remaining_cents": remaining,
-        "balance": dataclasses.asdict(balance),
-        "currency": invoice.currency,
-        "description": invoice.description,
-        "due_at": invoice.due_at,
-        "paid_at": invoice.paid_at,
-        "created_at": invoice.created_at,
-        "updated_at": invoice.updated_at,
-    }
+    """The shared invoice serialiser (tax, legal notes, sterling figures) with the admin extras on top."""
+    result = InvoiceService.serialize(db, invoice)
+    result.update(
+        reseller=_reseller_brief(invoice.reseller),
+        service=_service_brief(invoice.service),
+        status=_enum_value(invoice.status),
+    )
     if include_payments:
         result["payments"] = [
             _payment_payload(row)
