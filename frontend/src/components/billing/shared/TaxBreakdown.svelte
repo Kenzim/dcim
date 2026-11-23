@@ -5,6 +5,8 @@
   /** A quote or invoice that carries `tax_summary`, its legal notes (`legal_note_texts` on a quote, `legal_notes` on an invoice) and `reverse_charge`. */
   export let source;
   export let currency = 'USD';
+  /** `customer` words the reverse charge for the buyer; `staff` states it as a fact about the invoice. */
+  export let audience = 'customer';
 
   $: summary = Array.isArray(source?.tax_summary) ? source.tax_summary : [];
   $: notes = legalNotesOf(source).map(legalNoteView);
@@ -28,7 +30,13 @@
   </table>
 {/if}
 {#if reverseCharge}
-  <p class="reverse">The reverse charge applies: no VAT is charged here, and the VAT due is accounted for by you as the customer.</p>
+  <p class="reverse">
+    {#if audience === 'staff'}
+      Reverse charge: no VAT is charged on the reverse charge rows; the buyer accounts for the VAT due.
+    {:else}
+      The reverse charge applies: no VAT is charged here, and the VAT due is accounted for by you as the customer.
+    {/if}
+  </p>
 {/if}
 {#if notes.length}
   <ul class="notes" aria-label="Tax notes">
