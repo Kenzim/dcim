@@ -140,6 +140,40 @@ class ConfigureCloudInitNetworkStep(DeploymentStep):
             raise DeploymentError("Proxmox cloud-init network config update failed")
 
 
+class ApplyFirewallStep(DeploymentStep):
+    """Write the VM firewall before first boot (docs/vm-firewall.md section 6.5), replacing any
+    ``.fw`` the clone or restore brought with it. A failed write fails the step, so the job retries
+    and the VM never boots without its firewall."""
+
+    name = "apply_firewall"
+
+    async def precheck(self, ctx) -> StepOutcome:
+        from app.services.vm_firewall.reconcile import firewall_configured
+
+        if ctx.service.vm is None:
+            return StepOutcome.skip("Service has no VM record")
+        if not firewall_configured(ctx.db, ctx.service.id):
+            return StepOutcome.skip("VM firewall not configured for this location")
+        return StepOutcome.ready()
+
+    async def execute(self, ctx) -> None:
+        from app.services.vm_firewall.proxmox_fw import PluginTransport, VmFirewallClient
+        from app.services.vm_firewall.reconcile import ProvisionFirewallError, apply_for_provision
+
+        _cid, _node, target_vmid = ctx.require_placement()
+        client = VmFirewallClient(PluginTransport(ctx.get_plugin()), int(target_vmid))
+        try:
+            result = await apply_for_provision(
+                ctx.db, ctx.service.id, client, owner=f"deployment-job-{ctx.job.id}"
+            )
+        except ProvisionFirewallError as exc:
+            raise DeploymentError(str(exc)) from exc
+        if result is None:
+            ctx.logger.info("Firewall not managed for this VM; left as it is")
+        else:
+            ctx.logger.info("Firewall applied: state=%s revision=%s", result.state, result.revision)
+
+
 class PowerOnStep(DeploymentStep):
     name = "power_on"
 
@@ -692,6 +726,10 @@ class FinalizeBackupRestoreStep(DeploymentStep):
         _write_vm_restore_state(ctx, state)
         if ctx.service.vm:
             ctx.service.vm.guest_last_error = None
+        # The restore brought back the backup's ``.fw``; queue a fresh apply (section 6.6).
+        from app.services.vm_firewall.service import bump_revisions
+
+        bump_revisions(ctx.db, [ctx.service.id])
 
 
 class StampVmIdentityStep(DeploymentStep):

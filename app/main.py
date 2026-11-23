@@ -58,6 +58,11 @@ def _start_background_workers() -> list[asyncio.Task]:
 
         tasks.append(asyncio.create_task(run_alert_worker()))
         logger.info("In-process alert worker enabled")
+    if settings.run_vm_firewall_worker:
+        from app.workers.vm_firewall import run_vm_firewall_worker
+
+        tasks.append(asyncio.create_task(run_vm_firewall_worker()))
+        logger.info("In-process VM firewall worker enabled")
     if settings.run_plugin_worker:
         from app.workers.plugins import run_plugin_worker
 

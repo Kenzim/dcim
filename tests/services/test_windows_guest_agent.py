@@ -22,6 +22,7 @@ def test_windows_strategy_step_order():
     assert WindowsGuestAgentStrategy().step_names() == [
         "clone_from_template",
         "configure_sizing",
+        "apply_firewall",
         "power_on",
         "wait_for_guest_agent",
         "configure_windows_guest",

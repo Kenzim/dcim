@@ -1624,12 +1624,22 @@ def _clear_rollouts(db: Session, location_id: int) -> None:
 
 def release_due_rollouts(db: Session, *, now: Optional[datetime] = None) -> list[int]:
     """For the worker: rows whose ``rollout_after`` has come get it cleared and their revision
-    bumped, so the normal apply path picks them up. Returns their service ids; the caller commits."""
+    bumped, so the normal apply path picks them up, and ``rollout_released_at`` set. Rows of a
+    location whose rollout is paused (``rollout_paused_at``) stay where they are. Returns the
+    released service ids; the caller commits."""
     now = now or datetime.now(timezone.utc)
     rows = db.execute(select(ServiceFirewall).where(ServiceFirewall.rollout_after.is_not(None))).scalars()
     due = [row for row in rows if as_utc(row.rollout_after) <= now]
+    if due:
+        paused: set[int] = set()
+        for location_id in db.execute(
+            select(FirewallLocationSettings.location_id).where(FirewallLocationSettings.rollout_paused_at.is_not(None))
+        ).scalars():
+            paused |= _services_in_location(db, location_id)
+        due = [row for row in due if row.service_id not in paused]
     for row in due:
         row.rollout_after = None
+        row.rollout_released_at = now
         _bump(row)
     db.flush()
     return sorted(row.service_id for row in due)
