@@ -95,6 +95,58 @@ async def test_claimed_row_is_left_until_the_claim_expires(world, fake, access):
     assert (await _queue(world, access, now=later)).applied == [vm.id]
 
 
+LONG_WAIT = timedelta(seconds=reconcile.CLAIM_SECONDS + 180)
+
+
+class _LateProbe(FakeAccess):
+    """Asks, while the worker holds the claim, whether the deployment step (``apply_for_provision``)
+    could claim the VM too, and whether another worker's queue would list it."""
+
+    def __init__(self, fake, tick_now):
+        super().__init__(fake)
+        self.at = tick_now + LONG_WAIT
+        self.seen = []
+
+    async def vm_client(self, db, service):
+        listed = service.id in [sid for sid, _ in reconcile.due_for_apply(db, now=self.at)]
+        self.seen.append((reconcile.claim(db, service.id, owner="deployment", now=self.at), listed))
+        return await super().vm_client(db, service)
+
+
+def _long_wait(monkeypatch):
+    """The wall clock: the tick starts, then the VM's turn comes ``LONG_WAIT`` later."""
+    calls = []
+    wall = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    def utcnow():
+        calls.append(1)
+        return wall if len(calls) == 1 else wall + LONG_WAIT
+
+    monkeypatch.setattr(reconcile, "utcnow", utcnow)
+
+
+@pytest.mark.asyncio
+async def test_claim_taken_late_in_a_long_queue_runs_from_when_it_is_taken(world, fake, monkeypatch):
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    probe = _LateProbe(fake, T0)
+    _long_wait(monkeypatch)
+    result = await reconcile.process_queue(world.db, probe, owner=OWNER, now=T0)
+    assert result.applied == [vm.id]
+    assert probe.seen == [(False, False)]
+
+
+@pytest.mark.asyncio
+async def test_sweep_claim_after_a_long_queue_runs_from_when_it_is_taken(world, fake, access, monkeypatch):
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    later = T0 + timedelta(seconds=reconcile.reconcile_interval(world.db) + 1)
+    probe = _LateProbe(fake, later)
+    _long_wait(monkeypatch)
+    result = await reconcile.tick(world.db, probe, owner=OWNER, now=later)
+    assert result.sweep.checked == [vm.id]
+    assert probe.seen and all(claimed is False for claimed, _listed in probe.seen)
+
+
 @pytest.mark.asyncio
 async def test_cluster_concurrency_limits_parallel_applies(world, fake, access, monkeypatch):
     settings_store.set_setting(world.db, "vm_firewall_cluster_concurrency", 2)

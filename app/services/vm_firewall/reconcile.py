@@ -207,6 +207,13 @@ def claim(db: Session, service_id: int, *, owner: str, now: datetime) -> bool:
     return result.rowcount == 1
 
 
+def claim_clock(now: datetime) -> Callable[[], datetime]:
+    """``now`` moved on by the wall-clock time since this call. Claims taken late in a long tick
+    use it, so they expire ``CLAIM_SECONDS`` after they are taken, not after the tick started."""
+    started = utcnow()
+    return lambda: now + (utcnow() - started)
+
+
 def unclaim(db: Session, service_id: int, *, owner: str) -> None:
     db.execute(
         update(ServiceFirewall)
@@ -468,11 +475,13 @@ async def process_queue(
     now: Optional[datetime] = None,
     session_scope: Optional[SessionScope] = None,
     limit: int = QUEUE_BATCH,
+    clock: Optional[Callable[[], datetime]] = None,
 ) -> QueueResult:
     """One pass of the apply queue: release due rollout rows, then apply what is due, at most
     ``vm_firewall_cluster_concurrency`` VMs of one cluster at a time. Each VM's apply runs in its own
     session from ``session_scope`` (the shared ``db`` when not given)."""
     now = now or utcnow()
+    clock = clock or claim_clock(now)
     out = QueueResult()
     out.released = fw.release_due_rollouts(db, now=now)
     mark_unmanaged(db)
@@ -488,7 +497,7 @@ async def process_queue(
         semaphore = semaphores.setdefault(cluster_id, asyncio.Semaphore(per_cluster))
         async with semaphore:
             with scope() as session:
-                if not claim(session, service_id, owner=owner, now=now):
+                if not claim(session, service_id, owner=owner, now=clock()):
                     return
                 try:
                     out.attempted.append(service_id)
@@ -637,10 +646,12 @@ async def drift_sweep(
     now: Optional[datetime] = None,
     tick_seconds: int = TICK_SECONDS,
     batch: Optional[int] = None,
+    clock: Optional[Callable[[], datetime]] = None,
 ) -> SweepResult:
     """Check the slice of managed VMs due this tick: enough that each is checked once per
     ``vm_firewall_reconcile_interval_seconds``. ``completed`` is true when nothing due is left."""
     now = now or utcnow()
+    clock = clock or claim_clock(now)
     interval = reconcile_interval(db)
     out = SweepResult()
     if batch is None:
@@ -657,7 +668,7 @@ async def drift_sweep(
     )
     buckets = {"in_sync": out.in_sync, "repaired": out.repaired, "reported": out.reported, "queued": out.queued}
     for service_id in ids:
-        if not claim(db, service_id, owner=owner, now=now):
+        if not claim(db, service_id, owner=owner, now=clock()):
             continue
         try:
             outcome = await sweep_one(db, service_id, access, now=now)
@@ -777,12 +788,14 @@ async def tick(
     sweep: bool = True,
 ) -> TickResult:
     now = now or utcnow()
-    result = TickResult(queue=await process_queue(db, access, owner=owner, now=now, session_scope=session_scope))
+    clock = claim_clock(now)
+    result = TickResult(queue=await process_queue(db, access, owner=owner, now=now, session_scope=session_scope,
+                                                  clock=clock))
     if not sweep:
         _write_status(db, last_tick_at=now, owner=owner)
         db.commit()
         return result
-    result.sweep = await drift_sweep(db, access, owner=owner, now=now)
+    result.sweep = await drift_sweep(db, access, owner=owner, now=now, clock=clock)
     status = read_status(db)
     interval = reconcile_interval(db)
     last_readiness = status_time(status, "last_readiness_at")
