@@ -8,13 +8,9 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
-from app.plugins.proxmox import proxmox_token_header
 
 
 async def _cluster_auth_headers(cluster) -> Dict[str, str]:
-    token = proxmox_token_header(cluster.username, cluster.password)
-    if token is not None:
-        return token
     auth_url = f"{cluster.api_url.rstrip('/')}/api2/json/access/ticket"
     async with httpx.AsyncClient(verify=cluster.verify_ssl, timeout=20.0) as client:
         response = await client.post(
