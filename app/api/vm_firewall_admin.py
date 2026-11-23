@@ -543,7 +543,9 @@ async def apply_now(service_id: int, request: Request, auth: AdminDep, db: DbDep
     unless the VM was applied before, when it can only switch the firewall off, as the worker does.
     A VM its live config makes ineligible (infrastructure bridge, trunk, ...) is refused and not
     written, as the worker holds it. The apply takes the VM's claim like the worker; while the
-    worker or a deployment holds it the request is refused (409 ``apply_in_progress``)."""
+    worker or a deployment holds it the request is refused (409 ``apply_in_progress``) and leaves no
+    audit row. The ``firewall.apply_requested`` audit row of an apply that ran carries its outcome
+    (``claim_lost`` when another applier took the VM part-way, also answered 409)."""
     service = _service(db, service_id)
     row = svc.get_or_create(db, service.id)
     location = load_context(db, service.id).location_settings
@@ -565,10 +567,11 @@ async def apply_now(service_id: int, request: Request, auth: AdminDep, db: DbDep
                     if reason not in reconcile.RENDERED_REASONS]
             if hard:
                 raise FirewallNotEligible(hard)
-        svc._audit(db, actor, "firewall.apply_requested", resource_type="service",
-                   resource_id=service.id, subject_user_id=service.owner_user_id, metadata={"revision": row.revision})
+        revision = row.revision
         held = reconcile.Claim.of(db, service.id, owner=owner, clock=reconcile.claim_clock(now))
         result = await fw_apply.apply(db, service.id, client, vm_config=config, claim=held)
+        svc._audit(db, actor, "firewall.apply_requested", resource_type="service", resource_id=service.id,
+                   subject_user_id=service.owner_user_id, metadata={"revision": revision, "outcome": result.state})
         db.commit()
     except BaseException:
         db.rollback()

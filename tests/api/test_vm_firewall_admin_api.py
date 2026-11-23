@@ -358,9 +358,39 @@ def test_apply_while_the_worker_holds_the_vm_is_refused_and_writes_nothing(clien
     assert response.json()["code"] == "apply_in_progress" and response.json()["field"] is None
     assert response.json()["message"] == "This server's firewall is being applied right now. Try again in a minute."
     assert fake.writes == []
+    assert db_session.query(UserAuditEvent).filter_by(action="firewall.apply_requested").count() == 0
     db_session.expire_all()
     row = db_session.get(ServiceFirewall, vm.id)
     assert row.claimed_by == "worker-1" and row.applied_revision is None
+
+
+def test_apply_that_loses_its_claim_part_way_is_refused_and_audited_as_such(
+    client, monkeypatch, db_session, world, admin
+):
+    from datetime import timedelta
+
+    from sqlalchemy.orm import Session
+
+    vm = _vm(world, db_session)
+    fake = fake_proxmox(monkeypatch, world, [vm])
+    url = ADMIN + f"/services/{vm.id}"
+    client.put(url, json={"revision": 1, "client_enabled": True, "confirm_interruption": True}, headers=admin)
+
+    def worker_takes_over(_fake):
+        # The staff claim has expired and the worker takes the VM.
+        with Session(bind=db_session.get_bind()) as other:
+            assert reconcile.claim(other, vm.id, owner="worker-1", now=reconcile.utcnow() + timedelta(hours=1))
+
+    fake.on_next_write(worker_takes_over)
+    response = client.post(url + "/apply", headers=admin)
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "apply_in_progress"
+    assert len(fake.writes) == 1
+    audits = db_session.query(UserAuditEvent).filter_by(action="firewall.apply_requested").all()
+    assert [audit.event_metadata["outcome"] for audit in audits] == ["claim_lost"]
+    db_session.expire_all()
+    row = db_session.get(ServiceFirewall, vm.id)
+    assert row.claimed_by == "worker-1" and row.applied_revision is None and row.last_error is None
 
 
 def test_apply_holds_the_claim_while_writing_and_releases_it(client, monkeypatch, db_session, world, admin):
@@ -381,6 +411,8 @@ def test_apply_holds_the_claim_while_writing_and_releases_it(client, monkeypatch
     assert applied.status_code == 200, applied.text
     assert applied.json()["result"]["ok"] is True and applied.json()["firewall"]["state"] == "applied"
     assert worker_claims == [False]
+    audits = db_session.query(UserAuditEvent).filter_by(action="firewall.apply_requested").all()
+    assert [audit.event_metadata["outcome"] for audit in audits] == ["applied"]
     db_session.expire_all()
     row = db_session.get(ServiceFirewall, vm.id)
     assert row.claimed_by is None and row.claimed_until is None
