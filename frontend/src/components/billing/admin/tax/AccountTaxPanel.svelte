@@ -35,7 +35,7 @@
       account = acct;
       latestCheck = checks[0] || null;
       exempt = !!acct.tax_exempt;
-      reason = '';
+      reason = acct.tax_exempt_reason || '';
     } catch (err) {
       error = err.message;
     } finally {
@@ -56,7 +56,7 @@
         tax_exempt: exempt,
         tax_exempt_reason: exempt ? reason.trim() : null,
       });
-      account = { ...account, tax_exempt: saved.tax_exempt };
+      account = { ...account, tax_exempt: saved.tax_exempt, tax_exempt_reason: saved.tax_exempt ? reason.trim() : null };
       success = saved.tax_exempt ? 'The account is now exempt from tax.' : 'The account is no longer exempt from tax.';
     } catch (err) {
       error = err.message;
@@ -81,7 +81,7 @@
     }
   }
 
-  $: status = recheckedStatus || latestCheck?.status || (account?.profile?.tax_id ? 'unchecked' : '');
+  $: status = recheckedStatus || latestCheck?.status || account?.profile?.tax_id_status || (account?.profile?.tax_id ? 'unchecked' : '');
 </script>
 
 <div class="ba-panel">
@@ -99,8 +99,7 @@
     <div class="ba-form" style="max-width:520px">
       <label class="ba-check"><input type="checkbox" bind:checked={exempt} /> This whole account is exempt</label>
       {#if exempt}
-        <label>Reason<input bind:value={reason} maxlength="255" placeholder={account.tax_exempt ? 'Enter the reason again to save' : 'Why is the account exempt?'} /></label>
-        {#if account.tax_exempt}<span class="ba-hint">The stored reason is not shown by the API; saving replaces it.</span>{/if}
+        <label>Reason<input bind:value={reason} maxlength="255" placeholder="Why is the account exempt?" /></label>
       {/if}
       <div class="ba-inline">
         <Button on:click={saveFlag} disabled={working || (!exempt && !account.tax_exempt)}>Save</Button>
