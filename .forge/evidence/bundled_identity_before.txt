@@ -1,0 +1,43 @@
+============================= test session starts ==============================
+collected 14 items
+
+tests/plugin_host/test_bundled_identity.py F.FFF...F..FFF                [100%]
+
+=================================== FAILURES ===================================
+E   AssertionError: assert ('files_changed' == 'files_changed'
+      
+        files_changed and 'third-party plugin of that name' in 'The files on disk differ from the approved version; review and upgrade to run them.')
+     +  where 'The files on disk differ from the approved version; review and upgrade to run them.' = <app.models.plugin_host.PluginInstallation object at 0x7c12d3a6ef50>.disabled_reason
+/tmp/bi_before/tests/plugin_host/test_bundled_identity.py:104: AssertionError: assert ('files_changed' == 'files_changed'
+E   AssertionError: {"id":"demo_plugin","name":"Rackflow demo","version":"1.1.0","effective_api":"1.1","bundled":true,"description":"","author":null,"homepage":null,"licence":null,"status":"enabled","disabled_reason":null,"permissions":[],"health":{"state":"ok","consecutive_failures":0,"total_failures":0,"last_error":null,"last_error_at":null,"last_success_at":null,"circuit_open_until":null,"queued_deliveries":0,"dead_deliveries":0},"upgrade":null,"services":null,"addon_refs":[],"settings_schema":[],"actions":[],"schedules":[],"events":[],"hooks":[],"mcp_tools":[],"provides":[],"installed_at":"2026-11-23T03:04:40+00:00","updated_at":"2026-11-23T03:04:40+00:00"}
+    assert 200 == 400
+     +  where 200 = <Response [200 OK]>.status_code
+/tmp/bi_before/tests/plugin_host/test_bundled_identity.py:148: AssertionError: {"id":"demo_plugin","name":"Rackflow demo","version":"1.1.0","effective_api":"1.1","bundled":true,"description":"","author":null,"homepage":null,"licence":null,"status":"enabled","disabled_reason":null,"permissions":[],"health":{"state":"ok","consecutive_failures":0,"total_failures":0,"last_error":null,"last_error_at":null,"last_success_at":null,"circuit_open_until":null,"queued_deliveries":0,"dead_deliveries":0},"upgrade":null,"services":null,"addon_refs":[],"settings_schema":[],"actions":[],"schedules":[],"events":[],"hooks":[],"mcp_tools":[],"provides":[],"installed_at":"2026-11-23T03:04:40+00:00","updated_at":"2026-11-23T03:04:40+00:00"}
+E   AssertionError: {"id":"demo_plugin","name":"Rackflow demo","version":"1.1.0","effective_api":"1.1","bundled":true,"description":"","author":null,"homepage":null,"licence":null,"status":"disabled","disabled_reason":null,"permissions":[],"health":{"state":"disabled","consecutive_failures":0,"total_failures":0,"last_error":null,"last_error_at":null,"last_success_at":null,"circuit_open_until":null,"queued_deliveries":0,"dead_deliveries":0},"upgrade":null,"services":null,"addon_refs":[],"settings_schema":[],"actions":[],"schedules":[],"events":[],"hooks":[],"mcp_tools":[],"provides":[],"installed_at":"2026-11-23T03:04:41+00:00","updated_at":"2026-11-23T03:04:41+00:00"}
+    assert 200 == 400
+     +  where 200 = <Response [200 OK]>.status_code
+/tmp/bi_before/tests/plugin_host/test_bundled_identity.py:173: AssertionError: {"id":"demo_plugin","name":"Rackflow demo","version":"1.1.0","effective_api":"1.1","bundled":true,"description":"","author":null,"homepage":null,"licence":null,"status":"disabled","disabled_reason":null,"permissions":[],"health":{"state":"disabled","consecutive_failures":0,"total_failures":0,"last_error":null,"last_error_at":null,"last_success_at":null,"circuit_open_until":null,"queued_deliveries":0,"dead_deliveries":0},"upgrade":null,"services":null,"addon_refs":[],"settings_schema":[],"actions":[],"schedules":[],"events":[],"hooks":[],"mcp_tools":[],"provides":[],"installed_at":"2026-11-23T03:04:41+00:00","updated_at":"2026-11-23T03:04:41+00:00"}
+E   assert 405 == 400
+     +  where 405 = <Response [405 Method Not Allowed]>.status_code
+/tmp/bi_before/tests/plugin_host/test_bundled_identity.py:203: assert 405 == 400
+E   AssertionError: assert ('files_changed' == 'files_changed'
+      
+        files_changed and 'third-party copy' in 'The files on disk differ from the approved version; review and upgrade to run them.')
+     +  where 'The files on disk differ from the approved version; review and upgrade to run them.' = <app.models.plugin_host.PluginInstallation object at 0x7c12d9c72210>.disabled_reason
+/tmp/bi_before/tests/plugin_host/test_bundled_identity.py:255: AssertionError: assert ('files_changed' == 'files_changed'
+E   TypeError: 'bundled' is an invalid keyword argument for PluginInstallation
+/root/dcim/.venv/lib/python3.11/site-packages/sqlalchemy/orm/decl_base.py:2179: TypeError: 'bundled' is an invalid keyword argument for PluginInstallation
+E   AttributeError: 'PluginInstallation' object has no attribute 'bundled'
+/tmp/bi_before/tests/plugin_host/test_bundled_identity.py:345: AttributeError: 'PluginInstallation' object has no attribute 'bundled'
+E   AttributeError: 'PluginInstallation' object has no attribute 'bundled'
+/tmp/bi_before/tests/plugin_host/test_bundled_identity.py:345: AttributeError: 'PluginInstallation' object has no attribute 'bundled'
+=========================== short test summary info ============================
+FAILED tests/plugin_host/test_bundled_identity.py::test_a_third_party_install_is_not_loaded_upgraded_or_offered_the_bundled_plugin_of_its_name
+FAILED tests/plugin_host/test_bundled_identity.py::test_the_admin_api_refuses_the_upgrade_with_a_400_and_writes_nothing
+FAILED tests/plugin_host/test_bundled_identity.py::test_kept_data_blocks_the_bundled_install_until_it_is_purged_explicitly
+FAILED tests/plugin_host/test_bundled_identity.py::test_purging_is_refused_while_the_plugin_is_installed
+FAILED tests/plugin_host/test_bundled_identity.py::test_a_bundled_install_whose_shipped_folder_is_gone_does_not_run_a_plugins_folder_copy
+FAILED tests/plugin_host/test_bundled_identity.py::test_the_backfill_decides_by_location_and_uses_the_hash_only_to_break_a_tie
+FAILED tests/plugin_host/test_bundled_identity.py::test_a_backfilled_shipped_plugin_loads_and_upgrades_after_a_release_changed_its_code[vies_validator]
+FAILED tests/plugin_host/test_bundled_identity.py::test_a_backfilled_shipped_plugin_loads_and_upgrades_after_a_release_changed_its_code[hmrc_exchange_rates]
+========================= 8 failed, 6 passed in 5.03s ==========================
