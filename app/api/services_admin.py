@@ -495,6 +495,11 @@ async def _sync_guest_state_from_proxmox(db: Session, service: Service) -> None:
         plugin, _cid, _node, _vmid = await _admin_get_vm_plugin(db, service)
     except HTTPException:
         return
+    except Exception as exc:
+        # Resolving the plugin probes Proxmox itself, so an unreachable cluster surfaces here.
+        logger.warning("Proxmox guest sync failed (resolve) for service %s: %s", service.id, exc)
+        _set_guest_state(db, service, service.vm.guest_state, error=f"Proxmox sync failed: {exc}")
+        return
     try:
         exists = await plugin.vm_exists()
     except Exception as exc:

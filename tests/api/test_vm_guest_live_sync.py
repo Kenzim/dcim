@@ -93,6 +93,35 @@ def test_get_vm_service_syncs_destroyed_when_missing(client, db_session, test_ad
     assert service.vm.guest_state == VMGuestState.DESTROYED
 
 
+def test_get_vm_service_answers_when_proxmox_is_unreachable(client, db_session, test_admin_user):
+    import httpx
+
+    _login_admin(client, test_admin_user)
+    cluster = _cluster(db_session)
+    service = ServiceDAO.create_vm(
+        db_session,
+        name="vm-live-unreachable",
+        provisioning_source=ProvisioningSource.INTERNAL,
+        status=ServiceStatus.ACTIVE,
+        proxmox_cluster_id=cluster.id,
+        proxmox_node_name="pve",
+        proxmox_vmid=200903,
+    )
+    service.vm.guest_state = VMGuestState.RUNNING
+    db_session.commit()
+
+    # The real resolver probes the cached node; that probe cannot connect.
+    with patch(
+        "app.plugins.proxmox.ProxmoxPlugin.vm_exists",
+        new=AsyncMock(side_effect=httpx.ConnectError("All connection attempts failed")),
+    ):
+        r = client.get(f"/api/admin/services/vm/{service.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["vm_guest_state"] == "running"
+    assert body["vm_guest_last_error"].startswith("Proxmox sync failed:")
+
+
 def test_get_vm_service_skips_sync_while_provisioning(client, db_session, test_admin_user):
     _login_admin(client, test_admin_user)
     cluster = _cluster(db_session)
