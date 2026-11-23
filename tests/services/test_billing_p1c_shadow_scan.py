@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -155,6 +156,7 @@ def test_shadow_since_set_only_by_a_scheduled_real_scan(db_session):
 
 
 def _seed_quiet_history(db, engine: str, days: int, now: datetime) -> None:
+    now = now.astimezone(timezone.utc)  # the criterion counts UTC days whatever zone the caller's clock is in
     since = now - timedelta(days=days, hours=1)
     billing_shadow.set_shadow_since(db, engine, at=since, by="test")
     for day in range(days):
@@ -181,6 +183,27 @@ def test_switch_criterion_passes_after_a_clean_quiet_period(db_session):
     assert "quiet_period" in _failing(db_session)
     _seed_quiet_history(db_session, "credit", 14, NOW)
     assert _failing(db_session) == []
+
+
+@pytest.mark.parametrize("moment", [
+    datetime(2026, 11, 23, 0, 0, 5, tzinfo=timezone.utc),
+    datetime(2026, 11, 23, 0, 15, tzinfo=timezone.utc),
+    datetime(2026, 11, 23, 0, 29, 59, tzinfo=timezone.utc),
+    datetime(2026, 11, 23, 0, 30, tzinfo=timezone.utc),
+    datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc),
+    datetime(2026, 11, 23, 23, 59, 59, tzinfo=timezone.utc),
+    # Just after midnight in London during summer time, which is still the day before in UTC.
+    datetime(2026, 6, 14, 23, 10, tzinfo=timezone.utc),
+    datetime(2026, 6, 15, 0, 10, tzinfo=timezone.utc),
+    datetime(2026, 6, 15, 0, 10, tzinfo=ZoneInfo("Europe/London")),
+    datetime(2026, 11, 23, 0, 10, tzinfo=ZoneInfo("Europe/London")),
+])
+def test_daily_scans_hold_at_any_time_of_day_around_midnight(db_session, moment):
+    """The seeded quiet period covers every UTC day to yesterday however close to midnight the clock is."""
+    set_credit_mode(db_session, "shadow")
+    _seed_quiet_history(db_session, "credit", 14, moment)
+    items = {item["item"]: item for item in billing_shadow.evaluate_switch(db_session, "credit", moment)}
+    assert items["daily_scans"]["ok"] and items["quiet_period"]["ok"], items["daily_scans"]
 
 
 def test_switch_criterion_names_each_failing_item(db_session):
