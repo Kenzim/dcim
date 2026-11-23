@@ -225,7 +225,51 @@ def _backoff(row: ServiceFirewall, now: datetime) -> datetime:
     return now + timedelta(seconds=delay)
 
 
-async def apply(db: Session, service_id: int, client: VmFirewallClient, *, now: Optional[datetime] = None) -> ApplyResult:
+def record_failure(
+    db: Session,
+    row: ServiceFirewall,
+    exc: Exception,
+    *,
+    now: datetime,
+    revision: Optional[int] = None,
+    desired: Optional[RenderedFirewall] = None,
+) -> ApplyResult:
+    """Record a failed apply or read on the row: ``vm_missing`` for a VM Proxmox does not have,
+    else ``error`` with the backoff of section 6.2. Flushes; the caller commits."""
+    revision = row.revision if revision is None else revision
+    if isinstance(exc, VmMissing):
+        row.state = FirewallState.VM_MISSING
+        row.last_error = str(exc)[:2000]
+        db.flush()
+        return ApplyResult(row.service_id, ok=False, state=FirewallState.VM_MISSING.value, revision=revision,
+                           error=row.last_error)
+    logger.warning("[vm_firewall] apply failed for service %s: %s", row.service_id, exc)
+    row.state = FirewallState.ERROR
+    row.last_error = (str(exc) or exc.__class__.__name__)[:2000]
+    row.next_attempt_at = _backoff(row, now)
+    if row.failing_since is None:
+        row.failing_since = now
+    db.flush()
+    return ApplyResult(
+        row.service_id,
+        ok=False,
+        state=FirewallState.ERROR.value,
+        revision=revision,
+        desired_hash=desired.desired_hash if desired is not None else None,
+        error=row.last_error,
+    )
+
+
+async def apply(
+    db: Session,
+    service_id: int,
+    client: VmFirewallClient,
+    *,
+    now: Optional[datetime] = None,
+    vm_config: Optional[dict[str, Any]] = None,
+) -> ApplyResult:
+    """``vm_config`` is the VM config the caller has just read through ``client`` (the worker reads
+    it for the eligibility check); without it apply reads it itself."""
     row = db.get(ServiceFirewall, service_id)
     if row is None:
         raise FirewallNotFound(f"service {service_id} has no firewall", code="firewall_not_found")
@@ -237,35 +281,16 @@ async def apply(db: Session, service_id: int, client: VmFirewallClient, *, now: 
         return ApplyResult(service_id, ok=True, state=FirewallState.UNMANAGED.value, revision=row.revision)
 
     def failed(exc: Exception, revision: int, desired: Optional[RenderedFirewall]) -> ApplyResult:
-        if isinstance(exc, VmMissing):
-            row.state = FirewallState.VM_MISSING
-            row.last_error = str(exc)[:2000]
-            db.flush()
-            return ApplyResult(service_id, ok=False, state=FirewallState.VM_MISSING.value, revision=revision,
-                               error=row.last_error)
-        logger.warning("[vm_firewall] apply failed for service %s: %s", service_id, exc)
-        row.state = FirewallState.ERROR
-        row.last_error = (str(exc) or exc.__class__.__name__)[:2000]
-        row.next_attempt_at = _backoff(row, now)
-        if row.failing_since is None:
-            row.failing_since = now
-        db.flush()
-        return ApplyResult(
-            service_id,
-            ok=False,
-            state=FirewallState.ERROR.value,
-            revision=revision,
-            desired_hash=desired.desired_hash if desired is not None else None,
-            error=row.last_error,
-        )
+        return record_failure(db, row, exc, now=now, revision=revision, desired=desired)
 
     # Render depends on net0's bridge (IPv6 router-advert rule), so observe it first; a change
     # bumps the revision and this apply renders the new one.
-    try:
-        config = await client.get_config()
-    except Exception as exc:  # Proxmox errors, transport failures
-        return failed(exc, row.revision, None)
-    observe_net0_bridge(row, config)
+    if vm_config is None:
+        try:
+            vm_config = await client.get_config()
+        except Exception as exc:  # Proxmox errors, transport failures
+            return failed(exc, row.revision, None)
+    observe_net0_bridge(row, vm_config)
 
     revision = row.revision
     desired = render(db, service_id, now=now)

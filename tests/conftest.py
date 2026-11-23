@@ -24,6 +24,7 @@ os.environ["CLIENT_MCP_ENABLED"] = "false"
 # The alert worker loop must not start inside TestClient lifespans.
 os.environ["RUN_ALERT_WORKER"] = "false"
 os.environ["RUN_PLUGIN_WORKER"] = "false"
+os.environ["RUN_VM_FIREWALL_WORKER"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient

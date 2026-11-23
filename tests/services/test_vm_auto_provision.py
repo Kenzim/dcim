@@ -29,6 +29,7 @@ CLOUDINIT_STEPS = [
     "clone_from_template",
     "configure_sizing",
     "configure_cloudinit_network",
+    "apply_firewall",
     "power_on",
     "stamp_vm_identity",
 ]

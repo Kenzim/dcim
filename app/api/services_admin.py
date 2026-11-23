@@ -1536,7 +1536,13 @@ async def assign_service_owner(
         owner = UserDAO.get_by_id(db, body.owner_user_id)
         if owner is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_OWNER_USER_NOT_FOUND)
+    changed = service.owner_user_id != body.owner_user_id
     service.owner_user_id = body.owner_user_id
+    if changed:
+        from app.services.vm_firewall.service import Actor, remove_foreign_references
+
+        db.flush()
+        remove_foreign_references(db, service.id, Actor.staff(int(auth.get("user_id") or 0) or None))
     ServiceDAO.update(db, service)
     return _service_to_admin_response(db, service)
 
