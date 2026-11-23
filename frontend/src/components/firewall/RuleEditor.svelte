@@ -38,11 +38,11 @@
   $: groupName = (id) => groups.find((g) => String(g.id) === String(id))?.name || `group #${id}`;
   $: usableGroups = groups.filter((g) => !rules.some((r) => r.kind === 'group' && String(r.group_id) === String(g.id)));
 
-  const rowErrors = (index) =>
+  $: rowErrors = (index) =>
     Object.entries(errors || {})
       .filter(([path]) => path === `${prefix}[${index}]` || path.startsWith(`${prefix}[${index}].`))
       .map(([path, message]) => ({ field: path.slice(`${prefix}[${index}]`.length + 1), message }));
-  const fieldError = (index, field) => errors?.[`${prefix}[${index}].${field}`] || '';
+  $: fieldError = (index, field) => errors?.[`${prefix}[${index}].${field}`] || '';
 
   // Open the first row the server complained about so its message is visible.
   $: {

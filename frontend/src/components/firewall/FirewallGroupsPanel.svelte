@@ -110,7 +110,7 @@
     }
   }
 
-  const errorAt = (field) => fieldErrors[field] || '';
+  $: errorAt = (field) => fieldErrors[field] || '';
 
   onMount(load);
 </script>

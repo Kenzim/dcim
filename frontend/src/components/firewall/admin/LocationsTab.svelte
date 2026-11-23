@@ -65,7 +65,7 @@
     return body;
   }
 
-  const dirty = (loc) => Object.keys(changes(loc, forms[idOf(loc)])).length > 0;
+  $: dirty = (loc) => forms[idOf(loc)] !== undefined && Object.keys(changes(loc, forms[idOf(loc)])).length > 0;
 
   function describe(id, err) {
     errors = { ...errors, [id]: err.field ? `${err.field}: ${err.message}` : err.message };

@@ -145,8 +145,8 @@
     }
   }
 
-  const errorAt = (field) => fieldErrors[field] || '';
-  const managementSets = () => ipsets.filter((set) => set.purpose === 'management');
+  $: errorAt = (field) => fieldErrors[field] || '';
+  $: managementSets = () => ipsets.filter((set) => set.purpose === 'management');
 
   onMount(load);
 </script>

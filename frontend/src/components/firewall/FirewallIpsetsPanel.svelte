@@ -120,7 +120,7 @@
     }
   }
 
-  const errorAt = (field) => fieldErrors[field] || '';
+  $: errorAt = (field) => fieldErrors[field] || '';
   const addEntry = () => (form.entries = [...form.entries, blankEntry()]);
   const dropEntry = (index) => (form.entries = form.entries.filter((_, i) => i !== index));
 

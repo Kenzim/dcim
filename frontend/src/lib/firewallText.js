@@ -1,11 +1,12 @@
 // Wording shared by every VM firewall screen. The interruption figure is measured, so it lives here only.
 
-export const INTERRUPTION_WARNING =
-  "Turning the firewall on briefly interrupts this server's network (under half a second).";
+// The measured length of the blip when the network card's firewall flag flips on a running server.
+const INTERRUPTION_DURATION = 'under half a second';
+
+export const INTERRUPTION_WARNING = `Turning the firewall on briefly interrupts this server's network (${INTERRUPTION_DURATION}).`;
 
 /** The same warning for the bulk rollout, which reaches many servers. */
-export const ROLLOUT_INTERRUPTION_WARNING =
-  'Each running server that does not yet have the firewall switched on for its network card will briefly interrupt its network (under half a second) when the baseline reaches it.';
+export const ROLLOUT_INTERRUPTION_WARNING = `Turning the firewall on briefly interrupts a server's network (${INTERRUPTION_DURATION}).`;
 
 export const STATE_INFO = {
   off: { label: 'Off', variant: 'muted', text: 'Nothing is being filtered on this server.' },
