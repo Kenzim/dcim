@@ -414,7 +414,7 @@ Every kind needs its own permission (section 4), and the manifest is refused wit
 
 ### Bundled plugins
 
-Rackflow ships a few plugins of its own, in a second, read-only folder: `settings.bundled_plugins_dir`, which defaults to `plugin_packages/` in the repository (a relative path counts from the repository root). They appear on the admin plugin page marked as bundled, and go through the ordinary lifecycle: an administrator installs one, accepts its permissions, enables, upgrades and uninstalls it. Nothing is installed or enabled automatically, and uninstalling never touches the folder. If the same plugin id exists in both the plugins folder and the bundled folder, the page shows an error and neither copy loads until one is removed, so do not give your own plugin the id of a bundled one.
+Rackflow ships a few plugins of its own, in a second, read-only folder: `settings.bundled_plugins_dir`, which defaults to `plugin_packages/` in the repository (a relative path counts from the repository root). They appear on the admin plugin page marked as bundled, and go through the ordinary lifecycle: an administrator installs one, accepts its permissions, enables, upgrades and uninstalls it. Nothing is installed or enabled automatically, and uninstalling never touches the folder. The folder name and the manifest id of every bundled plugin are reserved. If a plugin in the plugins folder uses one, it is refused with the error "`<name>` is a reserved name used by a plugin Rackflow ships; rename this plugin.": it cannot be installed or upgraded, and it never loads. The bundled plugin is not affected and keeps running. Do not give your own plugin the folder name or id of a bundled one.
 
 The bundled plugins are also the best worked examples of providers:
 
@@ -438,6 +438,7 @@ Its tests replay recorded VIES answers through the test kit and call the provide
 - Secrets are `secret` settings and never reach logs, state or panels.
 - Handlers are idempotent and tolerate payload fields they do not know.
 - Failures you expect are caught and logged; the plugin works with its settings empty (it does nothing, and says why in the log) rather than crashing on every event.
+- The folder name and `id` are not those of a bundled plugin (section 15); Rackflow refuses to install or load a plugin that uses one.
 - `rackflow_api` has a lower and an upper bound (`>=1.1` if you use `provides`); `version` was raised.
 - Each provider answers with the exact dataclasses of its kind, reports a registry that is down as `unavailable` (validators) or an exception (other kinds) instead of guessing, and has a test for each of those paths.
 - The README says what the plugin does, its permissions and why it needs each, and its settings.

@@ -101,7 +101,7 @@ def _iso(value) -> Optional[str]:
 
 
 def _summary(db: Session, inst: PluginInstallation) -> dict:
-    package = next((p for p in discover() if p.directory == inst.directory), None)
+    package = next((p for p in discover() if p.directory == inst.directory and not p.reserved), None)
     return lifecycle.summary(db, inst, package)
 
 
