@@ -420,14 +420,20 @@ against the real API.
      its row changes unflushed until the outcome is recorded. A renewal that matches no row means
      another applier has the VM (the claim expired and was taken), and the apply stops before that
      write. One apply may therefore run longer than 120 s, as long as no single write does;
-   - before recording `applied_revision`, `applied_hash` and `applied_digest`, reads `claimed_by`
-     with `SELECT ... FOR UPDATE` in its own session and records only if the claim is still its own;
-     the lock lasts until that session commits, so nobody can take the claim in between.
+   - before recording any outcome on the row (success with `applied_revision`, `applied_hash` and
+     `applied_digest`; a failure with `error`, `last_error`, `failing_since` and the backoff; a
+     `vm_missing` VM; an unmanaged one), reads `claimed_by` with `SELECT ... FOR UPDATE` in the
+     apply's session and records only if the claim is still its own. The lock lasts until that session
+     commits, so nobody can take the claim in between. This includes a Proxmox or transport error
+     raised after the claim was taken, and the failed Proxmox reads of the queue, the drift sweep and
+     the deployment step before an apply. The check comes after the last renewal, so the apply never
+     holds the lock while its own renewal, in the other session, waits for it.
 
    An apply that lost its claim records nothing: its unflushed row changes are discarded, the VM is not
    marked `error`, the staged-rollout count is not touched, and the row is left for whoever holds the
-   claim now (or the next tick). The worker logs it; the deployment step fails and is retried; staff
-   "apply now" answers 409 `apply_in_progress`.
+   claim now (or the next tick). The worker logs it; the drift sweep counts it under `claim_lost`
+   rather than `in_sync`, `repaired`, `reported` or `queued`; the deployment step fails and is retried;
+   staff "apply now" answers 409 `apply_in_progress`.
 2. **Drift sweep** (every `vm_firewall_reconcile_interval_seconds`, spread over the interval): for each
    managed row, `GET .../firewall/options`. If the digest equals `applied_digest` and the options match,
    the VM is in sync (one API call per VM). Otherwise read rules, IP sets and `net0`, compare with the
@@ -871,7 +877,8 @@ off). Reads never write: a VM or location with no row yet is shown with the defa
 write starts from. A missing id and an object the client or billing actor may not use (another
 client's, or a non-selectable admin group or IP set) answer identically. Unknown request fields,
 the admin-only ones among them, are refused with 422 on the client and billing routes. Every write
-route leaves a `firewall.*` audit row (staff `apply` writes `firewall.apply_requested`); linking a
+route leaves a `firewall.*` audit row (staff `apply` writes `firewall.apply_requested` with the
+apply's outcome; one refused because another applier holds the VM writes none); linking a
 service to a new owner through billing `/link` removes rules referencing the old owner's objects.
 
 ### 10.1 Client API (`app/api/vm_firewall_client.py`)
@@ -918,7 +925,7 @@ detail (`GET /api/services/{id}`) carries `firewall_available`.
 | `GET /services?state=&location_id=&q=&offset=&limit=` | `[{service_id, service_name, owner_user_id, owner_username, location_id, location_name, cluster_id, node, vmid, state, client_enabled, managed, excluded, nic_flag, revision, applied_revision, last_applied_at, last_error}]`; a VM never opened shows `off` |
 | `GET/PUT /services/{id}` | The client view plus `managed, excluded, enforce_baseline, admin_overrides, location_id, cluster_id, cluster_ready, nics_checked, net0_bridge, rollout_after, applied_revision, desired_hash, applied_hash, in_sync, last_error, failing_since, last_checked_at, next_attempt_at, drift_repairs_24h, rendered: {options, rules[]}`; PUT takes the client fields and the four admin ones under one `revision`. Staff see the firewall of a VM in a staging location (`available` true) |
 | `PUT/POST /services/{id}/rules`, `PUT/DELETE /services/{id}/rules/{rule_id}`, `POST /services/{id}/rules/order`, `POST /services/{id}/presets/{key}`, `POST/DELETE /services/{id}/groups/{group_id}` | As the client routes, answering the staff view |
-| `POST /services/{id}/apply` | Apply now: `{result: {ok, state, ...}, firewall: <staff view>}`; 502 when Proxmox is unreachable. Takes the VM's claim (owner `staff-<user id>-<random>`) for the apply and releases it afterwards; while the worker or a deployment holds it, 409 `apply_in_progress` ("This server's firewall is being applied right now. Try again in a minute.") and nothing is written |
+| `POST /services/{id}/apply` | Apply now: `{result: {ok, state, ...}, firewall: <staff view>}`; 502 when Proxmox is unreachable. Takes the VM's claim (owner `staff-<user id>-<random>`) for the apply and releases it afterwards; while the worker or a deployment holds it, 409 `apply_in_progress` ("This server's firewall is being applied right now. Try again in a minute.") and nothing is written, the audit row included. An apply that ran is audited as `firewall.apply_requested` with `{revision, outcome}`; one that loses the claim part-way has outcome `claim_lost` (its earlier writes may have reached Proxmox) and also answers 409 `apply_in_progress` |
 | `POST /services/{id}/check` | Drift check now, writes nothing: `{in_sync, differences[], ...}`; 404 `firewall_not_found` when the VM has no firewall row |
 
 ### 10.3 Billing API for WHMCS (`app/api/billing_vm_firewall.py`)
