@@ -1,14 +1,13 @@
 <script>
   import { onMount } from 'svelte';
   import { Alert, Button, Modal, Spinner } from '../../../ui/index.js';
-  import { applyTaxPack, listTaxPacks, listTaxRules, previewTaxPack } from '../../../../lib/billingTaxAdminApi.js';
+  import { applyTaxPack, listTaxPacks, previewTaxPack } from '../../../../lib/billingTaxAdminApi.js';
   import { fromInput, inMinutes, label, show, when } from './taxUi.js';
 
   const ACTION_TONE = { add: 'ok', change: 'warn', remove: 'bad', unchanged: '', kept_edited: 'info' };
   const SHOWN_FIELDS = ['name', 'country', 'tax_class', 'customer_type', 'rate_percent', 'jurisdiction', 'reverse_charge', 'valid_from', 'valid_to'];
 
   let packs = [];
-  let applied = {};
   let loading = true;
   let error = '';
 
@@ -32,15 +31,7 @@
     loading = true;
     error = '';
     try {
-      const [list, rules] = await Promise.all([listTaxPacks(), listTaxRules({ limit: 500 })]);
-      packs = list;
-      applied = {};
-      rules.filter((r) => r.pack_id).forEach((r) => {
-        const entry = applied[r.pack_id] || { versions: new Set(), rules: 0 };
-        entry.versions.add(r.pack_version);
-        entry.rules += 1;
-        applied[r.pack_id] = entry;
-      });
+      packs = await listTaxPacks();
     } catch (err) {
       error = err.message;
     } finally {
@@ -48,10 +39,8 @@
     }
   }
 
-  function appliedText(packId) {
-    const entry = applied[packId];
-    if (!entry) return 'never applied';
-    return [...entry.versions].sort().join(', ');
+  function appliedText(pack) {
+    return pack.applied_versions?.length ? pack.applied_versions.join(', ') : 'never applied';
   }
 
   function openPack(pack) {
@@ -173,7 +162,7 @@
               <td>
                 {#if pack.available}{pack.version}{:else}<span class="ba-pill bad">unavailable</span><div class="ba-hint">{pack.error}</div>{/if}
               </td>
-              <td>{appliedText(pack.pack_id)}{#if applied[pack.pack_id]}<div class="ba-hint">{applied[pack.pack_id].rules} rule row(s)</div>{/if}</td>
+              <td>{appliedText(pack)}{#if pack.applied_rule_count}<div class="ba-hint">{pack.applied_rule_count} rule row(s)</div>{/if}</td>
               <td><button class="ba-link" disabled={!pack.available} on:click={() => openPack(pack)}>Preview and apply</button></td>
             </tr>
           {/each}
@@ -187,7 +176,13 @@
   <div class="ba-panel">
     <h3>{active.title || active.pack_id} <small>preview and apply</small></h3>
     <div class="ba-toolbar">
-      <label>Version<input bind:value={version} maxlength="32" style="width:140px" /></label>
+      <label>Version
+        <select bind:value={version}>
+          {#each [...(active.versions?.length ? active.versions : [active.version])].reverse() as v (v)}
+            <option value={v}>{v}{v === active.version ? ' (newest)' : ''}</option>
+          {/each}
+        </select>
+      </label>
       <label>Takes effect (not in the past)<input type="datetime-local" bind:value={effectiveFrom} /></label>
       <Button on:click={preview} disabled={previewing}>{diff ? 'Preview again' : 'Preview'}</Button>
       <Button variant="secondary" on:click={() => { active = null; diff = null; previewError = null; applyError = null; }}>Close</Button>
