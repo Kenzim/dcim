@@ -346,6 +346,27 @@ def test_apply_and_check_use_proxmox(client, monkeypatch, db_session, world, adm
     assert check.json()["in_sync"] is True and check.json()["differences"] == []
 
 
+@pytest.mark.parametrize(
+    "net1, infrastructure, reason",
+    [("virtio=BC:24:11:00:01:01,bridge=vmbr2", "vmbr2", "infrastructure_bridge"),
+     ("virtio=BC:24:11:00:01:01,bridge=vmbr2,trunks=10;20", "", "nic_trunk")],
+)
+def test_apply_refuses_a_vm_its_live_config_makes_ineligible(
+    client, monkeypatch, db_session, world, admin, net1, infrastructure, reason
+):
+    from app.services.settings_store import set_setting
+
+    vm = _vm(world, db_session)
+    set_setting(db_session, "vm_firewall_infrastructure_bridges", infrastructure)
+    db_session.commit()
+    fake = fake_proxmox(monkeypatch, world, [vm])
+    fake.vms[vm.vm.proxmox_vmid].config["net1"] = net1
+    response = client.post(ADMIN + f"/services/{vm.id}/apply", headers=admin)
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "not_eligible" and response.json()["reasons"] == [reason]
+    assert fake.writes == []
+
+
 def test_apply_reports_an_unreachable_proxmox(client, monkeypatch, db_session, world, admin):
     from app.api import vm_firewall_common
 
