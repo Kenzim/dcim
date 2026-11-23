@@ -160,3 +160,37 @@ def test_the_proxmox_plugin_config_masks_the_secret():
 
     masked = mask_plugin_config("proxmox", {"hostname": "pve", "username": TOKEN_USER, "password": SECRET})
     assert masked["password"] == MASKED_SECRET_PLACEHOLDER and masked["username"] == TOKEN_USER
+
+
+@pytest.mark.asyncio
+async def test_test_connection_works_with_a_token(monkeypatch):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        if request.url.path.endswith("/access/ticket"):
+            return httpx.Response(401, json={"data": None})
+        return httpx.Response(200, json={"data": {"status": "running", "name": "g0"}})
+
+    _mock_client(monkeypatch, httpx, handler)
+    result = await _plugin(TOKEN_USER).test_connection()
+    assert result["success"] is True, result
+    assert seen == [("/api2/json/nodes/pve1/qemu/101/status/current", f"PVEAPIToken={TOKEN_USER}=s3cret")]
+
+
+@pytest.mark.asyncio
+async def test_test_connection_still_logs_in_for_password_users(monkeypatch):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/access/ticket"):
+            return httpx.Response(200, json={"data": {"ticket": "T", "CSRFPreventionToken": "C"}})
+        return httpx.Response(200, json={"data": {"status": "running"}})
+
+    _mock_client(monkeypatch, httpx, handler)
+    plugin = _plugin("root@pam")
+    plugin.ticket = "stale"
+    assert (await plugin.test_connection())["success"] is True
+    assert seen == ["/api2/json/access/ticket", "/api2/json/nodes/pve1/qemu/101/status/current"]
+    assert plugin.ticket == "T"

@@ -335,10 +335,11 @@ class ProxmoxPlugin(ServerPlugin):
         try:
             logger.info(f"[ProxmoxPlugin.test_connection] Testing Proxmox connection to {self.hostname}:{self.port}")
             
-            # Authenticate
-            auth_data = await self._get_auth_ticket()
-            self.ticket = auth_data["ticket"]
-            self.csrf_token = auth_data["CSRFPreventionToken"]
+            # Authenticate (an API token has no ticket; its header is checked by the request below)
+            if proxmox_token_header(self.username, self.password) is None:
+                auth_data = await self._get_auth_ticket()
+                self.ticket = auth_data["ticket"]
+                self.csrf_token = auth_data["CSRFPreventionToken"]
             
             # Test by getting VM status
             url = f"{self.base_url}/api2/json/nodes/{self.node}/qemu/{self.vmid}/status/current"
