@@ -257,3 +257,54 @@ def test_a_successful_staff_status_change_still_blocks_the_lift(db_session, env)
     _staff_status(db_session, billing, None, action="suspend", activity_status="success")
     _pay(db_session, db_session.get(Invoice, invoice.id))
     assert _state(db_session, billing)[0] == ServiceStatus.SUSPENDED
+
+
+# ---------------------------------------------------------------- L2
+
+
+def _dispute_on_the_order_invoice(db, account, billing):
+    """A chargeback on the checkout invoice of the order that created the service."""
+    from app.models.commerce_order import Order, OrderItem
+    from app.models.product_catalog import Product
+    from app.models.refund import Refund, RefundDestination, RefundReason, RefundStatus
+    from app.models.reseller import InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
+    from app.models.storefront import FrontendProduct, PricePlan, PricePlanPricingModel
+
+    product = Product(name="Proxy", code="settle-fix-proxy")
+    db.add(product)
+    db.flush()
+    frontend = FrontendProduct(name="Proxy", slug="settle-fix-proxy", product_id=product.id, service_type="vm")
+    db.add(frontend)
+    db.flush()
+    plan = PricePlan(frontend_product_id=frontend.id, name="m", currency="USD", pricing_model=PricePlanPricingModel.FREE)
+    db.add(plan)
+    db.flush()
+    order = Order(order_number=771001, billing_account_id=account.id, user_id=account.user_id, currency="USD")
+    db.add(order)
+    db.flush()
+    db.add(OrderItem(order_id=order.id, frontend_product_id=frontend.id, price_plan_id=plan.id,
+                     name_snapshot="Proxy", service_id=billing.service_id))
+    invoice = Invoice(invoice_number=771001, billing_account_id=account.id, order_id=order.id,
+                      purpose=InvoicePurpose.ORDER_CHARGE, status=InvoiceStatus.PAID, amount_cents=1000, currency="USD")
+    db.add(invoice)
+    db.flush()
+    payment = Payment(invoice_id=invoice.id, gateway="stripe", status=PaymentStatus.SUCCEEDED, amount_cents=1000,
+                      refunded_cents=0, currency="USD", payment_metadata={})
+    db.add(payment)
+    db.flush()
+    db.add(Refund(payment_id=payment.id, invoice_id=invoice.id, billing_account_id=account.id, amount_cents=1000,
+                  currency="USD", destination=RefundDestination.GATEWAY, gateway="stripe", reason=RefundReason.DISPUTE,
+                  status=RefundStatus.SUCCEEDED, idempotency_key="settle-fix-dispute", requested_at=NOW))
+    db.commit()
+    assert invoice.service_id is None
+
+
+def test_a_chargeback_on_the_checkout_invoice_blocks_the_lift(db_session, env):
+    account, billing, lifecycle, job = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    run_job(db_session, job, make_run(SUSPEND))
+    _dispute_on_the_order_invoice(db_session, account, billing)
+    _pay(db_session, db_session.get(Invoice, invoice.id))
+    assert _state(db_session, billing)[0] == ServiceStatus.SUSPENDED
+    skipped = db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_unsuspend_skipped").one()
+    assert skipped.event_metadata["reason"] == "chargeback"

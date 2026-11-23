@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.billing_jobs import (
@@ -294,7 +294,9 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
     alert lists it). Then nothing may have changed the service's status
     since: no successful staff or WHMCS status change in the service activity
     log (a failed or merely attempted one changed nothing), no
-    unsuspension by billing, and no chargeback on an invoice of the service.
+    unsuspension by billing, and no chargeback on an invoice of the service
+    (its cycle invoices, or the checkout invoice of the order that created
+    it, linked through ``OrderItem.service_id``).
     "Since" means rows with ids above the marks the job recorded
     (``suspension_marks``), or, for a settled claim, above the marks taken
     when it was settled (``resolution.marks``). Returns
@@ -342,15 +344,20 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
     )
     if unsuspended:
         return False, "unsuspended_since"
+    from app.models.commerce_order import OrderItem
+
+    service_invoices = select(Invoice.id).where(Invoice.service_id == int(service_id))
+    order_invoices = (
+        select(Invoice.id)
+        .join(OrderItem, OrderItem.order_id == Invoice.order_id)
+        .where(OrderItem.service_id == int(service_id))
+    )
     disputed = db.scalar(
         select(
             exists().where(
-                and_(
-                    Refund.invoice_id == Invoice.id,
-                    Invoice.service_id == int(service_id),
-                    Refund.reason == RefundReason.DISPUTE,
-                    since(Refund, "refund_id"),
-                )
+                Refund.reason == RefundReason.DISPUTE,
+                since(Refund, "refund_id"),
+                or_(Refund.invoice_id.in_(service_invoices), Refund.invoice_id.in_(order_invoices)),
             )
         )
     )
