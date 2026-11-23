@@ -214,7 +214,7 @@
             <li>
               <span class="mark {item.ok ? 'ok' : 'bad'}" aria-hidden="true">{item.ok ? '✓' : '✗'}</span>
               <div>
-                <strong>{label(item.item)}</strong> <span class="ba-hint">{item.ok ? 'ok' : 'failing'}</span>
+                <strong>{item.label || label(item.item)}</strong> <span class="ba-hint">{item.ok ? 'ok' : 'failing'}</span>
                 <CriterionDetail {item} />
               </div>
             </li>
@@ -336,7 +336,7 @@
       <div class="ba-error">
         {switchError.message}
         {#if switchError.criteria.length}
-          <ul>{#each switchError.criteria as item}<li><strong>{label(item.item)}</strong><CriterionDetail {item} /></li>{/each}</ul>
+          <ul>{#each switchError.criteria as item}<li><strong>{item.label || label(item.item)}</strong><CriterionDetail {item} /></li>{/each}</ul>
         {:else if switchError.failing.length}
           <ul>{#each switchError.failing as name}<li>{label(name)}</li>{/each}</ul>
         {/if}
