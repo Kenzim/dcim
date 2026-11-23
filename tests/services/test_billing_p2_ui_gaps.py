@@ -336,3 +336,12 @@ def test_the_client_invoice_route_carries_the_tax_fields(client, db_session, tax
     body = response.json()
     assert TAX_KEYS <= set(body) and "fx_rate_id" not in body
     assert body["tax_total_gbp_cents"] == 149 and body["fx_period"] == "2026-11"
+
+
+def test_serialize_carries_the_invoice_tax_total_basis_and_engine(db_session, tax_v2, monkeypatch):
+    _user, account = retail_account(db_session, country="GB")
+    invoice = _sterling_invoice(db_session, account, monkeypatch)
+    payload = InvoiceService.serialize(db_session, invoice)
+    assert payload["tax_cents"] == invoice.tax_cents and payload["tax_cents"] > 0
+    assert payload["prices_include_tax"] is invoice.prices_include_tax
+    assert payload["tax_engine"] == invoice.tax_engine and payload["tax_engine"]
