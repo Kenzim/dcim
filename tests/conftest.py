@@ -1,7 +1,6 @@
 """
 Pytest configuration and shared fixtures
 """
-import gc
 import os
 
 # Use SQLite for tests - must be set before app imports so migrations use it
@@ -340,10 +339,6 @@ def _reset_plugin_runtime():
 @pytest.fixture(scope="function")
 def db_session():
     """Create a fresh database session for each test"""
-    # Every session shares the one StaticPool connection. A session an earlier test left unclosed
-    # in a reference cycle is rolled back whenever the collector finalises it, which would wipe
-    # this test's uncommitted rows at a random moment (StaleDataError on the next UPDATE).
-    gc.collect()
     Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()
     try:
