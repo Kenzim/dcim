@@ -359,6 +359,12 @@ button.rf-ca__btn--danger:hover {
 .rf-ca__slot-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .rf-ca__slot-form select, .rf-ca__slot-form input { min-width: 180px; }
 .rf-ca__slot-warning { color: #b42318; font-weight: 600; }
+.rf-ca__fw-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.rf-ca__fw-table th, .rf-ca__fw-table td { padding: 6px 8px; border-bottom: 1px solid var(--rf-line); text-align: left; vertical-align: middle; }
+.rf-ca__fw-table--baseline { color: var(--rf-muted); }
+.rf-ca__fw-table .rf-ca__btn { min-width: 0; padding: 2px 8px; }
+.rf-ca__fw-off td { opacity: 0.55; }
+.rf-ca__fw-actions { white-space: nowrap; }
 
 .rf-ca__panel-head--row {
   display: flex;
@@ -833,6 +839,114 @@ button.rf-ca__btn--danger:hover {
         <p class="rf-ca__note" id="rackflow-slot-msg" hidden></p>
       </div>
       {/if}
+
+      {if $rackflow_firewall_panel}
+      <div class="rf-ca__backups" id="rackflow-firewall" data-rf-fw="{$rackflow_firewall_json|escape}" data-rf-fw-action="{$rackflow_firewall_action_url|escape}" data-rf-service-id="{$rackflow_whmcs_service_id|escape}" data-rf-can-edit="{if $rackflow_firewall_can_edit}1{else}0{/if}">
+        <div class="rf-ca__panel-head">
+          <p class="rf-ca__action-title">Firewall</p>
+          <p class="rf-ca__action-help">Rules for traffic to and from this server. The provider's baseline always applies first and cannot be changed here.</p>
+        </div>
+        {if $rackflow_firewall_error}
+        <p class="rf-ca__note">{$rackflow_firewall_error|escape}</p>
+        {else}
+        <div class="rf-ca__slot-meta">
+          <span>Firewall: <strong>{if $rackflow_firewall.client_enabled}On{else}Off{/if}</strong></span>
+          <span>State: <strong>{$rackflow_firewall.state|escape}</strong></span>
+        </div>
+        {if $rackflow_firewall.message}
+        <p class="rf-ca__note">{$rackflow_firewall.message|escape}</p>
+        {/if}
+        {if $rackflow_firewall_can_edit}
+        <div class="rf-ca__slot-form">
+          {if $rackflow_firewall.client_enabled}
+          {if $rackflow_firewall.baseline.client_may_disable}
+          <button type="button" class="rf-ca__btn rf-ca__btn--danger" data-rf-fw-op="disable">Turn firewall off</button>
+          {/if}
+          {else}
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" data-rf-fw-op="enable" data-rf-needs-interruption="{if $rackflow_firewall.needs_interruption}1{else}0{/if}">Turn firewall on</button>
+          {/if}
+        </div>
+        {else}
+        <p class="rf-ca__note">Your account cannot change the firewall of this server.</p>
+        {/if}
+
+        {if $rackflow_firewall.baseline.rules|@count}
+        <p class="rf-ca__action-title">Provider baseline (read only)</p>
+        <table class="rf-ca__fw-table rf-ca__fw-table--baseline">
+          <thead><tr><th>Direction</th><th>Action</th><th>Protocol</th><th>Ports</th><th>Note</th></tr></thead>
+          <tbody>
+            {foreach from=$rackflow_firewall.baseline.rules item=b}
+            <tr>
+              <td>{if $b.kind == 'group'}Group {if $b.group_name}{$b.group_name|escape}{/if}{else}{if $b.direction == 'out'}Outgoing{else}Incoming{/if}{/if}</td>
+              <td>{$b.action|escape}</td>
+              <td>{if $b.protocol}{$b.protocol|escape}{else}any{/if}</td>
+              <td>{if $b.ports}{$b.ports|escape}{else}-{/if}</td>
+              <td>{$b.comment|escape}</td>
+            </tr>
+            {/foreach}
+          </tbody>
+        </table>
+        {/if}
+        {if $rackflow_firewall.smtp_block_help}
+        <p class="rf-ca__note">{$rackflow_firewall.smtp_block_help|escape}</p>
+        {/if}
+
+        <div class="rf-ca__slot-form">
+          <label for="rackflow-fw-policy-in">Incoming traffic with no matching rule</label>
+          <select id="rackflow-fw-policy-in"{if !$rackflow_firewall_can_edit} disabled{/if}>
+            {foreach from=['ACCEPT', 'DROP', 'REJECT'] item=p}
+            <option value="{$p|escape}"{if $rackflow_firewall.policy_in == $p} selected{/if}>{$p|lower|ucfirst|escape}</option>
+            {/foreach}
+          </select>
+          <label for="rackflow-fw-policy-out">Outgoing</label>
+          <select id="rackflow-fw-policy-out"{if !$rackflow_firewall_can_edit} disabled{/if}>
+            {foreach from=['ACCEPT', 'DROP', 'REJECT'] item=p}
+            <option value="{$p|escape}"{if $rackflow_firewall.policy_out == $p} selected{/if}>{$p|lower|ucfirst|escape}</option>
+            {/foreach}
+          </select>
+          {if $rackflow_firewall_can_edit}
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" data-rf-fw-op="policy">Save policies</button>
+          {/if}
+        </div>
+
+        <p class="rf-ca__action-title">Your rules</p>
+        <p class="rf-ca__action-help">Rules are checked from the top; the first match wins.</p>
+        <noscript><p class="rf-ca__note">Turn on JavaScript to see and edit your rules.</p></noscript>
+        <table class="rf-ca__fw-table" id="rackflow-fw-rules">
+          <thead><tr><th>Order</th><th>On</th><th>Direction</th><th>Action</th><th>Protocol</th><th>Ports</th><th>Address</th><th>Note</th><th></th></tr></thead>
+          <tbody id="rackflow-fw-rules-body"></tbody>
+        </table>
+
+        {if $rackflow_firewall_can_edit}
+        <div class="rf-ca__slot-form">
+          <select id="rackflow-fw-new-direction" aria-label="Direction"><option value="in">Incoming</option><option value="out">Outgoing</option></select>
+          <select id="rackflow-fw-new-action" aria-label="Action"><option value="ACCEPT">Accept</option><option value="DROP">Drop</option><option value="REJECT">Reject</option></select>
+          <select id="rackflow-fw-new-protocol" aria-label="Protocol"><option value="">Any protocol</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option></select>
+          <input type="text" id="rackflow-fw-new-ports" placeholder="Ports, e.g. 80,443" autocomplete="off" />
+          <input type="text" id="rackflow-fw-new-cidr" placeholder="Address, e.g. 203.0.113.0/24" autocomplete="off" />
+          <input type="text" id="rackflow-fw-new-comment" placeholder="Note (optional)" autocomplete="off" />
+          <button type="button" class="rf-ca__btn rf-ca__btn--ghost" id="rackflow-fw-add">Add rule</button>
+        </div>
+        {if $rackflow_firewall.available_groups|@count}
+        <div class="rf-ca__slot-form">
+          <select id="rackflow-fw-group" aria-label="Rule group">
+            {foreach from=$rackflow_firewall.available_groups item=g}
+            <option value="{$g.id|escape}">{$g.name|escape}</option>
+            {/foreach}
+          </select>
+          <button type="button" class="rf-ca__btn rf-ca__btn--ghost" id="rackflow-fw-add-group">Add group of rules</button>
+        </div>
+        {/if}
+        <div class="rf-ca__slot-form">
+          <button type="button" class="rf-ca__btn rf-ca__btn--secondary" id="rackflow-fw-save" data-rf-fw-op="rules" disabled>Save rules</button>
+          <span id="rackflow-fw-presets"></span>
+        </div>
+        {/if}
+        {/if}
+        <p class="rf-ca__note" id="rackflow-fw-msg" hidden></p>
+        <button type="button" class="rf-ca__btn rf-ca__btn--ghost" id="rackflow-fw-reload" hidden>Reload the page</button>
+      </div>
+      {/if}
     </div>
   </div>
   {if $rackflow_plugin_panels_html}
@@ -1262,6 +1376,228 @@ button.rf-ca__btn--danger:hover {
 })();
 </script>
 {/literal}
+
+{if $rackflow_firewall_panel && !$rackflow_firewall_error}
+{literal}
+<script>
+(function () {
+  var box = document.getElementById('rackflow-firewall');
+  if (!box) { return; }
+  var data;
+  try { data = JSON.parse(box.getAttribute('data-rf-fw')); } catch (e) { return; }
+  var url = box.getAttribute('data-rf-fw-action');
+  var sid = box.getAttribute('data-rf-service-id');
+  var canEdit = box.getAttribute('data-rf-can-edit') === '1';
+  var revision = data.revision;
+  var rules = (data.rules || []).map(function (r) { return JSON.parse(JSON.stringify(r)); });
+  var groupNames = {};
+  (data.groups || []).forEach(function (g) { groupNames[g.id] = g.name; });
+  var body = document.getElementById('rackflow-fw-rules-body');
+  var saveBtn = document.getElementById('rackflow-fw-save');
+  var busy = false;
+
+  function msg(text, isError) {
+    var el = document.getElementById('rackflow-fw-msg');
+    if (!el) { return; }
+    el.hidden = !text;
+    el.textContent = text || '';
+    el.style.color = isError ? '#b42318' : '#0a7a32';
+  }
+  function val(id) {
+    var el = document.getElementById(id);
+    return el ? el.value.trim() : '';
+  }
+  function cell(text) {
+    var td = document.createElement('td');
+    td.textContent = text;
+    return td;
+  }
+  function button(label, title, handler, disabled) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'rf-ca__btn rf-ca__btn--ghost';
+    b.textContent = label;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.disabled = !!disabled;
+    b.addEventListener('click', handler);
+    return b;
+  }
+  function changed() {
+    if (saveBtn) { saveBtn.disabled = false; }
+    msg('You have unsaved changes to your rules.', false);
+    render();
+  }
+  function render() {
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    if (!rules.length) {
+      var empty = document.createElement('tr');
+      var td = cell('You have no rules yet.');
+      td.colSpan = 9;
+      empty.appendChild(td);
+      body.appendChild(empty);
+      return;
+    }
+    rules.forEach(function (rule, i) {
+      var tr = document.createElement('tr');
+      if (rule.enabled === false) { tr.className = 'rf-ca__fw-off'; }
+      var order = document.createElement('td');
+      order.className = 'rf-ca__fw-actions';
+      if (canEdit) {
+        order.appendChild(button('Up', 'Move rule ' + (i + 1) + ' up', function () {
+          rules.splice(i - 1, 0, rules.splice(i, 1)[0]); changed();
+        }, i === 0));
+        order.appendChild(button('Down', 'Move rule ' + (i + 1) + ' down', function () {
+          rules.splice(i + 1, 0, rules.splice(i, 1)[0]); changed();
+        }, i === rules.length - 1));
+      } else {
+        order.textContent = String(i + 1);
+      }
+      tr.appendChild(order);
+      var on = document.createElement('td');
+      var box2 = document.createElement('input');
+      box2.type = 'checkbox';
+      box2.checked = rule.enabled !== false;
+      box2.disabled = !canEdit;
+      box2.setAttribute('aria-label', 'Rule ' + (i + 1) + ' on');
+      box2.addEventListener('change', function () { rule.enabled = box2.checked; changed(); });
+      on.appendChild(box2);
+      tr.appendChild(on);
+      if (rule.kind === 'group') {
+        var label = cell('Group: ' + (groupNames[rule.group_id] || ('#' + rule.group_id)));
+        label.colSpan = 6;
+        tr.appendChild(label);
+      } else {
+        tr.appendChild(cell(rule.direction === 'out' ? 'Outgoing' : 'Incoming'));
+        tr.appendChild(cell(String(rule.action || '')));
+        tr.appendChild(cell(rule.protocol || 'any'));
+        tr.appendChild(cell(rule.ports || (rule.icmp_type || '-')));
+        var addr = (rule.remote_cidrs && rule.remote_cidrs.length) ? rule.remote_cidrs.join(', ') : (rule.remote_ipset_id ? 'IP set #' + rule.remote_ipset_id : 'any');
+        tr.appendChild(cell(addr));
+        tr.appendChild(cell(rule.comment || ''));
+      }
+      var del = document.createElement('td');
+      if (canEdit) {
+        del.appendChild(button('Delete', 'Delete rule ' + (i + 1), function () { rules.splice(i, 1); changed(); }));
+      }
+      tr.appendChild(del);
+      body.appendChild(tr);
+    });
+  }
+
+  function send(op, extra, confirmed) {
+    if (busy) { return; }
+    var form = new URLSearchParams();
+    form.set('serviceid', sid);
+    form.set('op', op);
+    form.set('revision', String(revision));
+    Object.keys(extra).forEach(function (k) { form.set(k, extra[k]); });
+    if (confirmed) { form.set('confirm_interruption', '1'); }
+    busy = true;
+    msg('Working...', false);
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
+      body: form.toString(),
+      credentials: 'same-origin'
+    }).then(function (res) {
+      return res.json().catch(function () { return { ok: false, error: 'Unexpected response (' + res.status + ')' }; });
+    }).then(function (reply) {
+      busy = false;
+      if (reply && reply.ok) {
+        msg(reply.message || 'Done.', false);
+        window.setTimeout(function () { window.location.reload(); }, 800);
+        return;
+      }
+      if (reply && reply.code === 'interruption_confirmation_required') {
+        msg('', false);
+        if (window.confirm('Turning the firewall on briefly interrupts this server\'s network, for well under a second. Go ahead?')) { send(op, extra, true); }
+        return;
+      }
+      if (reply && reply.code === 'firewall_changed') {
+        msg('Your firewall was changed somewhere else, for example in the RackFlow portal, so nothing was saved. Reload the page to see the latest rules, then make your change again.', true);
+        var reload = document.getElementById('rackflow-fw-reload');
+        if (reload) { reload.hidden = false; }
+        return;
+      }
+      msg((reply && reply.error) ? reply.error : 'Request failed.', true);
+    }).catch(function (err) {
+      busy = false;
+      msg(err && err.message ? err.message : 'Request failed.', true);
+    });
+  }
+
+  var reloadBtn = document.getElementById('rackflow-fw-reload');
+  if (reloadBtn) { reloadBtn.addEventListener('click', function () { window.location.reload(); }); }
+  render();
+  if (!canEdit) { return; }
+
+  var addBtn = document.getElementById('rackflow-fw-add');
+  if (addBtn) {
+    addBtn.addEventListener('click', function () {
+      var rule = {
+        kind: 'rule',
+        direction: val('rackflow-fw-new-direction'),
+        action: val('rackflow-fw-new-action'),
+        protocol: val('rackflow-fw-new-protocol') || null,
+        ports: val('rackflow-fw-new-ports') || null,
+        remote_cidrs: val('rackflow-fw-new-cidr') ? [val('rackflow-fw-new-cidr')] : null,
+        comment: val('rackflow-fw-new-comment') || null,
+        enabled: true
+      };
+      rules.push(rule);
+      ['ports', 'cidr', 'comment'].forEach(function (k) { var el = document.getElementById('rackflow-fw-new-' + k); if (el) { el.value = ''; } });
+      changed();
+    });
+  }
+  var addGroup = document.getElementById('rackflow-fw-add-group');
+  if (addGroup) {
+    addGroup.addEventListener('click', function () {
+      var id = parseInt(val('rackflow-fw-group'), 10);
+      if (!id) { return; }
+      if (rules.some(function (r) { return r.kind === 'group' && r.group_id === id; })) {
+        msg('That group is already in your rules.', true);
+        return;
+      }
+      rules.push({ kind: 'group', group_id: id, enabled: true, comment: null });
+      changed();
+    });
+  }
+  var presetBox = document.getElementById('rackflow-fw-presets');
+  if (presetBox) {
+    (data.presets || []).forEach(function (p) {
+      var b = button('Add ' + p.label, 'Add the ' + p.label + ' rules', function () {
+        if (saveBtn && !saveBtn.disabled && !window.confirm('Adding this set saves it now and drops your unsaved changes. Continue?')) { return; }
+        send('preset', { preset: p.key }, false);
+      });
+      presetBox.appendChild(b);
+    });
+  }
+  box.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('[data-rf-fw-op]') : null;
+    if (!btn || btn.disabled) { return; }
+    var op = btn.getAttribute('data-rf-fw-op');
+    if (op === 'enable') {
+      if (btn.getAttribute('data-rf-needs-interruption') === '1') {
+        if (!window.confirm('Turning the firewall on briefly interrupts this server\'s network, for well under a second. Go ahead?')) { return; }
+        send('enable', {}, true);
+      } else {
+        send('enable', {}, false);
+      }
+    } else if (op === 'disable') {
+      if (!window.confirm('Turn the client firewall off? Your rules are kept, but they stop applying.')) { return; }
+      send('disable', {}, false);
+    } else if (op === 'policy') {
+      send('policy', { policy_in: val('rackflow-fw-policy-in'), policy_out: val('rackflow-fw-policy-out') }, false);
+    } else if (op === 'rules') {
+      if (!window.confirm('Replace your rules with the list shown?')) { return; }
+      send('rules', { rules: JSON.stringify(rules) }, false);
+    }
+  });
+})();
+</script>
+{/literal}
+{/if}
 
 {if $rackflow_slot_panel || $rackflow_vm_slots|@count}
 {literal}
