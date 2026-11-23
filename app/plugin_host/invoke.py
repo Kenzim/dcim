@@ -68,6 +68,7 @@ class _Call:
     thread: Optional[threading.Thread] = None
     finished: bool = False  # set under _slots_lock when the thread is done with the plugin
     abandoned: bool = False  # set under _slots_lock when the caller stops waiting
+    committing: bool = False  # set under _slots_lock when the handler succeeded and its writes are being kept
     abandoned_at: Optional[datetime] = None
 
 
@@ -130,10 +131,11 @@ def _release_slot(call: _Call) -> bool:
 
 
 def _abandon(call: _Call) -> Optional[int]:
-    """Stop waiting for a call: the plugin's count of abandoned handlers, or None when its thread finished meanwhile."""
+    """Stop waiting for a call: the plugin's count of abandoned handlers, or None when its thread finished
+    meanwhile or is already committing a successful result (the caller then waits for that outcome)."""
     global _heartbeat
     with _slots_lock:
-        if call.finished:
+        if call.finished or call.committing:
             return None
         call.abandoned = True
         call.abandoned_at = utcnow()
@@ -316,20 +318,36 @@ async def invoke(
         if refused is not None:
             return _refuse(inst, label, refused, count_failures=count_failures, service_id=service_id)
 
-    db = new_session()
-    ctx = PluginContext(
-        db,
-        plugin_id=inst.id,
-        plugin_version=inst.version,
-        manifest=loaded.manifest,
-        granted=set(inst.granted_permissions or []),
-        kind=kind,
-        actor=actor,
-    )
+    db = None
+    try:
+        db = new_session()
+        ctx = PluginContext(
+            db,
+            plugin_id=inst.id,
+            plugin_version=inst.version,
+            manifest=loaded.manifest,
+            granted=set(inst.granted_permissions or []),
+            kind=kind,
+            actor=actor,
+        )
+    except BaseException:
+        if db is not None:
+            db.close()
+        if not is_async:
+            _release_slot(call)
+        raise
 
     def finish(success: bool) -> None:
+        keep = False
+        if success:
+            # Decided under the slot lock so that a caller timing out at this moment either sees
+            # the commit coming (and waits for it) or has already abandoned the call (and it rolls back).
+            with _slots_lock:
+                if not call.abandoned:
+                    call.committing = True
+                    keep = True
         try:
-            if success and not ctx.abandoned:
+            if keep and not ctx.abandoned:
                 ctx._commit()
             else:
                 ctx._rollback()
@@ -399,11 +417,11 @@ async def invoke(
     try:
         succeeded, value = await asyncio.wait_for(asyncio.shield(done), timeout)
     except asyncio.TimeoutError:
-        ctx.abandoned = True
         held = _abandon(call)
-        if held is None:  # finished just as the time ran out
+        if held is None:  # finished, or committing its result, just as the time ran out
             succeeded, value = await done
         else:
+            ctx.abandoned = True
             message = (f"{label} timed out after {timeout:g}s; its code is still running "
                        f"({held} of the plugin's {SLOTS_PER_PLUGIN} slots held by handlers that timed out)")
             logger.warning("Plugin %s: %s", inst.id, message)
@@ -411,11 +429,12 @@ async def invoke(
                 health.record_failure(inst.id, message, service_id=service_id)
             else:
                 write_log(inst.id, "error", message, service_id=service_id)
-            _write_report()
+            # The report is a database write; keep it off the event loop thread.
+            await asyncio.to_thread(_write_report)
             return Outcome(ok=False, timed_out=True, error=f"The plugin did not answer within {timeout:g} seconds")
     except asyncio.CancelledError:
-        ctx.abandoned = True
         if _abandon(call) is not None:
+            ctx.abandoned = True
             _write_report()
         raise
     if succeeded:

@@ -225,6 +225,41 @@ def test_a_ui_action_gets_a_clear_error(plugins, db_session):
 # ------------------------------------------------------------------ freeing a slot
 
 
+def test_a_session_that_cannot_be_opened_frees_the_slot(plugins, db_session, monkeypatch):
+    _, healthy = plugins
+
+    def broken_session():
+        raise RuntimeError("no database")
+
+    monkeypatch.setattr(invoke, "new_session", broken_session)
+    with pytest.raises(RuntimeError):
+        run(invoke.invoke(healthy, "event", "service.created", (ENV,), timeout=1))
+    assert not getattr(invoke, "_running", {}).get(HEALTHY)
+
+
+def test_a_timeout_during_the_commit_waits_for_the_committed_result(plugins, db_session, monkeypatch):
+    import threading
+
+    from app.plugin_host.sdk import PluginContext
+
+    _, healthy = plugins
+    in_commit = threading.Event()
+    real_commit = PluginContext._commit
+
+    def slow_commit(self):
+        in_commit.set()
+        time.sleep(0.5)  # longer than the caller's time limit
+        real_commit(self)
+
+    monkeypatch.setattr(PluginContext, "_commit", slow_commit)
+    outcome = run(invoke.invoke(healthy, "event", "service.created", (ENV,), timeout=0.2))
+    assert in_commit.is_set()
+    assert outcome.ok and outcome.value == "fine", outcome
+    assert HEALTHY not in getattr(invoke, "_abandoned", {})
+    settle()
+    assert not getattr(invoke, "_running", {}).get(HEALTHY)
+
+
 def test_a_returning_abandoned_handler_frees_its_slot_and_closes_its_session(plugins, db_session, monkeypatch):
     stuck, _ = plugins
     sessions = []
