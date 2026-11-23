@@ -1,6 +1,0 @@
-============================= test session starts ==============================
-collected 14 items
-
-tests/plugin_host/test_bundled_identity.py ..............                [100%]
-
-============================== 14 passed in 7.08s ==============================
