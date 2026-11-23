@@ -12,7 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.sql import false, func
+from sqlalchemy.sql import func
 
 from app.core.database import Base
 
@@ -43,7 +43,7 @@ class PluginInstallation(Base):
     directory = Column(String(255), nullable=False)
     code_hash = Column(String(64), nullable=False)
     # True when the package was installed from the bundled root (plugins Rackflow ships), false for the plugins folder.
-    bundled = Column(Boolean, nullable=False, default=False, server_default=false())
+    bundled = Column(Boolean, nullable=False, default=False, server_default="0")
     status = Column(String(16), nullable=False, default=PluginStatus.DISABLED)
     granted_permissions = Column(JSON, nullable=False, default=list)
     addon_refs = Column(JSON, nullable=False, default=list)

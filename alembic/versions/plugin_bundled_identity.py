@@ -70,7 +70,7 @@ def backfill(bind) -> None:
 def upgrade() -> None:
     op.add_column(
         "plugin_installations",
-        sa.Column("bundled", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("bundled", sa.Boolean(), nullable=False, server_default="0"),
     )
     backfill(op.get_bind())
 
