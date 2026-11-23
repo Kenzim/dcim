@@ -311,6 +311,9 @@ baseline value, so existing VMs never pick it up by inheritance:
 - Ports 1 to 65535, ranges `a:b` with `a < b`, at most 10 items; CIDRs parsed with `ipaddress`, host
   bits must be zero, no `0.0.0.0/0` inside an IP set (use "any"), at most 20 per rule.
 - A client may reference only its own groups and IP sets and admin ones marked `client_selectable`.
+- A rule of the VM that references an admin group or IP set clients may not select was set by staff:
+  a client or billing write that drops it, detaches it or changes its effect gets 403 `staff_attached`
+  (moving it and editing its comment are allowed). Staff may change it.
 - Every write carries the `revision` the caller read; a stale one gets 409 `firewall_changed`.
 
 ## 5. Proxmox writer

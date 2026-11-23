@@ -95,6 +95,72 @@ async def test_claimed_row_is_left_until_the_claim_expires(world, fake, access):
     assert (await _queue(world, access, now=later)).applied == [vm.id]
 
 
+LONG_WAIT = timedelta(seconds=reconcile.CLAIM_SECONDS + 180)
+
+
+class _LateProbe(FakeAccess):
+    """Asks, while the worker holds the claim, whether the deployment step (``apply_for_provision``)
+    could claim the VM too, and whether another worker's queue would list it."""
+
+    def __init__(self, fake, tick_now):
+        super().__init__(fake)
+        self.at = tick_now + LONG_WAIT
+        self.seen = []
+
+    async def vm_client(self, db, service):
+        listed = service.id in [sid for sid, _ in reconcile.due_for_apply(db, now=self.at)]
+        self.seen.append((reconcile.claim(db, service.id, owner="deployment", now=self.at), listed))
+        return await super().vm_client(db, service)
+
+
+def _long_wait(monkeypatch):
+    """The wall clock: the tick starts, then the VM's turn comes ``LONG_WAIT`` later."""
+    calls = []
+    wall = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    def utcnow():
+        calls.append(1)
+        return wall if len(calls) == 1 else wall + LONG_WAIT
+
+    monkeypatch.setattr(reconcile, "utcnow", utcnow)
+
+
+@pytest.mark.asyncio
+async def test_claim_taken_after_waiting_in_the_cluster_queue_runs_from_when_it_is_taken(world, fake, monkeypatch):
+    """One apply at a time per cluster: the second VM waits while the first one's apply takes
+    ``LONG_WAIT``, longer than ``CLAIM_SECONDS``; its claim must still hold when its turn comes."""
+    settings_store.set_setting(world.db, "vm_firewall_cluster_concurrency", 1)
+    vms = [_enabled_vm(world, fake)[0] for _ in range(2)]
+    wall = {"now": datetime(2000, 1, 1, tzinfo=timezone.utc)}
+    start = wall["now"]
+    monkeypatch.setattr(reconcile, "utcnow", lambda: wall["now"])
+    seen = []
+
+    class SlowCluster(FakeAccess):
+        async def vm_client(self, db, service):
+            at = T0 + (wall["now"] - start)
+            listed = service.id in [sid for sid, _ in reconcile.due_for_apply(db, now=at)]
+            seen.append((service.id, reconcile.claim(db, service.id, owner="deployment", now=at), listed))
+            wall["now"] += LONG_WAIT  # this apply is slow; the next VM of the cluster waits for it
+            return await super().vm_client(db, service)
+
+    result = await reconcile.process_queue(world.db, SlowCluster(fake), owner=OWNER, now=T0)
+    assert sorted(result.applied) == sorted(vm.id for vm in vms)
+    assert sorted(seen) == sorted((vm.id, False, False) for vm in vms)
+
+
+@pytest.mark.asyncio
+async def test_sweep_claim_after_a_long_queue_runs_from_when_it_is_taken(world, fake, access, monkeypatch):
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    later = T0 + timedelta(seconds=reconcile.reconcile_interval(world.db) + 1)
+    probe = _LateProbe(fake, later)
+    _long_wait(monkeypatch)
+    result = await reconcile.tick(world.db, probe, owner=OWNER, now=later)
+    assert result.sweep.checked == [vm.id]
+    assert probe.seen and all(claimed is False for claimed, _listed in probe.seen)
+
+
 @pytest.mark.asyncio
 async def test_cluster_concurrency_limits_parallel_applies(world, fake, access, monkeypatch):
     settings_store.set_setting(world.db, "vm_firewall_cluster_concurrency", 2)

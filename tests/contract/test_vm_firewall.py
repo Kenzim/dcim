@@ -204,6 +204,54 @@ def test_hidden_groups_and_ipsets_answer_like_missing_ids(whmcs, ready, db_sessi
         assert hidden.json() == missing.json()
 
 
+def test_attached_hidden_group_id_answers_like_a_missing_id_and_shows_nothing_more(whmcs, ready, db_session):
+    from tests.api.vm_firewall_helpers import seed_hidden_admin_objects
+
+    hidden = seed_hidden_admin_objects(db_session, svc.Actor.system(), ready.id)["group"]
+    other = whmcs.vm()
+    db_session.commit()
+    entry = {"id": hidden.id, "name": "Provided by us", "description": None, "provided_by_us": True, "rules": []}
+    body = _view(whmcs.call("firewall", ready.id))
+    assert body["groups"] == [entry]
+    revision = body["revision"]
+
+    def calls(group_id):
+        ref = {"kind": "group", "group_id": group_id}
+        return {
+            "rules on another VM": whmcs.call("firewall_rules_replace", other.id, body={"revision": 1, "rules": [ref]}),
+            "add rule on another VM": whmcs.call("firewall_rule_create", other.id, body={"revision": 1, "rule": ref}),
+        }
+
+    hidden_calls, missing_calls = calls(hidden.id), calls(hidden.id + 100000)
+    for name, response in hidden_calls.items():
+        assert response.status_code >= 400, (name, response.text)
+        assert (response.status_code, response.json()) == (missing_calls[name].status_code,
+                                                           missing_calls[name].json()), name
+    assert hidden_calls["rules on another VM"].json()["code"] == "reference_not_found"
+    saved = _view(whmcs.call("firewall_rules_replace", ready.id, body={"revision": revision, "rules": body["rules"]}))
+    assert saved["groups"] == [entry]
+
+
+def test_rules_staff_set_cannot_be_removed_through_billing(whmcs, ready, db_session):
+    from tests.api.vm_firewall_helpers import seed_hidden_admin_objects
+
+    seed_hidden_admin_objects(db_session, svc.Actor.system(), ready.id)
+    body = _view(whmcs.call("firewall", ready.id))
+    group_rule, ipset_rule = body["rules"]
+    revision = body["revision"]
+    for response in (
+        whmcs.call("firewall_rules_replace", ready.id, body={"revision": revision, "rules": [ipset_rule, SSH]}),
+        whmcs.call("firewall_rules_replace", ready.id, body={"revision": revision, "rules": [group_rule]}),
+        whmcs.call("firewall_rule_delete", ready.id, rule_id=group_rule["id"], query={"revision": revision}),
+    ):
+        assert_error(response, 403)
+        assert response.json()["code"] == "staff_attached"
+    assert _view(whmcs.call("firewall", ready.id)) == body
+    added = _view(whmcs.call("firewall_rules_replace", ready.id,
+                             body={"revision": revision, "rules": body["rules"] + [SSH]}))
+    assert [r["id"] for r in added["rules"][:2]] == [group_rule["id"], ipset_rule["id"]]
+
+
 def test_link_to_a_new_owner_drops_rules_referencing_the_old_owners_objects(whmcs, ready, db_session):
     from app.dao.user_dao import UserDAO
 
