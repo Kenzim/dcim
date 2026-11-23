@@ -215,6 +215,37 @@ def test_staff_create_a_group_for_a_client(client, world, admin, alice_headers):
     assert [g["id"] for g in mine] == [group.json()["id"]]
 
 
+def test_rollout_resume_and_worker_status(client, db_session, world, admin):
+    from datetime import datetime, timezone
+
+    from app.models.commerce_account import SystemSetting
+
+    vm = _opened(world, db_session, _vm(world, db_session))
+    row = db_session.get(FirewallLocationSettings, world.location.id)
+    row.rollout_paused_at = datetime(2026, 11, 23, 9, 0, tzinfo=timezone.utc)
+    row.rollout_pause_reason = "3 failed applies"
+    row.rollout_failures = 3
+    fw_row = db_session.get(ServiceFirewall, vm.id)
+    fw_row.rollout_after = datetime(2026, 11, 23, 10, 0, tzinfo=timezone.utc)
+    db_session.commit()
+    item = client.get(ADMIN + f"/locations/{world.location.id}", headers=admin).json()
+    assert item["rollout_paused_at"].startswith("2026-11-23T09:00")
+    assert (item["rollout_pause_reason"], item["rollout_failures"]) == ("3 failed applies", 3)
+
+    resumed = client.post(ADMIN + f"/locations/{world.location.id}/rollout/resume", headers=admin)
+    assert resumed.status_code == 200, resumed.text
+    body = resumed.json()
+    assert (body["rollout_paused_at"], body["rollout_pause_reason"], body["rollout_failures"]) == (None, None, 0)
+    db_session.expire_all()
+    assert db_session.query(UserAuditEvent).filter_by(action="firewall.rollout_resumed").count() == 1
+    assert client.post(ADMIN + "/locations/999999/rollout/resume", headers=admin).status_code == 404
+
+    assert client.get(ADMIN + "/worker", headers=admin).json() == {}
+    db_session.add(SystemSetting(key="vm_firewall_worker", value={"last_tick_at": "2026-11-23T09:00:00", "owner": "w1"}))
+    db_session.commit()
+    assert client.get(ADMIN + "/worker", headers=admin).json()["owner"] == "w1"
+
+
 def test_status_list_filters(client, db_session, world, admin):
     opened = _opened(world, db_session, _vm(world, db_session))
     untouched = _vm(world, db_session)

@@ -33,8 +33,10 @@ from app.models.vm_firewall import (
     ServiceFirewall,
 )
 from app.services.vm_firewall import apply as fw_apply
+from app.services.vm_firewall import reconcile
 from app.services.vm_firewall import service as svc
-from app.services.vm_firewall.errors import FirewallChanged, FirewallNotFound
+from app.services.vm_firewall.errors import FirewallChanged, FirewallNotEligible, FirewallNotFound
+from app.services.vm_firewall.render import load_context
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -192,6 +194,23 @@ def rollout(location_id: int, body: RolloutRequest, request: Request, auth: Admi
     )
     db.commit()
     return {"dry_run": False, "preview": preview, "location": fw.location_payload(db, location)}
+
+
+@router.post("/locations/{location_id}/rollout/resume", responses=COMMON_ERROR_RESPONSES)
+def resume_rollout(location_id: int, request: Request, auth: AdminDep, db: DbDep):
+    """Resume a rollout the worker paused after repeated failures; the VMs still waiting are
+    staggered again from now. Returns the location."""
+    location = _location(db, location_id)
+    reconcile.resume_rollout(db, _actor(request, auth), location.id)
+    db.commit()
+    return fw.location_payload(db, location)
+
+
+@router.get("/worker", responses=COMMON_ERROR_RESPONSES)
+def worker_status(auth: AdminDep, db: DbDep):
+    """The firewall worker's last reported status (``last_tick_at``, ``owner`` and the counters it
+    writes); an empty object before its first tick."""
+    return reconcile.read_status(db)
 
 
 # Baselines
@@ -431,7 +450,7 @@ async def update_firewall(service_id: int, body: AdminFirewallUpdate, request: R
     ``admin_overrides``, under one ``revision``."""
     service = _service(db, service_id)
     actor = _actor(request, auth)
-    row = svc.get_firewall(db, service.id, actor)
+    row = db.get(ServiceFirewall, service.id) or svc.default_firewall(service.id)
     if body.revision != row.revision:
         raise FirewallChanged(row.revision)
     changed_settings = any(key in body.model_fields_set for key in _SETTINGS_FIELDS)
@@ -512,11 +531,18 @@ async def _proxmox(db: Session, service: Service):
 
 
 @router.post(_SERVICE + "/apply", responses=COMMON_ERROR_RESPONSES)
-async def apply_now(service_id: int, auth: AdminDep, db: DbDep):
-    """Apply the rendered firewall to Proxmox now; failures are recorded on the row like the worker's."""
+async def apply_now(service_id: int, request: Request, auth: AdminDep, db: DbDep):
+    """Apply the rendered firewall to Proxmox now; failures are recorded on the row like the worker's.
+    In a location whose firewall is off it is refused (409 ``not_eligible``, ``location_disabled``)
+    unless the VM was applied before, when it can only switch the firewall off, as the worker does."""
     service = _service(db, service_id)
-    svc.get_or_create(db, service.id)
+    row = svc.get_or_create(db, service.id)
+    location = load_context(db, service.id).location_settings
+    if not (location is not None and location.enabled) and row.applied_revision is None:
+        raise FirewallNotEligible(["location_disabled"])
     client = await _proxmox(db, service)
+    svc._audit(db, _actor(request, auth), "firewall.apply_requested", resource_type="service",
+               resource_id=service.id, subject_user_id=service.owner_user_id, metadata={"revision": row.revision})
     result = await fw_apply.apply(db, service.id, client)
     db.commit()
     return {"result": dataclasses.asdict(result), "firewall": fw.firewall_view(db, service.id, audience=fw.STAFF)}

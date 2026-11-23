@@ -1525,7 +1525,13 @@ def _link_service_assign_owner(
         external_username=data.external_username,
         external_email=data.external_email,
     )
+    changed = service.owner_user_id != billing_user.id
     service.owner_user_id = billing_user.id
+    if changed:
+        from app.services.vm_firewall.service import Actor, remove_foreign_references
+
+        db.flush()
+        remove_foreign_references(db, service.id, Actor.system())
     if service.provisioning_source == ProvisioningSource.INTERNAL:
         service.provisioning_source = ProvisioningSource.BILLING
 

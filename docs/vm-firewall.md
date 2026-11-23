@@ -626,9 +626,18 @@ message, for WHMCS): `firewall_changed` (409) adds `current_revision`, `not_elig
 `reasons[]`, `confirmation_required` (409) adds `preview`. Turning the firewall on while net0's
 `firewall` flag is not 1 answers 409 `interruption_confirmation_required` (field
 `confirm_interruption`) until `confirm_interruption=true` is sent; the route reads the VM's live
-Proxmox config to decide (and passes it to `eligibility` so the NIC checks run), falling back to the
-observed `nic_flag` when Proxmox cannot be read. Unknown request fields, the admin-only ones among
-them, are refused with 422 on the client and billing routes.
+Proxmox config to decide (and passes it to `eligibility` so the NIC checks run). When the config
+cannot be read the flag counts as unknown and the confirmation is required, even if the stored
+`nic_flag` is `on`. Eligibility is checked first, so in a location whose firewall is off, turning it
+on answers 409 `not_eligible` (`location_disabled`) for client, billing and staff alike, with or
+without the confirmation; other edits there are stored as preferences and nothing is written to
+Proxmox (staff `apply` is refused too, unless the VM was applied before and can only be switched
+off). Reads never write: a VM or location with no row yet is shown with the defaults its first
+write starts from. A missing id and an object the client or billing actor may not use (another
+client's, or a non-selectable admin group or IP set) answer identically. Unknown request fields,
+the admin-only ones among them, are refused with 422 on the client and billing routes. Every write
+route leaves a `firewall.*` audit row (staff `apply` writes `firewall.apply_requested`); linking a
+service to a new owner through billing `/link` removes rules referencing the old owner's objects.
 
 ### 10.1 Client API (`app/api/vm_firewall_client.py`)
 
@@ -666,6 +675,8 @@ detail (`GET /api/services/{id}`) carries `firewall_available`.
 | `PUT /locations/{id}` | Any settings field, `staging?`, `confirm_existing_vms?`; 409 `confirmation_required` with `preview` when the change reaches existing VMs, 409 `not_ready` when enabling an unready location without `staging` |
 | `POST /locations/{id}/readiness` | Re-run the read-only readiness check of every cluster; returns the location |
 | `POST /locations/{id}/rollout` | `{dry_run (default true), confirm_existing_vms?}` returns `{dry_run, preview: {changed, service_ids[], services: [{id, name}], ...}, location}`; a real run switches `enforce_baseline_on_all` on |
+| `POST /locations/{id}/rollout/resume` | Resume a rollout the worker paused; returns the location (items also carry `rollout_paused_at`, `rollout_pause_reason`, `rollout_failures`) |
+| `GET /worker` | The worker's last status from `system_settings` `vm_firewall_worker` (`{}` before its first tick) |
 | `GET/POST /baselines`, `GET/PUT/DELETE /baselines/{id}` | `{id, name, scope_type, scope_id, enabled, settings, revision, rules[]}` |
 | `GET/POST /groups`, `GET/PUT/DELETE /groups/{id}` | Admin groups and any client's (`?scope=admin\|client&owner_user_id=`); create takes `owner_user_id?`, `client_selectable` |
 | `GET/POST /ipsets`, `GET/PUT/DELETE /ipsets/{id}` | As groups, plus `purpose` (`general`, `management`; also a list filter) |

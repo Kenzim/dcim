@@ -117,7 +117,8 @@ def test_turning_on_with_net0_flag_off_needs_confirm_interruption(client, db_ses
     body = refused.json()
     assert body["code"] == "interruption_confirmation_required" and body["field"] == "confirm_interruption"
     assert body["detail"] == body["message"]
-    assert revision(db_session, alice_vm.id) == 1
+    db_session.expire_all()
+    assert db_session.get(ServiceFirewall, alice_vm.id) is None
 
     ok = client.put(url, json={"revision": 1, "client_enabled": True, "confirm_interruption": True}, headers=alice)
     assert ok.status_code == 200, ok.text
@@ -286,16 +287,46 @@ def test_client_cannot_attach_another_clients_group_or_reference_their_ipset(cli
     group = _group(client, alice)
     ipset = _ipset(client, alice)
     url = BASE.format(bob_vm.id)
-    attach = client.post(url + f"/groups/{group['id']}", json={"revision": 1}, headers=bob)
-    assert attach.status_code in (403, 404, 422) and attach.json()["code"]
-    as_rule = client.put(url + "/rules", json={"revision": 1, "rules": [{"kind": "group", "group_id": group["id"]}]},
-                         headers=bob)
-    assert as_rule.status_code in (403, 404, 422) and as_rule.json()["field"] == "rules[0].group_id"
-    ref = client.put(url + "/rules", json={"revision": 1, "rules": [{**SSH, "remote_ipset_id": ipset["id"]}]},
-                     headers=bob)
-    assert ref.status_code in (403, 404, 422) and ref.json()["field"] == "rules[0].remote_ipset_id"
+    missing = 999999
+
+    def same(method, path, make_body):
+        hidden = client.request(method, url + path(group["id"]), json=make_body(group["id"], ipset["id"]),
+                                headers=bob)
+        absent = client.request(method, url + path(missing), json=make_body(missing, missing), headers=bob)
+        assert (hidden.status_code, hidden.json()) == (absent.status_code, absent.json())
+        return hidden
+
+    attach = same("POST", lambda gid: f"/groups/{gid}", lambda gid, sid: {"revision": 1})
+    assert attach.status_code == 404 and attach.json()["code"] == "not_found"
+    as_rule = same("PUT", lambda gid: "/rules",
+                   lambda gid, sid: {"revision": 1, "rules": [{"kind": "group", "group_id": gid}]})
+    assert as_rule.status_code == 422 and as_rule.json()["field"] == "rules[0].group_id"
+    ref = same("PUT", lambda gid: "/rules", lambda gid, sid: {"revision": 1, "rules": [{**SSH, "remote_ipset_id": sid}]})
+    assert ref.status_code == 422 and ref.json()["field"] == "rules[0].remote_ipset_id"
     db_session.expire_all()
     assert client.get(url, headers=bob).json()["rules"] == []
+
+
+def test_hidden_admin_group_and_ipset_answer_like_missing_ids(client, db_session, world, vms, alice):
+    from app.services.vm_firewall import service as svc
+
+    alice_vm, _ = vms
+    group = svc.create_group(db_session, world.staff_actor, name="internal", rules=[SSH])
+    ipset = svc.create_ipset(db_session, world.staff_actor, name="internal", entries=["10.0.0.0/8"])
+    db_session.commit()
+    url = BASE.format(alice_vm.id)
+    for path in ("/api/client/firewall/groups/{}", "/api/client/firewall/ipsets/{}"):
+        hidden = client.get(path.format(group.id if "groups" in path else ipset.id), headers=alice)
+        absent = client.get(path.format(999999), headers=alice)
+        assert hidden.status_code == absent.status_code == 404 and hidden.json() == absent.json()
+    hidden = client.post(url + f"/groups/{group.id}", json={"revision": 1}, headers=alice)
+    absent = client.post(url + "/groups/999999", json={"revision": 1}, headers=alice)
+    assert hidden.status_code == 404 and hidden.json() == absent.json()
+    hidden = client.put(url + "/rules", json={"revision": 1, "rules": [{**SSH, "remote_ipset_id": ipset.id}]},
+                        headers=alice)
+    absent = client.put(url + "/rules", json={"revision": 1, "rules": [{**SSH, "remote_ipset_id": 999999}]},
+                        headers=alice)
+    assert hidden.status_code == 422 and hidden.json() == absent.json()
 
 
 def test_attach_detach_and_delete_of_an_attached_group(client, vms, alice):

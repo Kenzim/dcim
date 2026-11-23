@@ -166,6 +166,39 @@ def test_groups_lists_only_the_owners_groups(whmcs, ready, db_session):
     assert sorted(g["id"] for g in response.json()) == sorted([own.id, shared.id])
 
 
+def test_hidden_groups_and_ipsets_answer_like_missing_ids(whmcs, ready, db_session):
+    hidden_group = svc.create_group(db_session, svc.Actor.system(), name="internal")
+    hidden_ipset = svc.create_ipset(db_session, svc.Actor.system(), name="internal", entries=["10.0.0.0/8"])
+    db_session.commit()
+    for hidden_rule, missing_rule in (
+        ({"kind": "group", "group_id": hidden_group.id}, {"kind": "group", "group_id": 999999}),
+        ({**SSH, "remote_ipset_id": hidden_ipset.id}, {**SSH, "remote_ipset_id": 999999}),
+    ):
+        hidden = whmcs.call("firewall_rules_replace", ready.id, body={"revision": 1, "rules": [hidden_rule]})
+        missing = whmcs.call("firewall_rules_replace", ready.id, body={"revision": 1, "rules": [missing_rule]})
+        assert_error(hidden, 422)
+        assert hidden.json() == missing.json()
+
+
+def test_link_to_a_new_owner_drops_rules_referencing_the_old_owners_objects(whmcs, ready, db_session):
+    from app.dao.user_dao import UserDAO
+
+    staff_owner = UserDAO.create(db_session, username="fw-claim-old", email="fw-claim-old@example.com")
+    ready.owner_user_id = staff_owner.id
+    db_session.flush()
+    old = svc.Actor.client(staff_owner.id)
+    ipset = svc.create_ipset(db_session, old, name="old-office", entries=["198.51.100.0/24"])
+    svc.replace_rules(db_session, ready.id, old, [{**SSH, "remote_ipset_id": ipset.id}, SSH], revision=1)
+    db_session.commit()
+
+    link = whmcs.call("link", ready.id, body={"external_service_id": "fw-claim", "external_user_id": "ext-fw-claim"})
+    assert link.status_code == 200, link.text
+    db_session.expire_all()
+    rules = svc.service_rules(db_session, ready.id)
+    assert [rule.remote_ipset_id for rule in rules] == [None]
+    assert db_session.query(UserAuditEvent).filter_by(action="firewall.references_removed").count() == 1
+
+
 def test_another_integrations_service_is_404_on_every_firewall_route(whmcs, db_session):
     rival_vm = whmcs.rival().vm()
     calls = [

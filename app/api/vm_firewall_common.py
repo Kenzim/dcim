@@ -29,6 +29,7 @@ from app.models.vm_firewall import (
     FirewallNicFlag,
     FirewallRule,
     FirewallRuleKind,
+    ServiceFirewall,
 )
 from app.services.vm_firewall import presets as fw_presets
 from app.services.vm_firewall import service as svc
@@ -256,6 +257,9 @@ def _location_row_values(row: Optional[FirewallLocationSettings]) -> dict[str, A
             "ipv6_allowed_prefixes": [],
             "readiness": {},
             "readiness_checked_at": None,
+            "rollout_paused_at": None,
+            "rollout_pause_reason": None,
+            "rollout_failures": 0,
         }
     return {
         "enabled": bool(row.enabled),
@@ -266,6 +270,9 @@ def _location_row_values(row: Optional[FirewallLocationSettings]) -> dict[str, A
         "ipv6_allowed_prefixes": list(row.ipv6_allowed_prefixes or []),
         "readiness": dict(row.readiness or {}),
         "readiness_checked_at": _iso(row.readiness_checked_at),
+        "rollout_paused_at": _iso(row.rollout_paused_at),
+        "rollout_pause_reason": row.rollout_pause_reason,
+        "rollout_failures": int(row.rollout_failures or 0),
     }
 
 
@@ -360,13 +367,20 @@ def _baseline_view(db: Session, ctx, rendered) -> dict[str, Any]:
 
 def _needs_interruption(row, config: Optional[dict[str, Any]]) -> bool:
     """Whether turning the client firewall on now would write net0's ``firewall`` flag (the short
-    blip of section 5.2). Without the live config the observed flag is used, and an unknown flag
-    counts as yes."""
+    blip of section 5.2). Without the live config the flag is unknown, which counts as yes even
+    when the stored flag says it is set."""
     if row.client_enabled:
         return False
-    if config is not None:
-        return not net_firewall_flag(config.get("net0"))
-    return _value(row.nic_flag) in (FirewallNicFlag.OFF.value, FirewallNicFlag.UNKNOWN.value)
+    if config is None:
+        return True
+    return not net_firewall_flag(config.get("net0"))
+
+
+def _view_needs_interruption(row) -> bool:
+    """The view's hint, from the stored flag (reads do not call Proxmox); the write checks live."""
+    if row.client_enabled:
+        return False
+    return _value(row.nic_flag) != FirewallNicFlag.ON.value
 
 
 def firewall_available(db: Session, service: Service) -> bool:
@@ -383,8 +397,11 @@ def firewall_available(db: Session, service: Service) -> bool:
 
 def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> dict[str, Any]:
     """The firewall of a VM as section 10.1 describes it; ``audience`` ``staff`` adds the admin
-    fields. Creates the firewall row (not committed) when the VM has none yet."""
-    row = svc.get_or_create(db, service_id)
+    fields. Writes nothing: a VM with no firewall row yet is shown with the defaults."""
+    service = db.get(Service, service_id)
+    if service is None or _value(service.service_type) != "vm":
+        raise FirewallNotEligible(["not_vm"])
+    row = db.get(ServiceFirewall, service_id) or svc.default_firewall(service_id)
     ctx = load_context(db, service_id)
     rendered = render_context(db, ctx)
     result = svc.eligibility(db, service_id, observe=False)
@@ -416,7 +433,7 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
         "state": state,
         "enforced": bool(rendered.enforced and int(rendered.options["enable"]) == 1),
         "nic_flag": _value(row.nic_flag),
-        "needs_interruption": _needs_interruption(row, None),
+        "needs_interruption": _view_needs_interruption(row),
         "policy_in": _value(row.policy_in),
         "policy_out": _value(row.policy_out),
         "log_level_in": _value(row.log_level_in),
@@ -577,12 +594,18 @@ def given(body: BaseModel, *keys: str) -> dict[str, Any]:
 
 
 async def update_settings(db: Session, service: Service, actor: svc.Actor, body: FirewallSettingsUpdate) -> None:
-    row = svc.get_firewall(db, service.id, actor)
+    # The checks below read without creating the row, so a refusal writes nothing.
+    row = db.get(ServiceFirewall, service.id) or svc.default_firewall(service.id)
     if body.revision != row.revision:
         raise FirewallChanged(row.revision)
     config = None
     if body.client_enabled is True and not row.client_enabled:
         config = await live_vm_config(db, service)
+        # Eligibility first, so a VM that cannot have a firewall (its location switched off, for
+        # one) is told so rather than asked to confirm an interruption that would not happen.
+        result = svc.eligibility(db, service.id, vm_config=config, observe=False)
+        if not result.eligible:
+            raise FirewallNotEligible(result.reasons)
         if _needs_interruption(row, config) and not body.confirm_interruption:
             raise interruption_not_confirmed()
     svc.set_firewall(
