@@ -114,7 +114,7 @@
       await Promise.all([loadEngines(), loadMismatches()]);
     } catch (err) {
       switchError = {
-        message: err.message,
+        message: err.code === 'switch_criterion_not_met' ? 'The switch criterion is not met. These checks are failing:' : err.message,
         failing: err.detail?.failing || [],
         criteria: (err.detail?.criteria || []).filter((item) => !item.ok),
       };
