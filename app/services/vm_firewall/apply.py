@@ -48,6 +48,7 @@ from app.services.vm_firewall.proxmox_fw import (
     net_firewall_flag,
 )
 from app.services.vm_firewall.render import RenderedFirewall, render
+from app.services.vm_firewall.service import observe_net0_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -235,17 +236,13 @@ async def apply(db: Session, service_id: int, client: VmFirewallClient, *, now: 
         db.flush()
         return ApplyResult(service_id, ok=True, state=FirewallState.UNMANAGED.value, revision=row.revision)
 
-    revision = row.revision
-    desired = render(db, service_id)
-    row.desired_hash = desired.desired_hash
-    try:
-        result = await converge(client, desired)
-    except VmMissing as exc:
-        row.state = FirewallState.VM_MISSING
-        row.last_error = str(exc)[:2000]
-        db.flush()
-        return ApplyResult(service_id, ok=False, state=FirewallState.VM_MISSING.value, revision=revision, error=row.last_error)
-    except Exception as exc:  # Proxmox errors, transport failures, crashes mid-apply
+    def failed(exc: Exception, revision: int, desired: Optional[RenderedFirewall]) -> ApplyResult:
+        if isinstance(exc, VmMissing):
+            row.state = FirewallState.VM_MISSING
+            row.last_error = str(exc)[:2000]
+            db.flush()
+            return ApplyResult(service_id, ok=False, state=FirewallState.VM_MISSING.value, revision=revision,
+                               error=row.last_error)
         logger.warning("[vm_firewall] apply failed for service %s: %s", service_id, exc)
         row.state = FirewallState.ERROR
         row.last_error = (str(exc) or exc.__class__.__name__)[:2000]
@@ -258,9 +255,25 @@ async def apply(db: Session, service_id: int, client: VmFirewallClient, *, now: 
             ok=False,
             state=FirewallState.ERROR.value,
             revision=revision,
-            desired_hash=desired.desired_hash,
+            desired_hash=desired.desired_hash if desired is not None else None,
             error=row.last_error,
         )
+
+    # Render depends on net0's bridge (IPv6 router-advert rule), so observe it first; a change
+    # bumps the revision and this apply renders the new one.
+    try:
+        config = await client.get_config()
+    except Exception as exc:  # Proxmox errors, transport failures
+        return failed(exc, row.revision, None)
+    observe_net0_bridge(row, config)
+
+    revision = row.revision
+    desired = render(db, service_id)
+    row.desired_hash = desired.desired_hash
+    try:
+        result = await converge(client, desired)
+    except Exception as exc:  # Proxmox errors, transport failures, crashes mid-apply
+        return failed(exc, revision, desired)
 
     if int(desired.options["enable"]) != 1:
         state = FirewallState.OFF

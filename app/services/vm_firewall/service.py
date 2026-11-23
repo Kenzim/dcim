@@ -293,9 +293,23 @@ def _macs(net: Mapping[str, Optional[str]]) -> list[str]:
     return out
 
 
+def observe_net0_bridge(row: ServiceFirewall, vm_config: Mapping[str, Any]) -> bool:
+    """Record net0's bridge from a Proxmox VM config on the row, bumping the revision when it
+    changes (render depends on it). Returns whether it changed; the caller commits."""
+    bridge = (net_bridges(dict(vm_config)).get("net0") or {}).get("bridge") or None
+    if bridge is not None and len(bridge) > 32:
+        bridge = None
+    if bridge == row.net0_bridge:
+        return False
+    row.net0_bridge = bridge
+    _bump(row)
+    return True
+
+
 def eligibility(db: Session, service_id: int, *, vm_config: Optional[Mapping[str, Any]] = None) -> Eligibility:
     """Reasons a service cannot have a managed firewall. ``vm_config`` is the Proxmox VM config
-    (``netN`` strings); without it the NIC checks are skipped and ``nics_checked`` is false."""
+    (``netN`` strings); without it the NIC checks are skipped and ``nics_checked`` is false. With it,
+    net0's bridge is also recorded on an existing firewall row (``observe_net0_bridge``)."""
     reasons: list[str] = []
     service = _service(db, service_id)
     if _value(service.service_type) != ServiceType.VM.value:
@@ -313,6 +327,8 @@ def eligibility(db: Session, service_id: int, *, vm_config: Optional[Mapping[str
         reasons.append("excluded")
 
     if vm_config is not None:
+        if row is not None:
+            observe_net0_bridge(row, vm_config)
         nets = net_bridges(dict(vm_config))
         infrastructure = _bridge_setting(db, "vm_firewall_infrastructure_bridges")
         ra_bridges = _bridge_setting(db, "vm_firewall_ipv6_ra_bridges")

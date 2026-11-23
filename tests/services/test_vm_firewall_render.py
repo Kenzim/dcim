@@ -165,14 +165,49 @@ def test_no_address_means_no_ipfilter(world):
 
 
 def test_ipfilter_has_address_overrides_and_location_prefixes(world):
+    set_setting(world.db, "vm_firewall_ipv6_ra_bridges", "vmbr750")
     vm = world.vm(ip="203.0.113.20")
-    row = _on(world, vm)
+    row = _on(world, vm, net0_bridge="vmbr750")
     fw.set_admin_fields(world.db, vm.id, world.staff_actor, revision=row.revision,
                         admin_overrides={"extra_ipfilter": ["203.0.113.21"]})
     world.db.get(FirewallLocationSettings, world.location.id).ipv6_allowed_prefixes = ["2001:db8:7::/48"]
     world.db.flush()
     cidrs = [e.cidr for e in render(world.db, vm.id).ipsets["ipfilter-net0"]]
     assert cidrs == ["2001:db8:7::/48", "203.0.113.20", "203.0.113.21"]
+
+
+def _net0(bridge):
+    return {"net0": f"virtio=BC:24:11:00:00:01,bridge={bridge}"}
+
+
+def test_ipv6_prefixes_only_for_vms_observed_on_an_ra_bridge(world):
+    set_setting(world.db, "vm_firewall_ipv6_ra_bridges", "vmbr750")
+    world.db.get(FirewallLocationSettings, world.location.id).ipv6_allowed_prefixes = ["2001:db8:750::/48"]
+    world.db.flush()
+    ra_vm, plain_vm = world.vm(ip="203.0.113.30"), world.vm(ip="203.0.113.31")
+    for vm, bridge in ((ra_vm, "vmbr750"), (plain_vm, "vmbr0")):
+        row = _on(world, vm)
+        assert fw.eligibility(world.db, vm.id, vm_config=_net0(bridge)).eligible
+        assert (row.net0_bridge, row.revision) == (bridge, 2)
+    ra, plain = render(world.db, ra_vm.id), render(world.db, plain_vm.id)
+    assert [e.cidr for e in ra.ipsets["ipfilter-net0"]] == ["2001:db8:750::/48", "203.0.113.30"]
+    assert [e.cidr for e in plain.ipsets["ipfilter-net0"]] == ["203.0.113.31"]
+    assert ra.options["ipfilter"] == plain.options["ipfilter"] == 1
+    assert ra.reasons == plain.reasons == []
+
+
+def test_unknown_net0_bridge_fails_safe_while_ra_bridges_are_listed(world):
+    world.db.get(FirewallLocationSettings, world.location.id).ipv6_allowed_prefixes = ["2001:db8:750::/48"]
+    world.db.flush()
+    vm = world.vm(ip="203.0.113.40")
+    row = _on(world, vm)
+    assert row.net0_bridge is None
+    # No router-advert bridge configured: an unknown bridge does not matter.
+    assert render(world.db, vm.id).options["ipfilter"] == 1
+    set_setting(world.db, "vm_firewall_ipv6_ra_bridges", "vmbr750")
+    rendered = render(world.db, vm.id)
+    assert rendered.options["ipfilter"] == 0 and rendered.reasons == ["net0_bridge_unknown"]
+    assert [e.cidr for e in rendered.ipsets["ipfilter-net0"]] == ["203.0.113.40"]
 
 
 def test_markers_only_never_client_text(world):

@@ -303,14 +303,13 @@ def _entries_of(db: Session, ipset_id: int) -> list[IpsetEntry]:
     return sorted((IpsetEntry(e.cidr, bool(e.nomatch)) for e in ipset.entries), key=lambda e: e.cidr)
 
 
-def _ipfilter_entries(ctx: RenderContext) -> list[IpsetEntry]:
+def _ipfilter_entries(ctx: RenderContext, ipv6_prefixes: Sequence[str]) -> list[IpsetEntry]:
     cidrs: list[str] = []
     allocation = ctx.vm.vm_ip_allocation if ctx.vm is not None else None
     if allocation is not None and allocation.ip_address:
         cidrs.append(allocation.ip_address)
     cidrs.extend(ctx.settings.get("extra_ipfilter") or [])
-    if ctx.location_settings is not None:
-        cidrs.extend(ctx.location_settings.ipv6_allowed_prefixes or [])
+    cidrs.extend(ipv6_prefixes)
     return sorted({IpsetEntry(cidr) for cidr in cidrs}, key=lambda e: e.cidr)
 
 
@@ -323,19 +322,11 @@ def _referenced_ipsets(rules: Iterable[RenderedRule]) -> list[int]:
     return sorted(ids)
 
 
-def _on_unprefixed_ra_bridge(db: Session, ctx: RenderContext) -> bool:
-    """net0 (the bridge of the VM's public address) carries IPv6 router adverts and the location
-    lists no allowed IPv6 prefix."""
+def _ra_bridges(db: Session) -> set[str]:
     from app.services.settings_store import get_setting
 
-    if ctx.location_settings is not None and ctx.location_settings.ipv6_allowed_prefixes:
-        return False
-    allocation = ctx.vm.vm_ip_allocation if ctx.vm is not None else None
-    bridge = allocation.bridge_name if allocation is not None else None
-    if not bridge:
-        return False
-    ra_bridges = {part.strip() for part in str(get_setting(db, "vm_firewall_ipv6_ra_bridges") or "").split(",")}
-    return bridge in ra_bridges
+    raw = str(get_setting(db, "vm_firewall_ipv6_ra_bridges") or "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
 
 
 def render(db: Session, service_id: int) -> RenderedFirewall:
@@ -355,12 +346,19 @@ def render_context(db: Session, ctx: RenderContext) -> RenderedFirewall:
     if client_enabled:
         rules.extend(client_rules(db, ctx.service.id))
 
-    ipsets: dict[str, list[IpsetEntry]] = {IPFILTER_SET: _ipfilter_entries(ctx)}
+    settings = ctx.settings
+    location = ctx.location_settings
+    # The location's IPv6 prefixes widen anti-spoofing, so they go only to a VM whose net0 is known
+    # (recorded by eligibility or apply) to be on a router-advert bridge.
+    ra_bridges = _ra_bridges(db)
+    net0_bridge = firewall.net0_bridge if firewall is not None else None
+    on_ra_bridge = net0_bridge is not None and net0_bridge in ra_bridges
+    ipv6_prefixes = list(location.ipv6_allowed_prefixes or []) if on_ra_bridge and location is not None else []
+
+    ipsets: dict[str, list[IpsetEntry]] = {IPFILTER_SET: _ipfilter_entries(ctx, ipv6_prefixes)}
     for ipset_id in _referenced_ipsets(rules):
         ipsets[ipset_name(ipset_id)] = _entries_of(db, ipset_id)
 
-    settings = ctx.settings
-    location = ctx.location_settings
     enforce_baseline = bool(firewall.enforce_baseline) if firewall is not None else False
     enforce_all = bool(location and location.enforce_baseline_on_all)
     # A VM enforced only through ``enforce_baseline`` (a new VM, section 4.5a) gets the narrow
@@ -376,7 +374,11 @@ def render_context(db: Session, ctx: RenderContext) -> RenderedFirewall:
     # needs at least one address.
     anti_spoof = bool(settings.get("anti_spoof")) and bool(ipsets[IPFILTER_SET]) and not narrow
     reasons: list[str] = []
-    if anti_spoof and _on_unprefixed_ra_bridge(db, ctx):
+    if anti_spoof and ra_bridges and net0_bridge is None:
+        # Fail safe: no anti-spoofing rather than the wrong one until net0's bridge is observed.
+        anti_spoof = False
+        reasons.append("net0_bridge_unknown")
+    elif anti_spoof and on_ra_bridge and not ipv6_prefixes:
         # ipfilter would drop the addresses the VM takes from router adverts (section 3.1).
         anti_spoof = False
         reasons.append("ipv6_ra_bridge_needs_prefix")

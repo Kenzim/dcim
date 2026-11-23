@@ -136,6 +136,9 @@ class ServiceFirewall(Base):
     enforce_baseline = Column(Boolean, nullable=False, default=False)
     excluded = Column(Boolean, nullable=False, default=False)
     admin_overrides = Column(JSON, nullable=True)
+    # Bridge of net0 as last read from the Proxmox VM config by eligibility or apply; null until
+    # observed. Render uses it for the IPv6 router-advert bridge rule (section 3.1).
+    net0_bridge = Column(String(32), nullable=True)
     revision = Column(Integer, nullable=False, default=1)
     applied_revision = Column(Integer, nullable=True)
     desired_hash = Column(String(64), nullable=True)

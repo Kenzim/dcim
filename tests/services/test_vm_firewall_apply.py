@@ -341,6 +341,24 @@ async def test_every_write_url_is_under_the_vm():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bridge, prefixed", [("vmbr750", True), ("vmbr0", False)])
+async def test_apply_observes_net0_bridge_before_rendering(world, bridge, prefixed):
+    from app.services.settings_store import set_setting
+
+    set_setting(world.db, "vm_firewall_ipv6_ra_bridges", "vmbr750")
+    world.db.get(FirewallLocationSettings, world.location.id).ipv6_allowed_prefixes = ["2001:db8:750::/48"]
+    world.db.flush()
+    vm, row, fake, fake_vm = _setup(world, net0=f"virtio=BC:24:11:00:00:01,bridge={bridge}")
+    assert row.net0_bridge is None and render(world.db, vm.id).options["ipfilter"] == 0
+    revision = row.revision
+    result = await apply(world.db, vm.id, fake.client(fake_vm.vmid))
+    assert result.ok and result.reasons == []
+    assert (row.net0_bridge, row.revision, row.applied_revision) == (bridge, revision + 1, revision + 1)
+    assert fake_vm.options["ipfilter"] == 1
+    assert ("2001:db8:750::/48" in [e["cidr"] for e in fake_vm.ipsets["ipfilter-net0"]]) is prefixed
+
+
+@pytest.mark.asyncio
 async def test_cluster_reader_only_reads():
     recorder = _Recorder()
     reader = ClusterReader(recorder)
