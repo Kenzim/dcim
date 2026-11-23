@@ -232,6 +232,26 @@ def test_attached_hidden_group_id_answers_like_a_missing_id_and_shows_nothing_mo
     assert saved["groups"] == [entry]
 
 
+def test_rules_staff_set_cannot_be_removed_through_billing(whmcs, ready, db_session):
+    from tests.api.vm_firewall_helpers import seed_hidden_admin_objects
+
+    seed_hidden_admin_objects(db_session, svc.Actor.system(), ready.id)
+    body = _view(whmcs.call("firewall", ready.id))
+    group_rule, ipset_rule = body["rules"]
+    revision = body["revision"]
+    for response in (
+        whmcs.call("firewall_rules_replace", ready.id, body={"revision": revision, "rules": [ipset_rule, SSH]}),
+        whmcs.call("firewall_rules_replace", ready.id, body={"revision": revision, "rules": [group_rule]}),
+        whmcs.call("firewall_rule_delete", ready.id, rule_id=group_rule["id"], query={"revision": revision}),
+    ):
+        assert_error(response, 403)
+        assert response.json()["code"] == "staff_attached"
+    assert _view(whmcs.call("firewall", ready.id)) == body
+    added = _view(whmcs.call("firewall_rules_replace", ready.id,
+                             body={"revision": revision, "rules": body["rules"] + [SSH]}))
+    assert [r["id"] for r in added["rules"][:2]] == [group_rule["id"], ipset_rule["id"]]
+
+
 def test_link_to_a_new_owner_drops_rules_referencing_the_old_owners_objects(whmcs, ready, db_session):
     from app.dao.user_dao import UserDAO
 

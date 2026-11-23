@@ -285,6 +285,30 @@ async def test_attached_hidden_group_id_answers_like_a_missing_id_and_shows_noth
 
 
 @pytest.mark.asyncio
+async def test_rules_staff_set_cannot_be_removed_through_the_mcp(db_session, world, vms, as_client):
+    from tests.api.vm_firewall_helpers import seed_hidden_admin_objects
+
+    alice, alice_vm = world.users["alice"], vms[0]
+    hidden = seed_hidden_admin_objects(db_session, world.staff_actor, alice_vm.id)["group"]
+    view = await _view(alice, as_client, alice_vm.id)
+    group_rule, ipset_rule = view["rules"]
+    for op, params in (
+        ("replace_rules", {"rules": [ipset_rule]}),
+        ("replace_rules", {"rules": [group_rule, SSH]}),
+        ("delete_rule", {"rule_id": group_rule["id"]}),
+        ("delete_rule", {"rule_id": ipset_rule["id"]}),
+        ("detach_group", {"group_id": hidden.id}),
+    ):
+        with pytest.raises(ToolError) as exc:
+            await _fw(alice, ["write"], op, as_client, alice_vm.id, confirm=True, **params)
+        assert _error(exc)["code"] == "staff_attached", (op, params)
+    view_after = await _view(alice, as_client, alice_vm.id)
+    assert view_after == view
+    added = await _fw(alice, ["write"], "add_rule", as_client, alice_vm.id, rule=SSH)
+    assert [r["id"] for r in added["rules"][:2]] == [group_rule["id"], ipset_rule["id"]]
+
+
+@pytest.mark.asyncio
 async def test_suspended_vm_refuses_firewall_ops(db_session, world, vms, as_client):
     from app.models.service import ServiceStatus
 

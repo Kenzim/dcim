@@ -510,6 +510,48 @@ def _kept_admin_refs(
     return out
 
 
+def _hidden_admin(db: Session, model, ref: Optional[int]) -> bool:
+    obj = db.get(model, ref) if ref is not None else None
+    return (
+        obj is not None
+        and _value(obj.scope) == FirewallObjectScope.ADMIN.value
+        and not bool(obj.client_selectable)
+    )
+
+
+def _staff_set(db: Session, rule: FirewallRule) -> bool:
+    """Whether a rule of the VM references an admin group or admin IP set that clients may not
+    select: only staff can have put it there."""
+    return _hidden_admin(db, FirewallGroup, rule.ref_group_id) or _hidden_admin(db, FirewallIpset, rule.remote_ipset_id)
+
+
+def _staff_attached(field: Optional[str]) -> FirewallForbidden:
+    return FirewallForbidden("This rule was set by us and cannot be removed or changed", code="staff_attached",
+                             field=field)
+
+
+def _check_staff_rules_kept(
+    db: Session, service_id: int, actor: Actor, specs: Sequence[v.RuleSpec], ids: Sequence[Optional[int]],
+    field_path: str,
+) -> None:
+    """A client or billing list must keep every staff-set rule (``_staff_set``) under its id, with
+    the same effect; only its position and comment may change."""
+    if actor.is_staff:
+        return
+    index_of: dict[int, int] = {}
+    for index, rule_id in enumerate(ids):
+        if rule_id is not None:
+            index_of.setdefault(rule_id, index)
+    for rule in service_rules(db, service_id):
+        if not _staff_set(db, rule):
+            continue
+        index = index_of.get(rule.id)
+        if index is None:
+            raise _staff_attached(field_path)
+        if not specs[index].same_effect(v.specs_from_rows([rule])[0]):
+            raise _staff_attached(f"{field_path}[{index}]")
+
+
 def _validated_service_rules(
     db: Session,
     service: Service,
@@ -528,9 +570,12 @@ def _validated_service_rules(
         max_group_refs=limits.max_groups_per_vm,
     )
     kept = None
+    if ids is None:
+        ids = _raw_ids(raw)
     if not actor.is_staff:
-        kept = _kept_admin_refs(db, service.id, _raw_ids(raw) if ids is None else ids)
+        kept = _kept_admin_refs(db, service.id, ids)
     _check_references(db, specs, service.owner_user_id, actor, field_path, kept=kept)
+    _check_staff_rules_kept(db, service.id, actor, specs, ids, field_path)
     _check_rendered(db, service.id, specs, limits, field_path)
     return specs
 
@@ -801,6 +846,8 @@ def update_rule(
 def delete_rule(db: Session, service_id: int, actor: Actor, rule_id: int, *, revision: int) -> None:
     service, row = _locked(db, service_id, actor, revision)
     target = _service_rule(db, service_id, rule_id)
+    if not actor.is_staff and _staff_set(db, target):
+        raise _staff_attached("rule_id")
     before = _rule_summary(v.specs_from_rows([target]))[0]
     db.delete(target)
     db.flush()
@@ -896,6 +943,8 @@ def detach_group(db: Session, service_id: int, actor: Actor, group_id: int, *, r
     refs = [rule for rule in service_rules(db, service_id) if rule.ref_group_id == group_id]
     if not refs:
         raise FirewallNotFound("This group is not attached", code="group_not_attached")
+    if not actor.is_staff and any(_staff_set(db, rule) for rule in refs):
+        raise _staff_attached("group_id")
     for rule in refs:
         db.delete(rule)
     db.flush()

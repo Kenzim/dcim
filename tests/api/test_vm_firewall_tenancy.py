@@ -234,6 +234,75 @@ def test_client_can_save_its_list_with_staff_references_but_not_add_new_ones(cli
     assert added_one.status_code == 200, added_one.text
 
 
+def test_client_cannot_remove_or_change_what_staff_set(client, db_session, world, alice_vm, alice):
+    seeded = seed_hidden_admin_objects(db_session, world.staff_actor, alice_vm.id)
+    url = BASE.format(alice_vm.id)
+    before = _view(client, alice, alice_vm.id)
+    group_rule, ipset_rule = before["rules"]
+    revision = before["revision"]
+    opened = {**ipset_rule, "remote_ipset_id": None, "remote_cidrs": ["0.0.0.0/0"]}
+    for name, response in {
+        "drop the group": client.put(url + "/rules", json={"revision": revision, "rules": [ipset_rule]}, headers=alice),
+        "drop the IP set rule": client.put(url + "/rules", json={"revision": revision, "rules": [group_rule]},
+                                           headers=alice),
+        "disable the group": client.put(url + "/rules", json={"revision": revision,
+                                                              "rules": [{**group_rule, "enabled": False}, ipset_rule]},
+                                        headers=alice),
+        "change the IP set": client.put(url + "/rules", json={"revision": revision, "rules": [group_rule, opened]},
+                                        headers=alice),
+        "update the IP set rule": client.put(f"{url}/rules/{ipset_rule['id']}",
+                                             json={"revision": revision, "rule": {**ipset_rule, "ports": "2222"}},
+                                             headers=alice),
+        "delete the group rule": client.delete(f"{url}/rules/{group_rule['id']}", params={"revision": revision},
+                                               headers=alice),
+        "delete the IP set rule": client.delete(f"{url}/rules/{ipset_rule['id']}", params={"revision": revision},
+                                                headers=alice),
+        "detach the group": client.delete(f"{url}/groups/{seeded['group'].id}", params={"revision": revision},
+                                          headers=alice),
+    }.items():
+        assert response.status_code == 403, (name, response.text)
+        assert response.json()["code"] == "staff_attached", name
+    assert _view(client, alice, alice_vm.id) == before
+
+    # The client still orders its list, comments, and adds rules and presets around them.
+    moved = client.put(url + "/rules", json={"revision": revision,
+                                             "rules": [{**ipset_rule, "comment": "mine"}, group_rule, SSH]},
+                       headers=alice)
+    assert moved.status_code == 200, moved.text
+    preset = client.post(url + "/presets/web", json={"revision": moved.json()["revision"]}, headers=alice)
+    assert preset.status_code == 200, preset.text
+    assert [r.get("group_id") for r in preset.json()["rules"]][1] == seeded["group"].id
+
+
+def test_client_may_drop_selectable_and_own_groups_and_staff_may_drop_anything(
+    client, db_session, world, alice_vm, alice, admin
+):
+    hidden = seed_hidden_admin_objects(db_session, world.staff_actor, alice_vm.id)["group"]
+    offered = svc.create_group(db_session, world.staff_actor, name="offered", rules=[WEB], client_selectable=True)
+    own = svc.create_group(db_session, world.actor("alice"), name="mine", rules=[SSH])
+    row = svc.get_or_create(db_session, alice_vm.id)
+    svc.attach_group(db_session, alice_vm.id, world.staff_actor, offered.id, revision=row.revision)
+    svc.attach_group(db_session, alice_vm.id, world.actor("alice"), own.id, revision=row.revision)
+    db_session.commit()
+    url = BASE.format(alice_vm.id)
+    view = _view(client, alice, alice_vm.id)
+    kept = [r for r in view["rules"] if r.get("group_id") not in (offered.id, own.id)]
+    dropped = client.put(url + "/rules", json={"revision": view["revision"], "rules": kept}, headers=alice)
+    assert dropped.status_code == 200, dropped.text
+    assert [r.get("group_id") for r in dropped.json()["rules"]][0] == hidden.id
+    assert len(dropped.json()["rules"]) == 2
+
+    staff_url = f"/api/admin/vm-firewall/services/{alice_vm.id}"
+    removed = client.delete(f"{staff_url}/groups/{hidden.id}", params={"revision": dropped.json()["revision"]},
+                            headers=admin)
+    assert removed.status_code == 200, removed.text
+    rules = removed.json()["rules"]
+    assert len(rules) == 1 and rules[0]["remote_ipset_id"] is not None
+    cleared = client.put(f"{staff_url}/rules", json={"revision": removed.json()["revision"], "rules": []}, headers=admin)
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["rules"] == []
+
+
 def test_foreign_group_left_after_an_ownership_change_is_neutral_and_raised_to_staff(
     client, db_session, world, alice_vm, alice, bob, admin
 ):
