@@ -128,6 +128,43 @@ async def test_step_replaces_inherited_fw_sets_flag_and_blocks_smtp(world, fake)
 
 
 @pytest.mark.asyncio
+async def test_two_runs_of_one_jobs_step_do_not_share_the_vm_claim(world, fake):
+    """A job whose lease lapsed while its firewall step ran is reclaimed and the step runs again
+    while the first run still writes. The second run must not take over the first's claim (and so
+    must write nothing), and the first run must still finish and release its claim."""
+    from sqlalchemy.orm import Session
+
+    world.enable_location(nic_flag_on_provision=True)
+    vm = world.vm()
+    fake.add_vm(vm.vm.proxmox_vmid).set_option("enable", 1)
+    world.db.commit()
+    second = []
+    request = fake.request
+
+    async def first_run_pauses_at_its_first_write(method, path, params=None):
+        if method != "GET" and not second:
+            second.append(len(fake.writes))
+            with Session(bind=world.db.get_bind(), autoflush=False) as other:
+                ctx = _ctx(world, vm)
+                ctx.db = other
+                try:
+                    await ApplyFirewallStep().execute(ctx)
+                except DeploymentError as exc:
+                    second.append(str(exc))
+            second.append(len(fake.writes))
+        return await request(method, path, params)
+
+    fake.request = first_run_pauses_at_its_first_write
+    outcome = await _run_step(_ctx(world, vm))
+    assert outcome.result == StepResult.READY
+    assert second[1] == "firewall is being applied by the worker; retrying"
+    assert second[0] == second[2], "the second run must not write while the first holds the claim"
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.applied_revision == row.revision and row.claimed_by is None
+
+
+@pytest.mark.asyncio
 async def test_step_skips_a_new_vm_in_a_disabled_location(world, fake):
     fw.update_location_settings(world.db, world.staff_actor, world.location.id, enabled=False)
     vm = world.vm()
