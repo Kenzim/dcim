@@ -34,7 +34,9 @@ ledger fact 9eb1f440.
   are untouched by construction.
 - Everything is **off by default**: per location opt-in by an admin, then per VM opt-in by the client
   (or admin). New VMs in an opted-in location get `firewall=1` on `net0` at creation so a later opt-in
-  causes no interruption; existing VMs get one network blip of about 0.1 s when their NIC flag flips.
+  causes no interruption; existing VMs get one short network blip when their NIC flag flips (measured
+  on the nested test cluster: median 64 ms, worst 105 ms on nftables; median 169 ms, worst 363 ms on
+  iptables; section 9.4). The UI says "under half a second".
 - Surfaces: admin UI, client portal, WHMCS client area (native section, not the plugin panel),
   reseller panel (read only), client MCP, staff MCP (one compact tool inside the 38,000-byte budget),
   REST API, an audit row for every change, alerts for apply failures, drift and an unready cluster.
@@ -366,9 +368,22 @@ What a running VM sees when its flag flips (measured, nftables backend): qemu-se
 tap from the bridge and plugs it back (`tap_unplug` and `tap_plug`); the guest's virtual NIC is not
 hot-unplugged and its carrier does not change. The tap was off the bridge for 115 to 132 ms; 6 to 7
 pings at 20 ms intervals were lost; an open TCP stream stalled 226 ms and survived. Toggling the
-VM-level `enable` caused no loss at all. On the iptables backend the same code path also creates
-`fwbr`/`fwpr`/`fwln` devices; the blip is expected to be similar but must be measured on the nested
-test cluster before production if production uses iptables (section 9.4).
+VM-level `enable` caused no loss at all.
+
+Measured again on the nested test cluster (section 9.4, 20 ms ping interval, so about plus or minus
+20 ms): nftables median 64 ms, worst 105 ms over 20 flips, an open TCP stream stalled about 215 ms;
+iptables median 169 ms, worst 363 ms over 19 flips (0 to 1 is the slower direction, worst 363 ms), a
+TCP stream stalled typically 229 ms and up to 803 ms (a second retransmission), and the
+`fwbr`/`fwpr`/`fwln` devices appear and disappear with the flag. The guest saw no carrier change on
+either backend. The test cluster's qemu-server (9.2.20) is newer than production's and the flip runs
+through qemu-server, so production may differ; re-measure on one production-like VM before quoting a
+figure to clients. Every warning shown to admins and clients says "under half a second".
+
+The flip must send the whole `net0` value read just before (model, MAC, bridge, tag, rate and the
+changed `firewall` key) as form-encoded data: a malformed value in a hand-made test call was accepted
+by Proxmox and left the guest with no bridge. `proxmox_fw.set_net0_firewall_flag` reads `net0`,
+replaces only `firewall=` and writes it with the config digest; the end-to-end run (9.4) checks it
+against the real API.
 
 ## 6. Reconcile worker
 
@@ -482,8 +497,9 @@ before the cluster step, clients cannot see it then). Enabling a location:
 The client (or staff) opens Firewall and turns it on. The first time, the UI proposes rules from the
 VM's template OS (Linux: SSH and ping; Windows: RDP and ping) with inbound DROP and outbound ACCEPT, and
 shows them before saving. If the VM's `net0` flag is still 0 (VMs created before the location was
-enabled), the UI says "Turning the firewall on briefly interrupts this server's network (well under a
-second)" and the request must carry `confirm_interruption=true`.
+enabled), the UI says "Turning the firewall on briefly interrupts this server's network (under half a
+second)" and the request must carry `confirm_interruption=true`. When Rackflow cannot read the VM's
+live config, it treats the flag as unknown and requires the confirmation too.
 
 ### 8.3 Baseline for every VM in a location
 
@@ -491,8 +507,8 @@ second)" and the request must carry `confirm_interruption=true`.
 
 - the admin first sees a preview (`POST /api/admin/vm-firewall/locations/{id}/rollout` with
   `dry_run`, backed by `preview_enforce_baseline_on_all`): how many existing VMs change, how many are
-  running without `firewall=1` on `net0` and will get the blip of about 0.1 s (section 5.2), and
-  which;
+  running without `firewall=1` on `net0` and will get the short blip (under half a second, measured
+  in sections 5.2 and 9.4), and which;
 - the switch is refused unless the request carries `confirm_existing_vms` equal to the previewed
   count (error `confirmation_required` with a fresh preview); turning it off needs no confirmation;
 - the change is audited `firewall.location_updated` with the counts;
@@ -507,8 +523,12 @@ SMTP blocking for existing VMs stays out of this (Q3: existing VMs unchanged).
 
 Per VM: client or staff turns it off, or staff sets `managed = false`; `enable: 0` is written, no blip.
 Per location: disable, and the worker writes `enable: 0` on every managed VM in it. The `net0` flags
-stay 1, which with the VM firewall disabled filters nothing (to be confirmed for the iptables backend
-in 9.4, where the `fwbr` path also adds conntrack load).
+stay 1, which with the VM firewall disabled filters nothing on nftables. On iptables (measured in
+9.4) a guest left at `firewall=1` with no VM firewall still passes traffic, but a connection from
+another host to one of its closed ports times out instead of being refused (the guest's reset is
+dropped as INVALID by the host's forward chain), so port checks and scanners see timeouts. On both
+backends its traffic stays in the host's connection tracking while the datacenter firewall is on
+(9.3).
 
 ## 9. Datacenter and node firewall: the safety rules
 
@@ -564,14 +584,28 @@ When the datacenter firewall is enabled, every node's **host** firewall starts t
 defaults to on), and the datacenter `policy_in` defaults to **DROP**. With defaults, host traffic is
 then allowed only from the auto-detected local management network to SSH, the API (8006), VNC and
 corosync. Ceph between nodes, the Rackflow app reaching 8006 from another network, monitoring and
-anything else would be cut: on a hyper-converged cluster that is a storage outage. On the iptables
-backend, enabling it also turns on bridge netfilter and conntrack for bridged traffic, which can fill
-the conntrack table on busy hosts. epyc is already enabled (ACCEPT policies, a `fleet-tenant` group
+anything else would be cut: on a hyper-converged cluster that is a storage outage (the nested
+contrast run in 9.4 confirmed this: every new connection from outside the node's own subnet, and all
+ICMP, was blocked on both backends, while established flows survived). Connection tracking also
+changes (measured in 9.4): on iptables, enabling the datacenter firewall turns on bridge netfilter
+and **every bridged guest's traffic on the host is tracked from that moment**, including guests whose
+NIC has `firewall=0`, even with `host.fw` `enable: 0`; on nftables nothing is tracked until the first
+VM firewall on a node is enabled, and **then every bridged guest's flows on that node are tracked**,
+again including `firewall=0` guests. A full conntrack table drops new connections for every VM on the
+host, not only opted-in ones. epyc is already enabled (ACCEPT policies, a `fleet-tenant` group
 from another project, `nftables: 1`), so epyc tells us nothing about this step.
 
 Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
 
-1. Read-only survey (done for production, 9.2a) and the pre-enable audit (9.2).
+1. Read-only survey (done for production, 9.2a) and the pre-enable audit (9.2). The survey also
+   reads, on every node, `net.netfilter.nf_conntrack_count`, `nf_conntrack_max` and the peak count
+   over a busy period (`conntrack -S` or a few samples of the count), read only: no sysctl changes,
+   and on hv-01, hv-21 and hv-22 nothing beyond reading. Each bridged flow costs one entry (a UDP
+   entry lives about 30 to 120 s, an established TCP entry much longer). If a node's estimated peak
+   with all its guests' flows tracked is above about half of `nf_conntrack_max`, the plan must say
+   which comes first: raising `nf_conntrack_max` (and the hash size) on that node in a separate,
+   approved change, or keeping that node's location off. The proposal to Kenzi states the numbers
+   per node.
 2. Neutralise pre-existing guest firewalls: for every guest the audit lists that Rackflow does not
    manage, write `enable: 0` in its VM firewall options (a no-op today, because the datacenter is off,
    so it changes nothing that runs). Guests whose owners really want those settings are opted in
@@ -583,19 +617,27 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
 4. In `cluster.fw` write `policy_in: ACCEPT`, `policy_out: ACCEPT`, `policy_forward: ACCEPT` and,
    on the iptables backend only, `ebtables: 0` unless the survey shows ebtables is wanted, **before**
    `enable`.
-5. Set `enable: 1` in `cluster.fw`. Watch from a second session that SSH, 8006, corosync quorum and
-   Ceph health stay green on every node for 10 minutes; the rollback is setting `enable: 0` again,
-   which `pvesh` or the GUI can do from any node.
+5. Set `enable: 1` in `cluster.fw`. Watch from a second session that SSH, 8006, corosync quorum,
+   Ceph health and `nf_conntrack_count` stay green on every node for 10 minutes; the rollback is
+   setting `enable: 0` again, which `pvesh` or the GUI can do from any node. On iptables the rollback
+   leaves `net.bridge.bridge-nf-call-iptables` and `-ip6tables` at 1 (they were 0); new bridged flows
+   are no longer tracked once the rules are gone, but to return the host fully to its earlier state
+   also run `sysctl -w net.bridge.bridge-nf-call-iptables=0 net.bridge.bridge-nf-call-ip6tables=0` on
+   each node (tested in 9.4; `br_netfilter` is built into the PVE kernel and cannot be unloaded).
+   On nftables nothing is left behind.
 6. Run Rackflow's readiness check and the pre-enable audit again (it must list nothing unmanaged);
    then enable the location in Rackflow.
 
-**Backend: nftables (`proxmox-firewall`) recommended.** Measured on epyc: with the nftables backend a
-NIC with `firewall=1` whose VM firewall is disabled creates no conntrack entries, and a VM with its
-firewall enabled has only its own flows tracked (300 of 300 test flows), through a per-tap verdict map
-in the `bridge proxmox-firewall-guests` table. The iptables backend needs `br_netfilter` with
-`bridge-nf-call-iptables`, which sends bridged traffic through iptables and conntrack on the host;
-on production that would be 851 VMs' traffic on 25G uplinks against a 262,144-entry conntrack table
-per node. Choosing nftables is the `nftables: 1` line in each node's `host.fw` in step 3, so the
+**Backend: nftables (`proxmox-firewall`) recommended**, confirmed by the nested test (9.4): with
+`host.fw` `enable: 0` the datacenter enable installs nothing and tracks nothing until a VM firewall is
+switched on; the NIC flip is shorter (median 64 ms against 169 ms) and creates no `fwbr` devices; a
+closed port still answers with a refusal; rollback leaves nothing behind. An earlier single-node
+measurement on epyc suggested nftables tracks only the enabled VM's own flows; the controlled nested
+test showed otherwise: once any VM firewall on a node is enabled, the `bridge proxmox-firewall-guests`
+table tracks every bridged guest's flows on that node (300 of 300 for a `firewall=0` guest too). So
+nftables delays the conntrack cost until the first opted-in VM on a node, but does not avoid it; the
+conntrack check in step 1 applies to both backends. On production that is up to 851 VMs' traffic on
+25G uplinks against a 262,144-entry conntrack table per node. Choosing nftables is the `nftables: 1` line in each node's `host.fw` in step 3, so the
 production step writes `host.fw` with `enable: 0` and `nftables: 1` on all 23 nodes. Both daemons
 running on every node is the normal PVE 9 install (epyc is the same): the `nftables` host option picks
 which one generates rules, and the other stays idle, so they do not both manage rules. The option must
@@ -616,7 +658,64 @@ an unused VMID range on the isolated `vmbr90`), and on it:
   backend (on nftables it does not, measured on epyc), and whether `br_netfilter` then tracks every
   bridged VM's traffic.
 
-The results go into this section before the production step is proposed.
+**Results (chat B0, 2026-11-23).** Full write-up, scripts and raw logs:
+`/root/dcim/.forge/reviews/vm-firewall/b0-nested.md` and `b0-scripts/` (outside the repository).
+
+The cluster: VMs 7910 (fwn1) and 7911 (fwn2) on epyc, cluster `b0nested`, PVE 9.2 with
+`pve-firewall` 6.0.4 and `proxmox-firewall` 1.2.3 pinned to production's versions. qemu-server is
+9.2.20, newer than production's (a full downgrade conflicted with the repository), which matters for
+the NIC flip because it runs through qemu-server. Guests 101, 102, 103 on fwn1 and 201 on fwn2, all on
+the plain bridge `vmbr0` (10.198.0.0/24); a separate host interface carried a steady Ceph-like TCP
+stream between the nodes.
+
+| Check | iptables | nftables |
+|---|---|---|
+| Steps 3 to 5 of 9.3 | Safe: 0 SSH, API or quorum failures, 0 lost pings, 0 stream stalls over 100 ms. Installs about 80 PVEFW rules and sets `bridge-nf-call-iptables` to 1 | Safe: same, and installs nothing at all. Two stalls of 103 and 108 ms during later NIC flips, judged noise, not ruled out |
+| Contrast run (datacenter on with defaults) | Established flows and the node's local subnet survived; every new connection from other subnets (LAN SSH, API, Ceph-like network) and all ICMP blocked; revert from the guest-agent console path took 7 to 8 s | Same |
+| VM firewall with `host.fw` `enable: 0` | Works: unlisted ports blocked, listed allowed, spoofed source dropped | Works |
+| NIC flag flip on a running guest | Median 169 ms, worst 363 ms (19 flips); TCP stall up to 803 ms; `fwbr` devices come and go | Median 64 ms, worst 105 ms (20 flips); TCP stall about 215 ms; no extra devices |
+| Conntrack (300 UDP flows, one entry per flow) | Every bridged guest tracked from the datacenter enable, including `firewall=0` guests | Nothing tracked until a VM firewall on the node is enabled, then every bridged guest on that node, including `firewall=0` guests |
+| Closed port on a `firewall=1` guest with no VM firewall | Times out (reset dropped as INVALID) | Refused normally |
+| Rollback (`cluster.fw` `enable: 0`) | Rules gone, no stall; `bridge-nf-call-iptables`/`ip6tables` stay 1; new flows not tracked; `sysctl -w ...=0` restores the earlier state | Rules gone, nothing left behind |
+
+Consequences, already applied above: the flip figures (5.2, 8.2, 8.3), the conntrack check and the
+iptables sysctl step (9.3), the closed-port behaviour (8.4), and nftables as the backend.
+
+Further points from the test:
+
+- The datacenter `management` IP set is the node's own local subnet. Rackflow's API access and any
+  monitoring subnet must be inside it, or in an explicit allow rule, before any datacenter policy
+  stricter than ACCEPT. With the 9.3 ACCEPT policies this does not arise.
+- Privileges the worker needs on a cluster, tested with a dedicated token: role with `Sys.Audit`,
+  `VM.Audit` and `VM.Config.Network` on `/`, plus `SDN.Use` on `/sdn/zones/localnetwork` (or the zone
+  of the VM's bridge): a `net0` write, even of the firewall flag only, is refused without `SDN.Use`.
+  That token can read everything readiness needs and write VM firewall options, rules and IP sets and
+  the `net0` flag, and is refused for datacenter and node firewall writes, VM memory, stop and delete.
+  Rackflow never writes `cluster.fw` or `host.fw` (9.1), so it never needs `Sys.Modify`; production
+  should use a token with exactly these privileges.
+- Not tested: production's older qemu-server, IPv6, guests on VLAN-aware bridges, real Ceph load.
+
+**Kept for the end-to-end worker run.** Before the production procedure goes to Kenzi, Rackflow's real
+worker runs end to end against this cluster: enable, a rule change, drift repair, rollback, an
+ineligible VM and the paced rollout of 8.3. Conditions: a development Rackflow instance with its own
+database, never production Rackflow or its database; the dedicated token `rackflow-fw@pve!worker` with
+the privileges above, its secret only in `/root/rackflow-fw-token.json` on fwn1 (mode 600) and in the
+development instance's settings, never in a chat, document or ledger. The cluster was left on the
+nftables backend, firewall off (`cluster.fw` `enable: 0`, each `host.fw` `nftables: 1` and
+`enable: 0`, every guest NIC `firewall=0`, no VM firewall files). API at `https://<fwn1 or fwn2>:8006`
+with a self-signed certificate; the node addresses are DHCP leases on the LAN, listed in the B0
+write-up with how to look them up again.
+
+**Teardown.** The chat that runs the end-to-end test tears the cluster down right after its results
+are recorded here:
+
+1. On fwn1: `pveum user token remove rackflow-fw@pve worker; pveum user delete rackflow-fw@pve;
+   pveum role delete RackflowFW; pveum role delete RackflowFWNet; shred -u /root/rackflow-fw-token.json`,
+   and delete the secret from the development instance's settings.
+2. On epyc: `qm stop 7910; qm stop 7911; qm destroy 7910 --purge 1; qm destroy 7911 --purge 1`
+   (no `--destroy-unreferenced-disks`), then check that `ls /etc/pve/qemu-server/791*.conf` and
+   `zfs list | grep vm-791` print nothing. The guests live inside these two VMs and go with them.
+3. On the project host: remove the test SSH key copies listed in the B0 write-up.
 
 ## 10. Surfaces and API
 
@@ -834,9 +933,9 @@ Recommended defaults are what will be built unless told otherwise.
 | Q1 | Price: free for every VM, or a paid add-on? | **Decided by Kenzi, 2026-11-23: free for every VM, no billing hook** |
 | Q2 | May clients switch off baseline protections (anti-spoofing, SMTP block)? | No. Admins can relax them per service (`admin_overrides`) or per product |
 | Q3 | Outbound SMTP (25) block: default for new VMs, and for existing ones? | **Decided by Kenzi, 2026-11-23: block outbound port 25 by default on new VMs in firewall-enabled locations; staff can unblock per service; 465 and 587 stay open; existing VMs unchanged.** Built as in 4.5a |
-| Q4 | Enabling the datacenter firewall on production cluster `pve-06` after the nested test, and which backend | nftables backend (production runs PVE 9.2.3 with `proxmox-firewall` already installed and running), following 9.3 exactly: `host.fw` with `enable: 0` and `nftables: 1` on all 23 nodes, ACCEPT policies, then `enable: 1`; done by the deploy agent with your approval, in a quiet hour, with the rollback ready |
+| Q4 | Enabling the datacenter firewall on production cluster `pve-06` after the nested test, and which backend | nftables backend (production runs PVE 9.2.3 with `proxmox-firewall` already installed and running), following 9.3 exactly: `host.fw` with `enable: 0` and `nftables: 1` on all 23 nodes, ACCEPT policies, then `enable: 1`; done by the deploy agent with your approval, in a quiet hour, with the rollback ready. Proven on the nested cluster (9.4). The proposal includes the read-only conntrack numbers per node (9.3 step 1) and, if a node's margin is small, whether `nf_conntrack_max` is raised first or that location stays off |
 | Q4a | 46 production guests already have `enable: 1` in their VM firewall file and 22 have `firewall=1` on a NIC; those with both would start filtering (default inbound DROP) the moment the datacenter firewall is on. Switch their VM firewall off first (9.3 step 2)? | Yes: write `enable: 0` on every guest the pre-enable audit lists that Rackflow does not manage (a no-op today), and tell the owners they can opt in through Rackflow |
-| Q5 | Anti-spoofing baseline on every VM in a location (each existing VM gets one blip of about 0.1 s), or only VMs whose owners opt in? | Opt-in VMs only at first; a staged rollout to all VMs later, announced to clients |
+| Q5 | Anti-spoofing baseline on every VM in a location (each existing VM gets one blip, under half a second as measured in 9.4), or only VMs whose owners opt in? | Opt-in VMs only at first; a staged rollout to all VMs later, announced to clients |
 | Q6 | Do production public networks carry IPv6 that VMs use today? | Answered 2026-11-23 (9.2a): no on `vmbr0` (no router adverts, no global IPv6 in use), so anti-spoofing with IPv4 plus the link-local address breaks nothing; `ndp` stays allowed. `vmbr750` does have router adverts: a VM NIC there is refused by eligibility until a per-location "allowed IPv6 prefix" is configured |
 | Q7 | `vm.firewall` permission on by default for every VM client, including resellers' clients? | Yes; resellers can turn it off through their product permission ceiling |
 | Q8 | WHMCS: full editor in the client area, or rules and presets in WHMCS with groups and IP sets in the Rackflow portal? | The latter (section 10.5) |

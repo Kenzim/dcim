@@ -78,7 +78,7 @@ async def firewall_error_handler(request: Request, exc: FirewallError) -> JSONRe
 
 def interruption_not_confirmed() -> FirewallConflict:
     return FirewallConflict(
-        "Turning the firewall on briefly interrupts this server's network (well under a second); "
+        "Turning the firewall on briefly interrupts this server's network (under half a second); "
         "send confirm_interruption=true to go ahead",
         code="interruption_confirmation_required",
         field="confirm_interruption",
