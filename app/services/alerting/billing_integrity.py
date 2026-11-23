@@ -1281,10 +1281,7 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
     The termination job leaves a failed power-off in ``needs_review``; once an
     admin settles it as ``done`` or ``failed`` no job acts on it again, so the
     service stays as it is. The service's own status decides here, not the
-    claim's. The service's latest terminate claim counts: one keyed by its
-    invoice (``service:{id}:terminate:invoice:{invoice_id}``) while that
-    invoice is still unpaid, one of the older per-service form
-    (``service:{id}:terminate``) while any cycle invoice is.
+    claim's.
     """
     del now
     import re
@@ -1296,14 +1293,13 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
     from app.services.billing.jobs.termination import JOB
 
     claims: dict[int, BillingJobAction] = {}
-    invoice_of: dict[int, int | None] = {}
-    pattern = re.compile(r"^service:(\d+):terminate(?::invoice:(\d+))?$")
+    pattern = re.compile(r"^service:(\d+):terminate$")
     rows = db.scalars(
         select(BillingJobAction)
         .where(
             BillingJobAction.job == JOB,
             BillingJobAction.status.in_([BillingJobActionStatus.DONE, BillingJobActionStatus.FAILED]),
-            BillingJobAction.subject_key.like("service:%:terminate%"),
+            BillingJobAction.subject_key.like("service:%:terminate"),
         )
         .order_by(BillingJobAction.id)
     )
@@ -1311,7 +1307,6 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
         match = pattern.match(row.subject_key)
         if match:
             claims[int(match.group(1))] = row
-            invoice_of[int(match.group(1))] = int(match.group(2)) if match.group(2) else None
     found: list[tuple[BillingJobAction, ServiceBilling]] = []
     ids = sorted(claims)
     for start in range(0, len(ids), 500):
@@ -1325,9 +1320,7 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
             )
         ).scalars()
         for billing in stuck:
-            unpaid = {invoice.id for invoice in unpaid_cycle_invoices(db, billing.id)}
-            claim_invoice = invoice_of[int(billing.service_id)]
-            if unpaid and (claim_invoice is None or claim_invoice in unpaid):
+            if unpaid_cycle_invoices(db, billing.id):
                 found.append((claims[int(billing.service_id)], billing))
     found.sort(key=lambda pair: pair[0].id)
     shown = found[: params["max_rows"]]
