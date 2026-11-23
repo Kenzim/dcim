@@ -1276,12 +1276,17 @@ def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[F
 
 
 def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -> list[Finding]:
-    """A settled termination claim whose service is still suspended for non-payment with a balance due.
+    """A termination claim not done by the job whose service is still suspended for non-payment with a balance due.
 
     The termination job leaves a failed power-off in ``needs_review``; once an
     admin settles it as ``done`` or ``failed`` no job acts on it again, so the
-    service stays as it is. The service's own status decides here, not the
-    claim's.
+    service stays as it is. A claim still in ``needs_review`` is reported too:
+    the termination is a go-live guarantee and ``billing_job_needs_review`` is
+    not required to go live. The service's own status decides here, not the
+    claim's. The service's latest terminate claim counts: one keyed by its
+    invoice (``service:{id}:terminate:invoice:{invoice_id}``) while that
+    invoice is still unpaid, one of the older per-service form
+    (``service:{id}:terminate``) while any cycle invoice is.
     """
     del now
     import re
@@ -1293,13 +1298,16 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
     from app.services.billing.jobs.termination import JOB
 
     claims: dict[int, BillingJobAction] = {}
-    pattern = re.compile(r"^service:(\d+):terminate$")
+    invoice_of: dict[int, int | None] = {}
+    pattern = re.compile(r"^service:(\d+):terminate(?::invoice:(\d+))?$")
     rows = db.scalars(
         select(BillingJobAction)
         .where(
             BillingJobAction.job == JOB,
-            BillingJobAction.status.in_([BillingJobActionStatus.DONE, BillingJobActionStatus.FAILED]),
-            BillingJobAction.subject_key.like("service:%:terminate"),
+            BillingJobAction.status.in_(
+                [BillingJobActionStatus.DONE, BillingJobActionStatus.FAILED, BillingJobActionStatus.NEEDS_REVIEW]
+            ),
+            BillingJobAction.subject_key.like("service:%:terminate%"),
         )
         .order_by(BillingJobAction.id)
     )
@@ -1307,6 +1315,7 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
         match = pattern.match(row.subject_key)
         if match:
             claims[int(match.group(1))] = row
+            invoice_of[int(match.group(1))] = int(match.group(2)) if match.group(2) else None
     found: list[tuple[BillingJobAction, ServiceBilling]] = []
     ids = sorted(claims)
     for start in range(0, len(ids), 500):
@@ -1320,20 +1329,36 @@ def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -
             )
         ).scalars()
         for billing in stuck:
-            if unpaid_cycle_invoices(db, billing.id):
+            unpaid = {invoice.id for invoice in unpaid_cycle_invoices(db, billing.id)}
+            claim_invoice = invoice_of[int(billing.service_id)]
+            if unpaid and (claim_invoice is None or claim_invoice in unpaid):
                 found.append((claims[int(billing.service_id)], billing))
     found.sort(key=lambda pair: pair[0].id)
     shown = found[: params["max_rows"]]
+
+    def _texts(claim) -> tuple[str, str]:
+        status = getattr(claim.status, "value", claim.status)
+        if status == BillingJobActionStatus.NEEDS_REVIEW.value:
+            return (
+                "is still suspended for non-payment; its termination failed and waits for review",
+                "The termination job could not terminate the service and left the action in review, and an "
+                "invoice is still unpaid. Nothing will retry it; check the service, terminate or unsuspend it "
+                "by hand, then settle the action.",
+            )
+        return (
+            "is still suspended for non-payment after its termination was settled",
+            f"An admin settled the termination as {status} without the service being terminated, and an "
+            "invoice is still unpaid. Nothing will terminate it automatically; terminate or unsuspend it by hand.",
+        )
+
     out = [
         Finding(
             "billing_nonpayment_termination_unsettled",
             "service",
             str(billing.service_id),
             f"Service {billing.service_id}",
-            f"Service {billing.service_id} is still suspended for non-payment after its termination was settled",
-            f"An admin settled the termination as {getattr(claim.status, 'value', claim.status)} without the "
-            "service being terminated, and an invoice is still unpaid. Nothing will terminate it "
-            "automatically; terminate or unsuspend it by hand.",
+            f"Service {billing.service_id} {_texts(claim)[0]}",
+            _texts(claim)[1],
             details={
                 "service_id": int(billing.service_id),
                 "billing_id": billing.id,

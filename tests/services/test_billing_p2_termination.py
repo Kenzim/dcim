@@ -107,12 +107,12 @@ def test_notice_then_terminate_after_the_notice_age(db_session, env):
     assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=6))) == {}
     # Seven days after the notice: terminated.
     assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {
-        terminate_key(billing.service_id): "done"
+        terminate_key(billing.service_id, invoice.id): "done"
     }
     assert db_session.get(Service, billing.service_id).status == ServiceStatus.TERMINATED
     row = db_session.get(ServiceBilling, billing.id)
     assert row.status == ServiceBillingStatus.CANCELLED
-    terminated = _claims(db_session)[terminate_key(billing.service_id)]
+    terminated = _claims(db_session)[terminate_key(billing.service_id, invoice.id)]
     assert terminated.status == BillingJobActionStatus.DONE
     assert terminated.detail["cancelled_invoice_ids"] == []
     assert db_session.query(UserAuditEvent).filter_by(action="billing.nonpayment_terminated").count() == 1
@@ -124,7 +124,7 @@ def test_the_terminate_claim_commits_before_the_lifecycle_call(db_session, env, 
     import app.services.commerce_lifecycle_service as lifecycle_module
 
     _, billing, _ = env
-    _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
     job = NonpaymentTerminationJob()
     run_job(db_session, job, make_run(JOB, now=NOW))
     real = lifecycle_module.terminate_service
@@ -132,12 +132,14 @@ def test_the_terminate_claim_commits_before_the_lifecycle_call(db_session, env, 
 
     async def checking(db, service, **kwargs):
         with sessionmaker(bind=db_session.get_bind())() as other:
-            seen.append(other.query(BillingJobAction).filter_by(subject_key=terminate_key(service.id)).one().status)
+            seen.append(
+                other.query(BillingJobAction).filter_by(subject_key=terminate_key(service.id, invoice.id)).one().status
+            )
         return await real(db, service, **kwargs)
 
     monkeypatch.setattr(lifecycle_module, "terminate_service", checking)
     assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {
-        terminate_key(billing.service_id): "done"
+        terminate_key(billing.service_id, invoice.id): "done"
     }
     assert seen == [BillingJobActionStatus.CLAIMED]
 
@@ -231,7 +233,7 @@ def test_staff_unsuspension_stops_termination(db_session, env):
 
 def test_failed_termination_needs_review_and_is_never_retried(db_session, env, monkeypatch):
     _, billing, _ = env
-    _suspend_retail(db_session, billing, NOW - timedelta(days=24))
+    invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
     job = NonpaymentTerminationJob()
     run_job(db_session, job, make_run(JOB, now=NOW))
 
@@ -241,7 +243,7 @@ def test_failed_termination_needs_review_and_is_never_retried(db_session, env, m
     import app.services.commerce_lifecycle_service as lifecycle_module
 
     monkeypatch.setattr(lifecycle_module, "terminate_service", failing)
-    terminate = terminate_key(billing.service_id)
+    terminate = terminate_key(billing.service_id, invoice.id)
     assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=8))) == {terminate: "failed"}
     claim = _claims(db_session)[terminate]
     assert claim.status == BillingJobActionStatus.NEEDS_REVIEW
@@ -260,7 +262,7 @@ def test_a_resolved_termination_is_never_retried_and_its_effect_never_run(db_ses
     invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
     job = NonpaymentTerminationJob()
     run_job(db_session, job, make_run(JOB, now=NOW))
-    terminate = terminate_key(billing.service_id)
+    terminate = terminate_key(billing.service_id, invoice.id)
     calls = []
 
     async def failing(db, service, **kwargs):
@@ -299,7 +301,7 @@ def test_a_settled_termination_with_the_service_still_suspended_is_alerted(db_se
     invoice = _suspend_retail(db_session, billing, NOW - timedelta(days=24))
     job = NonpaymentTerminationJob()
     run_job(db_session, job, make_run(JOB, now=NOW))
-    terminate = terminate_key(billing.service_id)
+    terminate = terminate_key(billing.service_id, invoice.id)
 
     async def failing(db, service, **kwargs):
         raise ServiceTerminationError("power off failed")
@@ -314,8 +316,10 @@ def test_a_settled_termination_with_the_service_still_suspended_is_alerted(db_se
     assert get_setting(db_session, "billing_tax_engine") == "legacy"
     params = {"max_rows": 10}
     detect = billing_integrity.nonpayment_termination_unsettled
-    # In review, the needs_review alert covers it, not this one.
-    assert detect(db_session, params, NOW) == []
+    # In review it is reported too (billing_job_needs_review is not a go-live alert).
+    (in_review,) = detect(db_session, params, NOW)
+    assert in_review.details["claim_status"] == "needs_review"
+    assert "waits for review" in in_review.title
     resolve_action(
         db_session, _claims(db_session)[terminate].id, to="failed", note="still running", actor_user_id=None,
         now=NOW + timedelta(days=8),
@@ -364,7 +368,7 @@ def test_a_resolved_notice_gates_termination_by_its_resolution_time(db_session, 
     # The notice counts as sent when it was resolved: a full notice period must pass from then.
     assert run_job(db_session, job, make_run(JOB, now=resolved_at + timedelta(days=6))) == {}
     assert run_job(db_session, job, make_run(JOB, now=resolved_at + timedelta(days=7))) == {
-        terminate_key(billing.service_id): "done"
+        terminate_key(billing.service_id, invoice.id): "done"
     }
 
 
@@ -394,7 +398,9 @@ def test_cancel_action_cancels_the_unpaid_invoices(db_session, env):
     assert db_session.get(Invoice, invoice.id).status == InvoiceStatus.VOID
     cycle = db_session.query(BillingCycle).filter_by(invoice_id=invoice.id).one()
     assert cycle.state == BillingCycleState.CANCELLED
-    assert _claims(db_session)[terminate_key(billing.service_id)].detail["cancelled_invoice_ids"] == [invoice.id]
+    assert _claims(db_session)[terminate_key(billing.service_id, invoice.id)].detail["cancelled_invoice_ids"] == [
+        invoice.id
+    ]
 
 
 def test_policy_null_never_terminates(db_session, env):
@@ -419,7 +425,9 @@ def test_reseller_service_suspended_by_the_recurring_pass(db_session, env):
     db_session.query(BillingCycle).filter_by(invoice_id=invoice.id).one().state = BillingCycleState.SUSPENDED
     db_session.commit()
     assert run_job(db_session, job, make_run(JOB, now=NOW)) == {notice_key(service.id, invoice.id): "done"}
-    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {terminate_key(service.id): "done"}
+    assert run_job(db_session, job, make_run(JOB, now=NOW + timedelta(days=7))) == {
+        terminate_key(service.id, invoice.id): "done"
+    }
     assert db_session.get(Service, service.id).status == ServiceStatus.TERMINATED
 
 

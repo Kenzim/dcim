@@ -1701,6 +1701,15 @@ async def update_service_status(
         details={"old_status": old_status.value, "new_status": new_status.value},
     )
 
+    # Billing before the service row (BillingLocks order).
+    if old_status == ServiceStatus.SUSPENDED and new_status == ServiceStatus.ACTIVE:
+        from app.services.billing.jobs.nonpayment import release_after_staff_unsuspend
+
+        release_after_staff_unsuspend(db, service, auth.get("user_id"))
+    if new_status == ServiceStatus.TERMINATED and old_status != ServiceStatus.TERMINATED:
+        from app.services.billing.jobs.termination import end_billing_after_staff_terminate
+
+        end_billing_after_staff_terminate(db, service, auth.get("user_id"))
     service.status = new_status
     if new_status == ServiceStatus.TERMINATED:
         service.terminated_at = datetime.now(timezone.utc)

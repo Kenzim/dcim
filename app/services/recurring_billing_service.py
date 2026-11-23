@@ -233,6 +233,7 @@ class RecurringBillingService:
             "manual_review": 0,
         }
 
+        self._fund_suspended_cycles_from_credit(db, limit=limit)
         recovered = await self._recover_paid_cycles(
             db, now=now, limit=limit, result=result
         )
@@ -321,6 +322,83 @@ class RecurringBillingService:
             if outcome in result:
                 result[outcome] += 1
         return result
+
+    def _fund_suspended_cycles_from_credit(self, db: Session, *, limit: int) -> None:
+        """Pay suspended reseller cycle invoices from the reseller's credit (design 10.4).
+
+        For a reseller billing suspended for non-payment whose cycle the pass
+        suspended, the reseller's available credit is applied to the unpaid
+        cycle invoice under the billing's lock, through the reseller
+        apply-credit path (``CreditLedgerService.apply_to_invoice``), when it
+        covers the whole balance. Credit short of the balance applies nothing.
+        Only credit is used, never a card or gateway. The paid-cycle recovery
+        that runs next completes the cycle and unsuspends the service.
+        """
+        from app.services.credit_ledger_service import CreditLedgerError
+        from app.services.invoice_service import UNPAID_STATUSES
+
+        conditions = (
+            BillingCycle.state == BillingCycleState.SUSPENDED,
+            Invoice.status.in_(list(UNPAID_STATUSES)),
+        )
+        candidates = db.execute(
+            select(BillingCycle.id, BillingCycle.service_billing_id)
+            .join(Invoice, Invoice.id == BillingCycle.invoice_id)
+            .join(ServiceBilling, ServiceBilling.id == BillingCycle.service_billing_id)
+            .where(
+                *conditions,
+                ServiceBilling.reseller_id.is_not(None),
+                ServiceBilling.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT,
+            )
+            .order_by(BillingCycle.id)
+            .limit(limit)
+        ).all()
+        for cycle_id, billing_id in candidates:
+            # A transaction per cycle that starts with the billing's lock, so
+            # what it reads next was committed before the lock was granted.
+            db.commit()
+            billing = BillingLocks.service_billing(
+                db,
+                int(billing_id),
+                where=(
+                    ServiceBilling.reseller_id.is_not(None),
+                    ServiceBilling.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT,
+                ),
+                skip_locked=True,
+            )
+            if billing is None:
+                continue
+            invoice = db.execute(
+                select(Invoice)
+                .join(BillingCycle, BillingCycle.invoice_id == Invoice.id)
+                .where(BillingCycle.id == cycle_id, *conditions)
+            ).scalar_one_or_none()
+            if invoice is None:
+                db.rollback()
+                continue
+            due = InvoiceService.balance(db, invoice).remaining_cents
+            if due <= 0 or CreditLedgerService.available_cents(db, billing.reseller) < due:
+                db.rollback()
+                continue
+            try:
+                CreditLedgerService.apply_to_invoice(
+                    db,
+                    invoice,
+                    amount_cents=due,
+                    idempotency_key=f"recurring-suspended-cycle:{cycle_id}:credit",
+                )
+            except CreditLedgerError as exc:
+                # Short of credit after the lock, a payment pending at a
+                # gateway, or a balance that moved: tried again next pass.
+                db.rollback()
+                logger.info(
+                    "Recurring billing %s: credit not applied to suspended cycle %s (%s)",
+                    billing_id,
+                    cycle_id,
+                    type(exc).__name__,
+                )
+                continue
+            db.commit()
 
     async def _recover_paid_cycles(
         self,

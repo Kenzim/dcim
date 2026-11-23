@@ -203,6 +203,7 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
     from app.services.billing.jobs.nonpayment import (
         cycle_billing_id,
         latest_suspension_claim,
+        suspension_claim_is_current,
         suspension_is_ours,
         unpaid_cycle_invoices,
     )
@@ -247,8 +248,12 @@ def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
 
         # Settlement has set the billing active; the service stays down, so
         # the billing keeps saying why and ``billing_nonpayment_suspended_paid``
-        # reports it.
-        if billing.status != ServiceBillingStatus.CANCELLED:
+        # reports it. A claim of an earlier episode that billing already
+        # ended (paid and lifted) does not explain this suspension: the
+        # billing stays as settlement left it.
+        if billing.status != ServiceBillingStatus.CANCELLED and suspension_claim_is_current(
+            db, service.id, claim, paid_invoice_id=invoice.id
+        ):
             billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
             db.flush()
 

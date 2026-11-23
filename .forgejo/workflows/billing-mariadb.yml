@@ -19,8 +19,10 @@
 # rate read and its write), a credit note's sterling after another note
 # committed, and the guard refusing a second sterling fill),
 # tests/services/test_billing_p2_suspension_mariadb.py (a payment landing
-# before, during and after the suspension job's locked re-check) against a
-# mariadb:11.8
+# before, during and after the suspension job's locked re-check),
+# tests/services/test_billing_p2_reseller_suspension_mariadb.py (a reseller
+# payment or credit top-up racing the recurring pass's non-payment suspension)
+# against a mariadb:11.8
 # service container, the
 # version production runs. Manual trigger only, so it never blocks other work;
 # the SQLite migration tests in tests/migrations run in the normal test suite.
@@ -87,6 +89,17 @@ jobs:
         run: python -m pytest tests/services/test_billing_p2_late_fee_mariadb.py -q
       - name: Payment racing the non-payment suspension's provider call on MariaDB
         run: python -m pytest tests/services/test_billing_p2_suspension_mariadb.py -q
+      - name: Reseller payment or credit top-up racing the recurring pass's suspension on MariaDB
+        env:
+          RACKFLOW_TEST_MARIADB_URL: mysql+pymysql://root:rackflow-ci@mariadb:3306/rackflow_test_reseller_suspension
+        run: |
+          python - <<'EOF'
+          import pymysql
+          connection = pymysql.connect(host="mariadb", user="root", password="rackflow-ci")
+          connection.cursor().execute("CREATE DATABASE IF NOT EXISTS rackflow_test_reseller_suspension")
+          connection.close()
+          EOF
+          python -m pytest tests/services/test_billing_p2_reseller_suspension_mariadb.py -q
       - name: Cancellation request racing invoice generation on MariaDB
         run: python -m pytest tests/services/test_billing_p2_cancel_mariadb.py -q
       - name: Billing job claims and leases under concurrency on MariaDB

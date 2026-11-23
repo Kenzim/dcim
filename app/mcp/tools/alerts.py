@@ -65,10 +65,25 @@ async def alerts(
             else:
                 alerts_admin.unacknowledge(db, alert_id)
             return alerts_admin.alert_detail(db, alert_id)
+        try:
+            return _silence_write(db, user_id)
+        except Exception:
+            # The silence and its audit row commit together or not at all;
+            # run_tool commits whatever is left in the session.
+            db.rollback()
+            raise
+
+    def _silence_write(db, user_id):
+        """Silence or unsilence with the same audit rows as the admin API, in run_tool's transaction."""
         if action == "silence":
+            from app.api.alerts import _audit, _silence_snapshot
+
             _need("silence", duration_minutes=duration_minutes)
             if alert_id is not None:
-                row = alerts_admin.silence_alert(db, alert_id, user_id=user_id, duration_minutes=duration_minutes, reason=note)
+                row = alerts_admin.silence_alert(
+                    db, alert_id, user_id=user_id, duration_minutes=duration_minutes, reason=note, commit=False
+                )
+                metadata = {"alert_id": alert_id, **_silence_snapshot(row)}
             else:
                 row = alerts_admin.create_silence(
                     db,
@@ -78,10 +93,19 @@ async def alerts(
                     resource_id=resource_id,
                     duration_minutes=duration_minutes,
                     reason=note,
+                    commit=False,
                 )
+                metadata = _silence_snapshot(row)
+            _audit(db, {"user_id": user_id}, "alert.silence_created", "alert_silence", row.id, metadata)
             return alerts_admin.serialise_silence(row, alerts_admin.utcnow())
+        from app.api.alerts import _audit, _silence_snapshot
+        from app.models.alerting import AlertSilence
+
         _need("unsilence", silence_id=silence_id)
-        alerts_admin.delete_silence(db, silence_id)
+        existing = db.get(AlertSilence, silence_id)
+        snapshot = _silence_snapshot(existing) if existing is not None else {}
+        alerts_admin.delete_silence(db, silence_id, commit=False)
+        _audit(db, {"user_id": user_id}, "alert.silence_deleted", "alert_silence", silence_id, snapshot)
         return {"ok": True}
 
     return await run_tool("alerts", "write", write, args=args)
