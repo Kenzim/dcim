@@ -407,6 +407,27 @@ against the real API.
    `next_attempt_at <= now`. Claimed per row (`claimed_by`, `claimed_until` 120 s, conditional update),
    at most `vm_firewall_cluster_concurrency` per cluster at once. Changes made within 2 s of each other
    are coalesced by reading the revision at claim time.
+
+   **Claims during an apply.** Every applier takes the row's claim first: the queue, the drift repair,
+   the deployment step (`apply_for_provision`) and staff "apply now". The claim is the only thing
+   that keeps two appliers apart; the apply's session holds no row lock while it talks to Proxmox,
+   and each applier renders the desired document once, so without it an older revision could be
+   written over a newer one. While it applies, an applier:
+
+   - renews its claim before every Proxmox write (each planned operation and the `net0` firewall
+     flag): a conditional update on `claimed_by = owner` that moves `claimed_until` to 120 s from now.
+     The renewal runs in a short session of its own and commits at once; the apply's own session keeps
+     its row changes unflushed until the outcome is recorded. A renewal that matches no row means
+     another applier has the VM (the claim expired and was taken), and the apply stops before that
+     write. One apply may therefore run longer than 120 s, as long as no single write does;
+   - before recording `applied_revision`, `applied_hash` and `applied_digest`, reads `claimed_by`
+     with `SELECT ... FOR UPDATE` in its own session and records only if the claim is still its own;
+     the lock lasts until that session commits, so nobody can take the claim in between.
+
+   An apply that lost its claim records nothing: its unflushed row changes are discarded, the VM is not
+   marked `error`, the staged-rollout count is not touched, and the row is left for whoever holds the
+   claim now (or the next tick). The worker logs it; the deployment step fails and is retried; staff
+   "apply now" answers 409 `apply_in_progress`.
 2. **Drift sweep** (every `vm_firewall_reconcile_interval_seconds`, spread over the interval): for each
    managed row, `GET .../firewall/options`. If the digest equals `applied_digest` and the options match,
    the VM is in sync (one API call per VM). Otherwise read rules, IP sets and `net0`, compare with the
@@ -897,7 +918,7 @@ detail (`GET /api/services/{id}`) carries `firewall_available`.
 | `GET /services?state=&location_id=&q=&offset=&limit=` | `[{service_id, service_name, owner_user_id, owner_username, location_id, location_name, cluster_id, node, vmid, state, client_enabled, managed, excluded, nic_flag, revision, applied_revision, last_applied_at, last_error}]`; a VM never opened shows `off` |
 | `GET/PUT /services/{id}` | The client view plus `managed, excluded, enforce_baseline, admin_overrides, location_id, cluster_id, cluster_ready, nics_checked, net0_bridge, rollout_after, applied_revision, desired_hash, applied_hash, in_sync, last_error, failing_since, last_checked_at, next_attempt_at, drift_repairs_24h, rendered: {options, rules[]}`; PUT takes the client fields and the four admin ones under one `revision`. Staff see the firewall of a VM in a staging location (`available` true) |
 | `PUT/POST /services/{id}/rules`, `PUT/DELETE /services/{id}/rules/{rule_id}`, `POST /services/{id}/rules/order`, `POST /services/{id}/presets/{key}`, `POST/DELETE /services/{id}/groups/{group_id}` | As the client routes, answering the staff view |
-| `POST /services/{id}/apply` | Apply now: `{result: {ok, state, ...}, firewall: <staff view>}`; 502 when Proxmox is unreachable |
+| `POST /services/{id}/apply` | Apply now: `{result: {ok, state, ...}, firewall: <staff view>}`; 502 when Proxmox is unreachable. Takes the VM's claim (owner `staff-<user id>-<random>`) for the apply and releases it afterwards; while the worker or a deployment holds it, 409 `apply_in_progress` ("This server's firewall is being applied right now. Try again in a minute.") and nothing is written |
 | `POST /services/{id}/check` | Drift check now, writes nothing: `{in_sync, differences[], ...}`; 404 `firewall_not_found` when the VM has no firewall row |
 
 ### 10.3 Billing API for WHMCS (`app/api/billing_vm_firewall.py`)
@@ -999,9 +1020,10 @@ and the single-head assertion; MariaDB through the existing optional job.
   and removal, IP sets before rules, enable last and first), the "never writes cluster or node" URL
   test.
 - A fake Proxmox firewall (in-memory `.fw` model with positions, digests, IP sets, the `net0` config and
-  pending changes) in `tests/fakes/proxmox_firewall.py`, used by the worker tests: apply queue, claims,
-  coalescing, backoff, drift repair, unmarked rules removed, digest conflicts, `vm_missing`,
-  readiness flips to `not_enforced`, crash mid-apply leaves the guard.
+  pending changes) in `tests/fakes/proxmox_firewall.py`, used by the worker tests: apply queue, claims
+  (kept through an apply longer than 120 s, a lost claim stops the writes, a stale revision is never
+  written over a newer one), coalescing, backoff, drift repair, unmarked rules removed, digest
+  conflicts, `vm_missing`, readiness flips to `not_enforced`, crash mid-apply leaves the guard.
 - Tenancy: client A cannot read or change client B's VM firewall, groups or IP sets (404); cannot
   attach B's group or reference B's IP set; billing integration X cannot reach integration Y's
   service; reseller panel sees only its own clients; `vm.firewall` false blocks writes and not reads;
