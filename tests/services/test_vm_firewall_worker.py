@@ -10,13 +10,13 @@ import pytest
 from app.models.alerting import ClientNotificationPref
 from app.models.commerce_audit import UserAuditEvent
 from app.models.service import ServiceStatus
-from app.models.vm_firewall import FirewallLocationSettings
+from app.models.vm_firewall import FirewallLocationSettings, ServiceFirewall
 from app.services import settings_store
 from app.services.alerting import detectors, lease
 from app.services.alerting.catalogue import effective_settings
 from app.services.vm_firewall import reconcile
 from app.services.vm_firewall import service as fw
-from app.services.vm_firewall.render import IPFILTER_SET
+from app.services.vm_firewall.render import IPFILTER_SET, render
 from tests.fakes.proxmox_firewall import FakeProxmoxFirewall
 from tests.fakes.vm_firewall_world import make_world
 
@@ -161,13 +161,137 @@ async def test_sweep_claim_after_a_long_queue_runs_from_when_it_is_taken(world, 
     assert probe.seen and all(claimed is False for claimed, _listed in probe.seen)
 
 
+def _other_session(world):
+    """A session of another process (deployment step, second worker, client request)."""
+    from sqlalchemy.orm import Session
+
+    return Session(bind=world.db.get_bind(), autoflush=False)
+
+
+def _on_every_write(fake, callback):
+    def hook(f):
+        callback(f)
+        f.on_next_write(hook)
+
+    fake.on_next_write(hook)
+
+
+@pytest.mark.asyncio
+async def test_claim_is_kept_while_a_long_apply_writes(world, fake, access, monkeypatch):
+    """Every Proxmox write takes 50 s of the controlled clock, so the apply runs well past
+    ``CLAIM_SECONDS``; the deployment step must not be able to claim the VM at any write."""
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    wall = {"now": datetime(2000, 1, 1, tzinfo=timezone.utc)}
+    start = wall["now"]
+    monkeypatch.setattr(reconcile, "utcnow", lambda: wall["now"])
+    refused = []
+
+    def slow_write(_fake):
+        wall["now"] += timedelta(seconds=50)
+        with _other_session(world) as other:
+            at = T0 + (wall["now"] - start)
+            refused.append(not reconcile.claim(other, vm.id, owner="deployment", now=at))
+
+    _on_every_write(fake, slow_write)
+    result = await _queue(world, access)
+    assert result.applied == [vm.id]
+    assert len(refused) * 50 > reconcile.CLAIM_SECONDS + 50
+    assert all(refused), refused
+    assert row.applied_revision == row.revision
+
+
+@pytest.mark.asyncio
+async def test_apply_whose_claim_is_taken_writes_nothing_more_and_records_nothing(world, fake, access):
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    state = row.state.value
+
+    def taken(_fake):
+        # The worker's claim has expired and the deployment step takes the VM.
+        with _other_session(world) as other:
+            assert reconcile.claim(other, vm.id, owner="deployment", now=T0 + timedelta(hours=1))
+
+    fake.on_next_write(taken)
+    result = await _queue(world, access)
+    assert len(fake.writes) == 1
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.applied_revision is None and row.applied_hash is None and row.applied_digest is None
+    assert row.last_applied_at is None
+    assert row.state.value == state and row.last_error is None and row.failing_since is None
+    assert row.claimed_by == "deployment"
+    assert result.attempted == [vm.id] and result.applied == [] and result.failed == []
+
+
+class _SlowBetweenOps(FakeProxmoxFirewall):
+    """Runs ``pause`` once, at the first read after a write made since it was set: the applier is
+    slow between two operations."""
+
+    def __init__(self):
+        super().__init__()
+        self.pause = None
+        self.after = 0
+
+    def pause_after_next_write(self, pause):
+        self.pause, self.after = pause, len(self.writes)
+
+    async def request(self, method, path, params=None):
+        if method == "GET" and self.pause is not None and len(self.writes) > self.after:
+            pause, self.pause = self.pause, None
+            await pause()
+        return await super().request(method, path, params)
+
+
+@pytest.mark.asyncio
+async def test_stale_apply_never_overwrites_a_newer_revision(world, monkeypatch):
+    """Applier A renders r1; the client saves r2; A, slow, loses its claim; applier B (another
+    worker replica) applies r2. A must not write r1 back, and the row must say r2 is applied."""
+    fake = _SlowBetweenOps()
+    access = FakeAccess(fake)
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    fw.add_rule(world.db, vm.id, world.actor("alice"),
+                {"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": "80"}, revision=row.revision)
+    world.db.commit()
+    r1 = row.revision
+    wall = {"now": datetime(2000, 1, 1, tzinfo=timezone.utc)}
+    start = wall["now"]
+    monkeypatch.setattr(reconcile, "utcnow", lambda: wall["now"])
+    tick = T0 + timedelta(seconds=5)
+    b_results = []
+
+    async def meanwhile():
+        with _other_session(world) as client_db:
+            current = client_db.get(ServiceFirewall, vm.id).revision
+            fw.replace_rules(client_db, vm.id, world.actor("alice"),
+                             [{"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": "8443"}],
+                             revision=current)
+            client_db.commit()
+        wall["now"] += timedelta(seconds=reconcile.CLAIM_SECONDS + 60)
+        with _other_session(world) as b_db:
+            b_results.append(await reconcile.process_queue(b_db, access, owner="worker-b",
+                                                           now=tick + (wall["now"] - start)))
+
+    fake.pause_after_next_write(meanwhile)
+    a = await _queue(world, access, now=tick)
+    assert b_results and b_results[0].applied == [vm.id]
+    ports = {rule.get("dport") for rule in fake_vm.rules}
+    assert "8443" in ports and "80" not in ports and "22" not in ports
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.revision > r1
+    assert row.applied_revision == row.revision
+    assert row.applied_hash == render(world.db, vm.id).desired_hash
+    assert row.claimed_by is None
+    assert a.attempted == [vm.id] and a.applied == []
+
+
 @pytest.mark.asyncio
 async def test_cluster_concurrency_limits_parallel_applies(world, fake, access, monkeypatch):
     settings_store.set_setting(world.db, "vm_firewall_cluster_concurrency", 2)
     vms = [_enabled_vm(world, fake)[0] for _ in range(5)]
     active = {"now": 0, "max": 0}
 
-    async def slow_apply(db, service_id, access, *, now=None):
+    async def slow_apply(db, service_id, access, *, now=None, held=None):
         active["now"] += 1
         active["max"] = max(active["max"], active["now"])
         await asyncio.sleep(0.01)

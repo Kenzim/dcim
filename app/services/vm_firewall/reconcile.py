@@ -30,7 +30,7 @@ from app.models.service import Service, ServiceStatus
 from app.models.service_vm import ServiceVm
 from app.models.vm_firewall import FirewallLocationSettings, FirewallState, ServiceFirewall
 from app.services.vm_firewall import service as fw
-from app.services.vm_firewall.apply import ApplyResult, apply, check, readiness, record_failure
+from app.services.vm_firewall.apply import CLAIM_LOST, ApplyResult, apply, check, readiness, record_failure
 from app.services.vm_firewall.proxmox_fw import (
     ClusterReader,
     PluginTransport,
@@ -214,6 +214,49 @@ def claim_clock(now: datetime) -> Callable[[], datetime]:
     return lambda: now + (utcnow() - started)
 
 
+def renew(db: Session, service_id: int, *, owner: str, now: datetime) -> bool:
+    """Extend ``owner``'s claim to ``CLAIM_SECONDS`` from ``now`` (conditional update); false when
+    the row is no longer claimed by ``owner``. Commits."""
+    result = db.execute(
+        update(ServiceFirewall)
+        .where(ServiceFirewall.service_id == service_id, ServiceFirewall.claimed_by == owner)
+        .values(claimed_until=now + timedelta(seconds=CLAIM_SECONDS))
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
+@dataclass
+class Claim:
+    """An applier's claim on one row, kept alive while ``apply`` writes to Proxmox.
+
+    ``renew`` runs in a short session of its own on ``bind``, so it commits at once without
+    committing the apply's session, whose row changes stay unflushed until the apply records its
+    outcome. ``confirm`` runs in the apply's session and locks the row until that session commits."""
+
+    bind: Any
+    service_id: int
+    owner: str
+    clock: Callable[[], datetime]
+
+    @classmethod
+    def of(cls, db: Session, service_id: int, *, owner: str, clock: Callable[[], datetime]) -> "Claim":
+        return cls(db.get_bind(), service_id, owner, clock)
+
+    def renew(self) -> bool:
+        with Session(bind=self.bind, autoflush=False) as session:
+            return renew(session, self.service_id, owner=self.owner, now=self.clock())
+
+    def confirm(self, db: Session) -> bool:
+        claimed_by = db.execute(
+            select(ServiceFirewall.claimed_by)
+            .where(ServiceFirewall.service_id == self.service_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        return claimed_by == self.owner
+
+
 def unclaim(db: Session, service_id: int, *, owner: str) -> None:
     db.execute(
         update(ServiceFirewall)
@@ -337,9 +380,17 @@ async def _client_and_config(db: Session, service: Service, access: ProxmoxAcces
     return client, await client.get_config()
 
 
-async def apply_one(db: Session, service_id: int, access: ProxmoxAccess, *, now: Optional[datetime] = None) -> Optional[ApplyResult]:
-    """Check eligibility with the VM config just read, then apply. Returns None when nothing was
-    attempted. Commits."""
+async def apply_one(
+    db: Session,
+    service_id: int,
+    access: ProxmoxAccess,
+    *,
+    now: Optional[datetime] = None,
+    held: Optional[Claim] = None,
+) -> Optional[ApplyResult]:
+    """Check eligibility with the VM config just read, then apply under the ``held`` claim.
+    Returns None when nothing was attempted or the claim was lost (the row is left for the next
+    tick). Commits."""
     now = now or utcnow()
     row = db.get(ServiceFirewall, service_id)
     service = db.get(Service, service_id)
@@ -366,7 +417,9 @@ async def apply_one(db: Session, service_id: int, access: ProxmoxAccess, *, now:
             _hold_ineligible(db, row, hard, now)
             _count_rollout_outcome(db, row, None, now)
             return None
-        result = await apply(db, service_id, client, now=now, vm_config=config)
+        result = await apply(db, service_id, client, now=now, vm_config=config, claim=held)
+        if result.state == CLAIM_LOST:
+            return None
         _after_apply(db, row, result, now)
         return result
     finally:
@@ -400,6 +453,7 @@ async def apply_for_provision(
     db.commit()
     if not claim(db, service_id, owner=owner, now=now):
         raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
+    held = Claim.of(db, service_id, owner=owner, clock=claim_clock(now))
     try:
         row = db.get(ServiceFirewall, service_id)
         if not row.managed or row.excluded:
@@ -413,12 +467,18 @@ async def apply_for_provision(
             location = _location(db, service_id)
             if location is not None and location.enabled and location.nic_flag_on_provision:
                 if not net_firewall_flag(config.get("net0")):
+                    if not held.renew():
+                        raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
                     await client.set_net0_firewall_flag(True)
                     config = await client.get_config()
+        except ProvisionFirewallError:
+            raise
         except Exception as exc:  # Proxmox errors, transport failures
             failure = record_failure(db, row, exc, now=now)
             raise ProvisionFirewallError(f"firewall apply failed: {failure.error or failure.state}") from exc
-        result = await apply(db, service_id, client, now=now, vm_config=config)
+        result = await apply(db, service_id, client, now=now, vm_config=config, claim=held)
+        if result.state == CLAIM_LOST:
+            raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
         _after_apply(db, row, result, now)
         if not result.ok:
             raise ProvisionFirewallError(f"firewall apply failed: {result.error or result.state}")
@@ -522,7 +582,8 @@ async def process_queue(
                     return
                 try:
                     out.attempted.append(service_id)
-                    result = await apply_one(session, service_id, access, now=now)
+                    held = Claim.of(session, service_id, owner=owner, clock=clock)
+                    result = await apply_one(session, service_id, access, now=now, held=held)
                     if result is not None:
                         (out.applied if result.ok else out.failed).append(service_id)
                 except Exception:  # one VM must not stop the queue
@@ -584,10 +645,18 @@ def _drift_repairs_24h(db: Session, service_id: int, now: datetime) -> int:
     )
 
 
-async def sweep_one(db: Session, service_id: int, access: ProxmoxAccess, *, now: Optional[datetime] = None) -> str:
-    """Check one VM. Returns what happened: ``in_sync``, ``repaired``, ``reported``, ``queued``
-    (a change the apply queue picks up, such as a moved bridge), ``unmanaged``, ``vm_missing`` or
-    ``error``. Commits."""
+async def sweep_one(
+    db: Session,
+    service_id: int,
+    access: ProxmoxAccess,
+    *,
+    now: Optional[datetime] = None,
+    held: Optional[Claim] = None,
+) -> str:
+    """Check one VM; a repair runs under the ``held`` claim. Returns what happened: ``in_sync``,
+    ``repaired``, ``reported``, ``queued`` (a change the apply queue picks up, such as a moved
+    bridge), ``unmanaged``, ``vm_missing``, ``error`` or ``claim_lost`` (a repair stopped because
+    another applier took the VM; nothing recorded). Commits."""
     now = now or utcnow()
     row = db.get(ServiceFirewall, service_id)
     service = db.get(Service, service_id)
@@ -645,7 +714,9 @@ async def sweep_one(db: Session, service_id: int, access: ProxmoxAccess, *, now:
             row.state = FirewallState.DRIFT
             row.last_error = ("drift: " + "; ".join(report.differences))[:2000]
             return "reported"
-        result = await apply(db, service_id, client, now=now)
+        result = await apply(db, service_id, client, now=now, claim=held)
+        if result.state == CLAIM_LOST:
+            return CLAIM_LOST
         _after_apply(db, row, result, now)
         if not result.ok:
             return result.state
@@ -692,7 +763,8 @@ async def drift_sweep(
         if not claim(db, service_id, owner=owner, now=clock()):
             continue
         try:
-            outcome = await sweep_one(db, service_id, access, now=now)
+            held = Claim.of(db, service_id, owner=owner, clock=clock)
+            outcome = await sweep_one(db, service_id, access, now=now, held=held)
             out.checked.append(service_id)
             buckets.get(outcome, []).append(service_id)
         except Exception:  # one VM must not stop the sweep
@@ -833,6 +905,7 @@ async def tick(
 
 
 __all__ = [
+    "Claim",
     "LEASE_NAME",
     "PluginAccess",
     "ProxmoxAccess",
@@ -847,6 +920,7 @@ __all__ = [
     "notify_apply_failures",
     "process_queue",
     "read_status",
+    "renew",
     "resume_rollout",
     "sweep_one",
     "tick",
