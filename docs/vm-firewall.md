@@ -223,6 +223,7 @@ wins; rules are concatenated in that order (global rules first). Unique (`scope_
 | `nic_flag_on_provision` | Set `net0` `firewall=1` on new VMs (default true once enabled) |
 | `enforce_baseline_on_all` | Apply the baseline to every eligible VM, opted in or not (default false) |
 | `smtp_block_new_vms` | Default true. New VMs provisioned here get the SMTP block and an enforced baseline from creation (4.5a) |
+| `anti_spoof_new_vms` | Default false. Whether that enforced baseline on new VMs also includes `ipfilter` and `macfilter` (4.5a) |
 | `ipv6_allowed_prefixes` | JSON list, null. Prefixes added to `ipfilter-net0` for VMs on a bridge listed in `vm_firewall_ipv6_ra_bridges`; while empty such VMs are not eligible (reason `ipv6_ra_bridge_needs_prefix`) |
 | `readiness` | JSON cache of the last readiness check per cluster (section 9.2) |
 | `readiness_checked_at` | datetime |
@@ -278,9 +279,11 @@ baseline value, so existing VMs never pick it up by inheritance:
 
 - the provisioning step (6.5), in a location with `smtp_block_new_vms`, creates the VM's row with
   `admin_overrides.smtp_out = "block"` and `enforce_baseline = true`. The VM's firewall is enabled
-  before first boot with ACCEPT policies and the baseline (SMTP block, plus the location's other
-  baseline rules and anti-spoofing), so there is no blip and nothing else is filtered until the
-  client adds rules;
+  before first boot with ACCEPT policies and a narrow baseline: the SMTP block and, if an admin has
+  filled a management IP set, the management-network block. Anti-spoofing (`ipfilter`) and the MAC
+  filter stay off on such a VM until the client enables the firewall, unless the location setting
+  `anti_spoof_new_vms` (default off) is on (project chat decision, 2026-11-23). There is no blip and
+  nothing else is filtered until the client adds rules;
 - staff unblock per service by setting `admin_overrides.smtp_out = "allow"` (audited
   `firewall.admin_override_changed`); clients cannot change it (Q2);
 - the global, location and product `smtp_out` baseline values stay available for a later wider
