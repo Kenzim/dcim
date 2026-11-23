@@ -89,6 +89,32 @@ def test_anti_spoof_new_vms_follows_the_merged_baseline(world):
     assert (options["ipfilter"], options["macfilter"]) == (1, 0)
 
 
+def test_anti_spoof_new_vms_on_an_unprefixed_ra_bridge(world):
+    """Same rule as for opted-in VMs: no ipfilter, the reason is reported, the SMTP block stays."""
+    from app.services.settings_store import set_setting
+
+    set_setting(world.db, "vm_firewall_ipv6_ra_bridges", "vmbr750")
+    _location(world).anti_spoof_new_vms = True
+    world.db.flush()
+    vm = world.vm(bridge="vmbr750")
+    fw.init_for_new_vm(world.db, vm.id, Actor.system())
+    config = {"net0": "virtio=BC:24:11:00:00:01,bridge=vmbr750"}
+    assert "ipv6_ra_bridge_needs_prefix" in fw.eligibility(world.db, vm.id, vm_config=config).reasons
+    rendered = render(world.db, vm.id)
+    assert rendered.options["ipfilter"] == 0 and rendered.reasons == ["ipv6_ra_bridge_needs_prefix"]
+    assert (rendered.options["enable"], rendered.options["macfilter"]) == (1, 1)
+    assert _smtp_rules(rendered) == [("out", "DROP", "tcp", "25")]
+    # A VM on the plain public bridge in the same location keeps anti-spoofing.
+    plain = world.vm(bridge="vmbr0")
+    fw.init_for_new_vm(world.db, plain.id, Actor.system())
+    assert render(world.db, plain.id).options["ipfilter"] == 1
+    # Once the location lists a prefix, anti-spoofing applies with the prefix in ipfilter-net0.
+    fw.update_location_settings(world.db, world.staff_actor, world.location.id, ipv6_allowed_prefixes=["2001:db8:750::/48"])
+    rendered = render(world.db, vm.id)
+    assert rendered.options["ipfilter"] == 1 and rendered.reasons == []
+    assert "2001:db8:750::/48" in [e.cidr for e in rendered.ipsets["ipfilter-net0"]]
+
+
 def test_client_turning_on_keeps_the_block_and_gets_the_full_baseline(world):
     vm = world.vm()
     row = fw.init_for_new_vm(world.db, vm.id, Actor.system())

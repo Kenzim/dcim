@@ -108,6 +108,9 @@ class RenderedFirewall:
     active: bool
     settings: dict[str, Any] = field(default_factory=dict)
     desired_hash: str = ""
+    # Why a protection the settings ask for is not rendered (codes such as
+    # ``ipv6_ra_bridge_needs_prefix``); not part of the hash.
+    reasons: list[str] = field(default_factory=list)
 
     def canonical(self) -> str:
         document = {
@@ -320,6 +323,21 @@ def _referenced_ipsets(rules: Iterable[RenderedRule]) -> list[int]:
     return sorted(ids)
 
 
+def _on_unprefixed_ra_bridge(db: Session, ctx: RenderContext) -> bool:
+    """net0 (the bridge of the VM's public address) carries IPv6 router adverts and the location
+    lists no allowed IPv6 prefix."""
+    from app.services.settings_store import get_setting
+
+    if ctx.location_settings is not None and ctx.location_settings.ipv6_allowed_prefixes:
+        return False
+    allocation = ctx.vm.vm_ip_allocation if ctx.vm is not None else None
+    bridge = allocation.bridge_name if allocation is not None else None
+    if not bridge:
+        return False
+    ra_bridges = {part.strip() for part in str(get_setting(db, "vm_firewall_ipv6_ra_bridges") or "").split(",")}
+    return bridge in ra_bridges
+
+
 def render(db: Session, service_id: int) -> RenderedFirewall:
     ctx = load_context(db, service_id)
     return render_context(db, ctx)
@@ -357,6 +375,11 @@ def render_context(db: Session, ctx: RenderContext) -> RenderedFirewall:
     # An empty ipfilter set would drop all of the VM's IPv4 traffic (section 2), so anti-spoofing
     # needs at least one address.
     anti_spoof = bool(settings.get("anti_spoof")) and bool(ipsets[IPFILTER_SET]) and not narrow
+    reasons: list[str] = []
+    if anti_spoof and _on_unprefixed_ra_bridge(db, ctx):
+        # ipfilter would drop the addresses the VM takes from router adverts (section 3.1).
+        anti_spoof = False
+        reasons.append("ipv6_ra_bridge_needs_prefix")
     macfilter = bool(settings.get("macfilter")) and not narrow
     enforced = anti_spoof or macfilter or bool(baseline)
     enable = active and (client_enabled or (enforced and (enforce_baseline or enforce_all)))
@@ -382,6 +405,7 @@ def render_context(db: Session, ctx: RenderContext) -> RenderedFirewall:
         enforced=enforced,
         active=active,
         settings=settings,
+        reasons=reasons,
     )
     rendered.desired_hash = hashlib.sha256(rendered.canonical().encode()).hexdigest()
     return rendered

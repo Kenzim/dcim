@@ -74,6 +74,8 @@ class ApplyResult:
     replans: int = 0
     nic_flag: str = FirewallNicFlag.UNKNOWN.value
     error: Optional[str] = None
+    # From the rendered document: protections not applied and why (e.g. ipv6_ra_bridge_needs_prefix).
+    reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -285,6 +287,7 @@ async def apply(db: Session, service_id: int, client: VmFirewallClient, *, now: 
         ops=result.ops,
         replans=result.replans,
         nic_flag=result.nic_flag.value,
+        reasons=list(desired.reasons),
     )
 
 

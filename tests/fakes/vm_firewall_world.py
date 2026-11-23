@@ -55,6 +55,7 @@ class World:
         os_type: Optional[str] = None,
         product_code: Optional[str] = None,
         cluster: Optional[ProxmoxCluster] = None,
+        bridge: Optional[str] = "vmbr0",
     ) -> Service:
         n = next(_seq)
         if ip == "auto":
@@ -69,7 +70,8 @@ class World:
             template_id = template.id
         allocation_id = None
         if ip is not None:
-            allocation = VMIPAllocation(ip_address=ip, subnet_mask="255.255.255.0", gateway="203.0.113.1")
+            allocation = VMIPAllocation(ip_address=ip, subnet_mask="255.255.255.0", gateway="203.0.113.1",
+                                        bridge_name=bridge)
             self.db.add(allocation)
             self.db.flush()
             allocation_id = allocation.id
