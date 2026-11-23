@@ -63,6 +63,13 @@ IPV6_ALLOWED_PREFIXES_HELP = (
     "Per-VM IPv6 assignment will replace this."
 )
 
+# Shown with a VM's firewall when its merged baseline blocks outbound port 25.
+SMTP_BLOCK_HELP = (
+    "Outgoing mail on port 25 is blocked by default to protect our network from spam. "
+    "Sending through a mail provider on ports 465 or 587 works as normal. "
+    "If you need port 25, ask support to unblock it."
+)
+
 _MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
 
