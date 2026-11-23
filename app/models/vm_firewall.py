@@ -307,8 +307,9 @@ class FirewallLocationSettings(Base):
     smtp_block_new_vms = Column(Boolean, nullable=False, default=True)
     # Whether that enforced baseline also turns on ``ipfilter`` and ``macfilter``.
     anti_spoof_new_vms = Column(Boolean, nullable=False, default=False)
-    # IPv6 prefixes added to every managed VM's ``ipfilter-net0`` here; required before a VM
-    # on a bridge in ``vm_firewall_ipv6_ra_bridges`` is managed.
+    # IPv6 prefixes added to ``ipfilter-net0`` only for VMs whose observed ``net0_bridge`` is in
+    # ``vm_firewall_ipv6_ra_bridges``; such VMs get no anti-spoofing until this is set.
+    # Admin help text: ``service.IPV6_ALLOWED_PREFIXES_HELP``.
     ipv6_allowed_prefixes = Column(JSON, nullable=True)
     readiness = Column(JSON, nullable=True)
     readiness_checked_at = Column(DateTime(timezone=True), nullable=True)

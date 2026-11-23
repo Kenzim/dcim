@@ -51,6 +51,15 @@ from app.services.vm_firewall.proxmox_fw import net_bridges
 from app.services.vm_firewall.render import baseline_rules, load_context
 
 STORAGE_MAC_PREFIXES = PRESENCE_MAC_PREFIXES
+
+# Admin-facing help for ``FirewallLocationSettings.ipv6_allowed_prefixes``.
+IPV6_ALLOWED_PREFIXES_HELP = (
+    "IPv6 prefixes allowed as source addresses for VMs on a router-advert bridge. "
+    "Weaker than IPv4 anti-spoofing: it only stops addresses outside these prefixes, "
+    "so a VM can still use a neighbour's address inside them. "
+    "Per-VM IPv6 assignment will replace this."
+)
+
 _MAC = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
 
