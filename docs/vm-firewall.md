@@ -376,8 +376,9 @@ iptables median 169 ms, worst 363 ms over 19 flips (0 to 1 is the slower directi
 TCP stream stalled typically 229 ms and up to 803 ms (a second retransmission), and the
 `fwbr`/`fwpr`/`fwln` devices appear and disappear with the flag. The guest saw no carrier change on
 either backend. The test cluster's qemu-server (9.2.20) is newer than production's and the flip runs
-through qemu-server, so production may differ; re-measure on one production-like VM before quoting a
-figure to clients. Every warning shown to admins and clients says "under half a second".
+through qemu-server, so production may differ. Re-measuring is a step of the production procedure
+(9.3 step 5a), on a throwaway VM created for it, never a client's VM; until then every warning shown
+to admins and clients says "under half a second".
 
 The flip must send the whole `net0` value read just before (model, MAC, bridge, tag, rate and the
 changed `firewall` key) as form-encoded data: a malformed value in a hand-made test call was accepted
@@ -605,7 +606,8 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
    with all its guests' flows tracked is above about half of `nf_conntrack_max`, the plan must say
    which comes first: raising `nf_conntrack_max` (and the hash size) on that node in a separate,
    approved change, or keeping that node's location off. The proposal to Kenzi states the numbers
-   per node.
+   per node. The same read also records each node's current `net.bridge.bridge-nf-call-iptables`
+   and `net.bridge.bridge-nf-call-ip6tables` values, which the rollback in step 5 restores.
 2. Neutralise pre-existing guest firewalls: for every guest the audit lists that Rackflow does not
    manage, write `enable: 0` in its VM firewall options (a no-op today, because the datacenter is off,
    so it changes nothing that runs). Guests whose owners really want those settings are opted in
@@ -620,11 +622,17 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
 5. Set `enable: 1` in `cluster.fw`. Watch from a second session that SSH, 8006, corosync quorum,
    Ceph health and `nf_conntrack_count` stay green on every node for 10 minutes; the rollback is
    setting `enable: 0` again, which `pvesh` or the GUI can do from any node. On iptables the rollback
-   leaves `net.bridge.bridge-nf-call-iptables` and `-ip6tables` at 1 (they were 0); new bridged flows
-   are no longer tracked once the rules are gone, but to return the host fully to its earlier state
-   also run `sysctl -w net.bridge.bridge-nf-call-iptables=0 net.bridge.bridge-nf-call-ip6tables=0` on
-   each node (tested in 9.4; `br_netfilter` is built into the PVE kernel and cannot be unloaded).
-   On nftables nothing is left behind.
+   leaves `net.bridge.bridge-nf-call-iptables` and `-ip6tables` at 1; new bridged flows are no longer
+   tracked once the rules are gone, but to return the host fully to its earlier state also set both
+   back, on each node, to the values that node had before the enable as recorded in step 1 (never a
+   blind 0), with `sysctl -w net.bridge.bridge-nf-call-iptables=<recorded>
+   net.bridge.bridge-nf-call-ip6tables=<recorded>` (tested in 9.4; `br_netfilter` is built into the
+   PVE kernel and cannot be unloaded). On nftables nothing is left behind.
+5a. Re-measure the NIC flag flip on production's qemu-server: on one named host, create a throwaway
+   VM for the purpose (never a client's VM) on the public bridge, opt it in through Rackflow while
+   pinging it at a 20 ms interval from another host, flip the flag ten times, record median and
+   worst, then delete the VM. The procedure Kenzi approves names the host and the VMID. If the
+   result is above half a second, the client-facing text changes before the location is enabled.
 6. Run Rackflow's readiness check and the pre-enable audit again (it must list nothing unmanaged);
    then enable the location in Rackflow.
 
@@ -676,7 +684,7 @@ stream between the nodes.
 | NIC flag flip on a running guest | Median 169 ms, worst 363 ms (19 flips); TCP stall up to 803 ms; `fwbr` devices come and go | Median 64 ms, worst 105 ms (20 flips); TCP stall about 215 ms; no extra devices |
 | Conntrack (300 UDP flows, one entry per flow) | Every bridged guest tracked from the datacenter enable, including `firewall=0` guests | Nothing tracked until a VM firewall on the node is enabled, then every bridged guest on that node, including `firewall=0` guests |
 | Closed port on a `firewall=1` guest with no VM firewall | Times out (reset dropped as INVALID) | Refused normally |
-| Rollback (`cluster.fw` `enable: 0`) | Rules gone, no stall; `bridge-nf-call-iptables`/`ip6tables` stay 1; new flows not tracked; `sysctl -w ...=0` restores the earlier state | Rules gone, nothing left behind |
+| Rollback (`cluster.fw` `enable: 0`) | Rules gone, no stall; `bridge-nf-call-iptables`/`ip6tables` stay 1; new flows not tracked; setting them back to their earlier values (0 on these nodes) restores the earlier state | Rules gone, nothing left behind |
 
 Consequences, already applied above: the flip figures (5.2, 8.2, 8.3), the conntrack check and the
 iptables sysctl step (9.3), the closed-port behaviour (8.4), and nftables as the backend.
