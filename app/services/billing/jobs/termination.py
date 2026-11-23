@@ -367,3 +367,48 @@ class NonpaymentTerminationJob:
                 problems.append(f"the {event} email template is not enabled")
         problems.extend(stuck_service_alerts_problems(db))
         return problems
+
+
+def end_billing_after_staff_terminate(db: Session, service: Service, actor_user_id: Optional[int]) -> bool:
+    """End a retail billing suspended for non-payment when staff terminate its service by hand.
+
+    Called by the admin status route before it writes the service row (the
+    billing lock comes first). The billing is ended as the termination job
+    ends it after a termination (``_end_billing``: cancelled, with the
+    policy's ``unpaid_invoice_action_on_terminate``), and audited. Reseller
+    billings, and billings in any other status, are left to the recurring
+    pass, which cancels the billing of a terminated service. Returns True
+    when the billing was ended.
+    """
+    from app.services.audit_service import AuditService
+    from app.services.billing_locks import BillingLocks
+
+    billing_id = db.scalar(select(ServiceBilling.id).where(ServiceBilling.service_id == int(service.id)))
+    if billing_id is None:
+        return False
+    billing = BillingLocks.service_billing(db, int(billing_id))
+    if (
+        billing is None
+        or billing.reseller_id is not None
+        or billing.status != ServiceBillingStatus.SUSPENDED_NONPAYMENT
+    ):
+        return False
+    policy = policy_for_billing(db, billing)
+    detail = {
+        "billing_id": int(billing.id),
+        "service_id": int(service.id),
+        "policy_id": policy.id if policy is not None else None,
+        "unpaid_invoice_action": policy.unpaid_invoice_action_on_terminate if policy is not None else None,
+    }
+    cancelled = NonpaymentTerminationJob._end_billing(db, detail)
+    AuditService.log(
+        db,
+        actor_user_id=actor_user_id,
+        action="billing.nonpayment_billing_ended_by_staff",
+        resource_type="service",
+        resource_id=str(int(service.id)),
+        billing_account_id=billing.billing_account_id,
+        metadata={**detail, "cancelled_invoice_ids": cancelled},
+    )
+    db.flush()
+    return True
