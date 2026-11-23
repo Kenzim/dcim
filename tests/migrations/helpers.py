@@ -15,14 +15,16 @@ from pathlib import Path
 from typing import Optional
 
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from alembic.runtime.environment import EnvironmentContext
 from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).resolve().parents[2]
 A0 = "billing_a0_renewals"
-HEAD = "billing_p1_ledger_owner_check"
+P1_HEAD = "billing_p1_ledger_owner_check"
+# The single alembic head; the phase 2 chain follows the phase 1 head.
+HEAD = "billing_p2_email_money"
 CHAIN = [
     "billing_p1_series_shadow",
     "billing_p1_invoice_columns",
@@ -35,6 +37,59 @@ CHAIN = [
     "billing_p1_invoice_checks",
     "billing_p1_ledger_owner_check",
 ]
+# docs/billing-phase2-design.md 14.4.
+P2_CHAIN = [
+    "plugin_p2_effective_api",
+    "billing_p2_tax_schema",
+    "billing_p2_tax_columns",
+    "billing_p2_tax_seed",
+    "billing_p2_automation",
+    "billing_p2_email_templates",
+    "billing_p2_exchange_rates",
+    "billing_p2_fx_refs",
+    "billing_p2_email_money",
+]
+P2_NEW_TABLES = {
+    "tax_classes",
+    "tax_rules",
+    "invoice_profiles",
+    "seller_tax_registrations",
+    "tax_exemptions",
+    "tax_legal_notes",
+    "tax_id_checks",
+    "invoice_line_taxes",
+    "invoice_adjustment_line_taxes",
+    "billing_job_runs",
+    "billing_job_states",
+    "billing_job_run_items",
+    "billing_job_actions",
+    "billing_nonpayment_policies",
+    "cancellation_requests",
+    "email_templates",
+    "email_template_versions",
+    "tax_exchange_rates",
+}
+# Columns and indexes the phase 2 chain adds to existing tables.
+P2_COLUMNS = {
+    "plugin_installations": {"effective_api"},
+    "invoices": {"tax_engine", "tax_point_at", "tax_summary", "tax_evidence", "legal_notes", "seller_registration_id",
+                 "fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"},
+    "orders": {"tax_evidence"},
+    "billing_profiles": {"tax_id_type", "tax_id_status", "tax_id_checked_at", "tax_id_check_id", "is_business"},
+    "billing_accounts": {"tax_exempt_reason", "billing_late_fee_exempt"},
+    "products": {"tax_class_id"},
+    "price_plan_cycles": {"invoice_lead_days"},
+    "email_messages": {"template_id", "template_version", "render_fallback"},
+    "invoice_adjustments": {"fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"},
+}
+P2_INDEXES = {
+    "ix_invoices_seller_registration_id",
+    "ix_billing_profiles_tax_id_check_id",
+    "ix_products_tax_class_id",
+    "ix_email_messages_template_id",
+    "ix_invoices_fx_rate_id",
+    "ix_invoice_adjustments_fx_rate_id",
+}
 NEW_TABLES = {
     "document_series",
     "billing_shadow_mismatches",
@@ -55,8 +110,8 @@ def script() -> ScriptDirectory:
 
 
 def before(revision_id: str) -> str:
-    index = CHAIN.index(revision_id)
-    return A0 if index == 0 else CHAIN[index - 1]
+    revisions = [A0, *CHAIN, *P2_CHAIN]
+    return revisions[revisions.index(revision_id) - 1]
 
 
 def current(engine: sa.Engine) -> Optional[str]:
@@ -65,23 +120,21 @@ def current(engine: sa.Engine) -> Optional[str]:
 
 
 def migrate(engine: sa.Engine, target: str) -> None:
-    """Upgrade or downgrade ``engine`` to ``target`` through the real revision files."""
-    directory = script()
+    """Upgrade or downgrade ``engine`` to ``target`` through the real revision files.
+
+    Runs ``alembic/env.py`` itself on a connection of ``engine``, so the tests
+    use the transaction configuration of a real ``alembic upgrade``.
+    """
     start = current(engine)
-    revisions = [A0, *CHAIN]
-    upward = start is None or revisions.index(target) >= revisions.index(start)
-
-    def steps(rev, _context):
+    revisions = [A0, *CHAIN, *P2_CHAIN]
+    upward = start is None or start not in revisions or revisions.index(target) >= revisions.index(start)
+    config = alembic_config()
+    with engine.connect() as conn:
+        config.attributes["connection"] = conn
         if upward:
-            return directory._upgrade_revs(target, rev)
-        return directory._downgrade_revs(target, rev)
-
-    with EnvironmentContext(alembic_config(), directory, fn=steps, destination_rev=target) as env:
-        with engine.connect() as conn:
-            env.configure(connection=conn, transaction_per_migration=True)
-            with env.begin_transaction():
-                env.run_migrations()
-            conn.commit()
+            command.upgrade(config, target)
+        else:
+            command.downgrade(config, target)
 
 
 def build_a0_database(engine: sa.Engine) -> None:
@@ -95,6 +148,52 @@ def build_a0_database(engine: sa.Engine) -> None:
         raw.close()
     with engine.begin() as conn:
         MigrationContext.configure(conn).stamp(script(), A0)
+
+
+def build_p1_head_database(engine: sa.Engine) -> None:
+    """The a0 schema taken to the phase 1 head, plus the tables phase 2 touches.
+
+    ``billing_p2_base_schema.sql`` holds the tables the phase 2 chain alters that
+    ``billing_a0_schema.sql`` does not, as they stand at the phase 1 head.
+    """
+    build_a0_database(engine)
+    migrate(engine, P1_HEAD)
+    ddl = (Path(__file__).parent / "billing_p2_base_schema.sql").read_text()
+    raw = engine.raw_connection()
+    try:
+        raw.driver_connection.executescript(ddl)
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def seed_p2_data(engine: sa.Engine) -> None:
+    """Rows present before the phase 2 chain (design 15.1).
+
+    Two ``tax_rates`` rows (one with a region, one without and disabled), a client
+    billing account with its billing profile, and an email message.
+    """
+    execute(engine, "INSERT INTO users (id, username, email, is_admin) VALUES (41, 'p2', 'p2@example.com', 0)")
+    execute(
+        engine,
+        "INSERT INTO billing_accounts (id, account_type, user_id, status, currency, credit_balance_cents, "
+        "tax_exempt) VALUES (41, 'client', 41, 'active', 'GBP', 0, 0)",
+    )
+    execute(
+        engine,
+        "INSERT INTO billing_profiles (id, billing_account_id, company, country, tax_id) "
+        "VALUES (41, 41, 'Acme Ltd', 'GB', 'GB123456789')",
+    )
+    execute(
+        engine,
+        "INSERT INTO email_messages (id, to_address, subject, status, attempts, event, billing_account_id) "
+        "VALUES (41, 'p2@example.com', 'Hello', 'sent', 1, 'invoice_paid', 41)",
+    )
+    execute(
+        engine,
+        "INSERT INTO tax_rates (id, country, region, rate_bps, name, enabled) VALUES "
+        "(7, 'GB', NULL, 2000, 'UK VAT', 1), (8, 'US', 'CA', 725, 'California sales tax', 0)",
+    )
 
 
 def sqlite_table_sql(engine: sa.Engine, table: str) -> str:
@@ -143,3 +242,93 @@ def execute(engine: sa.Engine, sql: str, **params):
 def scalar(engine: sa.Engine, sql: str, **params):
     with engine.connect() as conn:
         return conn.execute(sa.text(sql), params).scalar()
+
+
+P2_TABLES = P2_NEW_TABLES | set(P2_COLUMNS)
+
+
+def _p2_object(obj, name, type_, _reflected, _compare_to) -> bool:
+    """Compare the tables phase 2 creates whole, and only the phase 2 columns of the tables it alters."""
+    if type_ == "table":
+        return name in P2_TABLES
+    table = getattr(obj, "table", None)
+    if table is None or table.name not in P2_TABLES:
+        return False
+    if table.name in P2_NEW_TABLES:
+        return True
+    added = P2_COLUMNS[table.name]
+    if type_ == "column":
+        return name in added
+    columns = {column.name for column in getattr(obj, "columns", ())}
+    if type_ == "foreign_key_constraint":
+        columns = {element.parent.name for element in obj.elements}
+    return bool(columns & added)
+
+
+def raw_p2_schema_diffs(engine: sa.Engine) -> list:
+    """``compare_metadata`` of the migrated phase 2 schema against the models."""
+    import app.models  # noqa: F401
+    import app.models.plugin  # noqa: F401  (server_plugins, which env.py's plugin_categories refers to)
+    from alembic.autogenerate import compare_metadata
+    from app.core.database import Base
+
+    with engine.connect() as conn:
+        context = MigrationContext.configure(
+            conn,
+            opts={"compare_type": True, "compare_server_default": True, "include_object": _p2_object},
+        )
+        return compare_metadata(context, Base.metadata)
+
+
+# Foreign keys the phase 2 revisions deliberately leave off the tables they alter on SQLite.
+SQLITE_OMITTED_FOREIGN_KEYS = {
+    ("billing_profiles", "fk_billing_profiles_tax_id_check_id"),
+    ("email_messages", "fk_email_messages_template_id"),
+    ("invoices", "fk_invoices_seller_registration_id"),
+    ("invoices", "fk_invoices_fx_rate_id"),
+    ("invoice_adjustments", "fk_invoice_adjustments_fx_rate_id"),
+    ("products", "fk_products_tax_class_id"),
+}
+
+
+def _is_reflection_noise(dialect: str, diff) -> bool:
+    if isinstance(diff, list) and len(diff) == 1:
+        diff = diff[0]
+    kind = diff[0]
+    if kind == "modify_default":
+        # MariaDB reflects server_default=func.now() as current_timestamp().
+        reflected, model = diff[5], diff[6]
+        reflected_text = str(getattr(getattr(reflected, "arg", None), "text", "")).lower()
+        return (
+            dialect in ("mysql", "mariadb")
+            and reflected_text in ("current_timestamp()", "current_timestamp")
+            and isinstance(getattr(model, "arg", None), sa.sql.functions.now)
+        )
+    if kind == "add_fk" and dialect == "sqlite":
+        constraint = diff[1]
+        return (constraint.table.name, constraint.name) in SQLITE_OMITTED_FOREIGN_KEYS
+    return False
+
+
+def p2_schema_diffs(engine: sa.Engine) -> list[str]:
+    """Differences between the migrated phase 2 schema and the models, minus known reflection noise.
+
+    Types, nullability, server defaults, indexes, unique keys and foreign keys
+    are compared on the tables phase 2 creates and on the columns it adds.
+    """
+    return [
+        repr(diff)
+        for diff in raw_p2_schema_diffs(engine)
+        if not _is_reflection_noise(engine.dialect.name, diff)
+    ]
+
+
+def load_revision(revision_id: str):
+    """Import one revision file as a module (to reach its constants)."""
+    import importlib.util
+
+    path = ROOT / "alembic" / "versions" / f"{revision_id}.py"
+    spec = importlib.util.spec_from_file_location(revision_id, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

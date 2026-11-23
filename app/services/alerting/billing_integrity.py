@@ -25,6 +25,7 @@ from sqlalchemy import MetaData, Table, and_, case, func, inspect, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
+from app.models.commerce_email import EmailMessage
 from app.models.commerce_invoice_ext import InvoiceLine
 from app.models.invoice_adjustment import AdjustmentKind, InvoiceAdjustment, InvoiceAdjustmentLine
 from app.models.reseller import (
@@ -43,6 +44,7 @@ OVERFLOW_ID = "overflow"
 _REFUNDS_TABLE = "refunds"
 _PENDING = "pending"
 _REVIEW = "review"
+EMAIL_RENDER_FAILED_LOOKBACK_DAYS = 7
 
 
 def _limited(db: Session, stmt: Select, max_rows: int) -> tuple[list[Any], int]:
@@ -1015,6 +1017,721 @@ def adjustment_bounds(db: Session, params: dict, now: datetime) -> list[Finding]
     return out
 
 
+# ------------------------------------------------------------------ billing phase 2
+# docs/billing-phase2-design.md 15.4. The types ship disabled.
+
+
+def _engine_taxed_invoices(params: dict, now: datetime):
+    """v2-taxed invoices published in the detector's window (the last 30 days by default)."""
+    days = int(params.get("lookback_days") or 30)
+    return (
+        Invoice.tax_engine.is_not(None),
+        Invoice.tax_engine != "legacy",
+        Invoice.tax_point_at >= now - timedelta(days=days),
+    )
+
+
+def tax_line_sum(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2 tax invoice line whose tax differs from the sum of its tax rows."""
+    from app.models.tax import InvoiceLineTax
+
+    rows_tax = (
+        select(InvoiceLineTax.invoice_line_id, func.sum(InvoiceLineTax.tax_cents).label("rows_tax"))
+        .group_by(InvoiceLineTax.invoice_line_id)
+        .subquery()
+    )
+    stmt = (
+        select(InvoiceLine.id.label("line_id"), Invoice.id, Invoice.invoice_number, InvoiceLine.tax_cents,
+               func.coalesce(rows_tax.c.rows_tax, 0).label("rows_tax"))
+        .join(Invoice, Invoice.id == InvoiceLine.invoice_id)
+        .outerjoin(rows_tax, rows_tax.c.invoice_line_id == InvoiceLine.id)
+        .where(*_engine_taxed_invoices(params, now),
+               func.coalesce(InvoiceLine.tax_cents, 0) != func.coalesce(rows_tax.c.rows_tax, 0))
+        .order_by(Invoice.id, InvoiceLine.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    by_invoice: dict[int, dict] = {}
+    for row in rows:
+        entry = by_invoice.setdefault(row.id, {"invoice_id": row.id, "invoice_number": int(row.invoice_number),
+                                               "lines": []})
+        entry["lines"].append({"invoice_line_id": row.line_id, "tax_cents": _money(row.tax_cents),
+                               "rows_tax_cents": _money(row.rows_tax)})
+    out = [
+        Finding(
+            "billing_tax_line_sum", "invoice", str(invoice_id), f"Invoice {d['invoice_number']}",
+            f"Invoice {d['invoice_number']} line tax does not match its tax rows",
+            f"{len(d['lines'])} line(s) carry a tax different from the sum of their tax rows.",
+            details=d,
+        )
+        for invoice_id, d in by_invoice.items()
+    ]
+    if remaining:
+        out.append(_overflow("billing_tax_line_sum", "invoice", "lines", remaining, len(rows)))
+    return out
+
+
+def tax_summary_consistent(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2 tax invoice whose ``tax_summary`` differs from its tax rows."""
+    from app.services.tax.audit import summary_from_rows, summary_stored
+
+    max_rows = params["max_rows"]
+    out: list[Finding] = []
+    checked = 0
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
+    for invoice in db.scalars(stmt):
+        rows = summary_from_rows(db, invoice.id)
+        stored = summary_stored(invoice)
+        if rows == stored:
+            continue
+        checked += 1
+        if len(out) >= max_rows:
+            continue
+        out.append(Finding(
+            "billing_tax_summary_consistent", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} tax summary does not match its tax rows",
+            "The frozen tax summary printed on the invoice differs from the sum of its tax rows per rate.",
+            details={
+                "invoice_id": invoice.id,
+                "summary": [[*k, *v] for k, v in sorted(stored.items())],
+                "rows": [[*k, *v] for k, v in sorted(rows.items())],
+            },
+        ))
+    if checked > len(out):
+        out.append(_overflow("billing_tax_summary_consistent", "invoice", "invoices", checked - len(out), len(out)))
+    return out
+
+
+def tax_evidence_conflict(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A published invoice whose location evidence disagrees with the country taxed.
+
+    The engine records ``conflict`` when the IP country differs from the
+    billing country, listed only where tax was charged; and
+    ``tax_id_country_mismatch`` when the buyer's VAT number is of another
+    country than its billing country (the buyer was taxed as a consumer),
+    listed whatever the tax.
+    """
+    max_rows = params["max_rows"]
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
+    found = []
+    for invoice in db.scalars(stmt):
+        evidence = invoice.tax_evidence if isinstance(invoice.tax_evidence, dict) else {}
+        if evidence.get("tax_id_country_mismatch") or (evidence.get("conflict") and int(invoice.tax_cents or 0) > 0):
+            found.append((invoice, evidence))
+    out = [_evidence_conflict_finding(invoice, evidence) for invoice, evidence in found[:max_rows]]
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_evidence_conflict", "invoice", "invoices", len(found) - max_rows, max_rows))
+    return out
+
+
+def _evidence_conflict_finding(invoice: Invoice, evidence: dict) -> Finding:
+    problems = []
+    if evidence.get("conflict") and int(invoice.tax_cents or 0) > 0:
+        problems.append(
+            f"Tax was charged for {evidence.get('buyer_country')} but the IP address was in "
+            f"{evidence.get('ip_country')}."
+        )
+    if evidence.get("tax_id_country_mismatch"):
+        problems.append(
+            f"The buyer's VAT number is from {evidence.get('tax_id_country')} but its billing country is "
+            f"{evidence.get('buyer_country')}, so it was taxed as a consumer in {evidence.get('buyer_country')}."
+        )
+    return Finding(
+        "billing_tax_evidence_conflict", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+        f"Invoice {invoice.invoice_number} location evidence conflicts",
+        " ".join(problems),
+        details={"invoice_id": invoice.id, "buyer_country": evidence.get("buyer_country"),
+                 "ip_country": evidence.get("ip_country"), "tax_id_country": evidence.get("tax_id_country"),
+                 "tax_cents": _money(invoice.tax_cents)},
+    )
+
+
+def tax_not_registered(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A rule that needs a seller registration was skipped because none is in force.
+
+    The engine records the evidence note ``not_registered`` for an EU or UK
+    buyer taxed nowhere because the seller holds no registration there (4.3 step 2).
+    """
+    max_rows = params["max_rows"]
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
+    found = []
+    for invoice in db.scalars(stmt):
+        evidence = invoice.tax_evidence if isinstance(invoice.tax_evidence, dict) else {}
+        if "not_registered" in (evidence.get("notes") or []):
+            found.append((invoice, evidence))
+    out = [
+        Finding(
+            "billing_tax_not_registered", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} was not taxed: no registration for {evidence.get('buyer_country')}",
+            "The supply is taxable in the buyer's country but the seller holds no registration in force there, "
+            "so no tax was charged.",
+            details={"invoice_id": invoice.id, "buyer_country": evidence.get("buyer_country")},
+        )
+        for invoice, evidence in found[:max_rows]
+    ]
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_not_registered", "invoice", "invoices", len(found) - max_rows, max_rows))
+    return out
+
+
+def _invoices_with_note(db: Session, params: dict, now: datetime, note: str) -> list[tuple[Invoice, dict]]:
+    stmt = select(Invoice).where(*_engine_taxed_invoices(params, now)).order_by(Invoice.id)
+    found = []
+    for invoice in db.scalars(stmt):
+        evidence = invoice.tax_evidence if isinstance(invoice.tax_evidence, dict) else {}
+        if note in (evidence.get("notes") or []):
+            found.append((invoice, evidence))
+    return found
+
+
+def tax_buyer_country_missing(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2-taxed invoice whose buyer had no country (evidence note ``buyer_country_missing``).
+
+    The engine taxes such a sale as one to a consumer in the seller's
+    country (4.3 step 2); the operator should get the buyer's address.
+    """
+    max_rows = params["max_rows"]
+    found = _invoices_with_note(db, params, now, "buyer_country_missing")
+    out = []
+    for invoice, evidence in found[:max_rows]:
+        taxed_as = evidence.get("buyer_country_assumed") or evidence.get("registration_jurisdiction")
+        where = taxed_as or "the seller's country"
+        out.append(Finding(
+            "billing_tax_buyer_country_missing", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} was taxed without the buyer's country",
+            f"The buyer's billing profile has no country, so the sale was taxed as one to a consumer in "
+            f"{where}. Record the buyer's address and check the tax.",
+            details={"invoice_id": invoice.id, "taxed_as": taxed_as, "tax_cents": _money(invoice.tax_cents)},
+        ))
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_buyer_country_missing", "invoice", "invoices", len(found) - max_rows,
+                             max_rows))
+    return out
+
+
+def tax_no_rule_for_class(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A v2-taxed invoice with a line whose class has no rule where it was taxed (``no_rule_for_class``).
+
+    The line was charged no tax; the evidence names each class, jurisdiction
+    and country without a rule.
+    """
+    max_rows = params["max_rows"]
+    found = _invoices_with_note(db, params, now, "no_rule_for_class")
+    out = []
+    for invoice, evidence in found[:max_rows]:
+        missing = [m for m in evidence.get("no_rule_for_class") or [] if isinstance(m, dict)]
+        names = ", ".join(
+            f"{m.get('tax_class')} in {m.get('jurisdiction')}" + (f" ({m['country']})" if m.get("country") else "")
+            for m in missing
+        )
+        out.append(Finding(
+            "billing_tax_no_rule_for_class", "invoice", str(invoice.id), f"Invoice {invoice.invoice_number}",
+            f"Invoice {invoice.invoice_number} has lines taxed at 0% for want of a rule",
+            f"No tax rule covers {names or 'a line class'}, so those lines were charged no tax. Add a rule for "
+            "the class in that jurisdiction, or move the product to a class that has one.",
+            details={"invoice_id": invoice.id, "missing": missing},
+        ))
+    if len(found) > max_rows:
+        out.append(_overflow("billing_tax_no_rule_for_class", "invoice", "invoices", len(found) - max_rows, max_rows))
+    return out
+
+
+def billing_job_needs_review(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A billing job action left in ``needs_review``."""
+    del now
+    from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus
+
+    stmt = (
+        select(
+            BillingJobAction.id,
+            BillingJobAction.job,
+            BillingJobAction.subject_key,
+            BillingJobAction.run_id,
+            BillingJobAction.claimed_at,
+        )
+        .where(BillingJobAction.status == BillingJobActionStatus.NEEDS_REVIEW)
+        .order_by(BillingJobAction.id)
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_job_needs_review",
+            "system",
+            f"billing_job_action:{row.id}",
+            f"{row.job} {row.subject_key}",
+            f"Billing job {row.job} left {row.subject_key} part way",
+            "The action was claimed and did not finish; check its effect, then mark it done or failed.",
+            details={
+                "action_id": row.id,
+                "job": row.job,
+                "subject_key": row.subject_key,
+                "run_id": row.run_id,
+                "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_job_needs_review", "system", "job actions needing review", remaining, len(out)))
+    return out
+
+
+def nonpayment_termination_unsettled(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A termination claim not done by the job whose service is still suspended for non-payment with a balance due.
+
+    The termination job leaves a failed power-off in ``needs_review``; once an
+    admin settles it as ``done`` or ``failed`` no job acts on it again, so the
+    service stays as it is. A claim still in ``needs_review`` is reported too:
+    the termination is a go-live guarantee and ``billing_job_needs_review`` is
+    not required to go live. The service's own status decides here, not the
+    claim's. The service's latest terminate claim counts: one keyed by its
+    invoice (``service:{id}:terminate:invoice:{invoice_id}``) while that
+    invoice is still unpaid, one of the older per-service form
+    (``service:{id}:terminate``) while any cycle invoice is.
+    """
+    del now
+    import re
+
+    from app.models.billing_jobs import BillingJobAction, BillingJobActionStatus
+    from app.models.reseller import ServiceBilling, ServiceBillingStatus
+    from app.models.service import Service, ServiceStatus
+    from app.services.billing.jobs.nonpayment import unpaid_cycle_invoices
+    from app.services.billing.jobs.termination import JOB
+
+    claims: dict[int, BillingJobAction] = {}
+    invoice_of: dict[int, int | None] = {}
+    pattern = re.compile(r"^service:(\d+):terminate(?::invoice:(\d+))?$")
+    rows = db.scalars(
+        select(BillingJobAction)
+        .where(
+            BillingJobAction.job == JOB,
+            BillingJobAction.status.in_(
+                [BillingJobActionStatus.DONE, BillingJobActionStatus.FAILED, BillingJobActionStatus.NEEDS_REVIEW]
+            ),
+            BillingJobAction.subject_key.like("service:%:terminate%"),
+        )
+        .order_by(BillingJobAction.id)
+    )
+    for row in rows:
+        match = pattern.match(row.subject_key)
+        if match:
+            claims[int(match.group(1))] = row
+            invoice_of[int(match.group(1))] = int(match.group(2)) if match.group(2) else None
+    found: list[tuple[BillingJobAction, ServiceBilling]] = []
+    ids = sorted(claims)
+    for start in range(0, len(ids), 500):
+        stuck = db.execute(
+            select(ServiceBilling)
+            .join(Service, Service.id == ServiceBilling.service_id)
+            .where(
+                ServiceBilling.service_id.in_(ids[start : start + 500]),
+                Service.status == ServiceStatus.SUSPENDED,
+                ServiceBilling.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT,
+            )
+        ).scalars()
+        for billing in stuck:
+            unpaid = {invoice.id for invoice in unpaid_cycle_invoices(db, billing.id)}
+            claim_invoice = invoice_of[int(billing.service_id)]
+            if unpaid and (claim_invoice is None or claim_invoice in unpaid):
+                found.append((claims[int(billing.service_id)], billing))
+    found.sort(key=lambda pair: pair[0].id)
+    shown = found[: params["max_rows"]]
+
+    def _texts(claim) -> tuple[str, str]:
+        status = getattr(claim.status, "value", claim.status)
+        if status == BillingJobActionStatus.NEEDS_REVIEW.value:
+            return (
+                "is still suspended for non-payment; its termination failed and waits for review",
+                "The termination job could not terminate the service and left the action in review, and an "
+                "invoice is still unpaid. Nothing will retry it; check the service, terminate or unsuspend it "
+                "by hand, then settle the action.",
+            )
+        return (
+            "is still suspended for non-payment after its termination was settled",
+            f"An admin settled the termination as {status} without the service being terminated, and an "
+            "invoice is still unpaid. Nothing will terminate it automatically; terminate or unsuspend it by hand.",
+        )
+
+    out = [
+        Finding(
+            "billing_nonpayment_termination_unsettled",
+            "service",
+            str(billing.service_id),
+            f"Service {billing.service_id}",
+            f"Service {billing.service_id} {_texts(claim)[0]}",
+            _texts(claim)[1],
+            details={
+                "service_id": int(billing.service_id),
+                "billing_id": billing.id,
+                "action_id": claim.id,
+                "claim_status": getattr(claim.status, "value", claim.status),
+            },
+        )
+        for claim, billing in shown
+    ]
+    if len(found) > len(shown):
+        out.append(_overflow("billing_nonpayment_termination_unsettled", "service",
+                             "services still suspended", len(found) - len(shown), len(shown)))
+    return out
+
+
+def _nonpayment_billings(db: Session, service_status_clause) -> list:
+    """Retail billings ``suspended_nonpayment`` whose service matches ``service_status_clause``, by id."""
+    from app.models.reseller import ServiceBilling, ServiceBillingStatus
+    from app.models.service import Service
+
+    return list(
+        db.execute(
+            select(ServiceBilling, Service.status)
+            .join(Service, Service.id == ServiceBilling.service_id)
+            .where(
+                ServiceBilling.reseller_id.is_(None),
+                ServiceBilling.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT,
+                service_status_clause(Service.status),
+            )
+            .order_by(ServiceBilling.id)
+        ).all()
+    )
+
+
+def nonpayment_suspension_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A retail billing ``suspended_nonpayment`` whose service is not suspended.
+
+    The suspension job marks the billing first and then powers the service
+    off; when that fails (``needs_review``, perhaps later settled) the
+    service keeps running while billing treats it as suspended, and the
+    termination job never acts on it. The state decides, not the claim.
+    """
+    del now
+    from app.models.service import ServiceStatus
+
+    rows = _nonpayment_billings(
+        db, lambda status: status.not_in([ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED])
+    )
+    shown = rows[: params["max_rows"]]
+    out = [
+        Finding(
+            "billing_nonpayment_suspension_failed",
+            "service",
+            str(billing.service_id),
+            f"Service {billing.service_id}",
+            f"Service {billing.service_id} is marked suspended for non-payment but is "
+            f"{getattr(status, 'value', status)}",
+            "The non-payment suspension did not take effect on the service. Suspend it by hand, or set "
+            "its billing back to active if the client has paid.",
+            details={
+                "service_id": int(billing.service_id),
+                "billing_id": billing.id,
+                "service_status": getattr(status, "value", status),
+            },
+        )
+        for billing, status in shown
+    ]
+    if len(rows) > len(shown):
+        out.append(_overflow("billing_nonpayment_suspension_failed", "service",
+                             "services not suspended", len(rows) - len(shown), len(shown)))
+    return out
+
+
+def nonpayment_suspended_paid(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A retail service suspended for non-payment with no cycle invoice owed.
+
+    Payment lifts a suspension only when billing can tell it is the job's
+    own (``suspension_is_ours``); otherwise, or when the unsuspension failed,
+    the client has paid and the service stays down. The state decides: the
+    service is suspended, its billing ``suspended_nonpayment``, and no unpaid
+    cycle invoice is due by now (one generated ahead and not yet due keeps
+    the suspension after payment, so it is reported too).
+    """
+    from app.models.service import ServiceStatus
+    from app.services.billing.jobs.nonpayment import unpaid_cycle_invoices
+
+    found = [
+        billing
+        for billing, _ in _nonpayment_billings(db, lambda status: status == ServiceStatus.SUSPENDED)
+        if not unpaid_cycle_invoices(db, billing.id, due_by=now)
+    ]
+    shown = found[: params["max_rows"]]
+    out = [
+        Finding(
+            "billing_nonpayment_suspended_paid",
+            "service",
+            str(billing.service_id),
+            f"Service {billing.service_id}",
+            f"Service {billing.service_id} is still suspended for non-payment with nothing overdue",
+            "No cycle invoice of the service is unpaid and due, yet it is suspended for non-payment and nothing "
+            "will unsuspend it automatically. Unsuspend it by hand after checking the audit log.",
+            details={"service_id": int(billing.service_id), "billing_id": billing.id},
+        )
+        for billing in shown
+    ]
+    if len(found) > len(shown):
+        out.append(_overflow("billing_nonpayment_suspended_paid", "service",
+                             "paid services still suspended", len(found) - len(shown), len(shown)))
+    return out
+
+
+def billing_job_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """A live billing job whose last scheduled run is older than twice its cadence."""
+    del params
+    from app.models.billing_jobs import (
+        BillingJobMode,
+        BillingJobRun,
+        BillingJobRunStatus,
+        BillingJobState,
+        BillingJobTrigger,
+    )
+    from app.services.billing.periodic import CADENCE, CADENCE_PERIOD, DAILY
+
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    out = []
+    for state in db.scalars(
+        select(BillingJobState).where(BillingJobState.mode == BillingJobMode.LIVE).order_by(BillingJobState.job)
+    ):
+        limit = 2 * CADENCE_PERIOD[CADENCE.get(state.job, DAILY)]
+        since = state.live_since
+        if since is None:
+            continue
+        since = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        if now - since <= limit:
+            continue
+        last = db.scalar(
+            select(func.max(BillingJobRun.now_at)).where(
+                BillingJobRun.job == state.job,
+                BillingJobRun.trigger == BillingJobTrigger.SCHEDULE,
+                BillingJobRun.status == BillingJobRunStatus.COMPLETE,
+            )
+        )
+        if last is not None:
+            last = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+            if now - last <= limit:
+                continue
+        out.append(
+            Finding(
+                "billing_job_stale",
+                "system",
+                f"billing_job:{state.job}",
+                f"Billing job {state.job}",
+                f"Billing job {state.job} has not completed a scheduled run in {int(limit.total_seconds() // 3600)} hours",
+                "Last completed scheduled run: " + (last.isoformat() if last else "never") + ".",
+                details={"job": state.job, "last_run_at": last.isoformat() if last else None},
+            )
+        )
+    return out
+
+
+def tax_context_changed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """More than ``daily_threshold`` invoices with ``t5_context_changed`` seen in the last 24 hours (design 5).
+
+    Each invoice has one mismatch row, so the count is of invoices, resolved
+    or not; the finding clears once the rate falls back under the threshold.
+    """
+    from app.models.billing_shadow import BillingShadowMismatch
+    from app.services.tax.shadow import ENGINE, T5_CONTEXT_CHANGED
+
+    count = db.execute(
+        select(func.count(BillingShadowMismatch.id)).where(
+            BillingShadowMismatch.engine == ENGINE,
+            BillingShadowMismatch.check_key == T5_CONTEXT_CHANGED,
+            BillingShadowMismatch.last_seen_at >= now - timedelta(hours=24),
+        )
+    ).scalar_one()
+    threshold = params["daily_threshold"]
+    if count <= threshold:
+        return []
+    return [
+        Finding(
+            "billing_tax_context_changed",
+            "system",
+            "tax",
+            "Tax engine",
+            f"{count} invoices had their prepared tax result discarded in 24 hours",
+            f"{count} invoices (threshold {threshold}) were taxed again at create because a rule, exemption or "
+            "profile changed after their tax was prepared. Check for frequent rule or profile edits, or a "
+            "provider whose results go stale.",
+            details={"invoices": count, "threshold": threshold},
+        )
+    ]
+
+
+def tax_fx_rate_missing(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """The HMRC rate of this month, or from the 25th of next month, is not stored (design 4.10).
+
+    Silent unless tax is in ``shadow`` or ``v2``, a ``GB`` registration is in
+    force and the operator currency is not GBP, so a system without UK tax
+    never sees it. Also raised, whatever the mode, for each month and
+    currency with paid invoices whose sterling VAT waits for the rate
+    (``sterling_conversion``).
+    """
+    del params
+    from app.services.billing_shadow import billing_engine_mode
+    from app.services.tax import exchange_rates
+    from app.services.tax.sterling_conversion import pending_months
+
+    pending = _pending_fx_findings(db, pending_months(db))
+    if billing_engine_mode(db, "tax") not in ("shadow", "v2"):
+        return pending
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    currency = exchange_rates.rates_needed(db, now)
+    if currency is None:
+        return pending
+    current = exchange_rates.period_of(now)
+    out = []
+    taken = {finding.resource_id for finding in pending}
+    for period in exchange_rates.missing_periods(db, now):
+        if f"tax_exchange_rate:{period}:{currency}" in taken:
+            continue
+        when = "this month" if period == current else "next month"
+        out.append(
+            Finding(
+                "billing_tax_fx_rate_missing",
+                "system",
+                f"tax_exchange_rate:{period}:{currency}",
+                f"HMRC rate {currency} {period}",
+                f"The HMRC {currency} rate for {period} ({when}) is not stored",
+                f"UK VAT invoices in {currency} with a tax point in {period} cannot be published until it is: "
+                "check the tax_exchange_rates_fetch job and the HMRC exchange rates plugin, or enter HMRC's "
+                "published rate under Billing, Tax, Exchange rates.",
+                details={"currency": currency, "period": period, "source": exchange_rates.SOURCE_HMRC},
+            )
+        )
+    return pending + out
+
+
+def tax_home_registration_missing(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """The seller holds no domestic registration in force in its establishment country (design 4.3 step 2).
+
+    Silent unless tax is in ``shadow`` or ``v2`` with ``billing_tax_enabled``
+    and a seller country set, so a system without tax set up never sees it.
+    An OSS registration alone does not count: domestic sales would go untaxed.
+    """
+    del params
+    from app.models.tax import SellerTaxRegistration, TaxRegistrationScheme
+    from app.services.billing_shadow import billing_engine_mode
+    from app.services.settings_store import get_setting
+    from app.services.tax.rules_repo import normalise_country
+
+    if billing_engine_mode(db, "tax") not in ("shadow", "v2") or not get_setting(db, "billing_tax_enabled"):
+        return []
+    seller = normalise_country(get_setting(db, "billing_tax_seller_country"))
+    if seller is None:
+        return []
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    found = db.scalar(
+        select(func.count(SellerTaxRegistration.id)).where(
+            SellerTaxRegistration.enabled.is_(True),
+            SellerTaxRegistration.scheme == TaxRegistrationScheme.DOMESTIC.value,
+            SellerTaxRegistration.jurisdiction == seller,
+            SellerTaxRegistration.valid_from <= now,
+            or_(SellerTaxRegistration.valid_to.is_(None), SellerTaxRegistration.valid_to > now),
+        )
+    )
+    if found:
+        return []
+    return [
+        Finding(
+            "billing_tax_home_registration_missing",
+            "system",
+            f"tax_registration:{seller}",
+            f"Tax registration {seller}",
+            f"No registration in force in the seller's country ({seller})",
+            f"The seller is established in {seller} but holds no enabled domestic registration there in force "
+            "now, so sales to buyers in that country are charged no tax. Add or re-enable the registration under "
+            "Billing, Tax, Registrations.",
+            details={"seller_country": seller},
+        )
+    ]
+
+
+def _pending_fx_findings(db: Session, months: list[tuple[str, str, int]]) -> list[Finding]:
+    """One finding per month and currency with pending invoices.
+
+    A rate already stored means the store missed them (possible under READ
+    COMMITTED, design 4.10): the job's daily sweep fills them.
+    """
+    from app.services.tax import exchange_rates
+
+    out = []
+    for period, currency, count in months:
+        stored = exchange_rates.has_rate(db, currency, period)
+        if stored:
+            summary = (
+                f"{count} paid invoices in {currency} wait for the daily sweep to show their sterling VAT for "
+                f"{period}; the HMRC rate is stored"
+            )
+            action = (
+                "The tax_exchange_rates_fetch job fills them on its next run; check that the job is enabled and "
+                "running."
+            )
+        else:
+            summary = f"{count} paid invoices in {currency} wait for the HMRC rate for {period} to show their sterling VAT"
+            action = (
+                "Proformas paid as VAT invoices in that month print their VAT in sterling once the rate is stored: "
+                "check the tax_exchange_rates_fetch job and the HMRC exchange rates plugin, or enter HMRC's "
+                "published rate under Billing, Tax, Exchange rates. Storing it fills those invoices."
+            )
+        out.append(
+            Finding(
+                "billing_tax_fx_rate_missing",
+                "system",
+                f"tax_exchange_rate:{period}:{currency}",
+                f"HMRC rate {currency} {period}",
+                summary,
+                action,
+                details={
+                    "currency": currency,
+                    "period": period,
+                    "source": exchange_rates.SOURCE_HMRC,
+                    "pending_invoices": count,
+                    "rate_stored": stored,
+                },
+            )
+        )
+    return out
+
+
+def email_template_render_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Email messages queued with the built-in text because their stored template failed to render.
+
+    One finding per template (and event) with such messages in the last
+    ``EMAIL_RENDER_FAILED_LOOKBACK_DAYS`` days; the finding clears once the
+    template is fixed and the last fallback message ages out of that window.
+    """
+    last = func.max(EmailMessage.id)
+    stmt = (
+        select(EmailMessage.template_id, EmailMessage.event, func.count(EmailMessage.id).label("messages"),
+               last.label("last_message_id"))
+        .where(
+            EmailMessage.render_fallback.is_(True),
+            EmailMessage.created_at >= now - timedelta(days=EMAIL_RENDER_FAILED_LOOKBACK_DAYS),
+        )
+        .group_by(EmailMessage.template_id, EmailMessage.event)
+        .order_by(last.desc())
+    )
+    rows, remaining = _limited(db, stmt, params["max_rows"])
+    out = [
+        Finding(
+            "billing_email_template_render_failed",
+            "email_template",
+            str(row.template_id) if row.template_id is not None else f"event:{row.event}",
+            f"Email template {row.template_id}" if row.template_id is not None else f"Event {row.event}",
+            f"The {row.event} email template failed to render",
+            f"{row.messages} message(s) in the last {EMAIL_RENDER_FAILED_LOOKBACK_DAYS} days were sent with the "
+            "built-in text because the stored template failed to render. The audit log has the error.",
+            details={
+                "template_id": row.template_id,
+                "event": row.event,
+                "messages": int(row.messages),
+                "last_message_id": int(row.last_message_id),
+            },
+        )
+        for row in rows
+    ]
+    if remaining:
+        out.append(_overflow("billing_email_template_render_failed", "email_template",
+                             "templates with render failures", remaining, len(rows)))
+    return out
+
+
 BILLING_DETECTORS = {
     "billing_invoice_lines_mismatch": invoice_lines_mismatch,
     "billing_paid_without_payment": paid_invoice_without_payment,
@@ -1031,4 +1748,19 @@ BILLING_DETECTORS = {
     "billing_numbering_gaps": numbering_gaps,
     "billing_refund_mismatch": refund_mismatch,
     "billing_adjustment_bounds": adjustment_bounds,
+    "billing_tax_line_sum": tax_line_sum,
+    "billing_tax_summary_consistent": tax_summary_consistent,
+    "billing_tax_evidence_conflict": tax_evidence_conflict,
+    "billing_tax_not_registered": tax_not_registered,
+    "billing_tax_context_changed": tax_context_changed,
+    "billing_job_needs_review": billing_job_needs_review,
+    "billing_job_stale": billing_job_stale,
+    "billing_nonpayment_termination_unsettled": nonpayment_termination_unsettled,
+    "billing_nonpayment_suspension_failed": nonpayment_suspension_failed,
+    "billing_nonpayment_suspended_paid": nonpayment_suspended_paid,
+    "billing_email_template_render_failed": email_template_render_failed,
+    "billing_tax_fx_rate_missing": tax_fx_rate_missing,
+    "billing_tax_buyer_country_missing": tax_buyer_country_missing,
+    "billing_tax_no_rule_for_class": tax_no_rule_for_class,
+    "billing_tax_home_registration_missing": tax_home_registration_missing,
 }

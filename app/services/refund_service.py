@@ -834,11 +834,16 @@ class RefundService:
                 hold_id = RefundService._place_hold(db, refund, invoice, allow_negative=True)
             refund.ledger_entry_id = hold_id
         lines = (refund.refund_metadata or {}).get("credit_note_lines")
+        tax_rows = None
         if lines:
             tax = sum(int(_line_value(line, "tax_cents") or 0) for line in lines)
         else:
-            tax = RefundService._refund_tax(db, refund, invoice)
+            tax, tax_rows = RefundService._refund_tax_split(db, refund, invoice)
         refund.refund_metadata = {**(refund.refund_metadata or {}), "tax_cents": tax}
+        if tax_rows is not None:
+            from app.services.invoice_adjustment_service import shares_json
+
+            refund.refund_metadata = {**refund.refund_metadata, "tax_rows": shares_json(tax_rows)}
         adjustment = None
         if refund.issue_credit_note:
             from app.services.invoice_adjustment_service import InvoiceAdjustmentService
@@ -852,9 +857,73 @@ class RefundService:
                         "tax_cents": tax,
                     }
                 ]
-            adjustment = InvoiceAdjustmentService.issue_for_refund(db, refund, lines=lines)
+            extra = {"tax_rows": tax_rows} if tax_rows is not None else {}
+            adjustment = InvoiceAdjustmentService.issue_for_refund(db, refund, lines=lines, **extra)
             refund.adjustment_id = getattr(adjustment, "id", None)
         return adjustment
+
+    @staticmethod
+    def _refund_tax_split(db: Session, refund: Refund, invoice: Invoice) -> tuple[int, Any]:
+        """``(tax, per-row shares)`` of this v2 refund; shares only for an invoice with tax rows.
+
+        An invoice taxed per row (tax engine v2, design 4.8) splits the refund
+        over ``tax_base_rows`` with ``split_by_rows``, the rule a credit note
+        by amount uses, so the refund's tax and its note's rows agree. Each
+        row's base shrinks by what earlier credit notes took; an earlier
+        refund with no credit note comes off per row too (its stored shares,
+        or its amount split over the rows). Any other invoice keeps
+        ``_refund_tax``.
+        """
+        from app.services.invoice_adjustment_service import (
+            InvoiceAdjustmentService,
+            rows_less,
+            shares_from_json,
+        )
+
+        if not InvoiceAdjustmentService.has_tax_rows(db, invoice):
+            return RefundService._refund_tax(db, refund, invoice), None
+        rows = InvoiceAdjustmentService.tax_base_rows(db, invoice, before_key=f"refund-cn:{refund.id}")
+        for amount, meta in RefundService._refunds_without_note(db, refund, invoice):
+            stored = (meta or {}).get("tax_rows")
+            taken = (
+                shares_from_json(stored)
+                if stored is not None
+                else InvoiceAdjustmentService.split_by_rows(rows, int(amount))
+            )
+            rows = rows_less(rows, taken)
+        shares = InvoiceAdjustmentService.split_by_rows(rows, int(refund.amount_cents))
+        return sum(int(share.tax_cents) for share in shares), shares
+
+    @staticmethod
+    def _refunds_without_note(db: Session, refund: Refund, invoice: Invoice) -> list[tuple[int, Any]]:
+        """``(amount, metadata)`` of the invoice's other succeeded refunds that issued no credit note."""
+        from app.models.invoice_adjustment import InvoiceAdjustment
+
+        previous = db.execute(
+            select(Refund.id, Refund.amount_cents, Refund.refund_metadata)
+            .where(
+                Refund.invoice_id == invoice.id,
+                Refund.status == RefundStatus.SUCCEEDED,
+                Refund.id != refund.id,
+            )
+            .order_by(Refund.id)
+            .with_for_update()
+        ).all()
+        noted = set(
+            db.scalars(
+                select(InvoiceAdjustment.idempotency_key).where(
+                    InvoiceAdjustment.invoice_id == invoice.id,
+                    InvoiceAdjustment.idempotency_key.in_(
+                        [f"refund-cn:{refund_id}" for refund_id, _amount, _meta in previous]
+                    ),
+                )
+            )
+        )
+        return [
+            (int(amount), meta)
+            for refund_id, amount, meta in previous
+            if f"refund-cn:{refund_id}" not in noted
+        ]
 
     @staticmethod
     def _refund_tax(db: Session, refund: Refund, invoice: Invoice) -> int:

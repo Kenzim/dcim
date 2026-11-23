@@ -677,10 +677,12 @@ def run_deferred_fulfilment(db: Session) -> None:
     rolled back to its state after settlement (paid, pending fulfilment) for
     an admin to retry; the settlement is already committed. A queued order is
     only fulfilled if its invoice is paid, so an order left in the queue by a
-    transaction that rolled back is skipped.
+    transaction that rolled back is skipped. Then runs the unsuspensions the
+    settlement queued (``run_deferred_unsuspensions``).
     """
     pending = db.info.pop(_DEFERRED_FULFILMENT_KEY, [])
     if not pending:
+        run_deferred_unsuspensions(db)
         return
     from app.services.billing.settlement_subscribers import fulfil_paid_order
 
@@ -693,6 +695,59 @@ def run_deferred_fulfilment(db: Session) -> None:
         except Exception:  # noqa: BLE001 - the order stays paid_pending_fulfillment for a retry
             db.rollback()
             logger.exception("Fulfilment of paid order %s failed", order_id)
+    run_deferred_unsuspensions(db)
+
+
+_DEFERRED_UNSUSPEND_KEY = "billing.deferred_nonpayment_unsuspend"
+
+
+def defer_unsuspension(db: Session, service_id: int) -> None:
+    """Queue a service the ``nonpayment_suspension`` job suspended for unsuspension after commit."""
+    pending = db.info.setdefault(_DEFERRED_UNSUSPEND_KEY, [])
+    if service_id not in pending:
+        pending.append(service_id)
+
+
+def run_deferred_unsuspensions(db: Session) -> None:
+    """Commit the settlement, then unsuspend the services it queued, one transaction each.
+
+    The lifecycle call must not run inside the settlement transaction. Each
+    service is checked again before it is unsuspended (``unsuspend_paid_service``),
+    so a service left in the queue by a transaction that rolled back stays
+    suspended. A failed unsuspension is logged and audited for staff.
+    """
+    pending = db.info.pop(_DEFERRED_UNSUSPEND_KEY, [])
+    if not pending:
+        return
+    from app.services.billing.settlement_subscribers import unsuspend_paid_service
+
+    db.commit()
+    for service_id in pending:
+        try:
+            unsuspend_paid_service(db, service_id)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - one service must not stop the others
+            db.rollback()
+            logger.exception("Unsuspension after payment of service %s failed", service_id)
+            _audit_unsuspend_failure(db, service_id, exc)
+
+
+def _audit_unsuspend_failure(db: Session, service_id: int, exc: Exception) -> None:
+    from app.services.audit_service import AuditService
+
+    try:
+        AuditService.log(
+            db,
+            actor_user_id=None,
+            action="billing.nonpayment_unsuspend_failed",
+            resource_type="service",
+            resource_id=str(service_id),
+            metadata={"error": f"{type(exc).__name__}: {exc}"[:500]},
+        )
+        db.commit()
+    except Exception:  # noqa: BLE001 - the payment is committed; the log line above remains
+        db.rollback()
+        logger.exception("Could not audit the failed unsuspension of service %s", service_id)
 
 
 def commit_and_fulfil(db: Session) -> None:
@@ -708,3 +763,4 @@ def commit_and_fulfil(db: Session) -> None:
 
 def discard_deferred_fulfilment(db: Session) -> None:
     db.info.pop(_DEFERRED_FULFILMENT_KEY, None)
+    db.info.pop(_DEFERRED_UNSUSPEND_KEY, None)

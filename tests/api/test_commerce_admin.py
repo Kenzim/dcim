@@ -158,6 +158,29 @@ def test_admin_commerce_audit_and_billing_accounts(client, db_session: Session, 
     assert len(accounts.json()) >= 1
 
 
+def test_admin_commerce_audit_names_the_actor(client, db_session: Session, test_admin_user):
+    from app.services.audit_service import AuditService
+
+    AuditService.log(
+        db_session,
+        actor_user_id=test_admin_user.id,
+        action="alert.type_updated",
+        resource_type="alert_type",
+        resource_id="stuck_service",
+        metadata={"old": {"enabled": False}, "new": {"enabled": True}, "changed": ["enabled"]},
+    )
+    AuditService.log(db_session, action="alert.system_noted", resource_type="alert_type")
+    db_session.commit()
+    token = _login_admin(client)
+    rows = client.get(
+        "/api/admin/commerce/audit-events", params={"action": "alert."}, headers=_auth(token)
+    ).json()
+    by_action = {row["action"]: row for row in rows}
+    assert by_action["alert.type_updated"]["actor_username"] == test_admin_user.username
+    assert by_action["alert.type_updated"]["metadata"]["new"] == {"enabled": True}
+    assert by_action["alert.system_noted"]["actor_username"] is None
+
+
 def test_admin_commerce_invoice_pdf(client, db_session: Session, test_admin_user):
     user = _make_user(db_session, f"pdf-{uuid.uuid4().hex[:6]}")
     account = BillingAccountDAO.ensure_client_account(db_session, user.id)

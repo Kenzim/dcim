@@ -96,6 +96,7 @@ async def install(
         manifest=package.raw,
         directory=package.directory,
         code_hash=package.code_hash,
+        effective_api=manifest.effective_api(),
         status=PluginStatus.DISABLED,
         granted_permissions=sorted(manifest.permissions),
         addon_refs=[],
@@ -182,6 +183,7 @@ async def upgrade(
     inst.version = manifest.version
     inst.manifest = package.raw
     inst.code_hash = package.code_hash
+    inst.effective_api = manifest.effective_api()
     inst.granted_permissions = sorted(manifest.permissions)
     inst.status = PluginStatus.DISABLED
     inst.disabled_reason = None
@@ -247,6 +249,7 @@ def available_view(package: Package, installed: Optional[PluginInstallation]) ->
         "errors": list(package.errors),
         "installed": installed is not None,
         "installed_version": installed.version if installed else None,
+        "bundled": package.bundled,
     }
 
 
@@ -280,6 +283,8 @@ def summary(db: Session, inst: PluginInstallation, package: Optional[Package] = 
         "id": inst.id,
         "name": inst.name,
         "version": inst.version,
+        "effective_api": inst.effective_api,
+        "bundled": bool(package and package.bundled),
         "description": manifest.description if manifest else "",
         "author": manifest.author if manifest else None,
         "homepage": manifest.homepage if manifest else None,
@@ -312,6 +317,10 @@ def summary(db: Session, inst: PluginInstallation, package: Optional[Package] = 
             {"id": t.id, "description": t.description, "audience": t.audience, "scope": t.scope}
             for t in (manifest.mcp_tools if manifest else [])
         ],
+        "provides": [
+            {"kind": p.kind, "id": p.id, "label": p.label, "ref": f"{inst.id}:{p.id}"}
+            for p in (manifest.provides if manifest else [])
+        ],
         "installed_at": _iso(inst.installed_at),
         "updated_at": _iso(inst.updated_at),
     }
@@ -319,7 +328,7 @@ def summary(db: Session, inst: PluginInstallation, package: Optional[Package] = 
 
 def overview(db: Session) -> dict:
     from app.plugin_host.catalogue import API_VERSION
-    from app.plugin_host.loader import plugins_root
+    from app.plugin_host.loader import bundled_root, plugins_root
 
     installed = list(db.execute(select(PluginInstallation).order_by(PluginInstallation.id)).scalars())
     by_id = {inst.id: inst for inst in installed}
@@ -329,6 +338,7 @@ def overview(db: Session) -> dict:
     return {
         "api_version": API_VERSION,
         "plugins_dir": str(plugins_root()),
+        "bundled_plugins_dir": str(bundled_root()),
         "installed": [summary(db, inst, package_by_dir.get(inst.directory)) for inst in installed],
         "available": [
             available_view(p, by_id.get(p.manifest.id) if p.manifest else None)

@@ -42,7 +42,7 @@ from app.services.billing.settlement import commit_and_fulfil
 from app.services.billing_shadow import is_reserved_key as is_reserved_billing_key
 from app.services.billing.order_refunds import cancel_order as cancel_commerce_order
 from app.services.commerce_webhook_service import CommerceWebhookService
-from app.services.email_message_service import EmailMessageService
+from app.services.email_message_service import EmailMessageService, EmailRetryRefused
 from app.services.gdpr_service import GdprService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceError, InvoiceService
@@ -202,10 +202,11 @@ def _serialize_gateway_log(row: PaymentGatewayLog) -> dict:
     }
 
 
-def _serialize_audit(row: UserAuditEvent) -> dict:
+def _serialize_audit(row: UserAuditEvent, actor_names: Optional[dict[int, str]] = None) -> dict:
     return {
         "id": row.id,
         "actor_user_id": row.actor_user_id,
+        "actor_username": (actor_names or {}).get(row.actor_user_id),
         "subject_user_id": row.subject_user_id,
         "billing_account_id": row.billing_account_id,
         "action": row.action,
@@ -229,11 +230,14 @@ def _serialize_billing_account(row) -> dict:
         "currency": row.currency,
         "credit_balance_cents": row.credit_balance_cents,
         "tax_exempt": row.tax_exempt,
+        "tax_exempt_reason": row.tax_exempt_reason,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "username": row.user.username if row.user else None,
         "email": row.user.email if row.user else None,
-        "reseller_name": row.reseller.name if row.reseller else None,
+        "reseller_name": (
+            row.reseller.user.username if row.reseller is not None and row.reseller.user is not None else None
+        ),
     }
 
 
@@ -643,7 +647,10 @@ def list_email_messages(
 
 @router.post("/email-messages/{message_id}/retry", responses=COMMON_ERROR_RESPONSES)
 def retry_email_message(message_id: int, db: DbDep):
-    row = EmailMessageService.retry(db, message_id)
+    try:
+        row = EmailMessageService.retry(db, message_id)
+    except EmailRetryRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if row is None:
         raise HTTPException(status_code=404, detail="Email message not found")
     db.commit()
@@ -673,7 +680,13 @@ def list_audit_events(
     if subject_user_id is not None:
         stmt = stmt.where(UserAuditEvent.subject_user_id == subject_user_id)
     rows = list(db.execute(stmt.offset(offset).limit(limit)).scalars())
-    return [_serialize_audit(row) for row in rows]
+    actor_ids = {row.actor_user_id for row in rows if row.actor_user_id is not None}
+    actor_names = (
+        dict(db.execute(select(User.id, User.username).where(User.id.in_(actor_ids))).all())
+        if actor_ids
+        else {}
+    )
+    return [_serialize_audit(row, actor_names) for row in rows]
 
 
 # --- Billing accounts ---
@@ -712,6 +725,10 @@ def get_billing_account(account_id: int, db: DbDep):
             "country": row.profile.country,
             "phone": row.profile.phone,
             "tax_id": row.profile.tax_id,
+            "tax_id_type": row.profile.tax_id_type,
+            "tax_id_status": row.profile.tax_id_status,
+            "tax_id_checked_at": row.profile.tax_id_checked_at,
+            "is_business": row.profile.is_business,
             "invoice_email": row.profile.invoice_email,
         }
     return payload

@@ -234,6 +234,9 @@ class PricePlanCycle(Base):
     interval_count = Column(SmallInteger, nullable=True)
     # Per-cycle setup fee; NULL means the plan's setup_cents.
     setup_cents = Column(BigInteger, nullable=True)
+    # Days before the due date the cycle invoice is generated; NULL means
+    # billing_invoice_lead_days (billing phase 2, B3).
+    invoice_lead_days = Column(SmallInteger, nullable=True)
 
     price_plan = relationship("PricePlan", back_populates="cycles")
 

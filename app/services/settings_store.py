@@ -32,6 +32,7 @@ from app.core import config as app_config
 from app.dao.commerce_dao import SystemSettingDAO
 from app.models.commerce_account import SystemSetting
 from app.services.audit_service import AuditService
+from app.services.billing.operator_currency import operator_currency
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,8 @@ class SettingDef:
 
     ``key`` is also the attribute name on ``Settings`` that supplies the
     default. ``fallback`` is used only when ``Settings`` has no such attribute
-    (a setting whose config field is added by another change).
+    (a setting whose config field is added by another change); a callable
+    fallback is called each time the default is read.
     ``requires_restart`` marks a value that is only read at process start-up.
     """
 
@@ -85,7 +87,9 @@ class SettingDef:
         source = base if base is not None else app_config.settings
         if self.fallback is _NO_FALLBACK:
             return getattr(source, self.key)
-        return getattr(source, self.key, self.fallback)
+        if hasattr(source, self.key):
+            return getattr(source, self.key)
+        return self.fallback() if callable(self.fallback) else self.fallback
 
     def validate(self, value: Any) -> Any:
         """Return the normalised value or raise ``SettingValidationError``."""
@@ -141,6 +145,71 @@ def _validate_retry_days(text: str) -> str:
     return ",".join(str(day) for day in parse_retry_days(text))
 
 
+# ``<plugin_id>:<provider_id>``, with the identifier rules of app/plugin_host/manifest.py.
+_PROVIDER_REF = r"[a-z][a-z0-9_]{2,47}:[a-z][a-z0-9_]{0,63}"
+
+
+def _validate_country_or_empty(text: str) -> str:
+    country = text.upper()
+    if country and not re.fullmatch(r"[A-Z]{2}", country):
+        raise SettingValidationError("must be a two-letter country code (ISO 3166-1 alpha-2) or empty")
+    return country
+
+
+def _validate_signoff(text: str) -> str:
+    return text.strip()
+
+
+def _validate_currency(text: str) -> str:
+    currency = text.upper()
+    if not re.fullmatch(r"[A-Z]{3}", currency):
+        raise SettingValidationError("must be a three-letter currency code (ISO 4217)")
+    return currency
+
+
+def _validate_provider_refs(text: str) -> str:
+    refs = [part.strip() for part in text.split(",") if part.strip()]
+    for ref in refs:
+        if not re.fullmatch(_PROVIDER_REF, ref):
+            raise SettingValidationError(
+                "must be comma-separated provider references of the form plugin_id:provider_id"
+            )
+    if len(set(refs)) != len(refs):
+        raise SettingValidationError("must not list a provider twice")
+    return ",".join(refs)
+
+
+def parse_reminder_overdue_days(text: str) -> tuple[int, ...]:
+    """Parse ``billing_reminder_overdue_days``: up to three ascending days, 1 to 365.
+
+    An empty value means no overdue reminders.
+    """
+    try:
+        days = tuple(int(part.strip()) for part in text.split(",") if part.strip())
+    except ValueError as exc:
+        raise SettingValidationError("must be comma-separated whole numbers") from exc
+    if len(days) > 3:
+        raise SettingValidationError("must list at most three days")
+    if any(day < 1 or day > 365 for day in days) or tuple(sorted(set(days))) != days:
+        raise SettingValidationError("must be unique, ascending days from 1 to 365, for example 1,7,14")
+    return days
+
+
+def _validate_reminder_overdue_days(text: str) -> str:
+    return ",".join(str(day) for day in parse_reminder_overdue_days(text))
+
+
+# Jobs of docs/billing-phase2-design.md 9.1 that can be limited to one track.
+BILLING_JOB_TRACK_JOBS = (
+    "generate_invoices_ahead",
+    "invoice_reminders",
+    "late_fees",
+    "nonpayment_termination",
+    "cancellations",
+)
+BILLING_JOB_TRACKS = ("both", "reseller", "retail")
+
+
 GROUPS: dict[str, SettingGroup] = {
     group.key: group
     for group in (
@@ -164,6 +233,23 @@ GROUPS: dict[str, SettingGroup] = {
             "Billing engines",
             "Which invoice and credit engines run (legacy, shadow comparison, or v2), "
             "the shadow comparison schedule, and the periodic billing jobs.",
+        ),
+        SettingGroup(
+            "billing_tax",
+            "Tax",
+            "The tax engine: which rules apply, the seller's country, tax-ID checks and the "
+            "location evidence used to choose a rate.",
+        ),
+        SettingGroup(
+            "billing_automation",
+            "Billing automation",
+            "Schedule and limits of the billing jobs (invoice generation, late fees, "
+            "non-payment, cancellations). Each job's mode is set on the jobs page.",
+        ),
+        SettingGroup(
+            "billing_email",
+            "Billing email",
+            "When invoice reminder emails are sent.",
         ),
     )
 }
@@ -416,6 +502,310 @@ _DEFINITIONS = (
         "retail_billing",
         fallback=False,
     ),
+    # Billing phase 2 (docs/billing-phase2-design.md appendix A).
+    SettingDef(
+        "billing_tax_engine",
+        "str",
+        "Tax engine: legacy (the tax_rates table only), shadow (legacy tax, with the v2 "
+        "answer compared and differences recorded), or v2. Reaches v2 only through the "
+        "engine switch, which checks the shadow comparison criteria.",
+        "billing_tax",
+        choices=ENGINE_MODES,
+        fallback="shadow",
+    ),
+    SettingDef(
+        "billing_tax_enabled",
+        "bool",
+        "Apply rule pack and admin tax rules, seller registrations and reverse charge. "
+        "Rules mirrored from the tax rates table apply either way.",
+        "billing_tax",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_tax_seller_country",
+        "str",
+        "Country the seller is established in (two-letter code), or empty. Required "
+        "before any rule that needs a seller registration applies.",
+        "billing_tax",
+        max_length=2,
+        validator=_validate_country_or_empty,
+        fallback="",
+    ),
+    SettingDef(
+        "billing_tax_prices_include_tax",
+        "bool",
+        "Catalogue prices include tax (tax is worked out inside the price) instead of "
+        "being added to it.",
+        "billing_tax",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_tax_retail_renewals",
+        "bool",
+        "Charge tax on retail renewal invoices once the tax engine is v2.",
+        "billing_tax",
+        fallback=True,
+    ),
+    SettingDef(
+        "billing_tax_resellers_enabled",
+        "bool",
+        "Charge tax on reseller invoices once the tax engine is v2.",
+        "billing_tax",
+        fallback=False,
+    ),
+    SettingDef(
+        "billing_tax_provider",
+        "str",
+        "Plugin tax calculation provider (plugin_id:provider_id) used instead of the "
+        "built-in rules, or empty for the built-in rules.",
+        "billing_tax",
+        max_length=113,
+        pattern=f"|{_PROVIDER_REF}",
+        fallback="",
+    ),
+    SettingDef(
+        "billing_tax_id_validators",
+        "str",
+        "Tax-ID validator providers to try, in order, comma-separated "
+        "(plugin_id:provider_id). Empty: tax IDs are only format-checked and stay unchecked.",
+        "billing_tax",
+        max_length=1000,
+        validator=_validate_provider_refs,
+        fallback="",
+    ),
+    SettingDef(
+        "billing_tax_id_unavailable_policy",
+        "str",
+        "What checkout does when no validator can check a business's tax ID: charge tax "
+        "as for a consumer, or block the checkout.",
+        "billing_tax",
+        choices=("charge_tax", "block_checkout"),
+        fallback="charge_tax",
+    ),
+    SettingDef(
+        "billing_tax_id_check_timeout_seconds",
+        "int",
+        "Seconds one tax-ID check may take before it counts as unavailable.",
+        "billing_tax",
+        min_value=1,
+        max_value=30,
+        fallback=8,
+    ),
+    SettingDef(
+        "billing_tax_id_valid_days",
+        "int",
+        "Days a valid tax-ID check result is cached before the validator is asked again.",
+        "billing_tax",
+        min_value=1,
+        max_value=365,
+        fallback=30,
+    ),
+    SettingDef(
+        "billing_tax_id_max_age_days",
+        "int",
+        "Days a valid tax-ID check counts as fresh evidence for reverse charge, counted back from the tax point.",
+        "billing_tax",
+        min_value=1,
+        max_value=365,
+        fallback=30,
+    ),
+    SettingDef(
+        "billing_tax_id_recheck_batch",
+        "int",
+        "Most billing profiles one run of the tax-ID recheck job checks.",
+        "billing_tax",
+        min_value=1,
+        max_value=5_000,
+        fallback=200,
+    ),
+    SettingDef(
+        "billing_tax_adviser_signoff",
+        "str",
+        "The tax adviser's sign-off of the VAT treatment (their reference and the date), or "
+        "empty. The tax engine cannot switch to v2 while it is empty.",
+        "billing_tax",
+        max_length=500,
+        validator=_validate_signoff,
+        fallback="",
+    ),
+    SettingDef(
+        "billing_tax_ip_country_header",
+        "str",
+        "Request header set by the proxy with the client's country (for example "
+        "CF-IPCountry), recorded as location evidence; empty to record none.",
+        "billing_tax",
+        max_length=64,
+        pattern=r"[A-Za-z0-9-]*",
+        fallback="",
+    ),
+    SettingDef(
+        "billing_automation_time_utc",
+        "str",
+        "Time of day (UTC, HH:MM) the daily billing jobs run.",
+        "billing_automation",
+        max_length=5,
+        pattern=r"([01][0-9]|2[0-3]):[0-5][0-9]",
+        fallback="09:00",
+    ),
+    SettingDef(
+        "billing_job_lease_seconds",
+        "int",
+        "Seconds a billing job run holds its lease.",
+        "billing_automation",
+        min_value=60,
+        max_value=3_600,
+        fallback=600,
+    ),
+    SettingDef(
+        "billing_job_max_catch_up_days",
+        "int",
+        "Most missed days a billing job catches up after downtime.",
+        "billing_automation",
+        min_value=1,
+        max_value=30,
+        fallback=3,
+    ),
+    SettingDef(
+        "billing_job_min_dry_runs",
+        "int",
+        "Completed dry runs a billing job needs before it can be set live.",
+        "billing_automation",
+        min_value=0,
+        max_value=30,
+        fallback=1,
+    ),
+    SettingDef(
+        "billing_job_stuck_minutes",
+        "int",
+        "Minutes after which a running billing job, or a claimed action, counts as stuck.",
+        "billing_automation",
+        min_value=5,
+        max_value=1_440,
+        fallback=60,
+    ),
+    SettingDef(
+        "billing_job_run_retention_days",
+        "int",
+        "Days billing job runs and their items are kept.",
+        "billing_automation",
+        min_value=7,
+        max_value=365,
+        fallback=90,
+    ),
+    *(
+        SettingDef(
+            f"billing_job_tracks_{job}",
+            "str",
+            f"Which services the {job.replace('_', ' ')} job handles: both tracks, "
+            "reseller only, or retail only.",
+            "billing_automation",
+            choices=BILLING_JOB_TRACKS,
+            fallback="both",
+        )
+        for job in BILLING_JOB_TRACK_JOBS
+    ),
+    SettingDef(
+        "billing_invoice_lead_days",
+        "int",
+        "Days before the due date a renewal invoice is generated, unless the billing "
+        "cycle sets its own.",
+        "billing_automation",
+        min_value=0,
+        max_value=60,
+        fallback=0,
+    ),
+    SettingDef(
+        "billing_reminder_upcoming_days",
+        "int",
+        "Days before the due date the invoice reminder is sent; 0 sends none.",
+        "billing_email",
+        min_value=0,
+        max_value=30,
+        fallback=3,
+    ),
+    SettingDef(
+        "billing_reminder_overdue_days",
+        "str",
+        "Days after the due date overdue reminders are sent: up to three, comma-separated, "
+        "ascending (for example 1,7,14); empty sends none.",
+        "billing_email",
+        max_length=32,
+        validator=_validate_reminder_overdue_days,
+        fallback="1,7,14",
+    ),
+    SettingDef(
+        "billing_late_fee_type",
+        "str",
+        "Late fee on overdue invoices: none, a fixed amount, or a percentage of the "
+        "amount still due.",
+        "billing_automation",
+        choices=("none", "fixed", "percent"),
+        fallback="none",
+    ),
+    SettingDef(
+        "billing_late_fee_fixed_cents",
+        "int",
+        "Fixed late fee, in minor currency units (cents).",
+        "billing_automation",
+        min_value=0,
+        max_value=1_000_000_000,
+        fallback=0,
+    ),
+    SettingDef(
+        "billing_late_fee_currency",
+        "str",
+        "Currency of the fixed late fee and of the minimum and maximum (three-letter code). "
+        "Invoices in another currency get no fixed fee.",
+        "billing_automation",
+        max_length=3,
+        validator=_validate_currency,
+        fallback=operator_currency,
+    ),
+    SettingDef(
+        "billing_late_fee_percent_bp",
+        "int",
+        "Percentage late fee, in basis points of the amount still due (100 = 1%).",
+        "billing_automation",
+        min_value=0,
+        max_value=10_000,
+        fallback=0,
+    ),
+    SettingDef(
+        "billing_late_fee_min_cents",
+        "int",
+        "Smallest percentage late fee, in minor currency units (cents).",
+        "billing_automation",
+        min_value=0,
+        max_value=1_000_000_000,
+        fallback=0,
+    ),
+    SettingDef(
+        "billing_late_fee_max_cents",
+        "int",
+        "Largest percentage late fee, in minor currency units (cents); 0 means no maximum.",
+        "billing_automation",
+        min_value=0,
+        max_value=1_000_000_000,
+        fallback=0,
+    ),
+    SettingDef(
+        "billing_late_fee_days",
+        "int",
+        "Days after the due date the late fee is added.",
+        "billing_automation",
+        min_value=1,
+        max_value=365,
+        fallback=14,
+    ),
+    SettingDef(
+        "billing_late_fee_min_balance_cents",
+        "int",
+        "Smallest amount still due, in minor currency units (cents), that attracts a late fee.",
+        "billing_automation",
+        min_value=1,
+        max_value=1_000_000_000,
+        fallback=1,
+    ),
 )
 
 SCHEMA: dict[str, SettingDef] = {definition.key: definition for definition in _DEFINITIONS}
@@ -455,6 +845,13 @@ def _retail_topup_range(values: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _late_fee_range(values: dict[str, Any]) -> Optional[str]:
+    maximum = values["billing_late_fee_max_cents"]
+    if maximum and values["billing_late_fee_min_cents"] > maximum:
+        return "billing_late_fee_min_cents must not exceed billing_late_fee_max_cents when a maximum is set"
+    return None
+
+
 RULES = (
     ConsistencyRule(
         ("recurring_billing_retry_days", "recurring_billing_grace_days"),
@@ -467,6 +864,10 @@ RULES = (
     ConsistencyRule(
         ("billing_credit_topup_min_cents", "billing_credit_topup_max_cents"),
         _retail_topup_range,
+    ),
+    ConsistencyRule(
+        ("billing_late_fee_min_cents", "billing_late_fee_max_cents"),
+        _late_fee_range,
     ),
 )
 

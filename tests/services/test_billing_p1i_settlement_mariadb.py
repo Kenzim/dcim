@@ -95,12 +95,18 @@ def _setup(sessions) -> tuple[int, int]:
         return int(invoice.id), int(account.id)
 
 
-def _pay(sessions, invoice_id: int, amount: int, *, delay: float, hold: float) -> int:
-    """Read the invoice, record a succeeded payment and settle; hold the locks for ``hold`` seconds."""
+def _pay(sessions, invoice_id: int, amount: int, *, hold: float,
+         locked: threading.Event | None = None, after: threading.Event | None = None) -> int:
+    """Read the invoice, record a succeeded payment and settle; hold the locks for ``hold`` seconds.
+
+    ``locked`` is set once this payment holds the invoice lock. With ``after``, the payment
+    starts only once that event is set, so the order does not depend on thread timing.
+    """
     from app.models.reseller import Invoice, Payment, PaymentStatus
     from app.services.invoice_service import InvoiceService
 
-    time.sleep(delay)
+    if after is not None:
+        assert after.wait(30), "the first payment never took the invoice lock"
     with sessions() as db:
         invoice = db.get(Invoice, invoice_id)
         payment = Payment(invoice_id=invoice_id, gateway="manual", status=PaymentStatus.SUCCEEDED,
@@ -108,6 +114,8 @@ def _pay(sessions, invoice_id: int, amount: int, *, delay: float, hold: float) -
         db.add(payment)
         db.flush()
         InvoiceService.recompute(db, invoice, cause="payment", payment=payment)
+        if locked is not None:
+            locked.set()
         time.sleep(hold)
         db.commit()
         return int(payment.id)
@@ -139,9 +147,10 @@ def test_two_payments_settling_at_once_credit_the_overpayment(sessions):
     from app.services.invoice_service import InvoiceService
 
     invoice_id, account_id = _setup(sessions)
+    first_locked = threading.Event()
     first, second = _together(
-        lambda: _pay(sessions, invoice_id, 600, delay=0.0, hold=1.0),
-        lambda: _pay(sessions, invoice_id, 600, delay=0.3, hold=0.0),
+        lambda: _pay(sessions, invoice_id, 600, hold=1.0, locked=first_locked),
+        lambda: _pay(sessions, invoice_id, 600, hold=0.0, after=first_locked),
     )
     assert not isinstance(first, Exception), first
     assert not isinstance(second, Exception), second
@@ -191,9 +200,10 @@ def test_two_payments_settling_at_once_pay_a_legacy_invoice(sessions, mode):
     from app.models.reseller import Invoice, InvoiceStatus
 
     invoice_id = _setup_legacy(sessions, mode)
+    first_locked = threading.Event()
     first, second = _together(
-        lambda: _pay(sessions, invoice_id, 500, delay=0.0, hold=1.0),
-        lambda: _pay(sessions, invoice_id, 500, delay=0.3, hold=0.0),
+        lambda: _pay(sessions, invoice_id, 500, hold=1.0, locked=first_locked),
+        lambda: _pay(sessions, invoice_id, 500, hold=0.0, after=first_locked),
     )
     assert not isinstance(first, Exception), first
     assert not isinstance(second, Exception), second

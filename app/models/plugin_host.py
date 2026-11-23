@@ -53,6 +53,9 @@ class PluginInstallation(Base):
     last_error = Column(Text, nullable=True)
     last_error_at = Column(DateTime(timezone=True), nullable=True)
     last_success_at = Column(DateTime(timezone=True), nullable=True)
+    # Highest supported plugin API version the manifest's range allows (API 1.1,
+    # docs/billing-phase2-design.md 8.1); NULL until the loader records it.
+    effective_api = Column(String(16), nullable=True)
     installed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

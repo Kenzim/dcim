@@ -37,7 +37,7 @@ from app.services.settings_store import get_setting, set_setting
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
-EngineName = Literal["invoice", "credit"]
+EngineName = Literal["invoice", "credit", "tax"]
 
 router = APIRouter(
     prefix="/admin/billing/engines",
@@ -189,6 +189,11 @@ class SwitchBody(BaseModel):
 
     to: Literal["legacy", "shadow", "v2"]
     confirm_overpayments_to_reseller_cache: bool = False
+    # Tax engine (design 5): switch with only the mirrored tax_rates rules, the
+    # open t1_rule_divergence row ids seen, and the t2_uncovered rows seen.
+    confirm_mirrored_only: bool = False
+    confirm_divergence: list[int] = Field(default_factory=list, max_length=10_000)
+    confirm_uncovered: bool = False
 
 
 def _conflict(code: str, message: str, **extra) -> HTTPException:
@@ -227,6 +232,9 @@ def switch_engine(engine: EngineName, body: SwitchBody, auth: AdminDep, db: DbDe
             engine,
             now,
             confirm_overpayments_to_reseller_cache=body.confirm_overpayments_to_reseller_cache,
+            confirm_mirrored_only=body.confirm_mirrored_only,
+            confirm_divergence=body.confirm_divergence,
+            confirm_uncovered=body.confirm_uncovered,
         )
         failing = [item for item in criteria if not item["ok"]]
         if failing:
@@ -252,6 +260,9 @@ def switch_engine(engine: EngineName, body: SwitchBody, auth: AdminDep, db: DbDe
                 for a, r, c in differing[:50]
             ],
         }
+    if current == "v2" and engine == "tax":
+        # Rollback is always allowed; later invoices go back to _tax_cents and untaxed renewals.
+        rollback_notes = {"open_v2_taxed_invoices": billing_shadow.open_v2_taxed_invoices(db)}
 
     set_setting(db, ENGINE_SETTING[engine], target, actor_user_id=auth["user_id"])
     record = billing_shadow.switch_record(db, engine)

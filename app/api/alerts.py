@@ -12,10 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import require_admin
 from app.core.database import get_db
-from app.models.alerting import AlertChannel
+from app.models.alerting import AlertChannel, AlertSilence
 from app.services.alerting import admin as svc
 from app.services.alerting import catalogue, status as eval_status
 from app.services.alerting.catalogue import CATALOGUE, effective_settings
+from app.services.audit_service import AuditService
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[dict, Depends(require_admin)]
@@ -27,6 +28,40 @@ def _fail(exc: Exception) -> HTTPException:
     if isinstance(exc, svc.NotFound):
         return HTTPException(status_code=404, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
+
+
+def _type_snapshot(db: Session, alert_type: str) -> dict[str, Any]:
+    eff = effective_settings(db)[alert_type]
+    return {
+        "enabled": eff.enabled,
+        "severity": eff.severity,
+        "params": dict(eff.params),
+        "reminder_interval_seconds": eff.reminder_interval_seconds,
+        "hold_down_seconds": eff.hold_down_seconds,
+    }
+
+
+def _silence_snapshot(row: AlertSilence) -> dict[str, Any]:
+    return {
+        "alert_type": row.alert_type,
+        "resource_type": row.resource_type,
+        "resource_id": row.resource_id,
+        "starts_at": svc._iso(row.starts_at),
+        "ends_at": svc._iso(row.ends_at),
+        "reason": row.reason,
+    }
+
+
+def _audit(db: Session, auth: dict, action: str, resource_type: str, resource_id: Any, metadata: dict[str, Any]) -> None:
+    """Add the audit row to the caller's open transaction; the caller commits."""
+    AuditService.log(
+        db,
+        actor_user_id=auth.get("user_id"),
+        action=action,
+        resource_type=resource_type,
+        resource_id=str(resource_id) if resource_id is not None else None,
+        metadata=metadata,
+    )
 
 
 class AcknowledgeBody(BaseModel):
@@ -181,8 +216,11 @@ def list_types(db: DbDep, _: AdminDep) -> dict[str, Any]:
 
 
 @router.put("/types/{alert_type}")
-def update_type(alert_type: str, body: TypeSettingBody, db: DbDep, _: AdminDep) -> dict[str, Any]:
+def update_type(alert_type: str, body: TypeSettingBody, db: DbDep, auth: AdminDep) -> dict[str, Any]:
+    if alert_type not in CATALOGUE:
+        raise HTTPException(status_code=404, detail="Unknown alert type")
     try:
+        before = _type_snapshot(db, alert_type)
         catalogue.update_type_setting(
             db,
             alert_type,
@@ -193,6 +231,17 @@ def update_type(alert_type: str, body: TypeSettingBody, db: DbDep, _: AdminDep) 
             hold_down_seconds=body.hold_down_seconds,
             reset=body.reset,
         )
+        after = _type_snapshot(db, alert_type)
+        changed = [key for key in after if before[key] != after[key]]
+        if changed:
+            _audit(
+                db,
+                auth,
+                "alert.type_updated",
+                "alert_type",
+                alert_type,
+                {"alert_type": alert_type, "old": before, "new": after, "changed": changed, "reset": body.reset},
+            )
         db.commit()
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown alert type")
@@ -208,9 +257,20 @@ def get_settings(db: DbDep, _: AdminDep) -> dict[str, int]:
 
 
 @router.put("/settings")
-def put_settings(body: GlobalSettingsBody, db: DbDep, _: AdminDep) -> dict[str, int]:
+def put_settings(body: GlobalSettingsBody, db: DbDep, auth: AdminDep) -> dict[str, int]:
     try:
+        before = catalogue.get_global_settings(db)
         result = catalogue.update_global_settings(db, body.settings)
+        changed = [key for key in result if before[key] != result[key]]
+        if changed:
+            _audit(
+                db,
+                auth,
+                "alert.settings_updated",
+                "alert_settings",
+                "global",
+                {"old": {k: before[k] for k in changed}, "new": {k: result[k] for k in changed}},
+            )
         db.commit()
         return result
     except ValueError as exc:
@@ -226,16 +286,22 @@ def list_silences(db: DbDep, _: AdminDep, include_expired: bool = False) -> dict
 @router.post("/silences")
 def create_silence(body: SilenceBody, db: DbDep, auth: AdminDep) -> dict[str, Any]:
     try:
-        row = svc.create_silence(db, user_id=auth.get("user_id"), **body.model_dump())
+        row = svc.create_silence(db, user_id=auth.get("user_id"), commit=False, **body.model_dump())
+        _audit(db, auth, "alert.silence_created", "alert_silence", row.id, _silence_snapshot(row))
+        db.commit()
     except svc.AlertError as exc:
         raise _fail(exc)
     return {"id": row.id}
 
 
 @router.delete("/silences/{silence_id}")
-def delete_silence(silence_id: int, db: DbDep, _: AdminDep) -> dict[str, bool]:
+def delete_silence(silence_id: int, db: DbDep, auth: AdminDep) -> dict[str, bool]:
     try:
-        svc.delete_silence(db, silence_id)
+        row = db.get(AlertSilence, silence_id)
+        snapshot = _silence_snapshot(row) if row is not None else {}
+        svc.delete_silence(db, silence_id, commit=False)
+        _audit(db, auth, "alert.silence_deleted", "alert_silence", silence_id, snapshot)
+        db.commit()
     except svc.NotFound as exc:
         raise _fail(exc)
     return {"ok": True}
@@ -250,27 +316,49 @@ def list_channels(db: DbDep, _: AdminDep) -> dict[str, Any]:
 @router.post("/channels")
 def create_channel(body: ChannelBody, db: DbDep, auth: AdminDep) -> dict[str, Any]:
     try:
-        channel = svc.create_channel(db, user_id=auth.get("user_id"), **body.model_dump())
+        channel = svc.create_channel(db, user_id=auth.get("user_id"), commit=False, **body.model_dump())
+        snapshot = svc.serialise_channel(channel)
+        _audit(db, auth, "alert.channel_created", "alert_channel", channel.id, {"new": snapshot})
+        db.commit()
     except svc.AlertError as exc:
         db.rollback()
         raise _fail(exc)
-    return svc.serialise_channel(channel)
+    return snapshot
 
 
 @router.put("/channels/{channel_id}")
-def update_channel(channel_id: int, body: ChannelUpdate, db: DbDep, _: AdminDep) -> dict[str, Any]:
+def update_channel(channel_id: int, body: ChannelUpdate, db: DbDep, auth: AdminDep) -> dict[str, Any]:
+    fields = body.model_dump(exclude_unset=True)
     try:
-        channel = svc.update_channel(db, channel_id, **body.model_dump(exclude_unset=True))
+        current = db.get(AlertChannel, channel_id)
+        before = svc.serialise_channel(current) if current is not None else None
+        channel = svc.update_channel(db, channel_id, commit=False, **fields)
+        after = svc.serialise_channel(channel)
+        secret_changed = fields.get("secret") is not None
+        if before != after or secret_changed:
+            _audit(
+                db,
+                auth,
+                "alert.channel_updated",
+                "alert_channel",
+                channel_id,
+                {"old": before, "new": after, "secret_changed": secret_changed},
+            )
+        db.commit()
     except (svc.AlertError, svc.NotFound) as exc:
         db.rollback()
         raise _fail(exc)
-    return svc.serialise_channel(channel)
+    return after
 
 
 @router.delete("/channels/{channel_id}")
-def delete_channel(channel_id: int, db: DbDep, _: AdminDep) -> dict[str, bool]:
+def delete_channel(channel_id: int, db: DbDep, auth: AdminDep) -> dict[str, bool]:
     try:
-        svc.delete_channel(db, channel_id)
+        current = db.get(AlertChannel, channel_id)
+        before = svc.serialise_channel(current) if current is not None else None
+        svc.delete_channel(db, channel_id, commit=False)
+        _audit(db, auth, "alert.channel_deleted", "alert_channel", channel_id, {"old": before})
+        db.commit()
     except svc.NotFound as exc:
         raise _fail(exc)
     return {"ok": True}
@@ -290,14 +378,31 @@ def list_recipients(db: DbDep, _: AdminDep) -> dict[str, Any]:
 
 
 @router.put("/recipients")
-def put_recipients(body: RecipientsBody, db: DbDep, _: AdminDep) -> dict[str, Any]:
+def put_recipients(body: RecipientsBody, db: DbDep, auth: AdminDep) -> dict[str, Any]:
     try:
+        before = {r["user_id"]: r for r in svc.list_recipients(db)}
         for item in body.recipients:
-            svc.set_recipient(db, item.user_id, enabled=item.enabled, min_severity=item.min_severity)
+            svc.set_recipient(db, item.user_id, enabled=item.enabled, min_severity=item.min_severity, commit=False)
+        items = svc.list_recipients(db)
+        changes = []
+        for after in items:
+            old = before[after["user_id"]]
+            if (old["enabled"], old["min_severity"]) != (after["enabled"], after["min_severity"]):
+                changes.append(
+                    {
+                        "user_id": after["user_id"],
+                        "username": after["username"],
+                        "old": {"enabled": old["enabled"], "min_severity": old["min_severity"]},
+                        "new": {"enabled": after["enabled"], "min_severity": after["min_severity"]},
+                    }
+                )
+        if changes:
+            _audit(db, auth, "alert.recipients_updated", "alert_recipients", "staff", {"changes": changes})
+        db.commit()
     except (svc.AlertError, svc.NotFound) as exc:
         db.rollback()
         raise _fail(exc)
-    return {"items": svc.list_recipients(db)}
+    return {"items": items}
 
 
 @router.get("/deliveries")
@@ -341,8 +446,22 @@ def unacknowledge(alert_id: int, db: DbDep, _: AdminDep) -> dict[str, Any]:
 def silence_alert(alert_id: int, body: AlertSilenceBody, db: DbDep, auth: AdminDep) -> dict[str, Any]:
     try:
         row = svc.silence_alert(
-            db, alert_id, user_id=auth.get("user_id"), duration_minutes=body.duration_minutes, reason=body.reason
+            db,
+            alert_id,
+            user_id=auth.get("user_id"),
+            duration_minutes=body.duration_minutes,
+            reason=body.reason,
+            commit=False,
         )
+        _audit(
+            db,
+            auth,
+            "alert.silence_created",
+            "alert_silence",
+            row.id,
+            {"alert_id": alert_id, **_silence_snapshot(row)},
+        )
+        db.commit()
     except (svc.AlertError, svc.NotFound) as exc:
         raise _fail(exc)
     return {"id": row.id}

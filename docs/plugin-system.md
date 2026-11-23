@@ -1,6 +1,6 @@
 # Rackflow plugin system
 
-Status: design for plugin API version **1.0**, core implemented in `app/plugin_host/`.
+Status: design for plugin API version **1.0**, core implemented in `app/plugin_host/`. API **1.1** adds typed provider kinds and bundled plugins (section 18); everything else in this document applies to both versions.
 Audience: Rackflow maintainers, plugin authors (this file is the public contract) and operators.
 
 This document is the contract between Rackflow and third-party plugins. Everything a plugin may rely on is written here: the package format, the manifest, the events, the permissions, the SDK, the UI contribution language and the HTTP shapes every surface (admin UI, client portal, WHMCS, MCP) renders from. Anything not written here is internal and may change without notice.
@@ -235,6 +235,10 @@ Every event a handler receives is:
 | `credit.added` | `ledger_entry_id`, `billing_account_id`, `amount_cents`, `balance_cents`, `currency`, `entry_type`; optional `reseller_id`, `invoice_id`, `refund_id` | `billing.read` | no |
 | `credit.applied` | `ledger_entry_id`, `billing_account_id`, `invoice_id`, `amount_cents`, `balance_cents`, `currency`; optional `reseller_id`, `payment_id` | `billing.read` | no |
 | `ticket.created` | `ticket_id`, `ticket_number`, `billing_account_id`, `department_id`, `subject` | `support.read` | no |
+| `tax_id.checked` (API 1.1) | `billing_account_id`, `country`, `status`, `validator`, `checked_at` (never the tax ID itself) | `billing.read` | no |
+| `invoice.reminder_sent` (API 1.1) | `invoice_id`, `billing_account_id`, `reseller_id`, `kind` (`upcoming` or `overdue`) | `billing.read` | no |
+| `service.termination_scheduled` (API 1.1) | `service_id`, `terminate_at`, `reason` | `billing.read` | no |
+| `service.cancellation_requested` (API 1.1) | `service_id`, `request_id`, `type`, `effective_at` | `billing.read` | no |
 
 Service events carry `service_id` in the envelope and are delivered only to plugins active for that service (checked at delivery). The service events come from one place: a SQLAlchemy `before_flush` listener on `Service` (`app/plugin_host/listeners.py`) that sees every insert and every status change from any code path (billing API, admin, reseller, MCP, recurring billing, commerce lifecycle), so no caller can forget to emit. `service.power_requested` is emitted by the power entry points (billing, client portal, admin, reseller, staff and client MCP, VNC console) after their own checks pass and before the power call. Commerce events are emitted where the commerce webhooks were queued before (`checkout_service.py`, `payments/webhooks.py`, `commerce_admin.py`, `ticket_service.py`).
 
@@ -254,6 +258,7 @@ There is one bus and one function to publish on it, `app.plugin_host.events.emit
 | `invoice.paid` | Only `publish_invoice_paid` in `app/services/billing/settlement_subscribers.py`, a subscriber of the billing settlement function `settle_invoice` (`app/services/billing/settlement.py`), for invoices with a billing account |
 | `invoice.created`, `invoice.overdue`, `invoice.voided`, `invoice.refunded`, `credit_note.issued`, `debit_note.issued`, `payment.refunded`, `credit.added`, `credit.applied` | Only the subscriber `catalogue:<event>` in `app/services/billing/settlement_subscribers.py`, which runs when billing fires the internal event of the same name with `settlement.fire` (`docs/billing-phase1-design.md` section 9). Billing phase 1 fires them from `InvoiceService` (publish and transitions), `InvoiceAdjustmentService`, `RefundService` and `CreditLedgerService`; none is fired before those services land |
 | `ticket.created` | `app/services/ticket_service.py` |
+| `tax_id.checked`, `invoice.reminder_sent`, `service.termination_scheduled`, `service.cancellation_requested` | Catalogued in API 1.1 for billing phase 2 (`docs/billing-phase2-design.md` 8.8); not emitted until the phase 2 tax-ID checks, reminder job, non-payment job and cancellation service land |
 
 Every way an invoice is paid (card webhook, saved-method charge, reseller credit, USDT, admin mark-paid) ends in `settle_invoice`, which publishes `invoice.paid` exactly once, on the transition to paid. Billing's own steps after settlement (count coupon use, complete a retail renewal cycle, send the email, fulfil the order) are in-process subscribers of that function (`docs/billing-target-spec.md` section 14), not handlers on this bus; the outbound webhook keeps coming from `emit`, which already queues it (section 6.5). Invoices without a billing account (reseller deploy and reseller cycle invoices) publish nothing, as before. The event names in section 6.2 are stable for API 1.x; billing adds new facts to this catalogue rather than invent parallel names. The billing events after `invoice.paid` in section 6.2 are catalogued for billing phase 1 and are not sent to outbound commerce webhooks (`COMMERCE_WEBHOOK_EVENTS` is unchanged). `payment.failed` is still only a suggested name and is not emitted.
 
@@ -288,7 +293,7 @@ The bus is the single place events come from. `emit()` also hands events in the 
 | Key | Lets the plugin | Risk |
 |---|---|---|
 | `service.read` | Read basic facts (id, name, type, status, owner id, product, OS) of services it is active for; receive service events; per-service schedules and panels | low |
-| `billing.read` | Receive the billing events of section 6.2: `order.paid`, `invoice.paid`, `invoice.created`, `invoice.overdue`, `invoice.voided`, `invoice.refunded`, `credit_note.issued`, `debit_note.issued`, `payment.refunded`, `credit.added` and `credit.applied` | low |
+| `billing.read` | Receive the billing events of section 6.2: `order.paid`, `invoice.paid`, `invoice.created`, `invoice.overdue`, `invoice.voided`, `invoice.refunded`, `credit_note.issued`, `debit_note.issued`, `payment.refunded`, `credit.added` and `credit.applied`; from API 1.1 also `tax_id.checked`, `invoice.reminder_sent`, `service.termination_scheduled` and `service.cancellation_requested` | low |
 | `support.read` | Receive `ticket.created` | low |
 | `events.veto` | Register before hooks that can refuse operations | medium |
 | `notify.client` | Send notices to the owner of a service it is active for (category "Notices from plugins", opt-in) | medium |
@@ -298,6 +303,10 @@ The bus is the single place events come from. `emit()` also hands events in the 
 | `mcp.client` | Offer tools to client MCP keys | medium |
 | `vm.power` | Start, shut down, stop, reboot or reset VMs it is active for | high |
 | `guest.exec` | Run commands inside VMs it is active for through the QEMU guest agent | high |
+| `tax.validate_id` (API 1.1) | Receive customers' tax identification numbers and countries to check them | medium |
+| `tax.rule_pack` (API 1.1) | Offer tax rules that an administrator may review and apply | medium |
+| `tax.calculate` (API 1.1) | Receive basket lines, amounts and the buyer's address and tax ID, and decide the tax on invoices | high |
+| `currency.rates` (API 1.1) | Offer published exchange rates that billing stores and uses to show tax in another currency | medium |
 
 The SDK checks the permission on every call and raises `PermissionDenied` otherwise; the manifest validator also refuses a manifest whose events, hooks, panels or tools need a permission it does not declare. Service-scoped calls also check the plugin is active for that service. A plugin's own settings, state, logs and audit entries need no permission.
 
@@ -753,7 +762,7 @@ def register(plugin):
 | Sold as an add-on | `enablement: addon` plus add-on references (section 9.2); WHMCS reports the add-on through its generic hook |
 | Only Windows VMs | The admin links the add-on only to Windows products; the plugin can also check `service["os_code"]` |
 
-## 17. Out of scope for API 1.0, and next steps
+## 17. Out of scope, and next steps
 
 - Plugin-owned tables and migrations (section 3.5).
 - Plugin kinds (below).
@@ -765,17 +774,67 @@ def register(plugin):
 
 ### 17.1 Plugin kinds
 
-API 1.0 has one kind of plugin, the general one described here. A kind is a plugin that also implements a typed provider interface Rackflow calls directly, declared in the manifest as `"provides": [{"kind": "payment_gateway", "id": "stripe"}]` (reserved, refused in 1.0) and registered with `@plugin.provider("payment_gateway", "stripe")`. Each kind gets its own permission, its own typed interface and the same lifecycle, settings, audit and failure isolation as everything else. The kinds expected, with the seam names billing should align to:
+A kind is a plugin that also implements a typed provider interface Rackflow calls directly. It is declared in the manifest as `"provides": [{"kind": "tax_id_validator", "id": "vies", ...}]` and registered with `@plugin.provider("tax_id_validator", "vies")`. Each kind gets its own permission, its own typed interface and the same lifecycle, settings, audit and failure isolation as everything else. API 1.0 refuses `provides`; API 1.1 accepts it for the three tax kinds and `currency_rates` below (section 18). The other kinds stay reserved, and the seam names billing should align to are:
 
-| Kind | Interface sketch |
+| Kind | State | Interface sketch |
+|---|---|---|
+| `tax_id_validator` | API 1.1 | validate a tax or VAT number for a country |
+| `tax_rule_pack` | API 1.1 | static rules (rates by country and product class) loaded as data |
+| `tax_provider` | API 1.1 | calculate tax for a basket and an address |
+| `payment_gateway` | reserved | create a payment, capture, refund, parse and verify a webhook |
+| `accounting_export` | reserved | export invoices, payments and credit notes to an external ledger |
+| `currency_rates` | API 1.1 | offer the published exchange rates of one month |
+| `notification_channel` | reserved | send a rendered message (email, SMS, chat) |
+| `import_source` | reserved | import clients, services and invoices from another billing system |
+| `fraud_check` | reserved | score an order before it is accepted (a before hook with a verdict) |
+| `server_adapter`, `switch_adapter`, `pdu_adapter` | reserved | the existing hardware adapters in `app/plugins/`, moved later |
+
+Payment gateways, fraud checks, accounting export and notification channels stay off the kind mechanism for now. `tables` is still refused.
+
+## 18. API 1.1: provider kinds and bundled plugins
+
+API 1.1 is a minor version. Every 1.0 plugin loads and behaves as before, including one whose `rackflow_api` range is `==1.0`; the host records on each installation which version it runs the plugin as (`effective_api`: the newest supported version the range allows). The generated [API reference](plugins/api-reference.md) lists every field, type and permission; this section is the contract behind it.
+
+### 18.1 Manifest and registration
+
+`provides` is a list of at most ten entries. The host refuses it with the message "provides needs plugin API 1.1; this manifest allows only 1.0" when the range allows only 1.0. Each entry has:
+
+| Field | Meaning |
 |---|---|
-| `payment_gateway` | create a payment, capture, refund, parse and verify a webhook |
-| `tax_provider` | calculate tax for a basket and an address |
-| `tax_id_validator` | validate a tax or VAT number for a country |
-| `tax_rule_pack` | static rules (rates by country and product class) loaded as data |
-| `accounting_export` | export invoices, payments and credit notes to an external ledger |
-| `currency_rates` | fetch exchange rates |
-| `notification_channel` | send a rendered message (email, SMS, chat) |
-| `import_source` | import clients, services and invoices from another billing system |
-| `fraud_check` | score an order before it is accepted (a before hook with a verdict) |
-| `server_adapter`, `switch_adapter`, `pdu_adapter` | the existing hardware adapters in `app/plugins/`, moved later |
+| `kind`, `id` | One of `tax_id_validator`, `tax_rule_pack`, `tax_provider`, `currency_rates`, and an id matching `^[a-z][a-z0-9_]{0,63}$`. The pair is unique in the plugin. Billing refers to a provider as `<plugin id>:<provider id>`. |
+| `label`, `description` | Shown to admins where they choose a provider. |
+| `countries` | Upper case ISO alpha-2 codes the provider covers (`EL` for Greece at VIES). Empty means any. |
+| `id_types` | Required for `tax_id_validator` and refused for other kinds: the tax ID types it checks, such as `eu_vat`. |
+| `currencies` | Only for `tax_provider`: ISO alpha-3 codes. Empty means any. |
+| `pack` | Required for `tax_rule_pack` and refused for other kinds: `{"file": "packs/uk.json"}`, a relative JSON file in the package that must exist and pass the pack schema when the package is read. |
+| `timeout_seconds` | Wall-clock limit of one call: 8 by default, 1 to 30. Billing may lower it for a call, never raise it. |
+| `rate_limit` | `{"calls": n, "per_seconds": s}`. Counts only the methods that may do real work (`check_online`, `load`, `calculate`, `rates`). |
+
+A provider also needs the permission of its kind (`tax.validate_id`, `tax.rule_pack`, `tax.calculate` or `currency.rates`); the manifest is refused without it. In `register`, `@plugin.provider(kind, id)` decorates a class or a factory function. The host calls it once per load with no arguments. At load time the host checks that the declared and registered providers match exactly and that each object has the methods of its kind with the right number of arguments; a mismatch or a constructor that raises fails the load like any other registration error.
+
+### 18.2 The interfaces
+
+`rackflow_plugin.kinds` holds the protocols and the frozen dataclasses below. Amounts are integers in minor units and tax rates are strings with at most four decimals (`"20.0000"`).
+
+| Kind | Methods |
+|---|---|
+| `tax_id_validator` | `supports(country, id_type) -> bool`, `check_format(country, tax_id) -> bool`, `check_online(request: TaxIdCheckRequest) -> TaxIdCheckResult` |
+| `tax_rule_pack` | `pack_id() -> str`, `versions() -> list[str]` (newest last), `load(version) -> dict` (the pack JSON, at most 1 MB) |
+| `tax_provider` | `supports(request: TaxProviderRequest) -> bool`, `calculate(request) -> TaxProviderResult` |
+| `currency_rates` | `rates(request: CurrencyRatesRequest) -> CurrencyRatesResult`: units of each currency per one unit of `request.base` for the month `request.period` (`YYYY-MM`), as ASCII decimals above zero with at most six decimals; an empty `rates` means the month is not published yet |
+
+Provider methods receive only their arguments. A method that needs its settings, the plugin log, state or outbound HTTP calls `rackflow_plugin.kinds.current_context()`, which returns the usual `ctx` for the duration of the call. Methods may be plain functions or coroutines. The plugin receives deep copies of its arguments.
+
+### 18.3 Calls and failure isolation
+
+Billing reaches a provider only through `call_provider(kind, "<plugin id>:<provider id>", method, *args, timeout_seconds=None, db=None)`. `db` is optional: the caller's session. On SQLite, which has one write lock for the whole database, a separate connection cannot write once the caller's transaction has written, so with `db` the call's failure count, circuit state, plugin log line and `plugin.provider_failed` audit entry (or its success) are written in a savepoint of the caller's transaction, and are lost if the caller rolls back. On every other database, and without `db`, they are committed on a separate session, as before. The plugin's own state writes during the call always use the plugin's session. Each call runs on a thread of its own with the provider's wall-clock limit, or the lower `timeout_seconds` when billing passes one (a higher value is ignored, and the floor is 0.1 seconds). The limit starts when the plugin's code starts and covers loading the plugin when this process has not loaded it yet; time spent asking Redis for the rate limit is taken off it. The call is refused at once when the plugin is not enabled, lacks the permission, or has an open circuit, when the provider's rate limit is used up, or when the plugin already has two calls whose code is still running, counting calls that timed out but have not returned (`busy`). A hung plugin therefore holds at most two threads and two database sessions, each session is closed when its call's code returns, and it never delays or fails calls to other plugins. The rate limit is counted per plugin, kind and provider in Redis, so all Rackflow processes share it, and per process while Redis is down or does not answer within 0.25 seconds. The plugin gets copies of the arguments, and the host checks every answer against billing's own: wrong types (checked exactly, so subclasses of the result classes or of `str`, `int` and `dict` are refused), an unknown status, an `unavailable` answer without an `error_code`, a `checked_at` before 2000 or more than a day ahead, and for tax providers a missing or unknown line key, a negative amount or one above 2^63 - 1, a rate that is not ASCII digits with at most four decimals, a rate that does not give the tax within one minor unit, or tax on a reverse charge part are all invalid, as are, for currency rates, a `period_start` or `period_end` that is not the requested month's first or last day, a currency that is not upper case ISO alpha-3, is the base or is listed twice, a rate that is not a decimal above zero with at most six decimals, more than 400 rates or a `source` not matching `^[a-z][a-z0-9_]{0,31}$`; a pack must be JSON without `NaN` or infinities. Billing receives new objects built from the checked values, never the plugin's own.
+
+`call_provider` raises only `ProviderUnavailable`, whose `reason` is one of `circuit_open`, `rate_limited`, `busy`, `timeout`, `error`, `invalid_answer`, `disabled`, `not_installed`, `not_loaded`, `not_permitted`, `unknown_provider`, `unknown_method` or `bad_arguments`. A timeout, an exception (whatever the exception's own message does) or an invalid answer counts as a failure for the circuit breaker (section 11) and writes a plugin log line; a valid answer of a metered method (`check_online`, `calculate`, `load`, `rates`) counts as a success. Answers of the cheap methods (`supports`, `check_format`, `pack_id`, `versions`) do not, so a provider whose metered calls keep failing cannot keep its circuit closed with them. Refused calls are not failures of the plugin, with one exception: a `busy` refusal while every one of the plugin's slots is held by a call that has already timed out counts as a failure, so a provider that hangs for good opens its circuit (and writes `plugin.provider_failed`) after the usual number of failures instead of answering `busy` unnoticed. A `busy` refusal while a slot is held by a call still inside its time limit is not a failure. When a provider failure opens the circuit, the audit entry `plugin.provider_failed` records the provider, the failure count and the error. Disabling or uninstalling a provider never changes results billing has already stored.
+
+### 18.4 Events
+
+API 1.1 adds `tax_id.checked`, `invoice.reminder_sent`, `service.termination_scheduled` and `service.cancellation_requested`. `tax_id.checked` never carries the number itself. See the API reference for their payloads.
+
+### 18.5 Bundled plugins
+
+Rackflow also reads first-party packages from a second, read-only folder, `settings.bundled_plugins_dir` (default `plugin_packages/` in the repository; a relative path counts from the repository root). They appear on the admin plugin page marked bundled and install, are granted permissions, enable, upgrade and uninstall through the ordinary lifecycle; nothing is installed or enabled automatically, and uninstalling never touches the folder. A plugin id present in both folders is an error shown on the page, and neither copy loads until one is removed.

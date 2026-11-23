@@ -9,6 +9,7 @@
     refundResellerPayment,
   } from '../lib/api.js';
   import { formatMoney } from '../lib/resellerMoney.js';
+  import InvoiceTaxPanel from './billing/shared/InvoiceTaxPanel.svelte';
 
   let invoices = [];
   let resellers = [];
@@ -275,6 +276,8 @@
               <dd>{dateTime(selected.due_at)}</dd>
             </div>
           </dl>
+
+          <InvoiceTaxPanel invoice={selected} audience="staff" />
 
           <h3>Payments</h3>
           {#if selected.payments?.length}

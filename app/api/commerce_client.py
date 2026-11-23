@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from app.models.commerce_order import Order, OrderStatus
 from app.models.reseller import CreditLedgerEntry, Invoice, InvoicePurpose, InvoiceStatus
 from app.models.storefront import FrontendProductVisibility
 from app.models.support_ticket import TicketPriority, TicketStatus
+from app.models.tax import TaxIdStatus, TaxIdType
 from app.services.billing.cycles import cycle_length_fields, sellable_cycles
 from app.services.billing_account_service import BillingAccountService
 from app.services.billing_locks import BillingLocks
@@ -45,7 +47,12 @@ from app.services.credit_ledger_service import (
     statuses_for_status_filter,
     unpaid_invoice_statuses,
 )
-from app.services.checkout_service import CheckoutError, CheckoutService
+from app.services.checkout_service import (
+    QUOTE_INTERNAL_FIELDS,
+    CheckoutError,
+    CheckoutService,
+    CheckoutTaxError,
+)
 from app.services.commerce_lifecycle_service import (
     CommerceLifecycleError,
     CommerceLifecycleService,
@@ -55,6 +62,7 @@ from app.services.email_message_service import EmailMessageService
 from app.services.invoice_pdf_service import InvoicePdfService
 from app.services.invoice_service import InvoiceService
 from app.services.settings_store import get_setting
+from app.services.tax.errors import RetryableTaxPublishError
 from app.services.payments.retail_card import (
     RetailCardPaymentError,
     start_card_payment,
@@ -107,6 +115,8 @@ class ProfileUpdate(RequestModel):
     phone: Optional[str] = Field(default=None, max_length=32)
     tax_id: Optional[str] = Field(default=None, max_length=64)
     invoice_email: Optional[str] = Field(default=None, max_length=320)
+    is_business: Optional[bool] = None
+    tax_id_type: Optional[TaxIdType] = None
 
 
 class DiscordCallbackBody(RequestModel):
@@ -142,6 +152,17 @@ def _client_ip(request: Request) -> Optional[str]:
     if settings.trust_x_forwarded_for and "x-forwarded-for" in request.headers:
         client_ip = request.headers["x-forwarded-for"].split(",")[0].strip()
     return client_ip
+
+
+def _ip_country(db: Session, request: Request) -> Optional[str]:
+    """The country header set by the proxy (``billing_tax_ip_country_header``), if configured."""
+    from app.services.settings_store import get_setting
+
+    header = str(get_setting(db, "billing_tax_ip_country_header") or "").strip()
+    if not header:
+        return None
+    value = (request.headers.get(header) or "").strip().upper()
+    return value[:2] if len(value) >= 2 and value.isalpha() else None
 
 
 def _block_impersonation_money_actions(auth: dict) -> None:
@@ -311,6 +332,7 @@ def get_product(product_id: int, db: DbDep):
 @router.post("/quote", responses=COMMON_ERROR_RESPONSES)
 def quote_checkout(
     body: QuoteRequest,
+    request: Request,
     *,
     account: AccountDep,
     db: DbDep,
@@ -324,11 +346,21 @@ def quote_checkout(
             body.cycle_interval,
             body.options,
             body.coupon_code,
+            evidence=CheckoutService._tax_evidence(db, account, _client_ip(request), _ip_country(db, request))
+            if CheckoutService._tax_mode(db) == "v2"
+            else None,
         )
+    except CheckoutTaxError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     except CheckoutError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = {
+        name: value
+        for name, value in asdict(quote).items()
+        if name not in QUOTE_INTERNAL_FIELDS
+    }
     return {
-        **asdict(quote),
+        **payload,
         "lines": [asdict(line) for line in quote.lines],
     }
 
@@ -360,7 +392,10 @@ def checkout(
             checkout_nonce=body.checkout_nonce,
             terms_version=body.terms_version,
             client_ip=_client_ip(request),
+            ip_country=_ip_country(db, request),
         )
+    except CheckoutTaxError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     except CheckoutError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
@@ -617,15 +652,18 @@ def create_credit_topup_invoice(
                     "projected_balance_cents": projected,
                 },
             )
-    invoice = InvoiceService.create(
-        db,
-        billing_account_id=locked.id,
-        purpose=InvoicePurpose.CREDIT_TOPUP,
-        amount_cents=body.amount_cents,
-        description="Account credit top-up",
-        due_at=datetime.now(timezone.utc),
-        currency=locked.currency,
-    )
+    try:
+        invoice = InvoiceService.create(
+            db,
+            billing_account_id=locked.id,
+            purpose=InvoicePurpose.CREDIT_TOPUP,
+            amount_cents=body.amount_cents,
+            description="Account credit top-up",
+            due_at=datetime.now(timezone.utc),
+            currency=locked.currency,
+        )
+    except RetryableTaxPublishError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     db.commit()
     db.refresh(invoice)
     return _serialize_invoice(db, invoice)
@@ -732,16 +770,24 @@ def cancel_service(
     account: AccountDep,
     db: DbDep,
 ):
+    from uuid import uuid4
+
+    from app.services.billing.cancellations import CancellationError, CancellationService
+
     try:
-        result = CommerceLifecycleService.request_cancellation_sync(
+        CancellationService.check_owner(db, service_id, account_user_id=account.user_id)
+        request = CancellationService.request(
             db,
-            service_id,
-            account,
-            when=body.when,  # type: ignore[arg-type]
+            service_id=service_id,
+            type="immediate" if body.when == "immediate" else "end_of_period",
             reason=body.reason,
+            actor_user_id=account.user_id,
+            source="client",
+            idempotency_key=f"client:{service_id}:{uuid4().hex}",
         )
-    except CommerceLifecycleError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CancellationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    result = CancellationService.summary(db, request)
     db.commit()
     return result
 
@@ -766,6 +812,8 @@ def upgrade_service(
         )
     except CommerceLifecycleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RetryableTaxPublishError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     db.commit()
     return result
 
@@ -834,16 +882,11 @@ def list_activity(
 # --- Billing profile ---
 
 
-@router.get("/profile", responses=COMMON_ERROR_RESPONSES)
-def get_profile(
-    account: AccountDep,
-    db: DbDep,
-):
-    profile = BillingAccountService.get_profile(db, account.id)
+def _serialize_profile(account_id: int, profile) -> dict:
     if profile is None:
-        return {"billing_account_id": account.id}
+        return {"billing_account_id": account_id}
     return {
-        "billing_account_id": account.id,
+        "billing_account_id": account_id,
         "legal_name": profile.legal_name,
         "company": profile.company,
         "address_line1": profile.address_line1,
@@ -855,7 +898,19 @@ def get_profile(
         "phone": profile.phone,
         "tax_id": profile.tax_id,
         "invoice_email": profile.invoice_email,
+        "is_business": bool(profile.is_business),
+        "tax_id_type": profile.tax_id_type,
+        "tax_id_status": profile.tax_id_status or "unchecked",
+        "tax_id_checked_at": profile.tax_id_checked_at.isoformat() if profile.tax_id_checked_at else None,
     }
+
+
+@router.get("/profile", responses=COMMON_ERROR_RESPONSES)
+def get_profile(
+    account: AccountDep,
+    db: DbDep,
+):
+    return _serialize_profile(account.id, BillingAccountService.get_profile(db, account.id))
 
 
 @router.put("/profile", responses=COMMON_ERROR_RESPONSES)
@@ -864,25 +919,40 @@ def update_profile(
     account: AccountDep,
     db: DbDep,
 ):
+    """Update the profile; a changed tax ID or country is checked again (design 6.2)."""
     data = body.model_dump(exclude_unset=True)
     if "country" in data and data["country"]:
         data["country"] = data["country"].upper()[:2]
+    if data.get("tax_id_type") is not None:
+        data["tax_id_type"] = TaxIdType(data["tax_id_type"]).value
+    if "is_business" in data and data["is_business"] is None:
+        data.pop("is_business")
+    before = BillingAccountService.get_profile(db, account.id)
+    changed = before is None or any(
+        name in data and (data[name] or None) != (getattr(before, name) or None) for name in ("tax_id", "country")
+    )
+    if changed:
+        data.update(tax_id_status=TaxIdStatus.UNCHECKED.value, tax_id_checked_at=None, tax_id_check_id=None)
     profile = BillingAccountService.upsert_profile(db, account.id, **data)
     db.commit()
-    return {
-        "billing_account_id": account.id,
-        "legal_name": profile.legal_name,
-        "company": profile.company,
-        "address_line1": profile.address_line1,
-        "address_line2": profile.address_line2,
-        "city": profile.city,
-        "region": profile.region,
-        "postal_code": profile.postal_code,
-        "country": profile.country,
-        "phone": profile.phone,
-        "tax_id": profile.tax_id,
-        "invoice_email": profile.invoice_email,
-    }
+    if changed and profile.tax_id:
+        _check_tax_id(db, profile)
+    return _serialize_profile(account.id, profile)
+
+
+def _check_tax_id(db: Session, profile) -> None:
+    """``TaxIdService.check`` after the commit; a failure leaves the status ``unchecked``."""
+    from app.services.tax.validators import TaxIdService
+
+    try:
+        TaxIdService.check(db, profile)
+        db.commit()
+    except NotImplementedError:
+        db.rollback()
+    except Exception:  # noqa: BLE001 - the check is retried on the next save or by the admin
+        logging.getLogger(__name__).warning("Tax ID check failed for billing profile %s", profile.id, exc_info=True)
+        db.rollback()
+    db.refresh(profile)
 
 
 # --- Discord ---

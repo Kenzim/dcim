@@ -1,8 +1,8 @@
 import { downloadPdfBlob } from './api.js';
 import { formatMoney } from './resellerMoney.js';
 
-// Client and reseller billing calls: retail credit, apply credit, and credit and
-// debit notes. Money is integer cents on every endpoint.
+// Client and reseller billing calls: retail credit, apply credit, credit and
+// debit notes, and cancellation requests. Money is integer cents on every endpoint.
 
 const API_BASE = '/api';
 // Same sessionStorage key api.js uses to keep an admin "sign in as" token for this tab.
@@ -179,6 +179,33 @@ export const clientGetAdjustment = (id) =>
 export const clientDownloadAdjustmentPdf = (note) =>
   download(CLIENT, `/adjustments/${note.id}/pdf`, noteFilename(note), 'Failed to download the note', { impersonation: true });
 
+/** The client's cancellation requests, newest first. Filters: `status`, `limit`, `offset`. */
+export const clientListCancellationRequests = (filters = {}) =>
+  request(CLIENT, `/cancellation-requests${query(filters)}`, {
+    errorMessage: 'Failed to load cancellation requests',
+    impersonation: true,
+  });
+
+/** Withdraws a scheduled request; answers the updated request. */
+export const clientWithdrawCancellationRequest = (id) =>
+  request(CLIENT, `/cancellation-requests/${id}/withdraw`, {
+    method: 'POST',
+    errorMessage: 'The cancellation could not be withdrawn',
+    impersonation: true,
+  });
+
+/**
+ * Starts a cancellation. `when` is `end_of_cycle` or `immediate`. The answer carries
+ * `request` (the cancellation request), `request_id`, `cancel_at` and `termination_pending`.
+ */
+export const clientCancelService = (serviceId, { when = 'end_of_cycle', reason } = {}) =>
+  request(CLIENT, `/services/${serviceId}/cancel`, {
+    method: 'POST',
+    body: { when, reason: reason || null },
+    errorMessage: 'The cancellation could not be requested',
+    impersonation: true,
+  });
+
 // --- Reseller panel ---
 
 const RESELLER = '/reseller-panel';
@@ -198,3 +225,30 @@ export const resellerGetAdjustment = (id) =>
 
 export const resellerDownloadAdjustmentPdf = (note) =>
   download(RESELLER, `/adjustments/${note.id}/pdf`, noteFilename(note), 'Failed to download the note');
+
+export const resellerListCancellationRequests = (filters = {}) =>
+  request(RESELLER, `/cancellation-requests${query(filters)}`, { errorMessage: 'Failed to load cancellation requests' });
+
+/**
+ * Requests a cancellation of one of the reseller's services. `type` is `end_of_period` or
+ * `immediate`; `invoiceAction` is `cancel_unpaid` or `keep`. Send the same key again only to
+ * retry the same request.
+ */
+export const resellerRequestCancellation = ({ serviceId, type, reason, invoiceAction }, idempotencyKey) =>
+  request(RESELLER, '/cancellation-requests', {
+    method: 'POST',
+    body: {
+      service_id: serviceId,
+      type,
+      reason: reason || null,
+      invoice_action: invoiceAction,
+    },
+    headers: { 'Idempotency-Key': idempotencyKey },
+    errorMessage: 'The cancellation could not be requested',
+  });
+
+export const resellerWithdrawCancellationRequest = (id) =>
+  request(RESELLER, `/cancellation-requests/${id}/withdraw`, {
+    method: 'POST',
+    errorMessage: 'The cancellation could not be withdrawn',
+  });

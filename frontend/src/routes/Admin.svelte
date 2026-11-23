@@ -59,11 +59,16 @@
   import RefundsAdmin from '../components/billing/admin/RefundsAdmin.svelte';
   import NotesList from '../components/billing/admin/NotesList.svelte';
   import CreditAdmin from '../components/billing/admin/CreditAdmin.svelte';
+  import BillingJobs from '../components/billing/admin/ops/BillingJobs.svelte';
+  import NonpaymentPolicies from '../components/billing/admin/ops/NonpaymentPolicies.svelte';
+  import CancellationQueue from '../components/billing/admin/ops/CancellationQueue.svelte';
+  import EmailTemplates from '../components/billing/admin/ops/EmailTemplates.svelte';
   import CommerceTransactions from '../components/commerce/CommerceTransactions.svelte';
   import CommerceGatewayLogs from '../components/commerce/CommerceGatewayLogs.svelte';
   import CommerceEmailLog from '../components/commerce/CommerceEmailLog.svelte';
   import CommerceAudit from '../components/commerce/CommerceAudit.svelte';
   import SupportTickets from '../components/commerce/SupportTickets.svelte';
+  import BillingTax from '../components/billing/admin/BillingTax.svelte';
 
   let authChecked = false;
   
@@ -415,6 +420,14 @@
         <NotesList />
       {:else if routeName === 'billing-credit'}
         <CreditAdmin />
+      {:else if routeName === 'billing-jobs'}
+        <BillingJobs />
+      {:else if routeName === 'billing-nonpayment'}
+        <NonpaymentPolicies />
+      {:else if routeName === 'billing-cancellations'}
+        <CancellationQueue />
+      {:else if routeName === 'commerce/email-templates'}
+        <EmailTemplates />
       {:else if routeName === 'commerce/transactions'}
         <CommerceTransactions />
       {:else if routeName === 'commerce/gateway-logs'}
@@ -423,6 +436,8 @@
         <CommerceEmailLog />
       {:else if routeName === 'commerce/audit'}
         <CommerceAudit />
+      {:else if routeName === 'billing/tax'}
+        <BillingTax />
       {:else if routeName === 'settings/automation'}
         <AutomationSettings />
       {:else if routeName === 'support/tickets'}

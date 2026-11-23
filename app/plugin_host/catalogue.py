@@ -1,10 +1,13 @@
-"""Public catalogue of plugin API 1.0: version, permissions and events (docs/plugin-system.md sections 6 and 7)."""
+"""Public catalogue of the plugin API: version, permissions and events (docs/plugin-system.md sections 6 and 7)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-API_VERSION = "1.0"
+API_VERSION = "1.1"
+# Every plugin API version this Rackflow runs, oldest first. A plugin is
+# compatible when its ``rackflow_api`` range allows at least one of them.
+SUPPORTED_API_VERSIONS = ("1.0", "1.1")
 
 
 @dataclass(frozen=True)
@@ -24,7 +27,8 @@ PERMISSION_LIST = (
         "billing.read",
         "Billing events",
         "Receive billing events: orders and invoices paid, invoices created, overdue, voided and refunded, "
-        "credit and debit notes issued, payments refunded, and account credit added or applied.",
+        "credit and debit notes issued, payments refunded, account credit added or applied, invoice "
+        "reminders sent, tax ID check results, service terminations scheduled and cancellations requested.",
         "low",
     ),
     Permission("support.read", "Support events", "Receive ticket created events.", "low"),
@@ -36,6 +40,26 @@ PERMISSION_LIST = (
     Permission("mcp.client", "Client MCP tools", "Offer tools to client MCP keys.", "medium"),
     Permission("vm.power", "VM power", "Start, shut down, stop, reboot or reset VMs it is active for.", "high"),
     Permission("guest.exec", "Run commands in VMs", "Run commands inside VMs it is active for through the QEMU guest agent.", "high"),
+    # Plugin API 1.1 provider kinds (docs/billing-phase2-design.md 8.3).
+    Permission(
+        "tax.validate_id",
+        "Validate tax IDs",
+        "Receive customers' tax identification numbers and countries to check them.",
+        "medium",
+    ),
+    Permission("tax.rule_pack", "Offer tax rule packs", "Offer tax rules that an administrator may review and apply.", "medium"),
+    Permission(
+        "tax.calculate",
+        "Calculate tax",
+        "Receive basket lines, amounts and the buyer's address and tax ID, and decide the tax on invoices.",
+        "high",
+    ),
+    Permission(
+        "currency.rates",
+        "Offer exchange rates",
+        "Offer published exchange rates that billing stores and uses to show tax in another currency.",
+        "medium",
+    ),
 )
 PERMISSIONS = {p.key: p for p in PERMISSION_LIST}
 
@@ -148,6 +172,27 @@ EVENT_LIST = (
         "billing.read",
         ("ledger_entry_id", "billing_account_id", "invoice_id", "amount_cents", "balance_cents", "currency"),
         ("reseller_id", "payment_id"),
+    ),
+    # Billing phase 2 (docs/billing-phase2-design.md 8.8).
+    EventSpec(
+        "tax_id.checked",
+        "billing.read",
+        ("billing_account_id", "country", "status", "validator", "checked_at"),
+    ),
+    EventSpec(
+        "invoice.reminder_sent",
+        "billing.read",
+        ("invoice_id", "billing_account_id", "reseller_id", "kind"),
+    ),
+    EventSpec(
+        "service.termination_scheduled",
+        "billing.read",
+        ("service_id", "terminate_at", "reason"),
+    ),
+    EventSpec(
+        "service.cancellation_requested",
+        "billing.read",
+        ("service_id", "request_id", "type", "effective_at"),
     ),
     EventSpec(
         "ticket.created",

@@ -1,14 +1,31 @@
-# Optional: billing phase 1 migrations on MariaDB 11.8.
+# Optional: billing phase 1 and phase 2 migrations on MariaDB 11.8.
 #
 # Runs tests/core/test_alembic_fresh_mariadb.py (the whole Alembic chain,
 # phase 1 included, from an empty database),
 # tests/migrations/test_billing_p1_mariadb.py (up, down, up of the
-# billing_p1_* chain), the snapshot isolation connect hook test,
+# billing_p1_* chain), tests/migrations/test_billing_p2_mariadb.py (up, down,
+# up of the billing phase 2 chain, with data present),
+# tests/services/test_billing_p2_tax_publish_mariadb.py (a tax rule superseded
+# during a publish, and a real UK and EU pack import against a real publish, in
+# both orders of arrival and queued behind a held rule, under REPEATABLE READ and
+# READ COMMITTED), the snapshot isolation connect hook test,
 # tests/services/test_billing_p1i_numbering_mariadb.py (series counters under
 # concurrency), tests/services/test_billing_p1i_settlement_mariadb.py (two
 # payments settling one invoice at once) and
 # tests/services/test_billing_p1c_credit_mariadb.py (credit applied to an
-# invoice under concurrency) against a mariadb:11.8 service container, the
+# invoice under concurrency), tests/services/test_tax_pack_import_mariadb.py
+# (a tax pack import and a publish locking the same rules wait instead of
+# deadlocking) and tests/services/test_billing_p2_exchange_rates_mariadb.py (an
+# exchange rate deleted or stored twice during a publish, stored during a
+# proforma payment whose month's rate is missing (also between the payment's
+# rate read and its write), a credit note's sterling after another note
+# committed, and the guard refusing a second sterling fill),
+# tests/services/test_billing_p2_suspension_mariadb.py (a payment landing
+# before, during and after the suspension job's locked re-check),
+# tests/services/test_billing_p2_reseller_suspension_mariadb.py (a reseller
+# payment or credit top-up racing the recurring pass's non-payment suspension)
+# against a mariadb:11.8
+# service container, the
 # version production runs. Manual trigger only, so it never blocks other work;
 # the SQLite migration tests in tests/migrations run in the normal test suite.
 name: Billing migrations (MariaDB)
@@ -64,3 +81,32 @@ jobs:
         run: python -m pytest tests/services/test_billing_p1c_credit_mariadb.py -q
       - name: Core invoice status fixes under concurrency on MariaDB
         run: python -m pytest tests/services/test_billing_core_status_mariadb.py -q
+      - name: Billing phase 2 chain on MariaDB
+        run: python -m pytest tests/migrations/test_billing_p2_mariadb.py -q
+      - name: Tax pack import against a concurrent publish on MariaDB
+        run: python -m pytest tests/services/test_tax_pack_import_mariadb.py -q
+      - name: Tax rule superseded during a publish on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_tax_publish_mariadb.py -q
+      - name: Late fee job under concurrent runs and payments on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_late_fee_mariadb.py -q
+      - name: Payment racing the non-payment suspension's provider call on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_suspension_mariadb.py -q
+      - name: Reseller payment or credit top-up racing the recurring pass's suspension on MariaDB
+        env:
+          RACKFLOW_TEST_MARIADB_URL: mysql+pymysql://root:rackflow-ci@mariadb:3306/rackflow_test_reseller_suspension
+        run: |
+          python - <<'EOF'
+          import pymysql
+          connection = pymysql.connect(host="mariadb", user="root", password="rackflow-ci")
+          connection.cursor().execute("CREATE DATABASE IF NOT EXISTS rackflow_test_reseller_suspension")
+          connection.close()
+          EOF
+          python -m pytest tests/services/test_billing_p2_reseller_suspension_mariadb.py -q
+      - name: Cancellation request racing invoice generation on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_cancel_mariadb.py -q
+      - name: Billing job claims and leases under concurrency on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_job_claim_mariadb.py -q
+      - name: Invoices generated ahead racing the at-due worker on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_generate_ahead_mariadb.py -q
+      - name: Exchange rate deleted or stored during a publish or a proforma payment on MariaDB
+        run: python -m pytest tests/services/test_billing_p2_exchange_rates_mariadb.py -q

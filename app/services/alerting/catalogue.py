@@ -422,6 +422,147 @@ _SPECS = (
         (_BILLING_MAX_ROWS,),
         enabled_by_default=False,
     ),
+    # Billing phase 2 (docs/billing-phase2-design.md 15.4).
+    AlertTypeSpec(
+        "billing_tax_line_sum",
+        "Invoice line tax does not match its tax rows",
+        "An invoice line's tax differs from the sum of the tax rows recorded for it.",
+        _C,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_summary_consistent",
+        "Invoice tax summary does not match its tax rows",
+        "An invoice's printed tax summary differs from the tax rows of its lines.",
+        _C,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_evidence_conflict",
+        "Invoice tax location evidence conflicts",
+        "The location evidence recorded on an invoice disagrees with the country whose tax was charged, or "
+        "the buyer's VAT number is from another country than its billing country.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_not_registered",
+        "Tax rule skipped: no seller registration",
+        "A tax rule applied to a sale but was skipped because the seller has no registration in force there.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_buyer_country_missing",
+        "Invoice taxed without the buyer's country",
+        "A buyer with no billing country was taxed as a consumer in the seller's country.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_no_rule_for_class",
+        "Invoice line untaxed: no rule for its class",
+        "A line's tax class has no rule in the jurisdiction the sale was taxed in, so it was charged no tax.",
+        _W,
+        "invoice",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_context_changed",
+        "Tax results often discarded at invoice create",
+        "More invoices than the threshold had their prepared tax result discarded in the last 24 hours "
+        "because a rule, exemption or profile changed between preparing and creating them.",
+        _W,
+        "system",
+        (ParamSpec("daily_threshold", "Alert above this many invoices in 24 hours", 10, 1, 10_000),),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_job_needs_review",
+        "Billing job action needs review",
+        "A billing job action failed part way and needs an operator to check it.",
+        _W,
+        "system",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_nonpayment_termination_unsettled",
+        "Termination settled but service still suspended",
+        "A non-payment termination was settled by an admin as done or failed, yet the service is still "
+        "suspended for non-payment with an unpaid invoice, and no job will act on it again.",
+        _W,
+        "service",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_nonpayment_suspension_failed",
+        "Suspended for non-payment but still running",
+        "A client service's billing is suspended for non-payment while the service itself is not "
+        "suspended, usually because the power-off failed.",
+        _W,
+        "service",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_nonpayment_suspended_paid",
+        "Suspended for non-payment with nothing overdue",
+        "A client service is suspended for non-payment, yet none of its cycle invoices is unpaid and due, and "
+        "nothing will unsuspend it automatically.",
+        _W,
+        "service",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_job_stale",
+        "Billing job overdue",
+        "A live billing job has not run on schedule for more than twice its cadence.",
+        _W,
+        "system",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
+    AlertTypeSpec(
+        "billing_tax_fx_rate_missing",
+        "HMRC exchange rate not stored",
+        "UK VAT invoices in the operator currency need HMRC's monthly rate for sterling VAT, and the rate for "
+        "this month (or, from the 25th, next month) is not stored, so those invoices cannot be published. "
+        "Checked only while tax is in shadow or v2 with a GB registration and an operator currency other than GBP.",
+        _W,
+        "system",
+    ),
+    AlertTypeSpec(
+        "billing_tax_home_registration_missing",
+        "No tax registration in the seller's country",
+        "The seller holds no enabled domestic registration in force in its establishment country, so sales "
+        "there are charged no tax. An OSS registration alone does not count. Checked only while tax is in "
+        "shadow or v2 with tax enabled and a seller country set.",
+        _W,
+        "system",
+    ),
+    AlertTypeSpec(
+        "billing_email_template_render_failed",
+        "Email template failed to render",
+        "Emails were sent with the built-in text because their stored template failed to render.",
+        _W,
+        "system",
+        (_BILLING_MAX_ROWS,),
+        enabled_by_default=False,
+    ),
 )
 
 CATALOGUE: dict[str, AlertTypeSpec] = {spec.key: spec for spec in _SPECS}

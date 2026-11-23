@@ -517,6 +517,7 @@ def test_outbox_dedupe_disabled_and_retry(db_session):
             smtp_enabled=True,
             smtp_host="smtp.example.com",
             smtp_from="billing@example.com",
+            public_app_url="https://app.example.com",
         ),
         transport=transport,
         clock=clock,
@@ -576,3 +577,66 @@ def test_worker_and_smtp_settings_are_validated():
             smtp_from="billing@example.com",
             smtp_username="username-only",
         )
+
+
+async def _suspended_reseller_cycle(db_session, suffix):
+    due = datetime(2027, 9, 1, tzinfo=timezone.utc)
+    clock = MutableClock(due)
+    reseller = _reseller(db_session, suffix)
+    billing = _billing(db_session, reseller, suffix, due)
+    lifecycle = FakeLifecycle()
+    gateway = FakeGateway(["fail"] * 4)
+    service = _service(_config(), gateway, lifecycle, clock)
+    for day in (0, 1, 3, 5, 7):
+        clock.current = due + timedelta(days=day)
+        await service.process_batch(db_session, owner=f"{suffix}-worker")
+    cycle = db_session.query(BillingCycle).one()
+    assert cycle.state == BillingCycleState.SUSPENDED
+    assert billing.service.status == ServiceStatus.SUSPENDED
+    return reseller, billing, cycle, service, clock, gateway, lifecycle
+
+
+@pytest.mark.asyncio
+async def test_a_credit_top_up_pays_a_suspended_reseller_cycle_and_restores_it(db_session):
+    from app.services.credit_ledger_service import CreditLedgerService
+
+    reseller, billing, cycle, service, clock, gateway, lifecycle = await _suspended_reseller_cycle(
+        db_session, "topup-restore"
+    )
+    CreditLedgerService.credit(db_session, reseller.id, cycle.amount_cents + 500, description="top-up",
+                               idempotency_key="topup-restore")
+    db_session.commit()
+    clock.current += timedelta(minutes=1)
+    await service.process_batch(db_session, owner="topup-restore-worker")
+    db_session.expire_all()
+    assert db_session.get(Invoice, cycle.invoice_id).status == InvoiceStatus.PAID
+    assert db_session.get(BillingCycle, cycle.id).state == BillingCycleState.PAID
+    assert billing.status == ServiceBillingStatus.ACTIVE
+    assert billing.service.status == ServiceStatus.ACTIVE
+    assert lifecycle.unsuspended == [billing.service_id]
+    assert reseller.billing_hold is False
+    # Paid from credit only: no further gateway call, and the rest of the credit is left.
+    assert len(gateway.calls) == 4
+    assert CreditLedgerService.available_cents(db_session, reseller) == 500
+    payment = db_session.query(Payment).filter_by(invoice_id=cycle.invoice_id, status=PaymentStatus.SUCCEEDED).one()
+    assert payment.gateway == "credit"
+
+
+@pytest.mark.asyncio
+async def test_credit_short_of_a_suspended_cycle_is_not_applied(db_session):
+    from app.services.credit_ledger_service import CreditLedgerService
+
+    reseller, billing, cycle, service, clock, gateway, lifecycle = await _suspended_reseller_cycle(
+        db_session, "topup-short"
+    )
+    CreditLedgerService.credit(db_session, reseller.id, cycle.amount_cents - 1, description="top-up",
+                               idempotency_key="topup-short")
+    db_session.commit()
+    clock.current += timedelta(minutes=1)
+    await service.process_batch(db_session, owner="topup-short-worker")
+    db_session.expire_all()
+    assert db_session.get(Invoice, cycle.invoice_id).status == InvoiceStatus.OVERDUE
+    assert billing.service.status == ServiceStatus.SUSPENDED
+    assert CreditLedgerService.available_cents(db_session, reseller) == cycle.amount_cents - 1
+    assert db_session.query(Payment).filter_by(invoice_id=cycle.invoice_id, status=PaymentStatus.SUCCEEDED).count() == 0
+    assert len(gateway.calls) == 4

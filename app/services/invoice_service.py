@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence, Union
 
 from sqlalchemy import and_, case, func, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -32,6 +32,9 @@ from app.models.reseller import (
     PaymentStatus,
 )
 from app.services import invoice_guard  # noqa: F401  (installs the frozen-column guard)
+
+if TYPE_CHECKING:
+    from app.services.tax.result import TaxResult
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +197,10 @@ class InvoiceError(ValueError):
 
 class InvoiceTransitionError(InvoiceError):
     """An edge that is not in the transition table of the current engine mode."""
+
+
+class TaxQuoteChanged(InvoiceError):
+    """``create`` discarded a prepared ``tax_result`` whose context changed, and the total moved with it."""
 
 
 def _utcnow() -> datetime:
@@ -449,6 +456,7 @@ class InvoiceService:
         locale: Optional[str] = None,
         series_id: Optional[int] = None,
         publish: bool = True,
+        tax_result: Optional["TaxResult"] = None,
     ) -> Invoice:
         """Create an invoice as ``draft`` with its lines and, by default, publish it.
 
@@ -457,7 +465,15 @@ class InvoiceService:
         and must equal ``amount_cents``. ``shadow_lines`` are the lines the v2
         engine would write when they differ from ``lines`` (checkout's tax
         line); in ``shadow`` their total is compared with the legacy total.
+        ``tax_result`` (billing phase 2, docs/billing-phase2-design.md 4.7) is
+        the result of ``TaxEngine.prepare`` made before any lock; in tax engine
+        ``v2`` it is used only if its context hash still matches under the lock.
+        In tax ``v2`` the engine sets every line's tax (``NewLine.tax_cents`` is
+        ignored) and ``amount_cents`` may be the total without tax or with it;
+        the stored total is the one with the engine's tax.
         """
+        from app.services.tax import invoice_tax
+
         mode = engine_mode(db)
         if mode == "v2" and type(amount_cents) is int and amount_cents == 0:
             if not zero_amounts_supported(db):
@@ -511,8 +527,9 @@ class InvoiceService:
         )
         db.add(invoice)
         db.flush()
+        line_rows = []
         for sort, line in enumerate(lines):
-            db.add(
+            line_rows.append(
                 InvoiceLine(
                     invoice_id=invoice.id,
                     description=line.description[:512],
@@ -532,8 +549,17 @@ class InvoiceService:
                     tax_snapshot=line.tax_snapshot,
                 )
             )
+            db.add(line_rows[-1])
         db.flush()
         db.expire(invoice, ["invoice_lines"])
+        tax_v2 = mode == "v2" and invoice_tax.effective_mode(db, invoice) == "v2"
+        verified_tax = None
+        if tax_v2:
+            created_at = _utcnow()
+            verified_tax = invoice_tax.calculate_verified(
+                db, invoice, line_rows, created_at, tax_result, "create"
+            )
+            invoice_tax.write_rows(db, invoice, line_rows, verified_tax, created_at)
         if mode == "shadow":
             totals = compute_totals(
                 shadow_lines if shadow_lines is not None else lines,
@@ -547,6 +573,16 @@ class InvoiceService:
                     {"amount_cents": totals.amount_cents, "problems": list(totals.problems)},
                     "create",
                 )
+        elif tax_v2:
+            totals = compute_totals(line_rows, prices_include_tax=prices_include_tax)
+            untaxed = totals.subtotal_cents - totals.discount_cents
+            if int(amount_cents) not in (totals.amount_cents, untaxed):
+                discarded = tax_result is not None and verified_tax is not tax_result
+                raise (TaxQuoteChanged if discarded else InvoiceError)(
+                    f"invoice lines add up to {untaxed} before tax and {totals.amount_cents} with it, "
+                    f"not {int(amount_cents)}"
+                )
+            invoice.amount_cents = totals.amount_cents
         elif mode == "v2":
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)
             if totals.amount_cents != int(amount_cents):
@@ -554,7 +590,7 @@ class InvoiceService:
                     f"invoice lines add up to {totals.amount_cents}, not {int(amount_cents)}"
                 )
         if publish:
-            InvoiceService._publish(db, invoice, inserted=True)
+            InvoiceService._publish(db, invoice, inserted=True, verified_tax=verified_tax)
         return invoice
 
     @staticmethod
@@ -599,15 +635,23 @@ class InvoiceService:
         return InvoiceService._publish(db, invoice, inserted=False)
 
     @staticmethod
-    def _publish(db: Session, invoice: Invoice, *, inserted: bool) -> Invoice:
+    def _publish(
+        db: Session, invoice: Invoice, *, inserted: bool, verified_tax: Optional["TaxResult"] = None
+    ) -> Invoice:
         """``publish``; ``inserted`` is set by ``create`` for the row it has just inserted.
 
         No other transaction can see that row, so a legacy or shadow publish
         of it needs no lock and keeps its lock sequence. A v2 publish still
         locks reseller, account and invoice, for the settlement after it.
+
+        In tax engine ``v2`` the tax is recalculated at the tax point (the
+        publish time) with the pure path under the lock and frozen with the
+        invoice; ``verified_tax`` is ``create``'s result of the same
+        transaction, already checked under the same locks (design 4.5).
         """
         from app.services.billing import settlement
         from app.services.billing_locks import BillingLocks
+        from app.services.tax import invoice_tax
 
         v2 = invoice.model_version == 2
         db.flush()
@@ -628,6 +672,20 @@ class InvoiceService:
                 .order_by(InvoiceLine.sort_order, InvoiceLine.id)
             ).scalars()
         )
+        now = _utcnow()
+        tax_mode = invoice_tax.effective_mode(db, invoice)
+        tax_result = None
+        if v2 and tax_mode == "v2" and lines:
+            tax_result = verified_tax or invoice_tax.calculate_verified(
+                db, invoice, lines, now, None, "publish"
+            )
+            invoice_tax.write_rows(db, invoice, lines, tax_result, now)
+            invoice_tax.stamp_published(db, invoice, tax_result, now)
+        else:
+            if v2:
+                invoice_tax.reset_to_legacy(db, invoice, lines)
+            if tax_mode != "legacy":
+                invoice_tax.shadow_publish(db, invoice, lines, now)
         if v2:
             prices_include_tax = bool(invoice.prices_include_tax)
             totals = compute_totals(lines, prices_include_tax=prices_include_tax)
@@ -642,10 +700,13 @@ class InvoiceService:
             invoice.tax_cents = totals.tax_cents
             invoice.prices_include_tax = prices_include_tax
             invoice.amount_cents = totals.amount_cents
-        now = _utcnow()
         invoice.issued_at = now
-        invoice.seller_snapshot = seller_snapshot(now)
-        invoice.buyer_snapshot = buyer_snapshot(db, invoice, now)
+        seller = seller_snapshot(now)
+        buyer = buyer_snapshot(db, invoice, now)
+        if tax_result is not None:
+            invoice_tax.snapshot_extras(db, invoice, seller, buyer)
+        invoice.seller_snapshot = seller
+        invoice.buyer_snapshot = buyer
         auto_apply = v2 and InvoiceService._auto_apply_credit(db, invoice)
         InvoiceService._allocate_publish_number(db, invoice, now, required=v2)
         InvoiceService.transition(db, invoice, InvoiceStatus.OPEN, cause=CAUSE_PUBLISH)
@@ -723,21 +784,30 @@ class InvoiceService:
 
         Runs inside the settlement transaction under the guard's
         ``proforma_conversion`` allowance; the proforma number and the
-        snapshots stay.
+        snapshots stay, and so do the VAT and the tax rows. The sterling VAT
+        follows the VAT invoice's tax point, ``at`` (design 4.10,
+        ``sterling_conversion.plan_restamp``); it is written in the same flush
+        as the document type, the only flush the guard lets it change in.
         """
         from app.models.billing_series import DocumentType
         from app.services.invoice_numbering import InvoiceNumbering
+        from app.services.tax import sterling_conversion
 
         if invoice.document_type != InvoiceDocumentType.PROFORMA:
             return
         series = InvoiceNumbering.default_series(db, DocumentType.INVOICE)
         with invoice_guard.allow(
             invoice_guard.PROFORMA_CONVERSION,
-            {"document_type", "issued_at", "series_id", "number_period", "number_value", "number_display"},
+            {"document_type", "issued_at", "series_id", "number_period", "number_value", "number_display"}
+            | set(sterling_conversion.STERLING_COLUMNS),
             invoice.id,
         ):
             period, value, display = InvoiceNumbering.allocate(
                 db, series, at=at, invoice_number=invoice.invoice_number
+            )
+            # After the counter, as at publish: the rate's share lock comes last.
+            restamp = (
+                sterling_conversion.plan_restamp(db, invoice, at) if invoice.tax_engine is not None else None
             )
             invoice.series_id = series.id
             invoice.number_period = period
@@ -745,7 +815,22 @@ class InvoiceService:
             invoice.number_display = display
             invoice.document_type = InvoiceDocumentType.INVOICE
             invoice.issued_at = at
+            if restamp is not None:
+                sterling_conversion.apply_restamp(invoice, restamp)
             db.flush()
+        if restamp is not None:
+            sterling_conversion.audit_restamp(db, invoice, restamp)
+        if invoice.tax_engine is not None:
+            from app.services.tax import invoice_tax
+
+            lines = list(
+                db.execute(
+                    select(InvoiceLine)
+                    .where(InvoiceLine.invoice_id == invoice.id)
+                    .order_by(InvoiceLine.sort_order, InvoiceLine.id)
+                ).scalars()
+            )
+            invoice_tax.proforma_rate_check(db, invoice, lines, at)
 
     @staticmethod
     def delete_draft(db: Session, invoice: Invoice) -> None:
@@ -821,6 +906,7 @@ class InvoiceService:
         service_billing_id: Optional[int] = None,
         period_start: Optional[datetime] = None,
         period_end: Optional[datetime] = None,
+        tax_result: Optional["TaxResult"] = None,
     ) -> Invoice:
         line = NewLine(
             description=description[:512],
@@ -842,6 +928,7 @@ class InvoiceService:
             currency=currency,
             billing_account_id=billing_account_id,
             lines=[line],
+            tax_result=tax_result,
         )
 
     @staticmethod
@@ -1255,6 +1342,17 @@ class InvoiceService:
             "reason_code": _kind(row.reason_code),
             "outcome": _kind(row.outcome),
             "issued_at": row.issued_at,
+            **InvoiceService._sterling_fields(row),
+        }
+
+    @staticmethod
+    def _sterling_fields(row: Any) -> dict:
+        """The frozen sterling VAT of an invoice or note (design 4.10); ``fx_rate_id`` stays internal."""
+        return {
+            "fx_rate": str(row.fx_rate) if row.fx_rate is not None else None,
+            "fx_period": row.fx_period,
+            "fx_source": row.fx_source,
+            "tax_total_gbp_cents": row.tax_total_gbp_cents,
         }
 
     @staticmethod
@@ -1311,6 +1409,13 @@ class InvoiceService:
             "document_type": _kind(invoice.document_type) or InvoiceDocumentType.INVOICE.value,
             "issued_at": invoice.issued_at,
             "balance": balance.as_dict(),
+            "tax_cents": invoice.tax_cents,
+            "prices_include_tax": invoice.prices_include_tax,
+            "tax_engine": invoice.tax_engine,
+            "tax_summary": invoice.tax_summary or [],
+            "legal_notes": invoice.legal_notes or [],
+            "tax_point_at": invoice.tax_point_at,
+            **InvoiceService._sterling_fields(invoice),
         }
         if payments:
             from app.models.refund import Refund

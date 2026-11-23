@@ -112,6 +112,7 @@ def test_invoice_paid_subscribers_keep_order_and_names():
     assert settlement.invoice_paid_subscribers() == [
         "coupon_usage",
         "complete_billing_cycle",
+        "unsuspend_after_payment",
         "publish_invoice_paid",
         "invoice_paid_email",
         "fulfil_order",

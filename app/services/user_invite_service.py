@@ -143,7 +143,7 @@ def _issue_token(db: Session, user: User, *, invited_by: int, username_prefilled
         to_address=user.email,
         event=EmailEvent.USER_INVITE,
         idempotency_key=f"userinvite:{user.id}:{raw_token[:16]}",
-        data={"invite_url": f"{base_url}/accept-invite?token={raw_token}", "kind": kind_of(user)},
+        variables={"invite_url": f"{base_url}/accept-invite?token={raw_token}"},
         user_id=user.id,
     )
     AuditService.log(

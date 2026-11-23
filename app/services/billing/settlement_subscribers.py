@@ -104,7 +104,7 @@ def email_invoice_paid(db: Session, event: InvoicePaid) -> None:
         to_address=user.email,
         event=EmailEvent.INVOICE_PAID,
         idempotency_key=f"invoice:{invoice.id}:paid",
-        data={
+        variables={
             "invoice_number": invoice.invoice_number,
             "invoice_id": invoice.id,
             "amount_cents": int(invoice.amount_cents),
@@ -185,10 +185,167 @@ def _is_retail_cycle(invoice: Invoice) -> bool:
     )
 
 
+def unsuspend_after_payment(db: Session, event: InvoicePaid) -> None:
+    """Queue the unsuspension of a retail service the ``nonpayment_suspension`` job suspended.
+
+    Runs after ``complete_billing_cycle`` with the paid invoice's service
+    billing locked. When the service has no other unpaid cycle invoice and its
+    current suspension is the job's, it is queued for
+    ``settlement.run_deferred_unsuspensions`` after the commit. While another
+    unpaid cycle invoice remains, the billing stays ``suspended_nonpayment``.
+    A suspension the job made that something else has since taken over is
+    left in place and audited for staff.
+    """
+    from sqlalchemy import select
+
+    from app.models.billing_jobs import BillingJobActionStatus
+    from app.models.service import Service, ServiceStatus
+    from app.services.billing.jobs.nonpayment import (
+        cycle_billing_id,
+        latest_suspension_claim,
+        suspension_claim_is_current,
+        suspension_is_ours,
+        unpaid_cycle_invoices,
+    )
+    from app.services.billing_locks import BillingLocks
+
+    invoice = event.invoice
+    billing_id = cycle_billing_id(db, invoice.id)
+    # Settlement holds this lock already (``for_invoice``); the job marks its
+    # claim done and re-checks the invoice under it. The claim and the
+    # service status are locking reads, so they show what committed before
+    # the lock was granted, not this transaction's older snapshot.
+    billing = BillingLocks.service_billing(db, billing_id) if billing_id is not None else None
+    if billing is None or billing.reseller_id is not None:
+        return
+    from app.models.reseller import ServiceBillingStatus
+
+    claim = latest_suspension_claim(db, billing.service_id, in_flight=True, for_share=True, settled=True)
+    if claim is not None and claim.status == BillingJobActionStatus.CLAIMED:
+        # The job is between its claim and its provider call's end: it sees
+        # this payment when it re-checks the invoice and lifts the suspension.
+        return
+    status = db.execute(
+        select(Service.status)
+        .where(Service.id == billing.service_id)
+        .with_for_update(read=True)
+    ).scalar_one_or_none()
+    owed = unpaid_cycle_invoices(db, billing.id, exclude_invoice_id=invoice.id)
+    if status != ServiceStatus.SUSPENDED:
+        # A suspension whose power-off failed leaves the service running and
+        # the billing suspended_nonpayment: with nothing owed the billing
+        # is active again.
+        if status is not None and billing.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT and not owed:
+            billing.status = ServiceBillingStatus.ACTIVE
+            db.flush()
+        return
+    service = billing.service
+    if claim is None:
+        return
+    ours, reason = suspension_is_ours(db, service.id, claim)
+    if not ours:
+        from app.services.audit_service import AuditService
+
+        # Settlement has set the billing active; the service stays down, so
+        # the billing keeps saying why and ``billing_nonpayment_suspended_paid``
+        # reports it. A claim of an earlier episode that billing already
+        # ended (paid and lifted) does not explain this suspension: the
+        # billing stays as settlement left it.
+        if billing.status != ServiceBillingStatus.CANCELLED and suspension_claim_is_current(
+            db, service.id, claim, paid_invoice_id=invoice.id
+        ):
+            billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+            db.flush()
+
+        AuditService.log(
+            db,
+            actor_user_id=None,
+            action="billing.nonpayment_unsuspend_skipped",
+            resource_type="service",
+            resource_id=str(service.id),
+            billing_account_id=billing.billing_account_id,
+            metadata={"invoice_id": invoice.id, "reason": reason},
+        )
+        return
+    if billing.status == ServiceBillingStatus.CANCELLED:
+        return
+    # The billing stays suspended_nonpayment until the service is lifted:
+    # ``unsuspend_paid_service`` sets it active, and if that fails the
+    # ``billing_nonpayment_suspended_paid`` alert reports the service.
+    billing.status = ServiceBillingStatus.SUSPENDED_NONPAYMENT
+    db.flush()
+    if owed:
+        return
+    settlement.defer_unsuspension(db, int(service.id))
+
+
+def unsuspend_paid_service(db: Session, service_id: int, *, lifecycle=None) -> bool:
+    """Unsuspend a service queued by ``unsuspend_after_payment``, after checking it again.
+
+    Returns True when the service was unsuspended. The checks repeat on
+    committed state because the queue outlives the settlement transaction.
+    """
+    from sqlalchemy import select
+
+    from app.models.reseller import ServiceBilling, ServiceBillingStatus
+    from app.models.service import Service, ServiceStatus
+    from app.services.audit_service import AuditService
+    from app.services.billing.jobs.nonpayment import (
+        AUDIT_UNSUSPENDED,
+        latest_suspension_claim,
+        suspension_is_ours,
+        unpaid_cycle_invoices,
+    )
+    from app.services.commerce_lifecycle_service import run_lifecycle_sync
+    from app.services.service_lifecycle import ServiceLifecycle
+
+    # Re-read even when the session already holds these rows: they may have
+    # been loaded from the settlement transaction's snapshot.
+    service = db.execute(
+        select(Service).where(Service.id == service_id).execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    billing = db.execute(
+        select(ServiceBilling)
+        .where(ServiceBilling.service_id == service_id)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if service is None or billing is None or billing.reseller_id is not None:
+        return False
+    if service.status != ServiceStatus.SUSPENDED or billing.status == ServiceBillingStatus.CANCELLED:
+        return False
+    ours, _ = suspension_is_ours(db, service_id, latest_suspension_claim(db, service_id, settled=True))
+    if not ours or unpaid_cycle_invoices(db, billing.id):
+        return False
+    runner = lifecycle or ServiceLifecycle()
+    changed = run_lifecycle_sync(
+        lambda: runner.unsuspend(db, service, reason="payment_recovered")
+    )
+    if not changed:
+        return False
+    if billing.status == ServiceBillingStatus.SUSPENDED_NONPAYMENT:
+        billing.status = ServiceBillingStatus.ACTIVE
+    billing.last_failure_code = None
+    billing.last_failure_message = None
+    AuditService.log(
+        db,
+        actor_user_id=None,
+        action=AUDIT_UNSUSPENDED,
+        resource_type="service",
+        resource_id=str(service_id),
+        billing_account_id=billing.billing_account_id,
+        metadata={"reason": "payment_recovered"},
+    )
+    db.flush()
+    return True
+
+
 def register_defaults() -> None:
     subscribe_invoice_paid("coupon_usage", count_coupon_usage, applies=_has_order)
     subscribe_invoice_paid(
         "complete_billing_cycle", complete_billing_cycle, applies=_is_retail_cycle
+    )
+    subscribe_invoice_paid(
+        "unsuspend_after_payment", unsuspend_after_payment, applies=_is_retail_cycle
     )
     subscribe_invoice_paid("publish_invoice_paid", publish_invoice_paid)
     subscribe_invoice_paid(

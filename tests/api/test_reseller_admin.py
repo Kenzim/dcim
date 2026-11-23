@@ -579,3 +579,31 @@ def test_credit_audit_invoice_payment_and_ledger_reads(
     )
     assert ledger.status_code == 200
     assert [row["id"] for row in ledger.json()] == [entry["id"]]
+
+
+def test_admin_reseller_invoice_carries_the_tax_fields_and_briefs(client, db_session, test_admin_user):
+    headers = _admin_headers(client)
+    reseller = _create_reseller(client, headers, "taxinv")
+    invoice = Invoice(
+        invoice_number=700077,
+        reseller_id=reseller["id"],
+        purpose=InvoicePurpose.CREDIT_TOPUP,
+        status=InvoiceStatus.OPEN,
+        amount_cents=1200,
+        currency="USD",
+        tax_cents=200,
+        prices_include_tax=False,
+        tax_engine="v2",
+        tax_summary=[{"name": "VAT", "rate_percent": "20", "tax_cents": 200}],
+    )
+    db_session.add(invoice)
+    db_session.commit()
+    for body in (
+        client.get(f"/api/admin/resellers/invoices/{invoice.id}", headers=headers).json(),
+        client.get(f"/api/admin/resellers/invoices?reseller_id={reseller['id']}", headers=headers).json()[0],
+    ):
+        assert body["tax_cents"] == 200 and body["prices_include_tax"] is False and body["tax_engine"] == "v2"
+        assert body["tax_summary"][0]["tax_cents"] == 200 and body["legal_notes"] == []
+        assert {"tax_point_at", "fx_rate", "fx_period", "tax_total_gbp_cents"} <= set(body)
+        assert body["reseller"]["username"] == reseller["user"]["username"]
+        assert body["status"] == "open" and "service" in body
