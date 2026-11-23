@@ -12,12 +12,21 @@ or superseded by the tax point. A supersede (lock the old row, close it,
 insert the new one) committed during a publish waits for that publish to
 commit. The invoice uses exactly one set of rules, those valid at its tax
 point.
+
+``test_a_real_pack_import_races_a_real_publish`` runs ``PackImporter.apply`` on
+the UK and EU packs against ``InvoiceService.publish`` of a UK invoice, both in
+their real code on two connections, in both orders of arrival.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
@@ -420,3 +429,289 @@ def test_an_import_holding_the_rules_in_descending_order_makes_the_publish_wait(
     assert outcome["result"] == "published"
     assert sorted({row[0] for row in _rows(sessions, invoice_id)}) <= sorted(new_ids)
     assert _status(sessions, invoice_id) == "open"
+
+
+IMPORT_VERSION = "2099.1.1"
+
+
+def _seed_packs(sessions) -> tuple[int, datetime]:
+    """The UK and EU packs applied, UK rule ids running against their rule keys, a draft UK invoice.
+
+    Returns the invoice id and the moment the next import takes effect (a minute ago, so a publish
+    now has the changed rules as its tax point's rules).
+    """
+    from app.models.commerce_invoice_ext import InvoiceLineKind
+    from app.models.reseller import InvoicePurpose
+    from app.models.tax import TaxClass
+    from app.services.invoice_service import InvoiceService, NewLine
+    from tests.services.tax_helpers import add_registration, enable_tax, invoice_v2, retail_account, set_engine
+    from tests.services.tax_pack_helpers import apply_pack, seed_tax_basics
+
+    long_ago = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    seeding_day = long_ago - timedelta(days=1)  # the importer refuses a start date before its own "now"
+    with sessions() as db:
+        seed_tax_basics(db)
+        apply_pack(db, "eu_vat", effective_from=long_ago, now=seeding_day)
+        apply_pack(db, "uk_vat", effective_from=long_ago, now=seeding_day)
+        db.commit()
+        db.execute(sa.text("UPDATE tax_rules SET id = 100000 - id WHERE pack_id = 'uk_vat' ORDER BY id DESC"))
+        invoice_v2(db)
+        set_engine(db, "tax", "v2")
+        enable_tax(db, "GB")
+        add_registration(db, "GB")
+        _user, account = retail_account(db, country="GB")
+        classes = {row.code: row.id for row in db.scalars(sa.select(TaxClass))}
+        invoice = InvoiceService.create(
+            db, billing_account_id=account.id, purpose=InvoicePurpose.UPGRADE, amount_cents=3000,
+            currency="GBP", publish=False,
+            lines=[NewLine(f"Line {code}", 1000, kind=InvoiceLineKind.PRODUCT, tax_class_id=classes[code])
+                   for code in ("zero", "reduced", "standard")],
+        )
+        db.commit()
+        return invoice.id, datetime.now(timezone.utc) - timedelta(minutes=1)
+
+
+def _next_pack_versions(monkeypatch):
+    """The built-in UK and EU packs as a newer version with every positive rate one point higher.
+
+    Returns ``offered(on)``: the registry offers the newer version only while it is on, so the
+    seeding applies the current version and the import the newer.
+    """
+    from app.plugin_host import providers as plugin_providers
+    from app.services.tax.packs import registry as registry_module
+    from app.services.tax.packs.schema import validate_pack
+
+    monkeypatch.setattr(plugin_providers, "providers_of", lambda kind: [])
+    registry_module._builtin.cache_clear()
+    original = registry_module._builtin
+    newer = {}
+    for pack_id in ("uk_vat", "eu_vat"):
+        data = json.loads((Path(registry_module.__file__).resolve().parent / f"{pack_id}.json").read_text())
+        data["version"] = IMPORT_VERSION
+        for rule in data["rules"]:
+            if Decimal(rule["rate_percent"]) > 0:
+                rule["rate_percent"] = str(Decimal(rule["rate_percent"]) + 1)
+        newer[pack_id] = registry_module._pack_data(pack_id, validate_pack(data), "builtin")
+    state = {"on": False}
+    monkeypatch.setattr(
+        registry_module, "_builtin", lambda pack_id: newer[pack_id] if state["on"] else original(pack_id)
+    )
+
+    def offered(on: bool) -> None:
+        state["on"] = on
+
+    return offered
+
+
+def _wait_until_blocked(engine, worker, outcome, like: str, timeout: float = 10.0) -> None:
+    """Wait until a statement of ``worker`` that matches ``like`` has been waiting for a lock for a while."""
+    query = sa.text(
+        "SELECT MAX(time_ms) FROM information_schema.PROCESSLIST WHERE info LIKE 'SELECT tax_rules.id%' AND info LIKE :like"
+    )
+    deadline = time.monotonic() + timeout
+    with engine.connect() as conn:
+        while time.monotonic() < deadline:
+            if not worker.is_alive():
+                pytest.fail(f"it finished without waiting: {outcome!r}")
+            if (conn.execute(query, {"like": like}).scalar() or 0) > 300:
+                return
+            conn.rollback()
+            time.sleep(0.05)
+    pytest.fail(f"nothing waited for a lock matching {like!r}")
+
+
+def _line_tax_rules(sessions, invoice_id: int) -> set[tuple[str, bool]]:
+    """``(rate, rule still open)`` for each rule the invoice's line taxes name."""
+    from app.models.tax import InvoiceLineTax, TaxRule
+
+    with sessions() as db:
+        rows = db.execute(
+            sa.select(TaxRule.rate_percent, TaxRule.valid_to)
+            .join(InvoiceLineTax, InvoiceLineTax.tax_rule_id == TaxRule.id)
+            .where(InvoiceLineTax.invoice_id == invoice_id)
+        ).all()
+    return {(str(rate), valid_to is None) for rate, valid_to in rows}
+
+
+def _publish_holding(sessions, invoice_id: int, outcome: dict, opened: threading.Event, release: threading.Event):
+    from app.models.reseller import Invoice
+    from app.services.invoice_service import InvoiceService
+
+    def run():
+        with sessions() as db:
+            db.execute(sa.text("SET SESSION innodb_lock_wait_timeout = 20"))
+            try:
+                InvoiceService.publish(db, db.get(Invoice, invoice_id))
+                opened.set()
+                release.wait(20)
+                db.commit()
+                outcome["result"] = "published"
+            except Exception as exc:  # noqa: BLE001 - reported to the test
+                outcome["result"] = exc
+                db.rollback()
+            finally:
+                opened.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def _import_holding(sessions, effective_from: datetime, outcome: dict, applied: threading.Event, release: threading.Event):
+    from app.services.tax.pack_import import PackImporter
+
+    before = effective_from - timedelta(days=1)
+
+    def run():
+        with sessions() as db:
+            db.execute(sa.text("SET SESSION innodb_lock_wait_timeout = 20"))
+            try:
+                for pack_id in ("uk_vat", "eu_vat"):
+                    diff = PackImporter.preview(db, pack_id, IMPORT_VERSION, effective_from, now=before)
+                    PackImporter.apply(
+                        db, pack_id, IMPORT_VERSION, effective_from,
+                        diff_hash=diff.diff_hash, actor_user_id=None, now=before,
+                    )
+                applied.set()
+                release.wait(20)
+                db.commit()
+                outcome["result"] = "imported"
+            except Exception as exc:  # noqa: BLE001 - reported to the test
+                outcome["result"] = exc
+                db.rollback()
+            finally:
+                applied.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def _no_deadlock(*outcomes: dict) -> None:
+    for outcome in outcomes:
+        result = outcome.get("result")
+        if isinstance(result, sa.exc.OperationalError):
+            assert result.orig.args[0] != 1213, "deadlock"
+
+
+def test_a_real_pack_import_races_a_real_publish(engine, sessions, monkeypatch):
+    """Both orders of arrival of a real import of the UK and EU packs and a real publish of a UK invoice.
+
+    A publish that holds the rule share locks makes the import wait; the publish keeps
+    the rules it saw (still valid at its tax point), and the import then closes them. An
+    import that holds the rule locks (taken in id order, the rows then written in rule
+    key order) makes the publish wait: it then refuses with ``TaxRuleChanged`` (a retry in a
+    new transaction publishes with the new rules) or publishes with the new rules. Never
+    error 1213, under REPEATABLE READ and READ COMMITTED.
+    """
+    from app.services.tax.invoice_tax import TaxRuleChanged
+
+    offered = _next_pack_versions(monkeypatch)
+
+    # The publish arrives first and is still open when the import starts.
+    invoice_id, effective_from = _seed_packs(sessions)
+    offered(True)
+    publish_out: dict = {}
+    import_out: dict = {}
+    opened, never, release_publish = threading.Event(), threading.Event(), threading.Event()
+    publisher = _publish_holding(sessions, invoice_id, publish_out, opened, release_publish)
+    assert opened.wait(20) and "result" not in publish_out
+    importer = _import_holding(sessions, effective_from, import_out, threading.Event(), never)
+    never.set()  # the import commits as soon as it has the locks
+    _wait_until_blocked(engine, importer, import_out, "%FOR UPDATE")
+    release_publish.set()
+    publisher.join(30)
+    importer.join(30)
+    assert not publisher.is_alive() and not importer.is_alive()
+    _no_deadlock(publish_out, import_out)
+    assert publish_out["result"] == "published", publish_out
+    assert import_out["result"] == "imported", import_out
+    assert _line_tax_rules(sessions, invoice_id) == {("20.0000", False), ("5.0000", False), ("0.0000", True)}
+
+    # The import arrives first and has not committed when the publish starts.
+    _drop_all(engine)
+    from app.core.database import Base
+
+    Base.metadata.create_all(engine)
+    offered(False)
+    invoice_id, effective_from = _seed_packs(sessions)
+    offered(True)
+    publish_out, import_out = {}, {}
+    applied, release_import = threading.Event(), threading.Event()
+    importer = _import_holding(sessions, effective_from, import_out, applied, release_import)
+    assert applied.wait(30) and "result" not in import_out, import_out
+    opened = threading.Event()
+    publisher = _publish_holding(sessions, invoice_id, publish_out, opened, threading.Event())
+    _wait_until_blocked(engine, publisher, publish_out, "%LOCK IN SHARE MODE")
+    release_import.set()
+    importer.join(30)
+    publisher.join(30)
+    assert not publisher.is_alive() and not importer.is_alive()
+    _no_deadlock(publish_out, import_out)
+    assert import_out["result"] == "imported", import_out
+    # The publish had read the old rules before it queued on the lock, so it refuses and a retry
+    # publishes with the new rules; one that read after the commit would publish with them at once.
+    if isinstance(publish_out["result"], TaxRuleChanged):
+        assert _status(sessions, invoice_id) == "draft"
+        retry: dict = {}
+        _publish_holding(sessions, invoice_id, retry, threading.Event(), _set_event()).join(30)
+        assert retry["result"] == "published", retry
+    else:
+        assert publish_out["result"] == "published", publish_out
+    assert _status(sessions, invoice_id) == "open"
+    assert _line_tax_rules(sessions, invoice_id) == {("21.0000", True), ("6.0000", True), ("0.0000", True)}
+
+
+def _set_event() -> threading.Event:
+    event = threading.Event()
+    event.set()
+    return event
+
+
+@pytest.mark.parametrize("first", ["publish", "import"])
+def test_a_real_import_and_a_real_publish_queued_behind_a_held_rule_never_deadlock(engine, sessions, monkeypatch, first):
+    """Both sides have taken some of their rule locks when a third transaction releases the highest rule.
+
+    Another connection holds the highest rule the invoice uses; the publish (share locks) and the
+    import (update locks) are started, one after the other, and both wait for it. Taking their
+    locks in ascending id order, whoever queued first finishes and the other follows. A side
+    that took them in descending order would hold a lock the other needs while it waits for one
+    the other holds: error 1213.
+    """
+    from app.models.tax import TaxClass, TaxRule
+
+    offered = _next_pack_versions(monkeypatch)
+    invoice_id, effective_from = _seed_packs(sessions)
+    offered(True)
+    with sessions() as db:
+        gate_id = db.scalar(
+            sa.select(sa.func.max(TaxRule.id))
+            .join(TaxClass, TaxClass.id == TaxRule.tax_class_id)
+            .where(TaxRule.country == "GB", TaxRule.valid_to.is_(None), TaxClass.code.in_(("standard", "reduced", "zero")))
+        )
+    publish_out: dict = {}
+    import_out: dict = {}
+    gate = sessions()
+    try:
+        gate.execute(sa.select(TaxRule.id).where(TaxRule.id == gate_id).with_for_update()).all()
+        starters = {
+            "publish": lambda: _publish_holding(sessions, invoice_id, publish_out, threading.Event(), _set_event()),
+            "import": lambda: _import_holding(sessions, effective_from, import_out, threading.Event(), _set_event()),
+        }
+        threads = []
+        for side in (first, "import" if first == "publish" else "publish"):
+            threads.append(starters[side]())
+            time.sleep(1.5)
+            assert threads[-1].is_alive(), (publish_out, import_out)
+        gate.rollback()
+    finally:
+        gate.close()
+    for thread in threads:
+        thread.join(30)
+        assert not thread.is_alive()
+    _no_deadlock(publish_out, import_out)
+    assert import_out["result"] == "imported", import_out
+    from app.services.tax.invoice_tax import TaxRuleChanged
+
+    assert publish_out["result"] == "published" or isinstance(publish_out["result"], TaxRuleChanged), publish_out
+    assert (publish_out["result"] == "published") is (first == "publish")
