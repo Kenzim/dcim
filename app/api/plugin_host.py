@@ -164,6 +164,16 @@ async def uninstall_plugin(plugin_id: str, body: UninstallBody, auth: AdminDep, 
     return {"ok": True}
 
 
+@admin_router.post("/{plugin_id}/purge-data")
+def purge_plugin_data(plugin_id: str, auth: AdminDep, db: DbDep) -> dict:
+    """Delete the settings, secrets, state and other rows an uninstall kept of a plugin that is no longer installed."""
+    try:
+        deleted = lifecycle.purge_data(db, plugin_id, actor_user_id=_admin_id(auth))
+    except lifecycle.LifecycleError as exc:
+        raise _lifecycle_error(exc) from exc
+    return {"ok": True, "deleted": deleted}
+
+
 @admin_router.post("/{plugin_id}/reset-health")
 def reset_health(plugin_id: str, auth: AdminDep, db: DbDep) -> dict:
     from app.plugin_host import health

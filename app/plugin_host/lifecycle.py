@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from app.models.commerce_audit import UserAuditEvent
 from app.models.plugin_host import (
     PluginDelivery,
     PluginInstallation,
@@ -21,7 +22,15 @@ from app.models.plugin_host import (
 from app.plugin_host import health, outbox, runtime, settings_store
 from app.plugin_host.catalogue import describe_permissions
 from app.plugin_host.common import audit, aware
-from app.plugin_host.loader import Package, PluginLoadError, discover, find_package, import_package
+from app.plugin_host.loader import (
+    Package,
+    PluginLoadError,
+    discover,
+    find_package,
+    import_package,
+    package_origin,
+    root_clash_reason,
+)
 from app.plugin_host.manifest import Manifest, parse_semver
 
 logger = logging.getLogger(__name__)
@@ -68,6 +77,64 @@ def _purge(db: Session, plugin_id: str, *, keep_data: bool) -> None:
             db.execute(delete(model).where(model.plugin_id == plugin_id).execution_options(synchronize_session=False))
 
 
+_DATA_MODELS = (
+    ("settings", PluginSetting),
+    ("state", PluginState),
+    ("service links", PluginServiceLink),
+    ("deliveries", PluginDelivery),
+    ("schedules", PluginSchedule),
+    ("logs", PluginLog),
+)
+
+
+def leftover_data(db: Session, plugin_id: str) -> dict[str, int]:
+    """Rows still keyed by this plugin id, by kind, with none counted as zero left out."""
+    counts = {}
+    for label, model in _DATA_MODELS:
+        count = db.execute(select(func.count()).select_from(model).where(model.plugin_id == plugin_id)).scalar() or 0
+        if count:
+            counts[label] = count
+    return counts
+
+
+def _kept_by_a_bundled_uninstall(db: Session, plugin_id: str) -> bool:
+    """Whether the most recent uninstall of this id was of a bundled installation (so its kept data is ours)."""
+    metadata = db.execute(
+        select(UserAuditEvent.event_metadata)
+        .where(UserAuditEvent.action == "plugin.uninstall", UserAuditEvent.resource_id == plugin_id)
+        .order_by(UserAuditEvent.id.desc())
+        .limit(1)
+    ).scalar()
+    return isinstance(metadata, dict) and metadata.get("bundled") is True
+
+
+def purge_data(db: Session, plugin_id: str, *, actor_user_id: Optional[int] = None) -> dict[str, int]:
+    """Delete what an uninstall kept of a plugin that is no longer installed, and audit it.
+
+    This is the one explicit way to clear a third-party plugin's leftovers before Rackflow's plugin of the same
+    name is installed. Returns the number of rows deleted by kind.
+    """
+    if db.get(PluginInstallation, plugin_id) is not None:
+        raise LifecycleError("The plugin is installed; uninstall it to delete its data")
+    counts = leftover_data(db, plugin_id)
+    if not counts:
+        return counts
+    _purge(db, plugin_id, keep_data=False)
+    audit("plugin.purge_data", plugin_id=plugin_id, actor_user_id=actor_user_id, resource_type="plugin",
+          resource_id=plugin_id, metadata={"deleted": counts}, db=db)
+    db.commit()
+    runtime.invalidate(plugin_id)
+    return counts
+
+
+def _leftover_refusal(plugin_id: str, counts: dict[str, int]) -> str:
+    kept = ", ".join(f"{n} {label}" for label, n in counts.items())
+    return (
+        f"Data of an earlier plugin named `{plugin_id}` was kept when it was uninstalled ({kept}). Rackflow's plugin of "
+        "that name would inherit it. Delete that data first with the purge action, then install again."
+    )
+
+
 async def install(
     db: Session,
     directory: str,
@@ -87,6 +154,10 @@ async def install(
     manifest = package.manifest
     if db.get(PluginInstallation, manifest.id) is not None:
         raise LifecycleError("This plugin is already installed; use upgrade")
+    if package.bundled:
+        leftovers = leftover_data(db, manifest.id)
+        if leftovers and not _kept_by_a_bundled_uninstall(db, manifest.id):
+            raise LifecycleError(_leftover_refusal(manifest.id, leftovers))
     missing = set(manifest.permissions) - set(accept_permissions or [])
     if missing:
         raise PermissionsNotAccepted(list(missing))
@@ -98,6 +169,7 @@ async def install(
         manifest=package.raw,
         directory=package.directory,
         code_hash=package.code_hash,
+        bundled=bool(package.bundled),
         effective_api=manifest.effective_api(),
         status=PluginStatus.DISABLED,
         granted_permissions=sorted(manifest.permissions),
@@ -129,6 +201,9 @@ async def install(
 
 async def set_enabled(db: Session, inst: PluginInstallation, enabled: bool, *, actor_user_id: Optional[int] = None) -> None:
     if enabled:
+        clash = root_clash_reason(inst.directory, bool(inst.bundled), package_origin(inst.directory))
+        if clash is not None:
+            raise LifecycleError(clash)
         if inst.status == PluginStatus.FILES_CHANGED:
             raise LifecycleError("The files on disk changed; review and upgrade before enabling")
         if inst.status == PluginStatus.ENABLED:
@@ -162,6 +237,9 @@ async def upgrade(
         package = find_package(inst.directory)
     except PluginLoadError as exc:
         raise LifecycleError(str(exc)) from exc
+    clash = root_clash_reason(inst.directory, bool(inst.bundled), package.bundled)
+    if clash is not None:
+        raise LifecycleError(clash)
     if package.reserved:
         raise LifecycleError("; ".join(package.errors))
     if package.manifest is None:
@@ -225,7 +303,7 @@ async def uninstall(db: Session, inst: PluginInstallation, *, keep_data: bool = 
     _purge(db, plugin_id, keep_data=keep_data)
     db.delete(inst)
     audit("plugin.uninstall", plugin_id=plugin_id, actor_user_id=actor_user_id, resource_type="plugin",
-          resource_id=plugin_id, metadata={"keep_data": keep_data}, db=db)
+          resource_id=plugin_id, metadata={"keep_data": keep_data, "bundled": bool(inst.bundled)}, db=db)
     db.commit()
     runtime.invalidate(plugin_id)
 
@@ -260,6 +338,8 @@ def available_view(package: Package, installed: Optional[PluginInstallation]) ->
 def _upgrade_view(inst: PluginInstallation, package: Optional[Package]) -> Optional[dict]:
     if package is None or package.manifest is None:
         return None
+    if root_clash_reason(inst.directory, bool(inst.bundled), package.bundled) is not None:
+        return None
     try:
         newer = parse_semver(package.manifest.version) > parse_semver(inst.version)
     except ValueError:
@@ -288,7 +368,8 @@ def summary(db: Session, inst: PluginInstallation, package: Optional[Package] = 
         "name": inst.name,
         "version": inst.version,
         "effective_api": inst.effective_api,
-        "bundled": bool(package and package.bundled),
+        "bundled": bool(inst.bundled),
+        "upgrade_blocked": root_clash_reason(inst.directory, bool(inst.bundled), package_origin(inst.directory)),
         "description": manifest.description if manifest else "",
         "author": manifest.author if manifest else None,
         "homepage": manifest.homepage if manifest else None,
