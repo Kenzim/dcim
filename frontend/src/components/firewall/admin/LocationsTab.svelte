@@ -171,10 +171,12 @@
 
         {#if loc.rollout_paused_at}
           <Alert type="warning">
+            <div>
             <strong>The staged rollout is paused</strong> since {when(loc.rollout_paused_at)} after {loc.rollout_failures} failed {loc.rollout_failures === 1 ? 'attempt' : 'attempts'}.
-            {#if loc.rollout_pause_reason}Reason: {loc.rollout_pause_reason}{/if}
+            {#if loc.rollout_pause_reason}Reason: {loc.rollout_pause_reason.replace(/[.\s]+$/, '')}.{/if}
             Servers still waiting are not touched until it is resumed.
             <div class="resume"><Button size="small" disabled={busyId === id} on:click={() => resume(loc)}>Resume rollout</Button></div>
+            </div>
           </Alert>
         {/if}
 
@@ -249,7 +251,7 @@
     {#if preview.nic_flag_unknown > 0}
       <p>
         <strong>{preview.nic_flag_unknown}</strong> {preview.nic_flag_unknown === 1 ? 'server has' : 'servers have'} not been checked yet, so
-        Rackflow does not know whether they will be interrupted.
+        Rackflow does not know whether {preview.nic_flag_unknown === 1 ? 'it' : 'they'} will be interrupted.
       </p>
     {/if}
     {#if servicesOf(preview).length}

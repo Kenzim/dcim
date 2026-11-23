@@ -272,7 +272,7 @@
     {#if fw.last_applied_at}<p class="hint">Last applied {when(fw.last_applied_at)}.</p>{/if}
 
     {#if fw.available === false}
-      <Alert type="info">The firewall is not offered for this server{staff ? '' : ' at the moment'}.{#if staff && fw.reasons.length} See the reasons below.{/if}</Alert>
+      <Alert type="info">The firewall is not offered for this server{staff ? '' : ' at the moment'}.{#if staff && fw.reasons.length}{' '}See the reasons below.{/if}</Alert>
     {:else}
       <p class="hint">
         {fw.client_enabled
