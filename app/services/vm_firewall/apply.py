@@ -50,7 +50,7 @@ from app.services.vm_firewall.proxmox_fw import (
     net_firewall_flag,
 )
 from app.services.vm_firewall.render import RenderedFirewall, render
-from app.services.vm_firewall.service import observe_net0_bridge
+from app.services.vm_firewall.service import loaded_revision, observe_net0_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +351,7 @@ async def apply(
     observe_net0_bridge(row, vm_config)
 
     revision = row.revision
+    loaded = loaded_revision(row)
     desired = render(db, service_id, now=now)
     row.desired_hash = desired.desired_hash
     try:
@@ -361,8 +362,14 @@ async def apply(
         return failed(exc, revision, desired)
     if claim is not None and not claim.confirm(db):
         return claim_lost(db, row, revision=revision, desired=desired)
-
-    if int(desired.options["enable"]) != 1:
+    # ``confirm`` settled the revision on the locked database value. If a save committed during the
+    # apply it is newer than the rendered one: record the revision loaded, whose rules were applied,
+    # never a later one, and leave the row pending for the queue.
+    current = row.revision == revision
+    if not current:
+        revision = loaded
+        state = FirewallState.PENDING
+    elif int(desired.options["enable"]) != 1:
         state = FirewallState.OFF
     elif result.nic_flag == FirewallNicFlag.PENDING_REBOOT:
         state = FirewallState.PENDING_REBOOT

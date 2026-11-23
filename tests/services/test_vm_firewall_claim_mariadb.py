@@ -238,3 +238,88 @@ def test_an_apply_that_lost_its_claim_records_nothing(factory, then):
     assert row.rollout_released_at is not None and row.claimed_by == "deployment"
     with factory() as db:
         assert (db.get(FirewallLocationSettings, location_id).rollout_failures or 0) == 0
+
+
+def _client_saves(factory, world, service_id, port):
+    """A client save on its own connection; it takes the row lock (``SELECT ... FOR UPDATE``), so
+    it would fail with error 1205 if the applier held the row while writing to Proxmox."""
+    from app.models.vm_firewall import ServiceFirewall
+    from app.services.vm_firewall import service as fw
+
+    with factory() as other:
+        current = other.get(ServiceFirewall, service_id).revision
+        fw.add_rule(other, service_id, world.actor("alice"),
+                    {"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": port}, revision=current)
+        other.commit()
+        return current + 1
+
+
+@pytest.mark.parametrize("mode", ["report", "repair"])
+def test_bridge_bump_during_an_apply_is_settled_on_a_concurrent_save(factory, mode):
+    """The apply bumps the revision it loaded for a moved bridge while a client save commits on
+    another connection. The bump lands on top of the save's number, the save's revision is not
+    recorded as applied, and the next queue pass applies the save."""
+    from app.services import settings_store
+    from app.services.vm_firewall import reconcile
+    from app.services.vm_firewall import service as fw
+    from app.services.vm_firewall.render import render
+    from tests.fakes.proxmox_firewall import FakeProxmoxFirewall
+    from tests.services.test_vm_firewall_worker import MOVED_NET0, OWNER, T0, FakeAccess
+
+    fake = FakeProxmoxFirewall()
+    access = FakeAccess(fake)
+    saved = []
+    with factory() as db:
+        settings_store.set_setting(db, "vm_firewall_drift_mode", mode)
+        world, service_id, fake_vm = _world_vm(db, fake)
+        db.commit()
+        assert asyncio.run(reconcile.process_queue(db, access, owner=OWNER, now=T0)).applied == [service_id]
+        rendered = _client_saves(factory, world, service_id, "80")
+        fake_vm.config["net0"] = MOVED_NET0
+        fake.on_next_write(lambda _fake: saved.append(_client_saves(factory, world, service_id, "8443")))
+        db.expire_all()
+        assert asyncio.run(reconcile.process_queue(db, access, owner=OWNER, now=T0)).applied == [service_id]
+    row = _row(factory, service_id)
+    assert row.revision == saved[0] + 1 and row.net0_bridge == "vmbr7"
+    assert row.applied_revision == rendered and row.state.value == "pending"
+    ports = {rule.get("dport") for rule in fake_vm.rules}
+    assert "80" in ports and "8443" not in ports
+    with factory() as db:
+        again = asyncio.run(reconcile.process_queue(db, access, owner=OWNER, now=T0 + timedelta(seconds=5)))
+        assert again.applied == [service_id]
+        assert db.get(fw.ServiceFirewall, service_id).applied_hash == render(db, service_id).desired_hash
+    row = _row(factory, service_id)
+    assert row.applied_revision == row.revision and row.state.value == "applied"
+    assert "8443" in {rule.get("dport") for rule in fake_vm.rules}
+
+
+def test_sweep_that_lost_its_claim_never_moves_the_revision_backwards(factory):
+    """The sweep loads revision r and reads a moved bridge; meanwhile the client saves (r+1) and
+    another worker takes the expired claim and applies with the bridge (r+2). The sweep's locked
+    confirmation sees the other owner and writes nothing, so the revision stays at r+2."""
+    from app.services.vm_firewall import reconcile
+    from tests.services.test_vm_firewall_worker import MOVED_NET0, OWNER, T0, FakeAccess, _PauseOnRead
+
+    fake = _PauseOnRead()
+    access = FakeAccess(fake)
+    other_worker = []
+    with factory() as db:
+        world, service_id, fake_vm = _world_vm(db, fake)
+        db.commit()
+        assert asyncio.run(reconcile.process_queue(db, access, owner=OWNER, now=T0)).applied == [service_id]
+        fake_vm.config["net0"] = MOVED_NET0
+        later = T0 + timedelta(seconds=reconcile.reconcile_interval(db) + 1)
+
+        async def meanwhile():
+            _client_saves(factory, world, service_id, "8443")
+            with factory() as b_db:
+                other_worker.append(await reconcile.process_queue(b_db, access, owner="worker-b",
+                                                                  now=later + timedelta(hours=1)))
+
+        fake.pause = meanwhile
+        sweep = asyncio.run(reconcile.drift_sweep(db, access, owner=OWNER, now=later))
+    assert other_worker[0].applied == [service_id]
+    row = _row(factory, service_id)
+    assert row.revision == row.applied_revision and row.net0_bridge == "vmbr7"
+    assert "8443" in {rule.get("dport") for rule in fake_vm.rules}
+    assert sweep.claim_lost == [service_id] and sweep.queued == []

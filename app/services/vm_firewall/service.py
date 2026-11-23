@@ -13,8 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, inspect, or_, select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.client_permissions import PermissionKey
 from app.models.private_network import PrivateNetworkPool
@@ -325,6 +326,24 @@ def _bump(row: ServiceFirewall) -> None:
     row.revision = (row.revision or 0) + 1
 
 
+def loaded_revision(row: ServiceFirewall) -> int:
+    """The revision ``row`` held when it was loaded, before any ``_bump`` in this session."""
+    history = inspect(row).attrs.revision.history
+    return (history.deleted[0] if history.deleted else row.revision) or 0
+
+
+def settle_revision(row: ServiceFirewall, locked: int) -> None:
+    """Rebase the revision raised on ``row`` in this session onto ``locked``, the value read under
+    the row lock. An applier bumps the revision (``observe_net0_bridge``) from the value it loaded
+    before its Proxmox calls, without the lock; a save committed meanwhile has raised it too, so
+    flushing that value would reuse the save's number or move the revision backwards. Afterwards
+    ``row.revision`` is the value the flush writes."""
+    raised = (row.revision or 0) - loaded_revision(row)
+    set_committed_value(row, "revision", locked)
+    if raised:
+        row.revision = locked + raised
+
+
 # Eligibility (section 3.1)
 
 
@@ -342,7 +361,8 @@ def _macs(net: Mapping[str, Optional[str]]) -> list[str]:
 
 def observe_net0_bridge(row: ServiceFirewall, vm_config: Mapping[str, Any]) -> bool:
     """Record net0's bridge from a Proxmox VM config on the row, bumping the revision when it
-    changes (render depends on it). Returns whether it changed; the caller commits."""
+    changes (render depends on it). Returns whether it changed; the caller commits. A caller that
+    does not hold the row lock settles the bump with ``settle_revision`` before flushing."""
     bridge = (net_bridges(dict(vm_config)).get("net0") or {}).get("bridge") or None
     if bridge is not None and len(bridge) > 32:
         bridge = None
@@ -1911,6 +1931,7 @@ __all__ = [
     "ipset_entries",
     "list_groups",
     "list_ipsets",
+    "loaded_revision",
     "preview_enforce_baseline_on_all",
     "record_readiness",
     "release_due_rollouts",
@@ -1920,6 +1941,7 @@ __all__ = [
     "service_rules",
     "set_admin_fields",
     "set_firewall",
+    "settle_revision",
     "update_baseline",
     "update_group",
     "update_ipset",
