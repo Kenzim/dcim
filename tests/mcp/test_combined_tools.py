@@ -10,7 +10,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from app.mcp.tools import combined
 
 EXPECTED_TOOLS = {
-    "cable", "delete_server_port", "save_server_ports",
+    "cable", "firewall", "delete_server_port", "save_server_ports",
     "save_product", "save_product_family", "save_subnet_group", "save_vm_template", "vm_ip_pool",
     "proxy_runner", "rotate_proxy_runner_key", "delete_proxy_runner",
     "storage_node", "rotate_storage_node_key", "delete_storage_node", "storage",

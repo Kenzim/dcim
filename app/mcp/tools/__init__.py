@@ -17,6 +17,7 @@ from app.mcp.tools import proxy_runners as _proxy_runners  # noqa: F401
 from app.mcp.tools import storage as _storage  # noqa: F401
 from app.mcp.tools import alerts as _alerts  # noqa: F401
 from app.mcp.tools import plugins as _plugins  # noqa: F401
+from app.mcp.tools import firewall as _firewall  # noqa: F401
 from app.mcp.tools import combined as _combined  # noqa: F401  (after the modules it dispatches to)
 
 

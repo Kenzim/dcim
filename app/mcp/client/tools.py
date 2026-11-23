@@ -26,6 +26,7 @@ from app.core.client_mcp_auth import ClientMcpAuthContext
 from app.core.config import settings
 from app.dao.commerce_dao import BillingAccountDAO
 from app.dao.service_dao import ServiceDAO
+from app.mcp.client.firewall import CONFIRMED_OPS, FIREWALL_OPS, firewall_action, firewall_view
 from app.mcp.client.instance import client_mcp
 from app.mcp.client.networks import NETWORK_SCOPE, network_action, networks_view
 from app.mcp.client.runtime import run_client_tool
@@ -80,6 +81,7 @@ _ACTION_SCOPE = {
     "fast_path_off": "write",
     "network": "write",
     "plugin": "write",
+    "firewall": "write",
 }
 
 
@@ -201,12 +203,13 @@ async def account(
 
 @client_mcp.tool()
 async def services(
-    view: Literal["list", "detail", "backups", "ssh_keys", "actions", "fast_path", "networks", "plugins"] = "list",
+    view: Literal["list", "detail", "backups", "ssh_keys", "actions", "fast_path", "networks", "plugins", "firewall"] = "list",
     service_id: Optional[int] = None,
     service_type: Optional[str] = None,
 ) -> Any:
     """Your services. list (service_type filters), detail, backups (a VM's backups and your backup slots, or a backup_slot service's retained backup and the VMs it can be restored onto), ssh_keys (VM), actions (server actions), plugins (plugin panels and tools).
     fast_path: private proxy addresses per location and proxy IP (service_id optional).
+    firewall (VM): state, rules, baseline, attachable groups, revision.
     networks (no service_id): your private networks with members, invitations and DHCP settings, networks shared with you with their open shares and effective DHCP settings, and invitations to answer. All others need service_id."""
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
@@ -232,6 +235,8 @@ async def services(
             return {**out, **await slot_portal.client_list_slots(auth, db)}
         if view == "ssh_keys":
             return await portal.client_get_vm_ssh_keys(service_id, auth, db)
+        if view == "firewall":
+            return await firewall_view(db, ctx, service_id)
         if view == "plugins":
             service = _owned_service(db, ctx, service_id)
             return {**plugin_ui.render(db, service, "client"), "tools": plugin_ui.client_tools(db, service)}
@@ -260,8 +265,10 @@ async def service_action(
         "fast_path_on",
         "fast_path_off",
         "plugin",
+        "firewall",
     ],
     service_id: Optional[int] = None,
+    op: Optional[str] = None,
     confirm: bool = False,
     console_type: Optional[Literal["kvm", "sol", "vnc", "serial"]] = None,
     backup_mode: Literal["snapshot", "suspend", "stop"] = "snapshot",
@@ -275,11 +282,12 @@ async def service_action(
     slot_service_id: Optional[int] = None,
     replace: bool = False,
 ) -> Any:
-    """Act on one of your services; confirm=true required except console.
+    """Act on one of your services; confirm=true required except console and firewall.
 
     write scope: power_on, power_off, reboot, reset, console (one-time browser link; console_type kvm/sol for servers, vnc/serial for VMs), backup_create (backup_mode, notes; suspend/stop interrupt the VM), set_ssh_keys (VM; replaces all keys, ssh_public_keys), backup_retain (service_id=VM, volid, slot_service_id; keeps that backup in your backup slot; replace=true swaps out what the slot holds).
     destructive scope: backup_delete and backup_restore (volid, storage; a volid held in a backup slot restores onto service_id, any of your VMs of the same type (cloud-init Linux or macOS), and replaces everything on it; on macOS, Apple account sign-ins may need redoing because they are tied to the VM's serial number), backup_release (service_id=backup_slot; deletes its retained backup), reinstall (VM; optional vm_template_id, ssh_public_keys), run_action (name, params).
     plugin (write): name = plugin_id.id from services view=plugins, params.
+    firewall (VM, write): op = enable, disable, policy, add_rule, delete_rule, replace_rules, preset, attach_group, detach_group; params: revision (default current; a change made meanwhile answers firewall_changed), confirm_interruption, policy_in, policy_out, rule, position, rule_id, rules, preset, group_id. disable and replace_rules need confirm=true. Errors: {code, field, message}.
     write scope, proxies: fast_path_on and fast_path_off turn the private proxy network on or off in the locations of this proxy's IPs (for all your servers there).
     network (service_id only for attach): name = attach, detach, invite, invitation_cancel, member_remove, leave, invitation_accept or invitation_decline; params = network_id plus attach: service_id (or here), ip_address; detach: attachment_id; invite: invitee (email or username); invitation_cancel: invitation_id; member_remove: member_user_id; invitation_accept and invitation_decline: invitation_id only. Write: attach, invite, invitation_cancel, invitation_accept, invitation_decline. Destructive: detach, member_remove, leave. Members attach and detach their own services; the rest is owner-only.
     network DHCP (owner only, params network_id plus): dhcp_get (read, no confirm); dhcp_set (write; any of enabled, range_start, range_end (both null removes the range), lease_seconds (null = default), gateway, dns_servers, domain, mtu, routes [{destination, gateway}], ntp_servers); dhcp_reservation_add (write; mac, ip, label); dhcp_reservation_update (write; reservation_id, mac, ip, label); dhcp_reservation_remove (destructive; reservation_id).
@@ -288,6 +296,12 @@ async def service_action(
         if name not in NETWORK_SCOPE:
             raise ToolError(f"network needs name, one of: {', '.join(NETWORK_SCOPE)}")
         min_scope = NETWORK_SCOPE[name]
+    elif action == "firewall":
+        if op not in FIREWALL_OPS:
+            raise ToolError(f"firewall needs op, one of: {', '.join(FIREWALL_OPS)}")
+        if service_id is None:
+            raise ToolError("firewall needs: service_id")
+        min_scope = _ACTION_SCOPE[action]
     else:
         if service_id is None:
             raise ToolError(f"{action} needs: service_id")
@@ -295,6 +309,8 @@ async def service_action(
     needs_confirm = action != "console" and not (action == "backup_create" and backup_mode == "snapshot")
     if action == "network" and min_scope == "read":
         needs_confirm = False
+    if action == "firewall":
+        needs_confirm = op in CONFIRMED_OPS
 
     async def work(db: Session, ctx: ClientMcpAuthContext):
         auth = _auth(ctx)
@@ -351,6 +367,8 @@ async def service_action(
             return _fast_path(await network_portal.client_fast_path(auth, db), service_id)
         if action == "plugin":
             return await _plugin_action(db, ctx, service_id, name, params, confirm)
+        if action == "firewall":
+            return await firewall_action(db, ctx, op, service_id=service_id, params=params)
         _need("run_action", name=name)
         body = portal.ClientStrategyActionBody(params=params or {})
         return await portal.client_run_strategy_action(service_id, name, body, auth, db)
@@ -367,6 +385,7 @@ async def service_action(
             "console_type": console_type,
             "volid": volid,
             "name": name,
+            "op": op,
             **({"network_id": params.get("network_id")} if action == "network" and params else {}),
         },
     )
