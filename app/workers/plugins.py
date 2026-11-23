@@ -12,14 +12,15 @@ import os
 import socket
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import delete, func, select
 
 from app.core.config import Settings, settings
+from app.models.commerce_account import SystemSetting
 from app.models.plugin_host import PluginLog
-from app.plugin_host import outbox, scheduler
+from app.plugin_host import invoke, outbox, scheduler
 from app.plugin_host.common import new_session, utcnow
 
 logger = logging.getLogger(__name__)
@@ -27,10 +28,31 @@ logger = logging.getLogger(__name__)
 PRUNE_EVERY = timedelta(hours=1)
 LOG_KEEP = timedelta(days=14)
 LOG_MAX_ROWS = 5000
+REPORT_KEEP = timedelta(days=1)
 
 
 def make_worker_id() -> str:
     return f"plugins-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def _prune_reports(db) -> int:
+    """Delete abandoned-handler reports (``app/plugin_host/invoke.py``) of processes gone for a day."""
+    cutoff = utcnow() - REPORT_KEEP
+    gone = 0
+    for row in db.execute(
+        select(SystemSetting).where(SystemSetting.key.startswith(invoke.REPORT_PREFIX, autoescape=True))
+    ).scalars():
+        seen = row.value.get("seen_at") if isinstance(row.value, dict) else None
+        try:
+            fresh = seen is not None and datetime.fromisoformat(str(seen).removesuffix("Z")).replace(
+                tzinfo=timezone.utc
+            ) >= cutoff
+        except ValueError:
+            fresh = False
+        if not fresh:
+            db.delete(row)
+            gone += 1
+    return gone
 
 
 def prune_once() -> dict[str, int]:
@@ -60,8 +82,9 @@ def prune_once() -> dict[str, int]:
                     .where(PluginLog.plugin_id == plugin_id, PluginLog.id <= cutoff)
                     .execution_options(synchronize_session=False)
                 ).rowcount or 0
+        reports = _prune_reports(db)
         db.commit()
-        return {"expired": expired, "deliveries": deliveries, "logs": logs}
+        return {"expired": expired, "deliveries": deliveries, "logs": logs, "reports": reports}
     except Exception:
         db.rollback()
         raise

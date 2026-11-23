@@ -81,16 +81,15 @@ def plugins(plugin_env, db_session, monkeypatch):
     healthy = install(db_session, HEALTHY)
     yield stuck, healthy
     gates.RELEASE.set()
-    wait_for(lambda: not getattr(invoke, "_running", {}), seconds=10)
+    settle()
 
 
-def wait_for(condition, seconds=5.0):
+def settle(seconds=10.0):
+    """Wait for the handler threads and the report heartbeat; they share the test's database connection."""
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if condition():
-            return True
-        time.sleep(0.02)
-    return condition()
+    for _ in range(2):
+        for thread in getattr(invoke, "_threads", list)():
+            thread.join(max(0.0, deadline - time.monotonic()))
 
 
 def abandon(inst, count):
@@ -249,11 +248,12 @@ def test_a_returning_abandoned_handler_frees_its_slot_and_closes_its_session(plu
     assert getattr(invoke, "_abandoned", {}).get(STUCK) == 1
     assert not sessions[-1].info.get("closed")
     gates.RELEASE.set()
-    assert wait_for(lambda: not getattr(invoke, "_running", {}).get(STUCK))
+    settle()
+    assert not getattr(invoke, "_running", {}).get(STUCK)
     assert sessions[-1].info.get("closed")
     assert STUCK not in getattr(invoke, "_abandoned", {})
+    assert any("returned" in line for line in log_lines(db_session, STUCK))
     assert run(invoke.invoke(stuck, "event", "service.created", (ENV,), timeout=2)).ok
-    assert wait_for(lambda: any("returned" in line for line in log_lines(db_session, STUCK)))
 
 
 # ------------------------------------------------------------------ the alert
@@ -276,7 +276,6 @@ def test_the_alert_fires_while_handlers_are_abandoned_and_clears_after(plugins, 
         return detector(db_session, params, catalogue.utcnow())
 
     abandon(stuck, 2)
-    assert wait_for(lambda: findings())
     [finding] = findings()
     assert finding.resource_type == "plugin" and finding.resource_id == STUCK
     assert finding.details["abandoned"] == 2
@@ -284,7 +283,8 @@ def test_the_alert_fires_while_handlers_are_abandoned_and_clears_after(plugins, 
     assert result.opened == 1
 
     gates.RELEASE.set()
-    assert wait_for(lambda: not getattr(invoke, "_running", {}).get(STUCK))
-    assert wait_for(lambda: findings() == [])
+    settle()
+    assert not getattr(invoke, "_running", {}).get(STUCK)
+    assert findings() == []
     result = run_cycle(db_session, only_types=[ALERT], flush=lambda *args: None)
     assert result.resolved == 1
