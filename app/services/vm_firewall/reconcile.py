@@ -231,10 +231,19 @@ def _count_rollout_outcome(db: Session, row: ServiceFirewall, result: Optional[A
     location = _location(db, row.service_id)
     if location is None:
         return
+    # Applies run concurrently, each session holding the location as it read it before its Proxmox
+    # calls, so the count is changed in SQL and read back rather than written from that copy.
+    table = FirewallLocationSettings
+    counted = func.coalesce(table.rollout_failures, 0) + 1
+    db.execute(
+        update(table)
+        .where(table.location_id == location.location_id)
+        .values(rollout_failures=0 if result.ok else counted)
+        .execution_options(synchronize_session=False)
+    )
+    db.refresh(location, ["rollout_failures", "rollout_paused_at"])
     if result.ok:
-        location.rollout_failures = 0
         return
-    location.rollout_failures = (location.rollout_failures or 0) + 1
     if location.rollout_failures >= ROLLOUT_PAUSE_AFTER and location.rollout_paused_at is None:
         location.rollout_paused_at = now
         location.rollout_pause_reason = (
@@ -284,11 +293,23 @@ def _hard_reasons(reasons: list[str]) -> list[str]:
     return [reason for reason in reasons if reason not in RENDERED_REASONS]
 
 
+_HELD_PREFIX = "not eligible: "
+
+
+def held_reasons(row: ServiceFirewall) -> list[str]:
+    """The reasons the worker found when it last held this VM as ineligible (``_hold_ineligible``),
+    which can come from its live config and so are not in the stored eligibility; empty otherwise."""
+    state = getattr(row.state, "value", row.state)
+    if state != FirewallState.UNMANAGED.value or not (row.last_error or "").startswith(_HELD_PREFIX):
+        return []
+    return [reason.strip() for reason in row.last_error[len(_HELD_PREFIX):].split(",") if reason.strip()]
+
+
 def _hold_ineligible(db: Session, row: ServiceFirewall, reasons: list[str], now: datetime) -> None:
     """An ineligible VM (infrastructure, no VM record, ...) is never written; the queue looks at it
     again after one reconcile interval, the sweep each interval."""
     row.state = FirewallState.UNMANAGED
-    row.last_error = ("not eligible: " + ", ".join(reasons))[:2000]
+    row.last_error = (_HELD_PREFIX + ", ".join(reasons))[:2000]
     row.last_checked_at = now
     row.next_attempt_at = now + timedelta(seconds=reconcile_interval(db))
     db.flush()
