@@ -7,6 +7,7 @@ and configuration is a declarative Proxmox ``config`` PUT.
 from __future__ import annotations
 
 import re
+import uuid
 
 from app.plugins.base import PowerState
 from app.services.deployment.step import DeploymentError, DeploymentStep, StepOutcome
@@ -162,10 +163,11 @@ class ApplyFirewallStep(DeploymentStep):
 
         _cid, _node, target_vmid = ctx.require_placement()
         client = VmFirewallClient(PluginTransport(ctx.get_plugin()), int(target_vmid))
+        # The job lease is not renewed while a step runs, so another worker can reclaim the job and
+        # run this step again while this run still writes; each run claims the VM as its own owner.
+        owner = f"deployment-job-{ctx.job.id}-{uuid.uuid4().hex[:12]}"
         try:
-            result = await apply_for_provision(
-                ctx.db, ctx.service.id, client, owner=f"deployment-job-{ctx.job.id}"
-            )
+            result = await apply_for_provision(ctx.db, ctx.service.id, client, owner=owner)
         except ProvisionFirewallError as exc:
             raise DeploymentError(str(exc)) from exc
         if result is None:

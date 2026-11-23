@@ -4,7 +4,9 @@
 so the next write carries a fresh digest and a concurrent edit is noticed at once. On a digest
 conflict (or any state other than the one simulated) it re-reads and re-plans, at most
 ``MAX_REPLANS`` times. It records the outcome on the ``ServiceFirewall`` row and leaves the commit
-to the caller. ``check`` and ``readiness`` only read.
+to the caller. Given the applier's ``claim``, it renews the claim before every write and records
+the outcome only while the claim is still the applier's (``CLAIM_LOST`` otherwise). ``check`` and
+``readiness`` only read.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 from sqlalchemy.orm import Session
 
@@ -48,13 +50,16 @@ from app.services.vm_firewall.proxmox_fw import (
     net_firewall_flag,
 )
 from app.services.vm_firewall.render import RenderedFirewall, render
-from app.services.vm_firewall.service import observe_net0_bridge
+from app.services.vm_firewall.service import loaded_revision, observe_net0_bridge
 
 logger = logging.getLogger(__name__)
 
 MAX_REPLANS = 3
 BACKOFF_MIN_SECONDS = 30
 BACKOFF_MAX_SECONDS = 600
+# ``ApplyResult.state`` of an apply stopped because another applier took the claim; never stored
+# on the row.
+CLAIM_LOST = "claim_lost"
 
 
 class ConcurrentChange(DigestConflict):
@@ -62,6 +67,25 @@ class ConcurrentChange(DigestConflict):
 
     def __init__(self, message: str):
         super().__init__(409, message, method="GET", path="")
+
+
+class ClaimLost(Exception):
+    """The applier's claim on the row was taken by another applier; nothing more may be written."""
+
+
+class ApplyClaim(Protocol):
+    """The applier's claim on the row (``reconcile.Claim``)."""
+
+    def renew(self) -> bool:
+        """Extend the claim from now; false when it is no longer this applier's. Commits on its own."""
+
+    def confirm(self, db: Session) -> bool:
+        """Whether the claim is still this applier's, locked in ``db`` until it commits."""
+
+
+def _renew(claim: Optional[ApplyClaim]) -> None:
+    if claim is not None and not claim.renew():
+        raise ClaimLost("the claim on this VM was taken by another applier")
 
 
 @dataclass
@@ -163,10 +187,13 @@ async def _refresh(client: VmFirewallClient, op: Op, expected: CurrentFirewall) 
     return state
 
 
-async def execute(client: VmFirewallClient, ops: list[Op], current: CurrentFirewall) -> CurrentFirewall:
+async def execute(
+    client: VmFirewallClient, ops: list[Op], current: CurrentFirewall, *, claim: Optional[ApplyClaim] = None
+) -> CurrentFirewall:
     state = current
     for op in ops:
         expected = simulate(state, op)
+        _renew(claim)
         await _send(client, op, state.digests)
         state = await _refresh(client, op, expected)
     return state
@@ -180,9 +207,16 @@ class _Converged:
     replans: int
 
 
-async def converge(client: VmFirewallClient, desired: RenderedFirewall, *, max_replans: int = MAX_REPLANS) -> _Converged:
+async def converge(
+    client: VmFirewallClient,
+    desired: RenderedFirewall,
+    *,
+    max_replans: int = MAX_REPLANS,
+    claim: Optional[ApplyClaim] = None,
+) -> _Converged:
     """Make Proxmox hold ``desired``; when enabling a VM whose ``net0`` has no firewall flag, write
-    everything with ``enable: 0`` first, flip the flag, then enable (section 5.2)."""
+    everything with ``enable: 0`` first, flip the flag, then enable (section 5.2). Raises
+    ``ClaimLost`` before a write when ``claim`` can no longer be renewed."""
     want_enable = int(desired.options["enable"]) == 1
     replans = 0
     total_ops = 0
@@ -193,13 +227,14 @@ async def converge(client: VmFirewallClient, desired: RenderedFirewall, *, max_r
             flag_on = net_firewall_flag(config.get("net0"))
             if want_enable and not flag_on:
                 ops = plan(current, desired.with_options(enable=0))
-                current = await execute(client, ops, current)
+                current = await execute(client, ops, current, claim=claim)
                 total_ops += len(ops)
+                _renew(claim)
                 await client.set_net0_firewall_flag(True)
                 total_ops += 1
                 flag_on = True
             ops = plan(current, desired)
-            current = await execute(client, ops, current)
+            current = await execute(client, ops, current, claim=claim)
             total_ops += len(ops)
             final = await client.read()
             if not matches(final, desired):
@@ -225,6 +260,19 @@ def _backoff(row: ServiceFirewall, now: datetime) -> datetime:
     return now + timedelta(seconds=delay)
 
 
+def claim_lost(
+    db: Session, row: ServiceFirewall, *, revision: int, desired: Optional[RenderedFirewall] = None
+) -> ApplyResult:
+    """The outcome of an applier that no longer holds the row's claim: the row's unflushed changes
+    are discarded and nothing is recorded."""
+    logger.info("[vm_firewall] claim on service %s lost during apply; left for the next tick", row.service_id)
+    service_id = row.service_id
+    db.expire(row)
+    return ApplyResult(service_id, ok=False, state=CLAIM_LOST, revision=revision,
+                       desired_hash=desired.desired_hash if desired is not None else None,
+                       error="the firewall is being applied by another applier")
+
+
 def record_failure(
     db: Session,
     row: ServiceFirewall,
@@ -233,10 +281,14 @@ def record_failure(
     now: datetime,
     revision: Optional[int] = None,
     desired: Optional[RenderedFirewall] = None,
+    claim: Optional[ApplyClaim] = None,
 ) -> ApplyResult:
     """Record a failed apply or read on the row: ``vm_missing`` for a VM Proxmox does not have,
-    else ``error`` with the backoff of section 6.2. Flushes; the caller commits."""
+    else ``error`` with the backoff of section 6.2. With ``claim``, records only while the claim is
+    still the applier's (``CLAIM_LOST`` otherwise). Flushes; the caller commits."""
     revision = row.revision if revision is None else revision
+    if claim is not None and not claim.confirm(db):
+        return claim_lost(db, row, revision=revision, desired=desired)
     if isinstance(exc, VmMissing):
         row.state = FirewallState.VM_MISSING
         row.last_error = str(exc)[:2000]
@@ -267,21 +319,27 @@ async def apply(
     *,
     now: Optional[datetime] = None,
     vm_config: Optional[dict[str, Any]] = None,
+    claim: Optional[ApplyClaim] = None,
 ) -> ApplyResult:
     """``vm_config`` is the VM config the caller has just read through ``client`` (the worker reads
-    it for the eligibility check); without it apply reads it itself."""
+    it for the eligibility check); without it apply reads it itself. With ``claim``, a lost claim
+    stops the apply before its next write and records nothing: the row's unflushed changes are
+    discarded and the result has state ``CLAIM_LOST``."""
     row = db.get(ServiceFirewall, service_id)
     if row is None:
         raise FirewallNotFound(f"service {service_id} has no firewall", code="firewall_not_found")
     now = now or _now()
-    row.last_checked_at = now
     if not row.managed or row.excluded:
+        if claim is not None and not claim.confirm(db):
+            return claim_lost(db, row, revision=row.revision)
+        row.last_checked_at = now
         row.state = FirewallState.UNMANAGED
         db.flush()
         return ApplyResult(service_id, ok=True, state=FirewallState.UNMANAGED.value, revision=row.revision)
+    row.last_checked_at = now
 
     def failed(exc: Exception, revision: int, desired: Optional[RenderedFirewall]) -> ApplyResult:
-        return record_failure(db, row, exc, now=now, revision=revision, desired=desired)
+        return record_failure(db, row, exc, now=now, revision=revision, desired=desired, claim=claim)
 
     # Render depends on net0's bridge (IPv6 router-advert rule), so observe it first; a change
     # bumps the revision and this apply renders the new one.
@@ -293,14 +351,25 @@ async def apply(
     observe_net0_bridge(row, vm_config)
 
     revision = row.revision
+    loaded = loaded_revision(row)
     desired = render(db, service_id, now=now)
     row.desired_hash = desired.desired_hash
     try:
-        result = await converge(client, desired)
+        result = await converge(client, desired, claim=claim)
+    except ClaimLost:
+        return claim_lost(db, row, revision=revision, desired=desired)
     except Exception as exc:  # Proxmox errors, transport failures, crashes mid-apply
         return failed(exc, revision, desired)
-
-    if int(desired.options["enable"]) != 1:
+    if claim is not None and not claim.confirm(db):
+        return claim_lost(db, row, revision=revision, desired=desired)
+    # ``confirm`` settled the revision on the locked database value. If a save committed during the
+    # apply it is newer than the rendered one: record the revision loaded, whose rules were applied,
+    # never a later one, and leave the row pending for the queue.
+    current = row.revision == revision
+    if not current:
+        revision = loaded
+        state = FirewallState.PENDING
+    elif int(desired.options["enable"]) != 1:
         state = FirewallState.OFF
     elif result.nic_flag == FirewallNicFlag.PENDING_REBOOT:
         state = FirewallState.PENDING_REBOOT

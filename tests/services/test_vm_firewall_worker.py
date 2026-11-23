@@ -10,13 +10,13 @@ import pytest
 from app.models.alerting import ClientNotificationPref
 from app.models.commerce_audit import UserAuditEvent
 from app.models.service import ServiceStatus
-from app.models.vm_firewall import FirewallLocationSettings
+from app.models.vm_firewall import FirewallLocationSettings, FirewallState, ServiceFirewall
 from app.services import settings_store
 from app.services.alerting import detectors, lease
 from app.services.alerting.catalogue import effective_settings
 from app.services.vm_firewall import reconcile
 from app.services.vm_firewall import service as fw
-from app.services.vm_firewall.render import IPFILTER_SET
+from app.services.vm_firewall.render import IPFILTER_SET, render
 from tests.fakes.proxmox_firewall import FakeProxmoxFirewall
 from tests.fakes.vm_firewall_world import make_world
 
@@ -161,13 +161,369 @@ async def test_sweep_claim_after_a_long_queue_runs_from_when_it_is_taken(world, 
     assert probe.seen and all(claimed is False for claimed, _listed in probe.seen)
 
 
+def _other_session(world):
+    """A session of another process (deployment step, second worker, client request)."""
+    from sqlalchemy.orm import Session
+
+    return Session(bind=world.db.get_bind(), autoflush=False)
+
+
+def _on_every_write(fake, callback):
+    def hook(f):
+        callback(f)
+        f.on_next_write(hook)
+
+    fake.on_next_write(hook)
+
+
+@pytest.mark.asyncio
+async def test_claim_is_kept_while_a_long_apply_writes(world, fake, access, monkeypatch):
+    """Every Proxmox write takes 50 s of the controlled clock, so the apply runs well past
+    ``CLAIM_SECONDS``; the deployment step must not be able to claim the VM at any write."""
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    wall = {"now": datetime(2000, 1, 1, tzinfo=timezone.utc)}
+    start = wall["now"]
+    monkeypatch.setattr(reconcile, "utcnow", lambda: wall["now"])
+    refused = []
+
+    def slow_write(_fake):
+        wall["now"] += timedelta(seconds=50)
+        with _other_session(world) as other:
+            at = T0 + (wall["now"] - start)
+            refused.append(not reconcile.claim(other, vm.id, owner="deployment", now=at))
+
+    _on_every_write(fake, slow_write)
+    result = await _queue(world, access)
+    assert result.applied == [vm.id]
+    assert len(refused) * 50 > reconcile.CLAIM_SECONDS + 50
+    assert all(refused), refused
+    assert row.applied_revision == row.revision
+
+
+@pytest.mark.asyncio
+async def test_apply_whose_claim_is_taken_writes_nothing_more_and_records_nothing(world, fake, access):
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    state = row.state.value
+
+    def taken(_fake):
+        # The worker's claim has expired and the deployment step takes the VM.
+        with _other_session(world) as other:
+            assert reconcile.claim(other, vm.id, owner="deployment", now=T0 + timedelta(hours=1))
+
+    fake.on_next_write(taken)
+    result = await _queue(world, access)
+    assert len(fake.writes) == 1
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.applied_revision is None and row.applied_hash is None and row.applied_digest is None
+    assert row.last_applied_at is None
+    assert row.state.value == state and row.last_error is None and row.failing_since is None
+    assert row.claimed_by == "deployment"
+    assert result.attempted == [vm.id] and result.applied == [] and result.failed == []
+
+
+@pytest.mark.asyncio
+async def test_apply_failing_after_its_claim_is_taken_records_nothing(world, fake, access):
+    """A Proxmox write that fails after the claim expired and another applier took the VM and
+    recorded its outcome: the failure must not be written over that outcome, nor counted towards
+    a staged-rollout pause."""
+    from app.services.vm_firewall.proxmox_fw import classify
+
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    row.rollout_released_at = T0
+    world.db.commit()
+    revision = row.revision
+
+    def taken_then_failed(_fake):
+        with _other_session(world) as other:
+            assert reconcile.claim(other, vm.id, owner="deployment", now=T0 + timedelta(hours=1))
+            theirs = other.get(ServiceFirewall, vm.id)
+            theirs.state = FirewallState.APPLIED
+            theirs.applied_revision = revision
+            theirs.applied_hash = "theirs"
+            theirs.last_applied_at = T0 + timedelta(hours=1)
+            other.commit()
+        raise classify(500, "Proxmox write timed out", method="PUT", path="/firewall/options")
+
+    fake.on_next_write(taken_then_failed)
+    result = await _queue(world, access)
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.state.value == "applied" and row.applied_hash == "theirs" and row.applied_revision == revision
+    assert row.last_error is None and row.failing_since is None and row.next_attempt_at is None
+    assert row.rollout_released_at is not None
+    location = world.db.get(FirewallLocationSettings, world.location.id)
+    assert (location.rollout_failures or 0) == 0
+    assert row.claimed_by == "deployment"
+    assert result.attempted == [vm.id] and result.applied == [] and result.failed == []
+
+
+@pytest.mark.asyncio
+async def test_drift_sweep_counts_a_repair_that_lost_its_claim(world, fake, access):
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    await _queue(world, access)
+    fake_vm.add_foreign_rule({"type": "in", "action": "ACCEPT", "proto": "tcp", "dport": "3389", "enable": 1})
+    later = T0 + timedelta(seconds=reconcile.reconcile_interval(world.db) + 1)
+
+    def taken(_fake):
+        with _other_session(world) as other:
+            assert reconcile.claim(other, vm.id, owner="deployment", now=later + timedelta(hours=1))
+
+    fake.on_next_write(taken)
+    result = await reconcile.drift_sweep(world.db, access, owner=OWNER, now=later)
+    assert result.checked == [vm.id]
+    assert result.claim_lost == [vm.id]
+    assert result.repaired == [] and result.in_sync == [] and result.reported == [] and result.queued == []
+    assert world.db.query(UserAuditEvent).filter_by(action="firewall.drift_repaired").count() == 0
+
+
+class _SlowBetweenOps(FakeProxmoxFirewall):
+    """Runs ``pause`` once, at the first read after a write made since it was set: the applier is
+    slow between two operations."""
+
+    def __init__(self):
+        super().__init__()
+        self.pause = None
+        self.after = 0
+
+    def pause_after_next_write(self, pause):
+        self.pause, self.after = pause, len(self.writes)
+
+    async def request(self, method, path, params=None):
+        if method == "GET" and self.pause is not None and len(self.writes) > self.after:
+            pause, self.pause = self.pause, None
+            await pause()
+        return await super().request(method, path, params)
+
+
+@pytest.mark.asyncio
+async def test_stale_apply_never_overwrites_a_newer_revision(world, monkeypatch):
+    """Applier A renders r1; the client saves r2; A, slow, loses its claim; applier B (another
+    worker replica) applies r2. A must not write r1 back, and the row must say r2 is applied."""
+    fake = _SlowBetweenOps()
+    access = FakeAccess(fake)
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    fw.add_rule(world.db, vm.id, world.actor("alice"),
+                {"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": "80"}, revision=row.revision)
+    world.db.commit()
+    r1 = row.revision
+    wall = {"now": datetime(2000, 1, 1, tzinfo=timezone.utc)}
+    start = wall["now"]
+    monkeypatch.setattr(reconcile, "utcnow", lambda: wall["now"])
+    tick = T0 + timedelta(seconds=5)
+    b_results = []
+
+    async def meanwhile():
+        with _other_session(world) as client_db:
+            current = client_db.get(ServiceFirewall, vm.id).revision
+            fw.replace_rules(client_db, vm.id, world.actor("alice"),
+                             [{"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": "8443"}],
+                             revision=current)
+            client_db.commit()
+        wall["now"] += timedelta(seconds=reconcile.CLAIM_SECONDS + 60)
+        with _other_session(world) as b_db:
+            b_results.append(await reconcile.process_queue(b_db, access, owner="worker-b",
+                                                           now=tick + (wall["now"] - start)))
+
+    fake.pause_after_next_write(meanwhile)
+    a = await _queue(world, access, now=tick)
+    assert b_results and b_results[0].applied == [vm.id]
+    ports = {rule.get("dport") for rule in fake_vm.rules}
+    assert "8443" in ports and "80" not in ports and "22" not in ports
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.revision > r1
+    assert row.applied_revision == row.revision
+    assert row.applied_hash == render(world.db, vm.id).desired_hash
+    assert row.claimed_by is None
+    assert a.attempted == [vm.id] and a.applied == []
+
+
+class _PauseOnRead(FakeProxmoxFirewall):
+    """Runs ``pause`` once, at the next read of a VM config: the applier is slow reading Proxmox."""
+
+    def __init__(self):
+        super().__init__()
+        self.pause = None
+
+    async def request(self, method, path, params=None):
+        if method == "GET" and path.endswith("/config") and self.pause is not None:
+            pause, self.pause = self.pause, None
+            await pause()
+        return await super().request(method, path, params)
+
+
+def _client_saves(world, vm_id, port):
+    """A client save committed from another session (saves take the row lock, never the claim)."""
+    with _other_session(world) as other:
+        current = other.get(ServiceFirewall, vm_id).revision
+        fw.add_rule(other, vm_id, world.actor("alice"),
+                    {"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": port}, revision=current)
+        other.commit()
+        return current + 1
+
+
+MOVED_NET0 = "virtio=BC:24:11:00:00:01,bridge=vmbr7"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["report", "repair"])
+async def test_bridge_bump_during_an_apply_does_not_swallow_a_concurrent_save(world, fake, access, mode):
+    """The apply observes a moved bridge and bumps the revision it loaded; meanwhile the client
+    saves, raising the same revision in the database. The apply must neither reuse the save's
+    number nor record it as applied, and the queue alone (no drift sweep) must apply the save."""
+    settings_store.set_setting(world.db, "vm_firewall_drift_mode", mode)
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    fw.add_rule(world.db, vm.id, world.actor("alice"),
+                {"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": "80"}, revision=row.revision)
+    world.db.commit()
+    rendered = row.revision
+    fake_vm.config["net0"] = MOVED_NET0
+    saved = []
+    fake.on_next_write(lambda _fake: saved.append(_client_saves(world, vm.id, "8443")))
+
+    assert (await _queue(world, access)).applied == [vm.id]
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    ports = {rule.get("dport") for rule in fake_vm.rules}
+    assert "80" in ports and "8443" not in ports
+    assert row.revision == saved[0] + 1 and row.net0_bridge == "vmbr7"
+    assert row.applied_revision == rendered and row.state.value == "pending"
+
+    again = await _queue(world, access, now=T0 + timedelta(seconds=5))
+    assert again.applied == [vm.id]
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert "8443" in {rule.get("dport") for rule in fake_vm.rules}
+    assert row.applied_revision == row.revision and row.applied_hash == render(world.db, vm.id).desired_hash
+    assert row.state.value == "applied"
+    later = T0 + timedelta(seconds=reconcile.reconcile_interval(world.db) + 10)
+    sweep = await reconcile.drift_sweep(world.db, access, owner=OWNER, now=later)
+    assert sweep.in_sync == [vm.id] and sweep.reported == [] and sweep.repaired == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_that_lost_its_claim_never_moves_the_revision_backwards(world):
+    """Sweep S loads revision r and reads a moved bridge; while it reads, the client saves (r+1)
+    and another worker, S's claim having expired, applies with the bridge (r+2). S must not then
+    write its bridge bump (r+1) over it."""
+    fake = _PauseOnRead()
+    access = FakeAccess(fake)
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    fake_vm.config["net0"] = MOVED_NET0
+    later = T0 + timedelta(seconds=reconcile.reconcile_interval(world.db) + 1)
+    other_worker = []
+
+    async def meanwhile():
+        _client_saves(world, vm.id, "8443")
+        with _other_session(world) as b_db:
+            other_worker.append(await reconcile.process_queue(b_db, access, owner="worker-b",
+                                                              now=later + timedelta(hours=1)))
+
+    fake.pause = meanwhile
+    sweep = await reconcile.drift_sweep(world.db, access, owner=OWNER, now=later)
+    assert other_worker[0].applied == [vm.id]
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.revision >= row.applied_revision
+    assert row.revision == row.applied_revision and row.net0_bridge == "vmbr7"
+    assert "8443" in {rule.get("dport") for rule in fake_vm.rules}
+    assert sweep.claim_lost == [vm.id] and sweep.queued == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_bridge_bump_is_settled_on_a_save_made_during_its_read(world):
+    fake = _PauseOnRead()
+    access = FakeAccess(fake)
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    fake_vm.config["net0"] = MOVED_NET0
+    later = T0 + timedelta(seconds=reconcile.reconcile_interval(world.db) + 1)
+    saved = []
+    fake.pause = lambda: asyncio.sleep(0, saved.append(_client_saves(world, vm.id, "8443")))
+    sweep = await reconcile.drift_sweep(world.db, access, owner=OWNER, now=later)
+    assert sweep.queued == [vm.id]
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.revision == saved[0] + 1 and row.net0_bridge == "vmbr7"
+    assert (await _queue(world, access, now=later + timedelta(seconds=5))).applied == [vm.id]
+    world.db.expire_all()
+    assert world.db.get(ServiceFirewall, vm.id).applied_revision == saved[0] + 1
+    assert "8443" in {rule.get("dport") for rule in fake_vm.rules}
+
+
+def _taken_while_reading(world, vm_id, owner="deployment"):
+    async def take():
+        with _other_session(world) as other:
+            assert reconcile.claim(other, vm_id, owner=owner, now=T0 + timedelta(hours=1))
+
+    return take
+
+
+@pytest.mark.asyncio
+async def test_queue_holds_an_ineligible_vm_only_while_it_has_the_claim(world):
+    fake = _PauseOnRead()
+    access = FakeAccess(fake)
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    assert (await _queue(world, access)).applied == [vm.id]
+    fw.add_rule(world.db, vm.id, world.actor("alice"),
+                {"direction": "in", "action": "ACCEPT", "protocol": "tcp", "ports": "80"}, revision=row.revision)
+    row.rollout_released_at = T0
+    world.db.commit()
+    before = (row.revision, row.state.value, row.net0_bridge)
+    settings_store.set_setting(world.db, "vm_firewall_infrastructure_bridges", "vmbr230")
+    fake_vm.config["net0"] = "virtio=BC:24:11:00:00:01,bridge=vmbr230"
+    fake.pause = _taken_while_reading(world, vm.id)
+    result = await _queue(world, access, now=T0 + timedelta(seconds=5))
+    assert result.attempted == [vm.id] and result.applied == [] and result.failed == []
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert (row.revision, row.state.value, row.net0_bridge) == before
+    assert row.last_error is None and row.rollout_released_at is not None
+    assert row.claimed_by == "deployment"
+
+
+def _new_vm_for_provision(world, fake, net0="virtio=BC:24:11:00:00:01,bridge=vmbr0"):
+    world.enable_location(nic_flag_on_provision=True)
+    vm = world.vm()
+    fake.add_vm(vm.vm.proxmox_vmid, net0=net0)
+    fw.init_for_new_vm(world.db, vm.id, fw.Actor.system())
+    world.db.commit()
+    row = world.db.get(ServiceFirewall, vm.id)
+    return vm, (row.revision, row.state.value, row.net0_bridge)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ineligible", [True, False], ids=["ineligible_hold", "nic_flag_renewal"])
+async def test_deployment_step_records_nothing_after_its_claim_is_taken(world, ineligible):
+    """While the step reads the VM config another applier takes its claim; the step must then
+    neither hold the VM as ineligible nor commit the bridge it observed, and is retried."""
+    fake = _PauseOnRead()
+    if ineligible:
+        settings_store.set_setting(world.db, "vm_firewall_infrastructure_bridges", "vmbr230")
+    vm, before = _new_vm_for_provision(
+        world, fake, net0="virtio=BC:24:11:00:00:01,bridge=" + ("vmbr230" if ineligible else "vmbr0"))
+    fake.pause = _taken_while_reading(world, vm.id, owner="worker-b")
+    with pytest.raises(reconcile.ProvisionFirewallError, match="being applied"):
+        await reconcile.apply_for_provision(world.db, vm.id, fake.client(vm.vm.proxmox_vmid),
+                                            owner="deployment-job-1-a", now=T0)
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert (row.revision, row.state.value, row.net0_bridge) == before
+    assert row.last_error is None and row.claimed_by == "worker-b"
+    assert fake.writes == []
+
+
 @pytest.mark.asyncio
 async def test_cluster_concurrency_limits_parallel_applies(world, fake, access, monkeypatch):
     settings_store.set_setting(world.db, "vm_firewall_cluster_concurrency", 2)
     vms = [_enabled_vm(world, fake)[0] for _ in range(5)]
     active = {"now": 0, "max": 0}
 
-    async def slow_apply(db, service_id, access, *, now=None):
+    async def slow_apply(db, service_id, access, *, now=None, held=None):
         active["now"] += 1
         active["max"] = max(active["max"], active["now"])
         await asyncio.sleep(0.01)

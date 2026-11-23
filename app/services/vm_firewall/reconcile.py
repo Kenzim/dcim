@@ -30,7 +30,15 @@ from app.models.service import Service, ServiceStatus
 from app.models.service_vm import ServiceVm
 from app.models.vm_firewall import FirewallLocationSettings, FirewallState, ServiceFirewall
 from app.services.vm_firewall import service as fw
-from app.services.vm_firewall.apply import ApplyResult, apply, check, readiness, record_failure
+from app.services.vm_firewall.apply import (
+    CLAIM_LOST,
+    ApplyResult,
+    apply,
+    check,
+    claim_lost,
+    readiness,
+    record_failure,
+)
 from app.services.vm_firewall.proxmox_fw import (
     ClusterReader,
     PluginTransport,
@@ -214,6 +222,66 @@ def claim_clock(now: datetime) -> Callable[[], datetime]:
     return lambda: now + (utcnow() - started)
 
 
+def renew(db: Session, service_id: int, *, owner: str, now: datetime) -> bool:
+    """Extend ``owner``'s claim to ``CLAIM_SECONDS`` from ``now`` (conditional update); false when
+    the row is no longer claimed by ``owner``. Commits."""
+    result = db.execute(
+        update(ServiceFirewall)
+        .where(ServiceFirewall.service_id == service_id, ServiceFirewall.claimed_by == owner)
+        .values(claimed_until=now + timedelta(seconds=CLAIM_SECONDS))
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
+@dataclass
+class Claim:
+    """An applier's claim on one row, kept alive while ``apply`` writes to Proxmox.
+
+    ``renew`` runs in a short session of its own on ``bind``, so it commits at once without
+    committing the apply's session, whose row changes stay unflushed until the apply records its
+    outcome. ``confirm`` runs in the apply's session and locks the row until that session commits;
+    every write of the outcome comes after it."""
+
+    bind: Any
+    service_id: int
+    owner: str
+    clock: Callable[[], datetime]
+
+    @classmethod
+    def of(cls, db: Session, service_id: int, *, owner: str, clock: Callable[[], datetime]) -> "Claim":
+        return cls(db.get_bind(), service_id, owner, clock)
+
+    def renew(self) -> bool:
+        with Session(bind=self.bind, autoflush=False) as session:
+            return renew(session, self.service_id, owner=self.owner, now=self.clock())
+
+    def confirm(self, db: Session) -> bool:
+        """Whether the claim is still this applier's, locking the row until ``db`` commits. If it
+        is, a revision bump made in ``db`` is settled on the locked value (``settle_revision``)."""
+        locked = db.execute(
+            select(ServiceFirewall.claimed_by, ServiceFirewall.revision)
+            .where(ServiceFirewall.service_id == self.service_id)
+            .with_for_update()
+        ).one_or_none()
+        if locked is None or locked.claimed_by != self.owner:
+            return False
+        row = db.get(ServiceFirewall, self.service_id)
+        if row is not None:
+            fw.settle_revision(row, locked.revision)
+        return True
+
+
+def _still_held(db: Session, row: ServiceFirewall, held: Optional[Claim]) -> bool:
+    """``held.confirm`` before writing to the row after a Proxmox call; when the claim is lost the
+    row's unflushed changes are discarded and nothing may be written."""
+    if held is None or held.confirm(db):
+        return True
+    claim_lost(db, row, revision=row.revision)
+    return False
+
+
 def unclaim(db: Session, service_id: int, *, owner: str) -> None:
     db.execute(
         update(ServiceFirewall)
@@ -337,9 +405,17 @@ async def _client_and_config(db: Session, service: Service, access: ProxmoxAcces
     return client, await client.get_config()
 
 
-async def apply_one(db: Session, service_id: int, access: ProxmoxAccess, *, now: Optional[datetime] = None) -> Optional[ApplyResult]:
-    """Check eligibility with the VM config just read, then apply. Returns None when nothing was
-    attempted. Commits."""
+async def apply_one(
+    db: Session,
+    service_id: int,
+    access: ProxmoxAccess,
+    *,
+    now: Optional[datetime] = None,
+    held: Optional[Claim] = None,
+) -> Optional[ApplyResult]:
+    """Check eligibility with the VM config just read, then apply under the ``held`` claim.
+    Returns None when nothing was attempted or the claim was lost (the row is left for the next
+    tick). Commits."""
     now = now or utcnow()
     row = db.get(ServiceFirewall, service_id)
     service = db.get(Service, service_id)
@@ -358,15 +434,21 @@ async def apply_one(db: Session, service_id: int, access: ProxmoxAccess, *, now:
         try:
             client, config = await _client_and_config(db, service, access)
         except Exception as exc:  # Proxmox errors, placement errors, transport failures
-            result = record_failure(db, row, exc, now=now)
+            result = record_failure(db, row, exc, now=now, claim=held)
+            if result.state == CLAIM_LOST:
+                return None
             _after_apply(db, row, result, now)
             return result
         hard = _hard_reasons(fw.eligibility(db, service_id, vm_config=config).reasons)
         if hard:
+            if not _still_held(db, row, held):
+                return None
             _hold_ineligible(db, row, hard, now)
             _count_rollout_outcome(db, row, None, now)
             return None
-        result = await apply(db, service_id, client, now=now, vm_config=config)
+        result = await apply(db, service_id, client, now=now, vm_config=config, claim=held)
+        if result.state == CLAIM_LOST:
+            return None
         _after_apply(db, row, result, now)
         return result
     finally:
@@ -400,6 +482,7 @@ async def apply_for_provision(
     db.commit()
     if not claim(db, service_id, owner=owner, now=now):
         raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
+    held = Claim.of(db, service_id, owner=owner, clock=claim_clock(now))
     try:
         row = db.get(ServiceFirewall, service_id)
         if not row.managed or row.excluded:
@@ -408,17 +491,28 @@ async def apply_for_provision(
             config = await client.get_config()
             hard = _hard_reasons(fw.eligibility(db, service_id, vm_config=config).reasons)
             if hard:
+                if not _still_held(db, row, held):
+                    raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
                 _hold_ineligible(db, row, hard, now)
                 return None
             location = _location(db, service_id)
             if location is not None and location.enabled and location.nic_flag_on_provision:
                 if not net_firewall_flag(config.get("net0")):
+                    if not held.renew():
+                        claim_lost(db, row, revision=row.revision)
+                        raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
                     await client.set_net0_firewall_flag(True)
                     config = await client.get_config()
+        except ProvisionFirewallError:
+            raise
         except Exception as exc:  # Proxmox errors, transport failures
-            failure = record_failure(db, row, exc, now=now)
+            failure = record_failure(db, row, exc, now=now, claim=held)
+            if failure.state == CLAIM_LOST:
+                raise ProvisionFirewallError("firewall is being applied by the worker; retrying") from exc
             raise ProvisionFirewallError(f"firewall apply failed: {failure.error or failure.state}") from exc
-        result = await apply(db, service_id, client, now=now, vm_config=config)
+        result = await apply(db, service_id, client, now=now, vm_config=config, claim=held)
+        if result.state == CLAIM_LOST:
+            raise ProvisionFirewallError("firewall is being applied by the worker; retrying")
         _after_apply(db, row, result, now)
         if not result.ok:
             raise ProvisionFirewallError(f"firewall apply failed: {result.error or result.state}")
@@ -522,7 +616,8 @@ async def process_queue(
                     return
                 try:
                     out.attempted.append(service_id)
-                    result = await apply_one(session, service_id, access, now=now)
+                    held = Claim.of(session, service_id, owner=owner, clock=clock)
+                    result = await apply_one(session, service_id, access, now=now, held=held)
                     if result is not None:
                         (out.applied if result.ok else out.failed).append(service_id)
                 except Exception:  # one VM must not stop the queue
@@ -546,6 +641,8 @@ class SweepResult:
     repaired: list[int] = field(default_factory=list)
     reported: list[int] = field(default_factory=list)
     queued: list[int] = field(default_factory=list)
+    # Checked, but another applier took the VM before anything was recorded.
+    claim_lost: list[int] = field(default_factory=list)
     completed: bool = False
 
 
@@ -584,79 +681,107 @@ def _drift_repairs_24h(db: Session, service_id: int, now: datetime) -> int:
     )
 
 
-async def sweep_one(db: Session, service_id: int, access: ProxmoxAccess, *, now: Optional[datetime] = None) -> str:
-    """Check one VM. Returns what happened: ``in_sync``, ``repaired``, ``reported``, ``queued``
-    (a change the apply queue picks up, such as a moved bridge), ``unmanaged``, ``vm_missing`` or
-    ``error``. Commits."""
+async def sweep_one(
+    db: Session,
+    service_id: int,
+    access: ProxmoxAccess,
+    *,
+    now: Optional[datetime] = None,
+    held: Optional[Claim] = None,
+) -> str:
+    """Check one VM; a repair runs under the ``held`` claim. Returns what happened: ``in_sync``,
+    ``repaired``, ``reported``, ``queued`` (a change the apply queue picks up, such as a moved
+    bridge), ``unmanaged``, ``vm_missing``, ``error`` or ``claim_lost`` (another applier took the
+    VM; nothing recorded). Whatever it found is written only after ``held.confirm``. Commits."""
     now = now or utcnow()
     row = db.get(ServiceFirewall, service_id)
     service = db.get(Service, service_id)
     if row is None or service is None:
         return "unmanaged"
+    outcome: Optional[str] = None
     try:
-        hard = _hard_reasons(fw.eligibility(db, service_id).reasons)
-        if hard:
-            _hold_ineligible(db, row, hard, now)
-            return "unmanaged"
-        try:
-            client, config = await _client_and_config(db, service, access)
-        except Exception as exc:  # Proxmox errors, placement errors, transport failures
-            result = record_failure(db, row, exc, now=now)
-            _after_apply(db, row, result, now)
-            return result.state
-        row.last_checked_at = now
-        if fw.observe_net0_bridge(row, config):
-            # Staff moved the public NIC: the revision is bumped and the queue renders for the new bridge.
-            row.next_attempt_at = None
-            return "queued"
-        hard = _hard_reasons(fw.eligibility(db, service_id, vm_config=config, observe=False).reasons)
-        if hard:
-            _hold_ineligible(db, row, hard, now)
-            return "unmanaged"
-        if row.state in (FirewallState.UNMANAGED, FirewallState.VM_MISSING):
-            # Eligible again, or the VM is back: write it afresh through the queue.
-            fw._bump(row)
-            row.state = FirewallState.PENDING
-            row.next_attempt_at = None
-            return "queued"
-
-        report = await check(db, service_id, client)
-        if report.vm_missing:
-            result = record_failure(db, row, VmMissing(404, "VM not found on Proxmox", method="GET", path=""), now=now)
-            _after_apply(db, row, result, now)
-            return "vm_missing"
-        if row.drift_repairs_24h:
-            row.drift_repairs_24h = _drift_repairs_24h(db, service_id, now)
-        if report.in_sync:
-            row.nic_flag = report.nic_flag
-            enabled = int(render(db, service_id, now=now).options["enable"]) == 1
-            if not enabled:
-                row.state = FirewallState.OFF
-            elif report.nic_flag == "pending_reboot":
-                row.state = FirewallState.PENDING_REBOOT
-            else:
-                row.state = FirewallState.APPLIED
-            if row.state != FirewallState.OFF:
-                row.last_error = None
-            _enforcement_state(db, row)
-            return "in_sync"
-
-        if str(_setting(db, "vm_firewall_drift_mode")) != "repair":
-            row.state = FirewallState.DRIFT
-            row.last_error = ("drift: " + "; ".join(report.differences))[:2000]
-            return "reported"
-        result = await apply(db, service_id, client, now=now)
-        _after_apply(db, row, result, now)
-        if not result.ok:
-            return result.state
-        fw._audit(db, fw.Actor.system(), "firewall.drift_repaired", resource_type="service", resource_id=service_id,
-                  subject_user_id=service.owner_user_id,
-                  metadata={"differences": report.differences[:50], "ops": result.ops})
-        row.drift_repairs_24h = _drift_repairs_24h(db, service_id, now)
-        return "repaired"
+        outcome = await _check_one(db, row, service, access, now=now, held=held)
     finally:
+        if outcome != CLAIM_LOST and not _still_held(db, row, held):
+            outcome = CLAIM_LOST
         db.flush()
         db.commit()
+    return outcome
+
+
+async def _check_one(
+    db: Session, row: ServiceFirewall, service: Service, access: ProxmoxAccess, *, now: datetime, held: Optional[Claim]
+) -> str:
+    service_id = row.service_id
+    hard = _hard_reasons(fw.eligibility(db, service_id).reasons)
+    if hard:
+        _hold_ineligible(db, row, hard, now)
+        return "unmanaged"
+    try:
+        client, config = await _client_and_config(db, service, access)
+    except Exception as exc:  # Proxmox errors, placement errors, transport failures
+        result = record_failure(db, row, exc, now=now, claim=held)
+        if result.state == CLAIM_LOST:
+            return CLAIM_LOST
+        _after_apply(db, row, result, now)
+        return result.state
+    row.last_checked_at = now
+    if fw.observe_net0_bridge(row, config):
+        # Staff moved the public NIC: the revision is bumped and the queue renders for the new bridge.
+        row.next_attempt_at = None
+        return "queued"
+    hard = _hard_reasons(fw.eligibility(db, service_id, vm_config=config, observe=False).reasons)
+    if hard:
+        if not _still_held(db, row, held):
+            return CLAIM_LOST
+        _hold_ineligible(db, row, hard, now)
+        return "unmanaged"
+    if row.state in (FirewallState.UNMANAGED, FirewallState.VM_MISSING):
+        # Eligible again, or the VM is back: write it afresh through the queue.
+        fw._bump(row)
+        row.state = FirewallState.PENDING
+        row.next_attempt_at = None
+        return "queued"
+
+    report = await check(db, service_id, client)
+    if report.vm_missing:
+        result = record_failure(db, row, VmMissing(404, "VM not found on Proxmox", method="GET", path=""), now=now,
+                                claim=held)
+        if result.state == CLAIM_LOST:
+            return CLAIM_LOST
+        _after_apply(db, row, result, now)
+        return "vm_missing"
+    if row.drift_repairs_24h:
+        row.drift_repairs_24h = _drift_repairs_24h(db, service_id, now)
+    if report.in_sync:
+        row.nic_flag = report.nic_flag
+        enabled = int(render(db, service_id, now=now).options["enable"]) == 1
+        if not enabled:
+            row.state = FirewallState.OFF
+        elif report.nic_flag == "pending_reboot":
+            row.state = FirewallState.PENDING_REBOOT
+        else:
+            row.state = FirewallState.APPLIED
+        if row.state != FirewallState.OFF:
+            row.last_error = None
+        _enforcement_state(db, row)
+        return "in_sync"
+
+    if str(_setting(db, "vm_firewall_drift_mode")) != "repair":
+        row.state = FirewallState.DRIFT
+        row.last_error = ("drift: " + "; ".join(report.differences))[:2000]
+        return "reported"
+    result = await apply(db, service_id, client, now=now, claim=held)
+    if result.state == CLAIM_LOST:
+        return CLAIM_LOST
+    _after_apply(db, row, result, now)
+    if not result.ok:
+        return result.state
+    fw._audit(db, fw.Actor.system(), "firewall.drift_repaired", resource_type="service", resource_id=service_id,
+              subject_user_id=service.owner_user_id,
+              metadata={"differences": report.differences[:50], "ops": result.ops})
+    row.drift_repairs_24h = _drift_repairs_24h(db, service_id, now)
+    return "repaired"
 
 
 async def drift_sweep(
@@ -687,12 +812,14 @@ async def drift_sweep(
             .limit(batch)
         ).scalars()
     )
-    buckets = {"in_sync": out.in_sync, "repaired": out.repaired, "reported": out.reported, "queued": out.queued}
+    buckets = {"in_sync": out.in_sync, "repaired": out.repaired, "reported": out.reported, "queued": out.queued,
+               CLAIM_LOST: out.claim_lost}
     for service_id in ids:
         if not claim(db, service_id, owner=owner, now=clock()):
             continue
         try:
-            outcome = await sweep_one(db, service_id, access, now=now)
+            held = Claim.of(db, service_id, owner=owner, clock=clock)
+            outcome = await sweep_one(db, service_id, access, now=now, held=held)
             out.checked.append(service_id)
             buckets.get(outcome, []).append(service_id)
         except Exception:  # one VM must not stop the sweep
@@ -833,6 +960,7 @@ async def tick(
 
 
 __all__ = [
+    "Claim",
     "LEASE_NAME",
     "PluginAccess",
     "ProxmoxAccess",
@@ -847,6 +975,7 @@ __all__ = [
     "notify_apply_failures",
     "process_queue",
     "read_status",
+    "renew",
     "resume_rollout",
     "sweep_one",
     "tick",

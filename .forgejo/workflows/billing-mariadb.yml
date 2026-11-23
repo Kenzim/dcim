@@ -24,6 +24,11 @@
 # before, during and after the suspension job's locked re-check),
 # tests/services/test_billing_p2_reseller_suspension_mariadb.py (a reseller
 # payment or credit top-up racing the recurring pass's non-payment suspension)
+# and tests/services/test_vm_firewall_claim_mariadb.py (the VM firewall claim's
+# row lock: a takeover waits for an applier that confirmed its claim, renewals
+# on their own connections never wait on the apply's session, an apply that
+# lost its claim records nothing, and a bridge bump racing a client save never
+# reuses the save's revision or moves it backwards)
 # against a mariadb:11.8
 # service container, the
 # version production runs. Manual trigger only, so it never blocks other work;
@@ -110,3 +115,15 @@ jobs:
         run: python -m pytest tests/services/test_billing_p2_generate_ahead_mariadb.py -q
       - name: Exchange rate deleted or stored during a publish or a proforma payment on MariaDB
         run: python -m pytest tests/services/test_billing_p2_exchange_rates_mariadb.py -q
+      # VM firewall claims: a takeover waits for the confirmed applier, renewals never wait on the apply's session.
+      - name: VM firewall claim renewal and confirmation under concurrency on MariaDB
+        env:
+          RACKFLOW_TEST_MARIADB_URL: mysql+pymysql://root:rackflow-ci@mariadb:3306/rackflow_test_vm_firewall_claim
+        run: |
+          python - <<'EOF'
+          import pymysql
+          connection = pymysql.connect(host="mariadb", user="root", password="rackflow-ci")
+          connection.cursor().execute("CREATE DATABASE IF NOT EXISTS rackflow_test_vm_firewall_claim")
+          connection.close()
+          EOF
+          python -m pytest tests/services/test_vm_firewall_claim_mariadb.py -q
