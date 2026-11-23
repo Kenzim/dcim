@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, aliased, joinedload
 
 from app.models.commerce_account import (
     BillingAccount,
@@ -118,14 +118,21 @@ class BillingAccountDAO:
         if status is not None:
             stmt = stmt.where(BillingAccount.status == status)
         if q:
-            needle = f"%{q.strip()}%"
-            stmt = stmt.outerjoin(User, BillingAccount.user_id == User.id).outerjoin(
-                Reseller, BillingAccount.reseller_id == Reseller.id
-            ).where(
-                or_(
-                    User.username.ilike(needle),
-                    User.email.ilike(needle),
-                    Reseller.name.ilike(needle),
+            text = q.strip()
+            needle = f"%{text}%"
+            reseller_user = aliased(User)
+            stmt = (
+                stmt.outerjoin(User, BillingAccount.user_id == User.id)
+                .outerjoin(Reseller, BillingAccount.reseller_id == Reseller.id)
+                .outerjoin(reseller_user, Reseller.user_id == reseller_user.id)
+                .where(
+                    or_(
+                        User.username.ilike(needle),
+                        User.email.ilike(needle),
+                        reseller_user.username.ilike(needle),
+                        reseller_user.email.ilike(needle),
+                        *([BillingAccount.id == int(text)] if text.isdigit() and len(text) <= 12 else []),
+                    )
                 )
             )
         return list(db.execute(stmt.offset(offset).limit(limit)).unique().scalars())

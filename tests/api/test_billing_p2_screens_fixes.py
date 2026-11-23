@@ -50,3 +50,23 @@ def test_billing_account_carries_the_exemption_reason_and_tax_id_status(client, 
     assert profile["tax_id_checked_at"].startswith("2026-11-01T09:00:00")
     listed = client.get("/api/admin/commerce/billing-accounts", headers=headers).json()
     assert next(item for item in listed if item["id"] == account.id)["tax_exempt_reason"] == "Diplomatic mission"
+
+
+def test_billing_account_search_finds_by_name_email_reseller_and_number(client, db_session, test_admin_user):
+    user = _make_user(db_session, "picker-person")
+    client_account = BillingAccountDAO.ensure_client_account(db_session, user.id)
+    reseller = make_reseller(db_session)
+    reseller_account = BillingAccountDAO.ensure_reseller_account(db_session, reseller)
+    db_session.commit()
+    headers = _auth(_login_admin(client))
+
+    def found(q):
+        resp = client.get("/api/admin/commerce/billing-accounts", headers=headers, params={"q": q})
+        assert resp.status_code == 200, resp.text
+        return {item["id"] for item in resp.json()}
+
+    assert found("picker-person") == {client_account.id}
+    assert found("picker-person@example") == {client_account.id}
+    assert found(reseller.user.username) == {reseller_account.id}
+    assert found(str(client_account.id)) >= {client_account.id}
+    assert found("no-such-account") == set()
