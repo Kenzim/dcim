@@ -38,6 +38,7 @@ class PermissionKey:
     VM_CHANGE_PASSWORD = "vm.change_password"
     VM_RESET_NETWORK = "vm.reset_network"
     VM_MANAGE_SSH_KEYS = "vm.manage_ssh_keys"
+    VM_FIREWALL = "vm.firewall"
 
     PROXY_VIEW_CREDENTIALS = "proxy.view_credentials"
     PROXY_ROTATE_CREDENTIALS = "proxy.rotate_credentials"
@@ -136,6 +137,11 @@ PERMISSION_CATALOG: List[Dict] = [
         "service_types": ["vm"],
     },
     {
+        "key": PermissionKey.VM_FIREWALL,
+        "label": "Manage the VM firewall",
+        "service_types": ["vm"],
+    },
+    {
         "key": PermissionKey.PROXY_VIEW_CREDENTIALS,
         "label": "View proxy credentials",
         "service_types": ["http_proxy"],
@@ -215,6 +221,7 @@ DEFAULT_PERMISSIONS_BY_SERVICE_TYPE: Dict[ServiceType, Dict[str, bool]] = {
         PermissionKey.VM_CHANGE_PASSWORD: True,
         PermissionKey.VM_RESET_NETWORK: False,
         PermissionKey.VM_MANAGE_SSH_KEYS: True,
+        PermissionKey.VM_FIREWALL: True,
     },
     ServiceType.HTTP_PROXY: {
         PermissionKey.SERVICE_VIEW: True,
@@ -269,6 +276,7 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.VM_CHANGE_PASSWORD: True,
             PermissionKey.VM_RESET_NETWORK: True,
             PermissionKey.VM_MANAGE_SSH_KEYS: True,
+            PermissionKey.VM_FIREWALL: True,
             PermissionKey.PROXY_VIEW_CREDENTIALS: True,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: True,
             PermissionKey.STORAGE_MANAGE_SHARES: True,
@@ -296,6 +304,7 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.VM_CHANGE_PASSWORD: True,
             PermissionKey.VM_RESET_NETWORK: False,
             PermissionKey.VM_MANAGE_SSH_KEYS: True,
+            PermissionKey.VM_FIREWALL: True,
         },
     },
     {
@@ -318,6 +327,7 @@ SYSTEM_PRESETS: List[Dict] = [
             PermissionKey.VM_CHANGE_PASSWORD: False,
             PermissionKey.VM_RESET_NETWORK: False,
             PermissionKey.VM_MANAGE_SSH_KEYS: False,
+            PermissionKey.VM_FIREWALL: False,
             PermissionKey.PROXY_VIEW_CREDENTIALS: False,
             PermissionKey.PROXY_ROTATE_CREDENTIALS: False,
             PermissionKey.STORAGE_MANAGE_SHARES: False,

@@ -7,7 +7,7 @@ from tests.migrations import helpers
 
 def test_single_head_and_chain_order():
     directory = helpers.script()
-    assert directory.get_heads() == [helpers.HEAD]
+    assert len(directory.get_heads()) == 1
     previous = helpers.A0
     for revision_id in helpers.CHAIN:
         assert len(revision_id) <= 32

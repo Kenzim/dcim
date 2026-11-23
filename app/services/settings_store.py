@@ -251,8 +251,108 @@ GROUPS: dict[str, SettingGroup] = {
             "Billing email",
             "When invoice reminder emails are sent.",
         ),
+        SettingGroup(
+            "vm_firewall",
+            "VM firewall",
+            "Limits, reconcile pacing and infrastructure bridges of the Proxmox VM firewall.",
+        ),
     )
 }
+
+
+def _validate_bridge_list(text: str) -> str:
+    bridges = [part.strip() for part in text.split(",") if part.strip()]
+    for bridge in bridges:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,31}", bridge):
+            raise SettingValidationError("must be comma-separated bridge names, for example vmbr230")
+    return ",".join(dict.fromkeys(bridges))
+
+
+def _vm_firewall_int(key: str, description: str, default: int, min_value: int, max_value: int) -> SettingDef:
+    return SettingDef(
+        key, "int", description, "vm_firewall", min_value=min_value, max_value=max_value, fallback=default
+    )
+
+
+# docs/vm-firewall.md section 4.4.
+_VM_FIREWALL_DEFINITIONS = (
+    _vm_firewall_int(
+        "vm_firewall_reconcile_interval_seconds",
+        "Seconds between drift sweeps of every managed VM firewall.",
+        600, 60, 86_400,
+    ),
+    _vm_firewall_int(
+        "vm_firewall_max_rules_per_vm", "Most client rule entries one VM may have.", 100, 1, 1000
+    ),
+    _vm_firewall_int(
+        "vm_firewall_max_rendered_rules",
+        "Most Proxmox rules one VM may render (baseline and expanded groups included).",
+        300, 10, 2000,
+    ),
+    _vm_firewall_int(
+        "vm_firewall_max_groups_per_client", "Most security groups one client may own.", 20, 0, 500
+    ),
+    _vm_firewall_int(
+        "vm_firewall_max_rules_per_group", "Most rules one security group may hold.", 50, 1, 500
+    ),
+    _vm_firewall_int(
+        "vm_firewall_max_groups_per_vm", "Most security groups one VM may reference.", 5, 0, 50
+    ),
+    _vm_firewall_int(
+        "vm_firewall_max_ipsets_per_client", "Most IP sets one client may own.", 20, 0, 500
+    ),
+    _vm_firewall_int(
+        "vm_firewall_max_ipset_entries", "Most entries one IP set may hold.", 64, 1, 4096
+    ),
+    _vm_firewall_int(
+        "vm_firewall_cluster_concurrency",
+        "Most VM firewalls written at the same time on one Proxmox cluster.",
+        4, 1, 64,
+    ),
+    _vm_firewall_int(
+        "vm_firewall_rollout_per_node_per_minute",
+        "Most existing VMs per Proxmox node that switching on a location's baseline for every VM "
+        "brings due each minute.",
+        10, 1, 1000,
+    ),
+    SettingDef(
+        "vm_firewall_drift_mode",
+        "str",
+        "What the drift sweep does when a VM firewall on Proxmox differs from Rackflow: "
+        "repair it, or only report it.",
+        "vm_firewall",
+        choices=("repair", "report"),
+        fallback="repair",
+    ),
+    SettingDef(
+        "firewall_client_logging",
+        "bool",
+        "Clients may switch on firewall logging (log levels and per-rule logging).",
+        "vm_firewall",
+        fallback=False,
+    ),
+    SettingDef(
+        "vm_firewall_infrastructure_bridges",
+        "str",
+        "Bridges of infrastructure VMs, comma-separated (for example vmbr230). A VM with a "
+        "network card on one of them is never managed.",
+        "vm_firewall",
+        max_length=1000,
+        validator=_validate_bridge_list,
+        fallback="",
+    ),
+    SettingDef(
+        "vm_firewall_ipv6_ra_bridges",
+        "str",
+        "Bridges that carry IPv6 router advertisements, comma-separated. A VM whose public "
+        "network card is on one is managed only where the location lists allowed IPv6 prefixes.",
+        "vm_firewall",
+        max_length=1000,
+        validator=_validate_bridge_list,
+        fallback="",
+    ),
+)
+
 
 _DEFINITIONS = (
     SettingDef(
@@ -806,13 +906,14 @@ _DEFINITIONS = (
         max_value=1_000_000_000,
         fallback=1,
     ),
+    *_VM_FIREWALL_DEFINITIONS,
 )
 
 SCHEMA: dict[str, SettingDef] = {definition.key: definition for definition in _DEFINITIONS}
 
 # Settings that stay in the environment because they decide, before the database
 # is reachable, what a process starts.
-ENV_ONLY = frozenset({"run_recurring_billing_worker"})
+ENV_ONLY = frozenset({"run_recurring_billing_worker", "run_vm_firewall_worker"})
 
 
 @dataclass(frozen=True)
