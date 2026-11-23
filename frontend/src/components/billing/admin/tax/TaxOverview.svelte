@@ -60,7 +60,7 @@
       <a href="/admin/billing-engines">Billing Engines screen</a>, where the engine is also switched.
     </p>
     {#if failing.length}
-      <p class="ba-hint">Not yet met for the switch to v2: {failing.map((item) => label(item.item)).join(', ')}.</p>
+      <p class="ba-hint">Not yet met for the switch to v2: {failing.map((item) => item.label || label(item.item)).join(', ')}.</p>
     {/if}
   </div>
 

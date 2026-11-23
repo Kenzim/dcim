@@ -16,11 +16,12 @@ const ACTIONS = {
 };
 
 // Keys that only repeat what another line says.
-const HIDDEN = new Set(['required']);
+const HIDDEN = new Set(['required', 'label']);
 
 const LABELS = {
-  covers: 'The sign-off must cover',
-  signoff: 'Signed off',
+  detail: 'About this item',
+  covers: 'The acknowledgement covers',
+  signoff: 'Recorded by the operator',
   open_mismatches: 'Open mismatches',
   open_divergence: 'Open differences between old and new tax',
   unconfirmed_divergence: 'Differences not yet confirmed',
