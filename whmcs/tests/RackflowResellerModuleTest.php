@@ -99,7 +99,8 @@ final class RackflowResellerModuleTest extends TestCase
         $this->assertSame('whmcs-service-321', $request['headers']['Idempotency-Key']);
         $this->assertSame('bare_metal', $request['payload']['service_type']);
         $this->assertSame('bm-small', $request['payload']['product_code']);
-        $this->assertSame('ubuntu-24', $request['payload']['os_code']);
+        $this->assertSame('ubuntu-24', $request['payload']['service_config']['template_id']);
+        $this->assertArrayNotHasKey('os_code', $request['payload']);
         $this->assertSame(9, $request['payload']['service_config']['server_group_id']);
         $this->assertSame('654', $request['payload']['external_user_id']);
         $this->assertSame(
@@ -221,10 +222,58 @@ final class RackflowResellerModuleTest extends TestCase
             if ($file->getExtension() !== 'php') {
                 continue;
             }
-            preg_match_all('/function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $contents, $matches);
-            foreach ($matches[1] as $functionName) {
+            foreach ($this->declaredPhpFunctionNames($contents) as $functionName) {
                 $this->assertStringStartsWith('rackflow_reseller_', $functionName, $file->getPathname());
             }
         }
+    }
+
+    public function testFunctionScanCatchesUnprefixedPhpFunctionsButNotInlineJavaScript(): void
+    {
+        $source = <<<'PHPSRC'
+<?php
+function rackflow_reseller_ok() {
+    return <<<HTML
+<script>function hideEl(el) { el.hidden = true; }</script>
+HTML;
+}
+function helperWithoutPrefix() {
+    $callback = function () { return 1; };
+}
+PHPSRC;
+        $this->assertSame(
+            array('rackflow_reseller_ok', 'helperWithoutPrefix'),
+            $this->declaredPhpFunctionNames($source)
+        );
+    }
+
+    /**
+     * Names of named PHP functions and methods declared in the source. Text inside
+     * strings, heredocs and inline HTML (such as JavaScript) is not scanned.
+     */
+    private function declaredPhpFunctionNames(string $source): array
+    {
+        $tokens = token_get_all($source);
+        $names = array();
+        $count = count($tokens);
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_FUNCTION) {
+                continue;
+            }
+            for ($j = $i + 1; $j < $count; $j++) {
+                $token = $tokens[$j];
+                if (is_array($token) && in_array($token[0], array(T_WHITESPACE, T_COMMENT, T_DOC_COMMENT), true)) {
+                    continue;
+                }
+                if ($token === '&') {
+                    continue;
+                }
+                if (is_array($token) && $token[0] === T_STRING) {
+                    $names[] = $token[1];
+                }
+                break;
+            }
+        }
+        return $names;
     }
 }
