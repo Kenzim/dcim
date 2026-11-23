@@ -74,7 +74,12 @@
     if (formError) return;
     checking = true;
     try {
-      preview = await previewExchangeRate(form.period.trim(), form.currency.trim().toUpperCase());
+      const checked = await previewExchangeRate(form.period.trim(), form.currency.trim().toUpperCase());
+      if (checked.stored) {
+        formError = `The ${checked.currency} rate for ${checked.period} is stored already and is never changed.`;
+        return;
+      }
+      preview = checked;
       fillConfirmed = false;
       confirmAdd = true;
     } catch (err) {
@@ -94,7 +99,7 @@
         confirm: pendingCount > 0 && fillConfirmed,
       });
       success = `Stored ${row.currency} ${row.units_per_gbp} per £1 for ${row.period}.`
-        + (row.filled_invoices ? ` ${row.filled_invoices} invoices waiting for this month's rate, and their notes, are filled in.` : '');
+        + (row.filled_invoices ? ` ${row.filled_invoices} ${row.filled_invoices === 1 ? 'invoice' : 'invoices'} waiting for this month's rate, and ${row.filled_invoices === 1 ? 'its' : 'their'} notes, ${row.filled_invoices === 1 ? 'is' : 'are'} filled in.` : '');
       adding = false;
       await load();
     } catch (err) {
@@ -157,7 +162,13 @@
                   <div class="ba-hint">{rate.compared_at ? `compared with HMRC ${when(rate.compared_at)}` : 'not compared with HMRC yet'}</div>
                 {:else}-{/if}
               </td>
-              <td><button class="ba-link" on:click={() => { deleting = rate; deleteError = ''; }}>Delete</button></td>
+              <td>
+                {#if rate.in_use}
+                  <span class="ba-hint">Used by an invoice or note</span>
+                {:else}
+                  <button class="ba-link" on:click={() => { deleting = rate; deleteError = ''; }}>Delete</button>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -191,7 +202,7 @@
       {/if}
       {#if pendingCount > 0}
         <Alert type="warning">
-          Storing this rate fills the sterling VAT of <strong>{preview.pending_invoices}</strong> invoices and <strong>{preview.pending_notes}</strong> notes of that month at once. Their figures cannot be changed afterwards, and the rate can then no longer be deleted.
+          Storing this rate fills the sterling VAT of <strong>{preview.pending_invoices}</strong> {preview.pending_invoices === 1 ? 'invoice' : 'invoices'} and <strong>{preview.pending_notes}</strong> {preview.pending_notes === 1 ? 'note' : 'notes'} of that month at once. Their figures cannot be changed afterwards, and the rate can then no longer be deleted.
         </Alert>
         <label class="ba-inline"><input type="checkbox" bind:checked={fillConfirmed} /> I have checked the rate against HMRC's file</label>
       {:else}

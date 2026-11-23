@@ -71,7 +71,7 @@
     }
   }
 
-  const serviceLabel = (id) => serviceNames[id] || `Service #${id}`;
+  const serviceLabel = (row) => row.service_label || serviceNames[row.service_id] || `Service #${row.service_id}`;
 </script>
 
 <div class="panel">
@@ -104,7 +104,7 @@
           {#each requests as row (row.id)}
             <tr>
               <td>
-                {#if serviceHref}<a href={serviceHref(row.service_id)}>{serviceLabel(row.service_id)}</a>{:else}{serviceLabel(row.service_id)}{/if}
+                {#if serviceHref}<a href={serviceHref(row.service_id)}>{serviceLabel(row)}</a>{:else}{serviceLabel(row)}{/if}
                 {#if row.reason}<small title={row.reason}>{row.reason}</small>{/if}
               </td>
               <td>
@@ -131,7 +131,7 @@
 {#if confirming}
   <Modal title="Withdraw this cancellation?" onClose={() => (confirming = null)}>
     <p>
-      {serviceLabel(confirming.service_id)} is due to be cancelled on <strong>{formatDate(confirming.effective_at)}</strong>.
+      {serviceLabel(confirming)} is due to be cancelled on <strong>{formatDate(confirming.effective_at)}</strong>.
       If you withdraw the request, the service stays and billing carries on as normal.
     </p>
     <svelte:fragment slot="footer">
