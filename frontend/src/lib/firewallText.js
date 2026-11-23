@@ -44,6 +44,8 @@ export const REASON_TEXT = {
     'net0 is on a bridge where servers choose their own IPv6 addresses from router adverts, and the location has no IPv6 allowed prefixes. Address anti-spoofing is held off for this server until a prefix is added to the location.',
   net0_bridge_unknown:
     'Rackflow has not yet seen which bridge net0 is on, and the location has router-advert bridges. Address anti-spoofing is held off until the next check.',
+  foreign_reference:
+    "A rule uses a group or IP set that belongs to another client, left over from an ownership change. Remove it: the other client's edits still change this server.",
 };
 
 export function reasonText(code) {

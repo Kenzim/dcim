@@ -6630,12 +6630,17 @@ function rackflow_firewallHandle($method, $isAjax, array $post, $isAdmin, $clien
     if (!$hosting) {
         return $fail('Service not found.', 404);
     }
+    // Another client's service answers exactly as a missing one, so ids reveal nothing.
     if (!$isAdmin && (int)$hosting->userid !== $clientId) {
-        return $fail('Access denied.', 403);
+        return $fail('Service not found.', 404);
     }
     $product = call_user_func($deps['product'], (int)$hosting->packageid);
     if (!$product || strtolower((string)$product->servertype) !== 'rackflow') {
         return $fail('Not a RackFlow service.', 400);
+    }
+    $whmcsStatus = isset($hosting->domainstatus) ? strtolower((string)$hosting->domainstatus) : '';
+    if (!$isAdmin && in_array($whmcsStatus, array('suspended', 'terminated', 'cancelled', 'fraud'), true)) {
+        return $fail('The firewall cannot be changed while this service is ' . $whmcsStatus . '.', 403);
     }
     $params = array(
         'serviceid' => $serviceId,

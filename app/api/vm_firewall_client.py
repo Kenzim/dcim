@@ -17,14 +17,12 @@ from sqlalchemy.orm import Session
 from app.api import vm_firewall_common as fw
 from app.api.reseller_panel import ResellerDep
 from app.core.auth import get_current_user, security
-from app.core.client_permissions import PermissionKey
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.service_dao import ServiceDAO
 from app.models.reseller import ServiceBilling
 from app.models.service import Service
 from app.models.vm_firewall import FirewallGroup, FirewallIpset
-from app.services.client_permission_resolver import require_client_permission
 from app.services.vm_firewall import service as svc
 
 DbDep = Annotated[Session, Depends(get_db)]
@@ -68,7 +66,7 @@ def _owned(db: Session, caller: _Caller, service_id: int, *, write: bool = False
     if service is None or service.owner_user_id != caller.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
     if write:
-        require_client_permission(db, service, PermissionKey.VM_FIREWALL)
+        fw.require_client_write(db, service)
     return service
 
 

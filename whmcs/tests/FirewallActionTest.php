@@ -79,11 +79,12 @@ final class FirewallActionTest extends TestCase
         $this->assertSame(array(), $this->calls);
     }
 
-    public function testAnotherClientsServiceIsRefusedAndRackflowIsNotCalled(): void
+    public function testAnotherClientsServiceAnswersLikeAMissingOneAndRackflowIsNotCalled(): void
     {
-        list($status, $payload) = $this->handle($this->enable(array('serviceid' => '11')));
-        $this->assertSame(403, $status);
-        $this->assertSame('Access denied.', $payload['error']);
+        $foreign = $this->handle($this->enable(array('serviceid' => '11')));
+        $missing = $this->handle($this->enable(array('serviceid' => '999')));
+        $this->assertSame(404, $foreign[0]);
+        $this->assertSame($missing, $foreign);
         $this->assertSame(array(), $this->calls);
     }
 
@@ -92,6 +93,25 @@ final class FirewallActionTest extends TestCase
         list($status) = $this->handle($this->enable(array('serviceid' => '999')));
         $this->assertSame(404, $status);
         $this->assertSame(array(), $this->calls);
+    }
+
+    public function testSuspendedOrTerminatedServiceIsRefusedForClients(): void
+    {
+        foreach (array('Suspended', 'Terminated', 'Cancelled', 'Fraud') as $whmcsStatus) {
+            $hosting = (object)array('id' => 10, 'userid' => 5, 'packageid' => 3, 'server' => 1, 'domainstatus' => $whmcsStatus);
+            $deps = $this->deps(array('hosting' => function ($id) use ($hosting) {
+                return $id === 10 ? $hosting : null;
+            }));
+            list($status) = $this->handle($this->enable(), false, 5, 'POST', true, $deps);
+            $this->assertSame(403, $status, $whmcsStatus);
+        }
+        $this->assertSame(array(), $this->calls);
+        $active = (object)array('id' => 10, 'userid' => 5, 'packageid' => 3, 'server' => 1, 'domainstatus' => 'Active');
+        $deps = $this->deps(array('hosting' => function ($id) use ($active) {
+            return $id === 10 ? $active : null;
+        }));
+        list($status) = $this->handle($this->enable(), false, 5, 'POST', true, $deps);
+        $this->assertSame(200, $status);
     }
 
     public function testNonRackflowProductIsRefused(): void
