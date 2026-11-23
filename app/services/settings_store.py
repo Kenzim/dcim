@@ -20,6 +20,7 @@ owns the transaction.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import re
 from dataclasses import dataclass
@@ -1089,6 +1090,31 @@ def _check_rules(db: Session, key: str, value: Any) -> None:
             raise SettingValidationError(problem)
 
 
+SettingChangeHook = Callable[[Session, str, Any, Any], None]
+_CHANGE_HOOKS: dict[str, list[SettingChangeHook]] = {}
+# Modules that register change hooks for a group, imported on the first change in that group so
+# the hook is in place however the setting is changed.
+_HOOK_MODULES: dict[str, str] = {"vm_firewall": "app.services.vm_firewall.settings_hook"}
+
+
+def on_setting_change(group: str, hook: SettingChangeHook) -> None:
+    """Call ``hook(db, key, old, new)`` in the same transaction whenever a setting of ``group``
+    changes its effective value through ``set_setting`` or ``reset_setting``."""
+    hooks = _CHANGE_HOOKS.setdefault(group, [])
+    if hook not in hooks:
+        hooks.append(hook)
+
+
+def _setting_changed(db: Session, definition: SettingDef, old: Any, new: Any) -> None:
+    if old == new:
+        return
+    module = _HOOK_MODULES.get(definition.group)
+    if module is not None:
+        importlib.import_module(module)
+    for hook in list(_CHANGE_HOOKS.get(definition.group, ())):
+        hook(db, definition.key, old, new)
+
+
 def set_setting(
     db: Session, key: str, value: Any, actor_user_id: Optional[int] = None
 ) -> Any:
@@ -1118,6 +1144,7 @@ def set_setting(
             "new": normalised,
         },
     )
+    _setting_changed(db, definition, previous.value, normalised)
     return normalised
 
 
@@ -1150,4 +1177,5 @@ def reset_setting(
         resource_id=key,
         metadata={"old": previous.value, "old_source": previous.source},
     )
+    _setting_changed(db, definition, previous.value, previous.default)
     return True

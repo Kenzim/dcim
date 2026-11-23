@@ -68,6 +68,11 @@ CATEGORY_LIST = (
         "An invitation to a shared private network, or a change to who is on a network you share.",
     ),
     Category("plugin", "Notices from plugins", "A notice about one of your services from an add-on feature."),
+    Category(
+        "firewall",
+        "Firewall changes",
+        "The firewall of one of your servers turned on or off, changed by staff, or failing to apply.",
+    ),
 )
 CATEGORIES = {c.key: c for c in CATEGORY_LIST}
 
@@ -364,6 +369,11 @@ def on_audit_event(db: Session, row: UserAuditEvent) -> int:
         message = _MCP_KEY_TEXT.get(action.split(".", 1)[1])
         if message is None:
             return 0
+    elif action.startswith("firewall."):
+        category = "firewall"
+        message = _firewall_audit_message(db, row)
+        if message is None:
+            return 0
     else:
         mapped = _AUDIT_MAP.get(action)
         if mapped is None:
@@ -382,6 +392,49 @@ def on_audit_event(db: Session, row: UserAuditEvent) -> int:
             data={"ip": row.ip, "user_agent": row.user_agent} if own_action else None,
             when=utcnow(),
         )
+
+
+_FIREWALL_RESOURCE_TEXT = {
+    "firewall_group": "one of your firewall security groups",
+    "firewall_ipset": "one of your firewall IP sets",
+}
+
+
+def _firewall_audit_message(db: Session, row: UserAuditEvent) -> Optional[str]:
+    """Firewall turned on or off by anyone, or any other firewall change made by staff. The
+    worker's own actions (drift repair, system actor) are not notices."""
+    metadata = row.event_metadata if isinstance(row.event_metadata, dict) else {}
+    actor_kind = (metadata.get("actor") or {}).get("kind")
+    service = None
+    if row.resource_type == "service" and row.resource_id and str(row.resource_id).isdigit():
+        service = db.get(Service, int(row.resource_id))
+    what = f"your server {service.name}" if service is not None else None
+    if row.action in ("firewall.enabled", "firewall.disabled"):
+        if what is None:
+            return None
+        state = "turned on" if row.action == "firewall.enabled" else "turned off"
+        return f"The firewall of {what} was {state}."
+    if actor_kind != "staff" or row.actor_user_id == row.subject_user_id:
+        return None
+    target = f"the firewall of {what}" if what is not None else _FIREWALL_RESOURCE_TEXT.get(row.resource_type or "")
+    if target is None:
+        return None
+    return f"Staff changed {target}."
+
+
+@_safe
+def notify_firewall_apply_failed(db: Session, service: Service, failing_since: Any) -> int:
+    """Once per failing episode (keyed by when it started); the caller commits."""
+    started = naive(failing_since)
+    key = f"firewall_failed:{service.id}:{started.isoformat() if started else 'unknown'}"
+    return _service_event(
+        db,
+        service,
+        "firewall",
+        f"The firewall of your server {service.name} could not be applied. Our staff have been alerted; "
+        "your previous firewall settings stay in place until it succeeds.",
+        key,
+    )
 
 
 @_safe
