@@ -15,6 +15,7 @@
   import ClientStorage from '../components/client/ClientStorage.svelte';
   import ClientBackupSlots from '../components/client/ClientBackupSlots.svelte';
   import ClientCancellations from '../components/client/ClientCancellations.svelte';
+  import ClientFirewall from '../components/client/ClientFirewall.svelte';
 
   let authChecked = false;
   let impersonating = false;
@@ -62,6 +63,8 @@
         }
       } else if (parts[1] === 'networks') {
         routeName = 'networks';
+      } else if (parts[1] === 'firewall') {
+        routeName = 'firewall';
       } else if (parts[1] === 'storage') {
         routeName = 'storage';
       } else if (parts[1] === 'backup-slots') {
@@ -135,6 +138,8 @@
         <ClientSupport {ticketId} />
       {:else if routeName === 'networks'}
         <ClientNetworks />
+      {:else if routeName === 'firewall'}
+        <ClientFirewall />
       {:else if routeName === 'storage'}
         <ClientStorage />
       {:else if routeName === 'backup-slots'}
