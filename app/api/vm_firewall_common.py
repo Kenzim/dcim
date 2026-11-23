@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.client_permissions import PermissionKey
 from app.core.commerce_auth import _impersonated_by_from_token, _token_from_request
 from app.models.location import Location
 from app.models.proxmox_inventory import ProxmoxCluster
@@ -27,10 +28,12 @@ from app.models.vm_firewall import (
     FirewallIpset,
     FirewallLocationSettings,
     FirewallNicFlag,
+    FirewallObjectScope,
     FirewallRule,
     FirewallRuleKind,
     ServiceFirewall,
 )
+from app.services.client_permission_resolver import require_client_permission
 from app.services.vm_firewall import presets as fw_presets
 from app.services.vm_firewall import reconcile
 from app.services.vm_firewall import service as svc
@@ -39,6 +42,7 @@ from app.services.vm_firewall.errors import (
     FirewallChanged,
     FirewallConflict,
     FirewallError,
+    FirewallForbidden,
     FirewallNotEligible,
 )
 from app.services.vm_firewall.proxmox_fw import (
@@ -327,13 +331,48 @@ _REASON_MESSAGES = {
 _SMTP_MARKER = MARKER_PREFIX + "smtp"
 _MGMT_MARKER = MARKER_PREFIX + "mgmt"
 
+# What a client is shown in place of an admin group, IP set or address range it may not see.
+PROVIDED_BY_US = "Provided by us"
+ADDRESSES_SET_BY_US = "Addresses set by us"
+_ANY_CIDRS = {"0.0.0.0/0", "::/0"}
 
-def _baseline_view(db: Session, ctx, rendered) -> dict[str, Any]:
-    """The baseline as the client sees it, read only: the admin baseline rules in merge order
-    (``baseline_id`` says which), then the generated SMTP and management blocks."""
+
+def _selectable(obj: Any) -> bool:
+    return obj is not None and _value(obj.scope) == FirewallObjectScope.ADMIN.value and bool(obj.client_selectable)
+
+
+def _client_baseline_rule(db: Session, rule: FirewallRule) -> dict[str, Any]:
+    """A baseline rule as a client sees it: what it does to their traffic, without internal
+    addresses or the names of admin groups and IP sets they may not use."""
+    full = rule_payload(rule)
+    item: dict[str, Any] = {key: full[key] for key in ("kind", "enabled", "comment")}
+    item["generated"] = False
+    if full["kind"] == FirewallRuleKind.GROUP.value:
+        group = db.get(FirewallGroup, rule.ref_group_id)
+        item["group_name"] = group.name if _selectable(group) else PROVIDED_BY_US
+        return item
+    for key in ("direction", "action", "ip_version", "protocol", "ports", "source_ports", "icmp_type"):
+        item[key] = full[key]
+    if rule.remote_ipset_id is not None:
+        ipset = db.get(FirewallIpset, rule.remote_ipset_id)
+        item["remote_label"] = f"IP set {ipset.name}" if _selectable(ipset) else ADDRESSES_SET_BY_US
+    elif full["remote_cidrs"] and not set(full["remote_cidrs"]) <= _ANY_CIDRS:
+        item["remote_label"] = ADDRESSES_SET_BY_US
+    if full["local_cidrs"]:
+        item["local_label"] = ADDRESSES_SET_BY_US
+    return item
+
+
+def _baseline_view(db: Session, ctx, rendered, audience: str = CUSTOMER) -> dict[str, Any]:
+    """The baseline, read only: the admin baseline rules in merge order, then the generated SMTP and
+    management blocks. Staff see the rules in full (``baseline_id`` says which baseline); a client
+    sees each rule's effect only (``_client_baseline_rule``)."""
     rules: list[dict[str, Any]] = []
     for baseline in ctx.baselines:
         for rule in _owned_rules(db, FirewallRule.baseline_id, baseline.id):
+            if audience != STAFF:
+                rules.append(_client_baseline_rule(db, rule))
+                continue
             item = {**rule_payload(rule), "baseline_id": baseline.id, "generated": False}
             if item.get("group_id") is not None:
                 group = db.get(FirewallGroup, item["group_id"])
@@ -426,7 +465,10 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
     rules = svc.service_rules(db, service_id)
     group_ids = [rule.ref_group_id for rule in rules if _value(rule.kind) == FirewallRuleKind.GROUP.value]
     groups = [db.get(FirewallGroup, gid) for gid in group_ids]
-    baseline = _baseline_view(db, ctx, rendered)
+    foreign = _foreign_reference_rule_ids(db, service, rules)
+    if foreign and audience == STAFF:
+        reasons.append("foreign_reference")
+    baseline = _baseline_view(db, ctx, rendered, audience)
     view: dict[str, Any] = {
         "service_id": service_id,
         "available": available,
@@ -442,7 +484,11 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
         "log_level_in": _value(row.log_level_in),
         "log_level_out": _value(row.log_level_out),
         "rules": [rule_payload(rule) for rule in rules],
-        "groups": [group_payload(db, group) for group in groups if group is not None],
+        "groups": [
+            group_payload(db, group) if audience == STAFF else _client_group_entry(db, group, service.owner_user_id)
+            for group in groups
+            if group is not None
+        ],
         "ipsets": ipset_choices(db, ctx.service, audience=audience),
         "baseline": baseline,
         "smtp_block_help": svc.SMTP_BLOCK_HELP if baseline["smtp_out"] == "block" else None,
@@ -473,9 +519,37 @@ def firewall_view(db: Session, service_id: int, *, audience: str = CUSTOMER) -> 
             last_checked_at=_iso(row.last_checked_at),
             next_attempt_at=_iso(row.next_attempt_at),
             drift_repairs_24h=row.drift_repairs_24h,
+            foreign_reference_rule_ids=foreign,
             rendered={"options": dict(rendered.options), "rules": [rule.params() for rule in rendered.rules]},
         )
     return view
+
+
+def _client_group_entry(db: Session, group: FirewallGroup, owner_user_id: Optional[int]) -> dict[str, Any]:
+    """A group attached to the client's VM: in full when it is theirs or offered to clients,
+    otherwise a neutral entry without rules or owner. The id stays: the rule list carries it, and
+    saving that list back keeps the reference."""
+    own = owner_user_id is not None and group.owner_user_id == owner_user_id
+    if own or _selectable(group):
+        return group_payload(db, group)
+    return {"id": group.id, "name": PROVIDED_BY_US, "description": None, "provided_by_us": True, "rules": []}
+
+
+def _foreign_reference_rule_ids(db: Session, service: Service, rules: list[FirewallRule]) -> list[int]:
+    """Rules of the VM that reference another client's group or IP set (left by an ownership change
+    that did not remove them); staff are shown these to clean up."""
+    out = []
+    for rule in rules:
+        for model, ref in ((FirewallGroup, rule.ref_group_id), (FirewallIpset, rule.remote_ipset_id)):
+            obj = db.get(model, ref) if ref is not None else None
+            if (
+                obj is not None
+                and _value(obj.scope) == FirewallObjectScope.CLIENT.value
+                and obj.owner_user_id != service.owner_user_id
+            ):
+                out.append(rule.id)
+                break
+    return out
 
 
 def ipset_choices(db: Session, service: Service, *, audience: str = CUSTOMER) -> list[dict[str, Any]]:
@@ -594,6 +668,16 @@ def given(body: BaseModel, *keys: str) -> dict[str, Any]:
 
 # Write handlers shared by the client, billing and admin routes. They leave committing to the
 # route.
+
+
+def require_client_write(db: Session, service: Service) -> None:
+    """What a client or billing write to a VM's firewall needs beyond owning it: the ``vm.firewall``
+    permission, and a service that is neither suspended nor terminated."""
+    require_client_permission(db, service, PermissionKey.VM_FIREWALL)
+    if service.status in svc.WRITE_BLOCKED_STATUSES:
+        raise FirewallForbidden(
+            f"The firewall cannot be changed while the service is {_value(service.status)}", code="service_not_active"
+        )
 
 
 async def update_settings(db: Session, service: Service, actor: svc.Actor, body: FirewallSettingsUpdate) -> None:

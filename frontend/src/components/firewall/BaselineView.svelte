@@ -11,6 +11,7 @@
     const described = describeServerRule(rule, ipsets);
     if (rule.kind === 'group') return { rule, ...described, group: true, groupName: rule.group_name || `group #${rule.group_id}` };
     if (rule.remote_ipset_name) described.remote = `IP set ${rule.remote_ipset_name}`;
+    if (rule.remote_label) described.remote = rule.remote_label;
     return { rule, ...described };
   });
   $: facts = [
