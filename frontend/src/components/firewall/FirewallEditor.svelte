@@ -3,6 +3,7 @@
   import { Alert, Button, Modal, Spinner } from '../ui/index.js';
   import * as api from '../../lib/vmFirewallApi.js';
   import { INTERRUPTION_WARNING, PRESET_FALLBACK, STATE_INFO, reasonText } from '../../lib/firewallText.js';
+  import { applyAllowed, notOffered, switchDisplay } from '../../lib/firewallDisplay.js';
   import FirewallStateBadge from './FirewallStateBadge.svelte';
   import BaselineView from './BaselineView.svelte';
   import RuleEditor from './RuleEditor.svelte';
@@ -34,6 +35,9 @@
   let admin = adminFrom(null);
 
   $: dirty = !sameDrafts(draft, saved);
+  $: unavailable = !!fw && notOffered(fw);
+  $: switchView = fw ? switchDisplay(fw) : { checked: false, label: 'Off' };
+  $: canApply = !!fw && applyAllowed(fw);
   $: ipsets = fw?.ipsets ?? [];
   $: allGroups = [...(fw?.groups || []), ...groupChoices.filter((g) => !(fw?.groups || []).some((x) => x.id === g.id))];
   $: locked = !canEdit || busy;
@@ -258,9 +262,9 @@
         <FirewallStateBadge state={fw.state} />
         {#if STATE_INFO[fw.state]}<span class="state-text">{STATE_INFO[fw.state].text}</span>{/if}
       </div>
-      <label class="switch" title={fw.available === false ? 'The firewall is not offered for this server' : dirty ? 'Save or discard your rule changes first' : ''}>
-        <input type="checkbox" checked={!!fw.client_enabled} disabled={locked || dirty || fw.available === false} on:change={onSwitch} />
-        <span>{fw.client_enabled ? 'On' : 'Off'}</span>
+      <label class="switch" title={unavailable ? 'The firewall is not offered for this server' : dirty ? 'Save or discard your rule changes first' : ''}>
+        <input type="checkbox" checked={switchView.checked} disabled={locked || dirty || unavailable} on:change={onSwitch} />
+        <span>{switchView.label}</span>
       </label>
     </header>
 
@@ -384,7 +388,8 @@
         <div class="save-bar">
           <Button disabled={locked} on:click={saveAdmin}>Save staff settings</Button>
           <Button variant="secondary" disabled={busy} on:click={() => runCheck('check')}>Check for drift</Button>
-          <Button variant="secondary" disabled={busy} on:click={() => runCheck('apply')}>Apply now</Button>
+          <Button variant="secondary" disabled={busy || !canApply} on:click={() => runCheck('apply')}>Apply now</Button>
+          {#if !canApply}<span class="hint">Not offered for this server: see the reasons above.</span>{/if}
         </div>
 
         {#if checkResult}
