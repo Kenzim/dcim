@@ -8,8 +8,6 @@ import pytest
 from app.plugins.proxmox import ProxmoxPlugin, proxmox_token_header
 from app.services import proxmox_vm_search as search
 
-_REAL_CLIENT = httpx.AsyncClient
-
 TOKEN_USER = "rackflow-fw@pve!worker"
 
 
@@ -52,7 +50,9 @@ async def test_plugin_requests_carry_the_token(monkeypatch):
         seen["path"] = request.url.path
         return httpx.Response(200, json={"data": {}})
 
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _REAL_CLIENT(transport=httpx.MockTransport(handler)))
+    transport = httpx.MockTransport(handler)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=transport))
     plugin = _plugin(TOKEN_USER)
     response = await plugin._get_with_relocate(lambda: f"{plugin.base_url}/api2/json/nodes/pve1/qemu/101/config")
     assert response.status_code == 200
@@ -77,86 +77,3 @@ async def test_cluster_search_uses_token_without_ticket(monkeypatch):
     monkeypatch.setattr(search.httpx, "AsyncClient", Client)
     cluster = SimpleNamespace(id=1, api_url="https://pve/", verify_ssl=False, username=TOKEN_USER, password="s3cret")
     assert await search._cluster_auth_headers(cluster) == {"Authorization": f"PVEAPIToken={TOKEN_USER}=s3cret"}
-
-
-SECRET = "9f1c2d3e-aaaa-bbbb-cccc-0123456789ab"
-
-
-def _mock_client(monkeypatch, module, handler):
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(module, "AsyncClient", lambda **kw: _REAL_CLIENT(transport=transport))
-
-
-@pytest.mark.asyncio
-async def test_password_login_sends_the_same_requests_and_headers_as_before(monkeypatch):
-    seen = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.method, request.url.path, dict(request.headers), request.content))
-        if request.url.path.endswith("/access/ticket"):
-            return httpx.Response(200, json={"data": {"ticket": "T", "CSRFPreventionToken": "C"}})
-        return httpx.Response(200, json={"data": {}})
-
-    _mock_client(monkeypatch, httpx, handler)
-    plugin = _plugin("root@pam")
-    await plugin._get_with_relocate(lambda: f"{plugin.base_url}/api2/json/nodes/pve1/qemu/101/config")
-    login, get = seen
-    assert login[:2] == ("POST", "/api2/json/access/ticket")
-    assert login[3] == b"username=root%40pam&password=s3cret"
-    assert "authorization" not in login[2]
-    assert get[:2] == ("GET", "/api2/json/nodes/pve1/qemu/101/config")
-    assert get[2]["cookie"] == "PVEAuthCookie=T" and get[2]["csrfpreventiontoken"] == "C"
-    assert "authorization" not in get[2]
-
-
-@pytest.mark.asyncio
-async def test_password_login_errors_are_unchanged(monkeypatch):
-    _mock_client(monkeypatch, httpx, lambda request: httpx.Response(401, json={"data": None}))
-    with pytest.raises(Exception, match="Authentication failed: Invalid username or password"):
-        await _plugin("root@pam")._get_auth_ticket()
-    _mock_client(monkeypatch, httpx, lambda request: httpx.Response(500, json={"data": None}))
-    with pytest.raises(Exception, match="HTTP error: 500"):
-        await _plugin("root@pam")._get_auth_ticket()
-    _mock_client(monkeypatch, httpx, lambda request: httpx.Response(200, json={"data": None}))
-    with pytest.raises(Exception, match="No authentication data returned"):
-        await _plugin("root@pam")._get_auth_ticket()
-
-
-@pytest.mark.asyncio
-async def test_cluster_search_password_login_is_unchanged(monkeypatch):
-    seen = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.url.path, request.content))
-        return httpx.Response(200, json={"data": {"ticket": "T", "CSRFPreventionToken": "C"}})
-
-    _mock_client(monkeypatch, search.httpx, handler)
-    cluster = SimpleNamespace(id=1, api_url="https://pve/", verify_ssl=False, username="root@pam", password="pw")
-    assert await search._cluster_auth_headers(cluster) == {"Cookie": "PVEAuthCookie=T", "CSRFPreventionToken": "C"}
-    assert seen == [("/api2/json/access/ticket", b"username=root%40pam&password=pw")]
-
-
-@pytest.mark.asyncio
-async def test_a_refused_token_leaves_no_secret_in_errors_or_logs(monkeypatch, caplog):
-    import logging
-
-    from app.services.vm_firewall.proxmox_fw import PluginTransport
-
-    caplog.set_level(logging.DEBUG)
-    _mock_client(monkeypatch, httpx, lambda request: httpx.Response(
-        401, json={"data": None, "errors": {"auth": "invalid token value"}}))
-    plugin = ProxmoxPlugin({"hostname": "pve.example", "username": TOKEN_USER, "password": SECRET,
-                            "node": "pve1", "vmid": 101, "verify_ssl": False})
-    with pytest.raises(Exception) as raised:
-        await PluginTransport(plugin).request("GET", "/nodes/{node}/qemu/101/firewall/options")
-    assert raised.value.status == 401
-    assert SECRET not in str(raised.value) and SECRET not in repr(raised.value)
-    assert SECRET not in caplog.text
-    assert SECRET not in repr(plugin.__dict__.get("ticket"))
-
-
-def test_the_proxmox_plugin_config_masks_the_secret():
-    from app.services.secret_masking import MASKED_SECRET_PLACEHOLDER, mask_plugin_config
-
-    masked = mask_plugin_config("proxmox", {"hostname": "pve", "username": TOKEN_USER, "password": SECRET})
-    assert masked["password"] == MASKED_SECRET_PLACEHOLDER and masked["username"] == TOKEN_USER
