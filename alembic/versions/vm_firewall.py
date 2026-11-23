@@ -63,6 +63,7 @@ def upgrade() -> None:
         sa.Column("excluded", sa.Boolean(), nullable=False),
         sa.Column("admin_overrides", sa.JSON(), nullable=True),
         sa.Column("net0_bridge", sa.String(32), nullable=True),
+        sa.Column("rollout_after", sa.DateTime(timezone=True), nullable=True),
         sa.Column("revision", sa.Integer(), nullable=False),
         sa.Column("applied_revision", sa.Integer(), nullable=True),
         sa.Column("desired_hash", sa.String(64), nullable=True),

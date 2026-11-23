@@ -309,6 +309,12 @@ _VM_FIREWALL_DEFINITIONS = (
         "Most VM firewalls written at the same time on one Proxmox cluster.",
         4, 1, 64,
     ),
+    _vm_firewall_int(
+        "vm_firewall_rollout_per_node_per_minute",
+        "Most existing VMs per Proxmox node that switching on a location's baseline for every VM "
+        "brings due each minute.",
+        10, 1, 1000,
+    ),
     SettingDef(
         "vm_firewall_drift_mode",
         "str",

@@ -12,7 +12,8 @@ import dataclasses
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional, Sequence
+from datetime import datetime, timezone
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -329,15 +330,33 @@ def _ra_bridges(db: Session) -> set[str]:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def render(db: Session, service_id: int) -> RenderedFirewall:
+def as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """A stored datetime as timezone-aware UTC (SQLite returns naive values)."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def render(db: Session, service_id: int, *, now: Optional[datetime] = None) -> RenderedFirewall:
     ctx = load_context(db, service_id)
-    return render_context(db, ctx)
+    return render_context(db, ctx, now=now)
 
 
-def render_context(db: Session, ctx: RenderContext) -> RenderedFirewall:
+def render_context(
+    db: Session,
+    ctx: RenderContext,
+    *,
+    now: Optional[datetime] = None,
+    assume: Optional[Mapping[str, bool]] = None,
+) -> RenderedFirewall:
+    """``now`` decides whether the row's ``rollout_after`` has passed. ``assume`` replaces the
+    location's ``enabled`` and ``enforce_baseline_on_all`` and ignores ``rollout_after``; the
+    rollout preview uses it to see what the switch would change."""
     firewall = ctx.firewall
     client_enabled = bool(firewall.client_enabled) if firewall is not None else False
     location_enabled = bool(ctx.location_settings and ctx.location_settings.enabled)
+    if assume is not None and "enabled" in assume:
+        location_enabled = bool(assume["enabled"])
     excluded = bool(firewall.excluded) if firewall is not None else False
     active = location_enabled and not excluded
 
@@ -361,6 +380,12 @@ def render_context(db: Session, ctx: RenderContext) -> RenderedFirewall:
 
     enforce_baseline = bool(firewall.enforce_baseline) if firewall is not None else False
     enforce_all = bool(location and location.enforce_baseline_on_all)
+    if assume is not None and "enforce_baseline_on_all" in assume:
+        enforce_all = bool(assume["enforce_baseline_on_all"])
+    elif enforce_all and firewall is not None and firewall.rollout_after is not None:
+        # Staged rollout (section 8.3): the switch reaches this VM only once its time has come.
+        if as_utc(firewall.rollout_after) > (now or datetime.now(timezone.utc)):
+            enforce_all = False
     # A VM enforced only through ``enforce_baseline`` (a new VM, section 4.5a) gets the narrow
     # baseline: anti-spoofing and the MAC filter stay off until the client turns the firewall on,
     # unless the location's ``anti_spoof_new_vms`` says otherwise.

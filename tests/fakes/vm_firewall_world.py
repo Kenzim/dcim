@@ -55,6 +55,7 @@ class World:
         os_type: Optional[str] = None,
         product_code: Optional[str] = None,
         cluster: Optional[ProxmoxCluster] = None,
+        node: str = "pve1",
     ) -> Service:
         n = next(_seq)
         if ip == "auto":
@@ -84,7 +85,7 @@ class World:
         )
         service.vm = ServiceVm(
             proxmox_cluster_id=(cluster or self.cluster).id,
-            proxmox_node_name="pve1",
+            proxmox_node_name=node,
             proxmox_vmid=vmid if vmid is not None else 1000 + n,
             vm_template_id=template_id,
             vm_ip_allocation_id=allocation_id,

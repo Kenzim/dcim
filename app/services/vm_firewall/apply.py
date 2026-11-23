@@ -268,7 +268,7 @@ async def apply(db: Session, service_id: int, client: VmFirewallClient, *, now: 
     observe_net0_bridge(row, config)
 
     revision = row.revision
-    desired = render(db, service_id)
+    desired = render(db, service_id, now=now)
     row.desired_hash = desired.desired_hash
     try:
         result = await converge(client, desired)

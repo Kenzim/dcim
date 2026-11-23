@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from sqlalchemy import func, or_, select, update
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.models.private_network import PrivateNetworkPool
 from app.models.proxmox_inventory import ProxmoxCluster
 from app.models.reseller import ServiceBilling
-from app.models.service import Service, ServiceType
+from app.models.service import Service, ServiceStatus, ServiceType
 from app.models.service_vm import ServiceVm
 from app.models.vm_firewall import (
     FirewallBaseline,
@@ -29,6 +30,7 @@ from app.models.vm_firewall import (
     FirewallIpsetPurpose,
     FirewallLocationSettings,
     FirewallLogLevel,
+    FirewallNicFlag,
     FirewallObjectScope,
     FirewallRule,
     FirewallRuleKind,
@@ -40,6 +42,7 @@ from app.services.private_network_dhcp import PRESENCE_MAC_PREFIXES
 from app.services.vm_firewall import validation as v
 from app.services.vm_firewall.errors import (
     FirewallChanged,
+    FirewallConfirmationRequired,
     FirewallConflict,
     FirewallForbidden,
     FirewallNotEligible,
@@ -47,8 +50,8 @@ from app.services.vm_firewall.errors import (
     FirewallValidationError,
 )
 from app.services.vm_firewall.presets import get_preset
-from app.services.vm_firewall.proxmox_fw import net_bridges
-from app.services.vm_firewall.render import baseline_rules, load_context
+from app.services.vm_firewall.proxmox_fw import net_bridges, net_firewall_flag
+from app.services.vm_firewall.render import as_utc, baseline_rules, load_context, render_context
 
 STORAGE_MAC_PREFIXES = PRESENCE_MAC_PREFIXES
 
@@ -315,10 +318,17 @@ def observe_net0_bridge(row: ServiceFirewall, vm_config: Mapping[str, Any]) -> b
     return True
 
 
-def eligibility(db: Session, service_id: int, *, vm_config: Optional[Mapping[str, Any]] = None) -> Eligibility:
+def eligibility(
+    db: Session,
+    service_id: int,
+    *,
+    vm_config: Optional[Mapping[str, Any]] = None,
+    observe: bool = True,
+) -> Eligibility:
     """Reasons a service cannot have a managed firewall. ``vm_config`` is the Proxmox VM config
-    (``netN`` strings); without it the NIC checks are skipped and ``nics_checked`` is false. With it,
-    net0's bridge is also recorded on an existing firewall row (``observe_net0_bridge``)."""
+    (``netN`` strings); without it the NIC checks are skipped and ``nics_checked`` is false. With it
+    and ``observe``, net0's bridge is also recorded on an existing firewall row
+    (``observe_net0_bridge``)."""
     reasons: list[str] = []
     service = _service(db, service_id)
     if _value(service.service_type) != ServiceType.VM.value:
@@ -336,7 +346,7 @@ def eligibility(db: Session, service_id: int, *, vm_config: Optional[Mapping[str
         reasons.append("excluded")
 
     if vm_config is not None:
-        if row is not None:
+        if row is not None and observe:
             observe_net0_bridge(row, vm_config)
         nets = net_bridges(dict(vm_config))
         infrastructure = _bridge_setting(db, "vm_firewall_infrastructure_bridges")
@@ -1491,6 +1501,133 @@ def _services_in_location(db: Session, location_id: int) -> set[int]:
     return set(db.execute(query).scalars())
 
 
+# Staged rollout of ``enforce_baseline_on_all`` (section 8.3)
+
+
+def _location_vm_ids(db: Session, location_id: int) -> list[int]:
+    query = (
+        select(ServiceVm.service_id)
+        .join(ProxmoxCluster, ProxmoxCluster.id == ServiceVm.proxmox_cluster_id)
+        .join(Service, Service.id == ServiceVm.service_id)
+        .where(
+            ProxmoxCluster.location_id == location_id,
+            Service.service_type == ServiceType.VM,
+            Service.status != ServiceStatus.TERMINATED,
+        )
+        .order_by(ServiceVm.service_id)
+    )
+    return list(db.execute(query).scalars())
+
+
+def _nic_flag_off(db: Session, service_id: int, config: Optional[Mapping[str, Any]]) -> Optional[bool]:
+    """Whether switching the firewall on would flip net0's ``firewall`` flag on a running VM
+    (the blip); None when that is not known."""
+    if config is not None:
+        status = config.get("status")
+        if status is not None and status != "running":
+            return False
+        return not net_firewall_flag(config.get("net0"))
+    row = db.get(ServiceFirewall, service_id)
+    flag = _value(row.nic_flag) if row is not None else FirewallNicFlag.UNKNOWN.value
+    if flag == FirewallNicFlag.UNKNOWN.value:
+        return None
+    return flag == FirewallNicFlag.OFF.value
+
+
+def preview_enforce_baseline_on_all(
+    db: Session,
+    location_id: int,
+    *,
+    vm_configs: Optional[Mapping[int, Mapping[str, Any]]] = None,
+) -> dict[str, Any]:
+    """What switching on the location's ``enforce_baseline_on_all`` changes, with the location
+    taken as enabled. ``changed`` is the count ``update_location_settings`` needs as
+    ``confirm_existing_vms``: eligible existing VMs whose rendered firewall differs with the switch
+    on (opted-in VMs, which it does not affect, are not counted).
+
+    ``vm_configs`` maps service id to the Proxmox VM config, optionally with ``status`` from
+    ``status/current``. With a config, eligibility runs the NIC checks and the blip count reads
+    net0's ``firewall`` flag, leaving out VMs whose ``status`` is not running. Without one the
+    row's observed ``nic_flag`` is used and VMs whose flag is unknown are listed separately.
+    Writes nothing."""
+    configs = vm_configs or {}
+    changed: list[int] = []
+    blip: list[int] = []
+    unknown: list[int] = []
+    for service_id in _location_vm_ids(db, location_id):
+        config = configs.get(service_id)
+        result = eligibility(db, service_id, vm_config=config, observe=False)
+        if any(reason != "location_disabled" for reason in result.reasons):
+            continue
+        ctx = load_context(db, service_id)
+        off = render_context(db, ctx, assume={"enabled": True, "enforce_baseline_on_all": False})
+        on = render_context(db, ctx, assume={"enabled": True, "enforce_baseline_on_all": True})
+        if off.desired_hash == on.desired_hash:
+            continue
+        changed.append(service_id)
+        if int(on.options["enable"]) == 1 and int(off.options["enable"]) != 1:
+            flag_off = _nic_flag_off(db, service_id, config)
+            if flag_off is None:
+                unknown.append(service_id)
+            elif flag_off:
+                blip.append(service_id)
+    return {
+        "location_id": location_id,
+        "changed": len(changed),
+        "service_ids": changed,
+        "blip": len(blip),
+        "blip_service_ids": blip,
+        "nic_flag_unknown": len(unknown),
+        "nic_flag_unknown_service_ids": unknown,
+    }
+
+
+def _schedule_rollout(db: Session, service_ids: Sequence[int], now: datetime) -> Optional[datetime]:
+    """Give each VM a ``rollout_after`` so at most ``vm_firewall_rollout_per_node_per_minute`` per
+    node become due each minute, the first batch at ``now``. Returns the last due time."""
+    from app.services.settings_store import get_setting
+
+    per_minute = max(1, int(get_setting(db, "vm_firewall_rollout_per_node_per_minute")))
+    per_node: dict[tuple[Optional[int], Optional[str]], int] = {}
+    last: Optional[datetime] = None
+    vms = db.execute(
+        select(ServiceVm).where(ServiceVm.service_id.in_(list(service_ids))).order_by(ServiceVm.service_id)
+    ).scalars()
+    for vm in vms:
+        key = (vm.proxmox_cluster_id, vm.proxmox_node_name)
+        index = per_node.get(key, 0)
+        per_node[key] = index + 1
+        due = now + timedelta(minutes=index // per_minute)
+        get_or_create(db, vm.service_id).rollout_after = due
+        last = due if last is None or due > last else last
+    db.flush()
+    return last
+
+
+def _clear_rollouts(db: Session, location_id: int) -> None:
+    ids = _services_in_location(db, location_id)
+    if ids:
+        db.execute(
+            update(ServiceFirewall)
+            .where(ServiceFirewall.service_id.in_(sorted(ids)), ServiceFirewall.rollout_after.is_not(None))
+            .values(rollout_after=None)
+            .execution_options(synchronize_session="fetch")
+        )
+
+
+def release_due_rollouts(db: Session, *, now: Optional[datetime] = None) -> list[int]:
+    """For the worker: rows whose ``rollout_after`` has come get it cleared and their revision
+    bumped, so the normal apply path picks them up. Returns their service ids; the caller commits."""
+    now = now or datetime.now(timezone.utc)
+    rows = db.execute(select(ServiceFirewall).where(ServiceFirewall.rollout_after.is_not(None))).scalars()
+    due = [row for row in rows if as_utc(row.rollout_after) <= now]
+    for row in due:
+        row.rollout_after = None
+        _bump(row)
+    db.flush()
+    return sorted(row.service_id for row in due)
+
+
 def update_location_settings(
     db: Session,
     actor: Actor,
@@ -1503,9 +1640,18 @@ def update_location_settings(
     anti_spoof_new_vms: Optional[bool] = None,
     ipv6_allowed_prefixes: Any = UNSET,
     staging: bool = False,
+    confirm_existing_vms: Optional[int] = None,
+    vm_configs: Optional[Mapping[int, Mapping[str, Any]]] = None,
+    now: Optional[datetime] = None,
 ) -> FirewallLocationSettings:
     """Turning a location on needs a passing readiness result for every cluster cached on the row,
-    unless ``staging`` (enabled before the cluster step, not enforced)."""
+    unless ``staging`` (enabled before the cluster step, not enforced).
+
+    A change that leaves the location enabled with ``enforce_baseline_on_all`` when it was not
+    before (switching it on, or enabling a location that has it) reaches existing VMs: it needs
+    ``confirm_existing_vms`` equal to ``preview_enforce_baseline_on_all(...)["changed"]`` (pass the
+    same ``vm_configs``), else ``FirewallConfirmationRequired`` with a fresh preview. The changed
+    VMs are then staggered through ``rollout_after`` instead of bumped together."""
     _require_staff(actor)
     row = get_location_settings(db, location_id)
     before = _location_snapshot(row)
@@ -1514,12 +1660,24 @@ def update_location_settings(
                        ("smtp_block_new_vms", smtp_block_new_vms), ("anti_spoof_new_vms", anti_spoof_new_vms)):
         if value is not None and not isinstance(value, bool):
             raise FirewallValidationError("must be true or false", field=key)
+    if confirm_existing_vms is not None and (isinstance(confirm_existing_vms, bool)
+                                             or not isinstance(confirm_existing_vms, int)):
+        raise FirewallValidationError("must be a whole number", field="confirm_existing_vms")
     if enabled and not row.enabled and not staging:
         readiness = row.readiness or {}
         clusters = readiness.get("clusters") or {}
         if not clusters or not all(entry.get("ready") for entry in clusters.values()):
             raise FirewallConflict("The readiness check has not passed for every cluster here", code="not_ready",
                                    field="enabled")
+    enforced_before = bool(row.enabled and row.enforce_baseline_on_all)
+    enforced_after = bool((row.enabled if enabled is None else enabled)
+                          and (row.enforce_baseline_on_all if enforce_baseline_on_all is None
+                               else enforce_baseline_on_all))
+    preview: Optional[dict[str, Any]] = None
+    if enforced_after and not enforced_before:
+        preview = preview_enforce_baseline_on_all(db, location_id, vm_configs=vm_configs)
+        if confirm_existing_vms != preview["changed"]:
+            raise FirewallConfirmationRequired(preview)
     if enabled is not None:
         row.enabled = enabled
         if enabled and nic_flag_on_provision is None:
@@ -1537,13 +1695,28 @@ def update_location_settings(
     after = _location_snapshot(row)
     if after == before:
         return row
-    # ``smtp_block_new_vms`` only affects VMs provisioned later, so it bumps nothing.
-    rendered_keys = ("enabled", "enforce_baseline_on_all", "anti_spoof_new_vms", "ipv6_allowed_prefixes")
+    rollout: Optional[dict[str, Any]] = None
+    if preview is not None:
+        # The changed VMs become due a batch at a time; ``release_due_rollouts`` bumps them.
+        _clear_rollouts(db, location_id)
+        last_due = _schedule_rollout(db, preview["service_ids"], now or datetime.now(timezone.utc))
+        rollout = {key: preview[key] for key in ("changed", "blip", "nic_flag_unknown")}
+        rollout["last_due_at"] = last_due.isoformat() if last_due is not None else None
+    elif before["enforce_baseline_on_all"] and not after["enforce_baseline_on_all"]:
+        _clear_rollouts(db, location_id)
+    # ``smtp_block_new_vms`` only affects VMs provisioned later, so it bumps nothing. Switching
+    # ``enforce_baseline_on_all`` on goes through the staged rollout above instead.
+    rendered_keys = ["enabled", "anti_spoof_new_vms", "ipv6_allowed_prefixes"]
+    if not (after["enforce_baseline_on_all"] and not before["enforce_baseline_on_all"]):
+        rendered_keys.append("enforce_baseline_on_all")
     if any(before[key] != after[key] for key in rendered_keys):
         bump_revisions(db, _services_in_location(db, location_id))
     db.flush()
+    metadata: dict[str, Any] = {"before": before, "after": after, "staging": bool(staging)}
+    if rollout is not None:
+        metadata["rollout"] = rollout
     _audit(db, actor, "firewall.location_updated", resource_type="location", resource_id=location_id,
-           subject_user_id=None, metadata={"before": before, "after": after, "staging": bool(staging)})
+           subject_user_id=None, metadata=metadata)
     return row
 
 
@@ -1590,7 +1763,9 @@ __all__ = [
     "ipset_entries",
     "list_groups",
     "list_ipsets",
+    "preview_enforce_baseline_on_all",
     "record_readiness",
+    "release_due_rollouts",
     "remove_foreign_references",
     "reorder_rules",
     "replace_rules",

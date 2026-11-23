@@ -62,6 +62,20 @@ class FirewallConflict(FirewallError):
     default_code = "conflict"
 
 
+class FirewallConfirmationRequired(FirewallConflict):
+    """A change reaching existing VMs needs ``confirm_existing_vms`` equal to the previewed count
+    (409 ``confirmation_required``); ``preview`` is a fresh preview to show the admin."""
+
+    default_code = "confirmation_required"
+
+    def __init__(self, preview: dict, message: str = "Confirm how many existing VMs this changes"):
+        super().__init__(message, code="confirmation_required", field="confirm_existing_vms")
+        self.preview = dict(preview)
+
+    def to_dict(self) -> dict:
+        return {**super().to_dict(), "preview": self.preview}
+
+
 class FirewallNotEligible(FirewallError):
     """The service cannot have a managed firewall (section 3.1)."""
 
