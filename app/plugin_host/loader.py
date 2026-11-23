@@ -273,6 +273,35 @@ def find_package(directory: str, root: Optional[Path] = None, *, for_install: bo
     return package
 
 
+def package_origin(directory: str) -> Optional[bool]:
+    """Whether the package ``find_package(directory)`` takes comes from the bundled root; None when there is none.
+
+    Only looks for the manifest file, so it is cheap enough to ask on every load.
+    """
+    if not directory or "/" in directory or "\\" in directory or directory.startswith("."):
+        return None
+    for base, bundled in sorted(package_roots(), key=lambda entry: not entry[1]):
+        if (base / directory / "plugin.json").is_file():
+            return bundled
+    return None
+
+
+def root_clash_reason(directory: str, installed_bundled: bool, package_bundled: Optional[bool]) -> Optional[str]:
+    """Why a package from the other root than the installation's one must not be used, or None when roots agree."""
+    if package_bundled is None or bool(package_bundled) == bool(installed_bundled):
+        return None
+    if package_bundled:
+        return (
+            f"A plugin Rackflow ships now uses the name `{directory}`. This installation is a third-party plugin "
+            "of that name. Uninstall it and remove its folder from the plugins folder before installing "
+            "Rackflow's plugin; its settings and data will not be carried over."
+        )
+    return (
+        f"This installation is the plugin Rackflow ships under the name `{directory}`, but the files now found "
+        "under that name are a third-party copy. They are not used; remove the copy from the plugins folder."
+    )
+
+
 class Registrar:
     """Collects the handlers a plugin's register(plugin) binds to its manifest names."""
 
