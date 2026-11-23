@@ -35,6 +35,13 @@ def test_every_event_and_sdk_member_has_a_description():
     assert not stale, f"SDK_NOTES names members that no longer exist: {stale}"
 
 
+def test_every_provider_refusal_reason_has_a_description():
+    reasons = reference.provider_reasons()
+    assert "busy" in reasons and len(reasons) == len(set(reasons))
+    assert set(reference.REASON_NOTES) == set(reasons), "REASON_NOTES must describe every ProviderUnavailable reason, and only those"
+    assert set(reference.FAILURE_REASONS) <= set(reasons)
+
+
 def test_field_notes_name_real_manifest_fields():
     known = set()
     for model in reference._MODELS:

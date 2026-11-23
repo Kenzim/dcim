@@ -161,18 +161,20 @@ async def run_row(row_id: int, owner: str) -> Optional[str]:
     now = utcnow()
     every = timedelta(seconds=spec.every_seconds)
     next_run = (previous_next or now) + every
-    if outcome.unavailable:
+    # Not run (plugin unavailable, or no free slot): skipped, and tried again in a minute.
+    not_run = outcome.unavailable or outcome.busy
+    if not_run:
         next_run = now + timedelta(seconds=60)
     elif next_run <= now:
         next_run = now + every
-    status = "ok" if outcome.ok else ("skipped" if outcome.unavailable else "failed")
+    status = "ok" if outcome.ok else ("skipped" if not_run else "failed")
     db = new_session()
     try:
         db.execute(
             update(PluginSchedule)
             .where(PluginSchedule.id == row_id, PluginSchedule.lease_owner == owner)
             .values(
-                last_run_at=now if not outcome.unavailable else PluginSchedule.last_run_at,
+                last_run_at=now if not not_run else PluginSchedule.last_run_at,
                 last_status=status,
                 last_error=None if outcome.ok else (outcome.error or outcome.refused or "failed")[:2000],
                 next_run_at=next_run,

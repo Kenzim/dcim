@@ -276,6 +276,14 @@ _SPECS = (
         ),
     ),
     AlertTypeSpec(
+        "plugin_handlers_abandoned",
+        "Plugin handlers stuck",
+        "A plugin's handlers timed out and are still running, each holding a thread and a database session.",
+        _W,
+        "plugin",
+        (_seconds("stale_after_seconds", "Ignore process reports not refreshed for", 120, minimum=60),),
+    ),
+    AlertTypeSpec(
         "client_storage_quota",
         "Client storage near quota",
         "A client's storage share has passed the quota warning level.",

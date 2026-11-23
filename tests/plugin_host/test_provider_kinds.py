@@ -813,35 +813,35 @@ def test_a_bundled_plugin_installs_runs_and_is_listed_as_bundled(plugin_env, bun
     assert (bundled / VALIDATOR / "plugin.json").is_file(), "uninstall never touches the bundled folder"
 
 
-def test_the_same_plugin_in_both_roots_is_an_error_and_neither_loads(plugin_env, bundled, db_session):
+def test_the_same_plugin_in_both_roots_refuses_the_plugins_folder_copy_and_the_bundled_one_runs(
+    plugin_env, bundled, db_session
+):
     put_fixture(bundled, VALIDATOR)
     install(db_session, VALIDATOR)
     put_fixture(plugin_env, VALIDATOR)
     (plugin_env / VALIDATOR / "notes.txt").write_text("a different copy")
-    packages = [p for p in discover() if p.directory == VALIDATOR]
-    assert len(packages) == 2 and not any(p.valid for p in packages)
-    assert all("exists in both the plugins folder and the bundled plugins folder" in " ".join(p.errors) for p in packages)
-    with pytest.raises(lifecycle.LifecycleError, match="exists in both"):
-        run(lifecycle.upgrade(db_session, db_session.get(PluginInstallation, VALIDATOR), accept_permissions=[]))
-    (plugin_env / VALIDATOR / "notes.txt").unlink()  # identical copies: still ambiguous, so still refused
+    packages = {p.bundled: p for p in discover() if p.directory == VALIDATOR}
+    assert packages[True].valid and not packages[True].errors
+    assert not packages[False].valid and packages[False].reserved
+    assert any("is a reserved name used by a plugin Rackflow ships" in e for e in packages[False].errors)
+    assert find_package(VALIDATOR).bundled is True and find_package(VALIDATOR).valid
     runtime.reset_all()
-    with pytest.raises(ProviderUnavailable) as err:
-        validator_call()
-    assert err.value.reason == "not_loaded"
+    assert validator_call().status == "valid"
     db_session.expire_all()
-    assert db_session.get(PluginInstallation, VALIDATOR).status == PluginStatus.FAILED
-    assert "exists in both" in db_session.get(PluginInstallation, VALIDATOR).disabled_reason
+    assert db_session.get(PluginInstallation, VALIDATOR).status == PluginStatus.ENABLED
+    with pytest.raises(lifecycle.LifecycleError, match="already installed"):
+        run(lifecycle.upgrade(db_session, db_session.get(PluginInstallation, VALIDATOR), accept_permissions=[]))
 
 
-def test_the_same_plugin_id_under_another_folder_name_is_a_conflict(plugin_env, bundled):
+def test_the_same_plugin_id_under_another_folder_name_is_refused_and_the_bundled_one_is_not(plugin_env, bundled):
     put_fixture(bundled, VALIDATOR)
     shutil.copytree(bundled / VALIDATOR, plugin_env / "renamed_copy")
     packages = {(p.directory, p.bundled): p for p in discover()}
     assert set(packages) == {(VALIDATOR, True), ("renamed_copy", False)}
-    for package in packages.values():
-        assert "exists in both the plugins folder and the bundled plugins folder" in " ".join(package.errors)
-    assert not find_package(VALIDATOR).valid
-    assert any("exists in both" in e for e in find_package(VALIDATOR).errors)
+    assert packages[(VALIDATOR, True)].valid
+    assert any("reserved name" in e for e in packages[("renamed_copy", False)].errors)
+    assert find_package(VALIDATOR).valid
+    assert any(f"`{VALIDATOR}` is a reserved name" in e for e in find_package("renamed_copy").errors)
 
 
 def test_a_pack_file_over_1_mb_is_refused_before_it_is_read(plugin_env, monkeypatch):
@@ -863,7 +863,7 @@ def test_a_pack_file_over_1_mb_is_refused_before_it_is_read(plugin_env, monkeypa
 def test_installing_a_plugin_present_in_both_roots_is_refused(plugin_env, bundled, db_session):
     put_fixture(bundled, VALIDATOR)
     put_fixture(plugin_env, VALIDATOR)
-    with pytest.raises(lifecycle.LifecycleError, match="exists in both"):
+    with pytest.raises(lifecycle.LifecycleError, match="reserved name"):
         run(lifecycle.install(db_session, VALIDATOR, accept_permissions=["tax.validate_id"]))
 
 

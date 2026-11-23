@@ -957,21 +957,29 @@ def evaluate_switch(
     return items
 
 
-# What the tax adviser's sign-off covers: design 18 questions 8 and 10, and the questions of the
-# legal review of billing phase 2 (design 18.1). The full text stays in the design.
+ADVISER_SIGNOFF_LABEL = "Operator has reviewed the tax defaults"
+ADVISER_SIGNOFF_DETAIL = (
+    "Rackflow is software for hosting operators, and its tax defaults are a starting point, not legal advice. "
+    "Record who reviewed the defaults and when, with your own tax adviser where you need one."
+)
+
+# The tax defaults the operator's acknowledgement covers: design 18 questions 8 and 10, and the
+# questions of the legal review of billing phase 2 (design 18.1), as decided there. The full text
+# stays in the design and in docs/billing-tax-packs.md, section "Defaults and why".
 ADVISER_SIGNOFF_COVERS = (
-    "18 q8: what Rackflow sells for VAT (electronically supplied services, or hire of equipment or "
-    "property-related services for bare metal and colocation)",
-    "18 q10: reverse charge wording",
-    "18.1 q1: Isle of Man and Monaco",
-    "18.1 q2: a VAT number of another country than the billing country; GB numbers for EU sellers",
-    "18.1 q3: a customer with no address",
-    "18.1 q4: wording of gb_outside_scope_b2b, eu_reverse_charge and outside_scope",
-    "18.1 q5: billing country outside the EU against an IP address in the EU",
-    "18.1 q6: Article 59c, established in only one member state",
+    "18 q8: VMs, proxies, storage, backup slots and dedicated bare-metal servers are electronically "
+    "supplied services (class digital_service); colocation or rack space needs its own tax class",
+    "18 q10: the wording of the reverse charge notes",
+    "18.1 q1: Isle of Man customers are taxed as UK customers and Monaco customers as French",
+    "18.1 q2: a VAT number of another country than the billing country does not give reverse charge",
+    "18.1 q3: a customer with no country is taxed as a consumer in the seller's country",
+    "18.1 q4: the wording of gb_outside_scope_b2b, eu_reverse_charge and outside_scope",
+    "18.1 q5: a billing country outside the EU against an IP address in the EU is flagged, and the "
+    "billing country decides",
+    "18.1 q6: the seller-state rows for an EU seller below the EU-wide threshold, chosen by registrations",
     "18.1 q7: exempt lines on EU invoices",
-    "18.1 q8: special territories (Canary Islands, Ceuta, Melilla)",
-    "18.1 q9: appendix C as a whole",
+    "18.1 q8: special territories (Canary Islands, Ceuta, Melilla) are not treated apart",
+    "18.1 q9: appendix C of the design as a whole",
 )
 
 
@@ -1054,8 +1062,9 @@ def _tax_switch_items(
     ))
     items.append(_product_classes_item(db, now, enabled))
     signoff = str(get_setting(db, "billing_tax_adviser_signoff") or "").strip()
-    items.append(_item("adviser_signoff", bool(signoff), signoff=signoff or None,
-                       setting="billing_tax_adviser_signoff", covers=list(ADVISER_SIGNOFF_COVERS)))
+    items.append(_item("adviser_signoff", bool(signoff), label=ADVISER_SIGNOFF_LABEL, detail=ADVISER_SIGNOFF_DETAIL,
+                       signoff=signoff or None, setting="billing_tax_adviser_signoff",
+                       covers=list(ADVISER_SIGNOFF_COVERS)))
     items.append(_tax_alerts_item(db))
     from app.services.tax import exchange_rates
 

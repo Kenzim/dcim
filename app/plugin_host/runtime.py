@@ -14,7 +14,15 @@ from sqlalchemy.orm import Session
 from app.models.plugin_host import PluginInstallation, PluginStatus
 from app.plugin_host.catalogue import EVENTS
 from app.plugin_host.common import new_session, write_log
-from app.plugin_host.loader import LoadedPlugin, PluginLoadError, _purge_modules, find_package, import_package
+from app.plugin_host.loader import (
+    LoadedPlugin,
+    PluginLoadError,
+    _purge_modules,
+    find_package,
+    import_package,
+    package_origin,
+    root_clash_reason,
+)
 from app.plugin_host.manifest import Manifest, validate_manifest
 
 logger = logging.getLogger(__name__)
@@ -116,6 +124,11 @@ def _set_status(plugin_id: str, status: str, reason: str) -> None:
 def load_installed(inst: PluginInstallation, *, require_enabled: bool = True) -> Optional[LoadedPlugin]:
     """The plugin's code as approved by the admin, or None when it cannot or must not run."""
     if require_enabled and inst.status != PluginStatus.ENABLED:
+        return None
+    clash = root_clash_reason(inst.directory, bool(inst.bundled), package_origin(inst.directory))
+    if clash is not None:
+        if require_enabled:
+            _set_status(inst.id, PluginStatus.FILES_CHANGED, clash)
         return None
     with _lock:
         cached = _loaded.get(inst.id)

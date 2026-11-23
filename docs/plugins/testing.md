@@ -49,7 +49,8 @@ def test_new_service_gets_a_welcome_note(rackflow):
 
 - manifest errors, as the admin would see them: unknown keys, a bad id, an unknown permission or event, a permission the manifest does not declare but its events, hooks, panels or tools need, undeclared actions in a panel;
 - a folder name that differs from the plugin id;
-- a `rackflow_api` range that excludes the current API version;
+- a `rackflow_api` range that allows none of the supported API versions;
+- a `provides` entry whose kind permission is missing, a `rackflow_api` range that allows only 1.0 together with `provides`, a pack file that is missing or invalid, and a provider that is declared but not registered with `@plugin.provider` (or the reverse), or whose object lacks a method of its kind;
 - a missing entry module, an import error, an error in `register(plugin)`;
 - a handler declared in the manifest but never registered, or registered but not declared;
 - warnings: a missing description, author or licence, a `rackflow_api` range with no upper bound, and every [deprecated item](deprecation-policy.md) the package uses.
@@ -111,8 +112,71 @@ The kit renders the same documents the portal, the admin interface, the WHMCS cl
 - `rackflow.audit_entries("plugin.")` lists the audit rows whose action starts with the prefix: `action`, `resource_type`, `resource_id`, `metadata`.
 - `rackflow.reset_rate_limits()` clears the action, tool and guest-command rate limits. An action allows 10 calls a minute per caller, so a test that clicks more often needs it.
 
+## Testing a provider plugin
+
+The kit supports plugins that offer a provider (API 1.1, see [kinds](README.md#15-plugin-kinds-api-11)), with no special fixture. `rackflow.install(PLUGIN)` runs the real install, including the permission check of every `provides` entry and the load that matches your `@plugin.provider` classes with the manifest. You then call the provider the way billing does, with the host's own `call_provider`, so the time limit, the two-call limit, the answer checks, the rate limit and the circuit breaker all run for real. Import the request and answer types from `app.plugin_host.kinds` in tests (inside the plugin they come from `rackflow_plugin.kinds`; both names are the same module once the kit has loaded a plugin).
+
+```python
+from pathlib import Path
+
+import pytest
+
+from app.plugin_host.testkit import assert_valid_package
+from app.plugin_host.kinds import TaxIdCheckRequest
+from app.plugin_host.providers import ProviderUnavailable, call_provider
+
+PLUGIN = Path(__file__).resolve().parents[1]
+REF = "norway_vat:registry"          # <plugin id>:<provider id>
+
+
+def ask(tax_id="123456789"):
+    request = TaxIdCheckRequest("NO", tax_id, "no_vat")
+    return call_provider("tax_id_validator", REF, "check_online", request)
+
+
+def test_package_is_valid():
+    assert_valid_package(PLUGIN)
+
+
+def test_a_known_number_is_valid_and_an_unknown_one_is_not(rackflow):
+    rackflow.install(PLUGIN)
+    rackflow.http.respond("registry.example.com", 200, "{}")
+    assert ask().status == "valid"
+    rackflow.http.respond("registry.example.com", 404, "")
+    assert ask().status == "invalid"
+
+
+def test_a_registry_outage_is_unavailable_not_invalid(rackflow):
+    rackflow.install(PLUGIN)
+    rackflow.http.respond("registry.example.com", 503, "")
+    result = ask()
+    assert (result.status, result.error_code) == ("unavailable", "HTTP_503")
+
+
+def test_billing_is_refused_while_the_plugin_is_disabled(rackflow):
+    plugin = rackflow.install(PLUGIN)
+    plugin.disable()
+    with pytest.raises(ProviderUnavailable) as refused:
+        ask()
+    assert refused.value.reason == "disabled"
+```
+
+What to test, and what the kit gives you for it:
+
+- **Answers.** Call each method with a request built from the dataclasses and assert on the result. `call_provider` returns the *checked* answer, so a test that passes also proves the host accepts your answer. A wrong answer shows up as `ProviderUnavailable` with the reason `invalid_answer`; the plugin log (`plugin.log_messages("error")`) says which check failed.
+- **Failures.** A method that raises gives the reason `error`; one that runs past its time limit gives `timeout` (pass `timeout_seconds=0.2` to `call_provider` to keep the test short; the floor is 0.1). Both write an error line to the plugin log, and `plugin.installation.consecutive_failures` counts them. Call it `health.FAILURES_TO_OPEN` times (from `app.plugin_host.health`) to see the circuit open, and `rackflow.audit_entries("plugin.provider_failed")` to see the audit entry.
+- **Outbound HTTP.** `rackflow.http` answers `ctx.http` inside a provider exactly as it does for handlers (see above); the host's URL rules still apply.
+- **Settings, store and state.** `plugin.configure(...)` and `plugin.state()` (the plugin-wide `ctx.store`) work as for any plugin.
+- **Rate limits.** The kit counts them with the same fake counter as the other limits. Calls over the manifest's `rate_limit` give `rate_limited` without running your code, and `rackflow.reset_rate_limits()` resets the count.
+- **Which providers exist.** `providers_of("tax_id_validator")` from `app.plugin_host.providers` lists the enabled providers of a kind whose circuit is closed and whose permission was granted.
+
+The bundled [`vies_validator`](../../plugin_packages/vies_validator/tests/test_vies_plugin.py) and [`hmrc_exchange_rates`](../../plugin_packages/hmrc_exchange_rates/tests/test_hmrc_plugin.py) tests are larger examples. They live outside `testpaths`, so the VIES tests are also run from `tests/plugin_host/`; run your own with `pytest path/to/tests` as above.
+
 ## What the kit does not cover
 
+- It has no helper for providers of its own. You call the host's `call_provider` and `providers_of` directly, and the types come from `app.plugin_host`, which the guide otherwise tells plugin code not to import: that is fine in a test, never in the plugin.
+- It does not run billing. It checks that your provider gives answers the host accepts, not what billing does with them (for example how an `unavailable` tax ID check is charged).
+- Provider calls run on real threads with real time limits, so a test that checks a time limit takes about as long as the limit; `rackflow.clock` does not speed it up.
 - It does not run a browser, WHMCS or an MCP client. It checks the document they all render.
 - It does not run MariaDB. A plugin reaches the database only through settings, state and logs, which the host manages, so the database engine is not part of what you test.
 - It does not run the plugin worker as a process. `deliver()` and `run_schedule()` call the same functions the worker calls.

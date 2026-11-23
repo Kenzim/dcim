@@ -226,7 +226,7 @@ Service types: `vm`, `bare_metal`, `http_proxy`, `nfs_storage`, `backup_slot`. V
 | `ui` | [UiSpec](#uispec) | empty |  |  |
 | `mcp_tools` | list of [McpToolSpec](#mcptoolspec) | empty | max length 20 |  |
 | `provides` | list of [ProvideSpec](#providespec) | empty | max length 10 | Typed providers the plugin offers (API 1.1 and later). Each needs the permission of its kind and an `@plugin.provider(kind, id)` in `register`. |
-| `tables` | any | none |  | Reserved. Refused in API 1.0. |
+| `tables` | any | none |  | Reserved. Refused in every API version so far. |
 
 ### ServicesSpec
 
@@ -369,12 +369,12 @@ Service types: `vm`, `bare_metal`, `http_proxy`, `nfs_storage`, `backup_slot`. V
 | `kind` | `"tax_id_validator"` or `"tax_rule_pack"` or `"tax_provider"` or `"currency_rates"` | required |  | `tax_id_validator`, `tax_rule_pack`, `tax_provider` or `currency_rates`. |
 | `id` | string | required |  | Unique with the kind inside the plugin. Billing refers to the provider as `<plugin id>:<provider id>`. |
 | `label` | string | required | min length 1, max length 80 | Shown to admins where they choose a provider. |
-| `description` | string | `""` | max length 500 |  |
+| `description` | string | `""` | max length 500 | Shown to admins with the label. |
 | `countries` | list of string | empty | max length 300 | Upper case ISO alpha-2 codes the provider covers (`EL` for Greece at VIES). Empty means any. |
 | `id_types` | list of string | empty | max length 50 | Tax ID types the provider checks, such as `eu_vat`. Required for `tax_id_validator`, refused elsewhere. |
 | `currencies` | list of string | empty | max length 200 | Upper case ISO alpha-3 codes. Only for `tax_provider`; empty means any. |
 | `timeout_seconds` | integer | `8` | at least 1, at most 30 | Wall-clock limit of one call. Billing may lower it for a call, never raise it. |
-| `rate_limit` | [RateLimitSpec](#ratelimitspec) | none |  | Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate`, `load` and `rates`, not `supports` or `check_format`. |
+| `rate_limit` | [RateLimitSpec](#ratelimitspec) | none |  | Calls allowed per window, shared by every Rackflow process. One counter per provider, used by `check_online`, `calculate`, `load` and `rates`; `supports`, `check_format`, `pack_id` and `versions` are not counted. |
 | `pack` | [PackRef](#packref) | none |  | Only for `tax_rule_pack`: the JSON file of the pack inside the package. It must exist and pass the pack schema at install. |
 
 ### RateLimitSpec
@@ -517,7 +517,68 @@ A provider method receives only its arguments. To read settings, write the plugi
 | `CurrencyRatesResult` | `period_end` | `date` | yes |
 | `CurrencyRatesResult` | `rates` | `tuple[CurrencyRate, ...]` | yes |
 
-Billing checks every answer. A wrong type, an unknown status, a missing, extra or unreadable field, an `unavailable` answer without an `error_code`, or (for a tax provider) a missing or unknown line key, a negative amount, a rate that does not give the tax within one minor unit, or tax on a reverse charge part counts as a failure of the plugin, the same as a timeout or an exception.
+Every answer is checked before billing sees it; see [Calls to providers](#calls-to-providers) for what is checked and what happens when a check fails.
+
+## Calls to providers
+
+Billing reaches a provider only through `call_provider(kind: str, provider_ref: str, method: str, *args: Any, timeout_seconds: Optional[float] = None, db: Optional[Session] = None) -> Any`. `provider_ref` is `<plugin id>:<provider id>`. A plugin never sees this function; this section describes what the host does around each call so that a provider's author knows what to expect. The plugin's own code runs inside the call and cannot make `call_provider` raise anything but `ProviderUnavailable`.
+
+### Time limit
+
+- A call may run for the provider's `timeout_seconds` (8 by default, 1 to 30). The caller may pass a lower `timeout_seconds`, never a higher one, and never below 0.1 s.
+- The limit starts when the plugin's code starts, so it includes loading the plugin (importing the module, `register` and creating the providers) when this process has not loaded it yet. Time spent asking Redis for the rate limit is taken off it.
+- A coroutine is cancelled at the limit. A plain function cannot be stopped: the host stops waiting, counts a `timeout` and rolls back whatever the call wrote to plugin state; the thread runs on until the function returns.
+
+### Slots and `busy`
+
+- Every call runs on a thread of its own. A plugin may have at most 2 calls whose code is still running, counting calls that timed out but have not returned. A further call is refused with `busy` at once, without calling the plugin and without waiting in a queue behind it. A plugin that hangs therefore holds at most 2 threads and database sessions, and never slows calls to other plugins.
+- `busy` is also the reason when the call's thread has not started within 2 s.
+- A `busy` refusal is not a failure of the plugin, with one exception: when every slot is held by a call of that plugin that has already timed out, each refusal counts as a failure, so that a provider that hangs for good opens its circuit.
+
+### Circuit breaker
+
+- A `timeout`, an exception or an invalid answer is a failure: it is written to the plugin log and counted. 5 failures in a row open the circuit for 60 s, doubling up to 1800 s; 25 in a row disable the plugin.
+- Only a valid answer from a method that does real work (`check_online`, `calculate`, `load`, `rates`) counts as a success and resets the count. A valid answer from `supports`, `check_format`, `pack_id` or `versions` does not, so a provider whose real calls keep failing cannot keep its circuit closed with cheap ones.
+- When a failure opens the circuit, the audit entry `plugin.provider_failed` records the provider (`<kind>:<provider id>`), the number of failures, the seconds the circuit stays open and the error. The failure that disables the plugin writes `plugin.auto_disabled` instead.
+- With a `db` argument the failure count, circuit state, log line and audit entry are written in a savepoint of the caller's transaction on SQLite, and committed on a separate session on other databases and without `db`. The plugin's own state writes during a call always use the plugin's own session.
+
+### Rate limit
+
+- The provider's `rate_limit` counts the methods that may do real work (`check_online`, `calculate`, `load`, `rates`). There is one counter for each provider, shared by all of its counted methods and by every Rackflow process through Redis. While Redis is down or does not answer within 0.25 s each process counts for itself.
+
+### Reasons
+
+`call_provider` raises only `ProviderUnavailable`, whose `reason` is one of these. A call never leaks the plugin's own exception, whatever its message does. Reasons marked failure count against the plugin's health.
+
+| Reason | Failure | Meaning |
+|---|---|---|
+| `circuit_open` | no | The plugin's circuit is open after repeated failures. Refused without calling the plugin. |
+| `rate_limited` | no | The provider's `rate_limit` is used up. Refused without calling the plugin. |
+| `busy` | only when hung | The plugin already has the most calls it may run at once, or the call's thread did not start in time. |
+| `timeout` | yes | The method did not return within its time limit. |
+| `error` | yes | The method raised an exception, or the host failed unexpectedly while making the call. |
+| `invalid_answer` | yes | The method returned something that failed the checks below. |
+| `disabled` | no | The plugin is not enabled. |
+| `not_installed` | no | No plugin with that id is installed. |
+| `not_loaded` | no | The plugin's manifest or code could not be loaded. |
+| `not_permitted` | no | The plugin was not granted the permission of the provider's kind. |
+| `unknown_provider` | no | The plugin does not declare that provider, or the reference is not `<plugin id>:<provider id>`. |
+| `unknown_method` | no | The kind has no such method. |
+| `bad_arguments` | no | The wrong number of arguments, or arguments that cannot be copied. |
+
+### Answer checks
+
+The plugin receives copies of its arguments, so nothing it does to them reaches billing. Its answer is rebuilt from new objects after checking, and checked against billing's own request, never the plugin's copy. Types are checked exactly: a subclass of a result class, of `str`, `int`, `dict` or `datetime`, and `bool` where a number is asked for, are refused. Any failed check is an `invalid_answer` and counts as a failure.
+
+| Method | What is checked |
+|---|---|
+| `supports`, `check_format` | A real `bool`. |
+| `tax_id_validator.check_online` | A `TaxIdCheckResult` with `status` `valid`, `invalid` or `unavailable`. `checked_at` is a `datetime` from 2000 to one day ahead of now (without a time zone it counts as UTC). `unavailable` needs an `error_code`. `error_code` and `request_ref` are at most 64 characters; `registered_name` and `registered_address` are cut to 512 characters. |
+| `tax_rule_pack.pack_id` | Text matching `^[a-z][a-z0-9_]{0,63}$`. |
+| `tax_rule_pack.versions` | A list of at most 500 non-empty texts of at most 32 characters. |
+| `tax_rule_pack.load` | A `dict` that is JSON (no `NaN` or infinity) and at most 1 MB as JSON text. |
+| `tax_provider.calculate` | A `TaxProviderResult` whose `lines` has exactly the keys of the request: none missing, none unknown. Each part is a `TaxProviderPart` with `name` (at most 255 characters) and `jurisdiction` (at most 64) not empty, `legal_note` at most 2,000, `reference` at most 128. `base_cents` and `tax_cents` are `int`, from 0 to 9,223,372,036,854,775,807 (2^63 - 1). `rate_percent` is a string of ASCII digits with at most three before the point and four after. Tax must be within one minor unit of `rate_percent` of `base_cents`, and must be 0 on a `reverse_charge` part. |
+| `currency_rates.rates` | A `CurrencyRatesResult` whose `source` matches `^[a-z][a-z0-9_]{0,31}$`, whose `period_start` and `period_end` are exactly the first and last day of the requested month, and with at most 400 rates. Each currency is an upper case ISO alpha-3 code, not the base currency and not listed twice. `units_per_base` is an ASCII decimal above zero with at most twelve digits before the point and six after. |
 
 ## Handlers
 
@@ -572,7 +633,14 @@ Nothing is deprecated in this API version.
 | MCP tool calls per minute | 30 per plugin, tool and caller |
 | Guest commands per minute | 6 per plugin and service, 60 per plugin |
 | Providers per plugin | 10 |
-| Provider call time limit | 8 s by default, at most 30 s (`timeout_seconds`) |
+| Provider call time limit | 8 s by default, at most 30 s (`timeout_seconds`); a caller may lower it, to 0.1 s at least |
+| Provider calls running at once | 2 per plugin, then `busy` |
+| Wait for a provider call's thread to start | 2 s, then `busy` |
+| Wait for Redis on a provider rate limit | 0.25 s, then each process counts for itself |
+| Largest tax rule pack | 1 MB |
+| Versions of a tax rule pack | 500 |
+| Rates in a currency rates answer | 400 |
+| Largest amount in a tax answer | 9,223,372,036,854,775,807 minor units |
 | Provider rate limit | set per provider in `rate_limit`, from 1 call per 86,400 s to 10,000 calls per second |
 | Failures that open the circuit | 5 in a row |
 | Failures that disable the plugin | 25 in a row |

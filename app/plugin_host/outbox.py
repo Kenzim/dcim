@@ -118,7 +118,8 @@ async def deliver_one(row_id: int, owner: str) -> str:
         _finish(row_id, owner, status=DeliveryStatus.DELIVERED, delivered_at=utcnow(), attempts=attempts + 1,
                 last_error=None)
         return DeliveryStatus.DELIVERED
-    if outcome.unavailable:
+    if outcome.unavailable or outcome.busy:
+        # Not attempted: the plugin was unavailable or had no free slot; try again later.
         _finish(row_id, owner, status=DeliveryStatus.QUEUED, next_attempt_at=utcnow() + timedelta(seconds=60))
         return DeliveryStatus.QUEUED
     attempts += 1
