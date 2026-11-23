@@ -239,6 +239,29 @@ async def test_hidden_admin_group_answers_like_a_missing_one(db_session, world, 
 
 
 @pytest.mark.asyncio
+async def test_view_holds_no_internal_address_or_hidden_name(db_session, world, vms, as_client):
+    from tests.api.vm_firewall_helpers import assert_nothing_hidden, seed_hidden_admin_objects
+
+    alice, alice_vm = world.users["alice"], vms[0]
+    seed_hidden_admin_objects(db_session, world.staff_actor, alice_vm.id)
+    view = await _view(alice, as_client, alice_vm.id)
+    assert_nothing_hidden(view)
+    assert [g["name"] for g in view["groups"]] == ["Provided by us"]
+
+
+@pytest.mark.asyncio
+async def test_suspended_vm_refuses_firewall_ops(db_session, world, vms, as_client):
+    from app.models.service import ServiceStatus
+
+    alice, alice_vm = world.users["alice"], vms[0]
+    alice_vm.status = ServiceStatus.SUSPENDED
+    db_session.commit()
+    with pytest.raises(ToolError) as exc:
+        await _fw(alice, ["read", "write"], "add_rule", as_client, alice_vm.id, rule=SSH)
+    assert _error(exc)["code"] == "service_not_active"
+
+
+@pytest.mark.asyncio
 async def test_another_clients_group_is_not_attachable(db_session, world, vms, as_client):
     alice, alice_vm = world.users["alice"], vms[0]
     theirs = svc.create_group(db_session, world.actor("bob"), name="bobs", rules=[WEB])

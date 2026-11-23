@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
+from app.core.client_permissions import PermissionKey
 from app.models.private_network import PrivateNetworkPool
 from app.models.proxmox_inventory import ProxmoxCluster
 from app.models.reseller import ServiceBilling
@@ -38,6 +39,7 @@ from app.models.vm_firewall import (
     ServiceFirewall,
 )
 from app.services.audit_service import AuditService
+from app.services.client_permission_resolver import has_client_permission
 from app.services.private_network_dhcp import PRESENCE_MAC_PREFIXES
 from app.services.vm_firewall import validation as v
 from app.services.vm_firewall.errors import (
@@ -141,6 +143,26 @@ class Actor:
 def _require_staff(actor: Actor, field_path: Optional[str] = None) -> None:
     if not actor.is_staff:
         raise FirewallForbidden("Only staff can change this", code="admin_only", field=field_path)
+
+
+# A client or billing change to the firewall of a service in one of these states is refused.
+WRITE_BLOCKED_STATUSES = (ServiceStatus.SUSPENDED, ServiceStatus.TERMINATED)
+
+
+def _require_may_change_services(db: Session, actor: Actor, service_ids: Iterable[int], what: str) -> None:
+    """A client's change to a group or IP set changes every VM that renders it, so it needs what a
+    change on each of those VMs needs: the ``vm.firewall`` permission and a service that is not
+    suspended. Terminated services are left out: their firewall no longer belongs to a running server."""
+    if actor.is_staff:
+        return
+    for service_id in sorted(set(service_ids)):
+        service = db.get(Service, service_id)
+        if service is None or service.status == ServiceStatus.TERMINATED:
+            continue
+        if service.status in WRITE_BLOCKED_STATUSES or not has_client_permission(db, service, PermissionKey.VM_FIREWALL):
+            raise FirewallForbidden(
+                f"This {what} is used by a server whose firewall you may not change", code="permission_denied"
+            )
 
 
 def _audit(
@@ -430,13 +452,18 @@ def _check_references(
     field_path: str,
     *,
     is_group: bool = False,
+    kept: Optional[Sequence[tuple[Optional[int], Optional[int]]]] = None,
 ) -> None:
+    """``kept`` holds, per entry, the (group, IP set) references the existing rule with the entry's
+    ``id`` already has; an entry keeping one of those is not checked again, so a client can save a
+    list holding an admin reference that staff put there."""
     for index, spec in enumerate(specs):
         path = f"{field_path}[{index}]"
-        if spec.ref_group_id is not None:
+        kept_group, kept_ipset = kept[index] if kept is not None else (None, None)
+        if spec.ref_group_id is not None and spec.ref_group_id != kept_group:
             group = db.get(FirewallGroup, spec.ref_group_id)
             _check_visible_reference(group, owner_id, actor, actor.is_staff, f"{path}.group_id", "security group")
-        if spec.remote_ipset_id is not None:
+        if spec.remote_ipset_id is not None and spec.remote_ipset_id != kept_ipset:
             ipset = db.get(FirewallIpset, spec.remote_ipset_id)
             staff = actor.is_staff and (not is_group or owner_id is None)
             _check_visible_reference(ipset, owner_id, actor, staff, f"{path}.remote_ipset_id", "IP set")
@@ -465,9 +492,33 @@ def _check_rendered(db: Session, service_id: int, specs: Sequence[v.RuleSpec], l
         )
 
 
+def _kept_admin_refs(
+    db: Session, service_id: int, ids: Sequence[Optional[int]]
+) -> list[tuple[Optional[int], Optional[int]]]:
+    """Per entry id, the admin group and admin IP set the existing rule with that id references."""
+    by_id = {rule.id: rule for rule in service_rules(db, service_id)}
+
+    def admin(model, ref: Optional[int]) -> Optional[int]:
+        obj = db.get(model, ref) if ref is not None else None
+        return ref if obj is not None and _value(obj.scope) == FirewallObjectScope.ADMIN.value else None
+
+    out = []
+    for rule_id in ids:
+        # Only the first entry carrying an id keeps that row (as ``_write_rules`` does).
+        rule = by_id.pop(rule_id, None)
+        out.append((admin(FirewallGroup, rule.ref_group_id), admin(FirewallIpset, rule.remote_ipset_id)) if rule else (None, None))
+    return out
+
+
 def _validated_service_rules(
-    db: Session, service: Service, actor: Actor, raw: Any, field_path: str = "rules"
+    db: Session,
+    service: Service,
+    actor: Actor,
+    raw: Any,
+    field_path: str = "rules",
+    ids: Optional[Sequence[Optional[int]]] = None,
 ) -> list[v.RuleSpec]:
+    """``ids`` are the existing rule ids the entries stand for (read from the entries when not given)."""
     limits = get_limits(db)
     specs = v.validate_rules(
         raw,
@@ -476,7 +527,10 @@ def _validated_service_rules(
         allow_logging=actor.is_staff or limits.client_logging,
         max_group_refs=limits.max_groups_per_vm,
     )
-    _check_references(db, specs, service.owner_user_id, actor, field_path)
+    kept = None
+    if not actor.is_staff:
+        kept = _kept_admin_refs(db, service.id, _raw_ids(raw) if ids is None else ids)
+    _check_references(db, specs, service.owner_user_id, actor, field_path, kept=kept)
     _check_rendered(db, service.id, specs, limits, field_path)
     return specs
 
@@ -668,9 +722,9 @@ def _insert(
     if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= len(raws):
         raise FirewallValidationError(f"must be from 0 to {len(raws)}", field="position")
     raws.insert(index, raw)
-    specs = _validated_service_rules(db, service, actor, raws, "rules")
-    ids = [rule.id for rule in existing]
+    ids: list[Optional[int]] = [rule.id for rule in existing]
     ids.insert(index, None)
+    specs = _validated_service_rules(db, service, actor, raws, "rules", ids=ids)
     written = _write_rules(db, {"service_id": service.id}, existing, specs, ids, actor)
     return written[index]
 
@@ -731,7 +785,7 @@ def update_rule(
     raws = [_row_input(r) for r in existing]
     raws[index] = rule
     try:
-        specs = _validated_service_rules(db, service, actor, raws)
+        specs = _validated_service_rules(db, service, actor, raws, ids=[r.id for r in existing])
     except FirewallValidationError as exc:
         _reraise_at(exc, index, "rule")
     _apply_spec(target, specs[index])
@@ -803,8 +857,9 @@ def apply_preset(db: Session, service_id: int, actor: Actor, preset_key: str, *,
     if not added and _value(row.policy_in) == policy_before:
         return row
     if added:
-        specs = _validated_service_rules(db, service, actor, raws)
-        _write_rules(db, {"service_id": service_id}, existing, specs, [r.id for r in existing] + [None] * len(added), actor)
+        ids = [r.id for r in existing] + [None] * len(added)
+        specs = _validated_service_rules(db, service, actor, raws, ids=ids)
+        _write_rules(db, {"service_id": service_id}, existing, specs, ids, actor)
     _bump(row)
     db.flush()
     _audit(db, actor, "firewall.preset_applied", resource_type="service", resource_id=service_id,
@@ -1109,6 +1164,7 @@ def update_group(
         raise FirewallNotFound("Security group not found", code="not_found")
     _check_object_access(group, actor, "Security group")
     _check_revision(group, revision)
+    _require_may_change_services(db, actor, _services_of_groups(db, [group_id]), "group")
     existing = group_rules(db, group_id)
     before = {"name": group.name, "description": group.description, "client_selectable": bool(group.client_selectable),
               "rules": _rule_summary(v.specs_from_rows(existing))}
@@ -1154,6 +1210,7 @@ def delete_group(db: Session, actor: Actor, group_id: int, *, revision: Optional
         raise FirewallNotFound("Security group not found", code="not_found")
     _check_object_access(group, actor, "Security group")
     _check_revision(group, revision)
+    _require_may_change_services(db, actor, _services_of_groups(db, [group_id]), "group")
     refs = list(db.execute(select(FirewallRule).where(FirewallRule.ref_group_id == group_id)).scalars())
     if refs and not detach:
         raise FirewallConflict("This security group is in use", code="in_use")
@@ -1300,6 +1357,7 @@ def update_ipset(
     _check_revision(ipset, revision)
     admin = _value(ipset.scope) == FirewallObjectScope.ADMIN.value
     affected_before = _services_of_ipset(db, ipset)
+    _require_may_change_services(db, actor, affected_before, "IP set")
     before = {"name": ipset.name, "description": ipset.description, "purpose": _value(ipset.purpose),
               "client_selectable": bool(ipset.client_selectable), "entries": _entries_summary(db, ipset_id)}
     if name is not UNSET:

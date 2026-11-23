@@ -141,6 +141,30 @@ def test_rule_routes_and_preset(whmcs, ready, db_session):
     assert all(row.event_metadata["actor"]["integration_id"] == whmcs.integration.id for row in rows)
 
 
+def test_billing_view_holds_no_internal_address_or_hidden_name(whmcs, ready, db_session):
+    from tests.api.vm_firewall_helpers import assert_nothing_hidden, seed_hidden_admin_objects
+
+    seed_hidden_admin_objects(db_session, svc.Actor.system(), ready.id)
+    body = _view(whmcs.call("firewall", ready.id))
+    assert_nothing_hidden(body)
+    assert [g["name"] for g in body["groups"]] == ["Provided by us"]
+    assert_nothing_hidden(whmcs.call("firewall_groups", ready.id).json())
+    saved = _view(whmcs.call("firewall_rules_replace", ready.id,
+                             body={"revision": body["revision"], "rules": body["rules"]}))
+    assert_nothing_hidden(saved)
+
+
+def test_writes_are_refused_on_a_suspended_service(whmcs, ready, db_session):
+    from app.models.service import ServiceStatus
+
+    ready.status = ServiceStatus.SUSPENDED
+    db_session.commit()
+    _view(whmcs.call("firewall", ready.id))
+    refused = whmcs.call("firewall_rules_replace", ready.id, body={"revision": 1, "rules": [SSH]})
+    assert_error(refused, 403)
+    assert refused.json()["code"] == "service_not_active"
+
+
 def test_writes_need_the_vm_firewall_permission_and_reads_do_not(whmcs, ready):
     whmcs.with_permissions(ready, {"vm.firewall": False})
     _view(whmcs.call("firewall", ready.id))

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import itertools
+import json
+from typing import Optional
 
 from app.api import vm_firewall_common
 from app.models.user import User
 from app.models.vm_firewall import ServiceFirewall
+from app.services.vm_firewall import service as svc
 from tests.fakes.proxmox_firewall import FakeProxmoxFirewall
 from tests.fakes.vm_firewall_world import World, make_world
 
@@ -58,3 +61,35 @@ def fake_proxmox(monkeypatch, world: World, services, *, net0: str = "virtio=BC:
 def revision(db, service_id: int) -> int:
     db.expire_all()
     return db.get(ServiceFirewall, service_id).revision
+
+
+# Names and ranges a client must never see in any firewall response.
+HIDDEN_TEXT = ("ops-hidden-group", "mgmt-hidden-set", "hidden-baseline", "10.77.0.0/16", "10.88.0.0/16", "10.99.0.0/16")
+
+
+def seed_hidden_admin_objects(db, actor, service_id: Optional[int] = None) -> dict:
+    """A global baseline using a hidden admin group, a hidden management IP set and an internal range.
+    With ``service_id``, staff also attach the hidden group and a rule on the hidden IP set to that VM."""
+    ipset = svc.create_ipset(db, actor, name="mgmt-hidden-set", entries=["10.99.0.0/16"], purpose="management")
+    group = svc.create_group(db, actor, name="ops-hidden-group", rules=[{**SSH, "remote_cidrs": ["10.88.0.0/16"]}])
+    svc.create_baseline(
+        db, actor, name="hidden-baseline", scope_type="global", settings={"management_ipset_ids": [ipset.id]},
+        rules=[
+            {"kind": "group", "group_id": group.id},
+            {"direction": "in", "action": "DROP", "remote_cidrs": ["10.77.0.0/16"], "comment": "internal"},
+            {"direction": "in", "action": "ACCEPT", "remote_ipset_id": ipset.id},
+            {"direction": "in", "action": "ACCEPT", "protocol": "icmp", "remote_cidrs": ["0.0.0.0/0"]},
+        ],
+    )
+    if service_id is not None:
+        row = svc.get_or_create(db, service_id)
+        svc.attach_group(db, service_id, actor, group.id, revision=row.revision)
+        svc.add_rule(db, service_id, actor, {**SSH, "remote_ipset_id": ipset.id}, revision=row.revision)
+    db.commit()
+    return {"group": group, "ipset": ipset}
+
+
+def assert_nothing_hidden(payload) -> None:
+    text = json.dumps(payload)
+    for hidden in HIDDEN_TEXT:
+        assert hidden not in text, hidden

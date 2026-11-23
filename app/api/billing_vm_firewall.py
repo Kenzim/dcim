@@ -14,13 +14,11 @@ from sqlalchemy.orm import Session
 
 from app.api import vm_firewall_common as fw
 from app.api.billing import _SERVICE_NOT_FOUND_MSG, BillingIntegrationDep, _assert_billing_owned_service
-from app.core.client_permissions import PermissionKey
 from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.service_dao import ServiceDAO
 from app.models.billing_integration import BillingIntegration
 from app.models.service import Service
-from app.services.client_permission_resolver import require_client_permission
 
 DbDep = Annotated[Session, Depends(get_db)]
 RevisionQuery = Annotated[int, Query(description="The `revision` as last read")]
@@ -34,7 +32,7 @@ def _owned(db: Session, integration: BillingIntegration, service_id: int, *, wri
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
     if write:
-        require_client_permission(db, service, PermissionKey.VM_FIREWALL)
+        fw.require_client_write(db, service)
     return service
 
 
