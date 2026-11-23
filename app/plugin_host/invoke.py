@@ -213,8 +213,9 @@ def _write_report_locked() -> None:
             for c in calls[:REPORT_HANDLERS]
         ],
     }
-    db = common.new_session()
+    db = None
     try:
+        db = common.new_session()
         row = db.get(SystemSetting, key)
         if not counts:
             if row is not None:
@@ -225,10 +226,12 @@ def _write_report_locked() -> None:
             row.value = value
         db.commit()
     except Exception:  # noqa: BLE001 - the report is best effort; a stale one ages out of the alert
-        db.rollback()
+        if db is not None:
+            db.rollback()
         logger.warning("Writing the abandoned plugin handler report failed", exc_info=True)
     finally:
-        db.close()
+        if db is not None:
+            db.close()
 
 
 def _heartbeat_loop() -> None:
@@ -368,16 +371,20 @@ async def invoke(
         try:
             outcome = _run_handler(handler, ctx, args, finish)
         finally:
-            if _release_slot(call):
-                message = (f"{label} returned after {time.monotonic() - call.started_at:.1f}s, after Rackflow had "
-                           "stopped waiting; its state changes were discarded")
-                logger.info("Plugin %s: %s", inst.id, message)
-                write_log(inst.id, "warning", message, service_id=service_id)
-                _write_report()
             try:
-                loop.call_soon_threadsafe(_settle, done, outcome)
-            except RuntimeError:  # the caller's event loop has closed
-                pass
+                if _release_slot(call):
+                    message = (f"{label} returned after {time.monotonic() - call.started_at:.1f}s, after Rackflow "
+                               "had stopped waiting; its state changes were discarded")
+                    logger.info("Plugin %s: %s", inst.id, message)
+                    write_log(inst.id, "warning", message, service_id=service_id)
+                    _write_report()
+            except Exception:  # noqa: BLE001 - the caller must still get the outcome
+                logger.warning("Recording the late return of plugin %s %s failed", inst.id, label, exc_info=True)
+            finally:
+                try:
+                    loop.call_soon_threadsafe(_settle, done, outcome)
+                except RuntimeError:  # the caller's event loop has closed
+                    pass
 
     call.thread = threading.Thread(target=work, name=f"rackflow-plugin-{inst.id}", daemon=True)
     try:
