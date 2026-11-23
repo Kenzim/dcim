@@ -260,6 +260,19 @@ def _backoff(row: ServiceFirewall, now: datetime) -> datetime:
     return now + timedelta(seconds=delay)
 
 
+def claim_lost(
+    db: Session, row: ServiceFirewall, *, revision: int, desired: Optional[RenderedFirewall] = None
+) -> ApplyResult:
+    """The outcome of an applier that no longer holds the row's claim: the row's unflushed changes
+    are discarded and nothing is recorded."""
+    logger.info("[vm_firewall] claim on service %s lost during apply; left for the next tick", row.service_id)
+    service_id = row.service_id
+    db.expire(row)
+    return ApplyResult(service_id, ok=False, state=CLAIM_LOST, revision=revision,
+                       desired_hash=desired.desired_hash if desired is not None else None,
+                       error="the firewall is being applied by another applier")
+
+
 def record_failure(
     db: Session,
     row: ServiceFirewall,
@@ -268,10 +281,14 @@ def record_failure(
     now: datetime,
     revision: Optional[int] = None,
     desired: Optional[RenderedFirewall] = None,
+    claim: Optional[ApplyClaim] = None,
 ) -> ApplyResult:
     """Record a failed apply or read on the row: ``vm_missing`` for a VM Proxmox does not have,
-    else ``error`` with the backoff of section 6.2. Flushes; the caller commits."""
+    else ``error`` with the backoff of section 6.2. With ``claim``, records only while the claim is
+    still the applier's (``CLAIM_LOST`` otherwise). Flushes; the caller commits."""
     revision = row.revision if revision is None else revision
+    if claim is not None and not claim.confirm(db):
+        return claim_lost(db, row, revision=revision, desired=desired)
     if isinstance(exc, VmMissing):
         row.state = FirewallState.VM_MISSING
         row.last_error = str(exc)[:2000]
@@ -312,20 +329,17 @@ async def apply(
     if row is None:
         raise FirewallNotFound(f"service {service_id} has no firewall", code="firewall_not_found")
     now = now or _now()
-    row.last_checked_at = now
     if not row.managed or row.excluded:
+        if claim is not None and not claim.confirm(db):
+            return claim_lost(db, row, revision=row.revision)
+        row.last_checked_at = now
         row.state = FirewallState.UNMANAGED
         db.flush()
         return ApplyResult(service_id, ok=True, state=FirewallState.UNMANAGED.value, revision=row.revision)
+    row.last_checked_at = now
 
     def failed(exc: Exception, revision: int, desired: Optional[RenderedFirewall]) -> ApplyResult:
-        return record_failure(db, row, exc, now=now, revision=revision, desired=desired)
-
-    def claim_lost(revision: int, desired: RenderedFirewall) -> ApplyResult:
-        logger.info("[vm_firewall] claim on service %s lost during apply; left for the next tick", service_id)
-        db.expire(row)
-        return ApplyResult(service_id, ok=False, state=CLAIM_LOST, revision=revision,
-                           desired_hash=desired.desired_hash, error="the firewall is being applied by another applier")
+        return record_failure(db, row, exc, now=now, revision=revision, desired=desired, claim=claim)
 
     # Render depends on net0's bridge (IPv6 router-advert rule), so observe it first; a change
     # bumps the revision and this apply renders the new one.
@@ -342,11 +356,11 @@ async def apply(
     try:
         result = await converge(client, desired, claim=claim)
     except ClaimLost:
-        return claim_lost(revision, desired)
+        return claim_lost(db, row, revision=revision, desired=desired)
     except Exception as exc:  # Proxmox errors, transport failures, crashes mid-apply
         return failed(exc, revision, desired)
     if claim is not None and not claim.confirm(db):
-        return claim_lost(revision, desired)
+        return claim_lost(db, row, revision=revision, desired=desired)
 
     if int(desired.options["enable"]) != 1:
         state = FirewallState.OFF

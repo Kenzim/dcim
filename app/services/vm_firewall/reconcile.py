@@ -409,7 +409,9 @@ async def apply_one(
         try:
             client, config = await _client_and_config(db, service, access)
         except Exception as exc:  # Proxmox errors, placement errors, transport failures
-            result = record_failure(db, row, exc, now=now)
+            result = record_failure(db, row, exc, now=now, claim=held)
+            if result.state == CLAIM_LOST:
+                return None
             _after_apply(db, row, result, now)
             return result
         hard = _hard_reasons(fw.eligibility(db, service_id, vm_config=config).reasons)
@@ -474,7 +476,9 @@ async def apply_for_provision(
         except ProvisionFirewallError:
             raise
         except Exception as exc:  # Proxmox errors, transport failures
-            failure = record_failure(db, row, exc, now=now)
+            failure = record_failure(db, row, exc, now=now, claim=held)
+            if failure.state == CLAIM_LOST:
+                raise ProvisionFirewallError("firewall is being applied by the worker; retrying") from exc
             raise ProvisionFirewallError(f"firewall apply failed: {failure.error or failure.state}") from exc
         result = await apply(db, service_id, client, now=now, vm_config=config, claim=held)
         if result.state == CLAIM_LOST:
@@ -607,6 +611,8 @@ class SweepResult:
     repaired: list[int] = field(default_factory=list)
     reported: list[int] = field(default_factory=list)
     queued: list[int] = field(default_factory=list)
+    # Checked, but another applier took the VM before anything was recorded.
+    claim_lost: list[int] = field(default_factory=list)
     completed: bool = False
 
 
@@ -670,7 +676,9 @@ async def sweep_one(
         try:
             client, config = await _client_and_config(db, service, access)
         except Exception as exc:  # Proxmox errors, placement errors, transport failures
-            result = record_failure(db, row, exc, now=now)
+            result = record_failure(db, row, exc, now=now, claim=held)
+            if result.state == CLAIM_LOST:
+                return CLAIM_LOST
             _after_apply(db, row, result, now)
             return result.state
         row.last_checked_at = now
@@ -691,7 +699,10 @@ async def sweep_one(
 
         report = await check(db, service_id, client)
         if report.vm_missing:
-            result = record_failure(db, row, VmMissing(404, "VM not found on Proxmox", method="GET", path=""), now=now)
+            result = record_failure(db, row, VmMissing(404, "VM not found on Proxmox", method="GET", path=""), now=now,
+                                    claim=held)
+            if result.state == CLAIM_LOST:
+                return CLAIM_LOST
             _after_apply(db, row, result, now)
             return "vm_missing"
         if row.drift_repairs_24h:
@@ -758,7 +769,8 @@ async def drift_sweep(
             .limit(batch)
         ).scalars()
     )
-    buckets = {"in_sync": out.in_sync, "repaired": out.repaired, "reported": out.reported, "queued": out.queued}
+    buckets = {"in_sync": out.in_sync, "repaired": out.repaired, "reported": out.reported, "queued": out.queued,
+               CLAIM_LOST: out.claim_lost}
     for service_id in ids:
         if not claim(db, service_id, owner=owner, now=clock()):
             continue

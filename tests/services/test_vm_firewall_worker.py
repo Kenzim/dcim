@@ -10,7 +10,7 @@ import pytest
 from app.models.alerting import ClientNotificationPref
 from app.models.commerce_audit import UserAuditEvent
 from app.models.service import ServiceStatus
-from app.models.vm_firewall import FirewallLocationSettings, ServiceFirewall
+from app.models.vm_firewall import FirewallLocationSettings, FirewallState, ServiceFirewall
 from app.services import settings_store
 from app.services.alerting import detectors, lease
 from app.services.alerting.catalogue import effective_settings
@@ -220,6 +220,61 @@ async def test_apply_whose_claim_is_taken_writes_nothing_more_and_records_nothin
     assert row.state.value == state and row.last_error is None and row.failing_since is None
     assert row.claimed_by == "deployment"
     assert result.attempted == [vm.id] and result.applied == [] and result.failed == []
+
+
+@pytest.mark.asyncio
+async def test_apply_failing_after_its_claim_is_taken_records_nothing(world, fake, access):
+    """A Proxmox write that fails after the claim expired and another applier took the VM and
+    recorded its outcome: the failure must not be written over that outcome, nor counted towards
+    a staged-rollout pause."""
+    from app.services.vm_firewall.proxmox_fw import classify
+
+    vm, row, _fake_vm = _enabled_vm(world, fake)
+    row.rollout_released_at = T0
+    world.db.commit()
+    revision = row.revision
+
+    def taken_then_failed(_fake):
+        with _other_session(world) as other:
+            assert reconcile.claim(other, vm.id, owner="deployment", now=T0 + timedelta(hours=1))
+            theirs = other.get(ServiceFirewall, vm.id)
+            theirs.state = FirewallState.APPLIED
+            theirs.applied_revision = revision
+            theirs.applied_hash = "theirs"
+            theirs.last_applied_at = T0 + timedelta(hours=1)
+            other.commit()
+        raise classify(500, "Proxmox write timed out", method="PUT", path="/firewall/options")
+
+    fake.on_next_write(taken_then_failed)
+    result = await _queue(world, access)
+    world.db.expire_all()
+    row = world.db.get(ServiceFirewall, vm.id)
+    assert row.state.value == "applied" and row.applied_hash == "theirs" and row.applied_revision == revision
+    assert row.last_error is None and row.failing_since is None and row.next_attempt_at is None
+    assert row.rollout_released_at is not None
+    location = world.db.get(FirewallLocationSettings, world.location.id)
+    assert (location.rollout_failures or 0) == 0
+    assert row.claimed_by == "deployment"
+    assert result.attempted == [vm.id] and result.applied == [] and result.failed == []
+
+
+@pytest.mark.asyncio
+async def test_drift_sweep_counts_a_repair_that_lost_its_claim(world, fake, access):
+    vm, row, fake_vm = _enabled_vm(world, fake)
+    await _queue(world, access)
+    fake_vm.add_foreign_rule({"type": "in", "action": "ACCEPT", "proto": "tcp", "dport": "3389", "enable": 1})
+    later = T0 + timedelta(seconds=reconcile.reconcile_interval(world.db) + 1)
+
+    def taken(_fake):
+        with _other_session(world) as other:
+            assert reconcile.claim(other, vm.id, owner="deployment", now=later + timedelta(hours=1))
+
+    fake.on_next_write(taken)
+    result = await reconcile.drift_sweep(world.db, access, owner=OWNER, now=later)
+    assert result.checked == [vm.id]
+    assert result.claim_lost == [vm.id]
+    assert result.repaired == [] and result.in_sync == [] and result.reported == [] and result.queued == []
+    assert world.db.query(UserAuditEvent).filter_by(action="firewall.drift_repaired").count() == 0
 
 
 class _SlowBetweenOps(FakeProxmoxFirewall):
