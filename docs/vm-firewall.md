@@ -334,7 +334,8 @@ re-reads and re-plans.
 
 Proxmox permissions needed by the cluster's API user: `VM.Audit` and `VM.Config.Network` on the VMs,
 `Sys.Audit` on `/` and `/nodes`, and `SDN.Use` on the zone of the VMs' bridge (`/sdn/zones/localnetwork`
-for a plain Linux bridge), without which a `net0` write is refused. The worker uses each cluster's
+for a plain Linux bridge, the vnet's zone for an SDN vnet), without which a `net0` write is refused.
+Section 9.4 lists every call with the check Proxmox applies to it. The worker uses each cluster's
 existing Rackflow login; procedure step 1a (9.3) confirms it holds these, read only. The nested tests
 used a dedicated token with only these as a stand-in (9.4).
 
@@ -620,10 +621,12 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
 1a. Read only, on one node of each cluster: confirm the cluster's existing Rackflow login (the user
    in its Rackflow cluster record) holds what the worker needs, changing nothing:
    `pveum user permissions <user> --path /`, `--path /vms/<vmid>` for one guest per node, and
-   `--path /sdn/zones/<zone>` for the zone of each guest bridge (`localnetwork` for plain Linux
-   bridges). It must show `Sys.Audit`, `VM.Audit` and `VM.Config.Network` (on `/` or every guest)
-   and `SDN.Use` on each zone; for a token login, also its own ACLs (`privsep`). `Sys.Modify` is not
-   needed. If anything is missing, stop: granting it is a separate change for Kenzi to approve.
+   `--path /sdn/zones/<zone>/<bridge>` for each bridge a guest uses (`<zone>` is `localnetwork` for
+   a plain Linux bridge, the vnet's zone for an SDN vnet; for a tagged guest also
+   `.../<bridge>/<tag>`). It must show `Sys.Audit`, `VM.Audit` and `VM.Config.Network` (on `/` or
+   every guest) and `SDN.Use` on each of those bridge paths (the derivation is in 9.4); for a
+   token login, also its own ACLs (`privsep`). `Sys.Modify` is not needed. If anything is
+   missing, stop: granting it is a separate change for Kenzi to approve.
 2. Neutralise pre-existing guest firewalls: for every guest the audit lists that Rackflow does not
    manage, write `enable: 0` in its VM firewall options (a no-op today, because the datacenter is off,
    so it changes nothing that runs). Guests whose owners really want those settings are opted in
@@ -724,6 +727,37 @@ Further points from the test:
   Rackflow never writes `cluster.fw` or `host.fw` (9.1), so it never needs `Sys.Modify`. Production's
   worker keeps each cluster's existing Rackflow login; step 1a of 9.3 confirms it holds these
   privileges. The dedicated token was only a stand-in for the nested tests.
+- The same list, derived from the code (2026-11-23): every Proxmox call the worker, the deployment
+  step and staff apply, check and readiness make, with the check Proxmox's own API code applies
+  (pve-firewall `8381d964b9f1`, qemu-server `58474c07c0e7`, pve-manager `e100ae7eed28`,
+  pve-guest-common `414b13c0c877`; read 2026-11-23, older releases on production should be
+  confirmed by step 1a, which reads the effective permissions rather than relying on this table).
+  Calls go through `VmFirewallClient` and `ClusterReader` in
+  `app/services/vm_firewall/proxmox_fw.py`, built by `PluginAccess` in `reconcile.py:65-88`.
+
+  | Call (method and path) | Rackflow code | Proxmox check |
+  |---|---|---|
+  | `POST /access/ticket` (login) | `app/plugins/proxmox.py:275`, `app/services/proxmox_vm_search.py` | none (credentials) |
+  | `GET /nodes/{node}/qemu/{vmid}/status/current` (placement probe) | `app/plugins/proxmox.py:426` via `proxmox_placement.py:112` | `VM.Audit` on `/vms/{vmid}` |
+  | `GET /cluster/resources?type=vm` (find a moved VM) | `app/services/proxmox_vm_search.py:41` | any user; a VM is listed only with `VM.Audit` on `/vms/{vmid}` |
+  | `GET .../qemu/{vmid}/firewall/options` | `proxmox_fw.py:174` | `VM.Audit` on `/vms/{vmid}` |
+  | `PUT .../qemu/{vmid}/firewall/options` | `proxmox_fw.py:181` | `VM.Config.Network` on `/vms/{vmid}` |
+  | `GET .../qemu/{vmid}/firewall/rules` | `proxmox_fw.py:185` | `VM.Audit` on `/vms/{vmid}` |
+  | `POST`, `PUT`, `DELETE .../firewall/rules[/{pos}]` | `proxmox_fw.py:192`, `:209`, `:212` | `VM.Config.Network` on `/vms/{vmid}` |
+  | `GET .../firewall/ipset`, `GET .../firewall/ipset/{name}` | `proxmox_fw.py:216`, `:221` | `VM.Audit` on `/vms/{vmid}` |
+  | `POST .../firewall/ipset`, `DELETE .../ipset/{name}`, `POST .../ipset/{name}`, `PUT` and `DELETE .../ipset/{name}/{cidr}` | `proxmox_fw.py:226`, `:229`, `:233`, `:238`, `:245` | `VM.Config.Network` on `/vms/{vmid}` |
+  | `GET .../qemu/{vmid}/config`, `GET .../qemu/{vmid}/pending` | `proxmox_fw.py:263`, `:266` | `VM.Audit` on `/vms/{vmid}` |
+  | `PUT .../qemu/{vmid}/config` (`net0` firewall flag only) | `proxmox_fw.py:283` | `VM.Config.Network` on `/vms/{vmid}`, and `SDN.Use` on the NIC's bridge: `/sdn/zones/<zone>/<bridge>`, or `.../<bridge>/<tag>` for a tagged NIC (`<zone>` is `localnetwork` for a plain Linux bridge, the vnet's zone for an SDN vnet) |
+  | `GET /cluster/firewall/options` (readiness) | `proxmox_fw.py:297` | `Sys.Audit` on `/` |
+  | `GET /nodes` (readiness) | `proxmox_fw.py:300` | any user |
+  | `GET /nodes/{node}/firewall/options` (readiness) | `proxmox_fw.py:303` | `Sys.Audit` on `/nodes/{node}` |
+  | `GET /nodes/{node}/services/{service}/state` (readiness) | `proxmox_fw.py:308` | `Sys.Audit` on `/nodes/{node}` |
+
+  Result: the list above is complete and nothing more is needed. `Sys.Audit` on `/` (propagated to
+  `/nodes`), `VM.Audit` and `VM.Config.Network` on `/` or on every managed guest, and `SDN.Use` on the
+  zone of every managed guest's bridge, propagated to its bridges and VLAN tags. The one precision the
+  code adds: for a guest on an SDN vnet the zone is the vnet's zone, not `localnetwork`. Nothing
+  Rackflow calls needs `Sys.Modify`, `VM.Config.Options`, `VM.PowerMgmt` or `Datastore.*`.
 - Not tested: production's older qemu-server, IPv6, guests on VLAN-aware bridges, real Ceph load.
 
 **Kept for the end-to-end worker run.** Before the production procedure goes to Kenzi, Rackflow's real
