@@ -748,13 +748,16 @@ fwn1 and fwn2 at 06:37 to 06:38 UTC, with ACCEPT policies; in the 11-minute watc
 2 s per node) SSH and quorum never failed and the API answered every probe (unauthenticated, so a 401
 after Proxmox's 3 s delay for failed logins). `bridge-nf-call-iptables` and `-ip6tables` read 0 and 0 on both
 nodes at step 1 (06:37:53, before any step and after B0's last reset), stayed 0 after the enable (the
-nftables backend never sets them) and were still 0 at the end; on these nodes they are set at boot by
+nftables backend never sets them) and were still 0 at the end (read live before the teardown, not
+kept in a log); on these nodes they are set at boot by
 `/usr/lib/sysctl.d/10-pve.conf`, and `br_netfilter` is built in. So the live value recorded at step 1
 equalled the boot value here (no node flagged), the rollback in case 4 had nothing to restore, and the
 rollback rule of 9.3 step 5 (restore each node's live value recorded at step 1, never the boot value,
 and read both back after the rollback) held: 0 and 0 afterwards.
 Rackflow's readiness check reported the location ready. 6,757 Proxmox requests were logged over the
-run: no 401 and no 403, so the privileges listed above were enough; the only failures were 25 `PUT
+run: no 401 and no 403, so the privileges listed above were enough (the token's roles, `RackflowFW`
+with `Sys.Audit`, `VM.Audit`, `VM.Config.Network` on `/` and `RackflowFWNet` with `SDN.Use` on
+`/sdn/zones/localnetwork`, as set up by B0 and read live; the teardown log deleted exactly these two); the only failures were 25 `PUT
 config` answering HTTP 500 "VM is locked (backup)", caused on purpose in case 6. A guest's `.fw` was always written and compiled by `proxmox-firewall`
 about 5 s later.
 
