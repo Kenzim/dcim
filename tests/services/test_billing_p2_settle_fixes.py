@@ -233,3 +233,27 @@ def test_after_a_staff_release_an_admin_hold_and_a_payment_do_not_relabel_the_bi
     _pay(db_session, db_session.get(Invoice, invoice.id))
     assert _state(db_session, billing) == (ServiceStatus.SUSPENDED, ServiceBillingStatus.ACTIVE)
     assert billing_integrity.nonpayment_suspended_paid(db_session, PARAMS, NOW) == []
+
+
+# ---------------------------------------------------------------- L1
+
+
+def test_a_failed_or_attempted_whmcs_suspend_does_not_block_the_lift(db_session, env):
+    _, billing, lifecycle, job = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    run_job(db_session, job, make_run(SUSPEND))
+    # The WHMCS suspend route logs an attempt, then a failure when the power-off fails.
+    _staff_status(db_session, billing, None, action="suspend", activity_status="attempt")
+    _staff_status(db_session, billing, None, action="suspend", activity_status="failed")
+    _pay(db_session, db_session.get(Invoice, invoice.id))
+    assert _state(db_session, billing) == (ServiceStatus.ACTIVE, ServiceBillingStatus.ACTIVE)
+    assert _audits(db_session, "billing.nonpayment_unsuspend_skipped") == 0
+
+
+def test_a_successful_staff_status_change_still_blocks_the_lift(db_session, env):
+    _, billing, lifecycle, job = env
+    invoice = make_cycle_invoice(db_session, billing, due_at=NOW - timedelta(days=20))
+    run_job(db_session, job, make_run(SUSPEND))
+    _staff_status(db_session, billing, None, action="suspend", activity_status="success")
+    _pay(db_session, db_session.get(Invoice, invoice.id))
+    assert _state(db_session, billing)[0] == ServiceStatus.SUSPENDED

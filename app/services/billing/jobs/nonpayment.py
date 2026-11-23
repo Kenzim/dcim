@@ -292,7 +292,8 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
     the service before settling it was part of handling the job's action. A
     claim still in ``needs_review`` is not ours (the ``billing_job_needs_review``
     alert lists it). Then nothing may have changed the service's status
-    since: no staff or WHMCS status change in the service activity log, no
+    since: no successful staff or WHMCS status change in the service activity
+    log (a failed or merely attempted one changed nothing), no
     unsuspension by billing, and no chargeback on an invoice of the service.
     "Since" means rows with ids above the marks the job recorded
     (``suspension_marks``), or, for a settled claim, above the marks taken
@@ -300,7 +301,7 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
     ``(ours, reason)``.
     """
     from app.models.refund import Refund, RefundReason
-    from app.models.server_activity import ServerActivity, ServerActivityEventType
+    from app.models.server_activity import ServerActivity, ServerActivityEventType, ServerActivityStatus
 
     if claim is None:
         return False, "no_suspension_by_job"
@@ -322,6 +323,7 @@ def suspension_is_ours(db: Session, service_id: int, claim: Optional[BillingJobA
                 ServerActivity.service_id == int(service_id),
                 ServerActivity.event_type == ServerActivityEventType.SERVICE,
                 ServerActivity.action.in_(_STATUS_ACTIVITY_ACTIONS),
+                ServerActivity.status == ServerActivityStatus.SUCCESS,
                 since(ServerActivity, "activity_id"),
             )
         )
