@@ -48,22 +48,60 @@ def test_new_vm_in_an_enabled_location_blocks_port_25_only(world):
     assert [r.comment for r in rendered.rules] == ["rf:smtp25"]
 
 
+def test_new_vm_without_an_address_still_blocks_smtp(world):
+    """The narrow baseline does not depend on ipfilter-net0 having an address."""
+    vm = world.vm(ip=None)
+    fw.init_for_new_vm(world.db, vm.id, Actor.system())
+    rendered = render(world.db, vm.id)
+    assert rendered.ipsets["ipfilter-net0"] == []
+    assert (rendered.options["enable"], rendered.options["ipfilter"], rendered.options["macfilter"]) == (1, 0, 0)
+    assert _smtp_rules(rendered) == [("out", "DROP", "tcp", "25")]
+
+
+def test_new_vm_management_block_applies_when_a_set_is_filled(world):
+    vm = world.vm()
+    fw.init_for_new_vm(world.db, vm.id, Actor.system())
+    mgmt = fw.create_ipset(world.db, world.staff_actor, name="mgmt", purpose="management", entries=["10.255.0.0/16"])
+    comments = [r.comment for r in render(world.db, vm.id).rules]
+    assert comments == ["rf:smtp25", f"rf:mgmt-out.{mgmt.id}", f"rf:mgmt-in.{mgmt.id}"]
+
+
 def test_anti_spoof_new_vms_adds_ipfilter_and_macfilter(world):
     _location(world).anti_spoof_new_vms = True
     world.db.flush()
+    vm = world.vm(ip="203.0.113.77")
+    fw.init_for_new_vm(world.db, vm.id, Actor.system())
+    rendered = render(world.db, vm.id)
+    options = rendered.options
+    assert (options["enable"], options["ipfilter"], options["macfilter"]) == (1, 1, 1)
+    assert (options["policy_in"], options["policy_out"]) == ("ACCEPT", "ACCEPT")
+    assert [e.cidr for e in rendered.ipsets["ipfilter-net0"]] == ["203.0.113.77"]
+    assert _smtp_rules(rendered) == [("out", "DROP", "tcp", "25")]
+
+
+def test_anti_spoof_new_vms_follows_the_merged_baseline(world):
+    _location(world).anti_spoof_new_vms = True
+    world.db.flush()
+    fw.create_baseline(world.db, world.staff_actor, name="g", scope_type="global", settings={"macfilter": False})
     vm = world.vm()
     fw.init_for_new_vm(world.db, vm.id, Actor.system())
     options = render(world.db, vm.id).options
-    assert (options["ipfilter"], options["macfilter"], options["policy_in"]) == (1, 1, "ACCEPT")
+    assert (options["ipfilter"], options["macfilter"]) == (1, 0)
 
 
 def test_client_turning_on_keeps_the_block_and_gets_the_full_baseline(world):
     vm = world.vm()
     row = fw.init_for_new_vm(world.db, vm.id, Actor.system())
+    fw.create_baseline(world.db, world.staff_actor, name="g", scope_type="global",
+                       rules=[{"direction": "in", "action": "DROP", "protocol": "tcp", "ports": "3306"}])
+    narrow = render(world.db, vm.id)
     fw.set_firewall(world.db, vm.id, world.actor("alice"), revision=row.revision, client_enabled=True)
     rendered = render(world.db, vm.id)
     assert _smtp_rules(rendered) == [("out", "DROP", "tcp", "25")]
-    assert (rendered.options["policy_in"], rendered.options["ipfilter"], rendered.options["macfilter"]) == ("DROP", 1, 1)
+    assert (rendered.options["enable"], rendered.options["policy_in"], rendered.options["policy_out"]) == (1, "DROP", "ACCEPT")
+    assert (rendered.options["ipfilter"], rendered.options["macfilter"]) == (1, 1)
+    assert (narrow.options["ipfilter"], narrow.options["macfilter"]) == (0, 0)
+    assert [r.dport for r in rendered.rules if r.comment.startswith("rf:b")] == ["3306"]
 
 
 def test_existing_vm_opting_in_renders_no_smtp_rule(world):
