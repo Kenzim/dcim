@@ -487,10 +487,21 @@ second)" and the request must carry `confirm_interruption=true`.
 
 ### 8.3 Baseline for every VM in a location
 
-`enforce_baseline_on_all` is a staged bulk rollout (`POST /api/admin/vm-firewall/locations/{id}/rollout`
-with `dry_run`): lists the VMs whose flag will flip, then flips at most N per minute per node
-(default 10), stops on the first 3 failures, and reports. SMTP blocking for existing VMs is a separate
-decision (Q3) because it can break customers' mail today.
+`enforce_baseline_on_all` reaches existing VMs, so switching it on is a staged bulk rollout:
+
+- the admin first sees a preview (`POST /api/admin/vm-firewall/locations/{id}/rollout` with
+  `dry_run`, backed by `preview_enforce_baseline_on_all`): how many existing VMs change, how many are
+  running without `firewall=1` on `net0` and will get the blip of about 0.1 s (section 5.2), and
+  which;
+- the switch is refused unless the request carries `confirm_existing_vms` equal to the previewed
+  count (error `confirmation_required` with a fresh preview); turning it off needs no confirmation;
+- the change is audited `firewall.location_updated` with the counts;
+- the affected rows get a staggered `rollout_after` time so at most
+  `vm_firewall_rollout_per_node_per_minute` (default 10) VMs per node become due each minute; render
+  ignores the location switch for a row until its time, and the worker applies rows as they come due
+  through its normal path, pausing the rollout after 3 consecutive failures.
+
+SMTP blocking for existing VMs stays out of this (Q3: existing VMs unchanged).
 
 ### 8.4 Rollback
 
