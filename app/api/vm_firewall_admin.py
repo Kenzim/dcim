@@ -7,6 +7,7 @@ list, and every VM's firewall with the admin-only fields. Lists are bare JSON ar
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -35,7 +36,7 @@ from app.models.vm_firewall import (
 from app.services.vm_firewall import apply as fw_apply
 from app.services.vm_firewall import reconcile
 from app.services.vm_firewall import service as svc
-from app.services.vm_firewall.errors import FirewallChanged, FirewallNotEligible, FirewallNotFound
+from app.services.vm_firewall.errors import FirewallChanged, FirewallConflict, FirewallNotEligible, FirewallNotFound
 from app.services.vm_firewall.render import load_context
 
 DbDep = Annotated[Session, Depends(get_db)]
@@ -530,32 +531,52 @@ async def _proxmox(db: Session, service: Service):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Proxmox is not reachable: {exc}")
 
 
+def _apply_in_progress() -> FirewallConflict:
+    return FirewallConflict("This server's firewall is being applied right now. Try again in a minute.",
+                            code="apply_in_progress")
+
+
 @router.post(_SERVICE + "/apply", responses=COMMON_ERROR_RESPONSES)
 async def apply_now(service_id: int, request: Request, auth: AdminDep, db: DbDep):
     """Apply the rendered firewall to Proxmox now; failures are recorded on the row like the worker's.
     In a location whose firewall is off it is refused (409 ``not_eligible``, ``location_disabled``)
     unless the VM was applied before, when it can only switch the firewall off, as the worker does.
     A VM its live config makes ineligible (infrastructure bridge, trunk, ...) is refused and not
-    written, as the worker holds it."""
+    written, as the worker holds it. The apply takes the VM's claim like the worker; while the
+    worker or a deployment holds it the request is refused (409 ``apply_in_progress``)."""
     service = _service(db, service_id)
     row = svc.get_or_create(db, service.id)
     location = load_context(db, service.id).location_settings
     if not (location is not None and location.enabled) and row.applied_revision is None:
         raise FirewallNotEligible(["location_disabled"])
-    client = await _proxmox(db, service)
+    actor = _actor(request, auth)
+    owner = f"staff-{actor.user_id}-{uuid.uuid4().hex[:12]}"
+    now = reconcile.utcnow()
+    if not reconcile.claim(db, service.id, owner=owner, now=now):
+        raise _apply_in_progress()
     try:
-        config = await client.get_config()
-    except Exception:  # left to ``apply``, which records the failure on the row
-        config = None
-    if config is not None:
-        hard = [reason for reason in svc.eligibility(db, service.id, vm_config=config, observe=False).reasons
-                if reason not in reconcile.RENDERED_REASONS]
-        if hard:
-            raise FirewallNotEligible(hard)
-    svc._audit(db, _actor(request, auth), "firewall.apply_requested", resource_type="service",
-               resource_id=service.id, subject_user_id=service.owner_user_id, metadata={"revision": row.revision})
-    result = await fw_apply.apply(db, service.id, client, vm_config=config)
-    db.commit()
+        client = await _proxmox(db, service)
+        try:
+            config = await client.get_config()
+        except Exception:  # left to ``apply``, which records the failure on the row
+            config = None
+        if config is not None:
+            hard = [reason for reason in svc.eligibility(db, service.id, vm_config=config, observe=False).reasons
+                    if reason not in reconcile.RENDERED_REASONS]
+            if hard:
+                raise FirewallNotEligible(hard)
+        svc._audit(db, actor, "firewall.apply_requested", resource_type="service",
+                   resource_id=service.id, subject_user_id=service.owner_user_id, metadata={"revision": row.revision})
+        held = reconcile.Claim.of(db, service.id, owner=owner, clock=reconcile.claim_clock(now))
+        result = await fw_apply.apply(db, service.id, client, vm_config=config, claim=held)
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+    finally:
+        reconcile.unclaim(db, service.id, owner=owner)
+    if result.state == fw_apply.CLAIM_LOST:
+        raise _apply_in_progress()
     return {"result": dataclasses.asdict(result), "firewall": fw.firewall_view(db, service.id, audience=fw.STAFF)}
 
 
