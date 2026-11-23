@@ -128,16 +128,45 @@ async def test_step_replaces_inherited_fw_sets_flag_and_blocks_smtp(world, fake)
 
 
 @pytest.mark.asyncio
-async def test_step_writes_enable_0_in_a_disabled_location(world, fake):
+async def test_step_skips_a_new_vm_in_a_disabled_location(world, fake):
     fw.update_location_settings(world.db, world.staff_actor, world.location.id, enabled=False)
     vm = world.vm()
     fake_vm = fake.add_vm(vm.vm.proxmox_vmid)
     fake_vm.set_option("enable", 1)
     world.db.commit()
+    outcome = await _run_step(_ctx(world, vm))
+    assert outcome.result == StepResult.SKIP and fake.writes == []
+    assert fake_vm.options["enable"] == 1
+    assert not net_firewall_flag(fake_vm.config["net0"])
+    assert world.db.get(ServiceFirewall, vm.id) is None
+
+
+@pytest.mark.asyncio
+async def test_reading_settings_or_recording_readiness_does_not_change_provisioning(db_session, fake):
+    world = make_world(db_session, location_enabled=False)
+    location_id = world.location.id
+    fw.get_location_settings(world.db, location_id)
+    fw.record_readiness(world.db, location_id, world.cluster.id, {"ready": True, "reasons": []})
+    world.db.commit()
+    vm = world.vm()
+    fake.add_vm(vm.vm.proxmox_vmid)
+    world.db.commit()
+    outcome = await _run_step(_ctx(world, vm))
+    assert outcome.result == StepResult.SKIP and fake.writes == []
+    assert world.db.get(ServiceFirewall, vm.id) is None
+
+
+@pytest.mark.asyncio
+async def test_step_writes_enable_0_for_an_existing_row_in_a_disabled_location(world, fake):
+    vm = world.vm()
+    fake_vm = fake.add_vm(vm.vm.proxmox_vmid)
+    fw.get_or_create(world.db, vm.id)
+    fw.update_location_settings(world.db, world.staff_actor, world.location.id, enabled=False)
+    fake_vm.set_option("enable", 1)
+    world.db.commit()
     await _run_step(_ctx(world, vm))
     assert fake_vm.options["enable"] == 0
     assert not net_firewall_flag(fake_vm.config["net0"])
-    assert world.db.get(ServiceFirewall, vm.id).admin_overrides in (None, {})
 
 
 @pytest.mark.asyncio

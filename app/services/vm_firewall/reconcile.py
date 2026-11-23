@@ -350,9 +350,13 @@ class ProvisionFirewallError(RuntimeError):
 
 
 def firewall_configured(db: Session, service_id: int) -> bool:
-    """Whether ``ApplyFirewallStep`` has work: the VM has a firewall row, or its location has
-    firewall settings (on or off). A location staff never configured is left as it is today."""
-    return db.get(ServiceFirewall, service_id) is not None or _location(db, service_id) is not None
+    """Whether ``ApplyFirewallStep`` has work: the VM has a firewall row, or its location has the
+    firewall switched on. A location that is off, with or without a settings row, is left as it is
+    today, so reading a location's settings (which creates the row) never changes provisioning."""
+    if db.get(ServiceFirewall, service_id) is not None:
+        return True
+    location = _location(db, service_id)
+    return location is not None and bool(location.enabled)
 
 
 async def apply_for_provision(
