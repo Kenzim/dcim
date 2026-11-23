@@ -10,9 +10,11 @@
   let container;
   let view = null;
   let modules = null;
+  let builtTheme;
 
   async function initEditor() {
     if (!container || typeof window === 'undefined') return;
+    builtTheme = theme;
     
     try {
       // Dynamically import CodeMirror modules
@@ -120,7 +122,7 @@
 
   onMount(() => initEditor());
 
-  $: if (container && view && theme !== undefined) {
+  $: if (container && modules && theme !== undefined && theme !== builtTheme) {
     initEditor();
   }
 
