@@ -333,8 +333,10 @@ GUI, another Rackflow process) fails the write instead of being overwritten blin
 re-reads and re-plans.
 
 Proxmox permissions needed by the cluster's API user: `VM.Audit` and `VM.Config.Network` on the VMs,
-`Sys.Audit` on `/` and `/nodes`. Production uses a full-rights user today, so nothing changes, but the
-live test uses a dedicated token with only these (section 13).
+`Sys.Audit` on `/` and `/nodes`, and `SDN.Use` on the zone of the VMs' bridge (`/sdn/zones/localnetwork`
+for a plain Linux bridge), without which a `net0` write is refused. The worker uses each cluster's
+existing Rackflow login; procedure step 1a (9.3) confirms it holds these, read only. The nested tests
+used a dedicated token with only these as a stand-in (9.4).
 
 ### 5.1 Applying a change without a permissive window
 
@@ -607,7 +609,21 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
    which comes first: raising `nf_conntrack_max` (and the hash size) on that node in a separate,
    approved change, or keeping that node's location off. The proposal to Kenzi states the numbers
    per node. The same read also records each node's current `net.bridge.bridge-nf-call-iptables`
-   and `net.bridge.bridge-nf-call-ip6tables` values, which the rollback in step 5 restores.
+   and `net.bridge.bridge-nf-call-ip6tables` values, which the rollback in step 5 restores, and the
+   boot value from `/usr/lib/sysctl.d/10-pve.conf` and `/etc/sysctl.d/` (0 on stock PVE). The current
+   value is the pre-firewall state only if the datacenter firewall has not been enabled on the
+   iptables backend since the node booted: enabling it sets both to 1 and disabling it does not set
+   them back, and `br_netfilter` is built into the kernel, so a node that ran the iptables firewall
+   earlier reads 1 here already. If the current value differs from the boot value, or `cluster.fw`
+   already has `enable: 1`, record both and say so in the proposal; the rollback then restores the
+   current (recorded) value, and returning to the boot value is a separate decision for Kenzi.
+1a. Read only, on one node of each cluster: confirm the cluster's existing Rackflow login (the user
+   in its Rackflow cluster record) holds what the worker needs, changing nothing:
+   `pveum user permissions <user> --path /`, `--path /vms/<vmid>` for one guest per node, and
+   `--path /sdn/zones/<zone>` for the zone of each guest bridge (`localnetwork` for plain Linux
+   bridges). It must show `Sys.Audit`, `VM.Audit` and `VM.Config.Network` (on `/` or every guest)
+   and `SDN.Use` on each zone; for a token login, also its own ACLs (`privsep`). `Sys.Modify` is not
+   needed. If anything is missing, stop: granting it is a separate change for Kenzi to approve.
 2. Neutralise pre-existing guest firewalls: for every guest the audit lists that Rackflow does not
    manage, write `enable: 0` in its VM firewall options (a no-op today, because the datacenter is off,
    so it changes nothing that runs). Guests whose owners really want those settings are opted in
@@ -699,8 +715,9 @@ Further points from the test:
   of the VM's bridge): a `net0` write, even of the firewall flag only, is refused without `SDN.Use`.
   That token can read everything readiness needs and write VM firewall options, rules and IP sets and
   the `net0` flag, and is refused for datacenter and node firewall writes, VM memory, stop and delete.
-  Rackflow never writes `cluster.fw` or `host.fw` (9.1), so it never needs `Sys.Modify`; production
-  should use a token with exactly these privileges.
+  Rackflow never writes `cluster.fw` or `host.fw` (9.1), so it never needs `Sys.Modify`. Production's
+  worker keeps each cluster's existing Rackflow login; step 1a of 9.3 confirms it holds these
+  privileges. The dedicated token was only a stand-in for the nested tests.
 - Not tested: production's older qemu-server, IPv6, guests on VLAN-aware bridges, real Ceph load.
 
 **Kept for the end-to-end worker run.** Before the production procedure goes to Kenzi, Rackflow's real
@@ -713,6 +730,42 @@ nftables backend, firewall off (`cluster.fw` `enable: 0`, each `host.fw` `nftabl
 `enable: 0`, every guest NIC `firewall=0`, no VM firewall files). API at `https://<fwn1 or fwn2>:8006`
 with a self-signed certificate; the node addresses are DHCP leases on the LAN, listed in the B0
 write-up with how to look them up again.
+
+**Results of the end-to-end worker run (chat B5b, 2026-11-23).** Details, scripts and raw logs:
+`/root/dcim/.forge/reviews/vm-firewall/b5b-results.md` and `b5b/` (outside the repository). A
+development Rackflow (throwaway MariaDB 11.8 and Redis containers, migrations at head, API and the
+standalone `app.workers.vm_firewall` process, no other workers) drove the cluster above through its
+API and the real worker. The cluster credential was the dedicated token `rackflow-fw@pve!worker`, a
+stand-in for production's existing Rackflow login, which this branch does not change; the token
+login code the run needed is reverted with the teardown. 9.3 steps 1 to 5 were applied by SSH on
+fwn1 and fwn2 at 06:37 to 06:38 UTC, with ACCEPT policies; in the 11-minute watch (146 samples, every
+2 s per node) SSH and quorum never failed and the API answered every probe (unauthenticated, so a 401
+after Proxmox's 3 s delay for failed logins). `bridge-nf-call-iptables` and `-ip6tables` read 0 and 0 on both
+nodes at step 1 (06:37:53, before any step and after B0's last reset), stayed 0 after the enable (the
+nftables backend never sets them) and were still 0 at the end; on these nodes they are set at boot by
+`/usr/lib/sysctl.d/10-pve.conf`, and `br_netfilter` is built in. Rackflow's readiness check reported
+the location ready. About 7,500 Proxmox requests over the run: no 401 and no 403, so the privileges
+listed above were enough; the only failures were 25 `PUT config` answering "VM is locked (backup)",
+caused on purpose in case 6. A guest's `.fw` was always written and compiled by `proxmox-firewall`
+about 5 s later.
+
+| Case | Result | Numbers |
+|---|---|---|
+| 1. Opt in, SSH preset, enable | Pass | Applied 2 s after the enable; flag flip lost 3 pings at 20 ms (about 60 ms); port 22 open, 8080 and 9999 time out, ICMP dropped; spoofed source from inside the guest dropped (0 of 3 reached the peer, 3 of 3 from an unfiltered guest) |
+| 2. Add and remove port 8080 | Pass | Worker applies 1.5 to 3.5 s after the change; nftables chain updated 4.7 to 5.2 s after the change; traffic follows |
+| 3. Drift repair | Pass | A hand edit (policy ACCEPT, a Rackflow rule deleted, an unmarked rule added) put right in 51 s; `firewall=0` set by hand restored in 34 s (sweep interval 60 s, the minimum) |
+| 4. Rollback (8.4) | Pass | Client off applied in 2.4 s (no flag flip); location off settled both VMs in 4 s; all guests answer on every port again, no guest chains left in nftables, spoofing passes again |
+| 5. Ineligible VM | Pass after fixes | Trunk NIC or NIC on an infrastructure bridge (`vmbr2`): client and staff enable answer 409 `not_eligible`, the worker holds the VM and writes nothing; staff "apply now" wrote a `.fw` before the fix, answers 409 and writes nothing after it; the panel now shows the reason |
+| 6. Paced rollout (8.3) | Pass after fix | Preview counted 4 VMs; a wrong confirmation count answers 409; released at 1 VM per node per minute; with backup locks it paused after 3 failures with the reason, and nothing was written after the pause; resume and success path: 4 VMs in about 3 min |
+| 7. Flag flip during the rollout | Pass | 3 to 5 lost pings at 20 ms per VM, longest gap between replies 84 to 126 ms (B0: median 64 ms, worst 105 ms) |
+| 8. Two workers | Pass | The standby made 0 Proxmox calls while the leaseholder applied 4 VMs; after `kill -9` of the holder the standby took over at lease expiry and finished 122 s after the crash; two processes running the queue at the same instant split the VMs four times, none applied twice |
+
+Bugs found and fixed on the branch: staff "apply now" wrote to a VM its live config makes ineligible;
+concurrent rollout failures were under-counted, so the pause came late; the staff and client views
+showed a VM the worker holds as ineligible as available, with no reason. Left open: the panel's
+state badge for such a VM still reads "Staff have set this server so that Rackflow does not touch its
+firewall" above the correct reason. Screenshots of the staff
+panel in the admin VM page: `/root/dcim/.forge/reviews/vm-firewall/screenshots/b5b-*.png`.
 
 **Teardown.** The chat that runs the end-to-end test tears the cluster down right after its results
 are recorded here:
