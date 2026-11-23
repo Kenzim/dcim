@@ -6,6 +6,7 @@
     listTaxClasses,
     listTaxExemptions,
     revokeTaxExemption,
+    searchCommerceBillingAccounts,
   } from '../../../../lib/billingTaxAdminApi.js';
   import { fromInput, when } from './taxUi.js';
 
@@ -24,6 +25,11 @@
   let creating = false;
   let form = blank();
   let formError = '';
+  let accountSearch = '';
+  let accountMatches = [];
+  let accountSearching = false;
+  let accountSearchError = '';
+  let chosenAccount = null;
   let revoking = null;
   let revokeError = '';
 
@@ -56,11 +62,47 @@
     creating = true;
     form = blank();
     formError = '';
+    accountSearch = '';
+    accountMatches = [];
+    accountSearchError = '';
+    chosenAccount = null;
+  }
+
+  const accountName = (account) => account.reseller_name || account.username || 'Account';
+
+  async function findAccounts() {
+    const text = accountSearch.trim();
+    if (!text) {
+      accountMatches = [];
+      return;
+    }
+    accountSearching = true;
+    accountSearchError = '';
+    try {
+      accountMatches = await searchCommerceBillingAccounts({ q: text, limit: 8 });
+      if (!accountMatches.length) accountSearchError = 'No billing account matches.';
+    } catch (err) {
+      accountSearchError = err.message;
+    } finally {
+      accountSearching = false;
+    }
+  }
+
+  function chooseAccount(account) {
+    chosenAccount = account;
+    form.billing_account_id = String(account.id);
+    accountMatches = [];
+    accountSearchError = '';
+  }
+
+  function clearAccount() {
+    chosenAccount = null;
+    form.billing_account_id = '';
   }
 
   async function save() {
     if (!/^[1-9]\d*$/.test(String(form.billing_account_id).trim())) {
-      formError = 'Enter the billing account number.';
+      formError = 'Choose the billing account.';
       return;
     }
     if (!form.reason.trim()) {
@@ -167,7 +209,33 @@
 {#if creating}
   <Modal title="New tax exemption" onClose={() => (creating = false)}>
     <form class="ba-form" on:submit|preventDefault={save}>
-      <label>Billing account number<input bind:value={form.billing_account_id} inputmode="numeric" disabled={!!accountId} /></label>
+      {#if accountId}
+        <p class="ba-muted">Billing account #{accountId}</p>
+      {:else}
+        <div class="ba-form">
+          <span>Billing account</span>
+          {#if chosenAccount}
+            <div class="ba-inline">
+              <strong>#{chosenAccount.id} {accountName(chosenAccount)}</strong>
+              {#if chosenAccount.email}<span class="ba-hint">{chosenAccount.email}</span>{/if}
+              <button type="button" class="ba-link" on:click={clearAccount}>Change</button>
+            </div>
+          {:else}
+            <div class="ba-inline">
+              <input bind:value={accountSearch} placeholder="Name, email or account number" aria-label="Search billing accounts" on:keydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); findAccounts(); } }} />
+              <Button variant="secondary" size="small" on:click={findAccounts} disabled={accountSearching}>Search</Button>
+            </div>
+            {#if accountSearchError}<span class="ba-hint">{accountSearchError}</span>{/if}
+            {#if accountMatches.length}
+              <ul class="picker">
+                {#each accountMatches as account (account.id)}
+                  <li><button type="button" class="ba-link" on:click={() => chooseAccount(account)}>#{account.id} {accountName(account)}{account.email ? ` (${account.email})` : ''}</button></li>
+                {/each}
+              </ul>
+            {/if}
+          {/if}
+        </div>
+      {/if}
       <label>Reason<input bind:value={form.reason} maxlength="255" placeholder="e.g. Charity, certificate on file" /></label>
       <label>Certificate reference (optional)<input bind:value={form.certificate_ref} maxlength="128" /></label>
       <div class="ba-two">
@@ -198,3 +266,7 @@
     </svelte:fragment>
   </Modal>
 {/if}
+
+<style>
+  .picker { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+</style>
