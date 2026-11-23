@@ -221,7 +221,7 @@ def test_switch_lists_products_whose_class_has_no_rule_where_registered(db_sessi
     assert _items(db_session)["product_classes_have_rules"]["ok"]
 
 
-def test_switch_needs_the_adviser_signoff(db_session):
+def test_switch_needs_the_operators_acknowledgement(db_session):
     from app.services.settings_store import set_setting
 
     seed_classes(db_session)
@@ -234,6 +234,26 @@ def test_switch_needs_the_adviser_signoff(db_session):
     set_setting(db_session, "billing_tax_adviser_signoff", "Smith & Co ref VAT-12, 2026-12-01")
     item = _items(db_session)["adviser_signoff"]
     assert item["ok"] and item["signoff"] == "Smith & Co ref VAT-12, 2026-12-01"
+
+
+def test_signoff_item_is_the_operators_acknowledgement_and_still_blocks_the_switch(db_session):
+    from app.services.settings_store import set_setting
+
+    seed_classes(db_session)
+    items = billing_shadow.evaluate_switch(db_session, "tax", _now())
+    item = next(i for i in items if i["item"] == "adviser_signoff")
+    assert item["label"] == "Operator has reviewed the tax defaults"
+    assert "own tax adviser" in item["detail"] and "not legal advice" in item["detail"]
+    for text in (item["label"], item["detail"], *item["covers"]):
+        assert "sign-off" not in text.lower() and "signed off" not in text.lower()
+    assert not item["ok"] and item["signoff"] is None
+    assert "adviser_signoff" in [i["item"] for i in items if not i["ok"]]
+
+    set_setting(db_session, "billing_tax_adviser_signoff", "  Reviewed by J Smith, 2026-12-01  ")
+    items = billing_shadow.evaluate_switch(db_session, "tax", _now())
+    item = next(i for i in items if i["item"] == "adviser_signoff")
+    assert item["ok"] and item["signoff"] == "Reviewed by J Smith, 2026-12-01"
+    assert "adviser_signoff" not in [i["item"] for i in items if not i["ok"]]
 
 
 def _home(db, now=None):

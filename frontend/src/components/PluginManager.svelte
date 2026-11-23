@@ -385,7 +385,7 @@
     {/each}
 
     <h2 class="sub">Available to install</h2>
-    {#each installable as pkg (pkg.directory)}
+    {#each installable as pkg (`${pkg.bundled ? 'bundled' : 'plugins'}:${pkg.directory}`)}
       <div class="card">
         <div class="card-head">
           <div>

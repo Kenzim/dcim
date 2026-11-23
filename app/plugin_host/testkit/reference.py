@@ -22,7 +22,7 @@ from typing import Any, Optional, get_args, get_origin
 from pydantic import BaseModel
 
 from app.plugin_host import events as events_module
-from app.plugin_host import health, kinds, loader, manifest, outbox, scheduler, sdk, state, ui
+from app.plugin_host import health, kinds, loader, manifest, outbox, providers, scheduler, sdk, state, ui
 from app.plugin_host.catalogue import API_VERSION, EVENT_LIST, PERMISSION_LIST, POWER_ACTIONS, POWER_SOURCES
 from app.plugin_host.testkit import deprecations
 
@@ -100,16 +100,17 @@ FIELD_NOTES: dict[str, str] = {
     "Manifest.services": "Required when the plugin has actions, panels or per-service schedules.",
     "Manifest.events": "Events delivered to after handlers.",
     "Manifest.hooks": "Events with before hooks (needs `events.veto`).",
-    "Manifest.tables": "Reserved. Refused in API 1.0.",
+    "Manifest.tables": "Reserved. Refused in every API version so far.",
     "Manifest.provides": "Typed providers the plugin offers (API 1.1 and later). Each needs the permission of its kind and an `@plugin.provider(kind, id)` in `register`.",
     "ProvideSpec.kind": "`tax_id_validator`, `tax_rule_pack`, `tax_provider` or `currency_rates`.",
     "ProvideSpec.id": "Unique with the kind inside the plugin. Billing refers to the provider as `<plugin id>:<provider id>`.",
     "ProvideSpec.label": "Shown to admins where they choose a provider.",
+    "ProvideSpec.description": "Shown to admins with the label.",
     "ProvideSpec.countries": "Upper case ISO alpha-2 codes the provider covers (`EL` for Greece at VIES). Empty means any.",
     "ProvideSpec.id_types": "Tax ID types the provider checks, such as `eu_vat`. Required for `tax_id_validator`, refused elsewhere.",
     "ProvideSpec.currencies": "Upper case ISO alpha-3 codes. Only for `tax_provider`; empty means any.",
     "ProvideSpec.timeout_seconds": "Wall-clock limit of one call. Billing may lower it for a call, never raise it.",
-    "ProvideSpec.rate_limit": "Calls allowed per window, shared by every Rackflow process. Counts `check_online`, `calculate`, `load` and `rates`, not `supports` or `check_format`.",
+    "ProvideSpec.rate_limit": "Calls allowed per window, shared by every Rackflow process. One counter per provider, used by `check_online`, `calculate`, `load` and `rates`; `supports`, `check_format`, `pack_id` and `versions` are not counted.",
     "ProvideSpec.pack": "Only for `tax_rule_pack`: the JSON file of the pack inside the package. It must exist and pass the pack schema at install.",
     "RateLimitSpec.calls": "Calls allowed in one window.",
     "RateLimitSpec.per_seconds": "Length of the window in seconds.",
@@ -412,10 +413,135 @@ def _kinds_section() -> list[str]:
             lines.append(f"| `{cls.__name__}` | `{item['name']}` | `{item['type']}` | {'yes' if item['required'] else 'no'} |")
     lines += [
         "",
-        "Billing checks every answer. A wrong type, an unknown status, a missing, extra or unreadable field, an `unavailable` "
-        "answer without an `error_code`, or (for a tax provider) a missing or unknown line key, a negative amount, a rate that "
-        "does not give the tax within one minor unit, or tax on a reverse charge part counts as a failure of the plugin, the "
-        "same as a timeout or an exception.",
+        "Every answer is checked before billing sees it; see [Calls to providers](#calls-to-providers) for what is "
+        "checked and what happens when a check fails.",
+        "",
+    ]
+    return lines
+
+
+# ------------------------------------------------------------------ calls to providers
+
+REASON_NOTES: dict[str, str] = {
+    "circuit_open": "The plugin's circuit is open after repeated failures. Refused without calling the plugin.",
+    "rate_limited": "The provider's `rate_limit` is used up. Refused without calling the plugin.",
+    "busy": "The plugin already has the most calls it may run at once, or the call's thread did not start in time.",
+    "timeout": "The method did not return within its time limit.",
+    "error": "The method raised an exception, or the host failed unexpectedly while making the call.",
+    "invalid_answer": "The method returned something that failed the checks below.",
+    "disabled": "The plugin is not enabled.",
+    "not_installed": "No plugin with that id is installed.",
+    "not_loaded": "The plugin's manifest or code could not be loaded.",
+    "not_permitted": "The plugin was not granted the permission of the provider's kind.",
+    "unknown_provider": "The plugin does not declare that provider, or the reference is not `<plugin id>:<provider id>`.",
+    "unknown_method": "The kind has no such method.",
+    "bad_arguments": "The wrong number of arguments, or arguments that cannot be copied.",
+}
+# A call ends in these reasons because the plugin did something wrong, so they count against its health.
+FAILURE_REASONS = ("timeout", "error", "invalid_answer")
+
+
+def provider_reasons() -> list[str]:
+    """The reasons of ``ProviderUnavailable``, read from its docstring."""
+    return re.findall(r"``([a-z_]+)``", (providers.ProviderUnavailable.__doc__ or "").partition("Reasons:")[2])
+
+
+def _calls_section() -> list[str]:
+    signature = str(inspect.signature(providers.call_provider)).replace("'", "")
+    slots = providers.SLOTS_PER_PLUGIN
+    lines = [
+        "## Calls to providers",
+        "",
+        "Billing reaches a provider only through `call_provider" + signature + "`. `provider_ref` is "
+        "`<plugin id>:<provider id>`. A plugin never sees this function; this section describes what the host does around "
+        "each call so that a provider's author knows what to expect. The plugin's own code runs inside the call and "
+        "cannot make `call_provider` raise anything but `ProviderUnavailable`.",
+        "",
+        "### Time limit",
+        "",
+        "- A call may run for the provider's `timeout_seconds` (8 by default, 1 to 30). The caller may pass a lower "
+        "`timeout_seconds`, never a higher one, and never below 0.1 s.",
+        "- The limit starts when the plugin's code starts, so it includes loading the plugin (importing the module, "
+        "`register` and creating the providers) when this process has not loaded it yet. Time spent asking Redis for the "
+        "rate limit is taken off it.",
+        "- A coroutine is cancelled at the limit. A plain function cannot be stopped: the host stops waiting, counts a "
+        "`timeout` and rolls back whatever the call wrote to plugin state; the thread runs on until the function returns.",
+        "",
+        "### Slots and `busy`",
+        "",
+        f"- Every call runs on a thread of its own. A plugin may have at most {slots} calls whose code is still running, "
+        f"counting calls that timed out but have not returned. A further call is refused with `busy` at once, without "
+        f"calling the plugin and without waiting in a queue behind it. A plugin that hangs therefore holds at most {slots} "
+        f"threads and database sessions, and never slows calls to other plugins.",
+        f"- `busy` is also the reason when the call's thread has not started within {providers.START_SECONDS:g} s.",
+        "- A `busy` refusal is not a failure of the plugin, with one exception: when every slot is held by a call of that "
+        "plugin that has already timed out, each refusal counts as a failure, so that a provider that hangs for good "
+        "opens its circuit.",
+        "",
+        "### Circuit breaker",
+        "",
+        f"- A `timeout`, an exception or an invalid answer is a failure: it is written to the plugin log and counted. "
+        f"{health.FAILURES_TO_OPEN} failures in a row open the circuit for {health.OPEN_BASE_SECONDS} s, doubling up to "
+        f"{health.OPEN_MAX_SECONDS} s; {health.FAILURES_TO_DISABLE} in a row disable the plugin.",
+        "- Only a valid answer from a method that does real work (`check_online`, `calculate`, `load`, `rates`) counts as a "
+        "success and resets the count. A valid answer from `supports`, `check_format`, `pack_id` or `versions` does not, so "
+        "a provider whose real calls keep failing cannot keep its circuit closed with cheap ones.",
+        "- When a failure opens the circuit, the audit entry `plugin.provider_failed` records the provider "
+        "(`<kind>:<provider id>`), the number of failures, the seconds the circuit stays open and the error. The failure "
+        "that disables the plugin writes `plugin.auto_disabled` instead.",
+        "- With a `db` argument the failure count, circuit state, log line and audit entry are written in a savepoint of "
+        "the caller's transaction on SQLite, and committed on a separate session on other databases and without `db`. "
+        "The plugin's own state writes during a call always use the plugin's own session.",
+        "",
+        "### Rate limit",
+        "",
+        "- The provider's `rate_limit` counts the methods that may do real work (`check_online`, `calculate`, `load`, "
+        "`rates`). There is one counter for each provider, shared by all of its counted methods and by every Rackflow "
+        f"process through Redis. While Redis is down or does not answer within {providers.REDIS_TIMEOUT_SECONDS:g} s each "
+        "process counts for itself.",
+        "",
+        "### Reasons",
+        "",
+        "`call_provider` raises only `ProviderUnavailable`, whose `reason` is one of these. A call never leaks the plugin's "
+        "own exception, whatever its message does. Reasons marked failure count against the plugin's health.",
+        "",
+        "| Reason | Failure | Meaning |",
+        "|---|---|---|",
+    ]
+    for reason in provider_reasons():
+        counts = "yes" if reason in FAILURE_REASONS else ("only when hung" if reason == "busy" else "no")
+        lines.append(f"| `{reason}` | {counts} | {REASON_NOTES.get(reason, '')} |")
+    lines += [
+        "",
+        "### Answer checks",
+        "",
+        "The plugin receives copies of its arguments, so nothing it does to them reaches billing. Its answer is rebuilt "
+        "from new objects after checking, and checked against billing's own request, never the plugin's copy. Types are "
+        "checked exactly: a subclass of a result class, of `str`, `int`, `dict` or `datetime`, and `bool` where a number is "
+        "asked for, are refused. Any failed check is an `invalid_answer` and counts as a failure.",
+        "",
+        "| Method | What is checked |",
+        "|---|---|",
+        "| `supports`, `check_format` | A real `bool`. |",
+        "| `tax_id_validator.check_online` | A `TaxIdCheckResult` with `status` `valid`, `invalid` or `unavailable`. "
+        f"`checked_at` is a `datetime` from {kinds.EARLIEST_CHECKED_AT.year} to one day ahead of now (without a time zone "
+        "it counts as UTC). `unavailable` needs an `error_code`. `error_code` and `request_ref` are at most 64 characters; "
+        "`registered_name` and `registered_address` are cut to 512 characters. |",
+        f"| `tax_rule_pack.pack_id` | Text matching `{kinds._PACK_ID_RE.pattern}`. |",
+        f"| `tax_rule_pack.versions` | A list of at most {kinds.MAX_VERSIONS} non-empty texts of at most 32 characters. |",
+        f"| `tax_rule_pack.load` | A `dict` that is JSON (no `NaN` or infinity) and at most {kinds.MAX_PACK_BYTES // (1024 * 1024)} MB "
+        "as JSON text. |",
+        "| `tax_provider.calculate` | A `TaxProviderResult` whose `lines` has exactly the keys of the request: none missing, "
+        "none unknown. Each part is a `TaxProviderPart` with `name` (at most 255 characters) and `jurisdiction` (at most "
+        "64) not empty, `legal_note` at most 2,000, `reference` at most 128. `base_cents` and `tax_cents` are `int`, from 0 "
+        f"to {kinds.MAX_CENTS:,} (2^63 - 1). `rate_percent` is a string of ASCII digits with at most three before the "
+        "point and four after. Tax must be within one minor unit of `rate_percent` of `base_cents`, and must be 0 on a "
+        "`reverse_charge` part. |",
+        "| `currency_rates.rates` | A `CurrencyRatesResult` whose `source` matches "
+        f"`{kinds._SOURCE_RE.pattern.rstrip(chr(92) + 'Z')}$`, whose `period_start` and `period_end` are exactly the first "
+        f"and last day of the requested month, and with at most {kinds.MAX_RATES} rates. Each currency is an upper case "
+        "ISO alpha-3 code, not the base currency and not listed twice. `units_per_base` is an ASCII decimal above zero "
+        "with at most twelve digits before the point and six after. |",
         "",
     ]
     return lines
@@ -450,7 +576,14 @@ def _limits() -> list[tuple[str, str]]:
             f"{Settings.model_fields['plugin_guest_exec_per_minute_total'].default} per plugin",
         ),
         ("Providers per plugin", str(manifest.Manifest.model_fields["provides"].metadata[0].max_length)),
-        ("Provider call time limit", "8 s by default, at most 30 s (`timeout_seconds`)"),
+        ("Provider call time limit", "8 s by default, at most 30 s (`timeout_seconds`); a caller may lower it, to 0.1 s at least"),
+        ("Provider calls running at once", f"{providers.SLOTS_PER_PLUGIN} per plugin, then `busy`"),
+        ("Wait for a provider call's thread to start", f"{providers.START_SECONDS:g} s, then `busy`"),
+        ("Wait for Redis on a provider rate limit", f"{providers.REDIS_TIMEOUT_SECONDS:g} s, then each process counts for itself"),
+        ("Largest tax rule pack", f"{kinds.MAX_PACK_BYTES // (1024 * 1024)} MB"),
+        ("Versions of a tax rule pack", str(kinds.MAX_VERSIONS)),
+        ("Rates in a currency rates answer", str(kinds.MAX_RATES)),
+        ("Largest amount in a tax answer", f"{kinds.MAX_CENTS:,} minor units"),
         ("Provider rate limit", "set per provider in `rate_limit`, from 1 call per 86,400 s to 10,000 calls per second"),
         ("Failures that open the circuit", f"{health.FAILURES_TO_OPEN} in a row"),
         ("Failures that disable the plugin", f"{health.FAILURES_TO_DISABLE} in a row"),
@@ -520,6 +653,7 @@ def render_reference() -> str:
         lines += _model_section(model)
     lines += _sdk_section()
     lines += _kinds_section()
+    lines += _calls_section()
     lines += [
         "## Handlers",
         "",

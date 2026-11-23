@@ -101,7 +101,7 @@ def _iso(value) -> Optional[str]:
 
 
 def _summary(db: Session, inst: PluginInstallation) -> dict:
-    package = next((p for p in discover() if p.directory == inst.directory), None)
+    package = next((p for p in discover() if p.directory == inst.directory and not p.reserved), None)
     return lifecycle.summary(db, inst, package)
 
 
@@ -162,6 +162,16 @@ async def uninstall_plugin(plugin_id: str, body: UninstallBody, auth: AdminDep, 
     inst = _installation(db, plugin_id)
     await lifecycle.uninstall(db, inst, keep_data=body.keep_data, actor_user_id=_admin_id(auth))
     return {"ok": True}
+
+
+@admin_router.post("/{plugin_id}/purge-data")
+def purge_plugin_data(plugin_id: str, auth: AdminDep, db: DbDep) -> dict:
+    """Delete the settings, secrets, state and other rows an uninstall kept of a plugin that is no longer installed."""
+    try:
+        deleted = lifecycle.purge_data(db, plugin_id, actor_user_id=_admin_id(auth))
+    except lifecycle.LifecycleError as exc:
+        raise _lifecycle_error(exc) from exc
+    return {"ok": True, "deleted": deleted}
 
 
 @admin_router.post("/{plugin_id}/reset-health")

@@ -55,7 +55,7 @@ def _engine(tmp_path):
 def test_single_head_is_vm_firewall():
     directory = helpers.script()
     assert directory.get_heads() == ["vm_firewall"]
-    assert directory.get_revision("vm_firewall").down_revision == "billing_p2_email_money"
+    assert directory.get_revision("vm_firewall").down_revision == "plugin_bundled_identity"
 
 
 def test_upgrade_and_downgrade(tmp_path):

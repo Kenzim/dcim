@@ -824,6 +824,9 @@ function rackflow_jsonBody($data)
     return json_encode($data);
 }
 
+/** cURL timeout for strategy actions that reboot the guest and wait for its agent. */
+define('RACKFLOW_STRATEGY_ACTION_TIMEOUT_SECONDS', 180);
+
 /**
  * Make API call to RackFlow backend.
  *
@@ -878,6 +881,7 @@ function rackflow_apiCall($apiUrl, $apiKey, $method, $endpoint, $data = null, $t
             'success' => false,
             'error' => 'CURL error: ' . $curlError,
             'http_code' => 0,
+            'data' => null,
         );
     }
     
@@ -3583,8 +3587,10 @@ function rackflow_runStrategyAction(array $params, $actionName, array $actionPar
     }
     $qs = '?audience=' . urlencode($audience);
     // change_password may briefly wait for the guest agent (~8s) before
-    // deferring; keep headroom under WHMCS's module call budget.
-    $timeout = ($actionName === 'change_password') ? 45 : 30;
+    // deferring; keep headroom under WHMCS's module call budget. Other actions
+    // (reset network, randomise SMBIOS) reboot the guest and wait for its agent
+    // before RackFlow answers, which takes about a minute for macOS.
+    $timeout = ($actionName === 'change_password') ? 45 : RACKFLOW_STRATEGY_ACTION_TIMEOUT_SECONDS;
     $result = rackflow_apiCall(
         $apiConfig['url'],
         $apiConfig['key'],
@@ -3595,6 +3601,10 @@ function rackflow_runStrategyAction(array $params, $actionName, array $actionPar
     );
     if (!$result['success']) {
         $err = isset($result['error']) ? $result['error'] : 'Unknown error';
+        if (empty($result['http_code']) && stripos((string)$err, 'timed out') !== false) {
+            return $err . ' (RackFlow did not answer within ' . (int)$timeout
+                . ' seconds; the action may still be running, so check the service before retrying.)';
+        }
         $detail = is_array($result['data']) && isset($result['data']['detail']) ? $result['data']['detail'] : $err;
         return is_string($detail) ? $detail : $err;
     }

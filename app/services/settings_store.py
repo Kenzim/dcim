@@ -722,8 +722,9 @@ _DEFINITIONS = (
     SettingDef(
         "billing_tax_adviser_signoff",
         "str",
-        "The tax adviser's sign-off of the VAT treatment (their reference and the date), or "
-        "empty. The tax engine cannot switch to v2 while it is empty.",
+        "The operator's acknowledgement that they have reviewed the tax defaults, with their own "
+        "adviser where needed: who reviewed them and when. Empty until recorded. The tax engine "
+        "cannot switch to v2 while it is empty.",
         "billing_tax",
         max_length=500,
         validator=_validate_signoff,

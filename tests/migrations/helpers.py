@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 A0 = "billing_a0_renewals"
 P1_HEAD = "billing_p1_ledger_owner_check"
 # The single alembic head; the phase 2 chain follows the phase 1 head.
-HEAD = "billing_p2_email_money"
+HEAD = "plugin_bundled_identity"
 CHAIN = [
     "billing_p1_series_shadow",
     "billing_p1_invoice_columns",
@@ -48,6 +48,7 @@ P2_CHAIN = [
     "billing_p2_exchange_rates",
     "billing_p2_fx_refs",
     "billing_p2_email_money",
+    "plugin_bundled_identity",
 ]
 P2_NEW_TABLES = {
     "tax_classes",
@@ -71,7 +72,7 @@ P2_NEW_TABLES = {
 }
 # Columns and indexes the phase 2 chain adds to existing tables.
 P2_COLUMNS = {
-    "plugin_installations": {"effective_api"},
+    "plugin_installations": {"effective_api", "bundled"},
     "invoices": {"tax_engine", "tax_point_at", "tax_summary", "tax_evidence", "legal_notes", "seller_registration_id",
                  "fx_rate", "fx_period", "fx_source", "tax_total_gbp_cents", "fx_rate_id"},
     "orders": {"tax_evidence"},

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.dao.runner_dao import RunnerDAO
 from app.dao.storage_dao import StorageDAO
-from app.models.alerting import NotificationDelivery, VmBackupRun
+from app.models.alerting import AlertSeverity, NotificationDelivery, VmBackupRun
 from app.models.boot_task import BootTask, BootTaskStatus
 from app.models.commerce_email import EmailMessage, EmailMessageStatus
 from app.models.installation_task import InstallationStatus, InstallationTask
@@ -1045,6 +1045,75 @@ def notification_delivery_failing(db: Session, params: dict, now: datetime) -> l
     ]
 
 
+# --------------------------------------------------------------------------- plugins
+
+
+def _report_time(value) -> datetime | None:
+    try:
+        return naive(datetime.fromisoformat(str(value).removesuffix("Z")))
+    except (TypeError, ValueError):
+        return None
+
+
+def plugin_handlers_abandoned(db: Session, params: dict, now: datetime) -> list[Finding]:
+    """Plugins with sync handlers that timed out and are still running, from each process's report.
+
+    Each process with such handlers keeps a ``system_settings`` row (``app/plugin_host/invoke.py``)
+    fresh while they run; a row not refreshed for ``stale_after_seconds`` belongs to a process that
+    has stopped, whose threads are gone with it, and is ignored.
+    """
+    from app.models.commerce_account import SystemSetting
+    from app.models.plugin_host import PluginInstallation
+    from app.plugin_host.invoke import REPORT_PREFIX
+
+    stale = now - timedelta(seconds=params["stale_after_seconds"])
+    by_plugin: dict[str, dict] = {}
+    rows = db.query(SystemSetting).filter(SystemSetting.key.startswith(REPORT_PREFIX, autoescape=True)).all()
+    for row in rows:
+        value = row.value if isinstance(row.value, dict) else {}
+        seen = _report_time(value.get("seen_at"))
+        if seen is None or seen < stale:
+            continue
+        slots = value.get("slots_per_plugin")
+        handlers = [h for h in value.get("handlers") or [] if isinstance(h, dict)]
+        for plugin_id, count in (value.get("plugins") or {}).items():
+            if not isinstance(count, int) or count <= 0:
+                continue
+            entry = by_plugin.setdefault(plugin_id, {"abandoned": 0, "processes": [], "handlers": [], "hung": False})
+            entry["abandoned"] += count
+            entry["processes"].append(value.get("process"))
+            entry["handlers"].extend(h for h in handlers if h.get("plugin_id") == plugin_id)
+            entry["hung"] = entry["hung"] or (isinstance(slots, int) and count >= slots)
+    out = []
+    for plugin_id, entry in sorted(by_plugin.items()):
+        inst = db.get(PluginInstallation, plugin_id)
+        name = inst.name if inst is not None else plugin_id
+        count = entry["abandoned"]
+        handlers = sorted(entry["handlers"], key=lambda h: str(h.get("abandoned_at") or ""))
+        oldest = handlers[0] if handlers else {}
+        hung = " Every slot of the plugin is held, so its calls are refused." if entry["hung"] else ""
+        out.append(
+            Finding(
+                "plugin_handlers_abandoned",
+                "plugin",
+                plugin_id,
+                name,
+                f"Plugin {name} has {count} handler{'s' if count != 1 else ''} stuck after timing out",
+                f"{count} of the plugin's handlers timed out and are still running, each holding a thread and "
+                f"a database session; the oldest is {oldest.get('handler', 'unknown')}, running for "
+                f"{_human(oldest.get('running_seconds'))}.{hung}",
+                severity=AlertSeverity.CRITICAL if entry["hung"] else None,
+                details={
+                    "abandoned": count,
+                    "hung": entry["hung"],
+                    "processes": entry["processes"],
+                    "handlers": handlers[:10],
+                },
+            )
+        )
+    return out
+
+
 DETECTORS: dict[str, Detector] = {
     "storage_node_offline": storage_node_offline,
     "storage_node_ceph": storage_node_ceph,
@@ -1073,5 +1142,6 @@ DETECTORS: dict[str, Detector] = {
     "vm_firewall_drift_repeated": vm_firewall_drift_repeated,
     "vm_firewall_cluster_not_ready": vm_firewall_cluster_not_ready,
     "vm_firewall_worker_stale": vm_firewall_worker_stale,
+    "plugin_handlers_abandoned": plugin_handlers_abandoned,
     **BILLING_DETECTORS,
 }

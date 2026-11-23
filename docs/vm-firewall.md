@@ -983,7 +983,7 @@ Alert types (catalogue plus detectors reading `service_firewalls` and the readin
 ## 12. Migration
 
 One revision `vm_firewall` (file `alembic/versions/vm_firewall.py`), `down_revision` = the single head
-of `main` when the branch is merged (today `billing_p2_email_money`; the billing programme's phase 3
+of `main` when the branch is merged (today `plugin_bundled_identity`; the billing programme's phase 3
 adds revisions on its own branch, so whichever merges second re-points its `down_revision` so there is
 one head). It only creates the tables of section 4 and their indexes; no existing table changes.
 Plain `op.create_table`, `sa.JSON`, string enums, foreign keys left out on SQLite as the recent

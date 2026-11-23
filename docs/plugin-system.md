@@ -267,7 +267,7 @@ Every way an invoice is paid (card webhook, saved-method charge, reseller credit
 A before hook runs synchronously inside the request, before the operation:
 
 - it returns `None` to allow, `ctx.veto("reason")` to refuse, or `ctx.alter({...})` to change fields the catalogue marks mutable (none in API 1.0; the mechanism exists for later events such as order placement);
-- each hook has **2 seconds**, all hooks for one operation together **3 seconds**; a hook that times out or raises counts as a failure for the circuit breaker and is treated as **allow** (fail open), so a broken plugin cannot lock clients out of their servers;
+- each hook has **2 seconds**, all hooks for one operation together **3 seconds**; a hook that times out or raises counts as a failure for the circuit breaker and is treated as **allow** (fail open), so a broken plugin cannot lock clients out of their servers. A hook whose plugin has no free slot (section 11) is skipped at once and also treated as allow; it counts as a failure only when the plugin is hung;
 - hooks run in order of plugin id; the first veto wins and later hooks do not run;
 - a veto is audited (`plugin.veto`) and the caller gets HTTP 409 with `{"detail": "<plugin name>: <reason>"}` (MCP: a tool error with the same text);
 - before hooks need the `events.veto` permission as well as the event's own permission.
@@ -280,7 +280,8 @@ Each emitted event creates one `plugin_deliveries` row per subscribed enabled pl
 - on failure marks it `failed` with the error and retries after `min(3600, 30 × 2^(attempts − 1))` seconds;
 - after **10** attempts, or 24 hours queued while the plugin is disabled, marks it `dead`;
 - while the plugin's circuit is open, leaves rows queued without counting an attempt;
-- skips (`skipped`) service events for services the plugin is no longer active for.
+- skips (`skipped`) service events for services the plugin is no longer active for;
+- when the plugin has no free slot (section 11), puts the row back to `queued` for 60 seconds without using an attempt, as when the plugin is disabled or its circuit is open.
 
 Admins see queued, failed and dead deliveries per plugin and can retry a dead one. Delivered and skipped rows are pruned after 7 days, dead ones after 30 days.
 
@@ -399,6 +400,8 @@ The add-on endpoint body is `{"addon_ref": "whmcs:12", "status": "active" | "sus
 ```json
 {"id": "check", "every": "6h", "scope": "service", "timeout": 120, "jitter": "30m"}
 ```
+
+A run whose plugin has no free slot (section 11) is recorded as `skipped` and tried again a minute later.
 
 - `every`: `<number><s|m|h|d>`, at least `60s`;
 - `scope`: `global` (one run per interval) or `service` (one run per service the plugin is active for);
@@ -538,7 +541,18 @@ For billing calls the integration must own the service (`_assert_billing_owned_s
 
 ## 11. Failure isolation and health
 
-- **Timeouts** on every call into plugin code: before hooks 2 seconds (3 seconds per operation), actions up to 30 seconds, deliveries 30 seconds, schedules up to 600 seconds, lifecycle handlers 30 seconds, MCP tools 30 seconds. Async handlers are cancelled at the limit. A plain function cannot be killed; Rackflow stops waiting, counts the failure, and the thread finishes on its own (the pool is small and separate, so it cannot starve Rackflow).
+- **Timeouts** on every call into plugin code: before hooks 2 seconds (3 seconds per operation), actions up to 30 seconds, deliveries 30 seconds, schedules up to 600 seconds, lifecycle handlers 30 seconds, MCP tools 30 seconds. Async handlers are cancelled at the limit. A plain function cannot be killed: Rackflow stops waiting, counts the failure, rolls back the handler's state writes, and the handler's thread carries on until the function returns, holding its thread and database session until then. A handler that finishes and is committing its writes when the limit passes is not abandoned: the caller waits for that commit and gets its result.
+- **Slots**: each plain-function handler runs on a thread of its own, so no call waits in a queue behind another plugin's. A plugin may have at most **4** such handlers running in one process, counting handlers that timed out but have not returned yet, and a process at most **12** in all (below SQLAlchemy's default pool of 15 connections). A call beyond either limit is not run and not queued: it is refused at once as **busy**. A plugin hung on four calls therefore holds four threads and four sessions at most and leaves the other eight to the rest. A refusal counts as a failure for the circuit breaker only when every one of the plugin's slots is held by a handler that timed out (the plugin is hung, not busy), so a hung plugin's circuit opens and it is auto-disabled in the usual way; a refusal because of the process limit never counts against the plugin. What each caller does with a refusal:
+
+| Caller | When the plugin has no free slot |
+|---|---|
+| Event delivery (outbox) | Put back in the queue for 60 seconds, like a delivery to an unavailable plugin; no attempt is used |
+| Schedule | Recorded as `skipped` with the reason in `last_error` and tried again in 60 seconds; `last_run_at` is unchanged |
+| Before hook | Skipped and treated as **allow**, as for a hook that times out (section 6.3); it does not wait for its 2 seconds |
+| Action, MCP tool | HTTP 503 with `detail` "The plugin is busy with other calls; try again shortly", or "The plugin is not responding: its earlier calls timed out and are still running" when every slot is held by timed-out handlers, or "Rackflow is running too many plugin calls; try again shortly" at the process limit. The `plugin.action` and `plugin.mcp_tool` audit entries carry `busy: true` |
+| Lifecycle step | Install, enable and upgrade fail with the same message; disable and uninstall go ahead, as they do when the step fails, so a hung plugin can always be disabled |
+
+- **Abandoned handlers** are visible: the timeout is written to the plugin log with the number of the plugin's slots held by timed-out handlers; a refusal is written to the plugin log (`warning`, or `error` with a failure counted when the plugin is hung); and a handler that returns after Rackflow stopped waiting writes "returned after N s, after Rackflow had stopped waiting; its state changes were discarded". While a process has such handlers it keeps a report in `system_settings` (key `plugin_abandoned:<host>:<pid>`), written when a handler is abandoned or returns and refreshed every 30 seconds, and deleted when the last one returns; the staff alert `plugin_handlers_abandoned` reads it (warning, critical while every slot of the plugin is held) and clears when the handlers return. A report not refreshed for 120 seconds belongs to a process that stopped and is ignored; the plugin worker deletes reports a day old.
 - **Exceptions** are caught at the boundary, logged to the plugin log with a trimmed traceback and recorded on the installation (`last_error`, `last_error_at`).
 - **Circuit breaker** per plugin: after 5 consecutive failures the circuit opens for 60 seconds, doubling on each re-open up to 30 minutes. While open: deliveries wait (no attempt counted), schedules wait, before hooks are skipped (allow), actions and MCP tools are refused with "temporarily unavailable", panels show `health: unavailable`. The first success closes it and resets the count.
 - **Auto-disable** after 25 consecutive failures: status `failed`, `disabled_reason` set, a `plugin.auto_disabled` audit entry and a staff alert (alert type `plugin_failed`). Re-enabling resets the counters.
@@ -547,7 +561,7 @@ For billing calls the integration must own the service (`_assert_billing_owned_s
 
 ## 12. Logging and audit
 
-- **Plugin log** (`plugin_logs`): what plugins write with `ctx.log`, plus every failure Rackflow records for them. Shown per plugin on the admin page with level filter. Kept 14 days and at most 5,000 rows per plugin.
+- **Plugin log** (`plugin_logs`): what plugins write with `ctx.log`, plus every failure Rackflow records for them, each handler that timed out while its code is still running, each call refused because the plugin had no free slot, and each abandoned handler that later returns. Shown per plugin on the admin page with level filter. Kept 14 days and at most 5,000 rows per plugin.
 - **Audit log** (`user_audit_events` through `AuditService.log`), never pruned by the plugin system:
   - admin actions: `plugin.install`, `plugin.upgrade`, `plugin.enable`, `plugin.disable`, `plugin.uninstall`, `plugin.settings`, `plugin.service_link`, `plugin.addon_refs`, `plugin.delivery_retry`, `plugin.health_reset` with the admin as actor and the approved permissions where relevant;
   - privileged plugin calls: `plugin.guest_exec`, `plugin.vm_power`, `plugin.notify_client`, `plugin.http`, `plugin.veto`, `plugin.auto_disabled`, with `metadata.plugin_id`;
@@ -837,4 +851,4 @@ API 1.1 adds `tax_id.checked`, `invoice.reminder_sent`, `service.termination_sch
 
 ### 18.5 Bundled plugins
 
-Rackflow also reads first-party packages from a second, read-only folder, `settings.bundled_plugins_dir` (default `plugin_packages/` in the repository; a relative path counts from the repository root). They appear on the admin plugin page marked bundled and install, are granted permissions, enable, upgrade and uninstall through the ordinary lifecycle; nothing is installed or enabled automatically, and uninstalling never touches the folder. A plugin id present in both folders is an error shown on the page, and neither copy loads until one is removed.
+Rackflow also reads first-party packages from a second, read-only folder, `settings.bundled_plugins_dir` (default `plugin_packages/` in the repository; a relative path counts from the repository root). They appear on the admin plugin page marked bundled and install, are granted permissions, enable, upgrade and uninstall through the ordinary lifecycle; nothing is installed or enabled automatically, and uninstalling never touches the folder. The folder name and manifest id of every package in the bundled folder are reserved, read from that folder at run time, so a new bundled plugin is reserved as soon as it ships. A package in the plugins folder that uses a reserved name gets the error "`<name>` is a reserved name used by a plugin Rackflow ships; rename this plugin." on the page; installing or upgrading it is refused (HTTP 400 from the admin API) before anything is written, and it never loads. The bundled package is never marked and keeps loading. A clash between two packages of the plugins folder, or of the bundled folder, is not changed by this. The plugin test kit loads no bundled packages, so a plugin under test never clashes with Rackflow's copy.

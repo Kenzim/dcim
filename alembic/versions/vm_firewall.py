@@ -5,7 +5,7 @@ changes. Foreign keys to existing tables are left out on SQLite, and the check t
 has exactly one owner exists only on MariaDB/MySQL (the service layer enforces it everywhere).
 
 Revision ID: vm_firewall
-Revises: billing_p2_email_money
+Revises: plugin_bundled_identity
 Create Date: 2026-11-23 12:00:00.000000
 """
 
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "vm_firewall"
-down_revision: Union[str, Sequence[str], None] = "billing_p2_email_money"
+down_revision: Union[str, Sequence[str], None] = "plugin_bundled_identity"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
