@@ -231,10 +231,19 @@ def _count_rollout_outcome(db: Session, row: ServiceFirewall, result: Optional[A
     location = _location(db, row.service_id)
     if location is None:
         return
+    # Applies run concurrently, each session holding the location as it read it before its Proxmox
+    # calls, so the count is changed in SQL and read back rather than written from that copy.
+    table = FirewallLocationSettings
+    counted = func.coalesce(table.rollout_failures, 0) + 1
+    db.execute(
+        update(table)
+        .where(table.location_id == location.location_id)
+        .values(rollout_failures=0 if result.ok else counted)
+        .execution_options(synchronize_session=False)
+    )
+    db.refresh(location, ["rollout_failures", "rollout_paused_at"])
     if result.ok:
-        location.rollout_failures = 0
         return
-    location.rollout_failures = (location.rollout_failures or 0) + 1
     if location.rollout_failures >= ROLLOUT_PAUSE_AFTER and location.rollout_paused_at is None:
         location.rollout_paused_at = now
         location.rollout_pause_reason = (

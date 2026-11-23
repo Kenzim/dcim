@@ -425,6 +425,37 @@ async def test_rollout_success_resets_failure_count(world, fake, access):
     assert location.rollout_failures == 0 and location.rollout_paused_at is None
 
 
+def test_rollout_failures_in_concurrent_sessions_all_count(world, fake):
+    """The queue applies VMs concurrently, each in its own session that loaded the location before
+    its Proxmox calls; every failure must count, so the pause comes after 3 as designed."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.services.vm_firewall.apply import ApplyResult
+
+    vms = _rollout(world, fake, 3)
+    for vm in vms:
+        fw.get_or_create(world.db, vm.id).rollout_released_at = T0
+    world.db.commit()
+    make = sessionmaker(bind=world.db.get_bind(), autoflush=False)
+    sessions = [make() for _ in vms]
+    try:
+        # Every session holds the location as read before any failure lands (on MariaDB, the
+        # transaction's snapshot), as the worker's sessions do across their Proxmox calls.
+        loaded = [session.get(FirewallLocationSettings, world.location.id) for session in sessions]
+        assert [location.rollout_failures for location in loaded] == [0, 0, 0]
+        for session, vm in zip(sessions, vms):
+            row = session.get(fw.ServiceFirewall, vm.id)
+            reconcile._count_rollout_outcome(session, row, ApplyResult(vm.id, False, "error", error="locked"), T0)
+            session.commit()
+    finally:
+        for session in sessions:
+            session.close()
+    world.db.expire_all()
+    location = world.db.get(FirewallLocationSettings, world.location.id)
+    assert location.rollout_failures == 3 and location.rollout_paused_at is not None
+    assert world.db.query(UserAuditEvent).filter_by(action="firewall.rollout_paused").count() == 1
+
+
 # Alerts, notices, status, lease
 
 
