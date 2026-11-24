@@ -750,14 +750,18 @@ shortened to 15 minutes.
 | T3 node cut from Ceph only (5 min) | 3 → 2 | 31.8 / 31.9 s | 31.5 / 45.5 s | guard stopped the tenant 19 s after the cut; node 2 took over at 24 s with a node fence; after the cut ended node 3 found itself blocklisted (errno 108) and served nothing |
 | T4 VM paused 60 s (`qm suspend`) | 2 → 3 | 39.0 / 39.2 s | 39.7 / 52.7 s | node 3 took over 32 s into the pause; on resume node 2 failed its first RADOS call (blocklisted) and stopped Ganesha within 0.1 s |
 | T5 VM killed (`qm stop`) | 3 → 2 | 30.1 / 30.0 s | 30.4 / 43.2 s | takeover with a node fence 22 s after the kill; on boot node 3 came up fenced, then unfenced when the entry expired |
-| T6 planned move, then drain, then return | 2 → 3 → 1 → 2 | pending | pending | move took 34 s from request to serving, drain 33 s; automatic return 15 min after the drain (`storage_return_after_seconds`); no fences |
+| T6 planned move, then drain, then return | 2 → 3 → 1 → 2 | move 9.8 / 9.8 s, drain 15.2 / 14.9 s, return 10.1 / 10.1 s | move 10.0 / 22.7 s, drain 14.8 / 27.9 s, return 10.1 / 23.1 s | move took 34 s from request to serving, drain 33 s; automatic return 15 min after the drain (`storage_return_after_seconds`); no fences |
 | T7 SFTP master runner stopped during a 1 GiB upload | 2 → 2 (master 1 → 2) | 1.0 / 0.5 s | 1.0 / 1.0 s | VIP silent for 15 s, then answered only by node 2; the upload resumed with `reput`; final sha256 over NFS matched the source |
 | T8 Rackflow app stopped 15 min | 2 → 2 | 1.1 / 1.0 s | 1.5 / 1.0 s | about 55 failed config and status calls per runner; normal again at once after the start |
 
 **Results across all tests:**
-- No client saw an I/O error in any test, and the T7 upload's sha256 matched over NFS. The
-  full re-read of every written file is pending.
-- The lock holder never lost its lock, and the prober never got the conflicting lock (0 `LOST`).
+- No client saw an I/O error in any test, and the T7 upload's sha256 matched over NFS. After
+  the run every written file was re-read: 460 of 460 per client matched their sha256, 0
+  mismatched. The only writer error came about 8 hours after T6, when the share reached its
+  10 GiB quota (`EDQUOT`), outside every test window.
+- The lock holder never lost its lock, and the prober never got the conflicting lock during
+  the tests (0 `LOST`). One `LOST` was logged at clean-up, in the same second the holder was
+  stopped on purpose.
 - The tenant link (`rf-v3` up) was never up on two nodes at once.
 - An ARP watcher on the public subnet saw at most one MAC for the VIP at any time.
 - Ceph health did not change.
