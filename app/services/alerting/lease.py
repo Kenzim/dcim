@@ -1,4 +1,4 @@
-"""Singleton lease for the alert worker, stored in the shared lease table."""
+"""Singleton lease for the alert worker (and other workers by ``name``), stored in the shared lease table."""
 
 from __future__ import annotations
 
@@ -13,19 +13,19 @@ from app.models.reseller import RecurringBillingLease
 LEASE_NAME = "alerts"
 
 
-def acquire(db: Session, *, owner: str, seconds: int, now: datetime) -> bool:
+def acquire(db: Session, *, owner: str, seconds: int, now: datetime, name: str = LEASE_NAME) -> bool:
     """Take or renew the lease. Returns False while another owner holds it."""
-    if db.get(RecurringBillingLease, LEASE_NAME) is None:
+    if db.get(RecurringBillingLease, name) is None:
         try:
             with db.begin_nested():
-                db.add(RecurringBillingLease(name=LEASE_NAME))
+                db.add(RecurringBillingLease(name=name))
                 db.flush()
         except IntegrityError:
             pass
     result = db.execute(
         update(RecurringBillingLease)
         .where(
-            RecurringBillingLease.name == LEASE_NAME,
+            RecurringBillingLease.name == name,
             or_(
                 RecurringBillingLease.owner.is_(None),
                 RecurringBillingLease.expires_at.is_(None),
@@ -40,10 +40,10 @@ def acquire(db: Session, *, owner: str, seconds: int, now: datetime) -> bool:
     return result.rowcount == 1
 
 
-def release(db: Session, *, owner: str) -> None:
+def release(db: Session, *, owner: str, name: str = LEASE_NAME) -> None:
     db.execute(
         update(RecurringBillingLease)
-        .where(RecurringBillingLease.name == LEASE_NAME, RecurringBillingLease.owner == owner)
+        .where(RecurringBillingLease.name == name, RecurringBillingLease.owner == owner)
         .values(owner=None, expires_at=None)
     )
     db.commit()

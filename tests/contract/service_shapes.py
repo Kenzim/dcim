@@ -29,6 +29,7 @@ STATUS = {
     "virtual_media_available": BOOL,
     "vnc_console_available": BOOL,
     "backups_available": BOOL,
+    "firewall_available": BOOL,
     "proxy_credentials_available": BOOL,
     "proxy_rotate_available": BOOL,
     "proxy_assignments": optional(LIST),

@@ -495,6 +495,11 @@ async def _sync_guest_state_from_proxmox(db: Session, service: Service) -> None:
         plugin, _cid, _node, _vmid = await _admin_get_vm_plugin(db, service)
     except HTTPException:
         return
+    except Exception as exc:
+        # Resolving the plugin probes Proxmox itself, so an unreachable cluster surfaces here.
+        logger.warning("Proxmox guest sync failed (resolve) for service %s: %s", service.id, exc)
+        _set_guest_state(db, service, service.vm.guest_state, error=f"Proxmox sync failed: {exc}")
+        return
     try:
         exists = await plugin.vm_exists()
     except Exception as exc:
@@ -1536,7 +1541,13 @@ async def assign_service_owner(
         owner = UserDAO.get_by_id(db, body.owner_user_id)
         if owner is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_OWNER_USER_NOT_FOUND)
+    changed = service.owner_user_id != body.owner_user_id
     service.owner_user_id = body.owner_user_id
+    if changed:
+        from app.services.vm_firewall.service import Actor, remove_foreign_references
+
+        db.flush()
+        remove_foreign_references(db, service.id, Actor.staff(int(auth.get("user_id") or 0) or None))
     ServiceDAO.update(db, service)
     return _service_to_admin_response(db, service)
 

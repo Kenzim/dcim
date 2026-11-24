@@ -268,6 +268,7 @@ function rackflow_ClientArea(array $vars)
     $proxyCredentialsAvailable = false;
     $proxyRotateAvailable = false;
     $proxyAssignments = array();
+    $firewallStatus = null;
     $serviceType = rackflow_getConfiguredServiceType($params);
     $isProxyService = ($serviceType === 'http_proxy');
     $perms = rackflow_getClientPermissions($params);
@@ -294,6 +295,7 @@ function rackflow_ClientArea(array $vars)
         $statusData = rackflow_fetchServiceStatus($apiConfig['url'], $apiConfig['key'], (int)$rackflowServiceId);
         if ($statusData) {
             $powerAvailable = true;
+            $firewallStatus = $statusData;
             $serviceStatus = isset($statusData['service_status']) ? $statusData['service_status'] : '';
             $serverName = isset($statusData['server_name']) ? $statusData['server_name'] : '';
             $statusLabel = isset($statusData['status']) ? $statusData['status'] : (isset($statusData['power_state']) ? strtolower($statusData['power_state']) : 'unknown');
@@ -406,9 +408,15 @@ function rackflow_ClientArea(array $vars)
             'client'
         );
     }
+    $firewallVars = rackflow_firewallClientAreaVars(
+        $params,
+        $rackflowServiceId,
+        $firewallStatus,
+        isset($vars['systemurl']) ? (string)$vars['systemurl'] : ''
+    );
     return array(
         'templatefile' => 'clientarea',
-        'vars' => array_merge($fastPathVars, $slotVars + array(
+        'vars' => array_merge($fastPathVars, $firewallVars, $slotVars + array(
             // Escaped HTML from rackflow_renderPluginPanels(); output without |escape.
             'rackflow_plugin_panels_html' => $pluginPanelsHtml,
             'rackflow_hostname' => $hostname,
@@ -5252,6 +5260,14 @@ function rackflow_AdminServicesTabFields(array $params)
         if ($pluginHtml !== '') {
             $out['RackFlow Plugins'] = $pluginHtml;
         }
+        if (rackflow_getConfiguredServiceType($params) === 'vm') {
+            $firewallFetch = rackflow_firewallRequest($params, (int)$rackflowSvcId, 'GET');
+            $out['RackFlow Firewall'] = rackflow_renderAdminFirewall(
+                $params,
+                (int)$rackflowSvcId,
+                !empty($firewallFetch['success']) && is_array($firewallFetch['data']) ? $firewallFetch['data'] : array()
+            );
+        }
     } else {
         $out['RackFlow Server Status'] = rackflow_buildAdminStatusCard($params, $serviceId, $rackflowSvcId);
     }
@@ -6359,6 +6375,366 @@ function rackflow_pluginActionEndpointUrl($systemUrl = '')
         }
     }
     return $basePath . '/modules/servers/rackflow/plugin_action.php';
+}
+
+/**
+ * URL of firewall_action.php (AJAX endpoint for the VM firewall section).
+ *
+ * @param string $systemUrl
+ * @return string
+ */
+function rackflow_firewallActionEndpointUrl($systemUrl = '')
+{
+    $basePath = rackflow_whmcsUrlBasePath();
+    if ($basePath === null) {
+        $basePath = '';
+        if (!empty($systemUrl)) {
+            $basePath = rtrim((string)parse_url($systemUrl, PHP_URL_PATH), '/');
+        }
+    }
+    return $basePath . '/modules/servers/rackflow/firewall_action.php';
+}
+
+/**
+ * Absolute SPA URL of the RackFlow admin VM firewall page (no SSO).
+ *
+ * @param string $apiUrl RackFlow API base URL from server config
+ * @return string
+ */
+function rackflow_adminFirewallPageUrl($apiUrl)
+{
+    $base = rtrim((string)$apiUrl, '/');
+    return $base === '' ? '' : $base . '/admin/vm-firewall';
+}
+
+/**
+ * Call a VM firewall billing route of one RackFlow service.
+ *
+ * The RackFlow service id comes from the caller, which takes it from the link stored for the
+ * WHMCS service, never from a request. A failed call carries RackFlow's stable error: code,
+ * field and, for a stale revision, current_revision.
+ *
+ * @param array       $params           module params (serverid)
+ * @param int         $rackflowServiceId linked RackFlow service id
+ * @param string      $method           GET|PUT|POST
+ * @param string      $suffix           path after /firewall ('' , '/rules', '/presets/ssh', '/groups')
+ * @param array|null  $body
+ * @return array {success, data} or {success:false, error, code, field, current_revision, http_code}
+ */
+function rackflow_firewallRequest(array $params, $rackflowServiceId, $method, $suffix = '', $body = null)
+{
+    $method = strtoupper((string)$method);
+    if ((int)$rackflowServiceId <= 0 || !in_array($method, array('GET', 'PUT', 'POST'), true)) {
+        return array('success' => false, 'error' => 'Invalid request.', 'code' => 'invalid_request', 'http_code' => 0);
+    }
+    $apiConfig = rackflow_getApiConfig($params);
+    if (empty($apiConfig['url']) || empty($apiConfig['key'])) {
+        return array('success' => false, 'error' => 'API URL and API key must be configured (Setup > Servers).', 'code' => 'not_configured', 'http_code' => 0);
+    }
+    $rackflowServiceId = (int)$rackflowServiceId;
+    $result = rackflow_apiCall(
+        $apiConfig['url'],
+        $apiConfig['key'],
+        $method,
+        '/api/billing/services/' . $rackflowServiceId . '/firewall' . $suffix,
+        $body,
+        30
+    );
+    if (!empty($result['success'])) {
+        return array('success' => true, 'data' => is_array($result['data']) ? $result['data'] : array());
+    }
+    $data = isset($result['data']) && is_array($result['data']) ? $result['data'] : array();
+    $error = 'The firewall request failed.';
+    if (isset($data['message']) && is_string($data['message']) && $data['message'] !== '') {
+        $error = $data['message'];
+    } elseif (isset($data['detail']) && is_string($data['detail']) && $data['detail'] !== '') {
+        $error = $data['detail'];
+    } elseif (isset($result['error']) && is_string($result['error']) && strpos($result['error'], 'CURL error') === 0) {
+        $error = 'RackFlow could not be reached.';
+    }
+    return array(
+        'success' => false,
+        'error' => $error,
+        'code' => isset($data['code']) && is_string($data['code']) ? $data['code'] : 'error',
+        'field' => isset($data['field']) && is_string($data['field']) ? $data['field'] : null,
+        'current_revision' => isset($data['current_revision']) ? (int)$data['current_revision'] : null,
+        'http_code' => isset($result['http_code']) ? (int)$result['http_code'] : 0,
+    );
+}
+
+/**
+ * The firewall view of a service and the groups its owner may attach.
+ *
+ * @return array {success, data: view + available_groups} or {success:false, error}
+ */
+function rackflow_fetchFirewall(array $params, $rackflowServiceId)
+{
+    $view = rackflow_firewallRequest($params, $rackflowServiceId, 'GET');
+    if (empty($view['success'])) {
+        return $view;
+    }
+    $groups = rackflow_firewallRequest($params, $rackflowServiceId, 'GET', '/groups');
+    $view['data']['available_groups'] = !empty($groups['success']) && isset($groups['data']) && isset($groups['data'][0])
+        ? array_values(array_filter($groups['data'], 'is_array'))
+        : array();
+    return $view;
+}
+
+/**
+ * Template variables for the firewall section of the client area.
+ *
+ * The firewall is only fetched when /status reports firewall_available.
+ *
+ * @param array         $params         module params
+ * @param int           $rackflowServiceId
+ * @param array|null    $statusData     the billing /status payload
+ * @param string        $systemUrl
+ * @param callable|null $fetcher        (params, rackflowServiceId) => {success, data}; default rackflow_fetchFirewall
+ * @return array
+ */
+function rackflow_firewallClientAreaVars(array $params, $rackflowServiceId, $statusData, $systemUrl = '', $fetcher = null)
+{
+    $vars = array(
+        'rackflow_firewall_panel' => false,
+        'rackflow_firewall' => array(),
+        'rackflow_firewall_json' => '',
+        'rackflow_firewall_error' => '',
+        'rackflow_firewall_can_edit' => false,
+        'rackflow_firewall_action_url' => '',
+    );
+    if (empty($rackflowServiceId) || empty($params['serviceid']) || !is_array($statusData) || empty($statusData['firewall_available'])) {
+        return $vars;
+    }
+    $fetch = $fetcher === null ? rackflow_fetchFirewall($params, $rackflowServiceId) : call_user_func($fetcher, $params, $rackflowServiceId);
+    if (empty($fetch['success'])) {
+        $vars['rackflow_firewall_panel'] = true;
+        $vars['rackflow_firewall_error'] = isset($fetch['error']) ? (string)$fetch['error'] : 'Unable to load the firewall.';
+        return $vars;
+    }
+    $view = is_array($fetch['data']) ? $fetch['data'] : array();
+    if (empty($view['available'])) {
+        return $vars;
+    }
+    $permissions = isset($statusData['client_permissions']) && is_array($statusData['client_permissions'])
+        ? $statusData['client_permissions']
+        : array();
+    $view['available_groups'] = isset($view['available_groups']) && is_array($view['available_groups']) ? $view['available_groups'] : array();
+    $baseline = isset($view['baseline']) && is_array($view['baseline']) ? $view['baseline'] : array();
+    $baseline['rules'] = isset($baseline['rules']) && is_array($baseline['rules']) ? $baseline['rules'] : array();
+    $baseline['client_may_disable'] = !array_key_exists('client_may_disable', $baseline) || !empty($baseline['client_may_disable']);
+    $view['baseline'] = $baseline;
+    $vars['rackflow_firewall_panel'] = true;
+    $vars['rackflow_firewall'] = $view;
+    $vars['rackflow_firewall_can_edit'] = !array_key_exists('vm.firewall', $permissions) || !empty($permissions['vm.firewall']);
+    $vars['rackflow_firewall_action_url'] = rackflow_firewallActionEndpointUrl($systemUrl);
+    // Read by the page script from an attribute; the hex flags keep the text safe inside HTML.
+    $vars['rackflow_firewall_json'] = json_encode(array(
+        'revision' => isset($view['revision']) ? (int)$view['revision'] : 0,
+        'rules' => isset($view['rules']) && is_array($view['rules']) ? array_values($view['rules']) : array(),
+        'groups' => array_values(array_merge(
+            isset($view['groups']) && is_array($view['groups']) ? $view['groups'] : array(),
+            $view['available_groups']
+        )),
+        'available_groups' => $view['available_groups'],
+        'needs_interruption' => !empty($view['needs_interruption']),
+        'client_enabled' => !empty($view['client_enabled']),
+        'presets' => rackflow_firewallPresetChoices(),
+    ), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    return $vars;
+}
+
+/**
+ * The quick rule sets RackFlow offers (key => label).
+ *
+ * @return array
+ */
+function rackflow_firewallPresetChoices()
+{
+    return array(
+        array('key' => 'ssh', 'label' => 'SSH'),
+        array('key' => 'rdp', 'label' => 'Remote Desktop'),
+        array('key' => 'web', 'label' => 'Web server'),
+        array('key' => 'ping', 'label' => 'Ping'),
+        array('key' => 'allow_all', 'label' => 'Allow everything'),
+    );
+}
+
+/**
+ * HTML for the admin service tab: the firewall state and a link to the RackFlow admin page.
+ *
+ * @param array $params         module params
+ * @param int   $rackflowSvcId  linked RackFlow service id
+ * @param array $view           the billing firewall view, or array() when it could not be read
+ * @return string
+ */
+function rackflow_renderAdminFirewall(array $params, $rackflowSvcId, array $view)
+{
+    $h = function ($v) {
+        return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    };
+    $apiConfig = rackflow_getApiConfig($params);
+    $url = rackflow_adminFirewallPageUrl(isset($apiConfig['url']) ? $apiConfig['url'] : '');
+    if (empty($view)) {
+        $text = 'The firewall state could not be read.';
+    } elseif (empty($view['available'])) {
+        $text = 'Not available for this server.';
+    } else {
+        $state = isset($view['state']) ? (string)$view['state'] : 'unknown';
+        $text = (!empty($view['client_enabled']) ? 'On' : 'Off') . ' (' . $state . '), '
+            . (isset($view['rules']) && is_array($view['rules']) ? count($view['rules']) : 0) . ' client rules';
+    }
+    $html = '<span>' . $h($text) . '</span>';
+    if ($url !== '') {
+        $html .= ' <a href="' . $h($url) . '" target="_blank" rel="noopener">Open the RackFlow firewall page</a>';
+    }
+    return $html;
+}
+
+/**
+ * Handle one firewall_action.php request and say what to answer.
+ *
+ * Only the logged-in client's own service is acted on (an admin session may act on any), it must
+ * use the rackflow server type, and RackFlow is called with the RackFlow service id stored for
+ * that WHMCS service. No id taken from the request is ever sent on.
+ *
+ * Request fields: serviceid (the WHMCS service), op, revision, and per op: confirm_interruption
+ * (enable), policy_in / policy_out (policy), rules as JSON (rules), preset (preset).
+ *
+ * @param string $method   HTTP method
+ * @param bool   $isAjax   request carries the AJAX header
+ * @param array  $post     raw $_POST
+ * @param bool   $isAdmin  admin session
+ * @param int    $clientId logged-in client id, 0 if none
+ * @param array  $deps     hosting(id) => object|null, product(id) => object|null,
+ *                         link(params) => RackFlow service id|null,
+ *                         call(params, rackflowId, method, suffix, body) => rackflow_firewallRequest() result
+ * @return array [http status, payload]
+ */
+function rackflow_firewallHandle($method, $isAjax, array $post, $isAdmin, $clientId, array $deps)
+{
+    $fail = function ($error, $status, array $extra = array()) {
+        return array($status, array_merge(array('ok' => false, 'error' => $error), $extra));
+    };
+    if (strtoupper((string)$method) !== 'POST') {
+        return $fail('POST required', 405);
+    }
+    if (!$isAjax) {
+        return $fail('Invalid request.', 403);
+    }
+    $serviceId = isset($post['serviceid']) && is_scalar($post['serviceid']) ? (int)$post['serviceid'] : 0;
+    $op = isset($post['op']) && is_string($post['op']) ? strtolower(trim($post['op'])) : '';
+    if ($serviceId <= 0 || !in_array($op, array('enable', 'disable', 'policy', 'rules', 'preset'), true)) {
+        return $fail('Invalid request.', 400);
+    }
+    // The page never sends a RackFlow id; a request that carries one is not from the page.
+    foreach (array('rackflow_service_id', 'rackflowserviceid', 'rackflow_id', 'service_id', 'slot_id', 'target_id', 'source_service_id') as $idField) {
+        if (array_key_exists($idField, $post)) {
+            return $fail('Invalid request.', 400);
+        }
+    }
+    $clientId = (int)$clientId;
+    if (!$isAdmin && $clientId <= 0) {
+        return $fail('Login required.', 403);
+    }
+    $hosting = call_user_func($deps['hosting'], $serviceId);
+    if (!$hosting) {
+        return $fail('Service not found.', 404);
+    }
+    // Another client's service answers exactly as a missing one, so ids reveal nothing.
+    if (!$isAdmin && (int)$hosting->userid !== $clientId) {
+        return $fail('Service not found.', 404);
+    }
+    $product = call_user_func($deps['product'], (int)$hosting->packageid);
+    if (!$product || strtolower((string)$product->servertype) !== 'rackflow') {
+        return $fail('Not a RackFlow service.', 400);
+    }
+    $whmcsStatus = isset($hosting->domainstatus) ? strtolower((string)$hosting->domainstatus) : '';
+    if (!$isAdmin && in_array($whmcsStatus, array('suspended', 'terminated', 'cancelled', 'fraud'), true)) {
+        return $fail('The firewall cannot be changed while this service is ' . $whmcsStatus . '.', 403);
+    }
+    $params = array(
+        'serviceid' => $serviceId,
+        'userid' => (int)$hosting->userid,
+        'packageid' => (int)$hosting->packageid,
+        'pid' => (int)$hosting->packageid,
+        'serverid' => (int)$hosting->server,
+    );
+    $rackflowServiceId = (int)call_user_func($deps['link'], $params);
+    if ($rackflowServiceId <= 0) {
+        return $fail('This service is not linked to RackFlow.', 400);
+    }
+
+    $revision = isset($post['revision']) && is_scalar($post['revision']) && ctype_digit((string)$post['revision'])
+        ? (int)$post['revision']
+        : 0;
+    if ($revision <= 0) {
+        return $fail('Invalid request.', 400);
+    }
+    $policies = array('ACCEPT', 'DROP', 'REJECT');
+    $httpMethod = 'PUT';
+    $suffix = '';
+    if ($op === 'enable' || $op === 'disable') {
+        $body = array('revision' => $revision, 'client_enabled' => $op === 'enable');
+        if ($op === 'enable') {
+            $body['confirm_interruption'] = !empty($post['confirm_interruption']) && (string)$post['confirm_interruption'] !== '0';
+        }
+    } elseif ($op === 'policy') {
+        $body = array('revision' => $revision);
+        foreach (array('policy_in', 'policy_out') as $key) {
+            if (!isset($post[$key]) || $post[$key] === '') {
+                continue;
+            }
+            $value = is_string($post[$key]) ? strtoupper(trim($post[$key])) : '';
+            if (!in_array($value, $policies, true)) {
+                return $fail('Choose accept, drop or reject.', 400);
+            }
+            $body[$key] = $value;
+        }
+        if (count($body) < 2) {
+            return $fail('Choose a policy.', 400);
+        }
+    } elseif ($op === 'rules') {
+        $rules = isset($post['rules']) && is_string($post['rules']) ? json_decode($post['rules'], true) : null;
+        if (!is_array($rules) || ($rules !== array() && array_keys($rules) !== range(0, count($rules) - 1)) || count($rules) > 500) {
+            return $fail('The rules could not be read.', 400);
+        }
+        foreach ($rules as $rule) {
+            if (!is_array($rule)) {
+                return $fail('The rules could not be read.', 400);
+            }
+        }
+        $suffix = '/rules';
+        $body = array('revision' => $revision, 'rules' => $rules);
+    } else {
+        $preset = isset($post['preset']) && is_string($post['preset']) ? trim($post['preset']) : '';
+        if (preg_match('/^[a-z][a-z_]{0,31}$/', $preset) !== 1) {
+            return $fail('Invalid request.', 400);
+        }
+        $httpMethod = 'POST';
+        $suffix = '/presets/' . $preset;
+        $body = array('revision' => $revision);
+    }
+
+    $result = call_user_func($deps['call'], $params, $rackflowServiceId, $httpMethod, $suffix, $body);
+    if (!empty($result['success'])) {
+        $data = isset($result['data']) && is_array($result['data']) ? $result['data'] : array();
+        return array(200, array(
+            'ok' => true,
+            'message' => 'Firewall updated.',
+            'revision' => isset($data['revision']) ? (int)$data['revision'] : null,
+        ));
+    }
+    $code = isset($result['code']) ? (string)$result['code'] : 'error';
+    $status = in_array($code, array('firewall_changed', 'interruption_confirmation_required'), true) ? 409 : 400;
+    return $fail(
+        isset($result['error']) ? (string)$result['error'] : 'The firewall request failed.',
+        $status,
+        array(
+            'code' => $code,
+            'field' => isset($result['field']) ? $result['field'] : null,
+            'current_revision' => isset($result['current_revision']) ? $result['current_revision'] : null,
+        )
+    );
 }
 
 /**

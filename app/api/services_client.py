@@ -29,6 +29,7 @@ from app.schemas.sol import (
 )
 from app.schemas.virtual_media import VirtualMediaInsertRequest, VirtualMediaStatusResponse
 from app.api.virtual_media import perform_eject, perform_insert, perform_status
+from app.api.vm_firewall_common import firewall_available
 from app.services.proxmox_placement import ProxmoxPlacementError, resolve_proxmox_plugin_for_service
 from app.services.vm_guest_credentials import session_guest_fields
 from app.services.vm_vnc_ticket_service import (
@@ -321,6 +322,7 @@ def _client_service_detail_fields(
         "ipmi_viewer_username": getattr(server, "ipmi_viewer_username", None) if ipmi_available else None,
         "ipmi_viewer_password": getattr(server, "ipmi_viewer_password", None) if ipmi_available else None,
         "installation": _client_server_installation(db, server),
+        "firewall_available": firewall_available(db, service) if is_vm else False,
         **availability,
     }
 

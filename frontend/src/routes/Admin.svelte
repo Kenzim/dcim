@@ -328,6 +328,15 @@
           <PageHeader title="Patch Panel" />
           <div class="content-body"><p>Could not load the patch panel page: {err.message}</p></div>
         {/await}
+      {:else if routeName === 'vm-firewall'}
+        {#await import('../components/VmFirewall.svelte')}
+          <div class="loading-container"><p>Loading…</p></div>
+        {:then module}
+          <svelte:component this={module.default} />
+        {:catch err}
+          <PageHeader title="VM Firewall" />
+          <div class="content-body"><p>Could not load the VM Firewall page: {err.message}</p></div>
+        {/await}
       {:else if routeName === 'pdus'}
         <Pdus />
       {:else if routeName.startsWith('pdus/') && pduId}

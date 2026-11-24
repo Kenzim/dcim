@@ -16,6 +16,7 @@
   $: onDashboard = path === '/client' || path === '/client/';
   $: onServices = path.startsWith('/client/services') || path.startsWith('/client/cancellations');
   $: onNetworks = path.startsWith('/client/networks');
+  $: onFirewall = path.startsWith('/client/firewall');
   $: onStorage = path.startsWith('/client/storage');
   $: onBackupSlots = path.startsWith('/client/backup-slots');
   $: onBilling = path.startsWith('/client/billing') || path.startsWith('/client/orders') || path.startsWith('/client/notes');
@@ -28,6 +29,7 @@
     { href: '/client', label: 'Dashboard', active: onDashboard, icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
     { href: '/client/services', label: 'Services', active: onServices, icon: 'M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01' },
     { href: '/client/networks', label: 'Networks', active: onNetworks, icon: 'M12 5v6m0 0H6v4m6-4h6v4M10 3h4v2h-4zM4 15h4v4H4zm12 0h4v4h-4z' },
+    { href: '/client/firewall', label: 'Firewall', active: onFirewall, icon: 'M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z' },
     { href: '/client/storage', label: 'Storage', active: onStorage, icon: 'M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 0v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3' },
     { href: '/client/backup-slots', label: 'Backup slots', active: onBackupSlots, icon: 'M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4' },
     { href: '/client/billing', label: 'Billing', active: onBilling, icon: 'M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z' },

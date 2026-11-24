@@ -846,6 +846,127 @@ def client_storage_quota(db: Session, params: dict, now: datetime) -> list[Findi
     return out
 
 
+# --------------------------------------------------------------------------- VM firewall
+
+
+def _firewall_service_label(db: Session, service_id: int) -> tuple[str, Service | None]:
+    service = db.get(Service, service_id)
+    return (service.name if service is not None else f"service {service_id}"), service
+
+
+def vm_firewall_apply_failed(db: Session, params: dict, now: datetime) -> list[Finding]:
+    from app.models.vm_firewall import FirewallState, ServiceFirewall
+
+    since = now - timedelta(minutes=params["error_after_minutes"])
+    rows = (
+        db.query(ServiceFirewall)
+        .filter(
+            ServiceFirewall.state == FirewallState.ERROR.value,
+            ServiceFirewall.failing_since.isnot(None),
+            ServiceFirewall.failing_since <= since,
+        )
+        .all()
+    )
+    out = []
+    for row in rows:
+        label, service = _firewall_service_label(db, row.service_id)
+        if service is not None and service.status == ServiceStatus.TERMINATED:
+            continue
+        out.append(
+            Finding(
+                "vm_firewall_apply_failed",
+                "service",
+                str(row.service_id),
+                label,
+                f"Firewall of {label} not applied for {_human(_age_seconds(row.failing_since, now))}",
+                scrub(row.last_error) or "no error recorded",
+                details={"service_id": row.service_id, "failing_since": _iso(row.failing_since),
+                         "revision": row.revision, "applied_revision": row.applied_revision},
+            )
+        )
+    return out
+
+
+def vm_firewall_drift_repeated(db: Session, params: dict, now: datetime) -> list[Finding]:
+    from app.models.vm_firewall import ServiceFirewall
+
+    threshold = params["repairs_threshold"]
+    rows = db.query(ServiceFirewall).filter(ServiceFirewall.drift_repairs_24h > threshold).all()
+    out = []
+    for row in rows:
+        label, _service = _firewall_service_label(db, row.service_id)
+        out.append(
+            Finding(
+                "vm_firewall_drift_repeated",
+                "service",
+                str(row.service_id),
+                label,
+                f"Firewall of {label} repaired {row.drift_repairs_24h} times in 24 hours",
+                "Something keeps changing this VM's firewall on Proxmox. Set the firewall to unmanaged "
+                "if hand-made rules are needed.",
+                details={"service_id": row.service_id, "repairs": row.drift_repairs_24h},
+            )
+        )
+    return out
+
+
+def vm_firewall_cluster_not_ready(db: Session, params: dict, now: datetime) -> list[Finding]:
+    from app.models.proxmox_inventory import ProxmoxCluster
+    from app.models.vm_firewall import FirewallLocationSettings
+
+    out = []
+    for location in db.query(FirewallLocationSettings).filter(FirewallLocationSettings.enabled.is_(True)).all():
+        clusters = ((location.readiness or {}).get("clusters") or {})
+        for cluster_id, entry in sorted(clusters.items()):
+            if not isinstance(entry, dict) or entry.get("ready", True):
+                continue
+            cluster = db.get(ProxmoxCluster, int(cluster_id)) if str(cluster_id).isdigit() else None
+            if cluster is None or cluster.location_id != location.location_id:
+                continue
+            reasons = [str(reason) for reason in entry.get("reasons") or []]
+            out.append(
+                Finding(
+                    "vm_firewall_cluster_not_ready",
+                    "proxmox_cluster",
+                    str(cluster.id),
+                    cluster.name,
+                    f"VM firewalls not enforced on cluster {cluster.name}",
+                    "; ".join(reasons) or "readiness check failed",
+                    details={"cluster_id": cluster.id, "location_id": location.location_id, "reasons": reasons,
+                             "checked_at": _iso(location.readiness_checked_at)},
+                )
+            )
+    return out
+
+
+def vm_firewall_worker_stale(db: Session, params: dict, now: datetime) -> list[Finding]:
+    from app.models.vm_firewall import FirewallLocationSettings
+    from app.services.vm_firewall import reconcile
+
+    if not db.query(FirewallLocationSettings).filter(FirewallLocationSettings.enabled.is_(True)).first():
+        return []
+    interval = reconcile.reconcile_interval(db)
+    limit = interval * params["intervals"]
+    status = reconcile.read_status(db)
+    last = naive(reconcile.status_time(status, "last_sweep_at"))
+    age = _age_seconds(last, now)
+    if age is not None and age <= limit:
+        return []
+    return [
+        Finding(
+            "vm_firewall_worker_stale",
+            "system",
+            "vm_firewall_worker",
+            "VM firewall worker",
+            "VM firewall worker has not completed a drift sweep",
+            f"Last completed sweep: {_human(age) + ' ago' if age is not None else 'never'} "
+            f"(reconcile interval {interval} seconds). Is the worker running?",
+            details={"last_sweep_at": _iso(last), "last_tick_at": status.get("last_tick_at"),
+                     "owner": status.get("owner")},
+        )
+    ]
+
+
 # --------------------------------------------------------------------------- notifications
 
 
@@ -1017,6 +1138,10 @@ DETECTORS: dict[str, Detector] = {
     "vm_backup_failed": vm_backup_failed,
     "notification_delivery_failing": notification_delivery_failing,
     "client_storage_quota": client_storage_quota,
+    "vm_firewall_apply_failed": vm_firewall_apply_failed,
+    "vm_firewall_drift_repeated": vm_firewall_drift_repeated,
+    "vm_firewall_cluster_not_ready": vm_firewall_cluster_not_ready,
+    "vm_firewall_worker_stale": vm_firewall_worker_stale,
     "plugin_handlers_abandoned": plugin_handlers_abandoned,
     **BILLING_DETECTORS,
 }

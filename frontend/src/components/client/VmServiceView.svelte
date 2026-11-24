@@ -6,10 +6,11 @@
   import SshKeysPanel from './SshKeysPanel.svelte';
   import StrategyActionsPanel from './StrategyActionsPanel.svelte';
   import ReinstallModal from './ReinstallModal.svelte';
+  import FirewallEditor from '../firewall/FirewallEditor.svelte';
 
   /** VM service detail payload. */
   export let service;
-  /** @type {'overview' | 'console' | 'backups' | 'reinstall' | 'settings'} */
+  /** @type {'overview' | 'console' | 'backups' | 'firewall' | 'reinstall' | 'settings'} */
   export let activeTab = 'overview';
 
   const dispatch = createEventDispatcher();
@@ -84,6 +85,8 @@
   </section>
 {:else if activeTab === 'backups'}
   <BackupsPanel {service} />
+{:else if activeTab === 'firewall'}
+  <FirewallEditor serviceId={service.id} audience="customer" canEdit={service.permissions?.['vm.firewall'] !== false} />
 {:else if activeTab === 'reinstall'}
   <section class="stack">
     <header class="panel-head">

@@ -132,6 +132,11 @@ class Settings(BaseSettings):
     alert_delivery_batch_size: int = 50
     alert_delivery_timeout_seconds: float = 10.0
 
+    # VM firewall reconcile worker (docs/vm-firewall.md section 6.1); a lease row
+    # keeps replicas from sweeping at the same time.
+    run_vm_firewall_worker: bool = True
+    vm_firewall_lease_seconds: int = 120
+
     # Plugin system (docs/plugin-system.md). Packages live outside app/.
     plugins_dir: str = "plugins"
     # Read-only folder of first-party packages; relative paths count from the repository root.

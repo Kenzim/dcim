@@ -30,6 +30,7 @@ from app.services.deployment.macos_restore import (
 )
 from app.services.deployment.step import DeploymentStep
 from app.services.deployment.steps import (
+    ApplyFirewallStep,
     ApplyGuestPasswordStep,
     CloneFromTemplateStep,
     ConfigureCloudInitNetworkStep,
@@ -62,6 +63,7 @@ class CloudinitCloneStrategy(DeploymentStrategy):
             CloneFromTemplateStep(),
             ConfigureSizingStep(),
             ConfigureCloudInitNetworkStep(),
+            ApplyFirewallStep(),
             PowerOnStep(),
             StampVmIdentityStep(),
         ]
@@ -103,6 +105,7 @@ class GuestAgentStrategy(DeploymentStrategy):
         return [
             CloneFromTemplateStep(),
             ConfigureSizingStep(),
+            ApplyFirewallStep(),
             PowerOnStep(),
             WaitForGuestAgentStep(),
             ConfigureViaGuestAgentStep(),
@@ -119,6 +122,7 @@ class MacosGuestAgentStrategy(DeploymentStrategy):
         return [
             CloneFromTemplateStep(),
             ConfigureSizingStep(),
+            ApplyFirewallStep(),
             PowerOnStep(),
             WaitForGuestAgentStep(timeout_seconds=900),
             ConfigureMacosGuestStep(),
@@ -201,6 +205,7 @@ class WindowsGuestAgentStrategy(DeploymentStrategy):
         return [
             CloneFromTemplateStep(),
             ConfigureSizingStep(),
+            ApplyFirewallStep(),
             PowerOnStep(),
             WaitForGuestAgentStep(timeout_seconds=900),
             ConfigureWindowsGuestStep(),
@@ -296,6 +301,7 @@ class RestoreRetainedBackupStrategy(DeploymentStrategy):
             ReapplyTargetNetworkStep(),
             ConfigureSizingStep(),
             ReapplyCloudInitStep(),
+            ApplyFirewallStep(),
             FinalizeBackupRestoreStep(),
         ]
 
@@ -330,6 +336,7 @@ class RestoreRetainedMacosBackupStrategy(_MacosRestoreStrategy):
             WaitForBackupRestoreStep(),
             ReapplyMacosIdentityStep(),
             ConfigureSizingStep(),
+            ApplyFirewallStep(),
             PowerOnStep(),
             WaitForRestoredGuestAgentStep(),
             ConfigureRestoredMacosGuestStep(),

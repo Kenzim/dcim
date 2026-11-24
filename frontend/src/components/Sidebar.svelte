@@ -76,6 +76,7 @@
     || currentPath.startsWith('/admin/proxy-catalog');
   $: isVmTemplatesActive = currentPath.startsWith('/admin/vm-templates');
   $: isVmIpAllocationsActive = currentPath.startsWith('/admin/vm-ip-allocations');
+  $: isVmFirewallActive = currentPath.startsWith('/admin/vm-firewall');
   $: isProxmoxInventoryActive = currentPath.startsWith('/admin/proxmox-inventory');
   $: isProxyIpamActive = currentPath.startsWith('/admin/proxy-ipam');
   $: isPrivateNetworksActive = currentPath.startsWith('/admin/private-networks');
@@ -268,6 +269,14 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" />
             </svg>
             <span>VM IP Allocations</span>
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="/admin/vm-firewall" class="nav-link" class:active={isVmFirewallActive}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z" />
+            </svg>
+            <span>VM Firewall</span>
           </a>
         </li>
         <li class="nav-item">

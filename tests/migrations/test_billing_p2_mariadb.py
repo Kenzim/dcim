@@ -117,7 +117,7 @@ def test_failed_data_revision_keeps_the_last_completed_version_on_mariadb(mariad
     helpers.execute(engine, "UPDATE tax_rates SET rate_bps = 2000 WHERE id = 9")
     rerun = _alembic_upgrade_head()
     assert rerun.returncode == 0, rerun.stderr[-3000:]
-    assert helpers.current(engine) == helpers.HEAD
+    assert helpers.current(engine) == helpers.script().get_current_head()
     assert helpers.scalar(engine, "SELECT COUNT(*) FROM tax_rules WHERE source = 'tax_rates'") == 3
 
 
