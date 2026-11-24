@@ -709,7 +709,8 @@ What this means for the conntrack check:
   count (step 5b). Raising the limit does not stop a large flood (at hv-07's rate a 1,048,576-entry
   table fills in about 5 s); shorter UDP conntrack timeouts would help further and are not part of
   this work. After step 6, read the drop and early-drop counters in `/proc/net/stat/nf_conntrack` on
-  every node, and pause opt-ins if early drops start.
+  every node, and pause opt-ins if early drops start. The same read-only watch lists any guest with
+  `enable: 1` and a NIC with `firewall=1` that Rackflow does not manage.
 - *Step 5a hosts.* Test VM 9030 on hv-11 (19 VMs, about 18,000 pps, no drops, 6.8.12-10); ping source
   9031 on hv-18 (20 VMs, about 20,000 pps, no drops, 6.8.12-22). Disks on `local-zfs`.
 
@@ -804,7 +805,10 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
 4. In `cluster.fw` write `policy_in: ACCEPT`, `policy_out: ACCEPT`, `policy_forward: ACCEPT` and,
    on the iptables backend only, `ebtables: 0` unless the survey shows ebtables is wanted, **before**
    `enable`.
-5. Set `enable: 1` in `cluster.fw`. Watch from a second session that SSH, 8006, corosync quorum,
+5. First, in the same request and read only, re-check all nodes for any guest (VM or template) with
+   `enable: 1` in its `.fw` and `firewall=1` on any NIC; if there is even one, stop before the enable
+   and report the list (step 2 wrote nothing on production: the 46 guests with `enable: 1` were left
+   as they are, Kenzi's decision 2026-11-24). Then set `enable: 1` in `cluster.fw`. Watch from a second session that SSH, 8006, corosync quorum,
    Ceph health and `nf_conntrack_count` stay green on every node for 10 minutes; the rollback is
    setting `enable: 0` again, which `pvesh` or the GUI can do from any node. On iptables the rollback
    leaves `net.bridge.bridge-nf-call-iptables` and `-ip6tables` at 1; new bridged flows are no longer
@@ -826,6 +830,12 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
    result is above half a second, the client-facing text changes before the location is enabled.
    For production: 9030 on hv-11, 9031 on hv-18 as the ping source (9.2b); if 5b is approved, both
    are kept for it and deleted at its end.
+   On production 5a and 5b run by hand (`qm set` on 9030 and 9031 only, project chat decision
+   2026-11-24), not through Rackflow: opting a VM in through Rackflow needs the location enabled, and
+   the "staging, not enforced" switch does not hide the firewall section from clients (to-do
+   c479731d). The pve-06 location stays disabled. Rackflow's worker acts only on `service_firewalls`
+   rows, which exist only for Rackflow services (`reconcile.py:559-574`), so it never touches 9030 or
+   9031. The Rackflow apply path is first exercised on production at step 6.
 5b. Measure conntrack for real, needing Kenzi's approval: enable VM 9030's firewall (ACCEPT rules)
    for 10 minutes and read hv-11's `nf_conntrack_count` and `/proc/net/stat/nf_conntrack` every
    minute. All of hv-11's guests are tracked while it is on. Abort at 131,072 entries (half the
