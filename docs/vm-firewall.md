@@ -629,6 +629,96 @@ Production cluster `pve-06` (23 nodes, hv-01 to hv-23, PVE 9.2.3, the same versi
   address there, hv-05 none. The Cogent bridge `vmbr750` (VLAN 750) does carry router adverts; any VM
   NIC on it needs the per-location IPv6 prefix before anti-spoofing is enabled for it.
 
+### 9.2b Steps 1 and 1a on production (2026-11-24, read only)
+
+Run by the deploy agent (sauce-complex-deploy, request 691cde2f), approved by Kenzi for reading
+only; nothing on epyc. Readings 02:30 to 02:40 UTC.
+
+**One side effect.** The request asked for `conntrack -S`. The binary talks to the kernel over
+ctnetlink, which auto-loaded `nf_conntrack_netlink` on all 23 nodes, and on hv-02 and hv-23 also
+`nf_conntrack`, which was not loaded there before (absent at 02:30, present at 02:36). Nothing is
+tracked (count 0 everywhere, no rule uses conntrack, bridge netfilter is off), so guest traffic is
+unaffected. The modules were left loaded (unloading is a change of its own) and go at the next
+reboot. Step 1 below now reads `/proc/net/stat/nf_conntrack` instead.
+
+**Step 1, per node.** `nf_conntrack_max` 262,144 and `nf_conntrack_buckets` 262,144 on every node.
+`nf_conntrack_count` was 0 in all five samples (02:36 to 02:40) on every node. Bridge netfilter
+`bridge-nf-call-iptables` / `-ip6tables`: live 0 / 0 on every node, boot value 0 / 0 on every node
+(set only by `/usr/lib/sysctl.d/10-pve.conf`; nothing in `/etc/sysctl.d` or `/etc/sysctl.conf`), so
+**no node is flagged**. `cluster.fw` is `[OPTIONS] enable: 0`, no node has a `host.fw`. Ceph:
+`HEALTH_WARN`, the known `BLUESTORE_FREE_FRAGMENTATION` on 32 OSDs (the baseline for step 5's watch).
+
+| Node | Running VMs | Guest pps (tap+veth, 60 s) | `conntrack -S` drop / insert_failed / early_drop since boot | Uptime (days) | Kernel |
+|---|---|---|---|---|---|
+| hv-01 | 21 | 25,133 | 2 / 2 / 0 | 668 | 6.8.8-2 |
+| hv-02 | 37 | 43,702 | 0 / 0 / 0 | 131 | 7.0.6-2 |
+| hv-03 | 37 | 51,486 | 0 / 0 / 0 | 196 | 6.8.12-22 |
+| hv-04 | 23 | 39,567 | 0 / 0 / 0 | 205 | 6.8.12-22 |
+| hv-05 | 37 | 37,538 | 0 / 0 / 0 | 205 | 6.8.12-22 |
+| hv-06 | 39 | 29,807 | 364,858 / 1 / 274,485 | 205 | 6.8.12-10 |
+| hv-07 | 41 | 198,716 | 250,865 / 0 / 599,144 | 276 | 6.8.12-10 |
+| hv-08 | 38 | 223,548 | 0 / 0 / 0 | 216 | 6.8.12-10 |
+| hv-09 | 26 | 36,324 | 0 / 0 / 0 | 132 | 7.0.6-2 |
+| hv-10 | 39 | 46,756 | 1 / 1 / 0 | 210 | 6.8.12-10 |
+| hv-11 | 19 | 18,167 | 0 / 0 / 0 | 210 | 6.8.12-10 |
+| hv-12 | 22 | 22,092 | 0 / 0 / 0 | 767 | 6.8.8-2 |
+| hv-13 | 17 | 18,652 | 23 / 3 / 357,164 | 666 | 6.8.8-2 |
+| hv-14 | 27 | 28,352 | 1 / 1 / 0 | 208 | 6.8.12-10 |
+| hv-15 | 24 | 148,376 | 0 / 0 / 0 | 228 | 6.8.12-10 |
+| hv-16 | 29 | 33,637 | 0 / 0 / 0 | 202 | 6.8.12-22 |
+| hv-17 | 25 | 41,363 | 31 / 0 / 303,972 | 202 | 6.8.12-22 |
+| hv-18 | 20 | 19,729 | 0 / 0 / 0 | 202 | 6.8.12-22 |
+| hv-19 | 35 | 31,538 | 0 / 0 / 0 | 202 | 6.8.12-22 |
+| hv-20 | 24 | 26,028 | 0 / 0 / 0 | 202 | 6.8.12-22 |
+| hv-21 | 35 | 170,171 | 0 / 0 / 0 | 216 | 6.8.12-10 |
+| hv-22 | 39 | 51,614 | 0 / 0 / 0 | 206 | 6.8.12-10 |
+| hv-23 | 40 | 53,849 | 0 / 0 / 0 | 166 | 7.0.6-2 |
+
+What this means for the conntrack check:
+
+- Nothing is tracked today, so the peak with every guest's flows tracked cannot be read; it only
+  shows once a VM firewall is enabled on a node (nftables, 9.4). Packets per second are a proxy for
+  load, not a flow count.
+- `early_drop` only happens when the table is full, so hv-06, hv-07, hv-13 and hv-17 have filled
+  their 262,144-entry table at some point since boot, for a reason not known. Together with the four
+  busiest nodes (hv-08, hv-07, hv-21, hv-15, all above 140,000 pps), these nodes need the
+  `nf_conntrack_max` decision in step 1 before any VM firewall is enabled on them.
+- Kernels are mixed (6.8.8, 6.8.12-10, 6.8.12-22, 7.0.6); the nested test ran none of these, so
+  step 5a should run on a 6.8.12 node, the most common one.
+
+**Step 1a.** Production Rackflow's one cluster record for pve-06 logs in as `root@pam` with a
+password (not a token, so `privsep` does not apply). `pveum user permissions` on hv-05 shows
+`Sys.Audit`, `VM.Audit`, `VM.Config.Network` and `SDN.Use` on `/`, on `/vms/<vmid>` for one running
+guest per node (23 guests), and on every bridge path guests use. There is no SDN
+(`/etc/pve/sdn/vnets.cfg` and `zones.cfg` absent), so every bridge is in `localnetwork`:
+
+| Bridge, tag | Guests | Path checked |
+|---|---|---|
+| `vmbr0` untagged (public, VLAN 733) | 579 | `/sdn/zones/localnetwork/vmbr0` |
+| `vmbr750` untagged (Cogent) | 266 | `/sdn/zones/localnetwork/vmbr750` |
+| `vmbr3000` untagged (VLAN-aware private) | 18 | `/sdn/zones/localnetwork/vmbr3000` |
+| `vmbr3000` tag 3001 | 2 | `/sdn/zones/localnetwork/vmbr3000/3001` |
+| `vmbr291` untagged (management) | 5 | `/sdn/zones/localnetwork/vmbr291` |
+| `vmbr230` untagged (Ceph) | 3 | `/sdn/zones/localnetwork/vmbr230` |
+| `vmbr1` untagged (no such bridge on these hosts) | 1 | `/sdn/zones/localnetwork/vmbr1` |
+
+Nothing is missing and nothing was granted. This is expected for `root@pam`, which holds every
+privilege, `Sys.Modify` included; Rackflow still never writes `cluster.fw` or `host.fw` (9.1). A
+least-privilege login would need its own step 1a.
+
+**Guests that later steps would touch (read 02:31 UTC).**
+
+- 46 guests have `enable: 1` in their `.fw`; **none** has `firewall=1` on a NIC, none has rules, an
+  `ipfilter` or an `ipfilter-net*` set, and all use the default policies except 16770 (hv-07,
+  `policy_in DROP`). Several are templates or copies.
+- 22 guests have `firewall=1` on a NIC; **none** has `enable: 1` (3 have `enable: 0`, 19 have no
+  `.fw`).
+- So no guest would start filtering when the datacenter firewall is enabled: the pre-enable audit
+  of 9.2 lists nothing today.
+- Free VMIDs: `/cluster/nextid` is 16492; 9030 to 9032 are free with no config, backup file or RBD
+  image (9023 and 9024 have leftover `.conf.bak` files). `rbd` is the only shared VM-disk storage,
+  `local-zfs` is node-local.
+
 ### 9.3 Why enabling the datacenter firewall is dangerous, and the safe order
 
 When the datacenter firewall is enabled, every node's **host** firewall starts too (host `enable`
@@ -650,7 +740,9 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
 
 1. Read-only survey (done for production, 9.2a) and the pre-enable audit (9.2). The survey also
    reads, on every node, `net.netfilter.nf_conntrack_count`, `nf_conntrack_max` and the peak count
-   over a busy period (`conntrack -S` or a few samples of the count), read only: no sysctl changes,
+   over a busy period (a few samples of the count; drop counters from `/proc/net/stat/nf_conntrack`,
+   never `conntrack -S`, which loads `nf_conntrack_netlink` and, where absent, `nf_conntrack`, as it
+   did on 2026-11-24, 9.2b), read only: no sysctl changes,
    and on hv-01, hv-21 and hv-22 nothing beyond reading. Each bridged flow costs one entry (a UDP
    entry lives about 30 to 120 s, an established TCP entry much longer). If a node's estimated peak
    with all its guests' flows tracked is above about half of `nf_conntrack_max`, the plan must say
