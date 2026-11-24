@@ -1224,6 +1224,7 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 	if hostname != "" {
 		fmt.Fprintf(h, "hostname:%s\x00", hostname)
 	}
+	fmt.Fprintf(h, "rpcbind:%s\x00", w.endpoint.Addr())
 	spec := ganesha.Spec{
 		Name:     names.Container(id),
 		TenantID: id,
@@ -1232,6 +1233,8 @@ func (p *pass) ensureNFS(w *tenantWork, exports []ganesha.Export) error {
 		CoreHash: hex.EncodeToString(h.Sum(nil))[:32],
 		Mounts:   mounts,
 		Hostname: hostname,
+
+		RPCBindAddr: w.endpoint.Addr(),
 	}
 
 	confPath := filepath.Join(confDir, "ganesha.conf")

@@ -396,6 +396,37 @@ Design: `docs/private-network-dhcp.md` (sections 2, 3 and 4.4 to 4.5 are the run
 - **Upgrade:** nothing to install beyond the 0.4.0 binary; `arping` is already required.
   Until Rackflow sends `networks` or `network_id` nothing changes.
 
+## NFSv3 (0.4.1)
+
+Ganesha serves NFSv3 next to NFSv4.1, mainly for the Windows "Client for NFS",
+which only speaks v3. Everything else (exports, client lists, `root_squash`,
+anonymous uid and gid, read-only or read-write) is the same export block, so
+v3 and v4 clients get identical access.
+
+- **Paths:** `Mount_Path_Pseudo = true`, so v3 clients mount the same
+  `/<share>` path as v4. The CephFS `/volumes/...` path is refused.
+- **Ports, all bound to the tenant's storage address in the tenant namespace:**
+  NFS 2049/TCP, MOUNT 20048/TCP and UDP (Windows asks over UDP), and rpcbind
+  111, started in the Ganesha container before `ganesha.nfsd` (its UDP sockets
+  bound to the storage address and loopback; its TCP socket also listens on the
+  namespace's link to the host, which the host firewall keeps unreachable from
+  other tenants). Nothing is on a random port. NFS itself stays TCP only.
+- **No locking over v3:** NLM and statd are off (`Enable_NLM = false`), so v3
+  clients must mount with `nolock`. Locks are then local to each client: two
+  clients do not see each other's locks. v4.1 clients keep real, failover-safe
+  locks.
+- **Mounting:**
+  - Linux: `mount -t nfs -o vers=3,nolock,hard <storage ip>:/<share> /mnt`
+  - Windows (Client for NFS): `mount -o nolock,mtype=hard \\<storage ip>\<share> Z:`.
+    Windows sends uid and gid -2 (4294967294) unless `AnonymousUid` and
+    `AnonymousGid` (DWORD) are set under
+    `HKLM\SOFTWARE\Microsoft\ClientForNFS\CurrentVersion\Default` (then restart
+    the NFS client service). Share roots are created mode 777, so either works;
+    set them to the uid and gid your Linux clients use if both write to the
+    share. File names with non-ASCII characters may need `-o lang=<code page>`.
+- **Upgrade:** changing the core config restarts each tenant's Ganesha once,
+  so v4 clients see one grace period (up to 45 s) and v3 clients a short pause.
+
 ## Safety rules
 
 - Nothing is destroyed unless the config lists it explicitly with a destroy

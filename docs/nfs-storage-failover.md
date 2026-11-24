@@ -351,6 +351,13 @@ Every node in a location already receives every private VLAN. To serve a tenant,
    cephx user alone is replaced: it would also evict the SFTP master's kernel mounts of that
    tenant, which use the same cephx user on another node.
 
+From runner 0.4.1 Ganesha also serves NFSv3 (storage_runner README, "NFSv3"), with rpcbind in the
+same container and fixed ports, all on the storage address. v3 has no lock state on the server
+(NLM is off, clients mount with `nolock`), so a takeover is just a TCP reconnect for v3 clients:
+file handles come from CephFS inode numbers and stay valid on any node, and v3 has no grace
+period. Locks for v3 across failover would need NLM plus statd with its state in RADOS like the
+v4 recovery database, and clients' statd to receive the new node's reboot notice; not built.
+
 Work that changes Ceph for a tenant (subvolumes, quotas, cephx users and caps, share and tenant
 destruction) is done only by the lease holder, so three nodes never race on the same Ceph
 objects. A terminated tenant is never served: its holder releases it, and its preferred node then

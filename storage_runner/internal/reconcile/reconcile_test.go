@@ -247,7 +247,8 @@ func TestFirstApply(t *testing.T) {
 	conf := e.ganeshaConf("t12")
 	for _, want := range []string{
 		"Bind_addr = 10.0.0.254;",
-		"Protocols = 4;",
+		"Protocols = 3, 4;",
+		"Mount_Path_Pseudo = true;",
 		`Path = "/volumes/rackflow/t12-s5/uuid-t12-s5";`,
 		`Pseudo = "/data";`,
 		"Squash = root_squash;",
@@ -274,6 +275,10 @@ func TestFirstApply(t *testing.T) {
 	spec, ok := e.nfs.Spec("rf-t12-nfs")
 	if !ok || len(spec.Mounts) != 3 || spec.Mounts[0].Target != "/etc/ganesha" || !spec.Mounts[0].ReadOnly {
 		t.Fatalf("unexpected container spec %+v", spec)
+	}
+	// rpcbind for NFSv3 answers on the tenant endpoint only.
+	if spec.RPCBindAddr.String() != "10.0.0.254" {
+		t.Fatalf("rpcbind address %v, want the tenant endpoint", spec.RPCBindAddr)
 	}
 }
 

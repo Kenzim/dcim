@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,10 @@ const (
 	CephDir     = "/etc/ceph"
 	RecoveryDir = "/var/lib/nfs/ganesha"
 	Entrypoint  = "/usr/bin/ganesha.nfsd"
+	// Shell and rpcbind inside the Ganesha image; rpcbind runs in the
+	// container next to Ganesha so NFSv3 clients find the MOUNT port.
+	Shell   = "/bin/sh"
+	RPCBind = "/usr/bin/rpcbind"
 )
 
 type Mount struct {
@@ -42,6 +47,10 @@ type Spec struct {
 	// Hostname is the container's host name, which Ganesha's CephFS client
 	// reports to the MDS; empty leaves podman's default.
 	Hostname string
+	// RPCBindAddr, when valid, starts rpcbind in the container before
+	// Ganesha, with its UDP sockets bound to this address (and loopback)
+	// only. Ganesha registers NFSv3 and MOUNT with it at start.
+	RPCBindAddr netip.Addr
 }
 
 type Container struct {
@@ -134,11 +143,15 @@ func RunArgs(spec Spec) []string {
 		}
 		args = append(args, "-v", v)
 	}
-	args = append(args,
-		"--entrypoint", Entrypoint,
-		spec.Image,
-		"-F", "-L", "STDERR", "-f", ConfDir+"/ganesha.conf")
-	return args
+	ganeshaArgs := []string{"-F", "-L", "STDERR", "-f", ConfDir + "/ganesha.conf"}
+	if !spec.RPCBindAddr.IsValid() {
+		args = append(args, "--entrypoint", Entrypoint, spec.Image)
+		return append(args, ganeshaArgs...)
+	}
+	// rpcbind daemonises once its sockets are bound; exec keeps Ganesha as
+	// the container's main process, so the container stops with it.
+	script := RPCBind + " -h " + spec.RPCBindAddr.String() + " && exec " + Entrypoint + " " + strings.Join(ganeshaArgs, " ")
+	return append(args, "--entrypoint", Shell, spec.Image, "-c", script)
 }
 
 func (p *Podman) Run(ctx context.Context, spec Spec) error {

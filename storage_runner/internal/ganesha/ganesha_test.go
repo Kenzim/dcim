@@ -21,7 +21,12 @@ func TestRender(t *testing.T) {
 			{ID: 7, Path: "/volumes/rackflow/t12-s7/c", Pseudo: "/closed"},
 		},
 	})
-	for _, want := range []string{"Protocols = 4;", "Minor_Versions = 1;", "Bind_addr = 10.0.0.254;", "Enable_NLM = false;", "Access_Type = None;", "Squash = root_squash;"} {
+	for _, want := range []string{
+		"Protocols = 3, 4;", "Minor_Versions = 1;", "Bind_addr = 10.0.0.254;", "Enable_NLM = false;",
+		"Access_Type = None;", "Squash = root_squash;",
+		// NFSv3: fixed MOUNT port, UDP for MOUNT only (Windows), v4 paths for v3 mounts.
+		"NFS_Port = 2049;", "MNT_Port = 20048;", "Enable_UDP = Mount;", "Mount_Path_Pseudo = true;",
+	} {
 		if !strings.Contains(core, want) {
 			t.Errorf("core lacks %q", want)
 		}
@@ -34,7 +39,7 @@ EXPORT {
 	Export_Id = 5;
 	Path = "/volumes/rackflow/t12-s5/a";
 	Pseudo = "/data";
-	Protocols = 4;
+	Protocols = 3, 4;
 	Transports = TCP;
 	Access_Type = None;
 	Squash = root_squash;
@@ -84,6 +89,22 @@ func TestPodmanRunArgs(t *testing.T) {
 		" --entrypoint /usr/bin/ganesha.nfsd quay.io/ceph/ceph:v20.2.5 -F -L STDERR -f /etc/ganesha/ganesha.conf"
 	if got := s.Lines(); len(got) != 1 || got[0] != want {
 		t.Fatalf("got %v\nwant %s", got, want)
+	}
+}
+
+func TestPodmanRunArgsWithRPCBind(t *testing.T) {
+	args := RunArgs(Spec{
+		Name: "rf-t12-nfs", TenantID: 12, Image: "img", Netns: "/run/netns/rf-t12", CoreHash: "abc",
+		RPCBindAddr: netip.MustParseAddr("10.0.0.254"),
+	})
+	got := strings.Join(args, " ")
+	want := "--entrypoint /bin/sh img -c /usr/bin/rpcbind -h 10.0.0.254 && exec /usr/bin/ganesha.nfsd -F -L STDERR -f /etc/ganesha/ganesha.conf"
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("got %s\nwant suffix %s", got, want)
+	}
+	// The script is one argument, so the shell sees it whole.
+	if args[len(args)-1] != "/usr/bin/rpcbind -h 10.0.0.254 && exec /usr/bin/ganesha.nfsd -F -L STDERR -f /etc/ganesha/ganesha.conf" {
+		t.Fatalf("script split: %q", args)
 	}
 }
 
