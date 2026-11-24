@@ -686,6 +686,33 @@ What this means for the conntrack check:
 - Kernels are mixed (6.8.8, 6.8.12-10, 6.8.12-22, 7.0.6); the nested test ran none of these, so
   step 5a should run on a 6.8.12 node, the most common one.
 
+**Conntrack risk (note for steps 5 onwards, from the data above, 2026-11-24).**
+
+- *What filled those tables.* The counters are cumulative since boot (202 to 666 days). `nf_conntrack`
+  was already loaded on 21 nodes before the survey (only hv-02 and hv-23 lacked it), so something
+  used connection tracking on them after boot: most likely an earlier firewall or stateful host rule
+  (a past Proxmox firewall test, NAT or `ct state` rules) since removed, together with a burst such as
+  a SYN or UDP flood from random sources, which costs one entry per packet. At hv-07's rate (about
+  199,000 pps) a flood fills 262,144 entries in a second or two. The data cannot say which.
+- *Can step 1's "peak above half of `nf_conntrack_max`" rule be met?* It cannot be shown met on any
+  node: the count is 0 and packets per second are not flows. On hv-06, hv-07, hv-13 and hv-17 the
+  evidence points the other way (whatever was tracked filled the whole table), so they count as
+  failing until measured. On the busiest nodes (hv-08, hv-07, hv-21, hv-15) it is unknown. The larger
+  risk is a flood against one guest: once any VM firewall on a node is on, every guest there is
+  tracked, and a full table drops new connections for all of them, opted in or not.
+- *Rackflow cannot keep opt-ins off a node.* Eligibility is per location and per VM only
+  (`location_disabled`, staff `excluded`, `app/services/vm_firewall/service.py:397-401`). Disks are on
+  Ceph RBD, so VMs migrate between nodes; a per-node exclusion would also need the worker to remove a
+  VM's firewall whenever it lands on an excluded node. Not proposed.
+- *Proposal.* Raise `nf_conntrack_max` to 1,048,576 on all 23 nodes (uniform, because VMs migrate),
+  as its own approved step before the location is enabled (9.3 step 5c), after measuring one real
+  count (step 5b). Raising the limit does not stop a large flood (at hv-07's rate a 1,048,576-entry
+  table fills in about 5 s); shorter UDP conntrack timeouts would help further and are not part of
+  this work. After step 6, read the drop and early-drop counters in `/proc/net/stat/nf_conntrack` on
+  every node, and pause opt-ins if early drops start.
+- *Step 5a hosts.* Test VM 9030 on hv-11 (19 VMs, about 18,000 pps, no drops, 6.8.12-10); ping source
+  9031 on hv-18 (20 VMs, about 20,000 pps, no drops, 6.8.12-22). Disks on `local-zfs`.
+
 **Step 1a.** Production Rackflow's one cluster record for pve-06 logs in as `root@pam` with a
 password (not a token, so `privsep` does not apply). `pveum user permissions` on hv-05 shows
 `Sys.Audit`, `VM.Audit`, `VM.Config.Network` and `SDN.Use` on `/`, on `/vms/<vmid>` for one running
@@ -797,6 +824,18 @@ Safe order, per cluster, executed by the operator (deploy agent) after go-ahead:
    pinging it at a 20 ms interval from another host, flip the flag ten times, record median and
    worst, then delete the VM. The procedure Kenzi approves names the host and the VMID. If the
    result is above half a second, the client-facing text changes before the location is enabled.
+   For production: 9030 on hv-11, 9031 on hv-18 as the ping source (9.2b); if 5b is approved, both
+   are kept for it and deleted at its end.
+5b. Measure conntrack for real, needing Kenzi's approval: enable VM 9030's firewall (ACCEPT rules)
+   for 10 minutes and read hv-11's `nf_conntrack_count` and `/proc/net/stat/nf_conntrack` every
+   minute. All of hv-11's guests are tracked while it is on. Abort at 131,072 entries (half the
+   table) by setting the VM's `enable: 0`. Then delete 9030 and 9031 with `--purge 1`.
+5c. Raise the conntrack limit, a separate change needing Kenzi's own approval (hv-01, hv-21 and hv-22
+   included: a sysctl change, no power action): on all 23 nodes, `sysctl -w
+   net.netfilter.nf_conntrack_max=1048576` and the hash size to match
+   (`/sys/module/nf_conntrack/parameters/hashsize`), plus a file in `/etc/sysctl.d` so it survives a
+   reboot. Record each node's previous values first; the rollback restores them and removes the
+   file. Cost: up to about 300 MB of memory per node, used only as the table fills.
 6. Run Rackflow's readiness check and the pre-enable audit again (it must list nothing unmanaged);
    then enable the location in Rackflow.
 
