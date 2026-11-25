@@ -50,6 +50,15 @@ def current_install_credentials(stored: Optional[Dict[str, Any]]) -> Optional[Di
     return {key: value for key, value in stored.items() if key in allowed}
 
 
+def clear_credentials_for_new_allocation(server: Any) -> None:
+    """Drop whatever keys a server holds when it is handed to a new service.
+
+    Runs inside the allocation transaction, before the new install writes its
+    own keys; the caller commits and already holds the server or group lock.
+    """
+    server.credentials = None
+
+
 def clear_credentials_on_terminate(db: Session, service: Service) -> bool:
     """Clear the server's credentials when the service being terminated is its current live service.
 

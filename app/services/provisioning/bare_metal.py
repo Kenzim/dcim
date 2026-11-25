@@ -25,6 +25,7 @@ from app.services.server_activity_logger import (
     log_server_activity_success,
 )
 
+from app.services.server_credentials import clear_credentials_for_new_allocation
 from app.services.server_lock import locked_message
 
 logger = logging.getLogger(__name__)
@@ -320,6 +321,11 @@ def create_bare_metal_service(
             "invalid_request",
             "bare_metal requires service_config.server_group_id or server_id",
         )
+
+    # A new service never inherits keys written for an earlier order. A retried
+    # order goes through resume_bare_metal_order and a reinstall through the
+    # install path; neither reaches this point.
+    clear_credentials_for_new_allocation(server)
 
     service_config = dict(req.service_config or {})
     if group_id is not None:
