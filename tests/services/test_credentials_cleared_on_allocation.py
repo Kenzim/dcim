@@ -13,7 +13,9 @@ from app.dao.server_dao import ServerDAO
 from app.dao.server_group_dao import ServerGroupDAO
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ProvisioningSource, ServiceStatus, ServiceType
+from app.services.provisioning.errors import ProvisioningError
 from app.services.provisioning.request import ProvisionRequest, ProvisioningActor
+from tests.api.test_billing_credentials_isolation import _install_mocks  # noqa: F401  (autouse fixture)
 
 ACTOR = ProvisioningActor(kind="admin", actor_id=1, name="test", source="test")
 STALE = {
@@ -66,18 +68,45 @@ def test_pinned_allocation_of_a_dirty_server_clears_credentials(db_session, clea
     assert not server.credentials
 
 
-def test_group_allocation_of_a_dirty_server_clears_credentials(db_session, monkeypatch, clear_calls):
+def test_group_allocation_clears_old_keys_and_keeps_the_new_install_keys(
+    db_session, monkeypatch, tmp_path, clear_calls
+):
+    from tests.api.test_billing_credentials_isolation import UBUNTU, UBUNTU_PARAMS
+
     server = _server(db_session, "alloc-grp", "198.51.100.151")
     group = ServerGroupDAO.create(db_session, name="alloc-grp-g")
     group.servers.append(server)
     db_session.commit()
     monkeypatch.setattr(bare_metal, "server_not_ready_reason", lambda *_: None)
-    monkeypatch.setattr(bare_metal, "queue_group_template_install", lambda *a, **k: None)
+    monkeypatch.setattr(bare_metal, "determine_template_for_group", lambda *_: UBUNTU.id)
     bare_metal.create_bare_metal_service(
-        db_session, _request("alloc-grp-svc", server_group_id=group.id), ACTOR, {}
+        db_session,
+        _request(
+            "alloc-grp-svc",
+            server_group_id=group.id,
+            template_id=UBUNTU.id,
+            template_parameters=dict(UBUNTU_PARAMS),
+        ),
+        ACTOR,
+        {},
     )
     db_session.refresh(server)
-    assert not server.credentials
+    creds = server.credentials
+    assert creds["password"] == UBUNTU_PARAMS["password"]
+    assert creds["username"] == UBUNTU_PARAMS["username"]
+    assert "PREVIOUS-SECRET" not in str(creds)
+    assert clear_calls == [server.id]
+
+
+def test_refused_pin_of_occupied_server_keeps_occupant_keys(db_session, clear_calls):
+    server = _server(db_session, "alloc-occ", "198.51.100.154")
+    bare_metal.create_bare_metal_service(db_session, _request("alloc-occ-1", server_id=server.id), ACTOR, {})
+    server.credentials = dict(STALE)
+    db_session.commit()
+    with pytest.raises(ProvisioningError):
+        bare_metal.create_bare_metal_service(db_session, _request("alloc-occ-2", server_id=server.id), ACTOR, {})
+    db_session.expire_all()
+    assert db_session.get(type(server), server.id).credentials == STALE
 
 
 def test_resume_of_the_same_order_keeps_credentials(db_session, monkeypatch, clear_calls):
