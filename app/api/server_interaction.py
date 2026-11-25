@@ -30,6 +30,7 @@ from app.models.network_port import NetworkPort
 from app.models.boot_task import BootType, BootTaskStatus
 from app.models.hardware_detection_report import HardwareDetectionReportStatus
 from app.services.os_template_service import get_template_service
+from app.services.server_credentials import build_install_credentials
 from app.services.temp_os_service import get_temp_os_service
 from app.services.download_token_service import get_download_token_service, template_file_scope
 from app.services.dhcp_config_service import get_dhcp_config_service
@@ -1637,23 +1638,16 @@ async def create_boot_task(
         db.commit()
         db.refresh(boot_task)
         
-        # Save credentials to server (passwords, etc.)
-        if boot_task_data.template_parameters:
-            credentials = server.credentials or {}
-            # Store template parameters as credentials (especially passwords)
-            credentials.update({
-                'os_type': template.os_type if template else None,
-                'template_id': boot_task_data.template_id,
-                'last_updated': boot_task.created_at.isoformat() if boot_task.created_at else None
-            })
-            # Store individual parameters
-            for param_name, param_value in boot_task_data.template_parameters.items():
-                credentials[param_name] = param_value
-            
-            server.credentials = credentials
-            db.commit()
-            logger.info(f"Saved credentials for server {server_id}")
-    
+        # Each install replaces the stored credentials with this order's keys
+        server.credentials = build_install_credentials(
+            template,
+            boot_task_data.template_id,
+            boot_task.created_at,
+            boot_task_data.template_parameters,
+        )
+        db.commit()
+        logger.info(f"Saved credentials for server {server_id}")
+
     logger.info(f"Created boot task {boot_task.id} for server {server_id}")
     if boot_task_data.template_id:
         log_server_activity_success(

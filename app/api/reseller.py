@@ -828,10 +828,12 @@ async def power_service(
     *,
     db: DbDep,
 ):
-    from app.api.billing import _billing_get_plugin_instance
+    from app.api.billing import _billing_get_plugin_instance, _require_current_server
+    from app.services.server_lock import ensure_server_unlocked
     from app.services.service_resource import service_linked_server
 
     service = _scoped_service(db, reseller, service_id)
+    _require_current_server(db, service)
     action = power_action.action.lower()
     if action not in {"on", "off", "reboot", "reset"}:
         raise HTTPException(
@@ -839,6 +841,7 @@ async def power_service(
             detail="Power action must be on, off, reboot, or reset",
         )
     server = service_linked_server(db, service)
+    ensure_server_unlocked(server)
     if action in {"on", "reboot", "reset"}:
         if service.status in {
             ServiceStatus.SUSPENDED,
@@ -884,9 +887,10 @@ async def get_service_status(
     *,
     db: DbDep,
 ):
-    from app.api.billing import _billing_get_plugin_instance
+    from app.api.billing import _billing_get_plugin_instance, _require_current_server
 
     service = _scoped_service(db, reseller, service_id)
+    _require_current_server(db, service)
     power_state = PowerState.UNKNOWN
     power_available = service.service_type != ServiceType.HTTP_PROXY
     if power_available:

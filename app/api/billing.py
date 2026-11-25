@@ -118,8 +118,15 @@ from app.services.server_activity_logger import (
 )
 from app.models.server_activity import ServerActivityEventType
 from app.api.server_interaction import _get_base_url_for_pxe_ip, _inject_script_url_param
+from app.services.server_credentials import (
+    build_install_credentials,
+    clear_credentials_on_terminate,
+    current_install_credentials,
+)
 from app.services.service_product_snapshot import build_product_snapshot
 from app.services.service_resource import (
+    is_current_occupant,
+    server_unavailable_reason,
     service_linked_server,
     service_server_id_for_response,
     vm_placement,
@@ -252,8 +259,19 @@ def _billing_external_user_id(service: Service) -> Optional[int]:
     return None
 
 
+def _require_current_server(db: Session, service: Service) -> None:
+    """Refuse (409) when the service is terminated or no longer holds its server."""
+    reason = server_unavailable_reason(db, service)
+    if reason:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{reason}; it cannot act on that server",
+        )
+
+
 def _billing_service_response(db: Session, service: Service) -> BillingServiceResponse:
     server = service_linked_server(db, service)
+    occupant = is_current_occupant(db, service, server)
     cid, node, vmid = vm_placement(service)
     proxy_assignments = _billing_proxy_assignments(db, service)
     src = service.provisioning_source or ProvisioningSource.BILLING
@@ -279,8 +297,8 @@ def _billing_service_response(db: Session, service: Service) -> BillingServiceRe
         status=service.status.value,
         description=service.description,
         config=service.config,
-        server_ip=server.server_ip if server else None,
-        credentials=server.credentials if server else None,
+        server_ip=server.server_ip if occupant else None,
+        credentials=current_install_credentials(server.credentials) if occupant else None,
         proxy_assignments=proxy_assignments,
         created_at=service.created_at,
         updated_at=service.updated_at,
@@ -295,6 +313,12 @@ async def _billing_get_plugin_instance(db: Session, service: Service):
     stale, this searches the Proxmox cluster for the VMID's current node and
     updates the cache before erroring.
     """
+    if getattr(service, "status", None) == ServiceStatus.TERMINATED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Service is terminated; it cannot act on that machine",
+        )
+    _require_current_server(db, service)
     if service.service_type == ServiceType.VM:
         try:
             inst, _cid, _node, _vmid = await resolve_proxmox_plugin_for_service(db, service)
@@ -956,22 +980,11 @@ def _queue_template_install_for_service(
     db.commit()
     db.refresh(boot_task)
 
-    # Persist credentials on the server object for later retrieval (e.g. billing API)
-    if template_parameters:
-        credentials = server.credentials or {}
-        credentials.update(
-            {
-                "os_type": template.os_type,
-                "template_id": template_id,
-                "last_updated": boot_task.created_at.isoformat()
-                if boot_task.created_at
-                else None,
-            }
-        )
-        for param_name, param_value in template_parameters.items():
-            credentials[param_name] = param_value
-        server.credentials = credentials
-        db.commit()
+    # Each install replaces the stored credentials with this order's keys
+    server.credentials = build_install_credentials(
+        template, template_id, boot_task.created_at, template_parameters
+    )
+    db.commit()
 
     logger.info(
         "Queued OS installation task %s for service %s on server %s "
@@ -1460,6 +1473,7 @@ async def get_service(
 
     server = service_linked_server(db, service)
     payload = _billing_service_response(db, service).model_dump()
+    server_visible = is_current_occupant(db, service, server)
     payload["server"] = (
         {
             "id": server.id,
@@ -1473,7 +1487,7 @@ async def get_service(
             "enabled": server.enabled,
             "os_boot_mode": server.os_boot_mode.value,
         }
-        if server
+        if server_visible
         else None
     )
     owner = service.owner_user
@@ -1741,6 +1755,7 @@ async def terminate_service(
         message=f"Terminating service {service.id}",
         details={"service_id": service.id, "integration_id": integration.id},
     )
+    clear_credentials_on_terminate(db, service)
     service.status = ServiceStatus.TERMINATED
     service.terminated_at = datetime.now(timezone.utc)
     ServiceDAO.update(db, service)
@@ -1923,6 +1938,7 @@ async def power_control(
         )
     
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
 
     log_kw = _billing_activity_log_kw(db, service)
     server = service_linked_server(db, service)
@@ -1957,6 +1973,7 @@ async def power_control(
             if blocked:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked)
 
+        ensure_server_unlocked(server)
         plugin_instance, _srv = await _billing_get_plugin_instance(db, service)
         if not plugin_instance:
             raise HTTPException(
@@ -2060,6 +2077,7 @@ async def get_service_status(
         )
     
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
 
     server = service_linked_server(db, service)
 
@@ -2352,6 +2370,7 @@ async def get_service_debug(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
 
     server = service_linked_server(db, service)
     owner = service.owner_user
@@ -3075,6 +3094,7 @@ async def create_ipmi_ticket(
         )
 
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_IPMI)
 
     server = service_linked_server(db, service)
@@ -3165,6 +3185,7 @@ async def create_kvm_ticket(
         )
 
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_KVM)
 
     server = service_linked_server(db, service)
@@ -3212,6 +3233,7 @@ async def create_sol_ticket(
         )
 
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_SOL)
 
     server = service_linked_server(db, service)
@@ -3255,6 +3277,7 @@ async def billing_sol_send(
             status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG
         )
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_SOL)
     return await perform_sol_send(
         db,
@@ -3282,6 +3305,7 @@ async def billing_windows_password_reset(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     if audience not in ("admin", "client"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_AUDIENCE_ADMIN_OR_CLIENT_MSG)
     if audience == "client":
@@ -3304,6 +3328,7 @@ async def billing_get_virtual_media(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_status(service_linked_server(db, service), db=db)
 
@@ -3319,6 +3344,7 @@ async def billing_insert_virtual_media(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_insert(
         db,
@@ -3340,6 +3366,7 @@ async def billing_eject_virtual_media(
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_SERVICE_NOT_FOUND_MSG)
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_VIRTUAL_MEDIA)
     return await perform_eject(
         db,
@@ -3405,6 +3432,7 @@ async def get_service_usage(
         )
     
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
 
     server = service_linked_server(db, service)
     if not server:
@@ -3461,6 +3489,7 @@ async def run_script_on_service(
         )
     
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     require_client_permission(db, service, PermissionKey.BMS_RUN_SCRIPT)
     
     # Get script
@@ -3662,6 +3691,7 @@ async def reinstall_os_on_service(
         )
     
     _assert_billing_owned_service(service, integration)
+    _require_current_server(db, service)
     if audience == "client":
         require_client_permission(db, service, PermissionKey.BMS_REINSTALL)
 
