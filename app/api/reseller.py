@@ -49,6 +49,7 @@ from app.services.provisioning import (
 from app.services.provisioning.adapters import from_billing_bare_metal, from_billing_vm
 from app.services.client_permission_resolver import require_client_permission
 from app.services.client_portal_service import mint_sso_ticket
+from app.services.server_credentials import clear_credentials_on_terminate
 from app.services.private_network_service import PrivateNetworkService
 from app.services.retained_restore_service import power_block_reason
 from app.services import backup_slot_service
@@ -763,6 +764,7 @@ async def terminate_service(
     billing = ResellerDAO.get_service_billing(
         db, reseller.id, service.id
     )
+    clear_credentials_on_terminate(db, service)
     service.status = ServiceStatus.TERMINATED
     service.terminated_at = datetime.now(timezone.utc)
     if billing is not None:
