@@ -15,6 +15,7 @@ from app.models.reseller import InvoicePurpose, InvoiceStatus, ServiceBilling, S
 from app.models.service import Service, ServiceStatus
 from app.models.storefront import FrontendProduct, PricePlan, PricePlanPricingModel
 from app.services.invoice_service import InvoiceService
+from app.services.server_credentials import clear_credentials_on_terminate
 from app.services.service_lifecycle import ServiceLifecycle, ServiceLifecycleError
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ class CommerceLifecycleService:
                         service_id,
                         exc,
                     )
+                clear_credentials_on_terminate(db, service)
                 service.status = ServiceStatus.TERMINATED
                 service.terminated_at = now
                 db.flush()

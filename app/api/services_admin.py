@@ -51,6 +51,7 @@ _MSG_EXTERNAL_SERVICE_ID = "Optional external line-item id (e.g. WHMCS service i
 _MSG_NOT_A_VM_SERVICE = "Not a VM service"
 _MSG_VM_SERVICE_NOT_FOUND = "VM service not found"
 _MSG_OWNER_USER_NOT_FOUND = "Owner user not found"
+from app.services.server_credentials import clear_credentials_on_terminate
 from app.services.service_resource import service_linked_server, service_server_id_for_response, vm_placement
 from app.models.server_activity import ServerActivityEventType
 from app.services.vm_strategy_executor import (
@@ -376,7 +377,7 @@ def _deployment_job_to_response(job) -> DeploymentJobResponse:
 
 
 def _service_to_admin_response(db: Session, service) -> ServiceResponse:
-    server = service_linked_server(db, service)
+    server = service_linked_server(db, service, include_history=True)
     owner = service.owner_user
     billed = owner if (owner is not None and owner.billing_integration_id) else None
     src = service.provisioning_source or ProvisioningSource.BILLING
@@ -1693,6 +1694,8 @@ async def update_service_status(
         details={"old_status": old_status.value, "new_status": new_status.value},
     )
 
+    if new_status == ServiceStatus.TERMINATED and old_status != ServiceStatus.TERMINATED:
+        clear_credentials_on_terminate(db, service)
     service.status = new_status
     if new_status == ServiceStatus.TERMINATED:
         service.terminated_at = datetime.now(timezone.utc)
