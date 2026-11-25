@@ -10,7 +10,7 @@ from app.core.database import get_db
 from app.core.openapi_responses import COMMON_ERROR_RESPONSES
 from app.dao.service_dao import ServiceDAO
 from app.models.service import ServiceStatus, ServiceType
-from app.services.service_resource import service_linked_server, vm_placement
+from app.services.service_resource import server_unavailable_reason, service_linked_server, vm_placement
 from app.services.ipmi_ticket_service import build_launch_payload, IPMIProxyUnavailable
 from app.services.ipmi_kvm import kvm_ready
 from app.api.ipmi_kvm import kvm_popup_redirect
@@ -475,6 +475,12 @@ async def client_power_service(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_SERVICE_NOT_FOUND)
     require_client_permission(db, service, _power_permission_key(service))
 
+    unavailable = server_unavailable_reason(db, service)
+    if unavailable:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{unavailable}; it cannot act on that server",
+        )
     action = (body.action or "").lower()
     server = service_linked_server(db, service)
     _validate_client_power_action(service, action, server)
