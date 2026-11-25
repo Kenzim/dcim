@@ -6,6 +6,7 @@ current install's keys, and nothing for a terminated or superseded service).
 """
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -309,22 +310,47 @@ def _terminate_admin(client, db, integration, service, admin):
 def _terminate_commerce(client, db, integration, service, admin):
     commerce = pytest.importorskip("app.services.commerce_lifecycle_service")
     terminate_service = getattr(commerce, "terminate_service", None)
-    if terminate_service is None:
-        pytest.skip("this branch has no commerce terminate_service")
+    if terminate_service is not None:
+        service.status = ServiceStatus.SUSPENDED if service.status != ServiceStatus.TERMINATED else service.status
+        db.commit()
+        asyncio.run(terminate_service(db, service))
+    else:
+        # No module-level terminate_service on this branch: cancel through the
+        # service class, with a lifecycle that never touches a machine.
+        class _NoMachineLifecycle:
+            async def suspend(self, *args, **kwargs):
+                return None
 
-    service.status = ServiceStatus.SUSPENDED if service.status != ServiceStatus.TERMINATED else service.status
+        with patch.object(commerce, "ServiceLifecycle", _NoMachineLifecycle):
+            asyncio.run(
+                commerce.CommerceLifecycleService.request_cancellation(
+                    db, service.id, None, when="immediate", force=True
+                )
+            )
     db.commit()
-    asyncio.run(terminate_service(db, service))
+
+
+def _terminate_reseller(client, db, integration, service, admin):
+    from app.models.reseller import ServiceBilling
+    from tests.api.test_reseller_api import _headers as reseller_headers
+    from tests.api.test_reseller_api import _reseller
+
+    reseller, key = _reseller(db, f"term-rs-{service.id}")
+    db.add(ServiceBilling(service_id=service.id, reseller_id=reseller.id, monthly_price_cents=100))
     db.commit()
+    resp = client.delete(f"/api/reseller/services/{service.id}", headers=reseller_headers(key))
+    assert resp.status_code == 204, resp.text
 
 
-@pytest.fixture(params=["billing", "admin", "commerce"])
+@pytest.fixture(params=["billing", "admin", "commerce", "reseller"])
 def terminate(request, client, db_session, test_admin_user):
     def run(integration, service):
         if request.param == "billing":
             _terminate_billing(client, db_session, integration, service)
         elif request.param == "admin":
             _terminate_admin(client, db_session, integration, service, test_admin_user)
+        elif request.param == "reseller":
+            _terminate_reseller(client, db_session, integration, service, test_admin_user)
         else:
             _terminate_commerce(client, db_session, integration, service, test_admin_user)
 
@@ -351,3 +377,85 @@ def test_terminating_superseded_live_service_keeps_credentials(db_session, termi
     _service(db_session, server, _user(db_session, integration, "tc-c-2"), "tc-c-2-svc")
     terminate(integration, first)
     assert _stored(db_session, server)
+
+
+def test_reseller_terminate_does_not_leave_old_keys_for_next_occupant(client, db_session):
+    from app.models.reseller import ServiceBilling
+    from tests.api.test_reseller_api import _headers as reseller_headers
+    from tests.api.test_reseller_api import _reseller
+
+    integration = BillingIntegrationDAO.create(db_session, name="rt-next", integration_type="whmcs")
+    server = _server(db_session, "rt-next-srv", "198.51.100.60")
+    server.credentials = {
+        "os_type": "linux",
+        "template_id": UBUNTU.id,
+        "username": "oldcust",
+        "password": "OLD-CUSTOMER-SECRET",
+        "ssh_public_key": "ssh-ed25519 OLDKEY",
+    }
+    db_session.commit()
+    old = _service(db_session, server, _user(db_session, integration, "rt-next-1"), "rt-next-old")
+    reseller, key = _reseller(db_session, "rt-next")
+    db_session.add(ServiceBilling(service_id=old.id, reseller_id=reseller.id, monthly_price_cents=100))
+    db_session.commit()
+    resp = client.delete(f"/api/reseller/services/{old.id}", headers=reseller_headers(key))
+    assert resp.status_code == 204, resp.text
+    new = _service(db_session, server, _user(db_session, integration, "rt-next-2"), "rt-next-new")
+    got = client.get(f"/api/billing/services/{new.id}", headers=_headers(integration))
+    assert got.status_code == 200, got.text
+    assert "OLD-CUSTOMER-SECRET" not in got.text
+    assert "OLDKEY" not in got.text
+
+
+def test_staff_keep_history_and_can_reclaim_a_terminated_servers(client, db_session, test_admin_user):
+    integration, server, old, new = _resold_world(db_session, "staff-h", "198.51.100.61")
+    headers = _admin_headers(client, test_admin_user)
+    detail = client.get(f"/api/admin/services/{old.id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["server_id"] == server.id
+    assert detail.json()["server_name"] == server.name
+    listing = client.get(f"/api/admin/services?server_id={server.id}", headers=headers)
+    assert listing.status_code == 200, listing.text
+    assert old.id in {row["id"] for row in listing.json()}
+    # Free the server again, then reclaim it through the staff create route.
+    new.status = ServiceStatus.TERMINATED
+    db_session.commit()
+    created = client.post(
+        "/api/admin/services/bare-metal",
+        headers=headers,
+        json={"name": "staff-h-reclaim", "server_id": server.id},
+    )
+    assert created.status_code == 201, created.text
+
+
+@pytest.mark.parametrize("method,path,body", [("post", "power", {"action": "off"}), ("get", "status", None)])
+def test_terminated_vm_service_is_refused_on_billing_routes(client, db_session, monkeypatch, method, path, body):
+    from app.dao.proxmox_inventory_dao import ProxmoxInventoryDAO
+
+    reached_calls = []
+
+    async def reached(*args, **kwargs):
+        reached_calls.append(args)
+        raise AssertionError("a Proxmox plugin was resolved for a terminated VM")
+
+    monkeypatch.setattr(billing, "resolve_proxmox_plugin_for_service", reached)
+    integration = BillingIntegrationDAO.create(db_session, name="vm-term", integration_type="whmcs")
+    cluster = ProxmoxInventoryDAO.create_cluster(
+        db_session, name="vm-term-c", api_url="https://pve.invalid", username="u", password="p"
+    )
+    vm = ServiceDAO.create_vm(
+        db_session,
+        name="vm-term-svc",
+        owner_user_id=_user(db_session, integration, "vm-term-u").id,
+        status=ServiceStatus.TERMINATED,
+        proxmox_cluster_id=cluster.id,
+        proxmox_node_name="n1",
+        proxmox_vmid=210001,
+    )
+    kwargs = {"json": body} if body is not None else {}
+    resp = getattr(client, method)(
+        f"/api/billing/services/{vm.id}/{path}", headers=_headers(integration), **kwargs
+    )
+    # status reports an unknown power state instead of failing; power is refused.
+    assert resp.status_code == (409 if path == "power" else 200), (resp.status_code, resp.text)
+    assert reached_calls == []
